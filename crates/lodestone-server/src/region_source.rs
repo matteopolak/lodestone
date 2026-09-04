@@ -1,13 +1,11 @@
 //! World persistence: a [`ChunkSource`] backed by Anvil region files on disk
-//! (issue [#437](https://github.com/matteopolak/lodestone/issues/437)).
+//! with the restart and registry invariants documented below.
 //!
 //! # What it is
 //!
-//! The thing that makes a singleplayer world survive quitting. Before this,
-//! `lodestone-server` had **no save or load path at all** — nothing in the
-//! crate read or wrote a world — and `lodestone-anvil` was a declared island
-//! with zero production callers (verified: no `Cargo.toml` in the workspace
-//! named it). [`RegionChunkSource`] is that crate's first caller.
+//! This source lets a singleplayer world survive quitting. It reads and writes
+//! Anvil region files while preserving block entities, tickets, and registry
+//! data for the next load.
 //!
 //! # Where this intercepts, and why exactly there
 //!
@@ -69,8 +67,8 @@
 //! # How to change it, and the gotchas
 //!
 //! - **A region file is rewritten whole.** `lodestone_anvil::region` builds a
-//!   complete `.mca` in one pass and has no incremental single-chunk update
-//!   (issue #437's body flags this). [`WorldSaveHandle::save`] therefore reads
+//!   complete `.mca` in one pass and has no incremental single-chunk update.
+//!   [`WorldSaveHandle::save`] therefore reads
 //!   the existing file back and re-emits untouched chunks **as their original
 //!   compressed bytes**, without decoding them — so the cost of saving one
 //!   chunk in a full region is a sector copy, not 1,024 NBT round trips.
@@ -94,7 +92,7 @@
 //! (verified against `.cache/mc/survival/world`, **not** the pre-1.21
 //! `<world>/region/`; that snapshot has a real `dimensions/minecraft/overworld/`
 //! directory too, so the overworld is not a special case here). Chunks are
-//! written with [`CompressionScheme::Zlib`], vanilla's `RegionFileVersion.DEFAULT`.
+//! written with [`CompressionScheme::Zlib`], the default region compression.
 //!
 //! # Dependencies
 //!
@@ -117,8 +115,8 @@ use crate::chunk::{ChunkColumn, ChunkSource};
 use crate::chunk_nbt::{self, ChunkExtras};
 use crate::dimension::Dimension;
 
-/// Vanilla's `RegionFileVersion.DEFAULT`, and the only scheme any real file
-/// this repo has read actually uses.
+/// Zlib is the compression scheme used by every captured region file this
+/// repository reads.
 const SCHEME: CompressionScheme = CompressionScheme::Zlib;
 
 /// What can go wrong saving or loading a world.
@@ -168,14 +166,14 @@ pub struct ResolvedSeed {
 ///
 /// # Why this exists, and why it is not optional
 ///
-/// Issue [#437](https://github.com/matteopolak/lodestone/issues/437) made
+/// The persistence behavior makes
 /// blocks survive a restart but left the seed unstored, and the two together
 /// are worse than neither: chunks the player *had* visited come back from disk
 /// while chunks they had not are regenerated from a **different** seed, so the
 /// world is discontinuous exactly at the edge of where they explored. A
 /// blocks-only gate structurally cannot see it, because every block such a gate
-/// checks is one that was saved. Issue
-/// [#468](https://github.com/matteopolak/lodestone/issues/468).
+/// checks is one that was saved. The stored generator identity must therefore
+/// be validated before loading any chunks.
 ///
 /// # The stored seed always wins
 ///
@@ -233,7 +231,7 @@ pub fn resolve_world_seed(world_dir: &Path, requested: i64) -> Result<ResolvedSe
 /// # What it stores, and the two things it does not
 ///
 /// See [`lodestone_anvil::level_dat`] for the measured 14-field schema. The
-/// two traps, both of which have already cost an issue each:
+/// two traps, both of which are easy to miss:
 ///
 /// - **The seed is not here.** It lives in `world_gen_settings.dat`, resolved
 ///   separately by [`resolve_world_seed`]. Do not add it.
@@ -407,9 +405,8 @@ pub struct PersistenceStats {
     /// filesystem work at all.
     pub empty_saves: AtomicU64,
     /// Block entities restored from disk into the live registry across all
-    /// loads. The counter that says the block-entity read path is reaching
-    /// anything at all — a saved container coming back empty was #468's
-    /// symptom, and this is the number that would have been `0`.
+    /// loads. A nonzero value confirms that persisted block entities reached
+    /// the live registry.
     pub block_entities_loaded: AtomicU64,
     /// Block entities encoded into a chunk across all saves.
     pub block_entities_written: AtomicU64,
@@ -418,11 +415,10 @@ pub struct PersistenceStats {
     /// Pending block and fluid ticks encoded into a chunk across all saves.
     pub scheduled_ticks_written: AtomicU64,
     /// `std::fs::read` calls against a `.mca` file across all loads — one per
-    /// [`RegionCache`] miss, **not** one per column (issue #509). Compare
-    /// against [`Self::loaded_from_disk`]: before the region cache existed
-    /// the two were equal (a file read per column); with it, this stays
-    /// bounded by the number of *distinct* region files a session actually
-    /// touches.
+    /// [`RegionCache`] miss, **not** one per column. Compare against
+    /// [`Self::loaded_from_disk`]: the value counts cache misses, so LRU
+    /// eviction and save invalidation can cause the same region file to be read
+    /// more than once during a session.
     pub region_files_read: AtomicU64,
     /// Bytes read from disk across all [`Self::region_files_read`] reads.
     /// The magnitude companion to that counter — see its own doc for why a
@@ -436,8 +432,8 @@ struct WorldState {
     /// `<world>/dimensions/minecraft/<dimension>/region` — see
     /// [`RegionChunkSource::new`]'s `dimension` parameter.
     region_dir: PathBuf,
-    /// `<world>/players/data`, or `None` if it could not be created (issue
-    /// #302). Handed out through [`ChunkSource::world_registries`].
+    /// `<world>/players/data`, or `None` if it could not be created (a
+    /// non-persistable player store). Handed out through [`ChunkSource::world_registries`].
     player_data: Option<crate::player_data::PlayerDataStore>,
     min_y: i32,
     height: i32,
@@ -455,7 +451,7 @@ struct WorldState {
     /// The world's live block entities — the same registry the tick loop and
     /// the connection task hold, not a copy.
     ///
-    /// Reading it non-destructively is what #468 was blocked on:
+    /// Reading it non-destructively is required here:
     /// [`crate::BlockEntityRegistry`]'s only other routes are `remove` and
     /// `tick_all`, so saving through them would have desynchronised the
     /// running server from what landed on disk.
@@ -465,14 +461,14 @@ struct WorldState {
     scheduled: ScheduledTickHandle,
     stats: PersistenceStats,
     /// Already-parsed region files, keyed by `(rx, rz)`. See [`RegionCache`]'s
-    /// own doc — this is the whole of issue #509's fix.
+    /// own doc — the cache is the single owner of this behavior.
     regions: Mutex<RegionCache>,
 }
 
 /// How many distinct region files [`RegionCache`] keeps parsed at once.
 ///
 /// A join at the shipped default (`render_distance = 8`) spans exactly 4
-/// distinct files (issue #509's own count), so this is well above the
+/// distinct files (the count), so this is well above the
 /// working set of a session that is not actively crossing region
 /// boundaries, while still bounding memory for a long session that roams
 /// across many — each entry holds one whole `.mca`'s bytes, so this is not
@@ -483,13 +479,12 @@ const OPEN_REGION_CAPACITY: usize = 16;
 ///
 /// # What it is
 ///
-/// `RegionChunkSource::load` used to `std::fs::read` + `RegionFile::parse`
-/// **every single column**, even though `ChunkStore` streams hundreds of
-/// columns out of the same handful of region files (issue #509: 361 column
-/// loads against 4 distinct files on a cold join). This cache makes the
-/// second and every later column out of the same file free of disk I/O and
-/// of the header-parse/sanitation pass — only the first column touching a
-/// given `(rx, rz)` pays either.
+/// `RegionChunkSource::load` caches parsed region files while `ChunkStore`
+/// streams hundreds of columns out of the same handful of region files (361
+/// column loads against 4 distinct files on a cold join). As long as an entry
+/// remains cached, later columns from the same file avoid disk I/O and the
+/// header-parse/sanitation pass. LRU eviction and save invalidation can require
+/// a subsequent load to parse that file again.
 ///
 /// # How to change it
 ///
@@ -642,8 +637,7 @@ impl ScheduledTickHandle {
     }
 }
 
-/// Refuses to open a world whose stored chunks this build cannot read (issue
-/// [#305](https://github.com/matteopolak/lodestone/issues/305)).
+/// Refuses to open a world whose stored chunks this build cannot read.
 ///
 /// # Why the check is here and not in [`RegionChunkSource::load`]
 ///
@@ -658,15 +652,15 @@ impl ScheduledTickHandle {
 /// no task has spawned, and not one byte has been written. There is no upgrade
 /// path in this repo (see
 /// [`lodestone_anvil::require_supported_data_version`]), so this is the whole of
-/// #305's answer and it is deliberate rather than unfinished.
+/// the answer and it is deliberate rather than unfinished.
 ///
 /// # What it samples
 ///
 /// The **first** chunk found in the **first** region file that has one. A world
 /// is written by one game version, so one chunk answers the question; walking all
 /// 89 region files of a real world at every open would put a multi-second scan on
-/// the world-open path this repo has already spent an issue removing
-/// (`docs/world-open-latency.md`). A brand-new world — no region directory, no
+/// the world-open path, which this bounded sample avoids
+/// (`docs/world-open-latency.md`). A world with no region directory, no
 /// files, or files with no chunks — is accepted, because there is nothing to
 /// mis-read.
 ///
@@ -774,11 +768,11 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             .join(dimension.dir_name())
             .join("region");
         std::fs::create_dir_all(&region_dir).map_err(io(&region_dir))?;
-        // Issue #305, and it happens **here**, before any task spawns and before
-        // any chunk is read. See `refuse_unreadable_world`'s own doc comment for
+        // World readability is checked **here**, before any task spawns and
+        // before any chunk is read. See `refuse_unreadable_world`'s doc comment for
         // why the check has to be at open rather than per chunk.
         refuse_unreadable_world(&region_dir)?;
-        // Issue #302. Created eagerly, and a failure is *not* fatal: a world whose
+        // The player-data store is created eagerly, and a failure is *not* fatal: a world whose
         // `players/data` cannot be created is still playable, it just cannot
         // persist a player — and refusing to open it would be a worse trade than
         // the terrain case, where refusing is the only thing that protects the
@@ -815,7 +809,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
     /// [`crate::IntegratedServer`]**, and that direction matters: the save
     /// path has to be able to read the registry, and a registry the server
     /// made privately is one persistence can never see — which is exactly the
-    /// shape of the island #468 was. Handing it *out* means there is only one,
+    /// shape of the shared persistence state. Handing it *out* means there is only one,
     /// by construction.
     #[must_use]
     pub fn block_entities(&self) -> BlockEntityHandle {
@@ -828,7 +822,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
     /// Handed out from here for exactly the reason
     /// [`block_entities`](Self::block_entities) is: a queue the tick loop owns
     /// privately is a queue persistence can never see, and that was the whole
-    /// of #468's remaining half.
+    /// of the persistence handoff.
     #[must_use]
     pub fn scheduled_ticks(&self) -> ScheduledTickHandle {
         self.state.scheduled.clone()
@@ -899,13 +893,12 @@ impl<S: ChunkSource> RegionChunkSource<S> {
     /// (see `lodestone_anvil::region::RegionFile::parse`), and a world's very
     /// first open has no files at all.
     ///
-    /// Goes through [`RegionCache`] first (issue #509): `ChunkStore` streams
-    /// hundreds of columns out of a handful of region files, and this used to
-    /// `std::fs::read` + parse the whole file **per column**. A cache hit
+    /// Goes through [`RegionCache`] first: `ChunkStore` streams hundreds of
+    /// columns out of a handful of region files, and a cache hit
     /// costs an `Arc` clone; only a genuine miss touches disk, and every
     /// touch is counted in [`PersistenceStats::region_files_read`] /
-    /// [`PersistenceStats::region_bytes_read`] so the fix is a counter
-    /// assertion, not a claim.
+    /// [`PersistenceStats::region_bytes_read`], so the cache behavior is
+    /// checked by counters rather than inferred.
     fn load(&self, cx: i32, cz: i32) -> Option<LoadedChunk> {
         let (rx, rz, local_x, local_z) = region_and_local(cx, cz);
         let region = self.open_region(rx, rz)?;
@@ -924,10 +917,10 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             chunk_nbt::column_from_nbt(&nbt, self.state.min_y, self.state.height).ok()?;
         let mut extras = chunk_nbt::extras_from_nbt(&nbt);
         // The column carries its own copy so `encode_chunk` can put them on the
-        // wire (issue #520). Before this, a chest read off disk reached the tick
-        // loop's registry and nothing else — the chunk packet claimed the chunk
-        // had no block entities at all. The registry stays the authority for
-        // *saving*, because a live furnace is newer than the disk one.
+        // wire. The chunk payload includes these entities so clients see the
+        // same state as the tick-loop registry. The registry remains the
+        // authority for saving, because a live furnace takes precedence over
+        // the disk copy.
         column.set_block_entities(extras.block_entities.clone());
         // Repair any block-entity-owning state this saved chunk's own NBT
         // never recorded — see `ChunkColumn::missing_block_entity_states`'s
@@ -1235,7 +1228,7 @@ impl WorldSaveHandle {
         //
         // This is still **mutation**-proportional rather than
         // residency-proportional, which is the property `docs/world-save-load.md`
-        // and #437's cost gate care about: it is bounded by the number of
+        // and the cost gate care about: it is bounded by the number of
         // block entities in the world, not by the 512-column store. A world
         // with no containers pays nothing.
         pending.extend(self.block_entity_chunks());
@@ -1602,7 +1595,7 @@ mod tests {
         // `RegionChunkSource` owns the edit map and deliberately does not
         // forward `set_block` to its inner source, so this is unreachable in
         // the tests. Explicitly discards rather than inheriting a silent
-        // default (issue #440).
+        // default.
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
             // No storage; edits are discarded by design for this fixture.
         }
@@ -1751,8 +1744,7 @@ mod tests {
     /// write and its sweep — a genuine concurrent window, which is why it is
     /// exercised by calling [`WorldSaveHandle::release_unloaded`] directly
     /// rather than by racing two threads and hoping. A timing-dependent gate
-    /// for this would be exactly the flake this repo just spent an issue
-    /// removing.
+    /// for this would introduce a timing-dependent flake.
     #[test]
     fn the_sweep_defers_a_column_that_is_dirty_when_it_runs() {
         let dir = tempdir("deferred");
@@ -1820,7 +1812,7 @@ mod tests {
         assert_eq!(source.block_state(1, 70, 1), MARKER);
     }
 
-    /// Issue #289's discriminating gate over the **real** production stack —
+    /// The discriminating gate over the **real** production stack —
     /// `ChunkStore -> RegionChunkSource -> disk`, exactly what
     /// `IntegratedServer::open_persistent_with_mobs` builds — and against a
     /// **saved world**, not a fresh one: the fixture is reopened from a

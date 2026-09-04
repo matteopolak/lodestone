@@ -1,4 +1,4 @@
-//! Villager professions and workstation claiming (issues #243, #245).
+//! Villager professions and workstation claiming.
 //!
 //! # What it is
 //!
@@ -13,42 +13,35 @@
 //!
 //! # How it works
 //!
-//! `crate::poi_storage` (issue #303's second half) already carries every
-//! profession POI type's ticket cap in [`crate::poi_storage::max_tickets`]
-//! and the claim mechanics themselves
-//! ([`crate::poi_storage::PoiRecord::acquire_ticket`]/`release_ticket`) —
-//! this module's own doc names villager professions as its "natural second
-//! consumer" after portal lookup, and [`WorkstationClaims`] is that consumer:
-//! it wraps a `HashMap<BlockPos, PoiRecord>` and claims/releases through the
-//! real record type rather than a parallel claimed-by-uuid table.
+//! `crate::poi_storage` carries every profession POI type's ticket cap in
+//! [`crate::poi_storage::max_tickets`] and the claim mechanics themselves
+//! ([`crate::poi_storage::PoiRecord::acquire_ticket`]/`release_ticket`).
+//! [`WorkstationClaims`] wraps a `HashMap<BlockPos, PoiRecord>` and
+//! claims/releases through that record type rather than a parallel
+//! claimed-by-uuid table.
 //!
 //! [`find_and_claim_workstation`] is the search a job-seeking villager runs:
 //! a bounded nearest-first scan of [`ChunkWorld`] for a block
 //! [`poi_type_for_block`] recognises, claiming the nearest one with a free
 //! ticket. Losing the block is handled by re-verification, not an event
-//! hook — see [`WorkstationClaims::remove`]'s doc for why, and this module's
-//! own "what is not built" section below for the trade-off that buys.
+//! hook — see [`WorkstationClaims::remove`]'s doc for the invalidation rule.
 //!
-//! # What is not built, named rather than silent
+//! # Deliberate limitations
 //!
 //! - **No on-disk persistence.** [`WorkstationClaims`] is a session-only
-//!   ledger, not backed by [`crate::poi_storage::PoiStorage`]. Wiring it into
-//!   the save/restore path this crate already has for portals would touch
-//!   `crate::integrated`, which is off limits for this change. A restart
-//!   loses every claim; every villager re-scans and re-claims from a clean
-//!   slate, which is a disclosed gap rather than a silent one.
+//!   ledger, not backed by [`crate::poi_storage::PoiStorage`]. The save/restore
+//!   path in `crate::integrated` does not persist these claims, so a restart
+//!   clears them and each villager scans and claims from an empty ledger.
 //! - **No block-place/break event hook.** A workstation destroyed or
 //!   replaced is detected by the next re-verification pass reading a
 //!   different (or absent) POI type at the claimed position, not
 //!   immediately. `crate::mobs::MobSim::tick_villager_professions` runs this
-//!   check every tick for every employed villager, so the lag is at most one
-//!   tick in practice — but it is a poll, not a push, and touching the real
-//!   event path would mean editing `crate::block_entities`/`crate::server`
-//!   far beyond a "minimal hunk".
-//! - **`VillagerType` (biome flavour) is not derived.** Every claimed
-//!   villager reports `minecraft:plains` regardless of where it stands —
-//!   `VillagerType.byBiome` is real vanilla logic this module does not port.
-//!   Cosmetic only; profession and workstation claiming do not depend on it.
+//!   check every tick for every employed villager, so a changed block is
+//!   observed within one simulation tick. Invalidation is polling-based; no
+//!   event subscription is attached to block placement or break events.
+//! - **Biome flavour is not derived.** Every claimed villager reports
+//!   `minecraft:plains` regardless of where it stands. This value is cosmetic;
+//!   profession and workstation claiming do not depend on it.
 //! - **[`WorkstationClaims`]/[`find_and_claim_workstation`] are native-only**,
 //!   `#[cfg(not(target_arch = "wasm32"))]` — they reuse
 //!   `crate::poi_storage::PoiRecord`, and `crate::poi_storage` itself is
@@ -64,10 +57,9 @@
 //!
 //! # Bed claiming ([`BedClaims`]) is a sibling of the above, not a new shape
 //!
-//! `PoiTypes.HOME` (`minecraft:home`, `#minecraft:beds` -> one ticket per
+//! The home point-of-interest type (`minecraft:home`, `#minecraft:beds` -> one ticket per
 //! bed) is a POI type this module's own `max_tickets` already priced, but
-//! nothing ever claimed one — issue #241 (raids)'s own trigger,
-//! `Raids.createOrExtendRaid`, needs an *occupied* `#village` POI (home,
+//! nothing ever claimed one — the raid trigger needs an *occupied* `#village` POI (home,
 //! meeting or a job site) within 64 blocks before it will start a raid at
 //! all, and a bed that is never claimed can never be occupied.
 //! [`BedClaims`]/[`find_and_claim_bed`] are exactly [`WorkstationClaims`]/
@@ -75,24 +67,22 @@
 //! same ticket accounting through `PoiRecord`, same bounded nearest-first
 //! terrain scan, same disclosed gaps (no on-disk persistence, no
 //! block-event hook, native-only). The one real difference from a job site
-//! is vanilla's own `validateBedPoi` — a bed currently `occupied=true` (someone
-//! is physically asleep in it right now) is skipped even if a ticket is
-//! free, which [`find_and_claim_bed`] ports directly.
+//! is that an occupied bed (someone is physically asleep in it) is skipped even
+//! if a ticket is free, which [`find_and_claim_bed`] implements directly.
 //!
-//! **This claims the bed as a *ticket*, not as a nightly sleep.** Vanilla's
-//! `PoiRecord.isOccupied` (which `Raids.createOrExtendRaid`'s
-//! `Occupancy.IS_OCCUPIED` query reads) is true the moment a villager's
+//! **This claims the bed as a *ticket*, not as a nightly sleep.** The
+//! occupancy flag is true the moment a villager's
 //! `AcquirePoi` behavior takes the ticket — independent of whether anyone is
 //! ever physically lying in the bed. So the raid trigger's occupancy check
-//! needs only this claim, not a full work/rest sleep cycle (`SleepInBed`,
-//! `LAST_SLEPT`, issue #231's own remainder) — that is a real, separate gap
-//! this module does not close.
+//! needs only this claim, not a full work/rest sleep cycle. Sleep-state
+//! tracking is separate from this ledger. Sleep tracking does not alter the
+//! claim ledger.
 //!
 //! # Bell claiming ([`BellClaims`]) is the third sibling, and it is what feeds `MEET`
 //!
 //! [`BellClaims`]/[`find_and_claim_bell`] complete the `#village` POI trio
 //! (workstation, bed, bell) with the identical ticket-accounting shape, this
-//! time against `PoiTypes.MEETING`'s 32-ticket cap. Issue #231's WORK/MEET/REST
+//! time against the meeting point's 32-ticket cap. The WORK/MEET/REST
 //! schedule (`crates/lodestone-entity`'s `brain::roster::villager_brain`)
 //! needs it directly: `MEET` is only eligible once
 //! `MemoryModuleType::MEETING_POINT` holds a value, and nothing wrote that
@@ -206,7 +196,7 @@ pub fn profession_for_poi_type(poi_type_path: &str) -> Option<Profession> {
     })
 }
 
-/// `PoiTypes.bootstrap`'s block registrations, restricted to the thirteen
+/// The registered point-of-interest block table, restricted to the thirteen
 /// workstation types (`home`/`meeting`/`bee_nest`/`nether_portal`/… are not
 /// profession job sites and are out of this module's scope — the first three
 /// have no consumer anywhere in this codebase yet, and the fourth is
@@ -225,7 +215,7 @@ pub fn poi_type_for_block(block_id: &str) -> Option<&'static str> {
         "composter" => Some("farmer"),
         "barrel" => Some("fisherman"),
         "fletching_table" => Some("fletcher"),
-        // `PoiTypes.CAULDRONS`: all four cauldron fill states share one POI type.
+        // All four cauldron fill states share one POI type.
         "cauldron" | "water_cauldron" | "lava_cauldron" | "powder_snow_cauldron" => {
             Some("leatherworker")
         }
@@ -242,8 +232,8 @@ pub fn poi_type_for_block(block_id: &str) -> Option<&'static str> {
 /// `"minecraft:composter[level=3]"` -> `"composter"`. Every caller of
 /// [`poi_type_for_block`] in this module runs its input through this first,
 /// since the world snapshot answers full state strings and the POI table is
-/// keyed on the block alone (vanilla's own `PoiTypes.forState` matches every
-/// *state* of the registered blocks, not a property subset).
+/// keyed on the block alone (every state of a registered block maps to the
+/// same point-of-interest type, rather than only selected properties).
 #[must_use]
 pub fn bare_block_id(state: &str) -> &str {
     let without_namespace = state.strip_prefix("minecraft:").unwrap_or(state);
@@ -257,10 +247,10 @@ pub fn bare_block_id(state: &str) -> &str {
 ///
 /// Reuses [`crate::poi_storage::PoiRecord`]'s own ticket accounting rather
 /// than a parallel claimed-by-uuid map: [`PoiRecord::acquire_ticket`]/
-/// [`PoiRecord::release_ticket`] are exactly vanilla's
-/// `PoiRecord.acquireTicket`/`releaseTicket`, and
+/// [`PoiRecord::release_ticket`] provide the ticket accounting used by this
+/// server, and
 /// [`crate::poi_storage::max_tickets`] already carries every profession POI
-/// type's cap (`1`, transcribed from `PoiTypes.bootstrap`) — this module
+/// type's cap (`1`, copied from the registered point-of-interest table) — this module
 /// invents no new occupancy math.
 ///
 /// Native-only — see this module's own doc for why.
@@ -296,8 +286,8 @@ impl WorkstationClaims {
             .expect("just inserted, or already present")
     }
 
-    /// The workstation at `pos` is gone or changed kind — vanilla's
-    /// `PoiManager.remove`. Any ticket held there is discarded with the
+    /// The workstation at `pos` is gone or changed kind. Any ticket held there
+    /// is discarded with the
     /// record itself: a villager whose claim this was finds
     /// [`get`](Self::get) answers `None` on its next verify pass and goes
     /// back to unemployed.
@@ -331,12 +321,11 @@ impl WorkstationClaims {
     /// ledger's claimed workstations — the `#minecraft:acquirable_job_site`
     /// third of vanilla's `#village` POI tag (`home` + `meeting` +
     /// `#acquirable_job_site`; see `point_of_interest_type/village.json`).
-    /// Issue #241's raid trigger unions this with
+    /// The raid trigger unions this with
     /// [`BedClaims::occupied_in_range`] and [`BellClaims::occupied_in_range`]
     /// (`MobSim::occupied_village_pois_in_range`) so a village with claimed
     /// jobs but no claimed bed yet still counts, matching
-    /// `Raids.createOrExtendRaid`'s real `PoiManager.getInRange(#village, …)`
-    /// query instead of narrowing it to beds alone.
+    /// raid query instead of narrowing it to beds alone.
     #[must_use]
     pub fn occupied_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
         let radius_sq = i64::from(radius) * i64::from(radius);
@@ -354,9 +343,8 @@ impl WorkstationClaims {
     }
 }
 
-/// How far a job-seeking villager scans. Vanilla's own search
-/// (`PoiManager.getRandom`, reached through the `AssignProfessionFromJobSite`/
-/// `YieldJobSite` behaviors) reads a **persistent per-section index** out to
+/// How far a job-seeking villager scans. The full implementation reads a
+/// **persistent per-section index** out to
 /// 48 blocks; this sim has no such index outside a claim's own lifetime (see
 /// [`WorkstationClaims`]'s module-level doc for why), so a search here is a
 /// bounded terrain re-scan instead. `SEARCH_RADIUS` is deliberately smaller
@@ -373,9 +361,9 @@ pub const SEARCH_RADIUS: i32 = 16;
 /// Runs one job search from `origin`: a nearest-first scan of `world` for a
 /// workstation block, claiming the first one with a free ticket.
 ///
-/// Nearest-first is this module's own approximation of vanilla's
-/// `PoiManager.getRandom`'s "closest of a random sample" — a full port of
-/// that sampling is not attempted here (see [`SEARCH_RADIUS`]'s doc for the
+/// Nearest-first is this module's own approximation of choosing the closest
+/// point from a random sample — the full sampling algorithm is not attempted
+/// here (see [`SEARCH_RADIUS`]'s doc for the
 /// wider disclosed gap it belongs to); nearest-first is a defensible,
 /// deterministic stand-in that a two-villager/one-workstation contention
 /// test can still observe cleanly.
@@ -423,9 +411,8 @@ pub fn find_and_claim_workstation(
     None
 }
 
-/// `BlockTags.BEDS` — every one of the sixteen dyed bed blocks, all
-/// registering `PoiTypes.HOME` (`PoiTypes.bootstrap`'s
-/// `register(HOME, BlockTags.BEDS, 1, 1)`). Takes a *bare* block id, the
+/// The bed block tag contains all sixteen dyed bed blocks, each registered as
+/// the `home` point-of-interest type with one ticket. Takes a *bare* block id, the
 /// same contract [`poi_type_for_block`] has — run a raw
 /// [`ChunkWorld::block_state`] string through [`bare_block_id`] first.
 #[must_use]
@@ -467,7 +454,7 @@ fn home_poi_type() -> ResourceKey {
 }
 
 /// The live, in-memory bed claim ledger — [`WorkstationClaims`]'s sibling
-/// for `PoiTypes.HOME`. See this module's own "Bed claiming" doc section for
+/// for the `home` point-of-interest type. See this module's own "Bed claiming" doc section for
 /// why this exists and what it deliberately does not model.
 ///
 /// Native-only, for the identical reason [`WorkstationClaims`] is — see that
@@ -494,9 +481,8 @@ impl BedClaims {
             .or_insert_with(|| PoiRecord::new(pos, home_poi_type()))
     }
 
-    /// The bed at `pos` is gone or no longer a bed — vanilla's
-    /// `PoiManager.remove`. Any ticket held there is discarded with the
-    /// record itself.
+    /// The block at `pos` is absent or has a different type than a bed. Any ticket held there is
+    /// discarded with the record itself.
     pub fn remove(&mut self, pos: BlockPos) {
         self.records.remove(&(pos.x, pos.y, pos.z));
     }
@@ -523,7 +509,7 @@ impl BedClaims {
     /// The live equivalent of
     /// [`crate::poi_storage::PoiStorage::occupied_in_range`], scoped to this
     /// ledger's own claimed beds: every claimed (ticket-occupied) bed within
-    /// `radius` real blocks of `center`. Issue #241's raid trigger is this
+    /// `radius` real blocks of `center`. The raid trigger is this
     /// method's reason to exist — the on-disk `poi/` region set is never
     /// written for a bed claimed through this ledger (see this module's "No
     /// on-disk persistence" gap), so a live query against the ledger itself,
@@ -549,9 +535,7 @@ impl BedClaims {
 /// unoccupied, unclaimed bed within [`SEARCH_RADIUS`], claiming the first
 /// one found.
 ///
-/// Ports `AcquirePoi.create(p -> p.is(PoiTypes.HOME), MemoryModuleType.HOME,
-/// false, Optional.of((byte) 14), VillagerGoalPackages::validateBedPoi)`:
-/// the `validPoi` predicate — skip a bed with `occupied=true` right now — is
+/// The bed-search predicate skips a bed with `occupied=true` — this is
 /// [`bed_state_is_occupied`]; the ticket gate is [`BedClaims::try_claim`].
 /// Nearest-first and [`SEARCH_RADIUS`] are [`find_and_claim_workstation`]'s
 /// own disclosed narrowing, reused rather than restated — see that
@@ -594,9 +578,8 @@ pub fn find_and_claim_bed(origin: BlockPos, world: &ChunkWorld, claims: &mut Bed
     None
 }
 
-/// `PoiTypes.MEETING`'s one registering block (`PoiTypes.bootstrap`'s
-/// `register(MEETING, ImmutableSet.of(Blocks.BELL), 32, 1)`) — a single block
-/// id, unlike [`is_bed_block`]'s sixteen-way tag match. Bare id, same
+/// The meeting point's one registering block is the bell, with a 32-ticket cap —
+/// a single block id, unlike [`is_bed_block`]'s sixteen-way tag match. Bare id, same
 /// contract as [`poi_type_for_block`]/[`is_bed_block`].
 #[must_use]
 pub fn is_bell_block(block_id: &str) -> bool {
@@ -610,7 +593,7 @@ fn meeting_poi_type() -> ResourceKey {
 }
 
 /// The live, in-memory bell claim ledger — [`WorkstationClaims`]/[`BedClaims`]'s
-/// third sibling, for `PoiTypes.MEETING`. Where a workstation and a bed each
+/// third sibling for meeting points. Where a workstation and a bed each
 /// hand out one ticket, a bell hands out
 /// [`crate::poi_storage::max_tickets`]'s `32` — vanilla villagers gather at a
 /// bell in a crowd, not a queue of one.
@@ -809,7 +792,7 @@ mod tests {
         assert_eq!(bare_block_id("minecraft:air"), "air");
     }
 
-    /// The discriminating claim gate issue #243 asks for: **two villagers,
+    /// The discriminating claim gate: **two villagers,
     /// one workstation.** A single-villager test would pass under an
     /// implementation with no occupancy at all — this one fails under that
     /// implementation, because the second search would also succeed.
@@ -942,7 +925,7 @@ mod tests {
         );
     }
 
-    /// [`BedClaims::occupied_in_range`] is the primitive issue #241's raid
+    /// [`BedClaims::occupied_in_range`] is the primitive the raid
     /// trigger needs: a claimed bed inside the radius comes back, one
     /// outside does not, and an unclaimed bed (a free ticket, `is_occupied`
     /// false) never does regardless of distance — the same
@@ -1027,7 +1010,7 @@ mod tests {
     }
 
     /// **The magnitude half, against a bed/workstation's own 1-ticket cap**:
-    /// a bell's `PoiTypes.bootstrap` registration is `maxTickets 32`, not `1`
+    /// the registration allows `maxTickets 32`, not `1`
     /// — a test that only checked "a second claim can happen" would pass
     /// with a cap of 2 just as well as 32. Claims 32 tickets successfully at
     /// the same position and asserts the 33rd is refused.

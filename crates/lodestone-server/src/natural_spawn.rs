@@ -1,21 +1,20 @@
-//! Natural mob spawning against a live world — the driver `mob_spawn.rs`'s
-//! cap/despawn engine never had, plus the per-species placement table
-//! `lodestone_entity::spawn`'s `SpawnRule`/`SpawnEnvironment` seam never had an
-//! implementer for (issues #221, #222).
+//! Natural mob spawning against a live world. This module combines the
+//! cap/despawn engine in `mob_spawn.rs` with the per-species placement rules
+//! exposed by `lodestone_entity::spawn`.
 //!
 //! ## What it is
 //!
 //! Three pieces that only make sense together:
 //!
-//! * [`SPAWN_RULES`] — vanilla's `SpawnPlacements` static registration block,
-//!   transcribed as data for every species the bundled 26.2 biome spawn lists can
+//! * [`SPAWN_RULES`] — the static placement table, transcribed as data for every
+//!   species the bundled 26.2 biome spawn lists can
 //!   actually name (51 of them). This is the *data* half `crate::mob_spawn`'s
 //!   module doc says must not live in the version-free engine.
 //! * [`ColumnLight`] — a per-column light cache over `lodestone_world`'s real
 //!   light engine, because every monster rule in the game is a light test and the
 //!   server had no light at any position.
 //! * [`NaturalSpawner`] — a [`SpawnCandidateSource`](crate::mob_spawn::SpawnCandidateSource)
-//!   that runs vanilla's `NaturalSpawner.spawnCategoryForChunk` cluster loop over
+//!   that runs the category cluster loop over
 //!   real terrain, real biomes and the real biome spawn lists
 //!   ([`lodestone_worldgen::spawners`], parsed but consumerless until now).
 //!
@@ -42,7 +41,7 @@
 //!   ~1 ms in release, and the tick budget is 50 ms; an unbounded first pass over
 //!   a 49-column tick area would blow it outright.
 //! * **The cache is dropped wholesale every [`LIGHT_TTL_TICKS`] ticks.** There is
-//!   no per-block relight anywhere in this tree (issue #94), so a torch placed in
+//!   no per-block relight anywhere in this tree, so a torch placed in
 //!   a dark room stops spawns within ten seconds rather than instantly. Vanilla's
 //!   own lighting is asynchronous; this is a coarser version of the same lag, and
 //!   it is the reason the cache is a TTL rather than a dirty set.
@@ -1053,7 +1052,7 @@ impl NaturalSpawner {
         None
     }
 
-    /// Issue #518 part 2/4: re-validates the `SPAWN` stage's raw candidates
+    /// The generation-spawn handoff re-validates the `SPAWN` stage's raw candidates
     /// (`lodestone_worldgen::spawn_stage::GenerationSpawn` — a position/species
     /// pair unconditioned on light or ground, see that module's own doc) against
     /// the exact same [`SpawnRule`] table and light cache the tick-driven
@@ -1378,18 +1377,14 @@ mod tests {
         assert_eq!(cod.placement, Placement::InWater);
         assert_eq!(cod.y_range, (SEA_LEVEL - 13, SEA_LEVEL));
 
-        // A guardian is registered in vanilla but appears in no bundled biome
-        // list, so it must be absent here rather than fall back to "anywhere".
+        // A guardian appears in no bundled biome list, so it must be absent here
+        // rather than fall back to "anywhere".
         assert!(spawn_rule("guardian").is_none());
     }
 
-    /// Issue #515: the slime row must carry the *alternation*, not one arm of it.
-    ///
-    /// The regression this pins is specific and was the shipped state: the row
-    /// used to be `y_range: (51, 69)` with `LightRule::MaxRandom(8)`, i.e. the
-    /// swamp arm only — and that band **excludes every Y the slime-chunk arm can
-    /// fire at** (`y < 40`), so a working `is_slime_chunk` predicate could not
-    /// have been reached even once.
+    /// The slime row carries both arms of its alternation. Its Y range is
+    /// unbounded because the swamp arm and the slime-chunk arm apply their own
+    /// ranges; a shared band would exclude one arm from every candidate.
     #[test]
     fn slime_carries_both_arms_not_one() {
         let slime = spawn_rule("slime").expect("registered");

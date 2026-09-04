@@ -1,14 +1,13 @@
-//! The chunk *schema*: `ChunkColumn` ↔ the NBT tree an Anvil region file holds
-//! (issue [#437](https://github.com/matteopolak/lodestone/issues/437)).
+//! The chunk *schema*: `ChunkColumn` ↔ the NBT tree an Anvil region file holds.
 //!
 //! # What it is
 //!
 //! `lodestone-anvil` deliberately stops at the *container* — it hands back "an
 //! arbitrary NBT blob at a given chunk coordinate" and parses no chunk schema
-//! at all (its own module doc says so, and issue #298 names the separation as a
+//! at all (its own module doc says so, and the storage boundary names the separation as a
 //! trap to preserve). This module is the other half: the mapping between that
 //! blob and [`crate::chunk::ChunkColumn`], i.e. vanilla's own chunk
-//! serialization territory, which issue #437 is where it "gets decided".
+//! serialization territory, which this module defines.
 //!
 //! # How it works
 //!
@@ -40,16 +39,15 @@
 //!
 //! # How to change it, and the gotchas
 //!
-//! - **Heightmaps are deliberately not written.** Vanilla re-primes any
-//!   heightmap missing from the file — its own chunk-load path re-primes
-//!   any type not present in the saved data — so omitting them
+//! - **Heightmaps are deliberately not written.** Loading recomputes any
+//!   heightmap missing from the file, so omitting them
 //!   is a supported input, whereas writing a *wrong* one is trusted and
 //!   corrupts terrain silently. Computing `MOTION_BLOCKING` correctly needs a
 //!   per-state "blocks motion" census this crate does not have; `WORLD_SURFACE`
 //!   we could compute, but a half-filled `Heightmaps` compound is worse than an
-//!   absent one because `status.heightmapsAfter()` decides per type. Do not add
+//!   absent one because the saved status decides which derived maps are needed. Do not add
 //!   one without the census.
-//!   The read direction still *uses* vanilla's heightmaps — as an oracle, in
+//!   The read direction still *uses* heightmaps — as an oracle, in
 //!   `tests/chunk_nbt_vanilla_oracle.rs`, never as data.
 //! - **`Status` is the one genuinely mandatory field.** `parse` returns `null`
 //!   for an empty `Status` and defaults literally everything else. We write
@@ -62,19 +60,19 @@
 //!   unsorted reconstruction produces a string that is `!=` the identical state
 //!   and every downstream `match` misses.
 //! - **A section outside the world's vertical extent is skipped, not an error.**
-//!   Vanilla does exactly this (`y >= getMinSectionY() && y <= getMaxSectionY()`)
-//!   because it writes light-only sections one past each end. Hence
+//!   The encoder accepts exactly the inclusive in-range section bounds and
+//!   skips light-only sections outside them. Hence
 //!   [`column_from_nbt`] takes the extent from its caller rather than inferring
 //!   it from the section list, which would inflate the column by 32 rows.
 //!
 //! # Block entities and scheduled ticks
 //!
-//! [`ChunkExtras`] carries the two lists this module wrote empty until issue
-//! [#468](https://github.com/matteopolak/lodestone/issues/468) — so a saved
-//! container came back empty and a pending tick was lost. Both halves were
-//! read off real 26.2 worlds with an independent stdlib parser (22,488 chunks
-//! across `.cache/mc/{survival,creative,26.2,terrain}`), and the measurement
-//! contradicted the obvious reading of the decompiled source twice:
+//! [`ChunkExtras`] carries the two lists needed by persistence.
+//! Block entities and scheduled ticks are saved explicitly — otherwise a saved
+//! container comes back empty and a pending tick is lost. An independent stdlib
+//! parser reads both lists from real 26.2 worlds (22,488 chunks across
+//! `.cache/mc/{survival,creative,26.2,terrain}`); the resulting measurements
+//! establish the following wire shapes:
 //!
 //! | measured | consequence |
 //! |---|---|
@@ -334,14 +332,14 @@ pub fn column_to_nbt(cx: i32, cz: i32, column: &ChunkColumn) -> Nbt {
 
 /// Encodes a column as the chunk NBT tree a 26.2 region file holds.
 ///
-/// Writes `Status = "minecraft:full"` (the one field vanilla treats as
-/// mandatory) and omits `Heightmaps` so vanilla re-primes them — see this
+/// Writes `Status = "minecraft:full"` (the mandatory status field) and omits
+/// `Heightmaps` so loading recomputes them — see this
 /// module's doc comment for why writing them would be worse than omitting them.
 ///
 /// `extras` supplies the chunk's block entities and its pending block/fluid
 /// ticks; see [`ChunkExtras`] for the two schema traps in the tick half.
 /// Nothing here filters by chunk — the caller is expected to have grouped
-/// already, matching vanilla's own `SavedTick.filterTickListForChunk`.
+/// already, matching the chunk-local grouping contract.
 #[must_use]
 pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &ChunkExtras) -> Nbt {
     let min_section = column.min_y.div_euclid(16);
@@ -389,13 +387,10 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
             block_states.push(("data".to_owned(), Nbt::LongArray(data)));
         }
 
-        // Biomes are a real 4×4×4 grid per section (issue #512), read out of the
-        // column's own 3-D cells. This used to repeat the 16 surface quarts
-        // across all four y-layers, which is why re-saving a vanilla world
-        // erased every `lush_caves`/`dripstone_caves`/`deep_dark` cell it held:
-        // the surface value overwrote them. The cell order — `(qy * 4 + qz) * 4
-        // + qx` — is vanilla's biome container order and `ChunkColumn`'s alike,
-        // so `cell` decomposes directly.
+        // Biomes are a real 4×4×4 grid per section, read out of the column's
+        // own 3-D cells. The cell order — `(qy * 4 + qz) * 4 + qx` — matches
+        // the `ChunkColumn` layout, so `cell` decomposes directly and preserves
+        // every biome value when the column is saved again.
         let mut biome_local: Vec<&str> = Vec::new();
         let mut biome_indices = Vec::with_capacity(BIOME_CELLS);
         for cell in 0..BIOME_CELLS {
@@ -474,17 +469,15 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
     ])
 }
 
-/// The chunk's `structures` compound (issue #514's S1): `starts` for the
+/// The chunk's `structures` compound: `starts` for the
 /// structures whose origin is this chunk, `References` for the ones it merely
 /// participates in.
 ///
-/// **This shipped as two permanently empty compounds** — the same "populated
-/// empty" defect as the omitted heightmaps: a field that exists, is well-formed,
-/// and always says nothing, so no reader ever errors and the absence is invisible
-/// until you look for a village that should be there.
+/// **Both compounds are emitted even when empty** so readers receive a
+/// well-formed structure container and no stale entries survive a rewrite.
 ///
-/// Field names and shapes are vanilla's `StructureStart.createTag` /
-/// `SerializableChunkData`: `starts` is keyed by structure id, each value
+/// Field names and shapes follow the interchange format: `starts` is keyed by
+/// structure id, each value
 /// `{id, ChunkX, ChunkZ, references, Children}` — with `id: "INVALID"` for an
 /// absent start, which is why an *incomplete* start must not be written at all
 /// rather than written empty (see
@@ -636,7 +629,7 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
         column.set_section_from_local_palette(y_base, &local, &indices);
 
         // Biomes: every section's full 4×4×4 container, into the column's 3-D
-        // grid (issue #512). Reading only section 0's y=0 layer — what this did
+        // grid. Reading only section 0's y=0 layer — what this did
         // before — is the load half of the cave-biome erasure: the deepest
         // section's value was broadcast over the whole column, and every cave
         // biome above it was gone before the writer ever ran.
@@ -695,7 +688,7 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
 }
 
 // ---------------------------------------------------------------------------
-// Block entities and scheduled ticks (issue #468's remaining half)
+// Block entities and scheduled ticks
 // ---------------------------------------------------------------------------
 
 /// One pending scheduled tick as it sits **on disk**, mirroring the real
@@ -737,9 +730,8 @@ pub struct SavedTick {
 /// A chunk's contents that are not blocks: its block entities, and the block
 /// and fluid ticks pending inside it.
 ///
-/// Before this existed [`column_to_nbt`] wrote all three lists empty for every
-/// chunk, so a saved container came back empty and a pending redstone or fluid
-/// tick was lost outright (issue #468).
+/// [`column_to_nbt`] writes each list explicitly, preserving containers and
+/// pending redstone or fluid ticks across a save/load cycle.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ChunkExtras {
     /// Every block entity in the chunk, at its **absolute** position.
@@ -1028,7 +1020,7 @@ const COMPOSTER_ID: &str = "lodestone:composter";
 const RECIPES_USED_FIELD: &str = "lodestone:recipes_used";
 
 /// Turns one [`GeneratedBlockEntity`] into the `(position, block entity)` pair
-/// [`ChunkColumn`] carries (issue #520).
+/// [`ChunkColumn`] carries in its chunk extras.
 ///
 /// The generator's typed enum becomes a [`BlockEntity::Opaque`] holding the full
 /// vanilla save-form compound: this crate has no beehive *simulation* to put the
@@ -1098,19 +1090,17 @@ pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, Block
     )
 }
 
-/// Encodes one block entity as the chunk NBT list element vanilla holds.
+/// Encodes one block entity as a chunk NBT list element.
 ///
 /// The `x`/`y`/`z` are **absolute** and `keepPacked` is `0`, both matching
 /// every real entry measured. `components` is written as an empty compound
-/// because vanilla writes one unconditionally and this crate models no
-/// block-entity components.
+/// because this crate models no block-entity components.
 ///
 /// `pub` because the **chunk packet** wants the same tree the region file does:
 /// a `ServerProtocol::encode_chunk` writes it as the block entity's network NBT
-/// (issue #520). The extra `id`/`x`/`y`/`z`/`keepPacked` fields are redundant
+/// The extra `id`/`x`/`y`/`z`/`keepPacked` fields are redundant
 /// there — position and type travel in the record header — but harmless, since
-/// both our own decoder and vanilla's `BlockEntity.loadWithComponents` read the
-/// fields they know and ignore the rest.
+/// readers use the fields they know and ignore the rest.
 #[must_use]
 pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
     let (id, mut extra): (&str, Vec<(String, Nbt)>) = match entity {
@@ -1183,11 +1173,10 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             ],
         ),
         BlockEntity::BrewingStand(b) => {
-            // Vanilla's 5-slot `BrewingStandMenu` order: 3 bottles, then the
-            // ingredient, then the fuel (`BrewingStandBlockEntity`'s own
-            // `items` list). Bottles become real potion items, which is what
-            // makes this entry vanilla-readable rather than namespaced like
-            // the composter above.
+            // The five slots are ordered as three bottles, ingredient, and
+            // fuel. Bottles become real potion items, which is what makes this
+            // entry readable by the standard client rather than namespaced
+            // like the composter above.
             let mut slots: Vec<Option<ItemStack>> = Vec::with_capacity(5);
             for index in 0..3 {
                 slots.push(b.bottle(index).map(|bottle| {
@@ -1235,12 +1224,10 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
                 ],
             )
         }
-        // `BaseCommandBlock.save` plus `CommandBlockEntity.saveAdditional`'s
-        // own three extra booleans, folded into one field list the way every
-        // other entry in this match already folds its block's own save
-        // method in. `LastOutput`/`LastExecution` are written only when their
-        // own governing flag is set, matching vanilla's own conditional
-        // `output.storeNullable`/`output.putLong` calls exactly.
+        // The command block stores its command, result count, five control
+        // flags, and optional output/execution fields in one flat list.
+        // `LastOutput` and `LastExecution` are written only when their
+        // respective control flags are set.
         BlockEntity::CommandBlock(data) => {
             let mut fields = vec![
                 ("Command".to_owned(), Nbt::String(data.command.clone())),
@@ -1281,14 +1268,13 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             }
             ("minecraft:spawner", fields)
         }
-        // `SignText.DIRECT_CODEC`: `messages`/`color`/`has_glowing_text` per
-        // side, under `front_text`/`back_text`, plus a sibling `is_waxed`.
+        // Sign data stores `messages`/`color`/`has_glowing_text` per side,
+        // under `front_text`/`back_text`, plus a sibling `is_waxed`.
         //
-        // A `messages` element is a `Component` under
-        // `ComponentSerialization.CODEC`, whose encoder collapses a plain,
-        // unstyled, sibling-less component to a **bare string holding the
-        // text verbatim** (`tryCollapseToString`) and only falls back to a
-        // structural compound otherwise. Every line this server writes is a
+        // A `messages` element uses the text-component wire form. For a plain,
+        // unstyled, sibling-less component, the encoder emits a **bare string
+        // holding the text verbatim** and uses a structural compound otherwise.
+        // Every line this server writes is a
         // plain `String` with no style at all, so the collapsed form is the
         // right — and the only correct — encoding: `Nbt::String(line)`, no
         // quoting.
@@ -1302,9 +1288,8 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
         // module's doc for the closed loop and what it cost.
         //
         // Colour/glow are not modelled (see `SignData`'s own doc for why),
-        // so every side is written black and unglowing — the codec's own
-        // defaults, and what `SignText::parse` falls back to for an absent
-        // field anyway.
+        // so every side is written black and unglowing, the defaults used when
+        // those fields are absent.
         BlockEntity::Sign(sign) => {
             let side = |lines: &[String; 4]| {
                 Nbt::Compound(vec![
@@ -1335,13 +1320,10 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
                 ],
             )
         }
-        // `BeaconBlockEntity.saveAdditional`: `primary_effect`/`secondary_effect`
-        // as bare strings (only written when set — `storeEffect`'s own
-        // `if (effect != null)` guard), `Levels` an int. The payment slot is
-        // menu-only scratch space in vanilla too (`BeaconMenu`'s own
-        // `SimpleContainer`, never part of `BeaconBlockEntity`'s saved state —
-        // `removed` drops it back to the player on menu close), so it is
-        // deliberately not written here.
+        // `primary_effect`/`secondary_effect` are bare strings written only
+        // when set, and `Levels` is an int. The payment slot is menu-only
+        // scratch space, never part of the block entity's saved state, so it
+        // is deliberately not written here.
         BlockEntity::Beacon(beacon) => {
             let mut fields = vec![("Levels".to_owned(), Nbt::Int(i32::from(beacon.levels)))];
             if let Some(primary) = &beacon.primary_effect {
@@ -1352,9 +1334,8 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             }
             ("minecraft:beacon", fields)
         }
-        // `CrafterBlockEntity.saveAdditional`: `Items` (`ContainerHelper.saveAllItems`),
-        // `disabled_slots` (an int array of the disabled indices —
-        // `addDisabledSlots`), `triggered` (always `0`, see this variant's
+        // The crafter stores `Items`, `disabled_slots` (an int array of the
+        // disabled indices), and `triggered` (always `0`, see this variant's
         // own doc for why nothing here ever sets it). `crafting_ticks_remaining`
         // is not written: it is the auto-crafting trigger's own countdown,
         // which never starts without the trigger itself.
@@ -1510,12 +1491,10 @@ fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)> {
                 .map(|s| (s.item.to_string(), s.count));
             let fuel_item = items[4].as_ref().map(|s| (s.item.to_string(), s.count));
             let brew_time = int_field(nbt, "BrewTime").unwrap_or(0);
-            // Vanilla reconstructs the in-flight ingredient from slot 3
-            // rather than persisting it (`BrewingStandBlockEntity.
-            // loadAdditional:200-202`, `if (this.brewTime > 0) this.ingredient
-            // = this.items.get(3).getItem();`). Reproduced exactly, including
-            // its consequence: an ingredient swapped while the world was
-            // closed is *not* detected as a mid-brew swap, in vanilla either.
+            // The in-flight ingredient is reconstructed from slot 3 rather
+            // than persisted. When `BrewTime` is positive, the slot contents
+            // therefore determine the locked ingredient; swapping that slot
+            // while the world is closed is not detected as a mid-brew swap.
             let locked = if brew_time > 0 {
                 ingredient.as_ref().map(|(id, _)| id.clone())
             } else {
@@ -1659,8 +1638,8 @@ pub fn extras_from_nbt(nbt: &Nbt) -> ChunkExtras {
     }
 }
 
-/// Counter-based proof for the load-path defect this module used to have
-/// (issue #510): `column_from_nbt` called `ChunkColumn::set_block` once per
+/// Counter-based proof for the load path: `column_from_nbt` calls
+/// `ChunkColumn::set_block` once per
 /// cell — 98,304 per column — each a linear scan of the *column-wide* palette.
 /// `ChunkColumn::set_section_from_local_palette` interns a section's own
 /// (small) local palette once per distinct state instead.
@@ -1679,8 +1658,7 @@ pub fn extras_from_nbt(nbt: &Nbt) -> ChunkExtras {
 /// probe was wrong about the element encoding — so for a while this gate
 /// was green while neither half matched a real server, which is the closed
 /// `decode(encode(x)) == x` loop this repo's evidence standards forbid.
-/// What settles the encoding is outside both: `SignText.LINES_CODEC` is
-/// `ComponentSerialization.CODEC.listOf()`, whose encoder collapses an
+/// The standard encoding uses a list of text components whose encoder collapses an
 /// unstyled component to a bare string. This round trip is still worth
 /// keeping — it catches a field-name or front/back transposition — but it
 /// is a consistency check, not evidence about the wire.
@@ -1895,7 +1873,7 @@ mod intern_bound_tests {
 
     /// A real column's `intern` calls must be bounded by its distinct states
     /// per section — never by its cell count, 98,304 — which is the exact
-    /// gate issue #510 names. The second assertion is the control: run
+    /// gate names. The second assertion is the control: run
     /// against the pre-fix cell-by-cell path (`set_block` called once per
     /// cell) and it fails, because `calls == 98_304` for every populated
     /// column regardless of how few distinct states it holds.

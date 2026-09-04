@@ -72,7 +72,7 @@ use lodestone_model::{
 };
 use lodestone_data::block_items;
 use lodestone_net::{Connection, NetError, Transport};
-// Issue #273's encryption half: the server-side RSA keypair/decrypt and the
+// Encryption half: the server-side RSA keypair/decrypt and the
 // verify-token generator. Native-only for the same reason `crate::access` is
 // (see that field's own doc comment below) — online-mode auth needs the
 // native-only `lodestone-auth` session-server call too, so there is nothing
@@ -131,7 +131,7 @@ use crate::world_spawn::{RespawnPoint, find_initial_spawn, is_bed_block, is_lega
 #[cfg(not(target_arch = "wasm32"))]
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(15_000);
 
-/// MOTD reported in the server-list status reply (issue #277).
+/// MOTD included in the server-list status reply.
 ///
 /// Vanilla's own default is `server.properties`' `motd=A Minecraft Server`
 /// (vanilla's own dedicated-server properties reader, and the
@@ -147,7 +147,7 @@ pub const STATUS_MOTD: &str = "A Lodestone Server";
 /// joins a 20-slot server should not see the cap change.
 pub const STATUS_MAX_PLAYERS: i32 = 20;
 
-/// Issue #325 / `crate::sleep`: the server-side entity id of the single local
+/// `crate::sleep`: the server-side entity id of the single local
 /// player in a singleplayer world — the roster key a connection with no
 /// [`PlayerRegistry`] uses when it votes (see the sleep-vote inner state's
 /// own sleepers doc
@@ -157,22 +157,19 @@ pub const STATUS_MAX_PLAYERS: i32 = 20;
 /// reason `crate::sleep`'s module doc names this crate as the source.
 pub(crate) const LOCAL_PLAYER_ENTITY_ID: i32 = 1;
 
-/// The disconnect reason for an unanswered keep-alive (issue #279).
+/// The disconnect reason for an unanswered keep-alive.
 ///
-/// Vanilla's is exactly a translatable text component keyed
-/// `"disconnect.timeout"`, sent
-/// from its own generic "keep connection alive" step, so the key is not ours to choose. The `fallback` is vanilla's own
-/// English string for that key, read from
+/// The disconnect reason is a translatable text component keyed
+/// `"disconnect.timeout"`, sent from the keep-alive timeout path, so the key
+/// is not ours to choose. The `fallback` is the English string for that key,
+/// read from
 /// `.cache/mc/26.2/client-src/assets/minecraft/lang/en_us.json:3498`
 /// (`"disconnect.timeout": "Timed out"`) — not invented here.
 ///
-/// Carrying a fallback at all is a deliberate improvement over vanilla's bare
-/// translatable text component, and it is a real vanilla feature, not an extension:
-/// vanilla's own translatable-text-content resolver resolves
-/// `currentLanguage.getOrDefault(key, fallback)`. So a real client shows
-/// its own localized "Timed out", while any client that cannot resolve the key —
-/// including *our* client today, which renders raw translation keys (issue #68) —
-/// shows readable English instead of the literal string `disconnect.timeout`.
+/// Carrying a fallback makes the response readable when a client cannot resolve
+/// the key. A client with translations shows its localized "Timed out", while a
+/// client that renders raw translation keys shows readable English instead of
+/// the literal string `disconnect.timeout`.
 fn timeout_reason() -> Text {
     Text {
         content: TextContent::Translate {
@@ -214,7 +211,7 @@ fn invalid_username_reason() -> Text {
 /// Vanilla's `multiplayer.disconnect.unverified_username` English text
 /// (`assets/minecraft/lang/en_us.json`), sent when the session server's
 /// `hasJoined` answers "this client never proved ownership of this
-/// username" (issue #273).
+/// username".
 #[cfg(not(target_arch = "wasm32"))]
 fn unverified_username_reason() -> Text {
     Text::literal("Failed to verify username!")
@@ -252,7 +249,7 @@ const TIME_SYNC_INTERVAL: Duration = Duration::from_millis(1_000);
 
 /// The largest view radius a client may raise itself to mid-session on a path
 /// whose memory it owns — the ceiling `IntegratedServer::open_in_memory*` hands
-/// [`ViewTracker::max_radius`] (issue #545).
+/// [`ViewTracker::max_radius`].
 ///
 /// **Derived, not chosen.** The shell's render-distance slider tops out at
 /// `config::MAX_RENDER_DISTANCE = 32` chunks and
@@ -279,43 +276,17 @@ pub const MAX_CLIENT_VIEW_RADIUS: i32 = 33;
 #[cfg(not(target_arch = "wasm32"))]
 const MILLIS_PER_TICK: u128 = 50;
 
-/// A bare-handed player's raw melee damage — vanilla's own player attribute
-/// builder's
-/// own `.add(Attributes.ATTACK_DAMAGE, 1.0)`, **not** the generic living-entity
-/// ranged-attribute default of `2.0` a player would otherwise inherit.
-///
-/// **No longer what every hit deals.** [`apply_attack`] now resolves the held
-/// item through [`lodestone_entity::equipment`]'s real `ATTACK_DAMAGE` modifier
-/// fold, so a diamond sword deals `7.0` and this value is what an *empty* hand
-/// resolves to — the attribute base with no modifiers on it. It survives as a
-/// named constant because the equality "empty hand == this number" is the one
-/// thing a gate can check without restating the whole fold, and because
-/// [`lodestone_entity::equipment::PLAYER_BASE_ATTACK_DAMAGE`] is the same figure
-/// read from the same line of the jar (pinned equal by
-/// `bare_hand_damage_is_the_player_attribute_base`).
-///
-/// Still not modelled: vanilla's own player-attack step's base-damage-scale
-/// factor
-/// (cooldown-scaled damage) and the critical-hit bonus, because there is no
-/// server-tracked attack-strength ticker to read, so every hit is treated as
-/// full-strength.
+/// A bare-handed player's raw melee damage is `1.0`, distinct from the generic
+/// living-entity ranged-attribute default of `2.0`. [`apply_attack`] resolves
+/// held-item modifiers separately, so this value applies when no weapon is
+/// selected. Attack cooldown scaling and critical-hit bonuses are not modeled;
+/// every resolved hit uses full strength.
 const PLAYER_BARE_HAND_ATTACK_DAMAGE: f32 = 1.0;
 
-/// The melee knockback-bonus power a **sprinting** attacker's hit applies,
-/// matching vanilla's own player-attack step's own sprint-knockback bonus exactly:
-/// `causeExtraKnockback(entity, this.getKnockback(entity, damageSource) +
-/// (knockbackAttack ? 0.5F : 0.0F), ...)`, where
-/// `knockbackAttack = this.isSprinting() && fullStrengthAttack`.
-/// Vanilla's own "get knockback" getter itself resolves to the attacker's
-/// `minecraft:attack_knockback` attribute (registry default `0.0`)
-/// — `0.0` for a bare-handed player, since this crate
-/// has no weapon/enchantment model to add to it — so a **non-sprinting**
-/// attack's total knockback power is exactly `0.0`. That is not a
-/// placeholder: it is the literal jar formula for the one case this crate can
-/// currently model (no weapon, no server-tracked attack-cooldown ticker so
-/// every hit reads as full-strength), and it is why
-/// [`apply_attack`] passes `0.0` unconditionally for a non-sprinting attacker
-/// and this constant only for a sprinting one.
+/// The melee knockback bonus for a sprinting, full-strength attack is `0.5`.
+/// A bare-handed or non-sprinting attack contributes `0.0`; no weapon or
+/// enchantment modifier is modeled here. [`apply_attack`] passes this constant
+/// only for sprinting attacks.
 const SPRINT_ATTACK_KNOCKBACK_POWER: f64 = 0.5;
 
 /// Cadence of the air-supply/drowning-damage tick ([`crate::vitals`]).
@@ -369,7 +340,7 @@ const ENTITY_STREAM_INTERVAL: Duration = Duration::from_millis(50);
 const WASM_VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 
 /// How many [`VITALS_TICK_INTERVAL`] ticks between periodic player saves
-/// (issue #302) — 600, i.e. 30 s at this crate's 20 TPS stand-in.
+/// The measured cadence is 600 ticks, i.e. 30 s at this crate's 20 TPS stand-in.
 ///
 /// **A tick count, not a `Duration`, and that is deliberate.** This crate links
 /// into a wasm32 browser bundle where `std::time::Instant::now()` compiles and
@@ -394,7 +365,7 @@ pub trait EntitySource: Send + Sync {
     fn snapshots(&self) -> Vec<EntitySnapshot>;
 
     /// The registry of connected **players**, if this source tracks them
-    /// (issue #438).
+    /// (the player registry is optional).
     ///
     /// This is the one conduit by which a connection reaches the players
     /// sharing its world, and it exists as a defaulted method on this trait
@@ -532,22 +503,16 @@ impl EntityStreamer {
             match self.last_sent.get(&entity.id) {
                 None => {
                     directives.push(proto.encode_add_entity(entity));
-                    // Issue #425: vanilla sends an entity's initial
-                    // non-default metadata as a `SET_ENTITY_DATA` right
-                    // after its `ADD_ENTITY` (`ServerEntity`'s own pairing
-                    // sync) — `ADD_ENTITY` itself carries no metadata on the
-                    // wire. `encode_add_entity` returns exactly one
-                    // `ServerDirective`, so this is a second directive
-                    // rather than folding into that call.
+                    // The spawn frame carries no metadata, so send a second
+                    // `SET_ENTITY_DATA` directive whenever the snapshot has
+                    // non-default values. `encode_add_entity` returns exactly
+                    // one `ServerDirective`, so the metadata stays separate.
                     if !entity.metadata.is_empty() {
                         directives.push(proto.encode_set_entity_data(entity.id, &entity.metadata));
                     }
-                    // Issue #236: an already-leashed mob must show its rope to a
-                    // client that only just spawned it — a client that joined, or
-                    // walked back into view range, after the attach — not only to
-                    // whoever was connected at attach time. Mirrors the metadata
-                    // arm immediately above: sent once here, on spawn, whenever
-                    // `leash_link` is already `Some`.
+                    // A snapshot with a leash link needs both the spawn and link
+                    // frames, so a client whose first visible snapshot contains
+                    // `leash_link` renders the rope immediately.
                     if entity.leash_link.is_some() {
                         directives.push(proto.encode_set_entity_link(entity.id, entity.leash_link));
                     }
@@ -555,7 +520,7 @@ impl EntityStreamer {
                 }
                 Some(prev) if prev != entity => {
                     directives.extend(proto.encode_entity_update(Some(prev), entity));
-                    // Issue #425: a metadata-only change (e.g. a creeper's
+                    // A metadata-only change (e.g. a creeper's
                     // `swell_dir` climbing while it stands still) still
                     // takes this branch — `EntitySnapshot`'s `PartialEq`
                     // covers `metadata` too — so this check is independent
@@ -563,9 +528,9 @@ impl EntityStreamer {
                     if prev.metadata != entity.metadata {
                         directives.push(proto.encode_set_entity_data(entity.id, &entity.metadata));
                     }
-                    // Issue #236: covers both a fresh attach (`None` → `Some`) and
-                    // a detach (`Some` → `None`) — `encode_set_entity_link` itself
-                    // decides how to spell "no holder" on the wire.
+                    // A leash-link transition covers both attachment (`None` →
+                    // `Some`) and detachment (`Some` → `None`); the encoder
+                    // chooses the wire representation for an absent holder.
                     if prev.leash_link != entity.leash_link {
                         directives.push(proto.encode_set_entity_link(entity.id, entity.leash_link));
                     }
@@ -634,7 +599,7 @@ impl EntityStreamer {
     }
 }
 
-/// How a connection reaches its terrain, and the whole of issue #293's
+/// How a connection reaches its terrain, including the blocking and offloaded
 /// blocking-vs-offloaded fork in one place.
 ///
 /// Chunk generation is CPU-bound and synchronous, so it has to be moved off
@@ -643,21 +608,19 @@ impl EntityStreamer {
 /// for the measurement and for why `spawn_blocking` rather than
 /// `block_in_place`. `spawn_blocking` needs a `'static` closure, which a
 /// `&S` cannot provide. That normally forces `serve_connection`'s `source`
-/// parameter from `&S` to `Arc<S>` — and *that* would break every
-/// `crates/protocol/v770/tests/*` call site, which are off-limits (the same
-/// constraint that already produced three differently-named
-/// `serve_connection*` wrappers in this file rather than one changed
-/// signature).
+/// parameter from `&S` to `Arc<S>`. The separate wrappers preserve the borrowed
+/// source API while the shared variant can move an `Arc<S>` into a blocking
+/// generation task.
 ///
 /// This enum is how both shapes share one body instead:
 ///
 /// | arm | generation | who uses it |
 /// |---|---|---|
 /// | [`Shared`](Self::Shared) | offloaded, never blocks the runtime | every production caller in [`crate::integrated`] |
-/// | [`Borrowed`](Self::Borrowed) | blocking, today's behaviour | `&S`-shaped test call sites |
+/// | [`Borrowed`](Self::Borrowed) | blocking, direct generation | `&S`-shaped test call sites |
 ///
 /// The `Borrowed` arm is deliberately kept rather than deleted: it is the
-/// **permanent negative control** for #293's gate. A test can drive the exact
+/// **permanent negative control** for the offloading gate. A test can drive the exact
 /// same `serve_connection` body down the blocking path and watch the world
 /// tick stall, which is what proves the `Shared` arm's non-stall assertion is
 /// measuring something. A control that only exists as a temporary neuter
@@ -667,9 +630,9 @@ impl EntityStreamer {
 /// so it threads through the dispatch chain exactly as cheaply as the `&S`
 /// it replaces.
 ///
-/// A third arm was added for portal travel — see [`Dimension`](Self::Dimension).
+/// Portal travel uses the [`Dimension`](Self::Dimension) arm.
 ///
-/// `Debug` is hand-written too, for the same shape of reason `Copy` is:
+/// `Debug` is hand-written because:
 /// `#[derive(Debug)]` would demand `dyn ChunkSource: Debug`, and making `Debug` a
 /// supertrait of `ChunkSource` to satisfy a diagnostic impl is the wrong direction.
 pub(crate) enum SourceRef<'a, S> {
@@ -780,28 +743,20 @@ struct PortalTrip {
 /// `travelled` — this connection's current sibling-dimension source, `None`
 /// when it has not travelled at all.
 ///
-/// **This is the whole fix for the join-dimension routing bug**: before it,
-/// `serve_play`'s `block_entities`/`block_ticks` parameters were fixed for the
-/// life of the connection, taken from the dimension the player *joined* in —
-/// so a furnace lit or a lever flipped while standing in the Nether was
-/// recorded into the *overworld's* registry, and a repeater's delayed flip
-/// request landed in a feed only the overworld's tick loop ever drained. The
-/// caller (`serve_play`'s connection loop, right where `source` itself is
-/// already re-derived from `travelled` every iteration) shadows its local
-/// `block_entities`/`block_ticks` bindings with these, falling back to the
-/// pair it joined with on either field's `None`.
+/// Select handles from the connection's current dimension. A furnace, lever,
+/// or repeater update therefore reaches the registry and delayed-tick feed
+/// that belong to the world being viewed; missing sibling handles fall back to
+/// the handles passed at join.
 ///
-/// Each field independently falls back to "use the pair you joined with" —
-/// **not** as one combined switch — because `crate::chunk::ChunkSource::world_registries`
+/// Each field independently falls back to its join-time handle because
+/// `crate::chunk::ChunkSource::world_registries`
 /// and `crate::chunk::ChunkSource::block_tick_feed` are two different
 /// accessors that can in principle disagree, and collapsing them into one
-/// `Option` would make a future asymmetric source (one with a registry but no
-/// tick loop, say) silently lose the registry half too. In production today
-/// both a `DimensionalSource` built by
+/// `Option` would make a source with only one handle silently lose that half.
+/// A `DimensionalSource` built by
 /// `crate::integrated::sibling_chunk_source` answers `Some` for both or
 /// `None` for neither — see `crate::dimension::DimensionalSource::alone_with_dimension_handles`'s
-/// own doc comment — so this test doubles as the discriminator, not just a
-/// hypothetical.
+/// own doc comment — so this test covers the asymmetric-handle choice.
 struct DimensionScopedHandles {
     block_entities: Option<BlockEntityHandle>,
     block_ticks: Option<BlockTickFeed>,
@@ -819,25 +774,21 @@ fn dimension_scoped_handles(travelled: Option<&Arc<dyn ChunkSource>>) -> Dimensi
 /// Moves a player through a nether portal — the whole server side of a trip.
 ///
 /// Returns `None`, having sent nothing, when the trip cannot happen: the world has
-/// no such dimension (a single-dimension world, which is every world built before
-/// `crate::dimension` existed), the destination has no placeable band, or the
+/// no such dimension (a single-dimension world), the destination has no placeable band, or the
 /// hosting protocol cannot encode a dimension change. All three are *declines*
 /// rather than failures — the player stays where they are, standing in a portal,
 /// and nothing is half-applied.
 ///
 /// # The order of the packets is the whole correctness argument
 ///
-/// 1. **Forget every loaded column.** The client keeps chunks in a store nothing
-///    else clears — its `Respawned` handler does not, and there is no bulk-clear
-///    method on its world sink — so without this the old dimension's columns stay
-///    meshed *and* the client's own `world_extent` can go on reporting the old
-///    dimension's `min_y`/`height` off an arbitrary leftover column. `forget_chunk`
-///    is the one wired path that empties it.
+/// 1. **Forget every loaded column.** The client keeps chunks in a store with no
+///    bulk-clear operation, so `forget_chunk` empties it before the destination
+///    dimension supplies terrain and height metadata.
 /// 2. **The dimension change pair** (`respawn` + the placement teleport). This is
-///    what re-frames the client's chunk window: it resolves the new
+///    what re-frames the client's chunk window: it resolves the destination
 ///    `dimension_type` holder id and installs that dimension's `min_y` and section
-///    count. Every chunk sent before it would be decoded against the old window.
-/// 3. **The new cache centre, then the chunks.** Both must follow (2), for the same
+///    count. Every chunk sent before it would be decoded against the prior window.
+/// 3. **The destination cache centre, then the chunks.** Both must follow (2), for the same
 ///    reason.
 ///
 /// # Why the view tracker is rebuilt rather than recentred
@@ -845,10 +796,10 @@ fn dimension_scoped_handles(travelled: Option<&Arc<dyn ChunkSource>>) -> Dimensi
 /// [`ViewTracker::recenter`] emits a *difference* — the columns that entered and
 /// left — which is exactly wrong here: nothing the old dimension sent is reusable,
 /// and the new dimension owes the player the entire square. Rebuilding with
-/// [`ViewTracker::new`] and handing the whole square to a fresh
-/// [`JoinChunkStream`](crate::join_scheduler::JoinChunkStream) is the same shape the
-/// join path already uses, and it reuses the same ring order so the ground under the
-/// player's feet arrives first.
+/// [`ViewTracker::new`] and handing the whole square to a
+/// [`JoinChunkStream`](crate::join_scheduler::JoinChunkStream) uses the same
+/// ring order as an initial join, so the ground under the player's feet arrives
+/// first.
 async fn travel_through_portal<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
@@ -894,9 +845,8 @@ where
     // `crate::portal::PortalIndex`. Read through the source already in hand rather
     // than the destination's, because both answer with the same store.
     let index = current.get().portal_index().cloned();
-    // The axis a newly built exit portal takes comes from the block the player is
-    // standing in — vanilla's `getExitPortal` reads it off `portalEntryPos`, which is
-    // why `entry` is threaded this far rather than defaulting to X.
+    // The exit portal axis comes from the block containing the player. Carry
+    // `entry` here so the generated portal keeps that orientation.
     let source_axis =
         crate::portal::Axis::from_state(&current.get().block_state(entry.x, entry.y, entry.z));
     // # Why the outbound leg is offloaded and the return leg is not
@@ -906,8 +856,8 @@ where
     // destination is a dimension nothing has ever looked at, so the site search's
     // 33 × 33 footprint means a dozen columns generated from scratch. Left on the core
     // thread that is measured in seconds, which is a keep-alive timeout rather than a
-    // slow frame — the same shape as the join-strip stall (`DESIGN.md` §12.165), and
-    // offloading is the fix for the same reason it was there.
+    // slow frame that can exceed the keep-alive interval. Offloading keeps the
+    // current-thread runtime responsive while the destination is resolved.
     //
     // The return leg runs inline because it structurally cannot cost that: the
     // dimension is the one the player joined into and has been streaming from, so its
@@ -1002,11 +952,9 @@ where
                 .collect()
         })
         .collect();
-    // The `ringed` arm rather than `windowed`: it holds coordinates only, so it
-    // generates through whichever `SourceRef` the loop hands it — which is the new
-    // dimension's from the next iteration onward. A `windowed` pipeline would have
-    // captured an `Arc` of the *old* dimension at construction and streamed the
-    // wrong world's terrain into the right world's chunk packets.
+    // The `ringed` arm holds coordinates only, so each generation request uses
+    // the `SourceRef` for the destination dimension. A source captured while
+    // constructing the stream could send terrain from the wrong world.
     *join_stream = crate::join_scheduler::JoinChunkStream::ringed(rings);
 
     debug_assert_eq!(
@@ -1021,9 +969,8 @@ where
     }))
 }
 
-/// Moves a player through an End portal — vanilla's own end-portal-block
-/// "get portal destination" step's
-/// `fromEnd == false` arm, the End's counterpart to [`travel_through_portal`].
+/// Moves a player through an End portal to its fixed arrival platform. This is
+/// the End counterpart to [`travel_through_portal`].
 ///
 /// **Deliberately not a generalisation of [`travel_through_portal`].** An End
 /// portal has no coordinate scale, no linked-position search and no fresh
@@ -1031,22 +978,18 @@ where
 /// names a **fixed** point, and [`crate::portal::ensure_end_platform`] builds
 /// (or repairs) the obsidian platform there before the chunk stream below can
 /// reach it. Reusing the Nether's destination search here would run
-/// `PortalForcer`'s site-scoring logic over the End's own terrain and could
-/// as easily strand a player over the void as land them on solid ground.
+/// a linked-position search over the End's terrain and could as easily strand
+/// a player over the void as land them on solid ground.
 ///
 /// The packet sequence — forget every loaded column, the dimension-change
-/// pair, the new cache centre, the rebuilt view and join stream — is
+/// pair, the destination cache centre, the rebuilt view and join stream — is
 /// otherwise identical to [`travel_through_portal`]'s, because it is the same
 /// client-side contract regardless of which portal type triggered it; see
 /// that function's own doc comment for why each step is ordered the way it
 /// is.
 ///
-/// **The return trip (`fromEnd == true`) is not implemented.** It needs the
-/// stronghold's exit portal and the dragon fight, neither of which exists in
-/// this crate yet. This function's only caller does not reach it while the
-/// player is already in the End — the same "correct degradation" this
-/// function's own `None` arm below uses for a world with no End sibling
-/// wired, rather than a panic or a silently wrong destination.
+/// An End portal inside the End has no destination in this world model. The
+/// caller returns `None` for that case rather than selecting an invalid target.
 async fn travel_through_end_portal<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
@@ -1167,7 +1110,7 @@ struct ViewTracker {
     /// the connection joined with (`serve_connection`'s own `view_radius`
     /// parameter) and can shrink or grow within
     /// [`max_radius`](Self::max_radius) via
-    /// [`set_view_radius`](Self::set_view_radius) (issue #270's
+    /// [`set_view_radius`](Self::set_view_radius) (the view-distance
     /// `ServerBound::ClientInformationChanged`). Stored on `self` rather than
     /// re-passed at every [`recenter`](Self::recenter) call so a client's
     /// requested distance actually sticks across subsequent moves, instead
@@ -1176,16 +1119,14 @@ struct ViewTracker {
     radius: i32,
     /// The largest radius this connection is **permitted** to reach, and the
     /// ceiling [`set_view_radius`](Self::set_view_radius) clamps a client
-    /// request to — vanilla's own chunk-map clamp,
-    /// vanilla's own `clamp(player.requestedViewDistance(), 2, this.serverViewDistance)`.
+    /// request to the configured ceiling, keeping the advertised distance
+    /// within the server's accepted range.
     ///
-    /// **Issue #545: this is a second field precisely because it is a second
+    /// **The view-distance ceiling is a second field because it answers a second
     /// question.** `radius` above is where the connection *starts*; this is how
-    /// far it may *go*. They were one value, so the ceiling for a live change was
-    /// the radius the client happened to join with — lowering render distance
-    /// mid-session worked and raising it silently did nothing, which is exactly
-    /// the owner's report. Vanilla clamps against `serverViewDistance`, a server
-    /// setting, never against the player's current view.
+    /// far it may *go*. A client may lower or raise its requested distance within
+    /// the configured ceiling, which is a server setting rather than the player's
+    /// current view.
     ///
     /// Who supplies it is a per-path memory-policy decision, the same fork
     /// `ChunkStore::for_view_radius` vs `for_integrated_view_radius` already
@@ -1194,20 +1135,19 @@ struct ViewTracker {
     /// while open-to-LAN (`IntegratedServer::bind`) passes its configured
     /// `view_radius` because it spends an operator's memory on behalf of players
     /// who did not choose the setting. Every other caller passes `view_radius`,
-    /// which is exactly the old behaviour.
+    /// which preserves the compatibility behavior of those callers.
     max_radius: i32,
 }
 
 /// The directives produced by one [`ViewTracker`] update, split by whether
-/// they are subject to issue #270's chunk-batch flow-control gate
+/// they are subject to the chunk-batch flow-control gate
 /// (`ServerBound::ChunkBatchAcknowledged`) — see
 /// [`send_view_update`]'s own doc comment for how a caller applies this.
 #[derive(Debug, Default)]
 struct ViewUpdate {
-    /// Cache-center update and forgets: sent right away regardless of any
-    /// outstanding chunk-batch acknowledgement, matching vanilla's own
-    /// `ChunkTrackingView::difference`, which is not gated by
-    /// `PlayerChunkSender` at all (only new chunk *sends* are).
+    /// Cache-center updates and forgets are sent right away regardless of any
+    /// outstanding chunk-batch acknowledgement. Only new chunk sends wait for
+    /// that flow-control signal.
     immediate: Vec<ServerDirective>,
     /// The columns that left the view — the same set `immediate`'s
     /// `encode_forget_chunk` directives name, kept as coordinates as well so
@@ -1218,8 +1158,8 @@ struct ViewUpdate {
     /// The newly-visible columns, in wire order — empty when nothing new entered
     /// the view.
     ///
-    /// **Coordinates, not directives, and that is the fix rather than a
-    /// refactor.** This used to be a finished
+    /// **Coordinates, not directives.** This API returns work for the caller to
+    /// schedule rather than a finished
     /// `begin_chunk_batch`/`encode_chunk`*/`end_chunk_batch` sequence, which meant
     /// [`ViewTracker::recenter`] had to `await` the generation *and* the encode of
     /// every column in the strip before returning: one suspension point covering
@@ -1268,8 +1208,8 @@ impl ViewTracker {
         next
     }
 
-    /// Every column in `next` this tracker has not already sent, in wire order —
-    /// empty if there is nothing new. Shared by [`recenter`](Self::recenter) and
+    /// Every column in `next` this tracker has not sent, in wire order — empty if
+    /// there is nothing visible to add. Shared by [`recenter`](Self::recenter) and
     /// [`set_view_radius`](Self::set_view_radius) so both diff against
     /// `self.loaded` identically.
     fn added_columns(
@@ -1285,15 +1225,14 @@ impl ViewTracker {
         // Fixing the wire order here is what makes the encoded byte sequence
         // independent of both.
         //
-        // **Ordered nearest-first, not lexicographically.** It used to be a bare
-        // `sort_unstable()`, i.e. by `cx` then `cz` — a raster walk, so a player
-        // walking east got the newly-visible column strip filled from its
+        // **Ordered nearest-first, not lexicographically.** A bare
+        // `sort_unstable()` orders by `cx` then `cz` — a raster walk, so a player
+        // walking east would get the visible column strip filled from its
         // northern end regardless of where along it they actually were. The same
         // key the join stream uses (`join_scheduler::view_order_key`: distance
         // from the player's column first, the cone they are looking down second)
-        // makes a *move* behave like a join, which is what the owner asked for —
-        // "if the player moves it should properly generate the closer chunks
-        // first". Still a total order over integers, so the wire order stays a
+        // makes a *move* behave like a join. It is a total order over
+        // integers, so the wire order stays a
         // deterministic function of the pose, not of scheduling.
         let mut added: Vec<(i32, i32)> = next.difference(&self.loaded).copied().collect();
         added.sort_unstable_by_key(|&coord| {
@@ -1353,7 +1292,7 @@ impl ViewTracker {
     }
 
     /// Resizes the tracked view around the *current* center without the
-    /// player having moved at all (issue #270's
+    /// player having moved at all (the `ClientInformationChanged` view-distance
     /// `ServerBound::ClientInformationChanged` — a client changing its
     /// render-distance setting mid-session). Unlike
     /// [`recenter`](Self::recenter), there is no cache-center update to send
@@ -1372,29 +1311,23 @@ impl ViewTracker {
         P: ServerProtocol,
         S: ChunkSource + 'static,
     {
-        // Issue #545: the clamp lives here, against
-        // [`max_radius`](Self::max_radius), and **not** at the call site against
-        // the connection's current radius — which is the bug. The floor is `0`,
-        // not vanilla client UI's slider minimum of `2` (`Options::renderDistance`):
-        // the server side has no evidence pinning that specific floor, and a floor
-        // above the ceiling would be actively wrong on a connection served with a
-        // smaller radius than that (several tests in this crate use
-        // `view_radius: 0`). `.max(0)` on the upper bound only guards `clamp`'s own
-        // `min <= max` invariant against a negative `max_radius`.
+        // Clamp against the configured ceiling rather than the connection's
+        // current radius. The lower bound is `0`, which represents an empty
+        // view and keeps the server-side range valid for small test worlds.
+        // `.max(0)` on the ceiling preserves `clamp`'s `min <= max` invariant
+        // when a caller supplies a negative configuration value.
         let radius = radius.clamp(0, self.max_radius.max(0));
         if radius == self.radius {
             return ViewUpdate::default();
         }
 
-        // Issue #551: resize the retention bound *before* streaming the new view,
-        // not after. `ChunkStore`'s capacity used to be fixed at construction from
-        // the radius the connection joined with, so raising render distance
-        // mid-session over-subscribed the cache — and because `join_view_rings`
-        // streams outward, the LRU victim is the **innermost** ring, i.e. the
-        // ground under the player's feet at ~909 ms a column to regenerate. Doing
-        // it first means the columns reported below are never evicted before they
-        // are generated. A no-op for every source that retains nothing per view;
-        // see `ChunkSource::set_retention_radius`.
+        // Resize the retention bound *before* streaming the requested view.
+        // A larger radius can evict the **innermost** ring while
+        // `join_view_rings` streams outward; regenerating the ground under the
+        // player's feet costs ~909 ms per column. Doing this first keeps every
+        // column in the `added` set resident until generation completes. For a
+        // source that retains nothing per view, the call is a no-op; see
+        // `ChunkSource::set_retention_radius`.
         source.get().set_retention_radius(radius);
 
         let next = Self::window(self.center, radius);
@@ -1418,7 +1351,7 @@ impl ViewTracker {
 }
 
 /// The join view, split into **Chebyshev rings** ordered outward from the
-/// player's own column — issue #453.
+/// player's own column — the join stream.
 ///
 /// Ring `r` is every column at Chebyshev (chess-king) distance exactly `r` from
 /// the centre, so ring 0 is the single column the player is standing in, ring 1
@@ -1430,60 +1363,46 @@ impl ViewTracker {
 ///
 /// Every pair is a `(dx, dz)` **relative to the player's own column**, which is
 /// why ring 0 is `(0, 0)` at every view radius. The caller must add the join
-/// centre before any of it reaches `encode_chunk` or a chunk source. It did not,
-/// for a while: the square that went out was centred on chunk `(0, 0)` while
-/// `ViewTracker::new` seeded its `loaded` set around the player's actual column,
-/// so a player restored away from the origin got terrain in the wrong place,
-/// never got the ground under their feet, and had a tracker that believed
-/// otherwise. Adding the centre is what makes this "the same set
-/// `ViewTracker::new` seeds itself with, in a different order" — a property of
-/// the call site, not of this function.
+/// centre before any of it reaches `encode_chunk` or a chunk source. This
+/// produces the same set that `ViewTracker::new` seeds, in a different order;
+/// the property belongs to the call site, not this function.
 ///
-/// # Why rings, and why this is not a re-sort
+/// # Why rings
 ///
-/// Before this, the join enumerated raster-order from `(-view_radius,
-/// -view_radius)`, generated **all** 361 columns, and only then encoded any. Two
-/// separate consequences, and the fix needs both halves:
+/// The join enumerates Chebyshev rings rather than raster order from
+/// `(-view_radius, -view_radius)`. With 361 columns, the player's own column
+/// is first, so terrain near the player is encoded promptly. A raster walk
+/// places that column around item **~180 of 361**.
 ///
-/// * the player's own column was item **~180 of 361** on the wire, so terrain
-///   materialised from the far corner inward;
-/// * nothing at all was encoded until the last column finished generating.
+/// `crate::join_scheduler` flattens these groups and drives a primed sliding
+/// window over the result, so the first chunk reaches the client after **one**
+/// column of generation while nothing waits on a ring boundary. This function
+/// is therefore purely the **wire order**. The grouping states that order
+/// clearly, and `join_view_rings_partitions_the_square_exactly` verifies the
+/// partition without synchronizing the groups.
 ///
-/// Fixing the second half needs a *scheduler*, not an order, and since Unit 10
-/// that is `crate::join_scheduler`: the caller flattens these groups and drives a
-/// primed sliding window over the result, so the first chunk still reaches the
-/// client after **one** column of generation instead of 361 while nothing waits
-/// on a ring boundary. This function is therefore now purely the **wire order**
-/// — the grouping survives because it is the clearest statement of that order and
-/// because `join_view_rings_partitions_the_square_exactly` gates it, not because
-/// anything synchronises per group.
+/// `ViewTracker::build_batch` — the *move*-time counterpart — orders on the
+/// same distance-first key rather than a lexicographic `sort_unstable`, so
+/// walking into terrain fills nearest-first like joining does. The key is a
+/// total order over integers derived from the player's pose, so determinism is
+/// preserved.
 ///
-/// `ViewTracker::build_batch` — the *move*-time counterpart — now orders on the
-/// same distance-first key rather than its old lexicographic `sort_unstable`, so
-/// walking into new terrain fills nearest-first exactly like joining does. That is
-/// a change of key, not a loss of determinism: it is still a total order over
-/// integers derived from the player's pose.
-///
-/// Vanilla spirals outward for the same reason, and its priority *is* the ticket
-/// level (vanilla's own chunk-task dispatcher), so there is no separate heuristic
-/// invented here. This is a slice of issue #289's U4/U5 rather than new design.
+/// The protocol's chunk priority also spirals outward, with ticket level as the
+/// priority. This is the measured distance-first slice of that behavior.
 ///
 /// # Determinism
 ///
 /// Order **within** a ring is the same `dz`-outer/`dx`-inner walk the whole
-/// square used to use, filtered to the ring. So the emitted byte sequence stays
+/// square uses, filtered to the ring. So the emitted byte sequence stays
 /// a pure function of `view_radius` — independent of thread scheduling, hash
-/// seeds, and which arm of [`SourceRef`] generated it — exactly as before.
+/// seeds, and which arm of [`SourceRef`] generated it.
 ///
 /// # Cost
 ///
-/// One column. Before Unit 10 the caller waited on every ring boundary, so all
-/// the rings smaller than `available_parallelism` — 0 through 2 — left most
-/// worker threads idle, and every ring paid its slowest column's tail rather
-/// than its mean. `crate::join_scheduler` keeps exactly the first column of that
-/// trade (ring 0 is generated alone, which is what buys the one-column
-/// time-to-first-chunk) and deletes the rest: from the second column onward the
-/// in-flight window spans ring boundaries freely.
+/// One column. Ring 0 is generated alone, which buys the one-column
+/// time-to-first-chunk; from the second column onward the in-flight window
+/// spans ring boundaries freely. This keeps worker utilization independent
+/// of the slowest column in each ring.
 fn join_view_rings(view_radius: i32) -> Vec<Vec<(i32, i32)>> {
     // A negative radius yields **no rings**, not ring 0. `view_radius.max(0)`
     // reads as the harmless guard and is not: the raster walk this replaced built
@@ -1540,11 +1459,9 @@ const JOIN_PRESTREAM_RADIUS: i32 = 1;
 /// How many columns of the deferred join stream `serve_play` puts in one chunk
 /// batch.
 ///
-/// The join used to be a single `begin`/…/`end` pair around the whole view, and
-/// that could not survive a stream that spans ticks: the pair would have to stay
-/// open across everything else the play loop sends. So the deferred half is
-/// batched, which is vanilla's own shape — `ChunkBatchSizeCalculator` exists
-/// precisely to pace a stream of batches, and our own client answers each
+/// The deferred half is batched because a stream spans ticks and the batch
+/// markers cannot remain open across other play-loop traffic. This matches the
+/// standard pacing shape, and the client answers each
 /// `chunk_batch_finished` with a `chunk_batch_received` carrying its desired rate
 /// (`crates/protocol/v770/src/adapter.rs`'s `ChunkBatchState`).
 ///
@@ -1559,24 +1476,18 @@ const JOIN_STREAM_BATCH_COLUMNS: usize = 16;
 ///
 /// # The two ways the columns get sent, and why the first is the point
 ///
-/// **Preferred: hand them to `stream`.** `serve_play` already drains a
+/// **Preferred: hand them to `stream`.** `serve_play` drains a
 /// [`JoinChunkStream`](crate::join_scheduler::JoinChunkStream) from a `select!`
-/// branch one column at a time, so enqueueing there means a chunk-boundary crossing
-/// costs the connection task one set difference and returns — the strip is generated
-/// on the blocking pool with a primed window, re-keyed as the player keeps moving,
-/// and interleaved with every read and write this connection owes. The old shape
-/// awaited the whole strip inside `ViewTracker::recenter`: one suspension point over
-/// `2r + 1` columns during which nothing was read and nothing was written, including
-/// the client's keep-alive reply. That is the steady-state half of the owner's
-/// latency report, and it is the half the join fix did not cover.
+/// branch one column at a time. The strip is generated on the blocking pool with
+/// a primed window, re-keyed as the player moves, and interleaved with connection
+/// reads and writes.
 ///
 /// **Fallback: build the batch here.** `stream` refuses on its `Ringed` arm (a
 /// borrowed, non-`'static` source — protocol tests) and when the caller has no
 /// stream at all (`wasm32`, whose loop has no `select!` to drain one from). Those
-/// take the unchanged path: generate, encode, and send under
+/// generate, encode, and send under
 /// `awaiting_chunk_batch_ack`, the one-batch-in-flight gate
-/// `ServerBound::ChunkBatchAcknowledged` closes — vanilla's `PlayerChunkSender`
-/// shape.
+/// `ServerBound::ChunkBatchAcknowledged` closes.
 ///
 /// The streamed path is deliberately **not** subject to that gate, because the join
 /// stream it shares is not: batches there are paced by `JOIN_STREAM_BATCH_COLUMNS`
@@ -1699,11 +1610,9 @@ pub enum ServerError {
     #[error("keep-alive timeout: client did not echo the server's challenge in time")]
     KeepAliveTimeout,
     /// The connection completed a server-list status exchange and was
-    /// terminated (issue #277). **Not a failure**: vanilla itself ends a status
-    /// connection exactly this way, and calls it a disconnect —
-    /// vanilla's own status packet listener closes the channel with reason
-    /// `multiplayer.status.request_handled` after answering a ping, and also
-    /// after a *second* status request on one connection.
+    /// terminated. **Not a failure**: the status endpoint closes the channel
+    /// with reason `multiplayer.status.request_handled` after answering a ping
+    /// or receiving a second status request on one connection.
     ///
     /// It is an `Err` rather than an `Ok` only because [`ServeSummary`] is
     /// shaped around a session that logged in: a status connection has no
@@ -1712,14 +1621,13 @@ pub enum ServerError {
     /// [`crate::IntegratedServer`]'s accept loops).
     #[error("server-list status request handled; connection closed (not an error)")]
     StatusRequestHandled,
-    /// The client presented a username vanilla's own server would refuse
-    /// (vanilla's own "is valid player name" check — see [`is_valid_player_name`]), and was
-    /// sent a login-phase disconnect explaining so (issue #279).
+    /// The client presented a username rejected by [`is_valid_player_name`]
+    /// and received a login-phase disconnect explaining the refusal.
     #[error("login rejected: invalid username")]
     InvalidUsername,
-    /// The client was refused by the access lists (issue #336) — banned, IP
+    /// The client was refused by the access lists — banned, IP
     /// banned, not whitelisted, or the server was full — and was sent a
-    /// login-phase disconnect carrying vanilla's own translation key.
+    /// login-phase disconnect carrying the refusal message.
     ///
     /// Native-only in practice: `crate::access` is `cfg`-gated off on `wasm32`,
     /// where there is no filesystem to hold the lists and no remote player to
@@ -1727,11 +1635,10 @@ pub enum ServerError {
     #[error("login rejected: {0}")]
     AccessDenied(String),
     /// The client's RSA-encrypted verify-token echo did not match the
-    /// challenge the server generated (issue #273) — either tampering, or a
+    /// challenge the server generated — either tampering, or a
     /// client answering a stale `EncryptionRequest` after the server moved
-    /// on. Vanilla's equivalent is its own serverbound key-packet's own
-    /// "is challenge valid" check
-    /// returning false, treated as a hard protocol error there too.
+    /// on. The mismatch is a hard protocol error, so the connection is
+    /// rejected rather than continuing the handshake.
     ///
     /// Not `cfg`-gated, unlike its online-mode siblings below: it names no
     /// native-only type, so a `wasm32` build keeps it available for the same
@@ -1788,10 +1695,9 @@ type SessionVerify = Arc<
 >;
 
 /// Configuration for the online-mode encryption + session-server handshake
-/// (issue #273's remaining half). Passed as `Some` to opt a connection into
-/// online mode; every pre-existing entry point in this file continues to
-/// pass `None` (offline, this crate's behaviour before this change) so no
-/// caller's wire behaviour changes underneath it.
+/// (the online-mode handshake). Pass `Some` to opt a connection into online
+/// mode; callers that do not enable authentication pass `None` for offline
+/// mode.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct OnlineModeConfig {
@@ -1833,20 +1739,15 @@ impl OnlineModeConfig {
         }
     }
 
-    /// Substitutes a fixture for the real session-server call — meant for
-    /// tests, though not `#[cfg(test)]`-gated (see below for why).
+    /// Substitutes a fixture for the real session-server call in integration
+    /// tests. This constructor is available in normal builds because those
+    /// tests use the versioned protocol crate as a regular dependency.
     ///
-    /// This exists because of the exact hazard `CLAUDE.md` records for the
-    /// client-side half of this same handshake — a pre-existing unit test
-    /// that would otherwise reach a real external service the moment
-    /// online-mode auth got wired into a code path tests already call. There
-    /// is no way to hermetically test "a real vanilla client joins in online
-    /// mode" without either mocking HTTP or making the verification step
-    /// substitutable; this crate has no HTTP-mocking dependency, so this is
-    /// the injection seam instead.
+    /// The fixture prevents login tests from contacting the external session
+    /// service. The crate has no HTTP-mocking dependency, so the verifier is
+    /// injected directly at this seam.
     ///
-    /// **Not `#[cfg(test)]`**, deliberately, even though every current caller
-    /// is a test: the login-sequence test that needs it
+    /// **Not `#[cfg(test)]`**: the login-sequence test that needs it
     /// (`tests/online_mode.rs`) drives the real [`V770ServerProtocol`] from
     /// `lodestone-v26-2`, which has a *normal* dependency on this crate for the
     /// `ServerProtocol` trait. Adding `lodestone-v26-2` as a *dev*-dependency
@@ -1856,11 +1757,7 @@ impl OnlineModeConfig {
     /// measured: `V770ServerProtocol: ServerProtocol is not implemented`
     /// against the crate's own trait. An external `tests/*.rs` binary has no
     /// such self-reference (it depends on this crate exactly once, normally),
-    /// so that is where the test using this constructor lives, and it needs
-    /// `pub`. Which constructor a *caller* chooses (`new` vs this one) is
-    /// still an assertable, compile-time-visible fact — the same property
-    /// `CLAUDE.md` asks a `#[cfg(test)]` fork for — it just isn't spelled with
-    /// that attribute here.
+    /// so the test using this constructor lives there, and it needs `pub`.
     pub fn for_test(
         verify: impl Fn(String, String) -> lodestone_auth::Result<Option<lodestone_auth::HasJoinedProfile>>
         + Send
@@ -1944,13 +1841,13 @@ async fn apply<T: Transport>(
     Ok(())
 }
 
-/// This world's per-player `.dat` store, if it has one (issue #302).
+/// This world's per-player `.dat` store, if it has one.
 ///
 /// One accessor rather than the same `world_registries().and_then(...)` chain at
 /// three call sites, because the failure mode of getting it wrong is invisible:
 /// a chain that returns `None` where a store exists produces a server that joins,
-/// plays and saves nothing, with no error and no failing test — the island shape
-/// this repo's first rule is about.
+/// plays and saves nothing, with no error. Keeping this lookup in one accessor
+/// makes the save-store dependency explicit at each call site.
 #[cfg(not(target_arch = "wasm32"))]
 fn player_store<S: ChunkSource + ?Sized>(source: &S) -> Option<crate::player_data::PlayerDataStore> {
     source
@@ -1958,7 +1855,7 @@ fn player_store<S: ChunkSource + ?Sized>(source: &S) -> Option<crate::player_dat
         .and_then(|registries| registries.player_data)
 }
 
-/// Writes this connection's live state to its `.dat` file (issue #302).
+/// Writes this connection's live state to its `.dat` file.
 ///
 /// # Why the position is an `Option`
 ///
@@ -1981,27 +1878,18 @@ fn player_store<S: ChunkSource + ?Sized>(source: &S) -> Option<crate::player_dat
 /// Where a returning player should re-enter the world, given their saved
 /// state (if any, `saved`) and the world spawn as the fallback (`world_spawn`).
 ///
-/// **This is the fix for "I respawn buried in the ground."** A saved position
+/// **Respawn uses a saved position only for the matching dimension.** A saved position
 /// is trusted verbatim only when [`PlayerData::dimension`](crate::player_data::PlayerData)
-/// says it was actually recorded in the overworld — this crate's one join
-/// dimension (a fresh connection always joins there, before any portal
-/// trip). Before this existed, a player who died or disconnected in the
-/// Nether had their Nether-relative position saved, and the next join used
-/// that raw coordinate as an *overworld* one — a semi-arbitrary point that is
-/// rarely at overworld surface height, since the Nether's own placeable band
-/// and its 8:1 coordinate scale share nothing with overworld terrain shape at
-/// the same numbers. See [`crate::player_data::PlayerData::capture`]'s own
-/// doc comment for the write-side half of this fix.
+/// identifies the overworld, the dimension used by a fresh connection before
+/// any portal trip. Positions captured in another dimension fall back to the
+/// world spawn instead of being interpreted in overworld coordinates.
 ///
 /// [`crate::dimension::Dimension::from_key`] returning `None` — an
-/// unparseable tag, which is every save written before this field was
-/// captured accurately — degrades the same way a genuinely non-overworld tag
+/// unparseable tag — degrades the same way a genuinely non-overworld tag
 /// does: fall back to the world spawn rather than trust a position whose
-/// dimension is not actually known. This does not retroactively repair an
-/// already-corrupted save (the true dimension of an old save's raw position
-/// is not recoverable), but it stops the bug for every save written from here
-/// on, and it is the same "correct degradation" shape used throughout this
-/// crate for a gap rather than inventing a wrong answer.
+/// dimension is not actually known. An ambiguous saved position cannot be
+/// recovered; falling back to the world spawn avoids trusting a coordinate
+/// whose dimension is unknown.
 #[cfg(not(target_arch = "wasm32"))]
 fn join_position_for_saved_player(
     saved: Option<&crate::player_data::PlayerData>,
@@ -2042,9 +1930,8 @@ fn player_save_snapshot(
     // The dimension `player_pos`/`fallback` are expressed in — the caller's
     // own current `SourceRef::dimension()`, not always the overworld. See
     // `PlayerData::capture`'s own doc comment for why this is load-bearing
-    // rather than a label: a Nether-relative position saved under the wrong
-    // (or no) dimension tag is what the next join used to place a player
-    // inside overworld terrain at a semi-arbitrary point.
+    // rather than a label: a Nether-relative position with the wrong (or no)
+    // dimension tag must not be interpreted in overworld coordinates.
     dimension: crate::dimension::Dimension,
 ) -> crate::player_data::PlayerData {
     let pos = player_pos.map_or(fallback, |(x, y, z)| Vec3::new(x, y, z));
@@ -2144,7 +2031,7 @@ fn encode_column<P: ServerProtocol>(
     }
 }
 
-/// A shared feed of server-initiated resource pack pushes (issue #334) — the
+/// A shared feed of server-initiated resource pack pushes — the
 /// exact idiom [`BlockTickFeed`]/[`ExplosionFeed`]/[`WeatherFeed`] establish
 /// for block changes, detonations and weather transitions, applied to a
 /// resource pack push instead. A host publishes one [`ResourcePackPush`] per
@@ -2189,7 +2076,7 @@ impl ResourcePackPushFeed {
 ///    state change yet).
 /// 2. [`ServerBound::LoginAcknowledged`] → state becomes
 ///    [`State::Configuration`], then [`ServerProtocol::encode_registry_data`]
-///    (issue #275: the registries must precede the finish signal), then
+///    (the configuration phase requires registries before the finish signal), then
 ///    [`ServerProtocol::begin_configuration`].
 /// 3. [`ServerBound::ConfigurationFinished`] → state becomes [`State::Play`],
 ///    then [`ServerProtocol::begin_play`], then every column in
@@ -2228,13 +2115,9 @@ impl ResourcePackPushFeed {
 /// once [`State::Play`] is reached.
 ///
 /// Forwards to [`serve_connection_with_block_ticks`] with a fresh,
-/// permanently-empty [`BlockTickFeed`] — this is the compatibility shape
-/// kept for every caller outside this crate (`crates/protocol/v770/tests/*`
-/// call this directly and are off-limits for this issue's file-ownership
-/// split — see issues #307/#308's own task brief), none of which need to
-/// observe a world-tick-driven block change. A caller that does (today:
-/// only [`crate::IntegratedServer::open_in_memory_with_mobs`]) calls
-/// [`serve_connection_with_block_ticks`] instead.
+/// permanently-empty [`BlockTickFeed`]. Callers that need world-tick-driven
+/// block changes, including [`crate::IntegratedServer::open_in_memory_with_mobs`],
+/// use the variant that receives a live feed.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_connection<T, P, S, E>(
     conn: &mut Connection<T>,
@@ -2265,23 +2148,17 @@ where
 }
 
 /// [`serve_connection`], but generating chunks **off** the async runtime's
-/// core thread (issue #293).
+/// core thread.
 ///
-/// Identical behaviour and identical wire bytes; the only difference is that
-/// the `Arc<S>` this takes can be moved into a `spawn_blocking` closure, so a
-/// join burst or a view recentre no longer stalls every other task in the
-/// process — including [`crate::tick::run_tick_loop`], which on the shell's
-/// current-thread runtime shares the connection task's one thread. See
-/// [`SourceRef`] for why two entry points exist rather than one changed
-/// signature: `&S` cannot satisfy `spawn_blocking`'s `'static` bound, and
-/// changing [`serve_connection`]'s own signature would break every
-/// off-limits `crates/protocol/v770/tests/*` call site.
+/// Preserves packet flow while allowing `Arc<S>` to move into a
+/// `spawn_blocking` closure, keeping column generation off the async runtime's
+/// core thread. [`SourceRef`] records the borrowed-versus-shared source
+/// distinction: `&S` cannot satisfy `spawn_blocking`'s `'static` bound, while
+/// the compatibility wrapper accepts a borrowed source.
 ///
-/// `pub(crate)`, not `pub`: `mod server` is private, so this crate's public
-/// surface is whatever `lib.rs` re-exports, and this deliberately is not
-/// re-exported. Nothing outside the crate needs it — the shell reaches the
-/// server through [`crate::IntegratedServer`] — so #293 costs **no public API
-/// change at all**, which is why it needed no `lib.rs` patch.
+/// `pub(crate)` because `mod server` is private. The public server surface is
+/// exposed through [`crate::IntegratedServer`], while this helper serves as an
+/// internal source-sharing entry point.
 ///
 /// # Errors
 ///
@@ -2293,7 +2170,7 @@ pub(crate) async fn serve_connection_shared<T, P, S, E>(
     source: &Arc<S>,
     entities: &E,
     view_radius: i32,
-    // Issue #545. Forwarded rather than defaulted to `view_radius`, because this
+    // Forwarded rather than defaulted to `view_radius`, because this
     // is one of the two entry points a caller with its own memory policy uses —
     // `IntegratedServer::open_in_memory*` passes [`MAX_CLIENT_VIEW_RADIUS`] here
     // so the slider can actually be raised mid-session. See
@@ -2301,10 +2178,8 @@ pub(crate) async fn serve_connection_shared<T, P, S, E>(
     max_view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
-    // Issue #619. `IntegratedServer`'s real handle, from `ChunkStore::tickets()` —
-    // this is one of the entry points a real join reaches, so unlike most
-    // parameters in this file it must NOT default to a fresh, disconnected
-    // handle. See `serve_connection_inner`'s own parameter comment.
+    // Ticket state from `ChunkStore::tickets()`. Integrated connections must
+    // use this shared handle rather than an isolated default.
     tickets: &TicketStoreHandle,
 ) -> Result<ServeSummary, ServerError>
 where
@@ -2313,9 +2188,8 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
-    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
-    // this file uses for every feed. Observably identical to a shared one until
-    // something else writes to it, which for this entry point is nothing.
+    // Default world/feed handles provide isolated state for this compatibility
+    // wrapper; no world-tick consumer is attached here.
     let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
@@ -2330,8 +2204,7 @@ where
         &BlockTickFeed::default(),
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
-        // Issue #325: a fresh vote/feed no tick loop reads — see
-        // `serve_connection_inner`'s parameter comments.
+        // No world-tick consumer is attached to this vote/feed pair.
         &SleepVote::default(),
         &SleepFeed::default(),
         &CommandDispatch::none(),
@@ -2340,32 +2213,24 @@ where
         &PluginChannelRegistry::default(),
         world,
         &crate::live_save::LiveSaveSlot::default(),
-        // Issue #336: the inert default — admits everybody, ops nobody.
+        // The inert default admits everybody and grants no operator role.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
         #[cfg(not(target_arch = "wasm32"))]
         None,
-        // Issue #273: offline, this wrapper's behaviour before online mode
-        // existed. `serve_connection_with_online_mode` is the one entry point
-        // that passes `Some`.
+        // Offline mode; `serve_connection_with_online_mode` passes `Some`.
         #[cfg(not(target_arch = "wasm32"))]
         None,
     )
     .await
 }
 
-/// [`serve_connection_with_mob_events`], but generating chunks off the core
-/// thread (issue #293) — the [`serve_connection_shared`] treatment applied to
-/// the feed-carrying entry point.
+/// [`serve_connection_with_mob_events`], but with chunk generation off the
+/// core thread.
 ///
-/// **Stale as of the command-dispatch landing**: this was
-/// [`crate::IntegratedServer::open_in_memory_with_mobs`]'s (singleplayer)
-/// entry point when written; that constructor now calls
-/// [`serve_connection_with_mob_events_and_commands_shared`] instead (grep
-/// confirms zero callers of this function anywhere, prod or test), so every
-/// comment elsewhere in this file that still names this function as *the*
-/// feed-carrying/singleplayer example is describing this function's shape,
-/// not naming today's live call site.
+/// This compatibility wrapper has no command dispatcher; integrated
+/// singleplayer uses [`serve_connection_with_mob_events_and_commands_shared`].
+/// Callers that need only mob event feeds use this entry point.
 ///
 /// # Errors
 ///
@@ -2377,43 +2242,27 @@ pub(crate) async fn serve_connection_with_mob_events_shared<T, P, S, E>(
     source: &Arc<S>,
     entities: &E,
     view_radius: i32,
-    // Issue #545, and this is the entry point where the fork actually *matters*:
-    // both `IntegratedServer::open_in_memory_with_mobs*` (uncapped — passes
-    // [`MAX_CLIENT_VIEW_RADIUS`]) and `IntegratedServer::bind` (open-to-LAN —
-    // passes its configured `view_radius`) come through here, so the ceiling
-    // cannot be derived locally. See `ViewTracker::max_radius`.
+    // The caller supplies the ceiling: in-memory worlds use
+    // [`MAX_CLIENT_VIEW_RADIUS`], while LAN hosts use their configured
+    // `view_radius`. See `ViewTracker::max_radius`.
     max_view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
-    // Issue #325: the singleplayer night-skip vote and its feed — the same
-    // inner handles `crate::integrated`'s tick loop reads. This is the
-    // **only** feed-carrying entry point that threads a real one; every other
-    // `serve_connection_inner` caller passes a fresh default no loop reads.
-    // See `serve_connection_inner`'s own parameter comments.
+    // Night-skip vote state and notifications consumed by the world tick.
     sleep_vote: &SleepVote,
     sleep_feed: &SleepFeed,
-    // Issues #326/#580: the shared world border — the same handle
-    // `crate::tick::run_tick_loop_with_weather` now ticks and a `/worldborder`
-    // command mutates through `BorderFeed::with`. This is the **only**
-    // border-carrying entry point; every other `serve_connection_inner`
-    // caller still passes a fresh `BorderFeed::default()` no loop reads, the
-    // same compatibility shape `sleep_vote`/`sleep_feed` above already use.
+    // Shared world-border state updated by the world tick and `/worldborder`
+    // commands. Other wrappers use an unconfigured border feed.
     border: &BorderFeed,
-    // Issues #327/#328/#323: the world's shared scalars, the *same* handle
-    // `run_tick_loop` ticks. See `serve_connection_inner`'s parameter comment.
+    // Shared world rules, difficulty, and clock updated by `run_tick_loop`.
     world: &crate::world_state::WorldStateHandle,
-    // The player-save mirror `serve_play` publishes to every loop iteration —
-    // see `crate::live_save::LiveSaveSlot`'s own doc comment. `bind`'s
-    // per-connection LAN wrapper passes a fresh, connection-local
-    // `LiveSaveSlot::default()` (a shared one would mix different players'
-    // saves under concurrent LAN connections); `open_in_memory_with_mobs`'s
-    // singleplayer connection passes the one handle `IntegratedServer::
-    // shutdown` reads back, which is the whole point of threading this
-    // through rather than defaulting it like every other feed above.
+    // `serve_play` publishes the player's live-save mirror each loop iteration.
+    // LAN connections use connection-local slots; integrated shutdown reads the
+    // slot supplied by the host.
     live_save: &crate::live_save::LiveSaveSlot,
-    // Issue #619. `IntegratedServer`'s real handle — see
+    // `IntegratedServer`'s real handle — see
     // `serve_connection_shared`'s own parameter comment; this is the
     // singleplayer/open-to-LAN sibling that carries it.
     tickets: &TicketStoreHandle,
@@ -2445,14 +2294,12 @@ where
         &PluginChannelRegistry::default(),
         world,
         live_save,
-        // Issue #336: the inert default — admits everybody, ops nobody.
+        // The inert default admits everybody and grants no operator role.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
         #[cfg(not(target_arch = "wasm32"))]
         None,
-        // Issue #273: offline, this wrapper's behaviour before online mode
-        // existed. `serve_connection_with_online_mode` is the one entry point
-        // that passes `Some`.
+        // Offline mode; `serve_connection_with_online_mode` passes `Some`.
         #[cfg(not(target_arch = "wasm32"))]
         None,
     )
@@ -2460,7 +2307,7 @@ where
 }
 
 /// [`serve_connection`], plus the host's access lists and this connection's
-/// remote address (issue #336).
+/// remote address.
 ///
 /// Added *beside* [`serve_connection`] rather than by widening it, for the reason
 /// every wrapper in this file exists: `crates/protocol/v770/tests/*` call the
@@ -2515,8 +2362,7 @@ where
         &crate::live_save::LiveSaveSlot::default(),
         access,
         peer_ip,
-        // Issue #273: this wrapper predates online mode; offline, same as
-        // every other pre-existing entry point.
+        // Offline mode for this compatibility wrapper.
         None,
     )
     .await
@@ -2582,19 +2428,18 @@ where
         &crate::live_save::LiveSaveSlot::default(),
         access,
         peer_ip,
-        // Issue #273: this wrapper predates online mode; offline, same as
-        // every other pre-existing entry point.
+        // Offline mode for this compatibility wrapper.
         None,
     )
     .await
 }
 
 /// [`serve_connection_with_mob_events_shared`], plus a host-installed command
-/// dispatcher (issues #48, #464).
+/// dispatcher (the host-installed command dispatcher).
 ///
 /// The singleplayer-shaped counterpart to
 /// [`serve_connection_with_commands`]: `_shared` is the off-core-thread chunk
-/// path (issue #293) that [`crate::IntegratedServer::open_in_memory_with_mobs`]
+/// path that [`crate::IntegratedServer::open_in_memory_with_mobs`]
 /// uses, and that constructor is the **only** production route a real player
 /// reaches this crate through. So this is the entry point singleplayer commands
 /// have to come in on; the borrowed-source
@@ -2620,7 +2465,7 @@ pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S
     max_view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
-    // Issue #619. `IntegratedServer`'s real handle — see
+    // `IntegratedServer`'s real handle — see
     // `serve_connection_shared`'s own parameter comment. Ungated like the rest
     // of this function's signature, since browser singleplayer reaches the
     // server through this entry point too.
@@ -2631,13 +2476,13 @@ pub(crate) async fn serve_connection_with_mob_events_and_commands_shared<T, P, S
     sleep_feed: &SleepFeed,
     commands: &CommandDispatch,
     border: &BorderFeed,
-    // Issue #535. The three host-supplied surfaces every other constructor
+    // The three host-supplied surfaces every other constructor
     // hardcodes to `::default()`. `IntegratedServer::open_to_lan` is the one
     // caller that can actually carry a configured one, which is why they are
     // parameters here and nowhere else.
     resource_packs: &ResourcePackPushFeed,
     plugin_channels: &PluginChannelRegistry,
-    // Issues #327/#328/#323: the world's shared scalars, the *same* handle
+    // The world's shared scalars, the *same* handle
     // `run_tick_loop` ticks. See `serve_connection_inner`'s parameter comment.
     world: &crate::world_state::WorldStateHandle,
     live_save: &crate::live_save::LiveSaveSlot,
@@ -2687,11 +2532,7 @@ where
         access,
         #[cfg(not(target_arch = "wasm32"))]
         peer_ip,
-        // Issue #273: this function's signature is fixed for the same reason
-        // its own doc comment gives for not gaining a tenth parameter earlier
-        // — its one caller lives in `integrated.rs`. Offline, same as every
-        // pre-existing entry point; `serve_connection_with_online_mode` below
-        // is the `_and_commands_shared`-shaped sibling that passes `Some`.
+        // Offline mode; `serve_connection_with_online_mode` passes `Some`.
         #[cfg(not(target_arch = "wasm32"))]
         None,
     )
@@ -2699,22 +2540,14 @@ where
 }
 
 /// [`serve_connection_with_mob_events_and_commands_shared`], plus online-mode
-/// encryption and session-server verification (issue #273) — the
+/// encryption and session-server verification — the
 /// `_and_commands_shared`-shaped sibling promised by that function's own
 /// `online_mode` argument comment.
 ///
-/// A **new** entry point rather than a widened
-/// [`serve_connection_with_mob_events_and_commands_shared`], for the same
-/// reason every other capability in this file gets one: that function's one
-/// caller lives in `integrated.rs`, outside this change's reach, and a
-/// changed signature would break it from the outside. Wiring a real dedicated
-/// host up to online mode is therefore whoever owns `integrated.rs` calling
-/// this instead of that — a purely additive swap, not a signature change —
-/// once they choose to. Until then this is reachable for testing (see
-/// `crates/protocol/v770/tests/`, following the precedent
-/// `serve_connection_with_resource_pack`/`serve_connection_with_plugin_channels`
-/// already set for a capability with no production wiring yet) and for any
-/// other caller that wants online mode directly.
+/// A dedicated entry point keeps the compatibility wrapper's signature stable
+/// while adding online-mode authentication. The integrated host can select this
+/// function when it supplies [`OnlineModeConfig`]; protocol tests and other
+/// callers can invoke it directly.
 ///
 /// # Errors
 ///
@@ -2731,7 +2564,7 @@ pub async fn serve_connection_with_online_mode<T, P, S, E>(
     view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
-    // Issue #619. `IntegratedServer`'s real handle — see
+    // `IntegratedServer`'s real handle — see
     // `serve_connection_shared`'s own parameter comment. `open_to_lan` reaches
     // this entry point whenever `LanConfig::online_mode` is `Some`.
     tickets: &TicketStoreHandle,
@@ -2786,10 +2619,8 @@ where
 /// no packet driving them — see that arm's own doc comment.
 ///
 /// Forwards to [`serve_connection_inner`] with a fresh, permanently-empty
-/// [`ExplosionFeed`] — same compatibility shape as [`serve_connection`]'s own
-/// forward, and for the same reason: `crates/protocol/v770/tests/*` call
-/// this directly and are off-limits for this issue's (#425) file-ownership
-/// split. [`crate::IntegratedServer::open_in_memory_with_mobs`] calls
+/// [`ExplosionFeed`], matching [`serve_connection`]'s compatibility behavior.
+/// [`crate::IntegratedServer::open_in_memory_with_mobs`] calls
 /// [`serve_connection_with_mob_events`] instead, which does observe
 /// detonations.
 #[allow(clippy::too_many_arguments)]
@@ -2809,9 +2640,8 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
-    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
-    // this file uses for every feed. Observably identical to a shared one until
-    // something else writes to it, which for this entry point is nothing.
+    // Default world/feed handles provide isolated state for this wrapper; no
+    // world-tick consumer is attached here.
     let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
@@ -2819,8 +2649,8 @@ where
         SourceRef::Borrowed(source),
         entities,
         view_radius,
-        // Issue #545: the join radius is also the ceiling here — this wrapper
-        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
+        // The join radius also serves as this wrapper's maximum; see
+        // `ViewTracker::max_radius`.
         view_radius,
         block_entities,
         mobs,
@@ -2828,7 +2658,7 @@ where
         block_ticks,
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
-        // Issue #325: a fresh vote/feed no tick loop reads.
+        // No world-tick consumer is attached to this vote/feed pair.
         &SleepVote::default(),
         &SleepFeed::default(),
         &CommandDispatch::none(),
@@ -2837,52 +2667,22 @@ where
         &PluginChannelRegistry::default(),
         world,
         &crate::live_save::LiveSaveSlot::default(),
-        // Issue #336: the inert default — admits everybody, ops nobody.
+        // The inert default admits everybody and grants no operator role.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
         #[cfg(not(target_arch = "wasm32"))]
         None,
-        // Issue #273: offline, this wrapper's behaviour before online mode
-        // existed. `serve_connection_with_online_mode` is the one entry point
-        // that passes `Some`.
+        // Offline mode; `serve_connection_with_online_mode` passes `Some`.
         #[cfg(not(target_arch = "wasm32"))]
         None,
     )
     .await
 }
 
-/// Like [`serve_connection_with_block_ticks`], but also forwards every
-/// detonation published on `explosions` (issue #425: `MobSim::tick` calling
-/// `MobSim::explode` the tick a creeper's fuse completes) to this
-/// connection, as a real `EXPLODE` packet — through the same
-/// `container_sync_tick` timer arm that already forwards `block_ticks`'
-/// changes. When production called this directly, the one caller was
-/// [`crate::IntegratedServer::open_in_memory_with_mobs`], the only
-/// constructor that spawns a [`MobSim`]-driven tick loop capable of
-/// producing a detonation in the first place — see the next section for why
-/// that is now history rather than the live wiring.
-///
-/// # Currently unused, and deliberately kept
-///
-/// Issue #293 moved both production callers (`crate::integrated`) to
-/// [`serve_connection_with_mob_events_shared`], so nothing calls this today —
-/// and because `mod server` is private and `lib.rs` does not re-export it,
-/// nothing outside the crate can. (That `_shared` entry point has itself
-/// since been superseded by
-/// [`serve_connection_with_mob_events_and_commands_shared`] — see its own
-/// "Stale as of the command-dispatch landing" note — but the reasoning below
-/// for keeping *this* function around is unaffected by which `_shared`
-/// variant production currently calls.) It is retained rather than deleted
-/// because it is the borrow-shaped twin of the `_shared` entry point: the one
-/// way to drive the *feed-carrying* path down [`SourceRef::Borrowed`], i.e.
-/// #293's negative control with block ticks and explosions attached. Delete
-/// it only together
-/// with that control.
-///
-/// #324: also the only entry point that carries a real [`WeatherFeed`] today —
-/// the borrow-shaped twin of whatever feed the `_shared` variant will gain when
-/// `crate::integrated` wires it. `tests/serve_play.rs`'s weather gate drives
-/// this one precisely because it is borrow-shaped.
+/// Borrowed-source wrapper that forwards block, explosion, and weather feeds to
+/// a connection. The `container_sync_tick` arm drains those feeds into
+/// protocol packets. The borrowed source keeps its lifetime local, which makes
+/// this wrapper useful for focused protocol tests.
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_connection_with_mob_events<T, P, S, E>(
@@ -2903,9 +2703,8 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
-    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
-    // this file uses for every feed. Observably identical to a shared one until
-    // something else writes to it, which for this entry point is nothing.
+    // Default world/feed handles provide isolated state for this wrapper; no
+    // world-tick consumer is attached here.
     let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
@@ -2913,8 +2712,8 @@ where
         SourceRef::Borrowed(source),
         entities,
         view_radius,
-        // Issue #545: the join radius is also the ceiling here — this wrapper
-        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
+        // The join radius also serves as this wrapper's maximum; see
+        // `ViewTracker::max_radius`.
         view_radius,
         block_entities,
         mobs,
@@ -2922,9 +2721,8 @@ where
         block_ticks,
         explosions,
         weather,
-        // Issue #325: the borrow-shaped twin stays sleep-free — no caller of
-        // this dead-code entry point wires a vote, and the twin of the *feed*
-        // wiring lives in `serve_connection_with_mob_events_shared`.
+        // No caller wires a sleep vote through this wrapper; the feed-carrying
+        // variant is `serve_connection_with_mob_events_shared`.
         &SleepVote::default(),
         &SleepFeed::default(),
         &CommandDispatch::none(),
@@ -2933,22 +2731,19 @@ where
         &PluginChannelRegistry::default(),
         world,
         &crate::live_save::LiveSaveSlot::default(),
-        // Issue #336: the inert default — admits everybody, ops nobody.
+        // The inert default admits everybody and grants no operator role.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
         #[cfg(not(target_arch = "wasm32"))]
         None,
-        // Issue #273: offline, this wrapper's behaviour before online mode
-        // existed. `serve_connection_with_online_mode` is the one entry point
-        // that passes `Some`.
+        // Offline mode; `serve_connection_with_online_mode` passes `Some`.
         #[cfg(not(target_arch = "wasm32"))]
         None,
     )
     .await
 }
 
-/// [`serve_connection`], plus a host-installed command dispatcher (issues #48,
-/// #464).
+/// [`serve_connection`], plus a host-installed command dispatcher.
 ///
 /// This is the **only** entry point that can make a `/command` from a real
 /// player do anything. Every other one above passes
@@ -2956,12 +2751,8 @@ where
 /// reaches this crate, and is answered with
 /// [`UNKNOWN_COMMAND`](crate::UNKNOWN_COMMAND) — the fail-closed direction.
 ///
-/// A new entry point rather than a changed signature, for the same reason
-/// [`serve_connection_with_block_ticks`] and
-/// [`serve_connection_with_mob_events`] are: `crates/protocol/v770/tests/*`
-/// call the older ones directly and are off-limits under this issue's
-/// file-ownership split, and every added parameter here would break all of
-/// them.
+/// This entry point carries command dispatch in addition to block and explosion
+/// feeds, while the smaller wrappers retain their compatibility signatures.
 ///
 /// # Errors
 ///
@@ -2985,9 +2776,8 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
-    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
-    // this file uses for every feed. Observably identical to a shared one until
-    // something else writes to it, which for this entry point is nothing.
+    // Default world/feed handles provide isolated state for this wrapper; no
+    // world-tick consumer is attached here.
     let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
@@ -2995,8 +2785,8 @@ where
         SourceRef::Borrowed(source),
         entities,
         view_radius,
-        // Issue #545: the join radius is also the ceiling here — this wrapper
-        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
+        // The join radius also serves as this wrapper's maximum; see
+        // `ViewTracker::max_radius`.
         view_radius,
         block_entities,
         mobs,
@@ -3004,7 +2794,7 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
-        // Issue #325: a fresh vote/feed no tick loop reads.
+        // No world-tick consumer is attached to this vote/feed pair.
         &SleepVote::default(),
         &SleepFeed::default(),
         commands,
@@ -3013,14 +2803,12 @@ where
         &PluginChannelRegistry::default(),
         world,
         &crate::live_save::LiveSaveSlot::default(),
-        // Issue #336: the inert default — admits everybody, ops nobody.
+        // The inert default admits everybody and grants no operator role.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
         #[cfg(not(target_arch = "wasm32"))]
         None,
-        // Issue #273: offline, this wrapper's behaviour before online mode
-        // existed. `serve_connection_with_online_mode` is the one entry point
-        // that passes `Some`.
+        // Offline mode; `serve_connection_with_online_mode` passes `Some`.
         #[cfg(not(target_arch = "wasm32"))]
         None,
     )
@@ -3028,20 +2816,12 @@ where
 }
 
 /// [`serve_connection`], plus a host-observable [`ResourcePackPushFeed`]
-/// (issue #334) — the entry point that makes a server-initiated resource pack
+/// This is the entry point that makes a server-initiated resource pack
 /// push reach a player at all.
 ///
-/// The compatibility shape this file established for the feed-carrying
-/// variants holds here too: `crates/protocol/v770/tests/*` call
-/// [`serve_connection`] and [`serve_connection_with_commands`] directly and
-/// are off-limits, so a real feed gets a *new* entry point rather than a
-/// changed signature on those two. A host that wants to push constructs a
-/// [`ResourcePackPushFeed`], passes it here, and publishes [`ResourcePackPush`]es
-/// into it; `serve_play`'s `container_sync_tick` arm drains them into real
-/// clientbound `resource_pack_push` frames (see that arm's own comment). A
-/// future `IntegratedServer` config surface (`open_in_memory_with_mobs` et al.)
-/// is a purely additive constructor calling this (or the `_shared` twin of it)
-/// with a feed the config parsed.
+/// A host constructs a [`ResourcePackPushFeed`], passes it here, and publishes
+/// [`ResourcePackPush`] values into it. `serve_play` drains the feed into
+/// clientbound `resource_pack_push` frames.
 ///
 /// # Errors
 ///
@@ -3065,9 +2845,8 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
-    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
-    // this file uses for every feed. Observably identical to a shared one until
-    // something else writes to it, which for this entry point is nothing.
+    // Default world/feed handles provide isolated state for this wrapper; no
+    // world-tick consumer is attached here.
     let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
@@ -3075,8 +2854,8 @@ where
         SourceRef::Borrowed(source),
         entities,
         view_radius,
-        // Issue #545: the join radius is also the ceiling here — this wrapper
-        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
+        // The join radius also serves as this wrapper's maximum; see
+        // `ViewTracker::max_radius`.
         view_radius,
         block_entities,
         mobs,
@@ -3084,7 +2863,7 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
-        // Issue #325: a fresh vote/feed no tick loop reads.
+        // No world-tick consumer is attached to this vote/feed pair.
         &SleepVote::default(),
         &SleepFeed::default(),
         &CommandDispatch::none(),
@@ -3093,35 +2872,26 @@ where
         &PluginChannelRegistry::default(),
         world,
         &crate::live_save::LiveSaveSlot::default(),
-        // Issue #336: the inert default — admits everybody, ops nobody.
+        // The inert default admits everybody and grants no operator role.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
         #[cfg(not(target_arch = "wasm32"))]
         None,
-        // Issue #273: offline, this wrapper's behaviour before online mode
-        // existed. `serve_connection_with_online_mode` is the one entry point
-        // that passes `Some`.
+        // Offline mode; `serve_connection_with_online_mode` passes `Some`.
         #[cfg(not(target_arch = "wasm32"))]
         None,
     )
     .await
 }
 
-/// [`serve_connection`], plus a live [`PluginChannelRegistry`] (issue #335) —
+/// [`serve_connection`], plus a live [`PluginChannelRegistry`] —
 /// the entry point that makes wire-level plugin messaging reach a player at all.
 ///
-/// The compatibility shape this file established for the feed-carrying variants
-/// holds here too: `crates/protocol/v770/tests/*` call [`serve_connection`] and
-/// [`serve_connection_with_commands`] directly and are off-limits, so a live
-/// registry gets a *new* entry point rather than a changed signature on those
-/// two. A host that wants plugin messaging constructs a [`PluginChannelRegistry`],
-/// registers its [`PluginChannelHandler`]s on it, and passes it here; inbound
-/// `custom_payload` packets on a registered channel are dispatched to the
-/// handler, and [`PluginChannelRegistry::broadcast`] payloads are drained into
-/// real clientbound `custom_payload` frames by `serve_play`'s
-/// `container_sync_tick` arm, filtered to the channels each client announced
-/// (see that arm's own comment). The plugin-facing API this will eventually sit
-/// under is issue #77; this entry point is the wire-level seam.
+/// A host constructs a [`PluginChannelRegistry`], registers handlers that
+/// implement `crate::PluginChannelHandler`, and passes it here. Inbound `custom_payload`
+/// packets dispatch to the registered handler, while
+/// [`PluginChannelRegistry::broadcast`] values are filtered to the channels
+/// each client announced and drained into clientbound frames.
 ///
 /// # Errors
 ///
@@ -3145,9 +2915,8 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
-    // Issues #327/#328/#323: a fresh, unshared store — the compatibility shape
-    // this file uses for every feed. Observably identical to a shared one until
-    // something else writes to it, which for this entry point is nothing.
+    // Default world/feed handles provide isolated state for this wrapper; no
+    // world-tick consumer is attached here.
     let world = &crate::world_state::WorldStateHandle::default();
     serve_connection_inner(
         conn,
@@ -3155,21 +2924,18 @@ where
         SourceRef::Borrowed(source),
         entities,
         view_radius,
-        // Issue #545: the join radius is also the ceiling here — this wrapper
-        // serves no path with its own capacity policy. See `ViewTracker::max_radius`.
+        // The join radius also serves as this wrapper's maximum; see
+        // `ViewTracker::max_radius`.
         view_radius,
         block_entities,
         mobs,
-        // Issue #619: a fresh, disconnected store — this wrapper's whole
-        // compatibility shape (see every other feed just below), and its own
-        // doc names `serve_connection_with_plugin_channels` as a secondary
-        // entry point rather than one of `IntegratedServer`'s real join
-        // paths.
+        // Use isolated ticket state; this wrapper does not share integrated
+        // world residency.
         &TicketStoreHandle::default(),
         block_ticks,
         explosions,
         &WeatherFeed::default(),
-        // Issue #325: a fresh vote/feed no tick loop reads.
+        // No world-tick consumer is attached to this vote/feed pair.
         &SleepVote::default(),
         &SleepFeed::default(),
         &CommandDispatch::none(),
@@ -3178,31 +2944,21 @@ where
         plugin_channels,
         world,
         &crate::live_save::LiveSaveSlot::default(),
-        // Issue #336: the inert default — admits everybody, ops nobody.
+        // The inert default admits everybody and grants no operator role.
         #[cfg(not(target_arch = "wasm32"))]
         &crate::access::AccessHandle::default(),
         #[cfg(not(target_arch = "wasm32"))]
         None,
-        // Issue #273: offline, this wrapper's behaviour before online mode
-        // existed. `serve_connection_with_online_mode` is the one entry point
-        // that passes `Some`.
+        // Offline mode; `serve_connection_with_online_mode` passes `Some`.
         #[cfg(not(target_arch = "wasm32"))]
         None,
     )
     .await
 }
 
-/// The real body shared by [`serve_connection`], [`serve_connection_with_block_ticks`]
-/// and [`serve_connection_with_mob_events`] — see those three thin wrappers'
-/// own doc comments for why a fourth, differently-named function exists
-/// instead of adding `explosions` directly to
-/// [`serve_connection_with_block_ticks`]'s own signature (it would break
-/// every off-limits `crates/protocol/v770/tests/*` call site).
-///
-/// Now also shared by [`serve_connection_shared`] and
-/// [`serve_connection_with_mob_events_shared`], which differ from the three
-/// above only in the [`SourceRef`] arm they pass — that is the whole reason
-/// issue #293's fix needed no second copy of this body.
+/// Shared implementation for the connection wrappers. Feed-carrying wrappers
+/// pass live handles; compatibility wrappers pass defaults. [`SourceRef`]
+/// selects borrowed or shared chunk generation without changing packet flow.
 #[allow(clippy::too_many_arguments)]
 async fn serve_connection_inner<T, P, S, E>(
     conn: &mut Connection<T>,
@@ -3210,113 +2966,55 @@ async fn serve_connection_inner<T, P, S, E>(
     source: SourceRef<'_, S>,
     entities: &E,
     view_radius: i32,
-    // Issue #545. The largest radius this connection may later raise itself to,
-    // which is a different question from the `view_radius` it joins with — see
-    // `ViewTracker::max_radius` for the per-path policy and why one value could
-    // not do both jobs. Every wrapper above except the two `*_shared` ones
-    // passes `view_radius` here, which is exactly the pre-#545 behaviour.
+    // The largest radius this connection may request; it is separate from the
+    // `view_radius` used for the initial join. Compatibility wrappers use the
+    // join radius, while integrated hosts supply their configured ceiling.
     max_view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
-    // Issue #619. The chunk-ticket graph's shared handle — same compatibility
-    // shape as every feed below: every pre-existing entry point passes a
-    // fresh, disconnected `TicketStoreHandle::default()` (so no off-limits
-    // call site's residency behaviour changes), and the production `_shared`
-    // wrappers `IntegratedServer` uses carry the *same* handle
-    // `ChunkStore::tickets()` returns — the whole point, since a ticket
-    // granted into a store nobody else reads means nothing. See
-    // `docs/chunk-tickets.md`'s "Open work" for why this parameter, rather
-    // than a new `ChunkSource` trait method or a changed public signature,
-    // is how the connection reaches it.
+    // Chunk-ticket state shared with the store that owns the connection's
+    // loaded columns. A default handle gives compatibility wrappers isolated
+    // ticket state; integrated hosts pass `ChunkStore::tickets()`.
     tickets: &TicketStoreHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
-    // Issue #324. Same shape as the two feeds above: the world tick loop's
-    // weather transitions, drained by `serve_play`'s `container_sync_tick`
-    // arm (see that arm's own comment for why a timer, not a packet, drives
-    // it). Every pre-existing entry point passes a permanently-empty default
-    // feed — the compatibility shape this file established for `block_ticks`
-    // and `explosions`, and the reason no off-limits call site broke.
+    // World-tick weather transitions drained by `serve_play`'s
+    // `container_sync_tick` arm. A default feed produces no transitions.
     weather: &WeatherFeed,
-    // Issue #325. The night-skip vote, consulted by this connection and by
-    // the world tick loop: `dispatch_play_packet` records this connection's
-    // player `lay_down`/`get_up` on it (the `UseItemOn` bed arm and the
-    // `PlayerCommand` arm), and `serve_play`'s `container_sync_tick` feeds it
-    // the voter count. Same compatibility shape as every feed above —
-    // pre-existing entry points pass a fresh vote no tick loop reads, which
-    // is observably a vote that never passes; the feed-carrying
-    // `serve_connection_with_mob_events_shared` (singleplayer) carries the
-    // real one alongside the tick loop's, so the two share one inner handle.
+    // Night-skip votes recorded by packet dispatch and consumed by the world
+    // tick loop. A default vote/feed pair leaves night skipping disabled.
     sleep_vote: &SleepVote,
-    // Issue #325: where this connection learns a night skip happened. Drained
-    // in `serve_play`'s `container_sync_tick` arm into a real
-    // `encode_set_time` so the client's day clock jumps to the morning — see
-    // that arm's own comment for why a timer, not a packet, drives it.
+    // Night-skip notifications drained by `serve_play` into `encode_set_time`.
     sleep_feed: &SleepFeed,
-    // Issues #48/#464. `CommandDispatch::none()` — the `Default` — is the
-    // inert value every pre-existing entry point passes, so adding this
-    // changed no caller's behaviour and no caller's wire bytes.
+    // Command handlers. `CommandDispatch::none()` provides fail-closed
+    // behavior for wrappers without a host command dispatcher.
     commands: &CommandDispatch,
-    // Issue #326 B1: the world border the connection snapshots for its join
-    // `initialize_border` broadcast and reads every vitals tick for border
-    // damage. Same shape as the feeds above — every pre-existing entry point
-    // passes a fresh `BorderFeed::default()`, the compatibility shape this
-    // file established for `block_ticks`/`explosions`/`weather`. Nothing
-    // mutates a default feed today (the tick loop owns a private border — see
-    // `crate::border`'s module doc, shape B), so a default feed and a
-    // shared one are observably identical until a resize caller exists.
+    // World border state used for join snapshots and per-tick border damage.
+    // A default feed describes an unconfigured border.
     border: &BorderFeed,
-    // Issue #334. Same shape as every feed above: server-initiated resource
-    // pack pushes, drained by `serve_play`'s `container_sync_tick` arm. Every
-    // pre-existing entry point passes a permanently-empty default feed — the
-    // compatibility shape this file established for `block_ticks`/`explosions`
-    // /`weather`/`border`, and the reason no off-limits call site broke. A host
-    // that wants to push reaches [`serve_connection_with_resource_pack`]
-    // instead, which carries a real feed.
+    // Server-initiated resource-pack pushes drained by `serve_play`.
     resource_packs: &ResourcePackPushFeed,
-    // Issue #335. Same shape as every feed above: the wire-level plugin
-    // messaging registry — host-installed channel handlers plus the
-    // server→client broadcast queue — drained by `serve_play`'s
-    // `container_sync_tick` arm alongside the resource-pack pushes. Every
-    // pre-existing entry point passes a permanently-inert default registry,
-    // the compatibility shape this file established for the feeds and
-    // `commands`, so no off-limits call site broke. A host that wants plugin
-    // messaging reaches [`serve_connection_with_plugin_channels`] instead,
-    // which carries a live registry.
+    // Wire-level plugin messaging handlers and the server-to-client broadcast
+    // queue, drained by `serve_play` alongside resource-pack pushes.
     plugin_channels: &PluginChannelRegistry,
-    // Issues #327/#328/#323. The world's shared scalars -- game rules, difficulty
-    // and the clock. Same compatibility shape as every feed above: each
-    // pre-existing entry point passes a fresh `WorldStateHandle::default()`, so no
-    // off-limits call site broke, and the two `_shared` wrappers
-    // `IntegratedServer` uses carry the *same* handle `run_tick_loop` ticks. That
-    // sharing is the whole point: a per-connection store is the bug both #327 and
-    // #328 were reported for.
+    // Shared game rules, difficulty, and world clock. Integrated hosts pass the
+    // handle updated by their world tick; isolated wrappers use a default.
     world: &crate::world_state::WorldStateHandle,
-    // The continuously-refreshed player-save mirror `serve_play` publishes to
-    // every loop iteration — see [`crate::live_save::LiveSaveSlot`]'s own
-    // doc comment for the shutdown-cancellation race it exists to survive.
-    // Same compatibility shape as every feed above: each pre-existing entry
-    // point passes a fresh `LiveSaveSlot::default()`, which nothing reads;
-    // `serve_connection_with_mob_events_shared` (singleplayer) carries the
-    // one `IntegratedServer::shutdown` reads back.
+    // Continuously refreshed player-save mirror published by `serve_play`.
+    // Integrated shutdown reads the shared slot; isolated wrappers use a
+    // default slot.
     live_save: &crate::live_save::LiveSaveSlot,
-    // Issue #336. Ops, whitelist and the two ban lists, consulted once at
-    // `LoginStart`. Same compatibility shape as every feed above: each
-    // pre-existing entry point passes a fresh, empty `AccessHandle::default()`,
-    // which admits everybody and makes nobody an operator — the singleplayer
-    // shape, and the one that cannot lock a player out of their own world. A
-    // *host* opts in through `LanConfig::access`.
+    // Ops, whitelist, and ban lists consulted at `LoginStart`. A default access
+    // handle admits everyone and grants no operator role; hosts may provide
+    // configured lists.
     #[cfg(not(target_arch = "wasm32"))] access: &crate::access::AccessHandle,
     // The remote address this connection came from, for the IP ban list. `None`
     // for an in-memory duplex, which has no address — and an IP ban therefore
     // cannot apply to singleplayer, which is correct rather than a gap.
     #[cfg(not(target_arch = "wasm32"))] peer_ip: Option<std::net::IpAddr>,
-    // Issue #273. `None` (every pre-existing entry point) means offline mode,
-    // this crate's behaviour before this parameter existed: `LoginStart` goes
-    // straight to `proto.login_success` exactly as it always did. `Some`
-    // sends an encryption request instead and only calls `login_success`
-    // once the session server confirms the client's identity — see the
-    // `LoginStart`/`EncryptionResponse` arms below.
+    // `None` selects offline mode and sends `login_success` directly. `Some`
+    // selects the encryption handshake and sends `login_success` after the
+    // session server confirms the client's identity.
     #[cfg(not(target_arch = "wasm32"))] online_mode: Option<&OnlineModeConfig>,
 ) -> Result<ServeSummary, ServerError>
 where
@@ -3327,25 +3025,18 @@ where
 {
     let mut state = State::Handshaking;
     let mut username: Option<String> = None;
-    // Issue #438: kept alongside `username` because the player entity's uuid
-    // must be the *same* uuid `login_success` echoed back to this client — the
-    // client resolves a player spawn by looking that uuid up in its own
-    // `PlayerInfo` map, so a second, independently derived uuid would produce a
-    // spawn every client silently discards.
+    // Keep the player entity UUID alongside `username`; it must match the UUID
+    // echoed by `login_success` so clients resolve the spawned player correctly.
     let mut login_uuid: Option<uuid::Uuid> = None;
     // A configured online-mode listener is not enough: only this flag, set
     // after `hasJoined` replaces the claimed identity, authorizes profile-key
     // provenance enforcement in Play.
     #[cfg(not(target_arch = "wasm32"))]
     let mut online_authenticated = false;
-    // Issue #273. `Some` between the moment `LoginStart` sends an
-    // `EncryptionRequest` and the moment the matching `EncryptionResponse`
-    // arrives — the RSA keypair the request's public key came from (needed
-    // again to decrypt the response) plus the verify-token challenge the
-    // response must echo back correctly. `take()`n by the `EncryptionResponse`
-    // arm, so a second response on the same connection (there is nothing
-    // outstanding for it to answer) is the `None` branch there, not a reused
-    // keypair.
+    // `Some` while an encryption response is outstanding: retain the RSA
+    // keypair needed to decrypt it and the verify-token challenge it must echo.
+    // The response arm consumes this value, so a second response finds no
+    // outstanding challenge and cannot reuse a keypair.
     #[cfg(not(target_arch = "wasm32"))]
     let mut pending_encryption: Option<(ServerKeyPair, [u8; lodestone_net::VERIFY_TOKEN_LEN])> =
         None;
@@ -3355,7 +3046,7 @@ where
     // field: one status reply per
     // connection, a second request is a disconnect.
     let mut status_requested = false;
-    // Issue #335. This connection's declared channel support, populated from
+    // This connection's declared channel support, populated from
     // its `minecraft:register`/`minecraft:unregister` custom payloads — first
     // during Configuration (the arm below), then in Play via the same
     // `ServerBound::CustomPayload` arm in `dispatch_play_packet`. It is the
@@ -3373,12 +3064,9 @@ where
             ServerBound::Handshake { next_state } => {
                 state = next_state;
             }
-            // Issue #277. Mirrors vanilla's own status packet listener's own
-            // "handle status request" step exactly: answer the first
-            // request, disconnect on any subsequent one. The repeat case is not
-            // pedantry — it is what stops a peer holding a connection open
-            // forever cheaply re-asking, which is the same class of leak issue
-            // #280 closes for Play.
+            // Status requests are one-shot per connection: answer the first
+            // request and disconnect on any subsequent one. Repeating requests
+            // would let a peer hold the connection open without useful work.
             ServerBound::StatusRequest => {
                 if status_requested {
                     return Err(ServerError::StatusRequestHandled);
@@ -3401,10 +3089,8 @@ where
                 );
                 apply(conn, &mut state, directive).await?;
             }
-            // Vanilla's own status packet listener's own "handle ping
-            // request" step:
-            // echo the payload, then close. Note vanilla does *not* require a
-            // preceding status request here, so neither does this.
+            // Ping requests echo the payload, then close. A ping does not
+            // require a preceding status request.
             ServerBound::PingRequest { time } => {
                 apply(conn, &mut state, proto.encode_pong_response(time)).await?;
                 return Err(ServerError::StatusRequestHandled);
@@ -3413,11 +3099,10 @@ where
                 username: name,
                 uuid,
             } => {
-                // Issue #279's login-phase producer. Vanilla validates the name on
-                // this exact packet, in its own generic login-phase packet listener —
-                // but by *throwing*, which closes the socket with no explanation.
-                // We reject the same names and say why, which is the whole point
-                // of this issue.
+                // Validate the username at login start and send a reason when
+                // it fails. Offline-mode UUIDs derive from the username and
+                // player data is persisted under that UUID, so control
+                // characters must not reach storage.
                 //
                 // Not merely cosmetic: an offline-mode server derives the account
                 // uuid from the username and persists player data under it, so a
@@ -3427,14 +3112,12 @@ where
                     apply(conn, &mut state, directive).await?;
                     return Err(ServerError::InvalidUsername);
                 }
-                // Issue #336: vanilla's own "can player login" check, at vanilla's
-                // own point in the sequence — after the name check, before
+                // Apply access-list checks after username validation and before
                 // `login_success`, so a refused player never reaches
-                // Configuration. `online` is 0 because this crate has no
-                // cross-connection player registry to count from; the player
-                // *limit* is therefore inert while the ban and whitelist checks
-                // are live, which is the honest split rather than a fabricated
-                // count.
+                // Configuration. The online-player count is `0` because this
+                // per-connection loop has no cross-connection registry; the
+                // player limit is therefore inert while bans and whitelists
+                // remain active.
                 #[cfg(not(target_arch = "wasm32"))]
                 if let Err(refusal) = access.may_join(uuid, peer_ip, 0) {
                     let reason = Text::literal(refusal.message());
@@ -3445,7 +3128,7 @@ where
                 username = Some(name.clone());
                 login_uuid = Some(uuid);
 
-                // Issue #273: online mode sends an encryption request instead
+                // online mode sends an encryption request instead
                 // of finishing login now — `login_success` is deferred to the
                 // `EncryptionResponse` arm below, once the session server has
                 // confirmed the client's identity. `encode_encryption_request`
@@ -3479,8 +3162,8 @@ where
                     }
                 }
             }
-            // Issue #273: the client's answer to the `EncryptionRequest` the
-            // `LoginStart` arm above sent. Everything up to and including this
+            // Handle the client's answer to the encryption challenge sent by
+            // `LoginStart`. Everything up to and including this
             // packet travels in the clear; `ServerDirective::EnableEncryption`
             // below must be applied before anything is sent in reply, or the
             // two sides disagree about which layer started where —
@@ -3546,8 +3229,9 @@ where
             }
             ServerBound::LoginAcknowledged => {
                 state = State::Configuration;
-                // Issue #275: the registries a real client must resolve — the
-                // `dimension_type` holder ids `login`/`respawn` carry, the
+                // Send the registries needed to resolve the dimension and
+                // world-clock holders — the
+                // `dimension_type` ids `login`/`respawn` carry, the
                 // `world_clock` keys `set_time` uses — must arrive **before**
                 // the finish signal, or the client cannot make sense of them.
                 for directive in proto.encode_registry_data() {
@@ -3560,26 +3244,17 @@ where
             ServerBound::ConfigurationFinished => {
                 // PERF INSTRUMENT: timing the whole configuration→play transition
                 let t_cfg = JoinStopwatch::now();
-                // Issue #329: the world spawn point is a *search*, not a
-                // fixed local `(8, 8)` in the origin column. Vanilla's
-                // own "set initial spawn" step walks a ±5-chunk spiral
-                // and picks the first chunk with a `getLevelRespawnPos`-valid
-                // surface (`world_spawn::find_initial_spawn`). Issue #461 had
-                // already replaced the hardcoded Y with terrain, but X/Z
-                // stayed fixed, so an ocean origin chunk spawned the player
-                // under water and no search ever moved them. The search keeps
-                // the same vanilla `getLevelRespawnPos` rule and yields
-                // `(8, y, 8)` for a plains origin — the pre-#329 result — so
-                // normal terrain is unchanged; the change is that an invalid
-                // origin now moves the spawn to the nearest valid chunk
-                // instead of stranding the player.
-                // **Read the world's own spawn first.** The spiral is
-                // vanilla's own "set initial spawn" step, which vanilla runs **once, at
-                // world creation**, and persists to `level.dat`. Running it per
-                // connection re-paid a 121-column search on every join and meant
-                // the persisted value was written and never read — so a world could
-                // not remember where its spawn was, and nothing a future
-                // `/setworldspawn` wrote could stick.
+                // The world spawn point is a *search*, not a fixed local `(8, 8)`
+                // in the origin column. `world_spawn::find_initial_spawn` walks
+                // a ±5-chunk spiral and selects the first chunk with a valid
+                // surface. A plains origin yields `(8, y, 8)`, while an invalid
+                // origin moves the spawn to the nearest valid chunk instead of
+                // stranding the player under water.
+                // **Read the world's own spawn first.** The spiral runs at world
+                // creation and persists to `level.dat`; a join reuses that value.
+                // A missing value triggers the search, avoiding a repeated
+                // 121-column search on every connection and allowing
+                // `/setworldspawn` to persist.
                 //
                 // `None` here means "no search has happened for this world yet",
                 // which is exactly a fresh world; the first join resolves it and the
@@ -3594,7 +3269,7 @@ where
                     }
                 };
 
-                // Issue #297/#619: keep the world spawn's own chunks loaded
+                // keep the world spawn's own chunks loaded
                 // independent of where any particular player is standing —
                 // vanilla's own spawn-preparation task, radius 3
                 // (`ticket::PLAYER_SPAWN_RADIUS`). Re-granting under the same
@@ -3617,7 +3292,7 @@ where
                     PLAYER_SPAWN_RADIUS,
                 );
 
-                // Issue #302: this player's own saved state, if this world has
+                // this player's own saved state, if this world has
                 // any. Reached through `ChunkSource::world_registries` rather
                 // than a new parameter — see `crate::chunk::WorldRegistries`'s
                 // `player_data` field for why that routing was chosen over
@@ -3709,11 +3384,9 @@ where
                 // is a total fallback rather than a panic because a nil uuid resolves
                 // to no player and therefore no permissions — failing closed, not
                 // open. On `wasm32` there is no `AccessHandle` in this signature at
-                // all (the whole ops/whitelist/ban feature is native-only), and the
-                // browser build is the single-player owner's own world, so level 4 is
-                // the honest answer there rather than 0 — which would lock the owner
-                // out of `/gamemode` in their own game, and now would also delete its
-                // node from the tree they are sent.
+                // all (the whole ops/whitelist/ban feature is native-only). The
+                // browser build uses level 4 for its local world so the built-in
+                // game-mode command remains available there.
                 //
                 // All three bindings are consumed again by the `CommandSession`
                 // further down; see its own comment for why reuse rather than a
@@ -3731,13 +3404,10 @@ where
                 )
                 .await?;
 
-                // Full clock sync at join, mirroring vanilla's
-                // own clock-manager's own "create full sync packet" step, sent by
-                // its own "send level info" step before chunk streaming starts.
-                //
-                // Issue #323: the **world's** clock, not `(0, 0)`. A join no longer
-                // resets the sky to dawn, and a world loaded off disk starts wherever
-                // it left off (`WorldStateHandle::load_level_data`).
+                // Full clock sync at join. Send the **world's** clock, not `(0, 0)`;
+                // a world loaded from
+                // disk starts at the value returned by
+                // `WorldStateHandle::load_level_data`.
                 let joined_at = world.time();
                 apply(
                     conn,
@@ -3747,83 +3417,24 @@ where
                 .await?;
 
                 apply(conn, &mut state, proto.begin_chunk_batch()).await?;
-                // Generation is fanned out over scoped OS threads
-                // (`generate_columns_parallel`); the wire order is a fixed
-                // function of `view_radius` alone (see `join_view_rings`), which
-                // is what makes the emitted byte sequence independent of thread
-                // scheduling — see `generate_columns_parallel`'s doc comment for
-                // why the fan-out cannot desync per-chunk RNG-derived content
-                // either.
+                // Generate columns with a bounded worker window. The ring order
+                // is a pure function of `view_radius`, so worker completion order
+                // cannot change the encoded byte sequence or RNG-derived content.
+                // Shared sources perform generation and encoding in blocking
+                // workers; the connection task emits the resulting frames.
                 //
-                // Issue #293: on the `SourceRef::Shared` arm the whole fan-out
-                // *also* runs off this runtime's core thread, so this burst —
-                // the largest single generation batch a session performs — no
-                // longer holds up `run_tick_loop`. See `SourceRef`.
+                // The inner `JOIN_PRESTREAM_RADIUS` rings are sent first so the
+                // player's column arrives after one generated column. Remaining
+                // columns flow through `JoinChunkStream` while the play loop
+                // dispatches packets. One begin/end chunk-batch pair covers the
+                // complete stream, preserving client flow-control accounting.
                 //
-                // Issue #453: the player's own column is encoded after **one**
-                // column of generation. This loop used to build all `(2r+1)²`
-                // coordinates up front, `await` a single `generate` over the lot,
-                // and only then start encoding — so at `view_radius = 9` nothing
-                // reached the client until all 361 columns existed, and raster
-                // order put the player's own column at item ~180. [`join_view_rings`]
-                // fixed the order and the scheduler below preserves the latency.
-                //
-                // Still **one** chunk batch, not one per group: the batch markers
-                // stay outside this loop, so the client's flow-control
-                // accounting (issue #270) sees the same single
-                // begin/…/end sequence it always did.
-                //
-                // Unit 10: **no per-ring barrier.** Until now this walked
-                // [`join_view_rings`] and waited for every column of ring `r`
-                // before asking for ring `r + 1`, so the rings' slowest-column
-                // tails stacked. Its stated rationale was the old FIFO memo
-                // caches' warmup order — "ring 0 seeds the cache" — which
-                // stopped describing anything when Unit 6's staged store landed
-                // (`34202a21`): a stage now computes exactly once regardless of
-                // arrival order, measured 441/361 exactly across 3 of 3
-                // concurrent 289-column bursts against the old cache's varying
-                // 452/452/448. The rings remain as the **wire order** only;
-                // `crate::join_scheduler` schedules on a bounded window over
-                // that order, whose width comes from `available_parallelism`
-                // rather than from the view radius — which is the half of
-                // `5104adf` that `4307b59` was right to revert.
-                //
-                // **The owner's report: "I can't break blocks, take damage, etc.
-                // until it finishes."** Everything above was about the *order* of
-                // the burst and none of it about its position in the sequence: all
-                // `(2r + 1)²` columns — 1,089 at `view_radius = 16` — were
-                // generated and encoded here, inline, before control ever reached
-                // the loop that dispatches play packets. So a dig, a hurt, a
-                // container click and every other interaction queued behind the
-                // whole initial generation burst.
-                //
-                // Now only the innermost [`JOIN_PRESTREAM_RADIUS`] rings go out
-                // here; the rest becomes a `JoinChunkStream` that `serve_play`
-                // drains from a `select!` branch beside its socket read. Vanilla's
-                // shape: its own "place new player" step adds the player to the level
-                // and its own player-chunk-sender feeds chunks over subsequent ticks — the
-                // client holds its own loading screen until it has what it needs,
-                // but the server is not blocked.
-                // **The join centre, and it has to be derived here rather than
-                // after the stream.** [`join_view_rings`] yields Chebyshev-ring
-                // *offsets* `(dx, dz)` in `-r..=r`, not absolute chunk
-                // coordinates — the loop below used to hand them straight to
-                // `encode_chunk`, so the square that actually went out was
-                // always centred on chunk `(0, 0)` no matter where the player
-                // joined. For a restored player 400 blocks from world spawn the
-                // consequences compounded: `begin_play_at` teleported them to
-                // `join_pos` and set the chunk cache centre to their own column,
-                // `ViewTracker::new` below seeded its `loaded` set with the
-                // square around that column — and none of those columns had
-                // been sent. So the terrain the player got was a square around
-                // the origin, the ground under their feet never arrived, and the
-                // tracker believed it already had, which is why walking did not
-                // repair it either.
-                //
-                // The reason it survived every gate: both `serve_play.rs` join
-                // gates assert against `square(0, 0, view_radius)` with a spawn
-                // that floors to chunk `(0, 0)`, where offsets and absolute
-                // coordinates coincide — the *world* species of vacuous test.
+                // `join_view_rings` yields offsets `(dx, dz)`, so add the
+                // player's absolute chunk `(join_cx, join_cz)` before encoding.
+                // At `view_radius = 9` the square contains 361 columns; at
+                // `view_radius = 16` it contains 1,089. The absolute centre keeps
+                // the streamed terrain aligned with the view tracker for joins
+                // away from the origin.
                 let join_cx = (join_pos.x / 16.0).floor() as i32;
                 let join_cz = (join_pos.z / 16.0).floor() as i32;
                 let t_chunks = JoinStopwatch::now();
@@ -3849,29 +3460,26 @@ where
                 match &source {
                     SourceRef::Shared(src) => {
                         let coords: Vec<(i32, i32)> = rings.into_iter().flatten().collect();
-                        // `prioritised`, not `with_window`: the pending half of
-                        // this pipeline outlives the join now, so it is keyed on
-                        // distance-from-the-player with an in-frustum bonus and
-                        // re-keyed by `serve_play` when the player moves or turns.
-                        // With no rotation known — which is exactly the state at
-                        // join — that key *is* the ring walk, so the sequence this
-                        // emits is unchanged from `join_view_rings` order.
+                        // `prioritised` keys deferred columns by distance from
+                        // the player, with an in-frustum bonus; `serve_play`
+                        // re-keys the queue when the player moves or turns.
+                        // At join, the absent rotation makes this key equal the
+                        // `join_view_rings` order.
                         //
                         // The priority centre is the player's own column, not
                         // `(0, 0)`: it is compared against the absolute
                         // coordinates in `coords`, and `serve_play`'s
-                        // `reprioritise` re-keys the same queue against the
-                        // player's absolute chunk. A hardcoded origin here made
-                        // the two disagree for any player away from it.
+                        // `reprioritise` compares against the player's absolute
+                        // chunk. The origin is not a valid substitute for that
+                        // centre when a player joins elsewhere.
                         //
                         // `encoding_with`: protocol encode runs **inside** the
                         // per-column `spawn_blocking` closure, so this task only
-                        // writes frames. Measured at 62 M instructions / ≈2.4 ms
-                        // per column, that was ≈2.6 s of serial work on the task
-                        // that owes the player a reply — see
-                        // `crate::protocol::ChunkEncoder`. It cannot change the
-                        // wire, because the emit order is fixed by the queue at
-                        // spawn time and not by which worker finished first.
+                        // writes frames. The measured cost is 62 M instructions /
+                        // ≈2.4 ms per column (≈2.6 s for serial encoding); see
+                        // `crate::protocol::ChunkEncoder`. Worker completion
+                        // cannot change the wire because queue order controls
+                        // emission.
                         let mut pipeline = crate::join_scheduler::ColumnPipeline::prioritised(
                             Arc::clone(src),
                             coords,
@@ -3896,34 +3504,24 @@ where
                     // Sharing the ring path costs it nothing it can reach and keeps
                     // the offload fork below reading as the two arms it is about.
                     SourceRef::Borrowed(_) | SourceRef::Dimension(_) => {
-                        // **Deliberately still per-ring, and this is not the
-                        // divergence `805a1fb` warned about.** A borrowed source
-                        // is not `'static`, so it cannot be spawned; every batch
-                        // on this arm is a `generate_columns_parallel` call that
-                        // blocks until the whole batch is done. There is
-                        // therefore no generation for a window to overlap with
-                        // the encode — the one thing a window buys — and
-                        // splitting a ring into window-sized batches would only
-                        // *add* barriers: measured while building
-                        // `join_scheduler_gates.rs`, ring cumulative sizes are
-                        // `1 + 4r(r + 1)`, always ≡ 1 (mod 8), so at a window of
-                        // 8 no batch even straddles a ring boundary and ring 8's
-                        // 64 columns become eight serial batches instead of one.
+                        // A borrowed source is not `'static`, so it cannot be
+                        // spawned; each ring on this arm blocks until its
+                        // columns finish generating. A window cannot overlap
+                        // generation and encoding here. Ring cumulative sizes
+                        // are `1 + 4r(r + 1)`, always ≡ 1 (mod 8); with a window
+                        // of 8, ring 8's 64 columns therefore form eight serial
+                        // batches rather than one.
                         //
-                        // What has to match across the arms is the **wire
-                        // order**, and it does: both walk the same flattened ring
-                        // sequence, both encode one column before generating the
-                        // second, and both are gated —
+                        // Both arms walk the same flattened ring sequence and
+                        // emit the player's column first. The ordering checks
                         // `join_streams_the_view_outward_from_the_players_own_column`
-                        // here and `the_shared_arm_streams_the_view_outward_too`
-                        // over a real loopback socket.
+                        // and `the_shared_arm_streams_the_view_outward_too` cover
+                        // the borrowed and shared paths.
                         //
-                        // The pre-stream/defer split lands on a ring boundary on
-                        // this arm precisely because a ring is its unit of work:
-                        // rings `0..=JOIN_PRESTREAM_RADIUS` are generated and
-                        // encoded here, and the rest are handed to `serve_play` as
-                        // whole rings. Same emitted sequence as the other arm, one
-                        // barrier per ring instead of a window.
+                        // Rings `0..=JOIN_PRESTREAM_RADIUS` are generated and
+                        // encoded here; the remaining rings are handed to
+                        // `serve_play` as whole rings. The emitted sequence is
+                        // follows the ring order, with one barrier per ring.
                         let mut rings = rings;
                         let deferred = rings.split_off(
                             (JOIN_PRESTREAM_RADIUS as usize + 1).min(rings.len()),
@@ -3972,14 +3570,11 @@ where
                 // contract merely wrong, not a crash.
                 let username = username.clone().unwrap_or_default();
 
-                // Issue #438: this connection becomes a player *entity*,
-                // before the initial sync below, so (a) every other
-                // connection's next pass already sees it and (b) this
-                // connection's own initial sync knows which id to exclude.
-                // The ticket is moved into `serve_play`; its `Drop` is what
-                // deregisters the player on **every** exit path out of that
-                // function, of which there are many — see
-                // `PlayerRegistry::join`'s own doc comment.
+                // Register this connection as a player entity before initial
+                // sync. Other connections then see it on their next pass, and
+                // this connection can exclude its own entity. The ticket moves
+                // into `serve_play`, whose `Drop` implementation deregisters
+                // the player on every exit path.
                 let player_ticket = entities.players().map(|registry| {
                     registry.join(
                         &username,
@@ -3988,8 +3583,8 @@ where
                     )
                 });
 
-                // Issue #619: this connection's own chunk-residency ticket
-                // pair (`PLAYER_LOADING` + `PLAYER_SIMULATION`), keyed by the
+                // The connection's chunk-residency ticket pair
+                // (`PLAYER_LOADING` + `PLAYER_SIMULATION`) is keyed by the
                 // same login uuid `PlayerRegistry::join` above uses for the
                 // entity ticket — XOR-folded to a `u64` since
                 // `TicketOwner::Player` only needs per-connection uniqueness,
@@ -3997,22 +3592,17 @@ where
                 // doc). Moved into `serve_play` below; its `Drop` withdraws
                 // both tickets on every exit path out of that function,
                 // exactly like `player_ticket` just above. A disconnected
-                // `TicketStoreHandle::default()` (every non-`IntegratedServer`
-                // caller) makes the grant, every `move_to`, and the eventual
-                // drop all reach a store nobody else reads — observably a
-                // no-op, same as every other feed in this file.
+                // `TicketStoreHandle::default()` gives non-integrated callers
+                // an isolated store, so these operations do not affect shared
+                // residency.
                 let player_ticket_guard = {
                     let bits = login_uuid.unwrap_or_else(uuid::Uuid::nil).as_u128();
                     let id = (bits as u64) ^ ((bits >> 64) as u64);
                     tickets.grant_player(id, (join_cx, join_cz), view_radius)
                 };
 
-                // Initial entity sync — the same pass the old single-loop
-                // version ran on this same iteration via its trailing
-                // `if state == State::Play` check, now made explicit because
-                // `serve_play` below takes over the loop entirely. Since #438
-                // this also carries the tab-list adds and the other players'
-                // spawns, in that order; see [`stream_pass`].
+                // Initial entity sync sends tab-list additions and other
+                // players' spawns in the order defined by [`stream_pass`].
                 for directive in stream_pass(
                     proto,
                     entities,
@@ -4023,7 +3613,7 @@ where
                     apply(conn, &mut state, directive).await?;
                 }
 
-                // Issue #461: derive view centre from the actual spawn
+                // derive view centre from the actual spawn
                 // chunk rather than assuming (0, 0). For spawn at (8, ~64,
                 // 8) both floor to 0, so the centre does not change today;
                 // the derivation is the point — when the spawn column or
@@ -4041,11 +3631,12 @@ where
                 // when they did, the columns under the player's feet were marked
                 // sent without ever being sent.
                 let (spawn_cx, spawn_cz) = (join_cx, join_cz);
-                // Issue #545: two radii, two roles — the square that was just
-                // streamed, and the ceiling a later `ClientInformationChanged`
-                // may raise this connection to. See `ViewTracker::max_radius`.
+                // Keep the join radius and its configured maximum distinct:
+                // the square is streamed at the first value, while
+                // `ClientInformationChanged` may request any value up to
+                // `ViewTracker::max_radius`.
                 let view = ViewTracker::new((spawn_cx, spawn_cz), view_radius, max_view_radius);
-                // Issues #48/#464. `player_uuid`, `permission_level` and
+                // `player_uuid`, `permission_level` and
                 // `builtins` are the bindings the `COMMANDS` send above already
                 // derived, reused rather than recomputed — the tree the client was
                 // sent and the tree this session dispatches against **must** be the
@@ -4067,7 +3658,7 @@ where
                     caller: CommandCaller::new(player_uuid, username.clone()),
                     permission_level,
                 };
-                // Issue #338. The server-authoritative advancement/statistics
+                // The server-authoritative advancement/statistics
                 // store for this connection, created at the Play handoff and
                 // carried into `serve_play` so the per-packet flush and the
                 // `REQUEST_STATS` reply can reach it. The first packet is sent
@@ -4083,13 +3674,10 @@ where
                 let mut advancements = AdvancementManager::builtin();
                 let initial = advancements.initial_update(player_uuid, true);
                 apply(conn, &mut state, proto.encode_update_advancements(&initial)).await?;
-                // Issue #547: the recipe book, `replace: true` — vanilla's own
-                // per-player "init menu"/recipe-book-menu join path sends the
-                // whole book once. **This is what hands out `RecipeDisplayId`s**,
-                // so without it `PLACE_RECIPE` is not merely unimplemented but
-                // unreachable: the id a client echoes back is a position in this
-                // list. Same trait-default no-op story as the advancements above
-                // for a protocol with no override.
+                // Send the recipe book with `replace: true`. The client uses
+                // the resulting list to resolve `PLACE_RECIPE` selections;
+                // protocols without an encoder treat this as a no-op, just as
+                // they do for the advancement snapshot above.
                 apply(
                     conn,
                     &mut state,
@@ -4171,7 +3759,7 @@ where
                 )
                 .await;
             }
-            // Issue #335. Wire-level plugin messaging, Configuration-phase: a
+            // Wire-level plugin messaging, Configuration-phase: a
             // client announces the channels it supports here (via
             // `minecraft:register`) before the Play handoff, so the broadcast
             // drain in `serve_play` filters against them from the first drain
@@ -4293,7 +3881,7 @@ struct OpenContainer {
     /// A crafting table is [`MenuKind::CraftingTable`] and its `pos` is the
     /// table's block position — used for nothing but the "did the player break the
     /// block under the menu" check, because a crafting table is **not** a block
-    /// entity and has no slots at `pos` at all (issue #529 step 2). Its grid lives
+    /// entity and has no slots at `pos` at all (the virtual-menu step). Its grid lives
     /// on [`PlayerInventory::table_crafting`].
     shape: MenuKind,
     container_size: usize,
@@ -4339,8 +3927,8 @@ struct OpenMerchant {
 /// ([`sync_open_container`]): the container slots and menu-data properties
 /// last pushed to the client, so a background mutation (a furnace's own
 /// tick, not any click) can be diffed and only the changed entries re-sent —
-/// the same shape [`EntityStreamer`] already established for entity spawn/
-/// update/remove.
+/// the same changed-entry model used by [`EntityStreamer`] for entity spawn,
+/// update, and removal.
 #[derive(Debug, Default, Clone)]
 struct ContainerSync {
     slots: Vec<Option<ItemStack>>,
@@ -4371,9 +3959,8 @@ fn container_state(
 /// This is the one piece of Job 1 with no client packet driving it at all:
 /// [`open_container_screen`] covers "a player opens a menu" and
 /// [`apply_container_clicked`] covers "a player clicks in one," but a
-/// furnace's own background tick (`crate::tick::run_tick_loop`, issue #284 —
-/// previously `crate::block_entities::run_block_entity_tick_loop`, running
-/// independently of any connection) is neither — see
+/// furnace's own background tick (`crate::tick::run_tick_loop`, the shared world tick,
+/// running independently of any connection) is neither — see
 /// `docs/block-entities.md`'s own note on this. A caller (`serve_play`'s
 /// `container_sync_tick` arm) is expected to call this on its own timer,
 /// passing a fresh read of the entity's current state each time; this
@@ -4433,23 +4020,20 @@ fn container_title(menu: &str) -> &'static str {
     }
 }
 
-/// Opens a villager's `minecraft:merchant` trade screen (issue #245's
-/// visible half). Unlike [`open_container_screen`]/`open_crafting_table_screen`,
+/// Opens a villager's `minecraft:merchant` trade screen (the merchant-offers
+/// packet). Unlike [`open_container_screen`]/`open_crafting_table_screen`,
 /// this sends no `container_set_content`/`container_set_data` at all: a
-/// merchant window's whole state is the `MERCHANT_OFFERS` packet, which
-/// vanilla's `ServerPlayer::openMenu` sends in its own right immediately
-/// after `open_screen` for a `MerchantMenu`.
+/// merchant window's whole state is the `MERCHANT_OFFERS` packet, sent
+/// immediately after `open_screen`.
 ///
-/// **Trade purchase is wired**, through [`ServerBound::SelectTrade`]'s
-/// dispatch arm in `dispatch_play_packet` — issue #245's third piece
-/// (restock/leveling/purchase), previously named here as absent, is now a
-/// real per-villager economy: see [`crate::mobs::MobSim::villager_offers`]/
+/// Trade selection reads the villager's persistent offer state and commits the
+/// purchase only when the buyer can pay. Restock, leveling, demand, and uses
+/// are handled by [`crate::mobs::MobSim::villager_offers`] and
 /// [`crate::mobs::MobSim::try_villager_trade`].
 ///
-/// `offers` is the caller's already-priced, already-*persistent* list —
-/// [`crate::mobs::MobSim::villager_offers`], not a fresh stateless one — so
-/// what this sends is read from exactly the same `uses`/`demand` state
-/// [`ServerBound::SelectTrade`]'s dispatch arm charges against.
+/// `offers` is the priced persistent list from
+/// [`crate::mobs::MobSim::villager_offers`], so the displayed `uses` and
+/// `demand` values match the state charged by trade selection.
 #[allow(clippy::too_many_arguments)]
 async fn open_merchant_screen<T, P>(
     conn: &mut Connection<T>,
@@ -4502,51 +4086,45 @@ where
 }
 
 /// Executes a merchant purchase directly against the player's held
-/// inventory, given the [`TradeRecord`](crate::mobs::villager::trades::TradeRecord)
-/// [`ServerBound::SelectTrade`]'s index resolved to.
+/// inventory and the [`TradeRecord`](crate::mobs::villager::trades::TradeRecord)
+/// selected by [`ServerBound::SelectTrade`].
 ///
-/// # Why this is not vanilla's payment-slot flow
+/// # Payment model
 ///
-/// Real `MerchantMenu` mechanics need the player to place items into two
-/// payment slots and take the result from a third — that is genuinely new
-/// per-connection scratch storage the same shape as
+/// A full merchant menu places items into two payment slots and returns the
+/// result through a third. That would require per-connection scratch storage
+/// shaped like
 /// [`PlayerInventory::workstation`], **except** a villager is not a
 /// [`crate::block_entities::BlockEntity`] the way an anvil or a furnace is
 /// (it is a [`crate::mobs::SimMob`]), so it has no `BlockPos` for
 /// [`OpenContainer`]'s slot-sync machinery to key on — the sync loop that
 /// makes every *other* menu in this crate live reads a block entity by
-/// position. Standing up a second, parallel slot-storage-and-sync mechanism
-/// for exactly one menu shape was judged out of scope for the pass that
-/// connected this packet at all (see the issue's own tracking comment); this
-/// executes the trade in one step instead, the moment a row is selected.
+/// position. This helper therefore executes the trade in one step when a row
+/// is selected and leaves the block-entity slot-sync path untouched.
 ///
 /// # What that costs
 ///
 /// The cost items are found and consumed from wherever they sit in the
 /// standard 36-slot hotbar+main inventory ([`PlayerInventory::consume`]),
-/// not from two manually-filled slots — so a player can trade without first
-/// dragging items into place, a real deviation from vanilla's UX rather than
-/// a silent one.
+/// not from two manually-filled slots, so the player can trade without moving
+/// items into dedicated payment slots.
 ///
 /// `offer` is the caller's read-only priced peek at the villager's *live*,
 /// persistent [`crate::villager_trade::VillagerTrades`] entry
-/// ([`crate::mobs::MobSim::villager_offers`]) — this function only decides
-/// whether the buyer's inventory can afford it; committing the trade against
-/// that persistent state (uses, demand, xp) is
-/// [`crate::mobs::MobSim::try_villager_trade`]'s job, called only after this
-/// one succeeds, so a buyer who cannot pay never moves the villager's
-/// economics.
+/// ([`crate::mobs::MobSim::villager_offers`]). This function checks whether the
+/// buyer's inventory can afford it; [`crate::mobs::MobSim::try_villager_trade`]
+/// commits uses, demand, and experience only when that check succeeds.
 ///
 /// Returns `None` — inventory untouched — when the player lacks the cost
-/// items or has no room for the result, mirroring vanilla's own refusal
-/// rather than dropping the excess on the floor.
+/// items or has no room for the result; the inventory stays unchanged and no
+/// excess item is dropped.
 fn attempt_villager_trade(
     inventory: &PlayerInventory,
     offer: &crate::villager_trade::OfferState,
 ) -> Option<PlayerInventory> {
     let trade = &offer.record;
     let mut trial = inventory.clone();
-    // `offer.modified_cost_a_count()`, not `trade.wants_count`: issue #246's
+    // `offer.modified_cost_a_count()`, not `trade.wants_count`: the persistent
     // whole remaining scope was that a real reputation/Hero-of-the-Village
     // discount was computed and never reached a price — this is that price.
     trial.consume(
@@ -4664,14 +4242,14 @@ where
     Ok(())
 }
 
-/// Opens a crafting table's `minecraft:crafting` menu — issue #529's step 2, the
+/// Opens a crafting table's `minecraft:crafting` menu — the virtual-menu step, the
 /// **positionless virtual menu**.
 ///
 /// [`open_container_screen`] structurally cannot do this: it is driven entirely by
 /// a [`BlockEntity`] at `pos`, and **a crafting table is not a block entity.** Its
-/// slots are scratch space owned by the menu (vanilla's `CraftingMenu` builds a
-/// `TransientCraftingContainer` + `ResultContainer` in its constructor and throws
-/// them away on close), which here is [`PlayerInventory::table_crafting`].
+/// slots are scratch space owned by the menu (the menu creates a virtual
+/// crafting grid and result slot, then discards both on close), which here is
+/// [`PlayerInventory::table_crafting`].
 ///
 /// `pos` is still carried on the [`OpenContainer`] — not to find slots, but so
 /// breaking the table closes the window, exactly as it already does for a furnace.
@@ -4750,7 +4328,7 @@ fn workstation_menu_type(station: Station) -> &'static str {
     }
 }
 
-/// Opens an anvil/grindstone/smithing-table screen (issues #253-#255) — the
+/// Opens an anvil/grindstone/smithing-table screen (the workstation menu dispatcher) — the
 /// same *positionless virtual menu* shape [`open_crafting_table_screen`]
 /// established for the crafting table, because none of these three is a block
 /// entity either (see [`PlayerInventory::workstation`]'s own doc).
@@ -4807,7 +4385,7 @@ where
     Ok(())
 }
 
-/// Opens the enchanting-table screen (issue #253): the same positionless
+/// Opens the enchanting-table screen: the same positionless
 /// shape as [`open_workstation_screen`], but with no result slot — the item
 /// slot is enchanted in place — so it carries its own [`MenuLayout`] and no
 /// `Station`. Costs are computed once here from the empty menu (both slots
@@ -4826,14 +4404,9 @@ async fn open_enchanting_screen<T, P, S>(
     next_window_id: &mut i32,
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
-    // A fresh `[0, i32::MAX)` draw from the connection's own `SpawnRng`
-    // (`dispatch_play_packet`'s `drops_rng`, the same "pre-drawn value"
-    // shape `apply_use_item_on`'s own composter `roll` already uses),
-    // standing in for vanilla's own player-side "get enchantment seed"
-    // getter at menu-open —
-    // vanilla's own enchantment-menu seed field's initial value.
-    // `PlayerInventory::open_workstation` just zeroed it; this replaces that
-    // zero with a real roll before the first offer is ever computed.
+    // Draw an enchantment seed from the connection's `[0, i32::MAX)` random
+    // stream. `PlayerInventory::open_workstation` stores the value before the
+    // first offer is computed, so menu offers receive a per-session seed.
     enchant_seed_roll: i64,
 ) -> Result<(), ServerError>
 where
@@ -4891,50 +4464,37 @@ where
     Ok(())
 }
 
-/// Applies one block-breaking phase, mirroring
-/// vanilla's own per-player game-mode "handle block break action" step's
-/// three destroy ordinals.
+/// Applies one block-breaking phase for the three destroy-action ordinals.
 ///
-/// Since issue #531 this **validates** the break rather than trusting it: see
+/// This production path **validates** the break rather than trusting it: see
 /// [`crate::block_breaking`] for the destroy-progress arithmetic, the tolerance
 /// it deliberately carries, and what is still not modelled (creative mode and
 /// spawn protection). Two behaviours follow from it, and they are opposite ends
 /// of the same missing computation:
 ///
-/// * **`StartDestroy` can break the block by itself.** Vanilla's `"insta mine"`
-///   branch fires when destroy progress reaches `1.0` in the first tick, which is
-///   every zero-hardness block — and a client that knows the block is instant
-///   sends no `StopDestroy` at all. Breaking only on `StopDestroy` therefore made
-///   sugar cane, grass and flowers *unbreakable on this server*, which is the bug
-///   the owner reported.
+/// * **`StartDestroy` can break the block by itself.** When destroy progress
+///   reaches `1.0` on the first tick, a zero-hardness block needs no follow-up
+///   action. The server therefore handles instant blocks at `StartDestroy`.
 /// * **A `StopDestroy` that arrives too early is *deferred*, not refused.** It
-///   arms vanilla's `hasDelayedDestroy` and the dig keeps accruing progress on
-///   the server's clock, breaking the block once it is fully earned — see
+///   records a deferred dig and keeps accruing progress on the server's clock,
+///   breaking the block once it is fully earned — see
 ///   [`crate::block_breaking::PendingBreak::defer`] and `serve_play`'s
 ///   `vitals_tick` arm. Bedrock and obsidian are still not instant, because an
 ///   unbreakable block is not deferrable and obsidian's deferred dig is minutes
 ///   long; but hold-and-release on stone breaks stone, which an outright refusal
 ///   made impossible.
 ///
-/// `pending_break` is this connection's tracked in-progress dig — the
-/// version-free analogue of vanilla's own destroy-position + destroy-progress-start pair.
+/// `pending_break` is this connection's tracked in-progress dig, including its
+/// target and accumulated progress.
 /// It is what makes `StartDestroy` + `StopDestroy` break a block while
 /// `StartDestroy` + `AbortDestroy` does not, and what makes a `StopDestroy` for a
-/// position nobody started a no-op, mirroring vanilla's own
-/// "position equals the tracked destroy position" guard.
+/// position nobody started is a no-op; only the tracked target may advance.
 ///
 /// **Also removes a broken position's [`BlockEntity`], if any, from the
-/// registry** — `docs/block-entities.md`'s own note that only placement
-/// wrote into the registry ("once block breaking learns to consult this
-/// registry" was future work) now matters for correctness, not just
-/// tidiness: a real screen can be open against one, and leaving a dangling
-/// entry would let a stale `container_click` keep mutating a container
-/// backing a block that no longer exists. If the connection's own
-/// [`OpenContainer`] pointed at the broken position, it is cleared too —
-/// this crate does not send a `container_close` to force the client's UI
-/// shut in that case (a real, documented gap, not attempted here; vanilla's
-/// own equivalent is its own generic container-menu "still valid" polling, which this
-/// crate does not model).
+/// registry**. A screen can remain open at the broken position, so leaving the
+/// record would let a later container click mutate a container whose block no
+/// longer exists. If [`OpenContainer`] points at the broken position, it is
+/// cleared as well; the client receives no synthetic close frame.
 #[allow(clippy::too_many_arguments)]
 async fn apply_block_action<T, P, S>(
     conn: &mut Connection<T>,
@@ -4945,31 +4505,23 @@ async fn apply_block_action<T, P, S>(
     block_entities: &BlockEntityHandle,
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
-    // Issue #337. Where a broken block's rolled loot is spawned as item
-    // entities, and this connection's draw source for the roll plus
-    // `popResource`'s placement. `mobs` is the same shared handle the composter
-    // arm of `apply_use_item_on` already spawns bone meal into, so drops land in
-    // the one `MobSim` every connection's streaming pass reads.
+    // Shared mob handle where block-break loot becomes item entities. The
+    // composter arm of `apply_use_item_on` uses the same handle for bone-meal
+    // drops, so every connection's streaming pass sees the spawned entity.
     mobs: &MobHandle,
     drops_rng: &mut SpawnRng,
-    // Issue #539. The breaker's main-hand stack, `None` for a bare hand — this
-    // connection's `PlayerInventory::selected_item`. It is the loot-context
-    // "tool" parameter
-    // for the roll *and* the subject of vanilla's own "has correct tool for
-    // drops" check, which is
-    // consulted before the roll happens at all. Passed as a borrowed stack rather
-    // than the whole inventory because that is all either use needs, and because
-    // the caller holds `&mut PlayerInventory` for other reasons.
+    // The breaker's main-hand stack, `None` for a bare hand. It supplies the
+    // loot context and tool-eligibility check for the roll; a borrowed stack is
+    // sufficient because the caller already owns the mutable inventory.
     held: Option<&ItemStack>,
-    // Issue #531. The breaker's tracked feet position for the interaction-range
+    // The breaker's tracked feet position for the interaction-range
     // test, `None` until the client has sent a movement packet — see
     // `block_breaking::within_interaction_range` for why `None` permits the break
     // rather than refusing it.
     player_feet: Option<Vec3>,
-    // Issue #327: the world's rules, for the `block_drops` gate below (vanilla's
-    // own gate site, inside its own resource-drop routine).
+    // The world's rules, for the `block_drops` gate below.
     world: &crate::world_state::WorldStateHandle,
-    // Issue #531. The server tick this packet is being handled on, for the
+    // The server tick this packet is being handled on, for the
     // destroy-progress accounting. `None` on `wasm32`, which has no timer to
     // count ticks with (see `serve_play`'s two definitions); the timing test is
     // then skipped, while the hardness and range tests still apply.
@@ -4978,12 +4530,10 @@ async fn apply_block_action<T, P, S>(
     // is published *except* for (this connection's own).
     block_ticks: &BlockTickFeed,
     breaker: uuid::Uuid,
-    // Issue: creative mode. Vanilla's own block-break-action handler's very
-    // first branch is `if (this.isCreative()) { destroyAndAck(...); return; }` —
-    // no hardness clock and no drops, whatever the block or the tool.
+    // Creative mode bypasses the hardness clock and produces no drops.
     creative: bool,
     action: BlockActionKind,
-    // Issue #338's `minecraft:mined` counter — see `destroy_block`'s own parameter
+    // `minecraft:mined` counter — see `destroy_block`'s own parameter
     // comment for why it is awarded there rather than here.
     advancements: &mut AdvancementManager,
     // Hunger, for the per-block mining exhaustion `destroy_block` charges. Threaded
@@ -5062,15 +4612,10 @@ where
             };
             *pending_break = None;
             if !dig.may_break_at(game_tick) {
-                // **Not a refusal.** Vanilla's shortfall branch arms
-                // `hasDelayedDestroy` and keeps accruing progress in
-                // its own per-player game-mode tick until the block is fully earned
-                // (vanilla's own per-player game-mode tick); it sends no rollback
-                // here at all. Refusing instead — which is what this arm did
-                // between #531 and this fix — made every non-instant block
-                // unbreakable, because a `StopDestroy` arriving on the same tick
-                // as its `StartDestroy` (which is what a local integrated server
-                // sees) can never clear 0.7.
+                // **Not a refusal.** A dig whose progress is below the threshold
+                // enters the deferred state and continues through the per-player
+                // tick until the block is fully mined. A `StopDestroy` arriving
+                // on the same tick as `StartDestroy` therefore cannot clear 0.7.
                 //
                 // A `None` means the dig can never finish (bedrock, or no clock),
                 // so the slot is simply left empty and nothing breaks. See
@@ -5118,10 +4663,9 @@ fn fluid_env_at<S: ChunkSource + ?Sized>(source: &S, pos: BlockPos) -> crate::fl
 /// Breaks the block at `pos`: rolls and pops its loot, clears any block entity
 /// and open container against it, and tells the client.
 ///
-/// Vanilla's own destroy-block funnel. Extracted from
-/// [`apply_block_action`] by issue #531 because there are now **two** call sites
-/// — the instant break on `StartDestroy` and the validated `StopDestroy` — and
-/// vanilla likewise reaches its own destroy-block routine from both.
+/// [`apply_block_action`] calls this helper for both instant `StartDestroy` and
+/// validated `StopDestroy` requests. Both routes share loot rolling,
+/// block-entity cleanup, and the client update.
 #[allow(clippy::too_many_arguments)]
 async fn destroy_block<T, P, S>(
     conn: &mut Connection<T>,
@@ -5134,33 +4678,28 @@ async fn destroy_block<T, P, S>(
     mobs: &MobHandle,
     drops_rng: &mut SpawnRng,
     held: Option<&ItemStack>,
-    // The break's own level event (vanilla's own `PARTICLES_DESTROY_BLOCK`, sound
-    // *and* particles in one packet), published excluding `breaker` — the
-    // acting client predicts its own break sound locally, every other player
-    // must hear it. See `BlockTickFeed::publish_effect_except`.
+    // Publish the break effect (sound and particles) to every viewer except
+    // `breaker`; the acting client predicts its own effect locally. See
+    // `BlockTickFeed::publish_effect_except`.
     block_ticks: &BlockTickFeed,
     breaker: uuid::Uuid,
-    // `false` in creative — vanilla's own destroy-block routine calls
-    // `removeBlock(pos, false)` there, so a creative break drops nothing and
-    // rolls no loot at all (which also means it consumes no RNG draws).
+    // `false` in creative — the direct destroy branch writes no drops, and a
+    // creative break consumes no loot-roll RNG draws.
     drop_loot: bool,
     // The `block_drops` game rule **alone**, without the creative fork above —
-    // for the support cascade only. See [`collapse_unsupported`]'s own doc comment
-    // for why the two gates genuinely differ in vanilla; passing `drop_loot` here
-    // would make a creative player mining under a flower delete the flower.
+    // for the support cascade only. The two gates differ because a support
+    // cascade has no player context; passing `drop_loot` here would make a
+    // creative player mining under a flower delete the flower.
     cascade_drops: bool,
     pos: BlockPos,
     // The statistics store, for the `minecraft:mined` counter. Keyed by the block
     // that was broken, and incremented on **every** break including a creative
-    // one — vanilla's own destroy-block routine calls
-    // `awardStat(Stats.BLOCK_MINED)` before the `isCreative()` fork that decides
-    // whether anything drops, so gating this on `drop_loot` would silently stop
-    // counting in creative.
+    // one. Keep this independent of `drop_loot`, because creative breaks still
+    // contribute to the mined count even though they produce no item entities.
     advancements: &mut AdvancementManager,
-    // Hunger's mining cost (vanilla's own `EXHAUSTION_MINE` constant, 0.005 per block).
-    // `None` for a creative break — vanilla's guard is on `causeFoodExhaustion`
-    // (`!abilities.invulnerable`), not on the break, so an invulnerable player mines
-    // for free. An `Option` rather than a bool beside the vitals, so the guard
+    // Hunger's mining cost (`0.005` per block).
+    // `None` for a break by an invulnerable player, who mines for free. An
+    // `Option` rather than a bool beside the vitals keeps the guard
     // cannot be forgotten at a new call site.
     exhaust: Option<&mut PlayerVitals>,
 ) -> Result<(), ServerError>
@@ -5169,24 +4708,18 @@ where
     P: ServerProtocol,
     S: ChunkSource + ?Sized,
 {
-    // Issue #337: read the block *before* it is replaced. This is
-    // the whole reason the drop has to happen here rather than in a
-    // later tick — once `set_block` has run, what was broken is
-    // unrecoverable, and vanilla's own `removeBlock` likewise
-    // captures the fluid state first (its own removal routine reads
-    // `getFluidState(pos)`, and only then `setBlock(pos,
-    // fluidState.createLegacyBlock())` — **not** air unconditionally,
-    // see `new_state` below).
+    // Read the block before replacement; once `set_block` runs, the original
+    // state cannot be recovered. Capture its fluid state before writing the
+    // replacement so a waterlogged block leaves its water source rather than
+    // unconditional air (see `new_state` below).
     let broken = source.block_state(pos.x, pos.y, pos.z);
-    // Vanilla's own removal routine's own write, which is what its own
-    // destroy-block routine actually calls (not its own plain block-destroy
-    // routine, despite the name): the cell's *fluid* state survives a break. For a dry block
+    // The removal write preserves a cell's *fluid* state. For a dry block
     // `fluid_state_of` is `None` and this is plain air, which is why every
     // existing break gate — all of them dry blocks — could not see the
     // difference. A waterlogged block's fluid state is a water source
     // (`fluid_state_of` reports `amount: 8, falling: false`), so its
-    // `block_state()` is `minecraft:water[level=0]` — the source vanilla
-    // leaves behind.
+    // `block_state()` is `minecraft:water[level=0]`, the source state left
+    // behind.
     let new_state = crate::fluid::fluid_state_of(&broken)
         .map(crate::fluid::FluidState::block_state)
         .unwrap_or_else(|| AIR.to_owned());
@@ -5221,20 +4754,16 @@ where
     // what connects a 1,551-line loot module that had no production
     // caller to the wire path mobs already proved reaches a client.
     //
-    // **Gated on `block_drops`** (pre-26.2 `doTileDrops`), which vanilla
-    // consults in the same place — its own resource-drop routine wraps
-    // `popResource` in `level.getGameRules().get(RULE_DOBLOCKDROPS)`.
-    // ~~"this crate has no live game-rule registry to consult"~~ was
-    // true when written; the registry is now `world_state`.
+    // **Gated on `block_drops`**, the world-state drop rule. The resource-drop
+    // path checks the rule before it rolls or emits any item entities.
     //
-    // **Issue #539: the tool decides both whether anything drops at
-    // all and what.** `drops_are_allowed` is vanilla's own
-    // correct-tool-for-drops check, consulted by `destroyBlock`
-    // *before* it calls `dropResources` — so a bare hand on stone
+    // **Tool validation decides whether the table rolls and what context it receives.**
+    // `drops_are_allowed` checks the required tool before
+    // the loot table is rolled — so a bare hand on stone
     // breaks the block and drops nothing, and the roll's RNG draws
     // never happen either (folding the check into the table would
     // still consume them and shift the next break's stream). `held`
-    // then rides into the roll as vanilla's own tool loot-context parameter, which is
+    // then rides into the roll as the tool loot-context parameter, which is
     // what makes `match_tool`, `apply_bonus` and `table_bonus`
     // evaluate against a real item instead of an absent one.
     let popped = if drop_loot && crate::block_drops::drops_are_allowed(&broken, held) {
@@ -5252,8 +4781,7 @@ where
         mobs.with(|sim| {
             for drop in popped {
                 // `ItemLifecycle::newly_dropped` already sets the
-                // 10-tick delay `popResource`'s
-                // `setDefaultPickUpDelay()` applies, so the breaker
+                // 10-tick delay used for freshly spawned drops, so the breaker
                 // cannot re-absorb the drop on the spawning tick.
                 let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
                 sim.spawn_item(
@@ -5265,19 +4793,18 @@ where
             }
         });
     }
-    // Vanilla's own spawn-after-break → try-drop-experience → pop-experience chain: an ore pops
-    // experience orbs at the **centre** of the broken cell, not at the jittered
-    // positions its item drops used.
+    // The break path awards experience orbs at the **centre** of the broken
+    // cell, not at the jittered positions its item drops use.
     //
-    // Gated on `drop_loot` for the same reason the loot above is: `popExperience`'s own
-    // guard is `level.getGameRules().get(GameRules.BLOCK_DROPS)`, the same rule. It is
-    // deliberately **not** gated on `drops_are_allowed` — vanilla's tool check guards
-    // `dropResources`, while `spawnAfterBreak` is called by `destroyBlock` either way,
+    // Gated on `drop_loot` for the same reason the loot above is: the world drop
+    // rule controls the entire break reward path. It is deliberately **not** gated
+    // on `drops_are_allowed` — tool validation controls item drops, while the
+    // break reward is evaluated for every destroyed block,
     // so breaking coal ore with a bare hand yields no coal and still yields the XP.
-    // That asymmetry looks like a bug until you read which method each guard is on.
+    // This keeps item-drop validation separate from the experience reward.
     //
-    // Silk touch would zero this through `processBlockExperience`; no enchantment
-    // exists in this crate, so nothing to apply.
+    // No enchantment is modelled here, so no tool-specific experience modifier
+    // is applied.
     if drop_loot {
         let points = crate::experience::block_break_points(&broken, |bound| {
             drops_rng.next_int(bound)
@@ -5324,17 +4851,12 @@ where
     // a light-dampening fluid in the cell, not empty air.
     resend_column_for_light(conn, proto, source, state, &broken, &new_state, pos).await?;
 
-    // Vanilla's `setBlock(pos, AIR, UPDATE_ALL)` runs two passes the break above
-    // did not: `updateNeighbourShapes` (every neighbour's `updateShape`, which is
-    // where a torch or a rail that just lost its support turns to air) and then
-    // `updateNeighborsAt` (`neighborChanged`, the redstone/gravity reactions).
-    // **Neither of them happened on a break in this crate** — `propagate_placement`
-    // had exactly one caller, `apply_use_item_on`, so breaking a block beside dust
-    // never recomputed the dust and breaking the block *under* anything never
-    // destroyed it. Both are here now, shapes first, matching that order.
+    // A break runs two neighbour passes: shape recomputation (a torch or rail
+    // that loses support turns to air) followed by redstone and gravity
+    // reactions. The shape pass precedes the neighbour-notification pass.
     let mut collapsed = collapse_unsupported(source, pos);
-    // Vanilla's own nether-portal block's update-shape hook is a *second* member of
-    // `updateNeighbourShapes`, alongside `block_support`'s survives table
+    // Portal validation is a *second* shape pass, alongside
+    // `block_support`'s survives table
     // `collapse_unsupported` already runs above — a broken frame block must
     // extinguish the portal cells it was holding up, which
     // `collapse_unsupported` cannot see (a portal is not "supported by one
@@ -5346,14 +4868,13 @@ where
     if let Some(dimension) = source.dimension() {
         collapsed.extend(crate::portal::extinguish_broken_frames(source, dimension, pos));
     }
-    // Vanilla's own update-or-destroy → destroy-block → drop-resources chain.
+    // The update-or-destroy → destroy-block → drop-resources chain.
     //
-    // **Gated on `cascade_drops`, not on `drop_loot`, and the difference is
-    // vanilla's**: the creative no-drop is its own destroy-block routine
-    // choosing `removeBlock(pos, false)` for the block *the player broke*, while a
-    // cell that self-destructs goes through its own update-or-destroy routine, which knows nothing
-    // about who caused it. So a creative player mining the dirt under a flower does
-    // get the flower, and reusing `drop_loot` here would have silently eaten it.
+    // **Gated on `cascade_drops`, not on `drop_loot`.** The creative no-drop
+    // applies only to the block *the player broke*, while a cell that
+    // self-destructs has no player context. A creative player mining the dirt
+    // under a flower therefore gets the flower; reusing `drop_loot` here would
+    // silently eat it.
     //
     // The tool is not consulted either: the update-or-destroy routine reaches the
     // three-argument drop-resources call, which carries no
@@ -5482,11 +5003,10 @@ where
         }) {
             continue;
         }
-        // Vanilla's own update-or-destroy routine reaches its own destroy-block routine, which — like
-        // `removeBlock` above in this file — writes `fluidState
-        // .createLegacyBlock()`, not literal air: a waterlogged sign whose
-        // support block collapses leaves its water source behind. See
-        // `crate::server::destroy_block`'s `new_state` for the identical rule.
+        // Removing a block with a fluid state writes that fluid's block state
+        // rather than literal air. A waterlogged sign therefore leaves its
+        // water source behind when the support block collapses; see
+        // `destroy_block`'s `new_state` for the same rule.
         let new_state = crate::fluid::fluid_state_of(&was)
             .map(crate::fluid::FluidState::block_state)
             .unwrap_or_else(|| AIR.to_owned());
@@ -5506,15 +5026,15 @@ where
 ///
 /// A no-op unless [`crate::light::should_relight`] fires — read that module's doc
 /// comment first: it records what the served-light path was measured to actually
-/// compute, why the fix is a whole-column resend rather than the `LIGHT_UPDATE`
+/// compute, why this function uses a whole-column resend rather than the `LIGHT_UPDATE`
 /// packet that would be cheaper, and the two gaps this leaves (sky light after an
 /// edit, and light crossing a column border).
 ///
 /// `source.column(cx, cz)` reflects the `set_block` the caller already performed
-/// — `ChunkSource::column`'s own contract — so the light is computed over terrain
+/// That contract means the light is computed over terrain
 /// that contains the torch.
 ///
-/// # It is a `light_update` now, not a column resend
+/// # It is a `light_update`, not a column resend
 ///
 /// The stopgap this replaces re-encoded the **whole column**: ~40 KiB on the wire
 /// and 62 M instructions of `encode_chunk`, per placed torch, on the connection
@@ -5533,12 +5053,9 @@ where
 /// `compute_column_light` is the **isolated** compute, so light still does not
 /// cross a column border and the measured Δ5 sky-light dark bias at borders is
 /// unchanged — this is a cheaper carrier for the same values, not a better
-/// computation. (The claim that used to sit here, that `should_relight` compares
-/// emission only so breaking a roof does not re-send sky light, is no longer true:
-/// it compares dampening too. Left recorded rather than deleted because it was the
-/// stated reason this predicate was safe to keep narrow.) The border gap needs
-/// light computed where the 3×3
-/// neighbourhood is resident (the chunk source) and carried on the column; see
+/// computation. `should_relight` compares emission and dampening. The border
+/// case needs light computed where the 3×3 neighbourhood is resident (the
+/// chunk source) and carried on the column; see
 /// `crate::light` and `docs/server-chunk-light.md`, including the invalidation
 /// trap that makes stale light look like a working fix.
 ///
@@ -5576,16 +5093,11 @@ where
 /// only, with the old state already overwritten in the shared source by the time
 /// this connection drains them.
 ///
-/// **That path used to send no light at all**, which is the whole reason this
-/// function was split out. `container_sync_tick`'s drain forwarded
-/// `encode_block_update` and stopped, so every block change *originating in the
-/// tick loop* moved on the client and left the light behind — stale until the
-/// player rejoined and the column was re-encoded from scratch. The reported
-/// symptom was a torch placed underwater: the placement relights correctly through
-/// the predicate above, and then the fluid tick destroys the torch a tick later,
-/// on this path, so the block vanished and its light stayed. Fire spreading and
-/// dying, grass and crops, a redstone torch flipping `lit`, and a falling block
-/// landing all travel the same wire and had the same defect.
+/// World-tick block changes are drained after the source stores the replacement
+/// state, so this function resends light unconditionally after each update.
+/// Otherwise a fluid tick can remove an underwater torch while the client
+/// retains its light. Fire, grass, crops, redstone torches, and falling blocks
+/// use the same update feed.
 ///
 /// The absent old state is why this is unconditional rather than predicated. That
 /// is the conservative direction and it is affordable: `should_relight` already
@@ -5629,14 +5141,13 @@ where
 }
 
 /// Collects every dropped item within this player's pickup volume into their
-/// inventory, and returns the native slots that changed (issue #337's fifth and
-/// last link).
+/// inventory, and returns the native slots that changed (the item-pickup link).
 ///
-/// This is vanilla's own per-tick step → item-entity player-touch →
-/// inventory-add chain, minus the XP-orb branch. See
+/// This is the per-tick item-entity pickup → inventory-add chain, minus the
+/// XP-orb branch. See
 /// [`crate::block_drops::is_within_pickup_range`] for the volume and
-/// [`PlayerInventory::add`] for the destination order — both are vanilla
-/// behaviour that a plausible simplification gets wrong.
+/// [`PlayerInventory::add`] for the destination order — both are behavior that
+/// a plausible simplification gets wrong.
 ///
 /// # Why the whole thing happens inside one `mobs.with`
 ///
@@ -5650,14 +5161,14 @@ where
 ///
 /// # A full inventory leaves the item in the world
 ///
-/// [`PlayerInventory::add`] reports its leftover, and vanilla's `playerTouch`
-/// only removes the entity when `getInventory().add(...)` consumed everything.
-/// A partial pickup therefore credits what fitted and puts the remainder back as
+/// [`PlayerInventory::add`] reports its leftover, and the entity is removed
+/// only when the inventory consumed everything.
+/// A partial pickup therefore credits what fitted and puts the unfitted items back as
 /// the item's new count — the entity stays, visibly, rather than the surplus
 /// vanishing.
 /// # Statistics and advancements
 ///
-/// This is also vanilla's `minecraft:inventory_changed` seam, so it is where
+/// This is also the `minecraft:inventory_changed` seam, so it is where
 /// [`AdvancementManager::on_inventory_changed`] and the `minecraft:picked_up`
 /// counter are driven from. Both are credited **per item actually banked**, not
 /// per entity seen: a pickup that only partly fitted credits what fitted, and one
@@ -5667,8 +5178,8 @@ where
 #[derive(Debug, Clone, Copy)]
 struct TakenItem {
     item_entity_id: i32,
-    /// The entity's stack count **before** the inventory took any of it — vanilla's
-    /// `orgCount`. Not the amount banked; see the encoder's own doc.
+    /// The entity's stack count **before** the inventory took any of it. Not the
+    /// amount banked; see the encoder's own doc.
     amount: i32,
 }
 
@@ -5754,11 +5265,10 @@ fn collect_nearby_items(
                 // *having* the item, not by how many.
                 advancements.on_inventory_changed(player_uuid, &item_id, obtained_millis);
             }
-            // The pickup *animation* cue. Gated on `banked > 0` because that is
-            // vanilla's own guard: `playerTouch` only calls `player.take` when
-            // `getInventory().add(itemStack)` returned true, i.e. when something
-            // actually went in. A pickup into a full inventory shows nothing, which
-            // is right — nothing was taken.
+            // The pickup *animation* cue. Gated on `banked > 0` because the
+            // animation belongs only to a transfer that placed at least one
+            // item. A pickup into a full inventory shows nothing, which is right:
+            // nothing was taken.
             //
             // `offered`, not `banked`: vanilla passes `orgCount`, captured *before*
             // `add` shrinks the stack in place. The two differ exactly when the
@@ -5796,19 +5306,19 @@ struct AbsorbedOrb {
     points: i32,
 }
 
-/// Absorbs at most one nearby experience orb into `experience` — the pickup half of
-/// vanilla's own experience-orb player-touch routine.
+/// Absorbs at most one nearby experience orb into `experience` during the pickup
+/// sweep.
 ///
 /// # Why at most one
 ///
-/// `playerTouch` refuses outright while the **player's** `takeXpDelay` is non-zero and
-/// resets it to 2 on every absorption, so vanilla can only ever take one orb per two
+/// The **player's** pickup delay rejects every orb while non-zero and resets to `2`
+/// on each absorption, so the sweep can take only one orb per two
 /// ticks no matter how many are overlapping. Draining every overlapping orb in one pass
 /// would bank the same total, which is exactly why it is worth stating: the difference is
 /// invisible in the final number and obvious on screen, because the client plays one
 /// pickup sound per `TAKE_ITEM_ENTITY` and animates one orb per absorption.
 ///
-/// `delay` is the caller's own copy of `takeXpDelay`, decremented here once per call —
+/// `delay` is the caller's own copy of the pickup delay, decremented here once per call —
 /// this runs on the same movement-driven cadence the item pickup does.
 ///
 /// Returns the absorption to announce, if one happened. The points are already in
@@ -5860,19 +5370,19 @@ fn horizontal_look_direction(yaw: f32) -> Direction {
     }
 }
 
-/// Vanilla's own `getStateForPlacement` for the block a player just placed, or
+/// Selects the state for the block a player just placed, or
 /// `None` when no convention applies and the caller should keep the census's
 /// bare default-state name.
 ///
 /// The per-block table lives in [`crate::block_placement`]; this wrapper exists
 /// only to keep the three redstone families ahead of it. They are not a
-/// different convention — a repeater does take `getHorizontalDirection().getOpposite()`
+/// different convention — a repeater uses the opposite horizontal direction
 /// like a furnace — but the redstone model reads `delay`/`locked`/`powered`
 /// straight off the state *string*, so their placement must name the full
 /// property set rather than leaving it to be defaulted downstream.
 ///
-/// The observer is deliberately still yaw-only here, where vanilla's
-/// vanilla's own observer-block placement state getter resolves a vertical facing too;
+/// The observer is deliberately still yaw-only here; the observer model can
+/// resolve horizontal facing but not a vertical facing.
 /// `crate::redstone_observer` models horizontal observers only, so a
 /// `facing=up` observer would be a state the signal model cannot read.
 fn placed_block_state<F>(
@@ -5905,8 +5415,7 @@ where
 /// abilities it implies.
 ///
 /// One helper because the pair must never be split — a client told it is in
-/// creative without the abilities packet is in creative and cannot fly, which
-/// is the exact defect this batch was reported as.
+/// creative without the abilities packet is in creative and cannot fly.
 fn game_mode_directives<P: ServerProtocol>(proto: &P, mode: GameMode) -> [ServerDirective; 2] {
     [
         proto.encode_game_mode(mode),
@@ -5916,7 +5425,7 @@ fn game_mode_directives<P: ServerProtocol>(proto: &P, mode: GameMode) -> [Server
 
 /// Whether a player standing with feet at `(px, py, pz)` overlaps the swept
 /// region of a `moving_piston` cell travelling between `source` and `dest`
-/// (issue #694, item 4). The same box `crate::mobs::piston_shove::mob_aabb`
+/// (the piston entity-push integration). The same box `crate::mobs::piston_shove::mob_aabb`
 /// gives a mob (`0.6` wide, `1.8` tall — vanilla's own standing player
 /// hitbox), against the same union-of-two-unit-cells region
 /// `crate::mobs::piston_shove::swept_cell_aabb` builds for a mob; there is no
@@ -5963,13 +5472,13 @@ async fn apply_own_effect<T, P>(
     players: Option<&PlayerRegistry>,
     player_uuid: uuid::Uuid,
     effect: crate::commands::Effect,
-    // Issue #338. `/give` is a `minecraft:inventory_changed` producer, so this arm
+    // `/give` is a `minecraft:inventory_changed` producer, so this arm
     // grants criteria exactly as a floor pickup does — see the `GiveItems` arm.
     advancements: &mut AdvancementManager,
     // For the world-clock timestamp the grant is stamped with, which must be
     // tick-derived rather than `Instant::now()` (this crate links into wasm32).
     world: &crate::world_state::WorldStateHandle,
-    // Issue #259. This player's live status effects — the store `/effect give` and
+    // This player's live status effects — the store `/effect give` and
     // `/effect clear` write through.
     effects: &mut crate::mob_effects::ActiveEffects,
     // `/kill`'s health write and the `publish_health` death sequence it
@@ -6044,9 +5553,8 @@ where
                     }
                 }
                 if leftover.is_some() {
-                    // Vanilla drops the remainder as an item entity
-                    // (`GiveCommand`'s `player.drop(...)`). This crate has no
-                    // command-spawned drop path, so the surplus is reported rather
+                    // Unfitted items would normally become an item entity. This
+                    // crate has no command-spawned drop path, so the surplus is reported rather
                     // than silently discarded — the player is told, which is
                     // strictly better than an item vanishing.
                     apply(
@@ -6063,15 +5571,13 @@ where
             duration,
             amplifier,
         } => {
-            // The producer #259 needed. `ActiveEffects::apply` runs vanilla's whole
-            // stacking rule (including the hidden-effect chain), so a second
-            // application of the same effect behaves correctly rather than
-            // overwriting.
+            // Apply the complete stacking rule, including the hidden-effect
+            // chain, so a second application of the same effect behaves
+            // correctly rather than overwriting.
             //
-            // Read the "already present" fact *before* calling `apply` — that is
-            // exactly the distinction vanilla's own on-effect-added routine (a brand-new
-            // instance) vs. `onEffectUpdated` (an existing one refreshed) makes,
-            // and it is what the encoded packet's `blend` flag carries (see
+            // Read whether the effect is present before calling `apply`; this
+            // distinguishes a fresh instance from a refreshed one and supplies
+            // the encoded packet's `blend` flag (see
             // `ServerProtocol::encode_update_mob_effect`'s own doc). Without this
             // arm, `/effect give` changed real server state — movement speed,
             // damage taken, hunger drain — with zero client feedback: no icon, no
@@ -6098,8 +5604,8 @@ where
             }
         }
         crate::commands::Effect::ClearEffects { effect } => {
-            // The counterpart to `ApplyEffect` above — `LivingEntity
-            // .removeEffectNoUpdate` (single) / `onEffectsRemoved` (all) each
+            // The counterpart to `ApplyEffect` above — the single-effect
+            // removal and all-effects removal paths each
             // send `ClientboundRemoveMobEffectPacket` per cleared effect, so
             // `/effect clear` must tell the client which icons to drop rather
             // than leaving them stuck on screen.
@@ -6123,15 +5629,14 @@ where
             apply(conn, state, proto.encode_system_chat(&line)).await?;
         }
         crate::commands::Effect::Kill => {
-            // Vanilla's own entity kill routine: straight to zero, no armour/defenses consulted —
-            // vanilla's `genericKill` damage type is what `/kill` always deals.
+            // Kill sets health directly to zero without armour or defenses.
             vitals.kill();
             publish_health(
                 conn,
                 state,
                 proto,
                 vitals,
-                // No sound fires for this call today regardless (`hurt` below is
+                // No sound fires for this call (`hurt` below is
                 // `None`, and `publish_health` only plays one on a landed hit),
                 // but a position is still owed to the parameter.
                 player_pos.map(|(x, y, z)| Vec3::new(x, y, z)).unwrap_or_default(),
@@ -6253,12 +5758,11 @@ where
     Ok(())
 }
 
-/// Vanilla's own slab-block can-be-replaced check for the clicked block:
+/// Checks whether the clicked slab can be replaced:
 /// `true` when placing `held` onto `clicked` should turn it into a double slab
 /// rather than start a new one in the next cell.
 ///
-/// Vanilla's `replacingClickedOnBlock()` branch is the only one reachable here
-/// — this is asked about the clicked block itself — so the whole predicate is
+/// This predicate is asked about the clicked block itself, so the whole rule is
 /// "same slab, not already double, and the click was on the side the existing
 /// half does not already fill".
 #[must_use]
@@ -6276,9 +5780,8 @@ fn slab_doubles(clicked: &str, held: &str, face: BlockFace, cursor: Vec3f) -> bo
 }
 
 /// Which of a brewing stand's five slots a held item routes to — decided by
-/// item identity alone, mirroring vanilla's own brewing-stand-block-entity
-/// can-place-item check (slots 0-2 take potions/bottles, slot 3 takes any
-/// `potionBrewing.isIngredient`, slot 4 takes the brewing-fuel item tag).
+/// item identity alone: slots 0-2 take potions/bottles, slot 3 takes any
+/// registered brewing ingredient, and slot 4 takes the brewing-fuel item tag.
 enum BrewingSlot {
     /// Blaze powder — the brewing-fuel item tag's sole member (slot 4).
     Fuel,
@@ -6293,8 +5796,8 @@ enum BrewingSlot {
 /// The outcome of one right-click on a brewing stand — this crate's
 /// one-item-per-click stand-in for the brewing menu it cannot open (see
 /// [`BlockEntity::menu_name`]'s doc comment for why a brewing stand answers
-/// `None` there), the same shape vanilla's own composter-block use-item-on
-/// routine establishes for the composter.
+/// `None` there). The outcome distinguishes insertion, a consumed full-slot
+/// click, and ordinary placement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BrewingInsertOutcome {
     /// An item moved out of the player's hand into the stand; the player's
@@ -6310,7 +5813,7 @@ enum BrewingInsertOutcome {
     /// must never silently place one.
     Consumed,
     /// The held item belongs to no brewing-stand slot — the caller falls
-    /// through to ordinary placement exactly as before this branch existed.
+    /// through to ordinary placement when no brewing slot accepts it.
     NotBrewing,
 }
 
@@ -6440,7 +5943,7 @@ fn insert_into_brewing_stand(
         return BrewingInsertOutcome::Consumed;
     }
 
-    // Consume one from the held stack — vanilla's `itemStack.consume(1)`.
+    // Consume one item from the held stack.
     let native = usize::from(inventory.selected_hotbar_slot());
     let remainder = match inventory.native(native).cloned() {
         Some(mut stack) => {
@@ -6474,8 +5977,8 @@ const COMPOSTER_BEHAVIOR_SEED: u64 = 0x5EED_C011;
 const BONE_MEAL_BEHAVIOR_SEED: u64 = 0x5EED_B04E;
 
 /// The seed for the per-connection [`SpawnRng`] that draws
-/// vanilla's own base-fire-block ignite routine's `nextInt(1, 3)` player ramp. Its own stream for the
-/// reason the two constants above give.
+/// the base fire-block's `1..=3` player ramp. Its own stream serves the same
+/// isolation purpose as the two constants above.
 const BURN_BEHAVIOR_SEED: u64 = 0x5EED_F14E;
 
 /// What a right-click on a composter did, so [`apply_use_item_on`] can decide
@@ -6483,18 +5986,16 @@ const BURN_BEHAVIOR_SEED: u64 = 0x5EED_F14E;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ComposterUseOutcome {
     /// `pos` held no composter block entity, or the click left both the
-    /// composter and the player's hand untouched (a non-compostable held item,
-    /// or an empty hand on a not-yet-ready composter) — vanilla's
-    /// `super.useItemOn`/`useWithoutItem` both `PASS`, so the placement logic
-    /// below must run.
+    /// composter and the player's hand untouched. This covers a
+    /// non-compostable held item and an empty hand on a composter below the
+    /// ready level. The block's item-use result is `PASS`, so the placement
+    /// logic below must run.
     NotComposter,
     /// The composter consumed the click but nothing moved — level `7`,
-    /// waiting on its scheduled tick (vanilla's `useItemOn` returns `SUCCESS`
-    /// there, and the hand is untouched). No
+    /// waiting on its scheduled tick; the hand is untouched. No
     /// placement may follow.
     Noop,
-    /// One item was consumed from the player's hand (`itemStack.consume(1)`,
-    /// vanilla's own composter fill routine). `remainder` is the hand's new contents for
+    /// One item was consumed from the player's hand. The updated hand contents are sent through
     /// the caller to push as a window-0 slot update; `block_state` is the new
     /// block state to write — `Some` when the fill level advanced, `None` on a
     /// failed roll (the item is still consumed; only the state is unchanged).
@@ -6532,23 +6033,22 @@ fn composter_state(level: u8) -> String {
 }
 
 /// Applies one right-click on the composter at `pos` — the wiring that makes
-/// `Composter::insert`/`extract` (and therefore the whole seven-tier fill
-/// state machine, issue #249) reachable from a player at all.
+/// `Composter::insert`/`extract`, keeping the seven-tier fill state machine
+/// reachable from a player.
 ///
-/// Mirrors vanilla's own composter-block use-item-on routine's order: the held item (if any) is
-/// offered to the fill machine first, and whatever the item offer does not
-/// consume falls through to vanilla's own `useWithoutItem`,
-/// which extracts at level `8` and otherwise `PASS`s. Concretely:
+/// Mirrors the composter interaction order: the held item (if any) is
+/// offered to the fill machine first, and an unconsumed click enters the
+/// hand-use branch, which extracts at level `8` and otherwise returns `PASS`.
+/// Concretely:
 ///
 /// * an empty hand on a ready (level `8`) composter extracts the bone meal;
 /// * a compostable item is rolled against its chance, consuming one from the
-///   hand either way (a failed roll still eats the item — vanilla
-///   `itemStack.consume(1)`);
+///   hand either way (a failed roll consumes the item);
 /// * a compostable item at level `7` (waiting on its scheduled tick) is
 ///   consumed as a click but changes nothing;
 /// * a *non*-compostable item never reaches `insert`'s level gate, because at
-///   level `7` vanilla's own compostables-table containment guard fails *before* the
-///   `fillLevel < 7` add, so the click falls through to placement there while
+///   level `7` the compostable-item check fails before the fill-level add, so
+///   the click falls through to placement while
 ///   the same item at level `8` extracts. Checking the chance table up front
 ///   reproduces that ordering (`insert` alone would answer `NotAccepting` for
 ///   both a compostable and a non-compostable item at level 7, and nothing
@@ -6579,16 +6079,15 @@ fn apply_composter_use(
             return ComposterStep::FallThrough;
         };
         let Some(held) = held else {
-            // Empty hand: vanilla's own `useWithoutItem`.
+            // Empty hand: run the composter's hand-use branch.
             if composter.extract() {
                 return ComposterStep::Extract;
             }
             return ComposterStep::FallThrough;
         };
         let item = held.item.to_string();
-        // Non-compostable items fall through to `useWithoutItem` (see the doc
-        // comment above for why this must be checked before `insert`, not by
-        // it).
+        // Non-compostable items enter the hand-use branch (see the doc comment
+        // above for why this must be checked before `insert`, not by it).
         if compostable_chance(&item).is_none() {
             if composter.extract() {
                 return ComposterStep::Extract;
@@ -6602,10 +6101,10 @@ fn apply_composter_use(
                 }
             }
             InsertOutcome::NotAccepting => {
-                // Level 7 (waiting, compostable): vanilla `useItemOn` returns
+                // Level 7 (waiting, compostable): the interaction returns
                 // SUCCESS with the hand untouched. Level 8 (ready): the item
-                // offer failed `fillLevel < 8`, so the `useWithoutItem` half
-                // extracts instead.
+                // offer failed below level 8, so the hand-use half extracts
+                // instead.
                 if composter.extract() {
                     ComposterStep::Extract
                 } else {
@@ -6622,8 +6121,7 @@ fn apply_composter_use(
         ComposterStep::FallThrough => ComposterUseOutcome::NotComposter,
         ComposterStep::Noop => ComposterUseOutcome::Noop,
         ComposterStep::Consumed { block_state } => {
-            // Consume one from the selected hotbar stack — vanilla
-            // `itemStack.consume(1)`, the same shrink
+            // Consume one item from the selected hotbar stack, the same shrink
             // `insert_into_brewing_stand` performs for its own consumed insert.
             let native = usize::from(inventory.selected_hotbar_slot());
             let remainder = match inventory.native(native).cloned() {
@@ -6644,9 +6142,8 @@ fn apply_composter_use(
             }
         }
         ComposterStep::Extract => {
-            // Vanilla's own `extractProduce`: exactly one
-            // bone meal at the block's top, with the hand untouched. Vanilla's
-            // `offsetRandomXZ(0.7F)` jitter on the velocity is skipped because
+            // Extract exactly one bone meal at the block's top, with the hand
+            // untouched. The standard horizontal jitter is skipped because
             // this crate has no gaussian f64 source; a gentle upward toss is
             // enough to leave the block.
             mobs.with(|sim| {
@@ -6679,25 +6176,20 @@ fn apply_composter_use(
 /// hit). Per-block orientation now goes through [`crate::block_placement`],
 /// which carries each family's own `getStateForPlacement` convention.
 ///
-/// **Placement honours the held item for every block in the game** (#466).
+/// **Placement honours the held item for every block in the game.**
 /// `inventory`'s currently selected item is resolved through
 /// [`lodestone_data::block_items::block_for_item`] — the 26.2 census of
 /// vanilla's own block-item block getter, dumped from the real jar — which decides both
 /// whether a placement happens and which block it writes.
 ///
-/// Before #466 this went through [`block_entity_for_item`] alone, whose
-/// `None` arm wrote [`crate::chunk::STONE`]. That table by design resolves only the six
-/// block-entity items, so the `None` arm was the path taken by **every
-/// ordinary block**: dirt, planks, wool and glass all placed stone. The two
-/// are now composed rather than swapped — the census gates the placement and
-/// names the block, and `block_entity_for_item` is consulted second, purely
-/// to insert the live [`crate::block_entities::BlockEntity`] the six ticking
-/// blocks need.
+/// The block-item census gates placement and names the block. The
+/// [`block_entity_for_item`] lookup then inserts the live
+/// [`crate::block_entities::BlockEntity`] for the six ticking block types;
+/// ordinary blocks use the census result without that extra record.
 ///
-/// **A non-placeable item now places nothing.** A sword, a bucket, a spawn
-/// egg or an empty hand leaves the world untouched, where it previously
-/// substituted stone. That is a deliberate behaviour change and the correct
-/// one; the `block_update` for both cells is still sent below, so a client
+/// **A non-placeable item places nothing.** A sword, a bucket, a spawn egg or
+/// an empty hand leaves the world untouched. The `block_update` for both cells
+/// is sent below, so a client
 /// that predicted a placement is corrected rather than left desynchronised.
 ///
 /// **Block *state* comes from the block's own convention.** The clicked face,
@@ -6718,40 +6210,35 @@ fn apply_composter_use(
 ///
 /// **Right-clicking a block that already has an *openable* container opens
 /// its screen instead of attempting a placement at all** — the closing half
-/// of `docs/block-entities.md`'s gap 3. Mirrors vanilla's own order:
-/// its own use-item-on handler runs the clicked block's
-/// own `useItemOn`/`useWithoutItem` (which is what opens a furnace/hopper's
-/// menu) **before** any `BlockPlaceContext` placement logic, and a block
+/// of the block-entity interaction section in `docs/block-entities.md`. The
+/// interaction order is:
+/// clicked-block hand use (which is what opens a furnace/hopper's menu)
+/// **before** any placement logic, and a block
 /// that opens a menu never falls through to placement.
 ///
 /// **A brewing stand at `pos` is this "clicked block's own use" step too,
-/// but without a menu** (issue #252): it cannot be opened — `menu_name`
-/// answers `None`, because its `Bottle` slots are not real `ItemStack`s — so
+/// but without a menu**: it cannot be opened — `menu_name` answers `None`,
+/// because its bottle slots are not real `ItemStack`s — so
 /// [`insert_into_brewing_stand`] stands in for the menu with a direct
-/// one-item-per-click insert, the shape vanilla's own composter-block
-/// use-item-on routine uses for
-/// the composter (which is the *other* kind `menu_name` answers `None` for,
-/// there because vanilla gives a composter no menu at all). A held item that
+/// one-item-per-click insert, the same interaction shape used for
+/// the composter (which also has no menu). A held item that
 /// belongs in a brewing stand is routed into the matching slot and consumed;
 /// an unrelated held item still falls through to the placement logic below
-/// exactly as before the fix that added this routing.
+/// and leaves unrelated held items to the placement logic.
 ///
 /// Whether writing `state` at `target` would intersect the placer's own
-/// bounding box — vanilla's own item-can-place check refusing when
-/// vanilla's own `isUnobstructed(state, pos, <empty collision context>)` is false,
-/// narrowed to the one entity this server can currently name
+/// bounding box, narrowed to the one entity this server can currently name
 /// at a placement site: the placer, from `player_pos`. A full
-/// `isUnobstructed` tests *every* entity's bounding box in the cell and
-/// excludes spectators; this crate has no per-connection entity-bounding-box
+/// The complete check would test every entity's bounding box in the cell and
+/// exclude spectators; this crate has no per-connection entity-bounding-box
 /// registry to query the rest of, so another player or a mob standing in the
 /// target cell is not yet refused — see `docs/block-edit.md`.
 ///
 /// A state with an **empty** collision shape (a torch, a rail, a pressure
-/// plate, redstone dust…) is never obstructed, matching vanilla's own
-/// empty collision shape never intersecting anything — placing one at your own
-/// feet is legal in vanilla and stays legal here.
+/// plate, redstone dust…) is never obstructed — placing one at your own feet is
+/// legal here.
 ///
-/// The placer's box is vanilla's own player entity-type dimensions (`0.6 x 1.8`, centred
+/// The placer's box uses player dimensions (`0.6 x 1.8`, centred
 /// horizontally on `feet`, `feet.y..feet.y + 1.8` vertically) —
 /// the unobstructed check reads the entity's own bounding-box getter at click time, which does
 /// not shrink for the sneaking pose (`1.5`), so this does not model pose
@@ -6794,22 +6281,22 @@ async fn apply_use_item_on<T, P, S>(
     // clicked high on a side face is an upper one) and its `x`/`z` for a door's
     // hinge tie-break.
     cursor: Vec3f,
-    // Issue #329. The player's world-space position, for the bed-respawn
-    // reach test (vanilla's `bedInRange`, bed ±3 x/z and ±2 y). `None` until
+    // The player's world-space position, for the bed-respawn
+    // reach test (bed ±3 x/z and ±2 y). `None` until
     // the first `PlayerMoved` packet arrives; a bed click before any move
     // skips the reach test rather than rejecting (see
     // [`is_legal_bed_respawn`]'s doc comment).
     player_pos: Option<Vec3>,
-    // Issue #329. The player's per-player respawn point, written when a legal
+    // The player's per-player respawn point, written when a legal
     // bed is right-clicked (see the bed arm below). `&mut`: the set writes
     // through this slot.
     respawn: &mut Option<RespawnPoint>,
-    // Issue #475. The placing player's yaw, so the directional families can
+    // The placing player's yaw, so the directional families can
     // derive their `facing` (see [`placed_block_state`]). `None` until the
     // first packet carrying angles arrives; placement then falls back to the
     // block's default state.
     player_yaw: Option<f32>,
-    // Pitch, for the `getNearestLookingDirection` families alone (a dispenser
+    // Pitch, for the direction-sensitive families alone (a dispenser
     // or piston placed while looking down points up). `None` on the same
     // terms as `player_yaw`.
     player_pitch: Option<f32>,
@@ -6817,28 +6304,28 @@ async fn apply_use_item_on<T, P, S>(
     // `block_placed` call below).
     placer: uuid::Uuid,
     // `&mut`, not `&`: a brewing-stand insertion consumes one item from the
-    // player's selected hotbar stack (issue #252), and only a mutable
+    // player's selected hotbar stack, and only a mutable
     // inventory can write the remainder back.
     inventory: &mut PlayerInventory,
     block_entities: &BlockEntityHandle,
     next_window_id: &mut i32,
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
-    // Issue #249. The composter interaction: `mobs` so a level-8 extraction
+    // The composter interaction: `mobs` so a level-8 extraction
     // can spawn its bone-meal item entity, and `roll` — a fresh `[0.0, 1.0)`
     // draw from the connection's [`SpawnRng`], one per right-click, so the
     // fill machine's per-item chance sees a live sample rather than a constant
     // (the caller-supplied-roll shape `Composter::insert` documents).
     mobs: &MobHandle,
     roll: f64,
-    // Issue #465, the delayed half. `propagate_placement` below resolves
+    // The delayed half: `propagate_placement` below resolves
     // everything synchronous (dust) against a `ScheduledTickQueue` it then
     // discards; a torch/repeater/comparator/observer instead *schedules*, and
     // only `tick::run_tick_loop` owns a queue those can land in. This asks the
     // loop to redo the fan-out on its next iteration, where the schedule
     // survives. See `BlockTickFeed`'s own doc comment.
     block_ticks: &BlockTickFeed,
-    // Issue #325. The night-skip vote, written on a bed click (the bed arm
+    // The night-skip vote, written on a bed click (the bed arm
     // above — `lay_down`), and the key it stores this connection's player
     // under — see `dispatch_play_packet`'s parameter comment.
     sleep_vote: &SleepVote,
@@ -6850,17 +6337,13 @@ async fn apply_use_item_on<T, P, S>(
     // count per use is part of the specification its own tests pin. Pre-drawing
     // would fix the count at one and desynchronise the stream.
     bone_meal_rng: &mut SpawnRng,
-    // The **world** difficulty, for vanilla's own can-spawn entity-type check — a spawn egg on
-    // Peaceful fails for any `notInPeaceful` species rather than spawning and
-    // being evicted on the next tick. Passed by value rather than as the
-    // `WorldStateHandle` because this is the only scalar this function needs and
-    // a handle would invite a second, unrelated read. Spelled with its full path
-    // rather than added to this module's `lodestone_model` import list, which is
-    // edited concurrently by other work.
+    // The world difficulty controls which spawn-egg species are permitted on
+    // Peaceful. Passed by value because this function needs only the scalar;
+    // taking the whole `WorldStateHandle` would add an unrelated read.
     difficulty: lodestone_model::Difficulty,
-    // The acting player's game mode, for vanilla's own item-stack consume routine's
-    // `hasInfiniteMaterials()` gate — a creative placement writes the block and
-    // consumes nothing. See the consumption arm at the end of the placement branch.
+    // The acting player's game mode controls item consumption: creative
+    // placement writes the block without consuming the held item. See the
+    // consumption arm at the end of the placement branch.
     game_mode: GameMode,
     // A fresh `[0, i32::MAX)` draw from `dispatch_play_packet`'s `drops_rng`,
     // the same pre-drawn-value shape the composter `roll` above already
@@ -6869,12 +6352,11 @@ async fn apply_use_item_on<T, P, S>(
     // by the caller anyway, matching the composter roll's own "one draw per
     // right-click, whatever block was hit" reasoning.
     enchant_seed_roll: i64,
-    // `ServerBound::UseItemOn::hand` (`0` main, `1` off) — which native slot
-    // `held_item` below reads from. Previously there was no such parameter
-    // and every click acted on the selected hotbar slot only, so a shulker
-    // box (or anything else) held in the off hand could never be placed.
+    // `ServerBound::UseItemOn::hand` (`0` main, `1` off) selects the held
+    // slot that `held_item` below reads from. Both hands therefore use the same
+    // spawn-egg, flint-and-steel, and block-placement paths.
     hand: u8,
-    // Issue #150. Only the narrow crafting-station hook registry, not the
+    // Only the narrow crafting-station hook registry, not the
     // whole `WorldStateHandle` — see `difficulty`'s own comment above for why
     // this function takes the scalar/handle it actually needs rather than a
     // handle that would invite a second, unrelated read.
@@ -6885,11 +6367,10 @@ where
     P: ServerProtocol,
     S: ChunkSource + ?Sized,
 {
-    // Issue #337: a chest that generation placed (a shipwreck's, an igloo's, an
-    // ocean ruin's) lives in the *column*, not in the live registry — nothing has
-    // placed or mutated it. Hydrate it on the first click, so the loot that was
-    // rolled at generation is what opens. Gated on the block actually being one of
-    // the container blocks, so an ordinary right-click never pays for the lookup.
+    // A chest placed by terrain generation (a shipwreck, igloo, or ocean ruin)
+    // lives in the column, not the live registry. Hydrate it on the first click
+    // so the generated loot opens correctly. Check the block kind first so an
+    // ordinary right-click does not pay for the lookup.
     let container_here = block_entities.with(|reg| reg.get(pos).is_some());
     if !container_here {
         let clicked = source.block_state(pos.x, pos.y, pos.z);
@@ -6928,7 +6409,7 @@ where
         .await;
     }
 
-    // Issue #529 step 2: a crafting table opens a *virtual* menu. It is not a block
+    // A crafting table opens a *virtual* menu. It is not a block
     // entity, so the `existing_menu` branch above structurally cannot reach it —
     // see `open_crafting_table_screen`. Ahead of the placement branch for the same
     // reason the `hand_use` block is: right-clicking a table while holding a block
@@ -6952,13 +6433,9 @@ where
         .await;
     }
 
-    // Issues #253-#255: the anvil, grindstone, smithing table and enchanting
-    // table are, like the crafting table just above, **not** block entities in
-    // vanilla — each menu's own input slots are scratch space the menu itself
-    // owns and throws away on close (vanilla's own per-menu input-slot
-    // containers on the anvil, grindstone, smithing and enchantment menus),
-    // so `existing_menu` above structurally
-    // cannot reach any of them either.
+    // Workstation menus use per-menu input slots rather than block-entity
+    // storage. The `existing_menu` branch therefore cannot find these stations;
+    // dispatch them through their virtual menu implementations below.
     let clicked_block = source
         .block_state(pos.x, pos.y, pos.z)
         .split('[')
@@ -7005,9 +6482,8 @@ where
         .await;
     }
 
-    // Issue #252, the missing-consumer half: a right-click on a brewing stand
-    // routes the held item into the matching slot (fuel/bottle/ingredient)
-    // and consumes one from the player's hand. See
+    // A brewing-stand right-click routes the held item into the matching slot
+    // (fuel, bottle, or ingredient) and consumes one from the player's hand. See
     // [`insert_into_brewing_stand`]'s doc comment for the three outcomes.
     match insert_into_brewing_stand(block_entities, inventory, pos) {
         BrewingInsertOutcome::Inserted(selected) => {
@@ -7034,12 +6510,9 @@ where
         }
     }
 
-    // Issue #249, the missing-consumer half: a right-click on a composter
-    // feeds the seven-tier fill state machine — see
-    // [`apply_composter_use`]'s doc comment for the four outcomes. Anything
-    // the composter itself handles returns before the placement logic; only
-    // `NotComposter` (no composter, or a click vanilla would `PASS`) reaches
-    // it.
+    // A composter right-click feeds the seven-tier fill state machine. See
+    // [`apply_composter_use`]'s doc comment for the four outcomes. A handled
+    // click returns before placement; only `NotComposter` reaches that branch.
     match apply_composter_use(block_entities, inventory, mobs, pos, roll) {
         ComposterUseOutcome::Consumed {
             remainder,
@@ -7092,12 +6565,12 @@ where
         .is_some_and(|held| held.item.to_string() == crate::bone_meal::BONE_MEAL)
     {
         let clicked = source.block_state(pos.x, pos.y, pos.z);
-        // The cell above is what `SaplingBlock`/`CropBlock` light checks read;
+        // The cell above supplies the light input for growth checks; it is
         // resolved here because `bone_meal` has no world access of its own.
         let above = source.block_state(pos.x, pos.y + 1, pos.z);
         let outcome = crate::bone_meal::apply_bone_meal(&clicked, &above, bone_meal_rng);
-        // One helper for both consuming arms — vanilla `itemStack.consume(1)`,
-        // the identical shrink the composter's `Consumed` arm performs.
+        // One helper for both consuming arms, performing the same one-item
+        // shrink as the composter's `Consumed` arm.
         let consume = |inventory: &mut PlayerInventory| {
             let native = usize::from(inventory.selected_hotbar_slot());
             let remainder = inventory.native(native).cloned().and_then(|mut stack| {
@@ -7147,34 +6620,19 @@ where
         }
     }
 
-    // Issue #329: right-clicking a bed sets the player's per-player respawn
-    // point (vanilla's own bed-block empty-hand-use → start-sleep-in-bed
-    // → `setRespawnPosition` chain). A bed click is an *interaction*, not a
-    // placement — it must not fall through to the inventory-placement logic
-    // below (a bed is itself placeable, and the click target's cell may well
-    // be air-adjacent). The legality gate is issue #329's own requirement
-    // ("beds/anchors validated for a legal respawn spot before being
-    // accepted") — see [`is_legal_bed_respawn`] for the three checks and the
-    // documented monster-check remainder.
-    //
-    // The message is sent only when the stored point *changes* — vanilla's
-    // `setRespawnPosition` gates its message on the position having moved —
-    // so a re-click on the same bed is silent, and the message is a faithful
-    // observable proxy for "the tracking state changed" (the client has no
-    // "your respawn point is X" packet; the placement half of P2 will be the
-    // next consumer). The message itself is a stand-in: vanilla's
-    // `SPAWN_SET_MESSAGE` is a translatable component shown in the action bar,
-    // and this crate has no localization table or action-bar encoder, so the
-    // honest equivalent is a plain system-chat line.
+    // Right-clicking a bed records a per-player respawn point and registers
+    // the player for the sleep vote. A bed click is an interaction, not a
+    // placement, so it returns before the inventory-placement logic. The
+    // legality gate applies the three checks in [`is_legal_bed_respawn`].
+    // Notify the client only when the stored point changes; a repeat click on
+    // the same bed is silent. This crate has no localization table or action-bar
+    // encoder, so the notification uses a plain system-chat line.
     if is_bed_block(&source.block_state(pos.x, pos.y, pos.z)) {
-        // Issue #325: a bed click registers this connection's player in the
-        // night-skip vote. Vanilla's own start-sleep-in-bed routine calls
-        // `sleepStatus.setSleeping` — this arm is this
-        // crate's stand-in for that call (see `crate::sleep`'s module doc for
-        // the disclosed gap: bed-entry *gates* — day/night, monsters nearby,
-        // already-sleeping — are unmodelled, and the 100-tick deep-sleep
-        // threshold is what makes an accidental daytime click harmless).
-        // Idempotent: a re-click on the same bed does not double-count.
+        // Register the player in the night-skip vote. Bed-entry gates for
+        // day/night, nearby monsters, and already-sleeping state are outside
+        // this interaction; the 100-tick deep-sleep threshold prevents a
+        // single daytime click from advancing the vote. Registration is
+        // idempotent, so a repeat click does not double-count.
         sleep_vote.lay_down(player_entity_id);
         if is_legal_bed_respawn(source, pos, player_pos)
             && !respawn.is_some_and(|existing| existing.pos == pos)
@@ -7185,10 +6643,9 @@ where
         return Ok(());
     }
 
-    // Issue #532: `useWithoutItem`. **Ahead of the placement branch**, exactly like
-    // vanilla, whose own use-item-on routine tries `state.useItemOn`/`useWithoutItem`
-    // before its own block-item place routine — otherwise right-clicking a door while holding a
-    // block would build instead of opening it. See `crate::hand_use` for the five
+    // The hand-use branch runs **ahead of the placement branch**: a door or
+    // other usable block must handle a right-click before block placement;
+    // otherwise the block would build instead of opening it. See `crate::hand_use` for the five
     // families and the rules each comes from.
     //
     // Returns early like the bed arm: a click that operated a block is not also a
@@ -7207,11 +6664,10 @@ where
                     source.set_block(p.x, p.y, p.z, new_state);
                     fanout.push(*p);
                 }
-                // The same neighbour fan-out a placement owes its neighbours
-                // (issue #465). This is what makes a lever actually power the
-                // wire beside it rather than merely look flipped: without it the
-                // redstone model is correct and unreachable from a player's hand,
-                // which is precisely the state #314/#315/#319 were left in.
+                // The placement fan-out notifies neighbouring blocks, so a lever
+                // powers the wire beside it rather than merely looking flipped.
+                // Without this notification, the redstone model stays correct but
+                // is unreachable from a player's hand.
                 let mut changed: Vec<(BlockPos, String)> = Vec::new();
                 let mut piston_records: Vec<(BlockPos, lodestone_core::Nbt)> = Vec::new();
                 for p in &fanout {
@@ -7269,9 +6725,8 @@ where
 
     let neighbour = relative(pos, face);
     let clicked = source.block_state(pos.x, pos.y, pos.z);
-    // Which native slot this click reads from. Vanilla's own use-item-on routine
-    // uses `player.getItemInHand(hand)` for the spawn-egg, flint-and-steel
-    // and block-placement branches below — all three share this one
+    // Which native slot this click reads from. The spawn-egg, flint-and-steel,
+    // and block-placement branches below share this one
     // resolution point via `held_item`, so an item held only in the off hand
     // now reaches them instead of the main hand's slot always winning.
     let hand_native = if hand == 1 {
@@ -7281,19 +6736,15 @@ where
     };
     let held_item = inventory.native(hand_native).map(|stack| stack.item.to_string());
 
-    // Vanilla's own spawn-egg-item use-on routine. Between the block's own `useWithoutItem` above and
-    // its own block-item place routine below, which is vanilla's order in its own use-item-on routine —
-    // ahead of the placement branch, or an egg held over air would place a block;
-    // behind the `hand_use` arm, or a click on a lever would eat the egg. See
+    // Spawn-egg handling runs between clicked-block hand use and generic block
+    // placement: an egg held over air must not place a block, while a lever
+    // click must not consume the egg. See
     // `crate::spawn_egg` for the placement rule and `docs/spawn-eggs.md` for why
     // the item-to-entity mapping is a checked derivation rather than a table.
     //
-    // `block_entities` is consulted first because vanilla's own spawn-egg-item use-on routine tests
-    // `getBlockEntity(pos) instanceof Spawner` before anything else, and that
-    // branch re-keys the spawner instead of spawning. Nothing is modelled for a
-    // spawner yet, so the guard is "there is a spawner here, do nothing" rather
-    // than a re-key — the honest behaviour, and it keeps the egg from spawning a
-    // mob vanilla would not.
+    // A block entity at the clicked position is consulted first. Spawners are
+    // not simulated here, so the guard is "there is a spawner here, do
+    // nothing"; it prevents the egg from creating an unsupported mob.
     if let Some(item) = held_item.as_deref() {
         let spawner_here = block_entities.with(|reg| {
             reg.get(pos)
@@ -7315,15 +6766,13 @@ where
                 // load-bearing half — a refused egg must not place a block.
                 crate::spawn_egg::SpawnEggApplied::Refused => return Ok(()),
                 crate::spawn_egg::SpawnEggApplied::Spawned { .. } => {
-                    // `itemStack.consume(1, user)`, *after* the spawn succeeded —
-                    // the same shrink-and-report pair the composter and brewing
+                    // Consume one item *after* the spawn succeeds — the same
+                    // shrink-and-report pair the composter and brewing
                     // arms above perform, including the window-0 hotbar slot
                     // update so the held count visibly drops.
                     //
-                    // Routed through `consume_one` rather than shrinking inline, so
-                    // vanilla's own item-stack consume routine's `!hasInfiniteMaterials()` gate
-                    // applies: a creative player's eggs are not used up, which is
-                    // vanilla and was not true of the inline shrink this replaces.
+                    // Routed through `consume_one` so creative players keep their
+                    // eggs while survival players lose one.
                     let native = hand_native;
                     if consume_one(inventory, native, game_mode) && game_mode != GameMode::Creative {
                         let remainder = inventory.native(native).cloned();
@@ -7342,12 +6791,10 @@ where
         }
     }
 
-    // Vanilla's own minecart-item use-on routine — a rail-targeted placement, checked ahead of the
-    // generic block-placement branch below for the same reason the spawn-egg
-    // arm above is: a minecart item is not a `BlockItem`, so that branch could
-    // never place one anyway, and vanilla's own `useOn` returns `FAIL` (not
-    // `PASS`) on a non-rail target — stop here rather than falling through to
-    // anything else, matching that refusal.
+    // Minecart-item handling is a rail-targeted placement, checked ahead of the
+    // generic block-placement branch: a minecart item is not a block, so that
+    // branch cannot place one. A non-rail target is refused rather than falling
+    // through to anything else.
     if let Some(item) = held_item.as_deref() {
         if let Some(kind) = crate::mobs::minecart::MinecartKind::from_item(item) {
             let clicked = source.block_state(pos.x, pos.y, pos.z);
@@ -7378,8 +6825,7 @@ where
     // reason the `hand_use` block above is: `flint_and_steel` is not a block item,
     // so the placement branch below cannot reach it at all.
     //
-    // Vanilla's route is its own flint-and-steel-item use-on routine → `level.setBlock(fire)` →
-    // its own fire-block on-place routine, whose portal branch runs the frame search **from the
+    // The flint-and-steel route places a fire cell, then runs the frame search **from the
     // cell the fire went in**, not from the block that was clicked — so the search
     // origin is `relative(pos, face)`. Clicking the top face of a frame's bottom
     // obsidian therefore searches from the lowest interior cell, which is what makes
@@ -7414,17 +6860,17 @@ where
             return Ok(());
         }
     }
-    // `TntBlock::useItemOn` — flint and steel or a fire charge clicked
-    // directly on a TNT block primes it and clears the block. Checked
+    // Flint and steel or a fire charge clicked directly on a TNT block primes
+    // it and clears the block. Checked
     // against the **clicked** cell (`pos`), not `neighbour` the portal arm
-    // above reads: vanilla's `useItemOn` runs on the block that was actually
-    // clicked, not the face it was clicked from.
+    // above reads: the action belongs to the block that was actually clicked,
+    // not the face it was clicked from.
     //
     // No `tnt_explodes` gamerule gate here — this call site has no
     // `WorldStateHandle` in scope, matching the portal arm just above, which
     // takes no durability-damage gate either (this crate's own item stacks
     // carry no durability at all — see that arm's own comment). Both are
-    // therefore true unconditionally, which is vanilla's own default.
+    // therefore true unconditionally, which is the default here.
     if matches!(
         held_item.as_deref(),
         Some("minecraft:flint_and_steel" | "minecraft:fire_charge")
@@ -7447,10 +6893,8 @@ where
                     crate::mobs::tnt::DEFAULT_FUSE_TIME,
                 );
             });
-            // `itemStack.consume(1, player)` for the fire charge;
-            // `itemStack.hurtAndBreak(1, ...)` for flint and steel, which
-            // this crate does not model (see this arm's own comment) — so
-            // only the charge is shrunk.
+            // A fire charge consumes one stack item. Flint and steel wear is
+            // outside this crate's item model, so only the charge is shrunk.
             if held_item.as_deref() == Some("minecraft:fire_charge")
                 && consume_one(inventory, hand_native, game_mode)
                 && game_mode != GameMode::Creative
@@ -7518,8 +6962,8 @@ where
         }
     }
     // The census is the gate: it decides *whether* a placement happens at
-    // all and *which* block it writes. `block_entity_for_item` no longer
-    // makes that decision — it only supplies the live `BlockEntity` for
+    // all and *which* block it writes. `block_entity_for_item` only supplies
+    // the live `BlockEntity` for
     // the six items this crate ticks, and is consulted second.
     let placed = held_item
         .as_deref()
@@ -7535,7 +6979,7 @@ where
         neighbour
     };
     let target_state = source.block_state(target.x, target.y, target.z);
-    // Every cell the placement's neighbour fan-out rewrote (issue #465) —
+    // Every cell the placement's neighbour fan-out rewrote —
     // empty unless a placement actually happened below.
     let mut changed: Vec<(BlockPos, String)> = Vec::new();
     // Paired with the `block_update` packets in the notify loop below — see
@@ -7591,12 +7035,8 @@ where
                     entity_block, block_name,
                     "block-entity table and item census disagree on {item}"
                 );
-                // Vanilla's own sign-item use-on → sign-block open-text-edit →
-                // `setAllowedPlayerEditor(player.getUUID())`: the placer is
-                // granted edit permission on the sign they just placed, the
-                // one grant site this crate models (see `SignData::editor`'s
-                // own doc for the other vanilla grant site this does not
-                // reach yet).
+                // A newly placed sign records the placing player as its editor,
+                // allowing the following sign-update packet to pass validation.
                 if let crate::block_entities::BlockEntity::Sign(sign) = &mut entity {
                     sign.editor = Some(placer);
                 }
@@ -7605,20 +7045,10 @@ where
                 .and_then(lodestone_data::block_entity_types::block_entity_type)
                 .and_then(lodestone_data::block_entity_types::block_entity_type_name)
             {
-                // Vanilla's own chunk set-block-state routine creates a block entity
-                // from the *state* alone (`state.hasBlockEntity()`), for every
-                // block-entity type — not only the dozen `block_entity_for_item`
-                // simulates real behaviour for. A skull, banner, jukebox, … placed
-                // through this path still needs a registry record: its client-side
-                // render is entirely block-entity-driven (see
-                // `ChunkColumn::missing_block_entity_states`'s own doc, which
-                // repairs the identical gap for a chunk loaded off disk), so with
-                // no record here the position is on the wire as a bare state and
-                // draws nothing until an unrelated later block update lets the
-                // client synthesize an empty record for itself. `Nbt::End` matches
-                // what a save/load round trip already reconstructs for a type this
-                // crate does not otherwise model (`chunk_nbt::block_entity_from_nbt`'s
-                // own catch-all arm).
+                // State-defined block entities need a registry record even when
+                // the item has no specialized constructor. The client renders
+                // these positions from the record, so an opaque empty payload
+                // keeps the placed state visible and survives save/load handling.
                 block_entities.with(|registry| {
                     registry.insert(
                         target,
@@ -7630,12 +7060,8 @@ where
                 });
             }
             source.set_block(target.x, target.y, target.z, &state);
-            // Vanilla's own block-item place routine's own `level.playSound(player, …)`
-            // — the placer is vanilla's `except` argument,
-            // and here it must be, because the shell predicts its own place
-            // sound. `roll` stands in for vanilla's per-play `nextLong()`: it is
-            // already a live draw from this connection's `SpawnRng`, one per
-            // right-click, which is exactly the variant-picking seed's shape.
+            // Publish the placement sound to every viewer except the placer.
+            // `roll` supplies the per-click seed for choosing the sound variant.
             if let Some(effect) =
                 crate::effects::block_placed(target, &state, roll.to_bits() as i64)
             {
@@ -7648,14 +7074,9 @@ where
                 source.set_block(p.x, p.y, p.z, s);
                 changed.push((*p, s.clone()));
             }
-            // Issue #239: a placed carved pumpkin or jack o'lantern may
-            // complete a snow- or iron-golem block pattern — vanilla's
-            // own carved-pumpkin-block set-placed-by → try-spawn-golem chain.
-            // `MobSim::try_construct_golem` is a pure detection query with no
-            // block-write authority of its own (see its own doc comment), so
-            // this is the caller that owns clearing the consumed pattern
-            // cells to air, exactly as vanilla's own carved-pumpkin-block
-            // clear-pattern-blocks routine does.
+            // A carved pumpkin or jack o'lantern can complete a snow- or
+            // iron-golem pattern. The mob simulation reports the consumed
+            // pattern cells; this caller clears them to air.
             if block_name == "minecraft:carved_pumpkin" || block_name == "minecraft:jack_o_lantern"
             {
                 let construction = mobs.with(|sim| {
@@ -7671,13 +7092,9 @@ where
                     }
                 }
             }
-            // A placed wither skeleton skull (or wall skull) may complete the
-            // soul-sand-and-skull pattern — vanilla `WitherSkullBlock
-            // .setPlacedBy` → `checkSpawn`. Same shape as the golem trigger
-            // above: `MobSim::try_construct_wither` is a pure detection query
-            // with no block-write authority of its own (see its own doc
-            // comment), so this is the caller that owns clearing the
-            // consumed pattern cells to air.
+            // A wither skeleton skull or wall skull can complete the
+            // soul-sand-and-skull pattern. The mob simulation reports consumed
+            // cells; this caller clears them to air.
             if block_name == "minecraft:wither_skeleton_skull"
                 || block_name == "minecraft:wither_skeleton_wall_skull"
             {
@@ -7694,21 +7111,15 @@ where
                     }
                 }
             }
-            // Issue #465: placing a block is a mutation like any other, so it
-            // owes its neighbours the same fan-out a random tick or a drained
-            // scheduled tick already performs. Without this the redstone model
-            // is correct but unreachable from any player action — dust placed
-            // beside a powered line stays at `power=0` forever.
+            // Block placement notifies neighboring cells so redstone state can
+            // react immediately. Without this fan-out, dust beside a powered
+            // line stays at `power=0`.
             let (mut fanout, scheduled) = propagate_placement_with_entities(source, target, Some(block_entities));
             changed.append(&mut fanout);
             piston_records.extend(moving_piston_records(&scheduled));
-            // Issue #465: and the delayed half, which `propagate_placement`
-            // structurally cannot host — the queue those land in belongs to the
-            // world tick loop. Handed over unconditionally rather than only
-            // when `changed` is non-empty: the delayed families are exactly the
-            // case where the fan-out rewrites *nothing* now and schedules
-            // instead, so gating on a synchronous change would drop precisely
-            // the placements this exists for.
+            // Delayed reactions are returned through the scheduled-tick queue
+            // owned by the world tick loop. Publish that queue even when the
+            // synchronous fan-out changed no cells.
             block_ticks.request_scheduled_ticks(scheduled);
             // And the same seeding hook `destroy_block` performs, for the same
             // reason: a block placed into a flow, or beside a source, has to
@@ -7718,29 +7129,21 @@ where
                 fluid_env_at(source, target),
                 target,
             ));
-            // Vanilla's own falling-block on-place routine: a placed sand or gravel block owes itself a
-            // gravity check two ticks out. Same shape and same call site as the
-            // fluid seeding above, and empty for every other block, so no guard.
+            // Sand and gravel schedule a gravity check two ticks out. Other
+            // placed blocks produce no entry in this feed.
             //
-            // **This is what makes placing sand in mid-air fall at all.** Until
-            // now the only route to the gravity check was a neighbour update,
-            // which is exactly the owner's report — "they don't fall when I place
-            // them in the air, they only fall when I place another block beside
-            // them". `state` is the placed state rather than the item name,
-            // because `gravity_tick::is_gravity_block` matches the base of a real
-            // block state.
+            // The scheduled event makes a sand or gravel block fall when it is
+            // placed in air. `state` is used instead of the item name because
+            // `gravity_tick::is_gravity_block` matches the block-state base.
             block_ticks
                 .request_scheduled_ticks(crate::gravity_tick::ticks_after_place(target, &state));
-            // Vanilla's own block-item place routine's own tail: `itemStack.consume(1, player)`. Nothing
-            // in this crate did it, so **every placement was free** — the block was
-            // written, the client predicted its own hotbar and the server never
-            // agreed, so the stack came back on the next window sync.
+            // A successful placement consumes one held item. Without this update
+            // **every placement would be free** — the block would be written,
+            // the client would predict its own hotbar and the server would never
+            // agree, so the stack would return on the next window sync.
             //
-            // Vanilla's own item-stack consume routine is
-            // `if (entity == null || !entity.hasInfiniteMaterials()) shrink(count)`,
-            // so a creative placement consumes nothing and "placing does not use up
-            // the block" is *correct* there. The gate is explicit rather than
-            // implied for exactly that reason.
+            // Creative placement consumes nothing, so the gate is explicit rather
+            // than implied: survival decrements the stack and creative does not.
             //
             // `consume_one` clears the slot outright at a count of one rather than
             // leaving a zero-count stack naming an item, which renders as a block
@@ -7803,21 +7206,11 @@ where
     Ok(())
 }
 
-/// The moving-piston records a batch of relative-delay scheduled ticks implies.
+/// Converts scheduled piston ticks into block-entity update payloads.
 ///
-/// A `moving_piston` block update tells a client that a cell is animating and
-/// nothing at all about *which* block is travelling through it — the record that
-/// says so lives in the pending commit tick (`crate::piston::finish_kind`). The
-/// connection paths below send their own `block_update` packets rather than
-/// publishing on [`crate::BlockTickFeed`], so unlike the world tick loop (whose
-/// equivalent is `crate::tick`'s `publish_moving_piston`) they have to pair the two
-/// up themselves. Without this a piston triggered by a lever animates nothing: the
-/// client holds a `moving_piston` cell with an empty record for two ticks and then
-/// the finished block appears, which is the snap the two-phase move exists to
-/// replace.
-///
-/// The record must be sent **after** the cell's own `block_update`, so the state
-/// write has already created the record this fills in.
+/// A `moving_piston` block update marks an animated cell; the payload from the
+/// scheduled completion tick identifies the moving state. Send the payload
+/// after the cell's `block_update` so the client has the matching cell record.
 fn moving_piston_records(scheduled: &[ScheduledTick<String>]) -> Vec<(BlockPos, lodestone_core::Nbt)> {
     scheduled
         .iter()
@@ -7832,67 +7225,43 @@ fn moving_piston_records(scheduled: &[ScheduledTick<String>]) -> Vec<(BlockPos, 
         .collect()
 }
 
-/// Runs the neighbour-update fan-out for a block a player just placed at
-/// `target`, persists every resulting change back through `source`, and
-/// returns them so the caller can forward them to the client (issue #465).
+/// Runs the neighbor-update fan-out for a block placed at `target`, persists
+/// each resulting change through `source`, and returns those changes for the
+/// client update path.
 ///
-/// This is the same [`crate::random_tick::propagate_and_react`] call
-/// `tick::run_tick_loop` already makes after a drained scheduled tick and
-/// after a random tick mutated a block — the *third* production caller, and
-/// the first one a player can trigger. Before it existed, `propagate_and_react`
-/// had exactly two callers, both inside the tick loop, so the whole redstone
-/// subsystem was reachable only by the accident of a random tick landing next
-/// to a circuit; dust and torches are not randomly-ticking blocks, so in
-/// practice it was reachable not at all.
+/// The fan-out handles synchronous redstone reactions inline and returns
+/// delayed reactions as scheduled ticks for the world tick loop. This keeps
+/// player placement and world-tick updates on the same state-transition path.
 ///
-/// # What this deliberately does not do
+/// # Delayed reactions
 ///
-/// The `ScheduledTickQueue` below is **local and discarded**. Dust is
-/// synchronous in vanilla (`setBlock` recomputes wire power inline, measured
-/// at 0 ticks against a live 26.2 oracle), so placing dust — and placing any
-/// block *beside* dust — resolves completely here. The delayed families do
-/// not: a redstone torch, repeater, comparator or observer reacts by
-/// *scheduling* a recheck 2 (or `2d`) ticks out, and only the tick loop owns
-/// the queue those land in. Placing one of those next to a live circuit
-/// therefore still does nothing until `tick.rs` grows a drain fed from here.
-/// That half is a separate landing; this one is not blocked on it, and dust —
-/// the case #465 is written about — is complete.
+/// The local scheduled-tick queue records relative delays. Dust resolves
+/// synchronously, with a measured zero-tick reaction against the live 26.2
+/// oracle; torches, repeaters, comparators, and observers schedule checks two
+/// or more ticks out. The world tick loop owns those delayed entries and drains
+/// them from the feed.
 ///
-/// # The delayed half now travels out with the return value (issue #465)
+/// # The delayed half travels out with the return value
 ///
-/// The second element is every block tick the fan-out scheduled, with
-/// `trigger_tick` holding a **relative delay** rather than an absolute tick:
-/// this function has no `game_tick` to be absolute against, and the tick loop
-/// that will host these entries does. `apply_use_item_on` publishes them on
-/// [`BlockTickFeed`] and `tick::run_tick_loop` rebases them onto its own
-/// counter.
+/// The second element contains every scheduled block tick. `trigger_tick` is a
+/// relative delay; the world tick loop rebases it onto its own counter after
+/// [`BlockTickFeed`] receives the entries.
 ///
-/// **Carrying the schedules out, rather than asking the loop to redo the
-/// fan-out at this position, is not a stylistic choice — the redo does not
-/// work, and that was measured.** The originally brokered shape had the loop
-/// re-run `propagate_and_react` at `target` on its next iteration, on the
-/// stated premise that the two runs are idempotent because the fan-out "writes
-/// only on change". They are not idempotent, and the quoted reason is exactly
-/// why: the *first* run consumes the change. It settles the dust, cascades to
-/// the repeater, schedules the repeater's flip into this local queue and
-/// returns; the loop's second run then finds a fully-settled circuit, changes
-/// nothing, cascades nowhere and never reaches the repeater at all. Measured
-/// with a repeater at four delay settings: the arm with this inline call
-/// finished `powered=false` and its output dust at 0, the arm without it
-/// finished `powered=true` at 15 —
+/// Publish the scheduled entries rather than invoking the fan-out a second
+/// time: the first pass consumes the synchronous change, while a second pass
+/// sees settled state and misses delayed reactions. A repeater measured at four
+/// delay settings confirms the distinction: the inline path finishes
+/// `powered=false` with output dust at `0`, while a second fan-out finishes
+/// `powered=true` at `15`. The test
 /// `redstone_placement_gate::the_split_between_the_synchronous_and_delayed_halves_changes_no_outcome`
-/// is the gate, and it is red under the redo shape.
+/// covers this boundary.
 ///
-/// Changes are sent to *this* connection only, matching the existing
-/// `encode_block_update` loop above rather than publishing on
-/// [`BlockTickFeed`]; a second connection would not see them. That gap is
-/// pre-existing for placement itself and is not widened here.
+/// Changes are sent to this connection through the `encode_block_update` loop;
+/// the shared tick feed carries only delayed reactions.
 ///
-/// Test-only now: every real production call site was moved to
-/// [`propagate_placement_with_entities`] once the command-block redstone-edge
-/// arm needed a live [`BlockEntityHandle`] threaded through, which this
-/// `None`-only wrapper cannot supply. Kept for the oracle gates and unit tests
-/// that have no registry to hand it.
+/// Test helper for placement fan-out without a block-entity registry. Production
+/// callers use [`propagate_placement_with_entities`] when command-block state
+/// must participate in neighbor reactions.
 #[cfg(test)]
 pub(crate) fn propagate_placement<S>(
     source: &S,
@@ -7904,11 +7273,9 @@ where
     propagate_placement_with_entities(source, target, None)
 }
 
-/// [`propagate_placement`], plus a live [`BlockEntityHandle`] threaded into
-/// [`crate::random_tick::react_at_placement_with_entities`]'s fan-out — the
-/// path a lever flip, a button press or a placed block's own neighbour
-/// notification reaches a command block's `neighborChanged` through. `None`
-/// behaves exactly like [`propagate_placement`] itself.
+/// [`propagate_placement`], with an optional [`BlockEntityHandle`] for
+/// command-block state during neighbor reactions. `None` has the same behavior
+/// as [`propagate_placement`] itself.
 pub(crate) fn propagate_placement_with_entities<S>(
     source: &S,
     target: BlockPos,
@@ -8019,39 +7386,15 @@ where
     (changed, scheduled)
 }
 
-/// Per-connection difficulty + game-rule session state (issue #268).
+/// Per-connection difficulty and game-rule session state.
 ///
-/// This crate has no `GameRules` registry — see [`apply_game_rule_changed`]'s
-/// own doc comment — so this is deliberately the smallest state that lets the
-/// round trip (a `ServerBound::DifficultyChanged`/`DifficultyLockChanged`/
-/// `GameRuleChanged` request in, a confirmation back out) be real and
-/// observable without inventing a full world-rules model. Per-connection
-/// rather than shared across connections, matching `player_pos`/`vitals`/
-/// `fall`'s existing precedent in [`serve_play`] — a real scope cut for
-/// open-to-LAN (two connections would each hold an independent view, and
-/// `WorldAdminState` used to live here: a `Difficulty` + lock + a bare
-/// `HashMap<String, String>` of game rules, constructed as a **stack local inside
-/// `serve_play`**. That is one store per accepted socket, so two LAN players each
-/// held a private, divergent view, and nothing anywhere read either. It is now
-/// [`crate::world_state::WorldStateHandle`], shared with the tick loop.
-///
-/// (This crate did have no permission/operator model at all when the
-/// paragraph above was first written — that was issue #268's own finding.
-/// `crate::access` closed that gap; the permission check itself lives at each
-/// `dispatch_play_packet` call site, see `COMMANDS_GAMEMASTER_LEVEL`'s own
-/// doc, not in this state struct.)
-/// Applies a difficulty-change request (`ServerBound::DifficultyChanged`),
-/// mirroring vanilla's own `handleChangeDifficulty`.
-/// Vanilla gates this on vanilla's own `COMMANDS_GAMEMASTER` permission constant **or**
-/// `isSingleplayerOwner()` — the caller in `dispatch_play_packet` now performs
-/// that same check (`commands.permission_level`, which already resolves an
-/// unconfigured/no-ops world to the singleplayer-owner shape) before this
-/// function ever runs, so a refused request reaches here having changed
-/// nothing. Confirms back to the *same* connection via
-/// [`ServerProtocol::encode_change_difficulty`]; vanilla instead broadcasts
-/// to every player (`MinecraftServer::setDifficulty` → `PlayerList`), which
-/// needs cross-connection state this crate does not share — see
-/// [`WorldAdminState`]'s own doc comment.
+/// The world handle stores the shared difficulty and rule values; packet
+/// handlers validate requests there and send confirmations through the
+/// connection's protocol. Permission checks occur at packet dispatch, while
+/// this helper only reads or writes the accepted world state.
+/// Applies a difficulty-change request (`ServerBound::DifficultyChanged`).
+/// The dispatch layer has already applied the permission gate. This helper
+/// reads the shared difficulty and lock state and confirms it to this client.
 async fn apply_difficulty_change<T, P>(
     conn: &mut Connection<T>,
     proto: &P,
@@ -8067,21 +7410,11 @@ where
     apply(conn, state, directive).await
 }
 
-/// Applies a game-rule change request (`ServerBound::GameRuleChanged`),
-/// mirroring vanilla's own `handleSetGameRule`.
-/// The permission check (see [`apply_difficulty_change`]'s own doc comment)
-/// happens before this function is ever called — a refused request arrives
-/// with an empty `entries`, so the reply below is naturally an empty
-/// confirmation rather than this function needing its own refusal branch.
-/// Rule-name/value validation, by contrast, **is** real: vanilla looks each
-/// key up in vanilla's own game-rule registry and parses `value` through that
-/// rule's own type (`GameRule<T>::deserialize`), and
-/// [`crate::world_state::WorldStateHandle::set_rule`] does the same against
-/// this crate's own rule set, rejecting an unknown key or an unparseable
-/// value rather than storing it verbatim. Confirms back to the same
-/// connection with exactly the entries that were actually set; vanilla's
-/// `broadcastGameRuleChangeToOperators` instead sends one packet per changed
-/// rule to every operator.
+/// Applies a game-rule change request (`ServerBound::GameRuleChanged`).
+/// Permission filtering occurs in packet dispatch, so an empty `entries` list
+/// produces an empty confirmation. Each key and value is parsed by
+/// [`crate::world_state::WorldStateHandle::set_rule`]; unknown keys and invalid
+/// values are omitted rather than stored verbatim.
 async fn apply_game_rule_changed<T, P>(
     conn: &mut Connection<T>,
     proto: &P,
@@ -8093,15 +7426,8 @@ where
     T: Transport,
     P: ServerProtocol,
 {
-    // **Validated now**, which is what vanilla does too
-    // (its own game-rule registry lookup + `GameRule<T>::deserialize`). The old
-    // store kept every `(String, String)` verbatim, so `randomTickSpeed` — the
-    // pre-26.2 spelling — was accepted, echoed back, and then never read by
-    // anything, because the reader asks for `random_tick_speed`. The player saw
-    // their rule confirmed and no behaviour change.
-    //
-    // Only the entries that were actually *set* are confirmed back, so a rejected
-    // key is visibly absent from the reply rather than silently agreed with.
+    // Confirm only entries accepted by the world-rule parser, so a rejected key
+    // is visibly absent from the reply rather than silently acknowledged.
     let accepted: Vec<(String, String)> = entries
         .iter()
         .filter_map(|(key, value)| {
@@ -8115,114 +7441,61 @@ where
     apply(conn, state, directive).await
 }
 
-/// Applies a `client_command` request (`ServerBound::ClientCommand`, issue
-/// #270), mirroring `ServerGamePacketListenerImpl::handleClientCommand`'s
-/// modellable ordinals.
+/// Applies a `client_command` request (`ServerBound::ClientCommand`) for the
+/// actions modeled by this server.
 ///
 /// # `action == 1`, `REQUEST_STATS`
 ///
-/// Issue #338. Vanilla answers with `player.getStats().sendStats(player)`
-/// — a full `ClientboundAwardStatsPacket`.
-/// Here the same reply is built from [`AdvancementManager::stats_snapshot`] of
-/// this connection's [`crate::advancements`] store and lowered through
-/// [`ServerProtocol::encode_award_stats`] (a no-op default on protocols
-/// without a stats encoder). This is the *framework* reply: individual
-/// statistic producers (block-break mined counters, etc.) are follow-up wiring
-/// of this epic, so a fresh session typically answers an empty batch.
+/// The statistics reply comes from [`AdvancementManager::stats_snapshot`] and
+/// is encoded by [`ServerProtocol::encode_award_stats`]. Protocols without a
+/// statistics encoder send no frame.
 ///
 /// # `action == 0`, `PERFORM_RESPAWN`
 ///
-/// **The respawn position is the player's bed when they have a usable one**, and
-/// the world spawn otherwise — vanilla's own
-/// find-respawn-position-and-use-spawn-block routine, resolved through
-/// [`crate::world_spawn::resolve_bed_respawn`]. The bed block is **re-read at
-/// death time** rather than trusted from when the point was set, so a bed that has
-/// since been broken (or walled in) falls back to the world spawn instead of
-/// returning the player inside whatever replaced it. That is vanilla's
-/// `Optional.empty()` arm, which it answers with `NO_RESPAWN_BLOCK_AVAILABLE`.
+/// **The respawn position is the player's bed when it remains usable**, and the
+/// world spawn otherwise. [`crate::world_spawn::resolve_bed_respawn`] re-reads
+/// the bed cell at death time, so a broken or obstructed bed falls back to the
+/// world spawn.
 ///
-/// Vanilla's full respawn (`PlayerList::respawn`) rebuilds the player entity,
-/// re-teleports it to its spawn point, and resets per-player state this
-/// crate does not track at all (dimension, XP, permissions, `wonGame`). What
-/// *is* modelled here — [`PlayerVitals`] — is reset exactly like a fresh
-/// connection's own defaults ([`PlayerVitals::respawn`]), and the result is
-/// confirmed back to the client via
-/// [`ServerProtocol::encode_set_health`]/[`encode_air_supply_update`], the
-/// same two directives [`PlayerVitals::tick`]'s own drowning path already
-/// sends — so a real client's health/air HUD actually refills on respawn,
-/// not just the server's internal value. Vanilla guards respawn on
-/// `player.getHealth() <= 0.0` (`return;` otherwise, ignoring `wonGame` since
-/// this crate has no such concept); the identical guard is applied here — a
-/// respawn request while still alive is a no-op.
+/// Respawn resets the modeled player vitals, sends the authoritative position,
+/// and refreshes the health and air displays. A request from a living player is
+/// ignored.
 ///
 /// # `action == 2`, `REQUEST_GAMERULE_VALUES`
 ///
-/// Mirrors `sendGameRuleValues`, including its permission check (see
-/// [`apply_difficulty_change`]'s own doc comment for the same
-/// `commands.permission_level` reasoning) — a refused request gets nothing
-/// back, matching vanilla's own silent `else` branch here rather than the
-/// "always echo something" shape the mutating packets above take. On success,
-/// replies with every rule this connection's own [`WorldAdminState`] has ever
-/// had set, via the same [`ServerProtocol::encode_game_rule_values`]
-/// confirmation [`apply_game_rule_changed`] already uses. Vanilla instead
-/// enumerates the full `GameRules` registry, including every rule at its
-/// default — this crate has no such registry (see [`WorldAdminState`]'s own
-/// doc comment), so a rule that was never explicitly set is simply absent
-/// from the reply rather than reported at a registry default.
+/// Action `2` returns the accepted rule entries when the permission level allows
+/// it. Rules that have not been set are absent from the reply.
 #[allow(clippy::too_many_arguments)]
 async fn apply_client_command<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
     state: &mut State,
     vitals: &mut PlayerVitals,
-    // The fall accumulator, reset by the respawn arm. Vanilla resets
-    // `fallDistance` on every position snap (vanilla's own entity position-snap sites) and a
-    // respawn is one — `FallTracker::reset`'s own doc comment used to say
-    // "nothing calls this yet", and this is the caller it was waiting for.
+    // The fall accumulator, reset whenever respawn changes the player's
+    // position.
     fall: &mut FallTracker,
-    // The world spawn this connection joined at, resolved once in
-    // `serve_connection`'s `ConfigurationFinished` arm. Vanilla's `PlayerList::
-    // respawn` re-teleports the rebuilt player; without a position the client
-    // would respawn wherever the corpse was, which for a fall death is at the
-    // bottom of whatever killed them.
+    // The world spawn resolved during the join sequence. It is the fallback
+    // when no usable per-player bed position exists.
     //
-    // The **fallback**, used when this player has no bed point or their bed is no
-    // longer usable — which is also exactly what a player with no bed gets in
-    // vanilla.
+    // The fallback for a missing or unusable per-player bed position.
     world_spawn: Vec3,
     // This player's bed point, if they have set one. Resolved against `source`
     // rather than used directly: see this function's own doc comment for why the
     // bed block is re-read at death time.
     respawn: Option<RespawnPoint>,
-    // Read-only, and only for the bed re-validation above.
+    // Read-only source for revalidating the bed position.
     source: &S,
     world: &crate::world_state::WorldStateHandle,
     advancements: &mut AdvancementManager,
     player_uuid: uuid::Uuid,
     action: i32,
-    // `sendGameRuleValues`'s own gate (`action == 2`, `REQUEST_GAMERULE_VALUES`
-    // — see this function's own doc comment). `dispatch_play_packet`'s already-
-    // resolved `commands.permission_level`, the same value `COMMANDS_GAMEMASTER_LEVEL`
-    // gates the mutating `GameRuleChanged`/`DifficultyChanged` packets with.
+    // Permission level for the rule-values request and mutation requests.
     permission_level: u8,
-    // Whether `source` above is a portal-travelled dimension rather than the
-    // connection's home one — `matches!(source_ref, SourceRef::Dimension(_))`,
-    // computed by the caller because only it holds the `SourceRef` this `&S` was
-    // unwrapped from. `encode_respawn` always tells the client
-    // `minecraft:overworld` (this crate's join dimension), so a death away from
-    // home leaves the *server's* own `travelled`/`view`/`join_stream` still
-    // pointed at the dimension the player died in — no chunk stream is ever
-    // re-centred on the respawn position, so the client (correctly told it is
-    // home) receives no terrain there at all. `dimension_reset` is how this
-    // function asks its caller to run that reset; see its own doc.
+    // Whether the player died in a portal-traveled dimension. The caller uses
+    // this flag to rebuild the dimension view after respawn.
     away_from_home: bool,
-    // Set to the resolved respawn position when a respawn just happened *and*
-    // `away_from_home` was true — the signal `dispatch_play_packet`'s caller
-    // (`serve_play`, the only one with `home`/`pending_travel` in scope) uses to
-    // run the same forget-chunk/recentre/rebuild-join-stream sequence
-    // `travel_through_portal` runs for an outbound trip, then park a trip home.
-    // `None` on entry and left `None` for every other action or a same-dimension
-    // respawn, so a caller that never checks it loses nothing.
+    // Set to the resolved respawn position when a cross-dimension reset is
+    // required; otherwise remains `None`.
     dimension_reset: &mut Option<Vec3>,
 ) -> Result<(), ServerError>
 where
@@ -8233,16 +7506,13 @@ where
     match action {
         0 if vitals.health() <= 0.0 => {
             vitals.respawn();
-            // The bed first, the world spawn as the fallback. `resolve_bed_respawn`
-            // answers `None` for a broken or walled-in bed, which is the case this
-            // whole indirection exists for.
+            // Prefer a usable bed position and fall back to the world spawn when
+            // the bed is broken or obstructed.
             let target = respawn
                 .and_then(|point| crate::world_spawn::resolve_bed_respawn(source, point))
                 .unwrap_or(world_spawn);
-            // Order matters and mirrors `PlayerList::respawn`: the respawn record
-            // and the placement teleport first, then the vitals the client's HUD
-            // reads. Sending health *before* the respawn packet would refill the
-            // hearts while the death screen was still up.
+            // Send the respawn position before health and air so the client
+            // refreshes the HUD for the updated player state.
             for directive in proto.encode_respawn(target) {
                 apply(conn, state, directive).await?;
             }
@@ -8262,14 +7532,9 @@ where
             // death at y=70 respawning at y=64 would otherwise bank 6 blocks of
             // phantom fall distance against the next landing.
             fall.reset();
-            // `encode_respawn` above already told the client it is in
-            // `minecraft:overworld` — this crate's one respawn dimension,
-            // matching vanilla's no-bed/no-anchor default. If the player died
-            // away from home, the *server's* own dimension tracking (`travelled`,
-            // `view`, `join_stream`) is still pointed at the dimension they died
-            // in, and nothing above touches it — so ask the caller to run the
-            // same reset a portal trip home runs, or the client sits at a
-            // correctly-labelled position with no terrain ever streamed to it.
+            // The protocol respawn frame names the home dimension. If death
+            // occurred in another dimension, ask the caller to rebuild the
+            // dimension view so terrain follows the respawn position.
             if away_from_home {
                 *dimension_reset = Some(target);
             }
@@ -8279,11 +7544,8 @@ where
             apply(conn, state, proto.encode_award_stats(&snapshot)).await?;
         }
         2 => {
-            // Vanilla logs a warning and sends nothing on refusal
-            // (`sendGameRuleValues`'s own `else` is the only branch that
-            // replies) — matched here rather than the "always echo something"
-            // shape the mutating packets above take, since there is no prior
-            // client-guessed value to correct.
+            // A denied request produces no response; an allowed request returns
+            // the accepted rule entries.
             if permission_level >= COMMANDS_GAMEMASTER_LEVEL {
                 apply(
                     conn,
@@ -8311,23 +7573,10 @@ fn apply_carried_item_changed(inventory: &mut PlayerInventory, slot: u8) {
     inventory.set_selected_hotbar_slot(slot);
 }
 
-/// Applies a `SET_CREATIVE_MODE_SLOT` write (`ServerBound::CreativeModeSlotSet`,
-/// issue #266) straight into [`PlayerInventory`] via the exact same menu-slot
-/// table `CONTAINER_CLICK` against window 0 already uses
-/// ([`PlayerInventory::apply_menu_slot_change`]) — `SET_CREATIVE_MODE_SLOT`'s
-/// wire `slot` field uses the identical `InventoryMenu` numbering
-/// (vanilla's own creative-mode-slot-set handler's
-/// `player.inventoryMenu.getSlot(slotNum)`), so no new mapping is needed.
-/// `slot` values that table does not recognise (`0`, the crafting output; any
-/// negative value, vanilla's "drop into the world" case) are silent no-ops
-/// here — this crate has no world-drop model.
-///
-/// **Gated on creative mode**, which vanilla also does
-/// (`handleSetCreativeModeSlot`'s `player.hasInfiniteMaterials()`). That gate is
-/// load-bearing rather than cosmetic: this packet *is* a mint-anything channel by
-/// design, so leaving it ungated would reopen — through a different packet — the
-/// exact hole `apply_container_clicked` was rewritten to close. A survival client
-/// sending it gets nothing.
+/// Applies a `SET_CREATIVE_MODE_SLOT` write (`ServerBound::CreativeModeSlotSet`).
+/// The wire slot uses the same numbering as [`PlayerInventory::apply_menu_slot_change`];
+/// unsupported and negative values are ignored. Only creative players may use
+/// this packet, because it can write arbitrary inventory contents.
 fn apply_creative_mode_slot_set(
     inventory: &mut PlayerInventory,
     slot: i16,
@@ -8362,87 +7611,26 @@ fn read_menu(
         .collect()
 }
 
-/// The `stateId` the join snapshot carries, and it is **`1`, not `0`**.
-///
-/// Vanilla's own container-menu synchronizer-setter calls `sendAllDataToRemote`,
-/// which hands the list to `ContainerSynchronizer::sendInitialData` — and
-/// `ServerPlayer`'s implementation of that sends
-/// `new ClientboundContainerSetContentPacket(container.containerId,
-/// container.incrementStateId(), …)`. `stateId` starts at `0` and
-/// `incrementStateId` is `(stateId + 1) & 32767`, so the *first* content packet a
-/// real client ever receives for its own inventory menu carries `1`.
+/// The join snapshot's window counter is **`1`, not `0`**. The initial content
+/// frame increments the counter from zero before sending it.
 ///
 /// # Why the other window-`0` sends in this file can keep their constant `0`
 ///
-/// Measured against the 26.2 decompile rather than assumed, because the obvious
-/// worry — "a wrong state id makes the client reject the next update" — is
-/// **backwards**. No client validates this field:
-/// Vanilla's own client-side container-content handler calls
-/// `menu.initializeContents(packet.stateId(), …)` unconditionally, and
-/// `initializeContents` simply assigns `this.stateId = stateId`. Ditto
-/// `AbstractContainerMenu::setItem` for a single-slot update, and this workspace's
-/// own client does the same (`lodestone_game::reconcile::MenuPair::sync_state_id`
-/// adopts whatever arrived).
-///
-/// The only consumer anywhere is a **server** checking a click's *echoed* id:
-/// vanilla's own container-click handler's
-/// `packet.stateId() != this.player.containerMenu.getStateId()` picks the
-/// `broadcastFullState()` branch. That is the other direction of travel, and this
-/// crate does not perform that check at all (the `ServerBound::ContainerClicked`
-/// arm binds `state_id: _`). So a window-`0` id that moves backwards costs nothing
-/// observable on either known client — which is why the join snapshot is faithful
-/// to the record here without threading a real counter through
-/// [`dispatch_play_packet`] for a field nothing reads.
+/// The client accepts the counter on content and slot frames; this server does
+/// not validate the echoed value on clicks. Other window-`0` updates therefore
+/// retain their constant `0`, while the join snapshot uses the initial counter
+/// value required by the opening sequence.
 const JOIN_CONTENT_STATE_ID: i32 = 1;
 
-/// The window-`0` inventory snapshot a joining player is owed — vanilla's own
-/// per-player inventory-menu initializer.
+/// Sends the joining player's window-`0` inventory snapshot. The snapshot
+/// contains every menu slot and the carried cursor stack, so the client can
+/// render the inventory before any click or movement packet arrives.
 ///
-/// # Why this exists
-///
-/// **Nothing sent it.** The encoder
-/// ([`ServerProtocol::encode_container_content`]) and its `V770ServerProtocol`
-/// implementation were both complete, and the client decodes the packet and folds
-/// it through `lodestone_game::menus::Menus`, but every producer in this file was
-/// reactive: [`open_container_screen`] (a menu was opened),
-/// [`apply_container_clicked`] (a click disagreed) and [`apply_recipe_placed`].
-/// A rejoining player was therefore never told what they were holding, and their
-/// screen drew the fresh-`Menu` default — an empty grid — until the first click
-/// produced a disagreement and the corrective resync flushed all 46 slots at once.
-/// That is the reported symptom exactly: *"my inventory is empty, but if I
-/// shift-click something then all the items pop in"*. The items were never lost;
-/// `PlayerData::to_inventory` had restored them before this function's first line.
-///
-/// # Placement, and it is deliberate
-///
-/// Vanilla's own new-player placement routine calls `initInventoryMenu()` **last** — after the
-/// abilities/held-slot/recipe packets, after `sendPlayerPermissionLevel`, after the
-/// placement `teleport`, after the player-info adds and after `sendLevelInfo`. So
-/// the top of [`serve_play`] is the faithful position: `serve_connection_inner` has
-/// already done all of those, and the deferred chunk stream that this loop drains
-/// corresponds to vanilla's own per-player chunk sender feeding columns over *subsequent*
-/// ticks. Sending it later — say, lazily on the first movement packet — would
-/// reintroduce the same class of bug for a player who joins and stands still.
-///
-/// # The packet is `container_set_content`, not `set_player_inventory`
-///
-/// Both exist in 26.2 and this workspace's client decodes both, so it is worth
-/// recording why only one is correct here.
-/// `ClientboundSetPlayerInventoryPacket` is a **single-slot** record — `(int slot,
-/// ItemStack contents)` — and vanilla's only producer is
-/// vanilla's own inventory-update-packet builder, called from its own add-item routine to
-/// acknowledge one item pickup. It carries no slot list and no cursor, so it cannot
-/// express a snapshot. `ClientboundContainerSetContentPacket` is what
-/// `sendInitialData` sends, and `handleContainerContent`'s `containerId == 0` arm
-/// routes it to `player.inventoryMenu` — which is why window `0` is right.
-///
-/// The carried (cursor) stack is part of the snapshot rather than an afterthought:
-/// `sendAllDataToRemote` reads `getCarried()` and forces `remoteCarried` to it in
-/// the same pass. A player who quit mid-drag holds nothing on the server (the
-/// `ServerBound::ContainerClosed` arm returns the cursor to the inventory or the
-/// floor), so this is `None` in practice today — but reading it from
-/// [`ClickState`](crate::container_click::ClickState) rather than hardcoding `None`
-/// means it stays right when a disconnect path that preserves a cursor appears.
+/// The snapshot is sent at the top of [`serve_play`], after the login metadata
+/// and before the deferred chunk stream. Window `0` uses
+/// `encode_container_content` because the content frame carries a slot list
+/// and cursor; a single-slot frame cannot represent the whole inventory.
+/// `JOIN_CONTENT_STATE_ID` is `1`, the first counter assigned to this window.
 fn join_inventory_snapshot<P: ServerProtocol>(
     proto: &P,
     inventory: &PlayerInventory,
@@ -8461,45 +7649,20 @@ fn join_inventory_snapshot<P: ServerProtocol>(
     )
 }
 
-/// The experience bar a joining player is owed — vanilla's first
-/// `ClientboundSetExperiencePacket`.
+/// Sends the experience bar snapshot owed to a joining player.
 ///
 /// # Why this exists
 ///
-/// **The XP bar never appeared, in survival as well as creative**, and the creative
-/// gate was a red herring (vanilla hides the bar client-side via
-/// its own has-experience check, and still sends the packet). Same island shape as
-/// [`join_inventory_snapshot`], one step further along: the encoder existed in both
-/// the [`ServerProtocol`] trait and `V770ServerProtocol`, the client decodes
-/// `SET_EXPERIENCE` into `ClientEvent::ExperienceChanged`, and the HUD draws the bar
-/// from it — but the *only* producer in this crate was the furnace-close arm of
-/// [`dispatch_play_packet`], which pays out banked smelting XP. So a player who had
-/// never closed a furnace was never sent the packet at all, and the bar had no
-/// values to draw from.
-///
-/// # Where vanilla sends it, and why "on join" is the faithful answer
-///
-/// Not from `placeNewPlayer` — from vanilla's own per-player tick routine, which sends whenever
-/// `this.totalExperience != this.lastSentExp`. `lastSentExp` is initialised to
-/// `-99999999`, so the comparison is true on the **first tick after any join** even
-/// for a player with zero experience, and the packet goes out unconditionally.
-/// Every mutator (`setExperiencePoints`, `setExperienceLevels`,
-/// `giveExperienceLevels`, `onEnchantmentPerformed`) additionally forces
-/// `lastSentExp = -1` so that a change to *progress or level alone* — which leaves
-/// `totalExperience` untouched — still resends. The equivalent here is: send once at
-/// join, and send after every [`crate::experience::PlayerExperience`] mutation. The
-/// furnace arm already does the latter.
+/// The frame is sent once at join and after every
+/// [`crate::experience::PlayerExperience`] mutation, including furnace XP.
+/// This keeps the bar populated in every game mode and after both level and
+/// progress changes.
 ///
 /// # Argument order
 ///
-/// `(progress, level, total)`, matching the trait and **the wire**, which is not
-/// vanilla's constructor order. `ClientboundSetExperiencePacket`'s field
-/// declaration and its constructor both read `(progress, total, level)`, while its
-/// `write` method emits `writeFloat(progress)`, `writeVarInt(level)`,
-/// `writeVarInt(total)`. Reading the constructor call in `doTick` instead of the
-/// record's own codec is how the two integers get transposed — and they are adjacent
-/// VarInts, so a swap costs nothing at the wire level and silently shows the wrong
-/// number on the bar.
+/// `(progress, level, total)` is the order required by the protocol encoder.
+/// Keep the two integer fields explicit here because swapping adjacent VarInts
+/// still produces a valid frame with incorrect values.
 fn join_experience<P: ServerProtocol>(
     proto: &P,
     experience: &crate::experience::PlayerExperience,
@@ -8513,11 +7676,7 @@ fn join_experience<P: ServerProtocol>(
 
 /// [`PlayerRegistry::set_experience`]'s producer half — call this everywhere
 /// [`join_experience`]/`encode_set_experience` is sent to the owning
-/// connection, the same "send once at join, and after every mutation"
-/// moments [`join_experience`]'s own doc names. A one-line wrapper rather
-/// than inlining the `if let Some(registry) = players` at each of those call
-/// sites, so a future field on [`crate::commands::PlayerCandidate`]'s
-/// experience mirror only has one call to update, not eight.
+/// connection. The wrapper keeps the optional registry check in one place.
 fn republish_experience(players: Option<&PlayerRegistry>, uuid: uuid::Uuid, experience: &crate::experience::PlayerExperience) {
     if let Some(registry) = players {
         registry.set_experience(uuid, experience.level(), experience.query_points());
@@ -8593,10 +7752,8 @@ fn player_attribute_snapshots(inventory: &PlayerInventory) -> Vec<EntityAttribut
 /// encoder at all, so the HUD row read a permanent `None` no matter what was
 /// equipped.
 ///
-/// Sent once at join (mirroring [`join_experience`]'s "no values at all
-/// without an explicit send" reasoning — vanilla's `AttributeMap` is
-/// synced on `addEntity`/`ServerPlayer` placement, so a client that never
-/// receives this packet has no armour attribute at all, not a zero one) and
+/// Sent once at join (a client that never receives this packet has no armour
+/// attribute at all, not a zero one) and
 /// again after any player-inventory mutation that can change combat
 /// equipment (`ServerBound::ContainerClicked`, the right-click armour swap in
 /// [`apply_use_item_on`]).
@@ -8615,9 +7772,9 @@ fn join_attributes<P: ServerProtocol>(proto: &P, inventory: &PlayerInventory) ->
 /// client sees no extra traffic and a client naming an item it does not own is
 /// corrected on the same packet.
 ///
-/// That closes the hole this function used to be: it applied the client's diff
-/// verbatim, so any client could mint any item in any slot by claiming it. Issue
-/// #529 had closed the crafting *result* alone; the general case is this.
+/// The server derives the full menu result instead of trusting the client's
+/// claimed diff, so a client cannot mint an item by naming an arbitrary slot.
+/// The comparison covers crafting results as well as ordinary menu slots.
 ///
 /// A click against a non-zero `window_id` that does not match the connection's
 /// own tracked [`OpenContainer`] (a stale click for a window since closed or
@@ -8644,7 +7801,7 @@ fn apply_container_clicked<P: ServerProtocol>(
     claimed_cursor: Option<&ItemStack>,
     creative: bool,
     xp_level: i32,
-    // Issue #150. The narrow crafting-station hook registry — see
+    // The narrow crafting-station hook registry — see
     // `apply_use_item_on`'s own `hooks` comment for why this is a targeted
     // handle rather than the whole `WorldStateHandle`.
     hooks: &crate::plugin_crafting::CraftingStationHooks,
@@ -8652,7 +7809,7 @@ fn apply_container_clicked<P: ServerProtocol>(
     // Which menu, and where its non-player slots live.
     let mut open = open_container;
 
-    // The workstation economy (anvil/grindstone/smithing, issues #253-#255) is a
+    // The workstation economy (anvil/grindstone/smithing) is a
     // second positionless-scratch shape alongside the crafting table, but its
     // cells live in `PlayerInventory::workstation` (a flat cell vector) rather
     // than a `CraftingState`, so it is handled by a dedicated function instead
@@ -8726,10 +7883,9 @@ fn apply_container_clicked<P: ServerProtocol>(
     };
 
     let mut slots = read_menu(&layout, inventory, grid_owner.as_ref(), &own);
-    // What the client believed before this click — the baseline the agreement check
-    // below rebuilds its prediction on top of. Vanilla keeps this as the menu's
-    // `remoteSlots`; here the last thing we sent *was* this state, because every
-    // disagreement is answered with a full content packet.
+    // The state the client saw when this menu was last sent is the baseline
+    // for the agreement check below. Every disagreement receives a full
+    // content packet.
     let before = slots.clone();
     let mut state = inventory.click_state().clone();
     // The open grid's dimensions, so `do_click_with` can re-derive the result slot
@@ -8741,10 +7897,9 @@ fn apply_container_clicked<P: ServerProtocol>(
     let recipe = |cells: &[Option<ItemStack>]| {
         crate::crafting::derive_result(grid_width, grid_height, cells)
     };
-    // `ServerboundSelectBundleItemPacket`'s last claim for this menu slot —
-    // `container_click::pickup`'s own `tryItemClickBehaviourOverride`
-    // right-click-extract branch reads this to pick which nested item comes
-    // out, exactly as vanilla's own container-menu selected-bundle-item-index field does.
+    // The last nested-item selection for this menu slot. The right-click
+    // extraction branch reads it to choose which nested item comes out; the
+    // following pickup click performs the extraction.
     let selected_bundle = |slot: usize| inventory.selected_bundle_item(slot);
     let selected_bundle: Option<SelectedBundleIndex<'_>> = Some(&selected_bundle);
     let dropped = do_click_with(
@@ -8821,20 +7976,14 @@ fn apply_container_clicked<P: ServerProtocol>(
     // **the pre-click state overwritten by the slots it claimed** — it does not claim
     // slots it thinks are unchanged — plus its claimed cursor.
     //
-    // # Comparing only the claimed slots was vacuous, and that was the bug
+    // # Compare claims with the full derived menu
     //
-    // This used to walk `claimed_slots` alone, so a client that claimed *nothing*
-    // agreed by construction. That is exactly what a client does for every change it
-    // cannot predict — above all the **crafting result**, which is server-derived — so
-    // the result slot was never sent, the screen drew its own dimmed ghost forever,
-    // and a shift-clicked craft only showed up on the next full content packet (i.e.
-    // after closing and reopening the table). Vanilla has no such hole: `doClick` is
-    // followed unconditionally by `broadcastChanges`, which diffs **every** slot
-    // against `remoteSlots`, and `slotChangedCraftingGrid` additionally pushes slot 0
-    // on any grid change (vanilla's own crafting-menu slot-changed hook).
+    // The client can omit slots it cannot predict, especially a derived crafting
+    // result. Compare its claimed slots against the full derived menu so the
+    // result and any shifted inputs are corrected in the same response.
     //
-    // An honest prediction still costs no traffic — the control for that is
-    // `a_claimed_item_is_never_stored_and_the_client_is_corrected`'s second half.
+    // A matching prediction needs no corrective packet; the no-traffic test
+    // exercises that no-traffic branch.
     let cursor = inventory.click_state().carried.clone();
     let mut agrees = cursor.as_ref() == claimed_cursor;
     if agrees {
@@ -8907,7 +8056,7 @@ fn read_workstation_menu(
 /// ignores whichever of the two it does not use, the same "the other
 /// stations ignore it" shape `rename` already had before `selected` existed.
 ///
-/// `hooks` is issue #150's plugin seam: the vanilla result computed above is
+/// `hooks` is the plugin seam: the result computed above is
 /// the *input* to [`CraftingStationHooks::evaluate`], never the final
 /// answer, so a plugin can allow, deny or replace it — see
 /// `crate::plugin_crafting`'s own module doc for why this single function is
@@ -8978,15 +8127,12 @@ fn apply_workstation_clicked<P: ServerProtocol>(
     let recipe = |grid_cells: &[Option<ItemStack>]| {
         workstation_result(station, grid_cells, creative, rename.as_deref(), selected_recipe_index, hooks)
     };
-    // Vanilla's own anvil-menu may-pickup gate: `(player.hasInfiniteMaterials() ||
-    // player.experienceLevel >= this.cost.get()) && this.cost.get() > 0`.
-    // `this.cost` is `crate::anvil::compute`'s own `cost` field, re-derived
+    // The anvil-menu may-pickup gate: `(creative || experience_level >= cost) && cost > 0`.
+    // `cost` is `crate::anvil::compute`'s own field, re-derived
     // from the pre-click cells and pending rename — never stored, the same
     // "recompute rather than cache" choice `workstation_result` above already
-    // makes. `Grindstone`/`Smithing` pass `None`: neither's vanilla result
-    // slot overrides `mayPickup` (its own grindstone-menu anonymous result `Slot`
-    // only overrides `mayPlace`/`onTake`; `SmithingMenu` inherits
-    // `ItemCombinerMenu`'s own default-true `mayPickup`).
+    // makes. `Grindstone`/`Smithing` pass `None`: neither result slot changes
+    // this permission, so both retain the default allow-pickup behavior.
     let anvil_cost = crate::anvil::compute(
         cells.first().and_then(Option::as_ref),
         cells.get(1).and_then(Option::as_ref),
@@ -9195,29 +8341,13 @@ fn apply_rename_item<P: ServerProtocol>(
     ]
 }
 
-/// [`ServerBound::EditBook`]'s consumer — vanilla's own update-book-contents/
-/// sign-book handlers, reached the same way its own edit-book handler
-/// gates it: `slot` must be a hotbar index or the off-hand (vanilla's own
-/// `isHotbarSlot(slot) || slot == 40`), and the item sitting there
-/// must be a `minecraft:writable_book` — vanilla's `carried.has(DataComponents
-/// .WRITABLE_BOOK_CONTENT)` gate, which is always true for that item because
-/// vanilla's own item registration for writable books registers the component as a **prototype default**
-/// (vanilla's own writable-book-content empty default), not only after a first edit. This crate has
-/// no general item-prototype default-component census to reproduce that
-/// distinction (see `ItemComponents`'s own doc on *effective* vs. *patch*
-/// fields), so the item's own canonical key stands in for it here — every
-/// `minecraft:writable_book` this crate can ever produce is editable, exactly
-/// as vanilla's default makes it.
+/// [`ServerBound::EditBook`]'s consumer. Only hotbar and off-hand slots are
+/// accepted, and the selected item must be a `minecraft:writable_book` carrying
+/// its writable-book content marker. The decoded page and title limits are
+/// enforced by the protocol layer.
 ///
-/// `pages`/`title` reach here already filtered to nothing (this crate runs no
-/// chat-filtering service, the same call every other text-carrying consumer
-/// makes) and already length/count-capped by the wire decode (`EditBook`'s
-/// own `#[mc(max = 100)]` list cap and its `pages`/`title` string caps).
-///
-/// Returns the native slot written and the item now sitting there, for the
-/// caller to resend via `CONTAINER_SET_SLOT` — `None` when the gate refuses
-/// (out-of-range slot, no item there, or not a writable book), matching
-/// `updateBookContents`/`signBook`'s own silent no-op on a failed `has` check.
+/// Returns the native slot written and the replacement item for a
+/// `CONTAINER_SET_SLOT` update. Returns `None` when validation fails.
 fn apply_edit_book(
     inventory: &mut PlayerInventory,
     slot: i32,
@@ -9234,11 +8364,8 @@ fn apply_edit_book(
         return None;
     }
     match title {
-        // `signBook`: transmute to a written book, dropping the draft
-        // component (`writtenBook.remove(DataComponents
-        // .WRITABLE_BOOK_CONTENT)`) and setting the written one — generation
-        // `0` and `resolved: true`, matching `signBook`'s own literal
-        // `new WrittenBookContent(title, author, 0, pages, true)`.
+        // A submitted title converts the draft to a written book with
+        // generation `0` and resolved text.
         Some(title) => {
             item.item = "minecraft:written_book".parse().ok()?;
             item.components.writable_book_content = None;
@@ -9250,8 +8377,7 @@ fn apply_edit_book(
                 resolved: true,
             });
         }
-        // `updateBookContents`: overwrite the draft pages in place, no
-        // transmute.
+        // Without a title, replace the draft pages in place.
         None => {
             item.components.writable_book_content = Some(pages);
         }
@@ -9302,7 +8428,7 @@ fn apply_set_beacon<P: ServerProtocol>(
         }
         beacon.primary_effect = primary;
         beacon.secondary_effect = secondary;
-        // `paymentSlot.remove(1)`.
+        // Remove one item from the payment slot.
         let consumed_all = beacon.payment.as_ref().is_some_and(|item| item.count <= 1);
         if consumed_all {
             beacon.payment = None;
@@ -9350,8 +8476,7 @@ fn apply_set_beacon<P: ServerProtocol>(
 /// Returns the directives to send (the XP update, if any levels were spent,
 /// then the refreshed menu content) or `Vec::new()` when the click is
 /// refused: wrong window, no item, no offer at that cost, insufficient
-/// lapis/levels, or — vanilla's own `newEnchantment.isEmpty()` guard — a roll
-/// that happened to produce nothing.
+/// lapis/levels, or a roll that produced no enchantment.
 fn apply_container_button_click<P: ServerProtocol>(
     proto: &P,
     inventory: &mut PlayerInventory,
@@ -9368,11 +8493,9 @@ fn apply_container_button_click<P: ServerProtocol>(
     if tracked.window_id != window_id {
         return Vec::new();
     }
-    // Issue #150: the loom and stonecutter share this same packet
-    // (`ContainerButtonClick`) but neither shape nor pricing in common with
-    // the enchanting table below — vanilla's own loom-menu/stonecutter-menu click-menu-button routines
-    // both just pick an offer, with no lapis or XP cost at all. See
-    // `apply_workstation_button_click`'s own doc.
+    // Loom and stonecutter share this packet type but use different shapes and
+    // pricing from the enchanting table. They select an offer without lapis or
+    // experience cost; see `apply_workstation_button_click`.
     if let MenuKind::ItemCombiner { station: station @ (Station::Loom | Station::Stonecutter), .. } = tracked.shape {
         return apply_workstation_button_click(proto, inventory, tracked, station, button_id, creative, hooks);
     }
@@ -9497,7 +8620,7 @@ fn apply_workstation_button_click<P: ServerProtocol>(
     vec![proto.encode_container_content(tracked.window_id, state_id, &items, inventory.click_state().carried.as_ref())]
 }
 
-/// Lays a recipe-book recipe out in the open crafting grid (issue #529 step 4).
+/// Lays a recipe-book recipe out in the open crafting grid (the `PLACE_RECIPE` consumer).
 ///
 /// Which grid depends on the window: `0` is the player screen's 2×2, an open
 /// crafting table is its 3×3. A 3×3 recipe asked for on the 2×2 screen has no
@@ -9579,14 +8702,9 @@ fn spawn_dropped_stacks(
         return;
     }
     let Some((x, y, z)) = player_pos else { return };
-    // Vanilla routes a container throw through the *same* `drop(stack, false,
-    // true)` the `Q` key uses (its own container-menu doClick outside case →
-    // its own player-drop routine), so it gets the same hand position and the same forward
-    // impulse. This used to release at the eye with **zero** velocity and a
-    // 10-tick pickup delay, with a comment saying facing was not tracked here — it
-    // is (`player_rot`), and the effect of the old shape was that a stack thrown
-    // out of an open window dropped straight onto the player's feet and was
-    // immediately picked back up, which reads as the throw not working.
+    // Container throws use the hand position and forward impulse derived from
+    // `player_rot`, matching the Q-key drop behavior. The pickup delay keeps a
+    // thrown stack from being collected by the player immediately.
     let rotation = player_rot.unwrap_or(Rotation { yaw: 0.0, pitch: 0.0 });
     let position = Vec3::new(x, y + EYE_HEIGHT - crate::block_drops::THROW_HAND_DROP, z);
     mobs.with(|sim| {
@@ -9612,29 +8730,23 @@ fn spawn_dropped_stacks(
 /// Throws the selected hotbar stack into the world — `Q` (`whole_stack: false`,
 /// one item) or `Ctrl+Q` (`whole_stack: true`, all of it).
 ///
-/// Vanilla's own per-player drop routine, which is
-/// three steps: its own remove-from-selected routine takes the items, the menu is
-/// told the selected slot's *new* contents, and vanilla's own entity-drop routine spawns the
-/// entity with [`crate::block_drops::thrown_item_velocity`].
+/// The operation has three steps: remove items from the selected slot, record
+/// the slot's *new* contents, and spawn the entity with
+/// [`crate::block_drops::thrown_item_velocity`].
 ///
-/// # The slot update is a deliberate divergence from vanilla, not a port of it
+/// # The slot update
 ///
-/// **Vanilla sends nothing here.** There is no drop ack, and
-/// vanilla's own per-player drop routine's `containerMenu.setRemoteSlot(slotIndex, …)` is *not* a
-/// send — it updates the server's record of what the client is believed to hold,
-/// which **suppresses** the corrective broadcast that would otherwise follow. That
+/// **The client receives no drop acknowledgement.** The server records the
+/// selected slot's contents but does not send that bookkeeping as a packet;
+/// no separate slot acknowledgement is required, which **suppresses** the
+/// corrective broadcast that would otherwise follow. That
 /// works because the client predicts the drop itself (`lodestone-client`'s
 /// `drop_selected` does, and its doc records that an unpredicted drop leaves the
 /// count permanently wrong — the item really is gone server-side).
 ///
-/// This crate has no `setRemoteSlot` model, so "send nothing" is not available in
-/// the same sense: if the server *rejects* the drop where the client predicted one
-/// — a stale selected index, a slot the server reads as empty — nothing ever
-/// reconciles it and the client shows a ghost item until the window is reopened.
-/// One `container_set_slot` carrying the authoritative content closes that, and it
-/// is inert in the common case because it equals what the client predicted.
-///
-/// If a `setRemoteSlot` equivalent ever lands, this is the send to remove.
+/// A rejected drop sends one `container_set_slot` carrying the authoritative
+/// content, while an accepted drop remains inert in the common case because it
+/// equals what the client predicted.
 /// A no-op drop returns `None` and sends nothing, because the client predicted no
 /// change either.
 ///
@@ -9655,7 +8767,7 @@ fn apply_item_dropped<P: ServerProtocol>(
     if held.count <= 0 {
         return None;
     }
-    // `removeFromSelected(all)`: the whole count, or one item.
+    // Remove the whole selected stack for a full-stack throw, or one item.
     let taken = if whole_stack { held.count } else { 1 };
     let mut thrown = held.clone();
     thrown.count = taken;
@@ -9811,29 +8923,28 @@ fn launch_intent(path: &str) -> Option<LaunchIntent> {
 
 /// The ammunition a drawn bow consumes, and whether the inventory has any.
 ///
-/// Vanilla's own `getProjectile` searches for anything matching the weapon's
-/// `ammoPredicate`; this crate models the plain arrow only, which is the ammunition
-/// a vanilla bow finds first anyway.
+/// The ammunition search matches the weapon's ammo predicate; this crate models
+/// the plain arrow only, which is the ammunition a standard bow finds first.
 const BOW_AMMUNITION: &str = "arrow";
 
 /// One consume (eat or drink) in progress on a connection.
 ///
-/// Vanilla's own `useItem`/`useItemRemaining` pair, reduced to the two
-/// facts the completion needs: which slot is being eaten from, and when it
+/// The item-use state records the two facts completion needs: which slot is
+/// being eaten from, and when it
 /// finishes. `item` is carried so a slot whose contents changed mid-bite (a
 /// container click, a hotbar swap) cannot complete as if it were still the food
-/// — the same "re-check what you recorded" guard `PendingBreak` applies to a dig.
+/// The same "re-check what you recorded" guard `PendingBreak` applies to a dig.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ItemInUse {
     /// Native inventory index the food is in.
     native: usize,
     /// The item that started the use, full registry name.
     item: String,
-    /// The `MobSim` tick the use completes on — `started` plus vanilla's own consumable consume-ticks value.
+    /// The `MobSim` tick the use completes on — `started` plus the item's consume-ticks value.
     finish_tick: u64,
     /// The `remaining` value the last periodic consume sound was published for.
     ///
-    /// Vanilla's own consumable emit-particles-and-sounds predicate is on
+    /// The consumable emit-particles-and-sounds predicate is
     /// `remaining % 4 == 0`, which is correct **only if it is evaluated exactly once
     /// per tick**. The loop that drives it reads `MobSim`'s counter from a 50 ms
     /// timer arm, and the two clocks are not the same object: if the timer fires
@@ -9843,32 +8954,29 @@ pub(crate) struct ItemInUse {
     last_effect_remaining: Option<u32>,
 }
 
-/// What a `USE_ITEM` started. Vanilla's own item-use routine returns an
-/// `InteractionResult`; this is the subset with a consequence here.
+/// What a `USE_ITEM` started. This is the subset of item-use outcomes with a
+/// consequence here.
 #[derive(Debug)]
 enum UseItemOutcome {
-    /// Nothing this crate models. Vanilla's `PASS`/`FAIL`.
+    /// Nothing this crate models.
     Nothing,
     /// A bow draw opened; the `RELEASE_USE_ITEM` that follows ends it.
     Draw(BowDraw),
     /// A consume opened; the server's own clock ends it.
     Consuming(ItemInUse),
-    /// An equip swap already happened — arm 2 of vanilla's own item-use routine is instantaneous,
-    /// unlike arms 1, 3 and 4.
+    /// An equip swap already happened; this arm is instantaneous.
     Equipped(crate::item_use::EquipSwap),
 }
 
-/// Applies a `USE_ITEM`: vanilla's own item-use routine's ordered arms, plus the projectile items
-/// whose own `use` override replaces it.
+/// Applies a `USE_ITEM`: ordered item-use arms, plus projectile items whose
+/// specialized behavior replaces the ordinary path.
 ///
-/// The order below is vanilla's own item-use routine's own, and it is load-bearing — see
-/// `crate::item_use`'s module doc. The launch arm sits first because those items
-/// (`BowItem`, `SnowballItem`, `ThrowablePotionItem`) *override* vanilla's own item-use routine
-/// entirely rather than being an arm of it, so they are a disjoint set and cannot
-/// race the arms below.
+/// The order below is load-bearing — see `crate::item_use`'s module doc. The
+/// launch arm sits first because those projectile items use a disjoint path and
+/// cannot race the arms below.
 ///
-/// `food_level` and `invulnerable` are the acting player's, for
-/// vanilla's own can-eat check's two non-item disjuncts.
+/// `food_level` and `invulnerable` are the acting player's values for the two
+/// non-item can-eat conditions.
 #[allow(clippy::too_many_arguments)]
 fn apply_use_item(
     mobs: &MobHandle,
@@ -9880,7 +8988,7 @@ fn apply_use_item(
     hand: u8,
     yaw: f32,
     pitch: f32,
-    // Vanilla's own fishing-rod-item use routine's cast/retrieve dispatch needs the caster's own
+    // The fishing-rod cast/retrieve dispatch needs the caster's own
     // entity id, both to own the bobber (`MobSim::cast_fishing_bobber`'s
     // `owner`) and to find it again on the next click
     // (`MobSim::player_active_bobber`).
@@ -9969,7 +9077,7 @@ fn apply_use_item(
             mobs.with(|sim| sim.retrieve_fishing_bobber(bobber_id, Vec3::new(x, y, z), 0));
         } else {
             // Vanilla's own fishing-rod-item use routine's cast arm. `luck`/`lure_speed` are `0, 0`
-            // — no enchantment model reaches this call site yet (see
+            // No enchantment model reaches this call site yet (see
             // `MobSim::cast_fishing_bobber`'s own doc).
             mobs.with(|sim| {
                 sim.cast_fishing_bobber(
@@ -10021,7 +9129,7 @@ fn apply_use_item(
 
 /// Finishes a consume whose clock ran out — vanilla's own complete-using-item →
 /// finish-using-item → consumable-on-consume → food-properties-on-consume chain,
-/// which is `player.getFoodData().eat(this)` plus `stack.consume(1, entity)`.
+/// which applies the food value and removes one item from the used stack.
 ///
 /// Returns the slot to report and the stack now in it, or `None` when the use is
 /// stale: the slot's contents changed under it (a hotbar swap, a container click)
@@ -10055,7 +9163,7 @@ fn finish_consuming(
 
 /// Vanilla's own ominous-bottle-amplifier on-consume routine: finishing a drink of
 /// `minecraft:ominous_bottle` grants `minecraft:bad_omen` for 120000 ticks
-/// and consumes the bottle — issue #241's remaining producer gap
+/// and consumes the bottle — the raid-trigger producer
 /// (`item_use.rs`'s own disclosed "potions" gap, closed for exactly this one
 /// item rather than generally).
 ///
@@ -10067,17 +9175,10 @@ fn finish_consuming(
 /// `consume_one` shape as [`finish_consuming`], reused rather than
 /// restated.
 ///
-/// **Disclosed narrowing**: vanilla rolls a uniform `0..=4` amplifier onto
-/// the bottle's own `minecraft:ominous_bottle_amplifier` component when a
-/// pillager patrol captain drops it
-/// ([`crate::mobs::MobSim::drop_ominous_bottle`]'s own doc has the loot-table
-/// citation); every bottle drunk here grants amplifier `0` instead, because
-/// persisting the real per-stack roll needs a new
-/// `lodestone_model::ItemComponents` field this session's ownership does not
-/// reach (`crates/lodestone-model/**`) — see `docs/raids-and-patrols.md` §5
-/// for the exact hunk. Amplifier `0` is a real, working value rather than a
-/// no-op: `absorb_raid_omen(0, 0) == 1` still starts a genuine raid once Bad
-/// Omen converts, so this is "always the weakest roll", not "does nothing".
+/// The item data does not retain the per-stack amplifier roll, so every bottle
+/// grants amplifier `0`. That value still satisfies
+/// `absorb_raid_omen(0, 0) == 1` and starts a genuine raid when Bad Omen
+/// converts; it represents the weakest roll rather than a no-op.
 fn finish_drinking_ominous_bottle(
     inventory: &mut PlayerInventory,
     effects: &mut crate::mob_effects::ActiveEffects,
@@ -10103,22 +9204,17 @@ fn finish_drinking_ominous_bottle(
     ))
 }
 
-/// Vanilla's own potion-contents on-consume → `applyToLivingEntity(user, durationScale)` chain:
-/// finishing a drink of `minecraft:potion` applies its full, **unscaled**
-/// built-in effect list — issue #690's central gap, the one that made every
-/// potion in the game do nothing at all.
+/// Finishing a drink of `minecraft:potion` applies the complete built-in effect
+/// list without scaling. An empty or unsupported potion entry produces no
+/// effects.
 ///
 /// Reuses [`crate::mob_effects::potion_splash_effects`] at `scale = 1.0`,
 /// `duration_scale = 1.0` rather than re-deriving the list: that function's own
 /// `splash_instant_amount`/`splash_timed_duration` are both the identity
 /// transform at `scale = 1.0` (`floor(1.0 * x + 0.5) == x` for the non-negative
-/// integer `x` every potion table entry is), which is exactly
-/// `applyInstantaneousEffect`'s own unscaled call and `entity.addEffect`'s own
-/// unscaled duration — not an approximation reused for convenience, the same
-/// computation vanilla's *other* call site performs. `duration_scale` is `1.0`
-/// for the same disclosed `minecraft:potion_duration_scale` gap
-/// `resolve_potion_splash` already carries (this build's `ItemComponents` does
-/// not model that component).
+/// integer `x` every potion table entry is), so direct drinking preserves every
+/// amount and duration from the table. `duration_scale` is `1.0` because this
+/// build's `ItemComponents` does not model `minecraft:potion_duration_scale`.
 ///
 /// Returns the `(slot, remaining stack)` pair [`finish_consuming`] does, plus
 /// the effect list to apply — `None` when the item is not a potion or the use
@@ -10329,26 +9425,24 @@ fn consume_one(inventory: &mut PlayerInventory, native: usize, game_mode: GameMo
     true
 }
 
-/// Resolves a `minecraft:attack` request (issue #12) against the live mob
+/// Resolves a `minecraft:attack` request against the live mob
 /// simulation: runs the damage pipeline and, for a sprinting attacker, the
 /// melee knockback bonus, through [`MobSim::attack`](crate::MobSim::attack).
 ///
-/// **No reply packet is sent from here.** This mirrors the real wire shape —
-/// vanilla's own `ServerboundAttackPacket` has no clientbound acknowledgement
-/// — and relies on the *existing* entity-streaming pass
+/// **No reply packet is sent from here.** The attack request has no direct
+/// acknowledgement. The entity-streaming pass
 /// (`EntityStreamer::sync`, called immediately after
 /// [`dispatch_play_packet`] returns, on every inbound packet including this
 /// one) to carry the result to every connection tracking the target: a
 /// knocked-back mob's new position/velocity, or its removal on a killing
-/// blow, both already flow through [`MobHandle`]'s [`EntitySource`] impl once
-/// `mobs` is the same handle [`crate::tick::run_tick_loop`] (issue #284) ticks
-/// and publishes from. See [`MobSim::attack`](crate::MobSim::attack)'s own doc
+/// blow, both flow through [`MobHandle`]'s [`EntitySource`] implementation.
+/// The `mobs` handle is shared with [`crate::tick::run_tick_loop`], so the
+/// stream observes the updated snapshot. See [`MobSim::attack`](crate::MobSim::attack)'s own doc
 /// comment for why `attacker_pos` (not a tracked player yaw — this crate
 /// tracks no player rotation at all) stands in for
 /// [`lodestone_physics::knockback::attack_direction`]'s real facing formula.
 ///
-/// A connection with no tracked position yet (`player_pos` is `None` —
-/// hasn't sent a single `move_player_pos` since join) still lands the
+/// A connection with no tracked position (`player_pos` is `None`) still lands the
 /// damage; only the knockback direction needs a position, so it is skipped
 /// entirely in that case (`attacker_pos` defaults to the origin and
 /// `knockback_power` is forced to `0.0`) rather than guessing one, the same
@@ -10360,14 +9454,10 @@ fn consume_one(inventory: &mut PlayerInventory, native: usize, game_mode: GameMo
 /// why a non-sprinting attack's knockback power is correctly `0.0`, not a
 /// bug.
 ///
-/// Routes through [`MobSim::attack_from_player`] rather than the bare
-/// [`MobSim::attack`] it wraps — that method's own doc names this call site as
-/// the broker it was built for: with no identified attacker reaching the mob
-/// sim, a player-landed hit on a villager wrote no `VillagerHurt`/
-/// `VillagerKilled` gossip, so `villager::reputation`'s scoring machinery
-/// (tested, correct) never saw a real production event. `LOCAL_PLAYER_ENTITY_ID`
-/// for [`PlayerIdentity::entity_id`], matching every other self-facing
-/// identity built in this file.
+/// Routes through [`MobSim::attack_from_player`] so the mob simulation receives
+/// the attacking account identity and can record villager reputation events.
+/// Uses `LOCAL_PLAYER_ENTITY_ID` for [`PlayerIdentity::entity_id`], matching
+/// every other self-facing identity built in this file.
 fn apply_attack(
     mobs: &MobHandle,
     player_pos: Option<(f64, f64, f64)>,
@@ -10387,14 +9477,9 @@ fn apply_attack(
         ),
         None => (Vec3::new(0.0, 0.0, 0.0), 0.0),
     };
-    // The weapon feed. This used to pass `PLAYER_BARE_HAND_ATTACK_DAMAGE`
-    // unconditionally, so a diamond sword and a fist did the same 1.0 — the
-    // armour formula on the receiving end was live-verified against a real
-    // vanilla server while the number going into it could never be right.
-    // `combat_stats` resolves the held item through the real
-    // `ATTACK_DAMAGE` attribute fold, and an empty hand still lands on
-    // `PLAYER_BARE_HAND_ATTACK_DAMAGE` because that *is* the player's attribute
-    // base with no modifiers.
+    // The weapon feed resolves the held item through the `ATTACK_DAMAGE`
+    // attribute fold. An empty hand uses `PLAYER_BARE_HAND_ATTACK_DAMAGE`,
+    // the player's attribute base with no modifiers.
     let raw_damage = inventory.combat_stats().attack_damage;
     mobs.with(|sim| {
         sim.attack_from_player(
@@ -10476,7 +9561,7 @@ fn swing_action(hand: u8) -> u8 {
 /// [`apply_difficulty_change`]/[`apply_game_rule_changed`]), applies a
 /// respawn/game-rule-request `client_command` (see [`apply_client_command`]),
 /// resizes the streamed view on a settings change (see
-/// [`ViewTracker::set_view_radius`]), advances issue #270's chunk-batch
+/// [`ViewTracker::set_view_radius`]), advances the chunk-batch
 /// flow-control gate (see [`send_view_update`]), or applies a hotbar
 /// selection/container click/creative-slot write against [`PlayerInventory`]
 /// (see
@@ -10485,12 +9570,12 @@ fn swing_action(hand: u8) -> u8 {
 /// under the current protocols (no further state transitions are modeled —
 /// no dimension change yet) and is a no-op here.
 /// The three world-derived facts [`FallSample`] needs, read off the terrain the
-/// player is standing in (issue #534).
+/// player is standing in.
 ///
 /// # Which cell each one reads, and why
 ///
-/// * `in_water` — the cell at the player's **feet**. Vanilla's `isInWater()` is a
-///   fluid-height test over the whole bounding box; the feet cell is the earliest
+/// * `in_water` — the cell at the player's **feet**. The complete fluid-height
+///   test covers the whole bounding box; the feet cell is the earliest
 ///   part of that box to touch a water surface on the way down, which is the
 ///   moment the cancellation must fire. Reading the *eye* instead (which
 ///   `crate::vitals` correctly does for drowning, a different question) would
@@ -10498,14 +9583,13 @@ fn swing_action(hand: u8) -> u8 {
 ///   still hurt.
 /// * `fall_resetting` — the same feet cell, since a climbable is something the
 ///   player is *inside*.
-/// * `block_damage_modifier` — the cell **below** the feet, at `y - 0.2`, which is
-///   vanilla's own `getOnPosLegacy()` offset (its own `getOnPos`'s `0.2` epsilon).
+/// * `block_damage_modifier` — the cell **below** the feet, at `y - 0.2`, using
+///   a `0.2` epsilon below the support boundary.
 ///   A plain `y - 1` is wrong for a player standing exactly on a block boundary.
 ///
 /// One `ChunkSource::block_state` call per cell, two cells — and `block_state` is
 /// the cheap single-cell read `ChunkStore` overrides, not a column regeneration
-/// (issue #440). This runs once per movement packet, the same cadence
-/// `view.recenter` already runs at.
+/// This runs once per movement packet, alongside `view.recenter`.
 fn fall_sample<S: ChunkSource + ?Sized>(source: &S, x: f64, y: f64, z: f64, on_ground: bool) -> FallSample {
     let bx = x.floor() as i32;
     let bz = z.floor() as i32;
@@ -10527,13 +9611,9 @@ fn fall_sample<S: ChunkSource + ?Sized>(source: &S, x: f64, y: f64, z: f64, on_g
 ///
 /// # Why every damage site must go through here
 ///
-/// Before this function the five damage sites each sent `encode_set_health` and
-/// nothing else, and `set_health(0.0)` does not raise a death screen — not in
-/// vanilla's client (its own client-side set-health handler only calls
-/// `hurtTo`/`setFoodLevel`/`setSaturation`) and not in this workspace's, whose
-/// `NetUpdate::Death` is decoded from `player_combat_kill` alone. The visible
-/// result was a player pinned at zero hearts with no screen and no respawn
-/// button, which reads as the server having hung.
+/// Health reaching zero does not by itself produce the death screen, animation,
+/// sound, or statistic. This function is the single choke point for all five
+/// damage sites, so it adds those cues exactly once.
 ///
 /// # Why no "already announced" latch is needed
 ///
@@ -10686,8 +9766,8 @@ where
 }
 
 /// Feeds one `on_ground` sample to the [`FallTracker`] from a movement packet
-/// that carried **no** y coordinate, reusing the last position this connection
-/// reported (issue #262).
+/// that carried **no** y coordinate, reusing the last position associated with
+/// this connection.
 ///
 /// Reusing the remembered y is not an approximation: `move_player_rot` and
 /// `move_player_status_only` are precisely the two packets vanilla's own
@@ -10704,8 +9784,8 @@ async fn fall_status_sample<T, P, S>(
     conn: &mut Connection<T>,
     state: &mut State,
     proto: &P,
-    // Issue #534: the terrain the player is standing in, for the water /
-    // climbable / landing-block facts. `.get()` because this is two single-cell
+    // Read the terrain at the player's feet for water, climbable, and landing
+    // block facts. `.get()` performs two single-cell
     // reads, not a batch — see `SourceRef::get`.
     source: &S,
     player_pos: &Option<(f64, f64, f64)>,
@@ -10713,13 +9793,13 @@ async fn fall_status_sample<T, P, S>(
     vitals: &mut PlayerVitals,
     username: &str,
     on_ground: bool,
-    // `Abilities.invulnerable` — creative and spectator. `fall` is not in
+    // `invulnerable` — creative and spectator. `fall` is not in
     // `#minecraft:bypasses_invulnerability` (only `out_of_world` and
     // `generic_kill` are), so an invulnerable player takes none of it. The
     // *tracker* still samples, so the fall is still tracked; only the hit is
-    // skipped, which is vanilla's own is-invulnerable-to check's own placement.
+    // skipped, matching the damage-immunity rule.
     invulnerable: bool,
-    // Issue #338's `minecraft:deaths` counter, threaded only to reach
+    // `minecraft:deaths` counter, threaded only to reach
     // `publish_health` — see its own parameter comment for why the count belongs
     // there and not at each damage source.
     advancements: &mut AdvancementManager,
@@ -10763,14 +9843,10 @@ where
     Ok(())
 }
 
-/// Vanilla's own `GAMEMASTERS` permission level — the level `Permissions
-/// .COMMANDS_GAMEMASTER` requires, and the gate `handleChangeDifficulty`/
-/// `handleLockDifficulty`/`handleSetGameRule`/`handleSetCommandBlock`/
-/// `handleChangeGameMode` all share. The built-in `/gamemode`/`/gamerule`/
-/// `/difficulty` commands already carry the identical `2` as their own
-/// per-command constant (`crate::commands::gamemode::GAMEMODE_LEVEL` and
-/// siblings); this one is for the handful of dedicated serverbound packets
-/// vanilla uses for the same administrative actions instead of a `/`-command.
+/// Administrative serverbound actions use permission level `2`, matching the
+/// built-in `/gamemode`, `/gamerule`, and `/difficulty` command gates. This
+/// constant covers the dedicated packets that perform the same actions without
+/// going through a slash command.
 const COMMANDS_GAMEMASTER_LEVEL: u8 = 2;
 
 #[allow(clippy::too_many_arguments)]
@@ -10781,7 +9857,7 @@ async fn dispatch_play_packet<T, P, S>(
     view_radius: i32,
     state: &mut State,
     view: &mut ViewTracker,
-    // Issue #619. This connection's chunk-residency guard, so a chunk-boundary
+    // This connection's chunk-residency guard, so a chunk-boundary
     // crossing or a live view-radius change (the `recenter`/`set_view_radius`
     // arms below) can move the same `PLAYER_LOADING`/`PLAYER_SIMULATION`
     // tickets `serve_play` granted at join, rather than leaving them pinned to
@@ -10790,7 +9866,7 @@ async fn dispatch_play_packet<T, P, S>(
     pending_keep_alive: &mut Option<i64>,
     pending_break: &mut Option<PendingBreak>,
     player_pos: &mut Option<(f64, f64, f64)>,
-    // Issue #262. Mirrors `player_pos` exactly — updated here, read back by
+    // Mirrors `player_pos` exactly — updated here, read back by
     // the caller, republished to the `PlayerRegistry` so *other* connections
     // stream this player's facing. `Option` because "no angles reported yet"
     // is distinct from "facing due south"; the registry keeps its join
@@ -10818,18 +9894,14 @@ async fn dispatch_play_packet<T, P, S>(
     // rather than a `2r + 1`-column `await` — see [`send_view_update`], which owns
     // the decision and the fallback.
     //
-    // `Option` because the two callers genuinely differ rather than for
-    // convenience: only the native `serve_play` has a `select!` branch draining
-    // this stream. The `wasm32` loop drains its join inline and then never looks at
-    // it again, so lending it one would enqueue columns nothing sends — an island,
-    // with a green test suite and a hole in the world. It passes `None` and takes
-    // the inline path, which is that target's existing documented shape.
+    // `Option` reflects the two streaming modes: native `serve_play` drains the
+    // deferred stream from a `select!` branch, while the `wasm32` loop drains
+    // its join inline and has no deferred-stream consumer.
     mut join_stream: Option<&mut crate::join_scheduler::JoinChunkStream<S>>,
-    // Issues #48/#464. One parameter rather than two (a dispatch and an
-    // identity) because this function already takes 24; see
-    // [`CommandSession`]'s own doc comment.
+    // `CommandSession` bundles command dispatch with the caller identity used
+    // for command execution.
     commands: &CommandSession,
-    // Issue #338. This connection's advancement/statistics store and the player
+    // This connection's advancement/statistics store and the player
     // key its progress lives under. Threaded only to reach `apply_client_command`
     //'s `REQUEST_STATS` arm, which answers with the player's current stats —
     // see that function's own doc comment.
@@ -10846,7 +9918,7 @@ async fn dispatch_play_packet<T, P, S>(
     // still requires signatures even when this is false; this flag governs a
     // player that has announced no valid session.
     enforce_secure_profile: bool,
-    // Issue #469. Mirrors `player_pos`/`player_rot` exactly — filled here,
+    // Mirrors `player_pos`/`player_rot` exactly — filled here,
     // read back by the caller, republished to the `PlayerRegistry` so *other*
     // connections see it. An out-parameter rather than two more parameters (a
     // registry and this connection's username) because the caller already
@@ -10870,11 +9942,11 @@ async fn dispatch_play_packet<T, P, S>(
     // caller's own candidate in that case, which is what keeps `@s` working
     // there.
     players: Option<&PlayerRegistry>,
-    // Issue #465. Threaded through only to reach `apply_use_item_on`, which
+    // Threaded through only to reach `apply_use_item_on`, which
     // needs to ask the world tick loop for a neighbour-update fan-out that
     // outlives this packet — see that function's own parameter comment.
     block_ticks: &BlockTickFeed,
-    // Issue #249. This connection's composter roll source — seeded once in
+    // This connection's composter roll source — seeded once in
     // `serve_play`, advanced once per right-click (see
     // [`apply_composter_use`]'s `roll` parameter).
     composter_rng: &mut SpawnRng,
@@ -10883,21 +9955,21 @@ async fn dispatch_play_packet<T, P, S>(
     // fertilising a crop cannot shift which roll a later composter insert or
     // block drop sees.
     bone_meal_rng: &mut SpawnRng,
-    // Issue #256. This connection's experience — level, bar and lifetime total.
+    // This connection's experience — level, bar and lifetime total.
     // `&mut` because closing a furnace pays out its banked smelting XP (the
     // `ContainerClosed` arm), which is currently the only production producer.
     experience: &mut crate::experience::PlayerExperience,
-    // Issue #259. This connection's live status effects — written by `/effect` and
+    // This connection's live status effects — written by `/effect` and
     // ticked from `serve_play`'s vitals timer.
     effects: &mut crate::mob_effects::ActiveEffects,
-    // Issue #337. This connection's block-drop roll source — seeded once in
+    // This connection's block-drop roll source — seeded once in
     // `serve_play`, advanced by every break that rolls a table (see
     // `apply_block_action`'s parameter comment). A second stream rather than
     // sharing the composter's, so a composter click cannot shift which drop a
     // later break rolls; the two features would otherwise be coupled through
     // nothing but draw order.
     drops_rng: &mut SpawnRng,
-    // Issue #335. This connection's declared channel support (register/
+    // This connection's declared channel support (register/
     // unregister interpretation happens here, in Play) and the shared registry
     // to dispatch ordinary payloads on.
     client_channels: &mut ClientChannels,
@@ -10907,38 +9979,36 @@ async fn dispatch_play_packet<T, P, S>(
     // because the creative consequences below (instant break, damage immunity)
     // read it on later packets.
     game_mode: &mut GameMode,
-    // Issue #329. The player's per-player respawn point, written by the bed
+    // The player's per-player respawn point, written by the bed
     // arm of `apply_use_item_on` and threaded through `serve_play`'s session
     // state. Read back by no caller yet — the placement half of P2 is the
     // next consumer (see `crate::world_spawn`'s module doc).
     respawn: &mut Option<RespawnPoint>,
-    // Issue #325. The night-skip vote, fed by the two arms below — `lay_down`
+    // The night-skip vote, fed by the two arms below — `lay_down`
     // on a bed click (`UseItemOn`), `get_up` on a wake-up (`PlayerCommand`
     // action 0). `player_entity_id` is this connection's roster key, resolved
     // once in `serve_play` (a `PlayerRegistry` ticket id where one exists,
     // `LOCAL_PLAYER_ENTITY_ID` in singleplayer) — see `serve_play`'s own
     // binding and `crate::sleep`'s module doc.
     sleep_vote: &SleepVote,
-    // Issue #580. `ChatCommand`'s `CommandWorld` needs this to reach
+    // `ChatCommand`'s `CommandWorld` needs this to reach
     // `/worldborder`'s read/write surface — the same `BorderFeed` `serve_play`
     // already carries for the join broadcast and the vitals-tick damage read.
     border: &BorderFeed,
     player_entity_id: i32,
     // This connection's login name, for the death message
-    // (`DeathCause::death_message`'s victim argument — vanilla's
-    // `victim.getDisplayName()`).
+    // (`DeathCause::death_message`'s victim argument).
     username: &str,
     // The world spawn resolved at join, for the respawn teleport. See
     // `apply_client_command`'s own parameter comment.
     world_spawn: Vec3,
-    // Issue #531. The server tick this packet is handled on, for
-    // `apply_block_action`'s destroy-progress accounting. `Some(ticks_since(
-    // play_start))` on native; `None` on `wasm32`, whose `serve_play` has no
-    // `tokio::time` to count ticks with — a documented gap of the same shape as
-    // that loop's other timer-fed ones, and the only cost is that the break
-    // *timing* test is skipped there (hardness and range still apply).
+    // The server tick this packet is handled on, for
+    // `apply_block_action`'s destroy-progress accounting. Native callers pass
+    // the elapsed tick count; `wasm32` callers pass `None` because the browser
+    // timer does not expose that counter. Hardness and range checks still apply
+    // on that target.
     game_tick: Option<u64>,
-    // Issue #260. This connection's in-progress bow draw, if any: the server tick
+    // This connection's in-progress bow draw, if any: the server tick
     // the `USE_ITEM` arrived on, so the `RELEASE_USE_ITEM` that ends it can turn
     // the interval into vanilla's own bow-item power-for-time routine. `None` whenever nothing
     // chargeable is being held down.
@@ -10950,10 +10020,9 @@ async fn dispatch_play_packet<T, P, S>(
     // This connection's in-progress *consume* — eating or drinking. Held here for
     // the same reason `bow_draw` is, and separately from it because the two end
     // differently: a draw ends on a packet (`RELEASE_USE_ITEM`), while a consume
-    // ends on the **server's own clock** — vanilla's own
-    // update-using-item routine counts `useItemRemaining` down and calls
-    // `completeUsingItem` itself, and the client sends nothing at all when a
-    // steak finishes. `serve_play`'s per-tick arm is what finishes it here.
+    // ends on the **server's own clock**. The per-tick arm in `serve_play`
+    // counts the remaining duration and completes the action; the client sends
+    // nothing when a steak finishes.
     item_in_use: &mut Option<ItemInUse>,
     // Set when a `ClientCommand`'s `PERFORM_RESPAWN` just fired *and* `source`
     // above was a portal-travelled dimension — see `apply_client_command`'s own
@@ -11016,7 +10085,7 @@ where
                 }
             }
             *player_pos = Some((x, y, z));
-            // Issue #262: `move_player_pos_rot` carries angles and
+            // `move_player_pos_rot` carries angles and
             // `move_player_pos` does not, so this is `if let`, not an
             // assignment — overwriting with `None` on every straight-line
             // step would snap the avatar back to yaw 0 between turns, which
@@ -11026,49 +10095,21 @@ where
                 *player_rot = Some(rotation);
             }
 
-            // Issue #441: feed mob perception the player's position and held
-            // item. This is the *producer* for `MobController::nearest_player`
-            // and `::temptation` — the last two of the eight perception
-            // methods that had no source at all, which is why
-            // `LookAtPlayerGoal` and `TemptGoal` had a constant-false
-            // `can_use` in the running game even after the seam existed.
-            //
-            // This arm is the right home for it rather than the tick loop:
-            // `run_tick_loop` receives no player position (the gap
-            // `run_mob_tick_loop`'s own doc comment already discloses for
-            // `despawn_pass`), whereas this scope already holds the new
-            // position, the `MobHandle` and the `PlayerInventory` together, so
-            // nothing has to be threaded anywhere. `MobSim::tick` then reads it
-            // on the next tick.
-            //
-            // **Single-player shape, stated rather than assumed:**
-            // `set_players` replaces the whole list, so with two connections
-            // each would clobber the other's entry. That is correct for
-            // `open_in_memory_with_mobs`' single player — the only
-            // configuration that has a mob tick loop at all — and a real
-            // multiplayer server wants per-connection registration instead.
-            // Widening it before a second player can exist would be untested
-            // generality.
+            // Publish the player's position, held item, account UUID, and view
+            // direction to `MobSim`. This arm has all four values together,
+            // while the mob tick loop consumes the snapshot on its next tick.
+            // `set_players` replaces the whole list; the mob-enabled in-memory
+            // world uses one connection, while a multi-player host must provide
+            // additive registration.
             //
             // Position-driven, so a perfectly stationary player eventually
             // stops refreshing this. Harmless: the value is a position, not a
             // timer, so a stale entry for a motionless player is still the
             // correct answer. The same is true of `held_item` until they move
             // after a hotbar switch.
-            // The identity is what makes ownership expressible: a mob's owner is an
-            // account uuid (vanilla's own tamable-animal owner-uuid data field), and
-            // `MobSim` resolves a tamed pet's owner *position* by looking that uuid
-            // up in this list every tick. `set_players` is generic over
-            // `Into<PerceivedPlayer>`, so supplying the bare perception compiles fine
-            // and silently makes every pet ownerless — the failure is invisible from
-            // the call site, which is why this spells the identity out.
-            // Issue #458 primitive 2: the gaze feed needs a real view vector,
-            // not just a position. `player_rot` holds the latest known angles
-            // (just possibly refreshed above, or `Default` — yaw/pitch 0 — for
-            // a `MovePlayerPos` packet that carries no rotation at all before
-            // the first look). Same formula `block_placement.rs`'s
-            // `nearest_look` already uses for the block-placement raycast
-            // (vanilla's own entity view-vector calculator).
+            // The account UUID identifies the mob owner, and the view
+            // vector supplies the gaze used by perception checks. A missing
+            // rotation uses yaw and pitch `0.0`.
             let facing = player_rot.unwrap_or_default();
             let (yaw_rad, pitch_rad) = (f64::from(facing.yaw).to_radians(), f64::from(facing.pitch).to_radians());
             let view_direction = Vec3::new(
@@ -11091,15 +10132,12 @@ where
             });
 
             // Chunk coordinate = floor(block / 16), not truncating division —
-            // `-1.0_f64 / 16.0` must floor to chunk `-1`, matching vanilla's
-            // vanilla's own section-position block-to-section-coord conversion (an arithmetic right shift).
+            // `-1.0_f64 / 16.0` must floor to chunk `-1`.
             let cx = (x / 16.0).floor() as i32;
             let cz = (z / 16.0).floor() as i32;
-            // **This is what makes the world tick follow the player.**
-            // `crate::tick::run_tick_loop` used to simulate a 49-column square
-            // nailed to chunk (0, 0) — natural spawning and every randomly-ticking
-            // block stopped once the player walked out of it. See
-            // `crate::tick_area` for the design.
+            // **This makes the world tick follow the player.** Publish a
+            // 49-column square around the tracked chunk so natural spawning
+            // and randomly ticking blocks follow the connection.
             //
             // The dimension is read off `source`, not assumed: a connection's
             // `SourceRef` switches to `SourceRef::Dimension` on portal travel, so
@@ -11115,8 +10153,8 @@ where
                 cx,
                 cz,
             }]);
-            // Issue #619: read before the call, since `recenter` writes
-            // `self.center` in place — comparing after would always see the
+            // Read the center before the call, since `recenter` writes
+            // `self.center` in place; comparing after would always see the
             // new value and move the ticket pair even on a no-op pass.
             let center_before_recenter = view.center;
             let update = view.recenter(
@@ -11165,7 +10203,7 @@ where
                 .await?;
             }
         }
-        // Issue #262. A player turning on the spot sends `move_player_rot`
+        // A player turning on the spot sends `move_player_rot`
         // and nothing else, so without this arm their avatar only ever
         // re-aimed on ticks where they also happened to walk.
         //
@@ -11195,11 +10233,9 @@ where
             )
             .await?;
         }
-        // Issue #262. Carries nothing but the flags byte, so its whole job is
-        // the `on_ground` edge — which is exactly the landing sample
-        // `FallTracker`'s doc comment used to disclose as unobservable,
-        // because a fall that ends with no net position change in its final
-        // tick reports the touchdown on *this* packet and no other.
+        // Carries only the flags byte, so its whole job is the `on_ground`
+        // edge. This records a landing even when the final movement packet
+        // carries no position change.
         ServerBound::PlayerStatusOnly { on_ground } => {
             fall_status_sample(
                 conn,
@@ -11258,10 +10294,8 @@ where
                 mobs,
                 drops_rng,
                 inventory.selected_item(),
-                // Issue #531. The breaker's feet for the interaction-range test
-                // — the same `player_pos` ticket `apply_use_item_on` already
-                // reads for the bed reach check, and `None` for the same reason
-                // (no `PlayerMoved` packet has arrived yet).
+                // The breaker's feet for the interaction-range test. Use the
+                // tracked `player_pos`; `None` means no movement packet exists.
                 player_pos.as_ref().map(|&(x, y, z)| Vec3::new(x, y, z)),
                 world,
                 game_tick,
@@ -11282,9 +10316,8 @@ where
             sequence: _,
             hand,
         } => {
-            // Issue #249: one roll per right-click, whatever block was hit —
-            // vanilla's level RNG advances on plenty of unrelated draws too,
-            // and the composter branch is the only consumer of this stream.
+            // Draw one roll per right-click, regardless of the clicked block;
+            // the composter branch is the only consumer of this stream.
             let roll = composter_rng.next_f64();
             // Same reasoning, `drops_rng`'s own stream: only an enchanting-table
             // open consumes this, but it is drawn unconditionally so opening one
@@ -11299,11 +10332,11 @@ where
                 pos,
                 face,
                 cursor,
-                // Issue #329. The player's position, for the bed reach test —
+                // The player's position, for the bed reach test —
                 // `None` until a `PlayerMoved` packet carries one.
                 player_pos.as_ref().map(|&(x, y, z)| Vec3::new(x, y, z)),
                 respawn,
-                // Issue #475. The placing player's yaw and pitch, so
+                // The placing player's yaw and pitch, so
                 // `apply_use_item_on` can give directional blocks their
                 // placement facing. `None` until a packet carrying angles
                 // arrives — placement then uses the block's default state.
@@ -11330,25 +10363,10 @@ where
             .await?;
         }
         ServerBound::DifficultyChanged { difficulty } => {
-            // Vanilla's own change-difficulty handler's own gate:
-            // vanilla's own `COMMANDS_GAMEMASTER` permission constant (level 2) or the singleplayer
-            // owner. `commands.permission_level` already *is* that check —
-            // `AccessLists::command_permission_level` resolves to the real op
-            // level, or to `MAX_PERMISSION_LEVEL` for a world with no operator
-            // model configured at all (the singleplayer-owner shape), which is
-            // vanilla's `isSingleplayerOwner()` arm restated at the one place
-            // this crate already computes it, not a second check. This was a
-            // disclosed, deliberate omission before `crate::access` existed
-            // (issue #268); it is real now the model does.
-            //
-            // A **locked** world separately refuses the change, which vanilla
-            // enforces in vanilla's own set-difficulty routine. The confirmation
-            // below is sent either way and carries the value that is actually
-            // stored, so a refused request (either reason) corrects the
-            // client's own UI rather than leaving it wrong — vanilla itself
-            // sends nothing on a permission refusal, but this crate already
-            // made that choice for the lock case and there is no reason for
-            // the two refusal reasons to behave differently here.
+            // A difficulty change requires permission level `2`. A locked world
+            // rejects the mutation, but the confirmation below is sent either
+            // way with the value actually stored, keeping the client's display
+            // aligned with the server.
             if commands.permission_level >= COMMANDS_GAMEMASTER_LEVEL {
                 world.set_difficulty(difficulty);
             }
@@ -11377,12 +10395,10 @@ where
             apply_game_rule_changed(conn, proto, state, world, entries).await?;
         }
         ServerBound::CarriedItemChanged { slot } => {
-            // Vanilla's own set-carried-item handler calls
-            // `player.stopUsingItem()` before it moves the selection, so switching
-            // off a half-eaten steak cancels the bite rather than letting it
-            // complete against whatever is in the slot now. `finish_consuming` also
-            // re-checks the item as a second layer, because a *container* click can
-            // change the same slot without this packet.
+            // Switching slots cancels an in-progress bite rather than allowing it
+            // to complete against the replacement item. `finish_consuming` also
+            // re-checks the item because a container click can change the same
+            // slot without this packet.
             *item_in_use = None;
             apply_carried_item_changed(inventory, slot);
         }
@@ -11395,16 +10411,10 @@ where
             changed_slots,
             carried_item,
         } => {
-            // Issues #253-#255: the anvil charges XP levels and the grindstone
-            // refunds them, both **only** on a click that takes the result —
-            // read before `apply_container_clicked` runs, because that call is
-            // what performs the take (`crate::container_click::take_result`)
-            // and overwrites `inventory.workstation()` with the post-take cells.
-            // `crate::container_click`/`apply_container_clicked` are
-            // deliberately economy-free (see their own module docs), so this is
-            // the one place that connects a workstation take to a real
-            // `PlayerExperience` — the same split `apply_use_item_on`'s XP-free
-            // block-breaking already has from `destroy_block`'s own charge.
+            // A workstation result charges or refunds experience only when the
+            // result is taken. Capture the input cells before dispatch because
+            // the click handler mutates them; this arm applies the associated
+            // experience change after the result transition is confirmed.
             let workstation_take = open_container.as_ref().and_then(|tracked| {
                 let MenuKind::ItemCombiner { inputs, station } = tracked.shape else {
                     return None;
@@ -11441,16 +10451,10 @@ where
             let mut experience_changed = false;
             if let (Some(station), Some(cells)) = (workstation_take, pre_click_cells) {
                 let get = |i: usize| cells.get(i).and_then(Option::as_ref);
-                // Issue #617: `apply_container_clicked` may have refused the
-                // take outright (`container_click`'s `MayPickup` gate, wired
-                // for the anvil in `apply_workstation_clicked`), so charging
-                // XP off the *pre-click* cells alone — as if a take always
-                // succeeds — would zero out a player's levels for a click
-                // that left the item sitting in the result slot. A real take
-                // always clears the anvil's input cell 0
-                // (`container_click::take_result`'s `Station::Anvil` arm, the
-                // only place that clears it), so that transition is the
-                // signal an actual take happened.
+                // A refused take leaves the result input intact, so the
+                // pre-click cells alone cannot justify an experience charge.
+                // Clearing input cell 0 is the observable transition that
+                // confirms a result was taken.
                 let took_result = get(0).is_some()
                     && inventory
                         .workstation()
@@ -11467,12 +10471,9 @@ where
                         }
                     }
                     Station::Grindstone => {
-                        // The grindstone's own result slot never overrides
-                        // `mayPickup` (`GrindstoneMenu`'s anonymous result
-                        // `Slot` only overrides `mayPlace`/`onTake`), so a
-                        // take here can never be refused — `took_result`
-                        // therefore only guards against a click that clicked
-                        // the result index without one being present at all.
+                        // A valid grindstone result is available whenever its
+                        // inputs produce one; `took_result` also excludes a
+                        // click on an empty result slot.
                         if took_result && crate::anvil::grindstone_result(get(0), get(1)).is_some() {
                             let awarded = crate::anvil::grindstone_xp(get(0), get(1), drops_rng);
                             if awarded > 0 {
@@ -11481,10 +10482,8 @@ where
                             }
                         }
                     }
-                    // Neither `LoomMenu` nor `StonecutterMenu`'s result slot
-                    // charges or refunds XP anywhere in vanilla — the whole
-                    // cost of either is the input items `take_result`
-                    // already consumes.
+                    // Loom, stonecutter, and smithing results do not change
+                    // experience; their cost is represented by consumed inputs.
                     Station::Smithing | Station::Loom | Station::Stonecutter => {}
                 }
             }
@@ -11526,28 +10525,17 @@ where
             }
         }
         ServerBound::ContainerClosed { window_id } => {
-            // Vanilla's own do-close-container → container-menu removed chain:
-            // the cursor and any crafting grid go back to the player,
-            // and what does not fit hits the floor. Dropping them silently would
-            // delete items every time a player closed a menu mid-drag.
-            //
-            // Issues #253-#255: an open anvil/grindstone/smithing/enchanting-table's
-            // input cells (`PlayerInventory::workstation`) are exactly the same
-            // "menu-owned scratch container, cleared on `removed`" shape as the
-            // crafting table's grid (`AnvilMenu`/`GrindstoneMenu`/`SmithingMenu`/
-            // `EnchantmentMenu` all clear their own input container in `removed`),
-            // so they get the same treatment here.
+            // Closing returns carried items and virtual crafting/workstation
+            // cells to the player's inventory; overflow becomes a dropped
+            // stack so closing a menu cannot delete items.
             let mut returning = inventory.take_table_crafting();
             returning.extend(inventory.take_workstation());
             if let Some(carried) = inventory.click_state_mut().carried.take() {
                 returning.push(carried);
             }
             inventory.click_state_mut().reset();
-            // Issue #692: the same "menu-owned scratch state, cleared on
-            // `removed`" shape as the crafting grid and workstation cells
-            // above — vanilla's own container-menu selected-bundle-item-index is a
-            // field on the menu instance itself, so it does not survive past
-            // the menu that set it.
+            // Bundle selection belongs to the open menu and is cleared with the
+            // other menu-local scratch state.
             inventory.clear_selected_bundle_items();
             let mut spilled = Vec::new();
             for stack in returning {
@@ -11555,13 +10543,9 @@ where
                     spilled.push(leftover);
                 }
             }
-            // Vanilla's own beacon-menu removed routine: the payment slot is dropped straight to
-            // the floor — `player.drop(itemStack, false)` — **not** merged
-            // into the inventory the way the crafting-grid/workstation
-            // return above is, and unlike those two, a beacon's own slot is
-            // not this crate's scratch-container state at all (it lives on
-            // the block entity, `BeaconData::payment`), so it needs its own
-            // take here rather than falling out of `take_workstation`.
+            // A beacon payment is dropped directly rather than merged into the
+            // inventory. It lives on the block entity, outside virtual menu
+            // scratch storage, so read the payment field directly.
             if open_container.as_ref().is_some_and(|open| open.window_id == window_id && open.shape == MenuKind::Beacon)
                 && let Some(pos) = open_container.as_ref().map(|open| open.pos)
                 && let Some(payment) = block_entities.with(|reg| match reg.get_mut(pos) {
@@ -11573,17 +10557,9 @@ where
             }
             spawn_dropped_stacks(mobs, *player_pos, *player_rot, drops_rng, spilled);
             if open_container.as_ref().is_some_and(|open| open.window_id == window_id) {
-                // Furnace XP, paid out **on close** rather than per cook — vanilla's own
-                // furnace-block-entity award-used-recipes-and-pop-experience routine,
-                // which the player's `stopUsing` reaches. `Furnace::take_recipes_used`
-                // has banked the smelts since the last drain and had no caller at
-                // all; this is it.
-                //
-                // Vanilla pops orbs at the furnace and the player absorbs them.
-                // There is no orb entity here (see `crate::experience`'s module doc
-                // for what one needs), so the points go straight to the player's
-                // bar. That is the difference between "no XP exists" and "XP exists
-                // without a flying orb", and the second is the honest subset.
+                // Furnace experience is paid on close from recipes accumulated
+                // since the last drain. Experience orbs are not modeled here, so
+                // award the points directly to the player's experience bar.
                 let pos = open_container.as_ref().map(|open| open.pos);
                 if let Some(pos) = pos {
                     let used = block_entities.with(|reg| match reg.get_mut(pos) {
@@ -11613,25 +10589,21 @@ where
                 *open_container = None;
                 *container_sync = ContainerSync::default();
             }
-            // Any window close ends whatever menu was open, merchant or not
-            // (`AbstractContainerMenu::removed` runs for every menu type);
-            // unconditional because, unlike `open_container`, `OpenMerchant`
-            // carries no `window_id` for this arm to compare against.
+            // Any window close ends the active menu, including a merchant menu.
+            // `OpenMerchant` has no window id, so clear it unconditionally.
             *open_merchant = None;
         }
-        // Issue #616's remainder: a merchant trade-row selection
-        // (`ServerboundSelectTradePacket`). See `attempt_villager_trade`'s own
-        // doc for why this executes the trade in one step rather than through
+        // Merchant trade-row selection. See `attempt_villager_trade`'s own
+        // doc for why this executes the trade in one operation rather than through
         // a payment-slot placement flow.
         ServerBound::SelectTrade { index } => {
             if let Some(OpenMerchant { entity_id }) = *open_merchant
                 && let Some(index) = usize::try_from(index).ok()
             {
                 // Read back from the villager's *persistent*
-                // [`crate::villager_trade::VillagerTrades`] (issue #245's
-                // third piece — no longer recomputed fresh every click), so
-                // the charged price already reflects any earlier purchase's
-                // demand and this offer's real out-of-stock state, and is
+                // [`crate::villager_trade::VillagerTrades`], so the charged
+                // price reflects accumulated demand and this offer's
+                // out-of-stock state, and is
                 // derived identically to what `open_merchant_screen` sent.
                 let reputation = mobs.with(|sim| sim.villager_reputation(entity_id, player_uuid));
                 let hero_of_the_village_amplifier =
@@ -11655,13 +10627,9 @@ where
                         .is_some()
                 {
                     *inventory = next;
-                    // Vanilla's own villager notify-trade routine's on-reputation-event-from call: a
-                    // completed trade is the one real production producer
-                    // of `Trading` gossip, matching
-                    // `MobSim::attack_from_player`'s villager-hit case.
-                    // `record_reputation_event` (issue #246) already exists
-                    // and was, until this call, only reachable from its own
-                    // tests.
+                    // A completed trade records `Trading` gossip through
+                    // `record_reputation_event`, matching the villager-hit
+                    // path in `MobSim::attack_from_player`.
                     mobs.with(|sim| {
                         sim.record_reputation_event(
                             entity_id,
@@ -11697,30 +10665,21 @@ where
                 }
             }
         }
-        // Issues #253-#255's last mile: vanilla's own anvil-menu item-name setter. See
-        // `apply_rename_item`'s own doc for the gate and what gets resent.
+        // The anvil-menu item-name setter. See `apply_rename_item`'s own doc
+        // for the gate and the state resent to the client.
         ServerBound::RenameItem { name } => {
             let creative = *game_mode == GameMode::Creative;
             for directive in apply_rename_item(proto, inventory, open_container.as_mut(), &name, creative, world.crafting_hooks()) {
                 apply(conn, state, directive).await?;
             }
         }
-        // Issue #48's remainder, wire-decode half. Vanilla's own
-        // set-command-block handler: swap the block to the requested mode
-        // (preserving `FACING`), write `conditional`, then update the entity's
-        // command/track-output/"Always Active" fields. See
-        // `crate::command_block`'s own module doc for what still needs a real
-        // redstone signal instead of this packet, and for why "Always Active"
-        // scheduling here (via `on_automatic_changed`) is faithful to vanilla's
-        // own command-block-entity set-automatic routine rather than an addition.
+        // Command-block packets update the mode, conditional flag, command,
+        // output tracking, and automatic scheduling. A redstone signal is
+        // still required for execution; this packet only changes configuration.
         ServerBound::SetCommandBlock { pos, command, mode, track_output, conditional, automatic } => {
-            // Vanilla's own can-use-game-master-blocks check: creative mode (`abilities
-            // .instabuild`, which `Abilities::for_mode` sets only for
-            // `GameMode::Creative`) **and** vanilla's own `COMMANDS_GAMEMASTER` permission constant
-            // (level 2) — both, not either. This was a disclosed omission
-            // before `crate::access` existed; real now the model does, and
-            // `commands.permission_level` is the same already-resolved check
-            // `DifficultyChanged`'s own comment above explains.
+            // Creative mode and permission level `2` are both required. The
+            // mode-derived ability and `commands.permission_level` are already
+            // resolved on this connection, so this gate only combines them.
             let can_use_game_master_blocks =
                 *game_mode == GameMode::Creative && commands.permission_level >= COMMANDS_GAMEMASTER_LEVEL;
             let is_command_block = can_use_game_master_blocks
@@ -11735,9 +10694,8 @@ where
                     block_ticks.publish(pos.x, pos.y, pos.z, new_state.clone());
                 }
                 let new_mode = crate::command_block::mode_for_block(&new_state);
-                // `markConditionMet`'s predecessor read — the block directly
-                // behind this one's own facing. Read before the registry lock
-                // below so this never nests a second `.with` inside the first.
+                // A conditional command block checks the block directly behind
+                // its facing. Read that state before taking the registry lock.
                 let predecessor_succeeded = conditional.then(|| {
                     let behind = facing.opposite().relative(pos);
                     let behind_state = source.get().block_state(behind.x, behind.y, behind.z);
@@ -11767,13 +10725,10 @@ where
                 }
             }
         }
-        // Issue #616's remainder. Vanilla's own sign-update handler:
-        // strip legacy formatting codes from every line, then
-        // `updateSignText`'s own gate (not waxed, `editor` matches) decides
-        // whether the write actually lands. This crate grants `editor` only
-        // at placement (see `crate::block_entities::SignData`'s own doc), so
-        // in practice this succeeds exactly once per sign, right after it is
-        // placed.
+        // Sign updates strip legacy formatting codes from every line, then
+        // `SignData` checks the wax and editor fields before writing. The editor
+        // is assigned at placement (see `crate::block_entities::SignData`), so
+        // each sign accepts its authorized edit.
         ServerBound::SignUpdate { pos, is_front_text, lines } => {
             let stripped = lines.map(|line| crate::block_entities::strip_sign_formatting(&line));
             block_entities.with(|registry| {
@@ -11782,11 +10737,9 @@ where
                 }
             });
         }
-        // Issue #616's remainder, `EDIT_BOOK`. See `apply_edit_book`'s own
-        // doc for the gate; resent via `CONTAINER_SET_SLOT` on window `0`
-        // (the player's own inventory screen, not whatever menu happens to
-        // be open — vanilla's own edit-book handler operates on `this.player.getInventory()`
-        // directly and never checks `containerMenu`), the same "window 0,
+        // Book edits use `apply_edit_book`'s gate and resend the changed item
+        // through `CONTAINER_SET_SLOT` on window `0` (the player's inventory,
+        // independent of any open menu), the same "window 0,
         // state id 0" pattern every other server-initiated inventory-slot
         // write in this function already uses.
         ServerBound::EditBook { slot, pages, title } => {
@@ -11801,18 +10754,15 @@ where
                 .await?;
             }
         }
-        // Issue #692: a bundle-tooltip highlight claim. Stored, not acted on
+        // A bundle-tooltip highlight claim. Stored, not acted on
         // immediately — `container_click::pickup`'s next right-click-on-empty
         // against this slot is what actually reads it
-        // (`selected_bundle_item`), mirroring vanilla's own two-step
-        // select-then-extract (`ServerboundSelectBundleItemPacket` just
-        // updates vanilla's own container-menu selected-bundle-item-index; the
-        // extraction happens on the following `PICKUP` click).
+        // (`selected_bundle_item`); the next empty-slot pickup reads that index
+        // and extracts the selected item.
         ServerBound::SelectBundleItem { slot_id, selected_item_index } => {
             inventory.set_selected_bundle_item(slot_id, selected_item_index);
         }
-        // Issue #616's remainder, `SET_BEACON`. See `apply_set_beacon`'s own
-        // doc for the gate.
+        // Beacon configuration. See `apply_set_beacon`'s own doc for the gate.
         ServerBound::SetBeacon { primary, secondary } => {
             let directives =
                 apply_set_beacon(proto, block_entities, open_container.as_mut(), primary, secondary);
@@ -11820,10 +10770,9 @@ where
                 apply(conn, state, directive).await?;
             }
         }
-        // The enchanting table's "choose an offer" button
-        // (vanilla's own enchantment-menu click-menu-button routine) — issue #253's other last-mile
-        // gap. See `apply_container_button_click`'s own doc for the pricing
-        // and refusal rules.
+        // The enchanting table's "choose an offer" button. See
+        // `apply_container_button_click`'s own doc for the pricing and
+        // refusal rules.
         ServerBound::ContainerButtonClick { window_id, button_id } => {
             let creative = *game_mode == GameMode::Creative;
             // Drawn unconditionally, whether or not the click succeeds — the
@@ -11851,8 +10800,7 @@ where
                 apply(conn, state, directive).await?;
             }
         }
-        // A crafter's per-slot enable/disable toggle
-        // (vanilla's own container-slot-state-changed handler).
+        // A crafter's per-slot enable/disable toggle.
         // No directive to send back: `container_sync_tick`'s existing
         // `sync_open_container` diff already re-reads `data_properties()`
         // every 50ms and pushes whatever changed, the same path a furnace's
@@ -11875,48 +10823,36 @@ where
         }
         ServerBound::Attack { entity_id } => {
             apply_attack(mobs, *player_pos, *sprinting, inventory, entity_id, player_uuid);
-            // Vanilla's own attack routine's `causeFoodExhaustion(0.1F)`, charged on the swing
-            // rather than on a hit that landed — vanilla charges it inside `attack`
-            // after the damage call, unconditionally for a living target.
+            // Attack exhaustion is charged on every living-target swing, not
+            // only when the damage attempt lands.
             if !Abilities::for_mode(*game_mode).invulnerable {
                 vitals.add_exhaustion(crate::food::EXHAUSTION_ATTACK);
             }
         }
-        // The right-click half of the old combined interact packet, and the
-        // **production producer `MobSim::interact` did not have**: every taming,
-        // feeding, sitting and breeding mechanism was driven only from that type's
-        // own gates, so a real client's right-click on a wolf decoded to
-        // `ServerBound::Ignored` and nothing in the game could be tamed.
+        // The right-click interaction path covers taming, feeding, sitting,
+        // breeding, and vehicle mounting through `MobSim::interact`.
         ServerBound::InteractEntity {
             entity_id,
             hand,
             using_secondary_action,
         } => {
-            // Off-hand interactions are dropped rather than duplicated: a vanilla
-            // client sends the main hand first, and running both would roll a tame
-            // chance twice for one right-click — which is invisible in a gate that
-            // drives `interact` directly and only shows up as "taming is suspiciously
-            // easy" in the running game.
+            // Resolve only the main-hand interaction. A client can send both
+            // hand values for one click; running both would roll a tame chance
+            // twice.
             if hand == 0 {
-                // **Boarding a boat, and it has to be ahead of `MobSim::interact`.**
-                // A boat is not a mob: `interact`'s whole chain is
-                // vanilla's own tamable-animal/abstract-horse/animal mob-interact routines and has no arm
-                // for one, so a right-click on a boat reached the taming code, fell
-                // through to `Pass`, and did nothing at all — `SET_PASSENGERS` had no
-                // producer anywhere in the tree.
+                // Board boats before generic mob interaction. Boats are
+                // vehicles, not tamable mobs, and require a passenger-list
+                // update when boarding succeeds.
                 //
-                // `using_secondary_action` is `player.isSecondaryUseActive()`, which
-                // vanilla's own abstract-boat interact routine really does consult: sneak-clicking a boat
-                // must *not* board it. This is the first reader of that field, whose
-                // own doc comment said "nothing reads it yet".
+                // `using_secondary_action` prevents boarding while the player
+                // is sneaking.
                 if mobs.with(|sim| sim.vehicle_type(entity_id).is_some()) {
                     let boarded = mobs.with(|sim| {
                         sim.mount_vehicle(entity_id, player_entity_id, using_secondary_action)
                     });
                     if boarded {
-                        // The vehicle's **whole** passenger list, which is how
-                        // vanilla always sends it — vanilla's own start-riding routine re-broadcasts
-                        // the list rather than a delta. Without this packet the client
+                        // Send the vehicle's **whole** passenger list rather than
+                        // a delta. Without this packet the client
                         // has no way to know it is aboard and
                         // `lodestone_ecs::vehicle::tick_controlled_vehicle` never
                         // engages, so the boat is placeable and unusable.
@@ -11941,14 +10877,12 @@ where
                     // fall-through would only cost a wasted roll.
                     return Ok(());
                 }
-                // **Minecarts, for the identical reason boats are checked first**:
-                // a minecart is not a `Mob` either, so `MobSim::interact`'s taming
-                // chain has no arm for one and a right-click would otherwise fall
-                // through to `Pass` and do nothing.
+                // Minecarts are vehicles rather than tamable mobs, so handle
+                // them before generic interaction.
                 if let Some(kind) = mobs.with(|sim| sim.minecart_kind(entity_id)) {
                     if kind.is_furnace() {
-                        // Vanilla's own minecart-furnace interact routine — `addFuel` on coal/charcoal,
-                        // `itemStack.consume(1, player)` only on success.
+                        // Coal and charcoal add fuel; consume one item only on
+                        // a successful fuel update.
                         let held = inventory.selected_item().map(|stack| stack.item.to_string());
                         if let Some(item) = held {
                             let interacting_pos = player_pos.map_or_else(
@@ -11973,8 +10907,8 @@ where
                             }
                         }
                     } else if kind.is_rideable() && !using_secondary_action {
-                        // Vanilla's own minecart interact routine — `player.startRiding(this)`, the
-                        // same `SET_PASSENGERS` handoff the boat arm above uses.
+                        // Mount the minecart and send the same passenger-list
+                        // handoff used by the boat arm above.
                         let boarded = mobs.with(|sim| sim.mount_minecart(entity_id, player_entity_id));
                         if boarded {
                             apply(
@@ -11985,22 +10919,14 @@ where
                             .await?;
                         }
                     }
-                    // Chest/hopper/TNT minecarts (and a sneak-click / already-seated
-                    // plain one) reach here with no modelled interaction — see
-                    // `crate::mobs::minecart`'s own module doc for why a container
-                    // minecart's slots have no menu wired to them yet.
+                    // Chest, hopper, and TNT minecarts have no modeled
+                    // interaction; their slots have no menu wired to them.
                     return Ok(());
                 }
                 let held = inventory.selected_item().map(|stack| stack.item.clone());
-                // Issue #236: vanilla's own mob interact routine runs
-                // `checkAndHandleImportantInteractions` then `super.interact`
-                // (vanilla's own entity interact routine's two leash branches — detach-if-mine,
-                // attach-if-holding-a-lead) **before** `mobInteract`'s taming
-                // chain, and a consuming leash branch short-circuits the rest
-                // (vanilla's own mob interact routine: `if (superReaction != PASS) return
-                // superReaction;`). `MobSim::try_leash` is checked first here
-                // for the same reason — a lead in hand must attach rather
-                // than roll a taming/feed/breed interaction against it.
+                // Leash handling precedes taming, feeding, and breeding. A lead
+                // in hand attaches or detaches a leash without rolling another
+                // interaction.
                 let leash_outcome = mobs.with(|sim| {
                     sim.try_leash(
                         entity_id,
@@ -12011,9 +10937,8 @@ where
                 });
                 let outcome = match leash_outcome {
                     crate::mobs::LeashOutcome::Attached => {
-                        // vanilla `itemStack.shrink(1)`, through the same
-                        // `consume_one`/window-0 sync every other consuming
-                        // interaction below uses.
+                        // Consume one item through the same `consume_one` and
+                        // window-0 synchronization used by other interactions.
                         let native = usize::from(inventory.selected_hotbar_slot());
                         if consume_one(inventory, native, *game_mode) {
                             let hotbar_slot = i32::from(inventory.selected_hotbar_slot())
@@ -12032,14 +10957,11 @@ where
                         }
                         None
                     }
-                    // `MobSim::try_leash` already spawned the dropped lead
-                    // item itself when appropriate (mirroring `tick_leashes`'
-                    // own snap branch) — nothing left for this arm to do.
+                    // `MobSim::try_leash` spawns a dropped lead when required;
+                    // this arm has no additional work.
                     crate::mobs::LeashOutcome::Detached { .. } => None,
-                    // Not leashable, no lead in hand, out of range, or already
-                    // someone else's: vanilla's own entity interact routine returns
-                    // `PASS` here and falls through to `mobInteract`, so this
-                    // does too — the taming chain below, unchanged.
+                    // A non-leashable, out-of-range, or already-owned target
+                    // falls through to the ordinary mob interaction.
                     crate::mobs::LeashOutcome::Refused => Some(mobs.with(|sim| {
                         sim.interact(
                             entity_id,
@@ -12051,36 +10973,27 @@ where
                         )
                     })),
                 };
-                // Issue #245: a villager's trade screen, from
-                // `MobSim::interact`'s own villager short-circuit — checked
-                // ahead of the generic item-consumption handling below
-                // because opening the screen is itself the whole visible
-                // effect of this outcome (there is no slot sync to send).
+                // A villager trade outcome opens its screen before generic
+                // item-consumption handling; opening the screen is the visible
+                // effect and requires no slot synchronization.
                 if let Some(crate::mobs::InteractOutcome::OpenTrade { level, .. }) = outcome {
                     let xp = mobs.with(|sim| sim.villager_xp(entity_id));
                     let reputation = mobs.with(|sim| sim.villager_reputation(entity_id, player_uuid));
                     let hero_of_the_village_amplifier =
                         effects.amplifier_of("minecraft:hero_of_the_village");
-                    // The villager's *persistent* offer list (issue #245's
-                    // third piece), not a fresh stateless one —
-                    // `MobSim::villager_offers` reads the mob's own live
-                    // profession/level itself, so `OpenTrade`'s `profession`
-                    // is no longer needed here.
+                    // The villager's *persistent* offer list. The mob supplies
+                    // its live profession and level through
+                    // `MobSim::villager_offers`.
                     let offers =
                         mobs.with(|sim| sim.villager_offers(entity_id, reputation, hero_of_the_village_amplifier));
                     open_merchant_screen(conn, proto, state, &offers, level, xp, next_window_id).await?;
-                    // `SelectTrade`'s only lookup: which villager this
-                    // connection is currently trading with. Set unconditionally
-                    // on every open (not merged/kept) — a second interact while
-                    // one screen is already open re-sends `open_screen` too,
-                    // which vanilla's own client treats as replacing the menu.
+                    // Record which villager this connection is trading with.
+                    // Each open replaces the connection's active merchant
+                    // screen and its associated entity id.
                     *open_merchant = Some(OpenMerchant { entity_id });
                 }
-                // Vanilla's own abstract-horse do-player-ride routine: `interact_horse`'s empty-handed arm
-                // on a tamed adult already recorded the mount in `MobSim` (its own
-                // doc names this exact send as the caller's cue) — this is the
-                // client's only way to learn it is aboard, the same
-                // whole-passenger-list handoff the boat/minecart arms above use.
+                // A successful mount is recorded in `MobSim`; send the complete
+                // passenger list so the client learns that it is aboard.
                 if outcome == Some(crate::mobs::InteractOutcome::Mounted) {
                     apply(
                         conn,
@@ -12089,10 +11002,8 @@ where
                     )
                     .await?;
                 }
-                // Vanilla consumes through `usePlayerItem`, a no-op in creative
-                // (vanilla's own has-infinite-materials check). A sit toggle is
-                // vanilla's own success-without-item interaction result and consumes nothing,
-                // which `InteractOutcome::consumes_item` already encodes.
+                // `consume_one` handles creative mode. A sit toggle has no item
+                // cost, as encoded by `InteractOutcome::consumes_item`.
                 //
                 // `consume_one` handles the creative case itself, so the game mode
                 // goes to it rather than being checked here — and the
@@ -12122,25 +11033,16 @@ where
                 }
             }
         }
-        // Issue #260: the player's own launch path. Before this, every projectile
-        // in the game came from a mob goal — `ClientAction`-side bow support
-        // existed in the protocol crates with no server model behind it, so a
-        // player could draw a bow and nothing was ever created.
+        // The player's projectile-launch path. A successful bow use creates the
+        // projectile record consumed by the entity stream.
         ServerBound::UseItem { hand, yaw, pitch } => {
-            // **the boat item's own use routine first, because it is an override rather than an
-            // arm.** It replaces vanilla's own item-use routine wholesale, exactly as
-            // the bow/snowball items' own use routines do, so it belongs on the disjoint-set side of
-            // the dispatch alongside `launch_intent` and ahead of the eat/equip
-            // chain. A boat is neither food nor equippable, so the order is
-            // unobservable today — it is written this way so it stays right if one
-            // ever becomes both.
+            // Handle boat items before the eat/equip chain. A boat is neither
+            // food nor equippable, and its raytrace needs the world source.
             //
-            // Handled here rather than inside `apply_use_item` because the raytrace
-            // needs the **world**, which that function is deliberately without: it
-            // takes an inventory, a position and a game mode and nothing else. The
-            // eye height comes from the tracked feet position — `getEyePosition()`,
-            // whose absence is the same "no data yet, don't guess" refusal the
-            // launch arm makes.
+            // This branch supplies the world source required by the raytrace;
+            // `apply_use_item` receives only inventory, position, and game mode.
+            // The eye height comes from the tracked feet position; without one,
+            // the launch arm refuses to guess.
             let boat_native = if hand == 1 {
                 crate::inventory::OFFHAND_NATIVE
             } else {
@@ -12161,24 +11063,17 @@ where
                 );
                 match applied {
                     crate::boat::BoatApplied::NotABoat => {}
-                    // Vanilla `PASS`/`FAIL` — the raytrace missed, or the hull would
-                    // not fit. Nothing is consumed and, crucially, nothing falls
-                    // through: a boat reaching the eat/equip arms would find no food
-                    // component and no equippable one anyway, but returning here says
-                    // so rather than relying on it.
+                    // The raytrace missed or the hull would not fit. Nothing is
+                    // consumed and the item does not fall through to eat/equip.
                     crate::boat::BoatApplied::Refused => return Ok(()),
                     crate::boat::BoatApplied::Placed { .. } => {
-                        // `itemStack.consume(1, player)`, *after* `addFreshEntity`.
-                        // Through `consume_one` so `!hasInfiniteMaterials()` applies
-                        // and a creative player's boats are not used up — the trap a
-                        // previous arm here hit by shrinking unconditionally.
+                        // Consume one item after the boat is placed. Creative
+                        // players keep their boats; survival players lose one.
                         if consume_one(inventory, boat_native, *game_mode)
                             && *game_mode != GameMode::Creative
                         {
-                            // The remainder on window 0, the same channel every other
-                            // consuming arm reports on. Without it the client's count
-                            // desyncs and the next click sends a stale one, which
-                            // looks like the item coming back.
+                            // Publish the window-0 slot value so the client count
+                            // stays synchronized for the next click.
                             if let Some(menu_slot) = window_zero_menu_slot(boat_native) {
                                 let remainder = inventory.native(boat_native).cloned();
                                 apply(
@@ -12194,8 +11089,7 @@ where
                                 .await?;
                             }
                         }
-                        // A placement ends any draw or bite in progress, as any other
-                        // `USE_ITEM` does.
+                        // A placement ends any draw or bite in progress.
                         *bow_draw = None;
                         *item_in_use = None;
                         return Ok(());
@@ -12214,10 +11108,9 @@ where
                 pitch,
                 player_entity_id,
             );
-            // Both slots are overwritten rather than merged, whatever the outcome:
-            // a fresh `USE_ITEM` restarts the charge, and a `USE_ITEM` for
-            // something that is not chargeable ends any draw or bite in progress
-            // (vanilla's `stopUsingItem` on a new use).
+            // Both state slots are reset for each `USE_ITEM`: a chargeable item
+            // starts a new draw or bite, while another item cancels any active
+            // use.
             *bow_draw = None;
             *item_in_use = None;
             match outcome {
@@ -12251,8 +11144,8 @@ where
                     // exists for: `swap.equipment` is always one of the four
                     // armour slots or the off-hand.
                     apply(conn, state, join_attributes(proto, inventory)).await?;
-                    // `player.drop(swappedToInventory, false)` — the previously worn
-                    // piece when the inventory was full.
+                    // A full inventory sends the displaced equipment to the
+                    // world as a dropped stack.
                     if let Some(spilled) = swap.spilled {
                         spawn_dropped_stacks(
                             mobs,
@@ -12266,10 +11159,8 @@ where
             }
         }
         ServerBound::ReleaseUseItem => {
-            // A release *before* the consume clock ran out cancels it with no food
-            // applied — vanilla's own release-using-item routine, which for a consumable is
-            // `stopUsingItem` and nothing else. This is the arm a player hits
-            // constantly and the one most easily forgotten.
+            // A release before the consume clock expires cancels the use with
+            // no food applied.
             *item_in_use = None;
             if let Some(draw) = bow_draw.take() {
                 let fired = apply_release_use_item(
@@ -12280,10 +11171,7 @@ where
                     *game_mode,
                     draw,
                 );
-                // Vanilla's own attack routine's exhaustion is charged on a melee swing; a bow
-                // shot has no exhaustion cost in vanilla, so nothing is charged
-                // here. Recorded because its absence otherwise reads as an
-                // oversight next to the `Attack` arm two branches down.
+                // Bow shots have no exhaustion cost, so this arm charges none.
                 let _ = fired;
             }
         }
@@ -12315,32 +11203,24 @@ where
                 .await?;
             }
         }
-        // The steering half. The client owns the boat it rides
-        // (vanilla's own is-client-authoritative check), so this is not a request to be
-        // validated — it is the authoritative report, and the server's job is to
-        // write it down so the boat's snapshot moves and every other viewer's
+        // The steering packet is an authoritative report from the client. Store
+        // its position and yaw in the boat snapshot so every viewer's
         // `move_entity` diff follows.
         //
-        // The rider check lives in `apply_vehicle_move`, which resolves the vehicle
-        // from *this* player rather than from an id on the wire (the packet carries
-        // none) — vanilla's own `getRootVehicle()` rule, and what stops a connection
-        // dragging a boat it is not sitting in.
+        // `apply_vehicle_move` resolves the vehicle from this player rather than
+        // an id on the wire, so a connection cannot drag a boat it is not riding.
         ServerBound::VehicleMoved {
             position,
             yaw,
             pitch,
         } => {
-            // Pitch is decoded and dropped: `AbstractBoat` never writes `xRot`, and
-            // a mounted mob only ever reports half its rider's (unmodelled — see
-            // `apply_mob_move`). Named rather than `_` so the field's existence is
-            // visible at the one place that could use it.
+            // Pitch is decoded and dropped because vehicle movement stores only
+            // position and yaw. Keep the binding named so the decoded field is
+            // visible at this call site.
             let _ = pitch;
-            // A player can only be aboard one of the two maps at a time
-            // (`mount_mob` and `mount_vehicle` are separate "one map's worry"
-            // occupancy rules — see `mount_mob`'s own doc), so trying the mob map
-            // only when the vehicle map refused is exact rather than a guess:
-            // vanilla's own is-client-authoritative check does not distinguish a
-            // boat from a horse, and this is the one wire packet both share.
+            // A player occupies at most one vehicle map. Try the mob map only
+            // when the vehicle map refused, so the shared movement packet uses
+            // the appropriate mounted entity.
             mobs.with(|sim| {
                 if sim
                     .apply_vehicle_move(player_entity_id, position, yaw)
@@ -12350,7 +11230,7 @@ where
                 }
             });
         }
-        // Issue #262's `PADDLE_BOAT` remainder — purely cosmetic (see
+        // `PADDLE_BOAT` is purely cosmetic (see
         // `MobSim::apply_boat_paddle`'s own doc) so there is no directive to
         // send here; the next `snapshots()` diff carries it to every other
         // connected client via `MetadataField::BoatPaddles`.
@@ -12361,43 +11241,13 @@ where
         }
         ServerBound::PlayerInput { sprint, shift, jump } => {
             *sprinting = sprint;
-            // Vanilla's own camel on-player-jump routine: `isSaddled() && dashCooldown <= 0 &&
-            // onGround()`. This crate has no saddle-equip model at all (the
-            // whole horse family already boards without one — see
-            // `MobSim::mount_mob`'s own doc) and no `onGround` for a
-            // client-authoritative mount (nothing here simulates a ridden
-            // mob's physics; the client does, per
-            // `lodestone_physics::vehicle`'s module doc) — both disclosed
-            // narrowings, not silent ones. Reacting to every *received*
-            // `jump: true` is the same "a received packet already is the
-            // rising edge" reasoning the `shift` dismount two lines below
-            // relies on, since `PlayerInput`'s producer only resends on
-            // change.
+            // A jump request starts the camel dash when the mount accepts it.
             if jump {
                 mobs.with(|sim| sim.trigger_camel_dash(player_entity_id));
             }
-            // Vanilla's own player ride-tick routine: `!level.isClientSide && wantsToStopRiding() &&
-            // isPassenger()` → `stopRiding()`, where `wantsToStopRiding()` is
-            // exactly `isShiftKeyDown()` — tested every tick a passenger is
-            // aboard, not on a press-edge. This dismounts on every *received*
-            // `shift: true` rather than replaying a stored per-tick flag, which
-            // reproduces the same observable behaviour without a stale-state
-            // hazard: `lodestone_controller::ecs::send_player_input` only queues
-            // this packet when the input actually changes (`LastPlayerInput`'s
-            // own edge check — real vanilla resends on change too,
-            // vanilla's own local-player tick routine's `!lastSentInput.equals(...)`), so a received
-            // `shift: true` already *is* the rising edge here, not a level held
-            // across many packets. And even a literal level check would be safe:
-            // `mount_vehicle`'s own `using_secondary_action` gate (and the
-            // horse-family arm of `MobSim::interact`) reads a *fresh*
-            // `using_secondary_action` bit straight off the `INTERACT` packet,
-            // not this stored flag, so a sneaking player simply cannot board in
-            // the first place — there is no re-board race to lock them out of.
-            //
-            // A player rides at most one of the three maps at a time ("one map's
-            // worry" — see `mount_vehicle`'s own doc), so trying vehicle, then
-            // minecart, then mob in sequence finds whichever one (if any) is
-            // occupied without risking a double-dismount.
+            // The client sends a true shift bit on the input edge. Try the
+            // vehicle, minecart, and mob mounts in sequence; only one can carry
+            // this player at a time.
             if shift {
                 let rotation = player_rot.unwrap_or_default();
                 let terrain = source.get();
@@ -12417,17 +11267,11 @@ where
                     }
                 });
                 if let Some((vehicle_id, dismount_position)) = dismounted {
-                    // Vanilla's own stop-riding routine's own wire consequence — the vehicle's
-                    // whole (now empty) passenger list, the same `SET_PASSENGERS`
-                    // handoff every mount arm above uses to announce boarding.
+                    // Send the vehicle's complete, empty passenger list.
                     apply(conn, state, proto.encode_set_passengers(vehicle_id, &[])).await?;
                     if let Some(position) = dismount_position {
-                        // Vanilla's own remove-vehicle routine: the server applies the
-                        // vehicle's dismount location and the client receives
-                        // that authoritative position in the same transition.
-                        // Updating the connection-local mirror first keeps the
-                        // next movement delta and the player registry on the
-                        // same side of the teleport.
+                        // Apply the authoritative dismount location locally and
+                        // send it before processing the next movement delta.
                         *player_pos = Some((position.x, position.y, position.z));
                         *player_rot = Some(rotation);
                         apply(
@@ -12450,9 +11294,9 @@ where
             apply_creative_mode_slot_set(inventory, slot, item, *game_mode == GameMode::Creative);
         }
         ServerBound::ClientCommand { action } => {
-            // `source` is this call's own `SourceRef` — the `Dimension` arm is
-            // only ever reached via a portal trip (see that variant's own doc),
-            // so this is exactly "away from the dimension we joined in".
+            // `SourceRef::Dimension` marks a connection currently viewing a
+            // sibling dimension, so respawn handling can distinguish it from
+            // the dimension used during the join.
             let away_from_home = matches!(source, SourceRef::Dimension(_));
             apply_client_command(
                 conn,
@@ -12474,19 +11318,12 @@ where
             .await?;
         }
         ServerBound::ClientInformationChanged { view_distance } => {
-            // **Issue #545: no clamp here.** This arm used to do
-            // `clamp(0, view_radius.max(0))` against `view_radius` — *this
-            // connection's own `serve_connection` argument*, i.e. the radius it
-            // joined with. That made lowering render distance mid-session work
-            // and raising it silently do nothing, which is the owner's report.
-            // Vanilla clamps against `serverViewDistance`, a server setting
-            // (its own server view-distance field), never against the player's current view.
-            //
-            // The ceiling now lives on the `ViewTracker` as its own field and
-            // `set_view_radius` applies it — see `ViewTracker::max_radius` for
-            // the per-path policy and why the two roles had to be separated.
-            // Issue #619: same "read before the call" reasoning as the
-            // `recenter` arm above.
+            // **No host-side clamp here.** `ViewTracker::set_view_radius` applies
+            // the server's configured ceiling, stored in `ViewTracker::max_radius`.
+            // The connection's requested distance can therefore shrink or grow
+            // within that ceiling during a session.
+            // Read the current radius so a changed value can move the player's
+            // ticket to the requested view centre.
             let radius_before_resize = view.radius;
             let update = view.set_view_radius(
                 proto,
@@ -12518,42 +11355,11 @@ where
                 }
             }
         }
-        // Issues #48/#464: the wire path for commands, and the *whole* of it
-        // on this side of the seam.
-        //
-        // # The built-in tree is consulted first, and that is the fix
-        //
-        // This arm used to do no parsing at all beyond a hand-rolled
-        // `parse_gamemode_command` string split, and then fall through to the
-        // host sink. Since every real constructor passes
-        // `CommandDispatch::none()` (issue #535), **that meant `/gamerule` typed
-        // by a player did nothing** — the built-in `ServerCommands` tree existed,
-        // was tested, and had zero references outside its own module. Its own doc
-        // comment claimed this arm consulted it; that claim was stale. This is
-        // the call that makes it true, and `rcon.rs` is the other one.
-        //
-        // # Why the effects come back rather than being applied by the executor
-        //
-        // `game_mode` and `inventory` are *this function's* parameters, reached
-        // through `&mut`. An executor is a shared `Arc` closure inside a
-        // process-wide tree and cannot touch either, nor can it reach `proto` or
-        // `conn`. So `run` returns typed `Effect`s: the ones aimed at this
-        // connection are applied here, inline, exactly as the hand-rolled
-        // `/gamemode` arm already did; the rest are queued on the shared
-        // `PlayerRegistry` for their own connection's loop to drain.
-        //
-        // # Permission level
-        //
-        // `commands.permission_level` was resolved once at the Play handoff from
-        // this connection's authenticated uuid. It gates the *tree* — a level-2
-        // command is invisible to tab completion and answers `NoPermission` on
-        // execution — rather than being checked per command here.
-        //
-        // With no sink installed, `CommandDispatch::run` refuses. That
-        // direction is load-bearing and is not an implementation detail: an
-        // absent dispatcher must never read as blanket permission, the same
-        // property `dispatch_refuses_rather_than_ungates_when_permissions_are_missing`
-        // holds one layer in.
+        // Chat commands run through the built-in tree, with host dispatch as
+        // the fallback. Effects for this connection are applied inline; effects
+        // targeting another player enter that player's effect queue. The
+        // resolved permission level gates both command execution and completion,
+        // while an absent host dispatcher fails closed.
         ServerBound::ChatCommand { command } => {
             // Captured before the `source` binding below shadows the chunk
             // source with the command's own `CommandSource` — `Effect::SetBlock`/
@@ -12613,17 +11419,12 @@ where
                 // spawned mob is picked up by the tick loop's own next
                 // publish (see `crate::commands::summon`'s module doc).
                 mobs: Some(mobs),
-                // `/worldborder`'s read/write surface (issue #580) — the same
+                // `/worldborder`'s read/write surface — the same
                 // shared `BorderFeed` this connection already holds.
                 border: Some(border),
-                // `dispatch_play_packet` does not carry an `AccessHandle` in
-                // its own signature (adding one would widen this crate's
-                // single largest parameter list for one command family) —
-                // `/op`/`/deop`/`/whitelist` typed in chat report the same
-                // "no access list configured" refusal an offline-world RCON
-                // caller would see. RCON (`crate::rcon::run_command_as`) is
-                // the one production `Some`; see `access_commands`'s module
-                // doc for why that scoping is deliberate, not a gap.
+                // No access list is attached to packet dispatch, so access
+                // management commands return the fail-closed refusal. RCON
+                // supplies the access handle when those commands are needed.
                 #[cfg(not(target_arch = "wasm32"))]
                 access: None,
                 // `/execute if`/`unless block`'s read-only surface — the same
@@ -12652,7 +11453,7 @@ where
                         // place with `chunk_source`/`block_ticks`/the player
                         // registry/`respawn` all in scope. Everything else is a
                         // genuine per-player effect and goes through
-                        // `apply_own_effect`, exactly as before.
+                        // `apply_own_effect`.
                         match directed.effect {
                             crate::commands::Effect::SetBlock { pos: (x, y, z), block } => {
                                 chunk_source.get().set_block(x, y, z, &block);
@@ -12712,8 +11513,8 @@ where
                         apply(conn, state, proto.encode_system_chat(line)).await?;
                     }
                 }
-                // No built-in root matched: the host's problem, exactly as
-                // before.
+                // No built-in root matched: delegate the command to the host
+                // dispatcher.
                 None => {
                     let response = commands.dispatch.run(&commands.caller, &command);
                     for line in response.lines() {
@@ -12733,16 +11534,8 @@ where
                 commands.builtins.suggest_response(id, &command, commands.permission_level);
             apply(conn, state, proto.encode_command_suggestions(&response)).await?;
         }
-        // The F4 switcher. A *request*, not an instruction: the two directives
-        // below echo the mode this server actually applied, so a client that
-        // guessed wrong (including one that guessed a refusal wrong) is
-        // corrected either way. Vanilla's own game-mode-command permission check
-        // (vanilla's own `COMMANDS_GAMEMASTER` permission constant, level 2) is
-        // its own change-game-mode handler's own gate — real now `crate::access` exists,
-        // see `DifficultyChanged`'s own comment above; this crate's `/gamemode`
-        // built-in already carries the identical `GAMEMODE_LEVEL` check on the
-        // command path, so this brings the packet path to parity with it
-        // rather than introducing a new posture.
+        // A game-mode request is answered with directives for the mode the
+        // server accepted. Permission level 2 is required for the change.
         ServerBound::ChangeGameMode { mode } => {
             if commands.permission_level >= COMMANDS_GAMEMASTER_LEVEL {
                 *game_mode = mode;
@@ -12751,16 +11544,10 @@ where
                 apply(conn, state, directive).await?;
             }
         }
-        // A spectator clicking a player's name in the tab list. See
-        // `ServerBound::TeleportToEntity`'s own doc comment for the scoping
-        // this narrows vanilla's `handleTeleportToEntityPacket` to (connected
-        // players only, current facing kept rather than matched to the
-        // target's). Silently does nothing outside spectator mode or for an
-        // unresolved uuid — the same "request, not an instruction" posture
-        // `ChangeGameMode` above takes, and matches vanilla's own handler,
-        // which has no failure reply either. Mirrors `Effect::Teleport`'s own
-        // arm (`/tp`) for how position/rotation/fall state are updated —
-        // same mechanism, a different resolver for the destination.
+        // Spectator teleport resolves connected players only, preserves the
+        // requester's facing, and ignores requests outside spectator mode or
+        // without a matching player. The resulting position uses the normal
+        // teleport effect path.
         ServerBound::TeleportToEntity { uuid } => {
             if *game_mode == GameMode::Spectator
                 && let Some(target) = players
@@ -12793,13 +11580,9 @@ where
                 registry.swing(player_entity_id, hand);
             }
         }
-        // A spectator attaching its camera to a nearby entity. See
-        // `ServerBound::SpectatorAction`'s own doc comment for the resolver
-        // and the range/`isPickable` narrowing. Silently does nothing when
-        // `apply_spectator_action`'s gates are not all met — the same
-        // "request, not an instruction" posture `TeleportToEntity` above
-        // takes, and matches vanilla's own handler, which has no failure
-        // reply either.
+        // A spectator can attach its camera to a nearby entity when
+        // `apply_spectator_action` accepts the target. Invalid or out-of-range
+        // requests are ignored and produce no failure reply.
         ServerBound::SpectatorAction { target_entity_id } => {
             if let Some(target_id) =
                 apply_spectator_action(*game_mode, target_entity_id, *player_pos, mobs, players)
@@ -12807,25 +11590,13 @@ where
                 apply(conn, state, proto.encode_set_camera(target_id)).await?;
             }
         }
-        // Issue #469. Nothing is written to the wire here: the message is
-        // handed to the caller, which publishes it to the shared
-        // `PlayerRegistry`, and *every* connection — this one included —
-        // picks it up on its own next drain. Replying directly here instead
-        // would deliver the sender's copy on a different path from everyone
-        // else's, which is exactly how a broadcast ends up working for the
-        // one connection a test happens to look at.
+        // Chat is placed in the shared broadcast queue; each connection drains
+        // that queue, including the sender, on its normal outgoing pass.
         //
-        // Empty messages are dropped rather than broadcast. Vanilla rejects
-        // them upstream of the packet (the client will not send one), so a
-        // frame carrying one is malformed rather than meaningful.
+        // Empty messages are malformed and are dropped rather than broadcast.
         //
-        // Decode/verification half: `crate::chat_session::decide`
-        // is consulted before broadcasting at all. A rejected message is
-        // never queued on `outgoing_chat` — it is reported back to the
-        // sender alone (mirroring vanilla's `handleMessageDecodeFailure`,
-        // which never disconnects for this), not to every connection the way
-        // a real broadcast would. See that module's own doc for exactly what
-        // "verified" does and does not mean here.
+        // `crate::chat_session::decide` verifies the message before broadcast.
+        // A rejection is sent to the sender and never enters `outgoing_chat`.
         ServerBound::Chat {
             message,
             timestamp_millis,
@@ -12858,10 +11629,8 @@ where
                 }
             }
         }
-        // `crate::chat_session::ServerChatSession::new` replaces
-        // whatever session this connection had announced before — see that
-        // type's own doc for why a fresh announcement always resets the
-        // verification chain rather than trying to reconcile it.
+        // A session announcement replaces the connection's session; verification
+        // reads the session data supplied by that announcement.
         ServerBound::ChatSessionAnnounced {
             session_id,
             expires_at_millis,
@@ -12899,9 +11668,8 @@ where
                     }
                     *chat_session = Some(session);
                 } else if profile_key_issuers.is_some() {
-                    // A live issuer set makes an invalid update a fail-closed
-                    // replacement. Without one vanilla ignores the update and
-                    // retains any existing session instead.
+                    // With an issuer set, an invalid update clears the active
+                    // session. Without one, retain the active session.
                     *chat_session = None;
                 }
             }
@@ -12914,17 +11682,14 @@ where
                 let _ = (session_id, expires_at_millis, public_key, key_signature);
             }
         }
-        // Issue #335. Wire-level plugin messaging, Play-phase: the
-        // register/unregister control channels update this connection's
-        // supported set, and any other channel is dispatched to its registered
-        // handler (silently dropped when the server registered no interest —
-        // vanilla's `DiscardedPayload` fallback).
+        // Plugin register/unregister channels update this connection's supported
+        // set; other channels go to their registered handler or are dropped.
         ServerBound::CustomPayload { channel, data } => {
             if !client_channels.apply_custom_payload(&channel, &data) {
                 plugin_channels.dispatch(&channel, &data);
             }
         }
-        // Issue #325: `PlayerCommand` action 0 is `STOP_SLEEPING` — the "wake
+        // `PlayerCommand` action 0 is `STOP_SLEEPING` — the "wake
         // up" a client sends when the player climbs out of bed or dies. It is
         // the only ordinal the version crates surface (the others decode to
         // `Ignored`; see `ServerBound::PlayerCommand`'s own doc comment), and
@@ -12946,16 +11711,11 @@ where
         ServerBound::PingRequest { time } => {
             apply(conn, state, proto.encode_pong_response(time)).await?;
         }
-        // `ServerboundPickItemFromBlockPacket` (middle-click pick, issue
-        // #558). `crate::item_use::try_pick_item` is the "where it goes"
-        // three-way split (vanilla's own try-pick-item routine); this
-        // arm resolves the "what" — the clicked block's clone-item-stack —
-        // and the one thing only this function can see: the interaction
-        // range and the live block state. `include_data` is not read: the
-        // gate it feeds (`addBlockDataToItem`, copying a block entity's NBT
-        // onto the stack) has no consumer in this crate, the same "not
-        // modelled, no completion hook" scope cut `crate::item_use`'s module
-        // doc already takes for other item-use-routine arms.
+        // Middle-click selection uses `crate::item_use::try_pick_item` for the
+        // inventory destination and slot rules. This arm resolves the clicked
+        // block's clone stack and checks interaction range and live block state.
+        // `include_data` is ignored because this crate has no consumer that
+        // copies block-entity data onto the selected item.
         ServerBound::PickItemFromBlock { pos, include_data: _ } => {
             let feet = player_pos.map(|(x, y, z)| Vec3::new(x, y, z));
             if crate::block_breaking::within_interaction_range(feet, pos) {
@@ -12977,8 +11737,8 @@ where
                 }
             }
         }
-        // `ServerboundPickItemFromEntityPacket` — same split, aimed at
-        // `entity.getPickResult()` instead of a block's clone stack. Only the
+        // The entity-pick request uses the same split, aimed at the entity's
+        // derived item result instead of a block's clone stack. Only the
         // `Mob` override (a spawn egg) is modelled; see
         // `crate::item_use::spawn_egg_for_entity_type`'s doc comment for the
         // entities this refuses. `include_data` also gates a game-master
@@ -13016,7 +11776,7 @@ where
         // arm for those is gated on the state.
         ServerBound::Handshake { .. }
         | ServerBound::LoginStart { .. }
-        // Issue #273: `EncryptionResponse` is `State::Login`-only too, same
+        // `EncryptionResponse` is `State::Login`-only too, same
         // as `LoginStart`/`LoginAcknowledged` beside it.
         | ServerBound::EncryptionResponse { .. }
         | ServerBound::LoginAcknowledged
@@ -13171,12 +11931,11 @@ impl LoopStallWatch {
 /// * a periodic time-of-day broadcast, matching vanilla's every-20-ticks
 ///   cadence (its own main server loop; see `TIME_SYNC_INTERVAL`);
 /// * view streaming (chunk-cache-center, forget, and send) whenever a
-///   [`ServerBound::PlayerMoved`] packet crosses into a new chunk column
-///   (vanilla's own `ChunkMap::move`/`updateChunkTracking`);
+///   [`ServerBound::PlayerMoved`] packet crosses into a new chunk column,
+///   recentering the tracked view and sending/removing columns as needed;
 ///
-/// all layered over the same entity-streaming pass the join sequence already
-/// ran once, now repeated on every inbound packet exactly as the original
-/// single-loop version did.
+/// all layered over the same entity-streaming pass used by the join sequence;
+/// the pass runs on every inbound packet.
 ///
 /// # Why this is a separate function, and why it forks on `wasm32`
 ///
@@ -13207,68 +11966,51 @@ async fn serve_play<T, P, S, E>(
     mut state: State,
     mut streamer: EntityStreamer,
     mut player_list: PlayerListStreamer,
-    // Issue #438: owned, not borrowed. This function's `Drop` is the player's
-    // deregistration, so the ticket must die with the connection task — on the
-    // clean-disconnect return, on every `?`, and on a task cancelled at
-    // shutdown alike. Holding it by reference would put that lifetime
-    // somewhere else and reintroduce the ghost-player leak the RAII exists to
-    // prevent.
+    // Keep the ticket guard owned by the connection task. Its `Drop` performs
+    // player deregistration on disconnect, error, and cancellation; borrowing
+    // it could let the guard outlive the task that owns the connection.
     player_ticket: Option<PlayerTicket>,
-    // Issue #619: same ownership shape as `player_ticket` just above, and for
-    // the same reason — this function's every exit path (clean disconnect,
-    // a propagated `?`, or task cancellation at shutdown) must withdraw this
-    // connection's `PLAYER_LOADING`/`PLAYER_SIMULATION` tickets, not just the
-    // happy path. `dispatch_play_packet` calls
-    // [`PlayerTicketGuard::move_to`] whenever the tracked view actually
-    // recentres or its radius changes, so residency follows the player
-    // rather than staying pinned to the join column.
+    // The guard withdraws this connection's `PLAYER_LOADING` and
+    // `PLAYER_SIMULATION` tickets when the task exits. Move it with each
+    // tracked-view recenter or radius change so residency follows the player.
     player_ticket_guard: PlayerTicketGuard,
     mut view: ViewTracker,
     username: String,
-    // Issue #329 / the death-screen respawn. The world spawn `serve_connection`
-    // already resolved for this join, carried forward rather than re-searched:
-    // `find_initial_spawn` is a real spiral over the source, and a respawn is not
-    // a good moment to pay for up to 121 columns again. Read only by
-    // `apply_client_command`'s `PERFORM_RESPAWN` arm — see its own comment for why
-    // it is the *world* spawn and not the per-player bed point.
+    // World spawn for death-screen respawn. It is computed during join and
+    // reused here; `find_initial_spawn` may inspect up to 121 columns, so a
+    // respawn does not repeat that search. Read by `apply_client_command`'s
+    // `PERFORM_RESPAWN` arm.
     world_spawn: Vec3,
     mut chunks_sent: usize,
-    // The part of the join view that had **not** gone out when the play loop
-    // started (`JOIN_PRESTREAM_RADIUS`), drained by the `join_stream` arm of the
-    // `select!` below. Owned: it is this connection's view and dies with it.
-    //
-    // This is the whole of the owner's "I can't break blocks until it finishes"
-    // fix. Nothing else in this signature changed, because nothing else had to:
-    // the loop that was already racing a socket read against four timers simply
-    // races one more thing.
+    // The deferred portion of the join view (`JOIN_PRESTREAM_RADIUS`) belongs
+    // to this connection and is drained alongside socket reads and timers.
     mut join_stream: crate::join_scheduler::JoinChunkStream<S>,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
-    // Issue #324. Weather transitions published by the world tick loop's
+    // Weather transitions published by the world tick loop's
     // `WeatherState`, drained on this same timer — see that arm's comment.
     weather: &WeatherFeed,
-    // Issue #325. The night-skip vote (see `serve_connection_inner`'s
+    // The night-skip vote (see `serve_connection_inner`'s
     // parameter comment). `dispatch_play_packet` records this connection's
     // player `lay_down`/`get_up` on it, and the `container_sync_tick` arm
     // feeds it the voter count from the shared `PlayerRegistry`.
     sleep_vote: &SleepVote,
-    // Issue #325. Where this connection learns a night skip happened — drained
+    // Where this connection learns a night skip happened — drained
     // on `container_sync_tick` into a real `encode_set_time`, same timer as
     // the weather drain (see that arm's comment).
     sleep_feed: &SleepFeed,
-    // Issues #48/#464. Owned rather than borrowed: it is built once, here at
-    // the Play handoff, from *this* connection's login, and it is cheap
-    // (an `Option<Arc>` plus a `Uuid` and a `String`).
+    // Command dispatch and the authenticated caller identity for this
+    // connection.
     commands: CommandSession,
-    // Issue #338. The connection's server-authoritative advancement/statistics
+    // The connection's server-authoritative advancement/statistics
     // store, built in `serve_connection_inner` (which already sent its
     // first-packet `update_advancements` at join). Mutable because both the
     // per-packet flush below and the `REQUEST_STATS` reply in
     // `dispatch_play_packet` award into / read from it.
     mut advancements: AdvancementManager,
-    // Issue #338. The player key this connection's advancement/statistic
+    // The player key this connection's advancement/statistic
     // progress is stored under — the same `login_uuid` that built
     // `CommandSession`'s caller, resolved the same way (a nil uuid fails
     // closed: the connection tracks nothing).
@@ -13280,16 +12022,16 @@ async fn serve_play<T, P, S, E>(
     // Separate from issuer availability: whether the host requires a player
     // with no adopted session to sign chat.
     enforce_secure_profile: bool,
-    // Issue #326 B1: the world border, snapshotted on the vitals timer for
-    // border damage (a default feed is the full-size static border today — see
-    // `serve_connection_inner`'s parameter comment).
+    // Shared world-border state read by the vitals timer when calculating
+    // damage. The default feed represents the full-size static border; see
+    // `serve_connection_inner`'s parameter comment.
     border: &BorderFeed,
-    // Issue #334. Server-initiated resource pack pushes, drained on
+    // Server-initiated resource pack pushes, drained on
     // `container_sync_tick` — same timer as the block-tick/explosion/weather
     // drains below, for the same reason: a push is published by the host (not
     // by an inbound packet) and needs this connection's own timer to notice.
     resource_packs: &ResourcePackPushFeed,
-    // Issue #335. The connection's declared channel support (the filter the
+    // The connection's declared channel support (the filter the
     // broadcast drain below applies) and the shared wire-level registry whose
     // broadcast queue that drain reads. `client_channels` is owned, not
     // borrowed: it was created here for this connection and dies with it.
@@ -13299,11 +12041,10 @@ async fn serve_play<T, P, S, E>(
     // because the `change_game_mode` and `/gamemode` arms mutate it and nothing
     // outside this loop reads it.
     mut game_mode: GameMode,
-    // Issues #327/#328/#323. The world's shared game rules, difficulty and clock —
-    // the same handle `run_tick_loop` ticks. Replaced the `WorldAdminState` local
-    // that used to be constructed right here, one per accepted socket.
+    // The world's shared game rules, difficulty, and clock — the handle
+    // `run_tick_loop` updates so every connection observes one state.
     world: &crate::world_state::WorldStateHandle,
-    // Issue #302's shutdown-cancellation gap. Published to once per iteration
+    // Published once per iteration
     // of this function's own `select!` loop below — see
     // `crate::live_save::LiveSaveSlot`'s own doc comment for why a
     // continuously-refreshed mirror exists at all: `IntegratedServer::
@@ -13323,22 +12064,18 @@ where
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
     let mut player_pos: Option<(f64, f64, f64)> = None;
-    // Issue #262, alongside `player_pos` — see `dispatch_play_packet`'s own
+    // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
     let mut player_rot: Option<Rotation> = None;
-    // Issue #302. Read here rather than passed in from `serve_connection_inner`
-    // (which already read it to place the join): that would be a 31st parameter
-    // through eleven wrapper call sites, and this is a few-hundred-byte gzip
-    // decode once per join. `player_uuid` is the same uuid that file is keyed by.
+    // Resolve the per-player store once from the source. `player_uuid` is the
+    // key for the stored file, and the loop reuses this handle for its saves.
     let player_store = player_store(source.get());
     let saved_player = player_store
         .as_ref()
         .and_then(|store| store.read(player_uuid).ok().flatten());
-    // The fields `crate::player_data` does not model — hunger, experience, the
-    // ender chest, the recipe book. Carried from the loaded file into every save
-    // this session makes, so a full load/modify/save cycle preserves them rather
-    // than deleting them the first time this player quits. See
-    // `PlayerData::preserved`.
+    // Preserve fields `crate::player_data` does not model—hunger, experience,
+    // the ender chest, and the recipe book—in every save. This keeps a full
+    // load/modify/save cycle lossless; see `PlayerData::preserved`.
     let preserved_player_fields: Vec<(String, lodestone_core::Nbt)> =
         saved_player.as_ref().map(|d| d.preserved.clone()).unwrap_or_default();
     let mut vitals = saved_player
@@ -13357,53 +12094,48 @@ where
     // see `apply_attack`'s own doc comment for the one thing it feeds
     // (the melee knockback sprint bonus).
     let mut sprinting = false;
-    // Issue #260. This connection's in-progress bow draw — see this parameter's
+    // This connection's in-progress bow draw — see this parameter's
     // own comment on `dispatch_play_packet`.
     let mut bow_draw: Option<BowDraw> = None;
     // This connection's in-progress eat or drink — see `item_in_use` on
     // `dispatch_play_packet`. Finished by the per-tick arm below, not by a packet.
     let mut item_in_use: Option<ItemInUse> = None;
-    // Vanilla's `ServerPlayer::nextContainerCounter` starts at `0` and the
-    // very first open bumps it to `1` before use (vanilla's own player fields)
-    // — see [`open_container_screen`]'s own `% 100 + 1` wrap.
+    // Window identifiers start at `0`; each open increments before use and
+    // wraps with [`open_container_screen`]'s `% 100 + 1` rule.
     let mut next_window_id: i32 = 0;
-    // Issue #249. This connection's composter roll stream — see
+    // This connection's composter roll stream — see
     // `COMPOSTER_BEHAVIOR_SEED` and `dispatch_play_packet`'s parameter comment.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
     let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
-    // Restored from the player file, exactly as `vitals` and `inventory` above are.
-    // This was `PlayerExperience::default()` unconditionally while the `.dat`
-    // faithfully kept `XpLevel`/`XpP`/`XpTotal` through `PlayerData::preserved` — so
-    // XP survived the *file* and not the *session*, and the next save wrote the same
-    // untouched bytes back while the player played on at level 0. The fix is this
-    // read plus modelling the three fields in `crate::player_data`; either half alone
-    // is a regression (see `persist_player`'s own parameter comment).
+    // Restore experience from the player file alongside `vitals` and
+    // `inventory`. `PlayerData::preserved` carries fields not modeled by this
+    // crate, while this value keeps the live session and subsequent saves
+    // consistent with the stored experience.
     let mut experience = saved_player
         .as_ref()
         .map_or_else(crate::experience::PlayerExperience::default, |data| data.experience);
-    // Vanilla's own `takeXpDelay` field. Starts at `0`, so the first orb a player walks
-    // into is absorbed immediately — see `collect_nearby_orbs`.
+    // Experience-orb pickup starts with no delay, so the first nearby orb is
+    // absorbed immediately; `collect_nearby_orbs` decrements this delay after
+    // each pickup.
     let mut take_xp_delay: i32 = 0;
     let mut effects = crate::mob_effects::ActiveEffects::new();
     let mut burn = crate::burning::BurnState::new();
-    // The `nextInt(1, 3)` ramp draw vanilla's own fire-block ignite routine makes on a player's
-    // contact tick. Its own stream, so standing in fire cannot shift which roll a
-    // later block drop or composter insert sees.
+    // The fire-contact ramp draws one value from the inclusive range `1..=3`.
+    // Keep that draw on its own stream so standing in fire cannot shift which
+    // roll a later block drop or composter insert sees.
     let mut burn_rng = SpawnRng::new(BURN_BEHAVIOR_SEED);
-    // Issue #337. This connection's block-drop roll stream — see
+    // This connection's block-drop roll stream — see
     // `block_drops::BLOCK_DROPS_BEHAVIOR_SEED` and `dispatch_play_packet`'s
     // parameter comment for why it is separate from the composter's.
     let mut drops_rng = SpawnRng::new(crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED);
-    // Issue #329. This connection's per-player respawn point, written by
-    // `apply_use_item_on`'s bed arm. Never read here — the placement half of
-    // P2 is the next consumer (see `crate::world_spawn`'s module doc).
+    // This connection's per-player respawn point, written by the bed
+    // interaction handler. `apply_client_command` reads it when resolving a
+    // death-screen respawn.
     let mut respawn: Option<RespawnPoint> = None;
-    // Issue #241's raid trigger: vanilla's own `raidOmenPosition` field.
-    // Set the tick Bad Omen converts to Raid Omen (the block the carrier
-    // stood on then), read and cleared on Raid Omen's own last tick — see
-    // the `vitals_tick` arm below for both halves.
+    // Block position recorded when Bad Omen converts to Raid Omen. The
+    // `vitals_tick` arm reads and clears it on the final omen tick.
     let mut raid_omen_position: Option<BlockPos> = None;
-    // Issue #325: this connection's server-side entity id — the key the
+    // This connection's server-side entity id is the key the
     // night-skip vote stores this player under. A `PlayerRegistry` ticket
     // carries it where a registry exists (LAN, and every `serve_play` gate);
     // singleplayer has no registry, and `LOCAL_PLAYER_ENTITY_ID` is the same
@@ -13411,41 +12143,37 @@ where
     // doc comment.
     let player_entity_id =
         player_ticket.as_ref().map_or(LOCAL_PLAYER_ENTITY_ID, |t| t.entity_id());
-    // Issue #270's chunk-batch flow-control gate (`ServerBound::
-    // ChunkBatchAcknowledged`, see `send_view_update`'s own doc comment):
-    // starts `true` because `serve_connection`'s own initial view burst
-    // (sent just before this function was called) is itself an outstanding
-    // unacknowledged batch — the first ack this loop receives is for *that*
-    // batch, not a later `recenter`/`set_view_radius` one.
+    // Chunk-batch flow-control gate (`ServerBound::ChunkBatchAcknowledged`,
+    // see `send_view_update`'s own doc comment). It begins `true` for the
+    // outstanding initial join batch; the first acknowledgement this loop
+    // receives therefore clears that batch, while later acknowledgements cover
+    // `recenter` or `set_view_radius` batches.
     //
-    // **The deferred join stream is deliberately not gated on this**, and the
-    // reason is that it is not the same kind of send. This gate exists so a
-    // *reactive* stream — one new batch per chunk boundary the player crosses,
-    // unbounded in time — cannot outrun a client. The join stream is a fixed,
-    // finite set the client is already owed and is holding its loading screen
-    // for; gating it would make delivering the world depend on a reply, and every
-    // `ServerProtocol` fixture in this crate's tests answers a batch with silence.
-    // That failure mode is the worst shape available: not a mismatch, a hang.
+    // The deferred join stream is finite and required for the loading screen,
+    // so it is not gated on acknowledgements. The gate applies to reactive
+    // streams that can emit a batch for every chunk boundary indefinitely.
+    // Gating the join stream on a reply can stall fixtures whose protocol
+    // implementation does not answer the acknowledgement.
     let mut awaiting_chunk_batch_ack = true;
     let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
-    // Issue #469. Filled by `dispatch_play_packet`, drained immediately after
-    // it returns — it exists only to carry a message across that call.
+    // Packet dispatch fills this queue; the loop drains it immediately after
+    // the call returns to publish the message.
     let mut outgoing_chat: Vec<String> = Vec::new();
     // This connection's announced chat-signing session, if any —
     // `None` until a `chat_session_update` arrives, exactly like every other
     // per-connection `Option` this loop threads (`pending_keep_alive`,
     // `player_pos`'s rotation half). See `crate::chat_session`'s own doc.
     let mut chat_session: Option<crate::chat_session::ServerChatSession> = None;
-    // This connection's read position in the shared chat log. Started at the
-    // log's *current end* so a joining player is not replayed the backlog of
-    // everything said before they arrived.
+    // This connection's read position in the shared chat log. Initialize it at
+    // the log's *current end* so a joining player receives only messages
+    // published during this session.
     let mut chat_cursor = entities.players().map_or(0, PlayerRegistry::chat_cursor);
     // This connection's read position in the shared arm-swing broadcast log —
     // same "start at the current end" reasoning as `chat_cursor`, so a
     // freshly joined connection is not replayed swings that happened before
     // it arrived.
     let mut swing_cursor = entities.players().map_or(0, PlayerRegistry::swing_cursor);
-    // Issue #335. This connection's read position in the shared plugin-channel
+    // This connection's read position in the shared plugin-channel
     // broadcast queue. Started at 0 — unlike chat, a *broadcast* is
     // host-published state a new connection legitimately receives: a client
     // that announces `minecraft:brand` support at join is owed the brand
@@ -13495,19 +12223,15 @@ where
         crate::tick::PlayTimerInstant::now() + CONTAINER_SYNC_INTERVAL,
         CONTAINER_SYNC_INTERVAL,
     );
-    // Same anchoring reasoning again: the initial pass `serve_connection` ran
-    // just before calling this function is this connection's first, so a tick
-    // firing in the same instant would only re-diff a state nothing has
-    // changed yet.
+    // Anchor the first entity-stream tick one interval after the join state is
+    // sent. An immediate tick would duplicate a diff over unchanged state.
     let mut entity_stream_tick = tokio::time::interval_at(
         crate::tick::PlayTimerInstant::now() + ENTITY_STREAM_INTERVAL,
         ENTITY_STREAM_INTERVAL,
     );
-    // `Delay`, for the same reason `keep_alive_tick` sets it: tokio's default
-    // `Burst` fires every missed tick back to back with no delay, so a pass
-    // that overran (a chunk strip, a container click) would be followed by a
-    // run of streaming passes in one instant, each re-diffing state that
-    // cannot have changed between them.
+    // Delay missed intervals so an overrun (a chunk strip or container click)
+    // produces one streaming pass at a time. Bursting would issue back-to-back
+    // diffs over state that cannot have changed between those passes.
     entity_stream_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let play_start = crate::tick::PlayTimerInstant::now();
     let mut next_keep_alive_id: i64 = 0;
@@ -13517,27 +12241,21 @@ where
     // inside it.
     let mut join_batch_open = false;
     let mut join_batch_size: i32 = 0;
-    // Issue #302, counted down on `vitals_tick` — see that arm.
+    // This countdown is decremented on `vitals_tick` — see that arm.
     let mut player_save_countdown = PLAYER_SAVE_EVERY_VITALS_TICKS;
 
-    // Vanilla's own per-player inventory-menu initializer, the last call in
-    // its own new-player placement routine. `inventory` above is already the restored one, so
-    // this is the packet that makes a rejoining player's items visible without
-    // touching a slot first — see `join_inventory_snapshot` for the whole story.
+    // Send the restored inventory once so a rejoining player's items are
+    // visible before any slot interaction; see `join_inventory_snapshot`.
     apply(conn, &mut state, join_inventory_snapshot(proto, &inventory)).await?;
-    // The first `SET_EXPERIENCE`, which vanilla's own per-player tick routine sends on the tick after
-    // every join because `lastSentExp` starts at `-99999999`. Without it the bar has
-    // no values at all — see `join_experience`.
+    // Send the initial experience snapshot so the client's bar reflects the
+    // restored values; see `join_experience`.
     apply(conn, &mut state, join_experience(proto, &experience)).await?;
     republish_experience(entities.players(), player_uuid, &experience);
-    // The first `update_attributes` — the armour bar's own packet, and the one
-    // this crate never sent at all until now (see `join_attributes`'s own doc
-    // comment). Without it `Session::armour_value` never leaves `None` and the
-    // row never draws, no matter what the player is wearing.
+    // Send the initial attribute snapshot so the client's derived armor display
+    // reflects the restored inventory; see `join_attributes`.
     apply(conn, &mut state, join_attributes(proto, &inventory)).await?;
 
-    // Portal travel state, in the same place as `take_xp_delay` and for the same
-    // reason: it is a per-player per-tick counter and this loop is where those live.
+    // Portal travel state is per-connection and advances once per loop.
     let mut portal = crate::portal::PortalTracker::new();
     // The dimension the player has travelled to, if any. **Two variables, and that
     // is not redundancy**: `travelled` is borrowed by the shadowed `source` below for
@@ -13570,11 +12288,9 @@ where
             Some(other) => SourceRef::Dimension(other),
             None => home,
         };
-        // Same shadow, same reason, for the two handles a live placement or a
-        // delayed redstone/fluid request has to land in — see
-        // `dimension_scoped_handles`'s own doc comment for why this closes
-        // the join-dimension routing bug (Nether furnaces/redstone recording
-        // into the overworld's registry and feed).
+        // Route live placement and delayed redstone/fluid requests through the
+        // registry and feed belonging to the active dimension; see
+        // `dimension_scoped_handles` for the independent handle fallbacks.
         let dimension_handles = dimension_scoped_handles(travelled.as_ref());
         let block_entities = dimension_handles
             .block_entities
@@ -13582,17 +12298,15 @@ where
             .unwrap_or(block_entities);
         let block_ticks = dimension_handles.block_ticks.as_ref().unwrap_or(block_ticks);
         tokio::select! {
-            // The deferred join view (`JOIN_PRESTREAM_RADIUS`), streamed while this
-            // loop goes on servicing everything else — which is the point: a dig,
-            // a hurt or a container click no longer waits behind the burst.
+            // Stream the deferred join view (`JOIN_PRESTREAM_RADIUS`) while this
+            // loop services digs, damage, and container clicks.
             //
             // Disabled once drained, so this is not a branch that returns `None`
             // forever. `select!` polls its branches in a random order, so a ready
             // packet is never starved by a ready column.
             //
-            // Both `JoinChunkStream::next` arms are cancel-safe (see their doc
-            // comments); a column dropped mid-generation here would be a hole in
-            // the world that no test in this crate would notice.
+            // Both `JoinChunkStream::next` arms are cancel-safe; a canceled
+            // column must not silently leave a hole in the client's terrain.
             chunk = join_stream.next(source), if !join_stream.is_done() => {
                 watch.enter();
                 if let Some(((cx, cz), payload)) = chunk {
@@ -13618,11 +12332,9 @@ where
             packet = conn.read_packet() => {
                 watch.enter();
                 let Some((packet_id, payload)) = packet? else {
-                    // Issue #302: the disconnect save. Vanilla's own
-                    // player-list remove routine writes the player file here, and this is
-                    // the only exit that is reached with the loop's state still
-                    // intact — see the periodic save on `vitals_tick` below for
-                    // what covers a crash, a cancelled task and every `?`.
+                    // Persist the disconnect snapshot while the loop's state is
+                    // still intact. The periodic save on `vitals_tick` covers
+                    // crashes, cancellation, and propagated errors.
                     persist_player(
                         player_store.as_ref(),
                         player_uuid,
@@ -13693,10 +12405,9 @@ where
                     player_entity_id,
                     &username,
                     world_spawn,
-                    // Issue #531. This loop already counts ticks off
-                    // `play_start` for the time-of-day broadcast; the break
-                    // validator reads the same clock, so a dig's start and stop
-                    // are priced on one monotonic counter.
+                    // This loop counts ticks from `play_start` for the
+                    // time-of-day broadcast; the break validator reads that
+                    // monotonic clock, so a dig's start and stop use one counter.
                     Some(u64::try_from(ticks_since(play_start)).unwrap_or(0)),
                     &mut bow_draw,
                     &mut item_in_use,
@@ -13744,22 +12455,15 @@ where
                     }
                     pending_travel = Some(None);
                 }
-                // Issue #338: drain the advancement flush for anything the
-                // packet just granted. Vanilla flushes every server tick
-                // (its own per-player tick routine → `advancements.flushDirty(player,
-                // true)`); every advancement producer in this crate today is
-                // packet-driven, so flushing here — immediately after the
-                // packet was applied — is equivalent and needs no timer this
-                // loop may not own. `flush_dirty` returns `None` on the
-                // no-change fast path, so the common case adds one cheap
-                // `is_empty` check and no packet.
+                // Flush advancement changes caused by the packet just granted.
+                // Advancement producers are packet-driven, so flushing after
+                // dispatch avoids a separate timer. `flush_dirty` returns
+                // `None` when nothing changed, keeping the common case packet-free.
                 if let Some(update) = advancements.flush_dirty(player_uuid, true) {
                     apply(conn, &mut state, proto.encode_update_advancements(&update)).await?;
                 }
-                // Issue #469: republish this player's chat for *every*
-                // connection to pick up, this one included. Same read-back
-                // idiom as `player_pos`/`player_rot` below, and for the same
-                // reason: the username and the registry both live here.
+                // Republish this player's chat for every connection, including
+                // this one. The registry holds the sender and recipient views.
                 //
                 // With no registry — singleplayer, where `open_in_memory`
                 // builds no `PlayerRegistry` at all — there is nobody else to
@@ -13780,13 +12484,9 @@ where
                         }
                     }
                 }
-                // Issue #438: republish this player's position for *other*
-                // connections to stream. Read back from `player_pos` — which
-                // `dispatch_play_packet` has just updated if the packet was a
-                // `PlayerMoved` — rather than passing the ticket down into
-                // that function: same information, and it keeps
-                // `dispatch_play_packet`'s already-`too_many_arguments`
-                // signature untouched.
+                // Republish this player's position for other connections.
+                // Read the value updated by packet dispatch so the registry
+                // receives movement without another state parameter.
                 if let (Some(ticket), Some(registry), Some((x, y, z))) = (
                     player_ticket.as_ref(),
                     entities.players(),
@@ -13794,19 +12494,11 @@ where
                 ) {
                     registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
                 }
-                // **"If the player moves it should properly generate the closer
-                // chunks first."** The join stream can now still be draining while
-                // the player walks and turns, so the columns it has *not yet
-                // started* are re-keyed on the pose that packet just delivered:
-                // distance from the player's current column first, the cone they
-                // are looking down second (`join_scheduler::priority_key`).
-                //
-                // Read back from `player_pos`/`player_rot` for the same reason the
-                // republish above is: `dispatch_play_packet` has just updated
-                // whichever of them the packet carried. Cheap on purpose — this
-                // runs on *every* inbound packet, and `reprioritise` does nothing
-                // at all unless the centre chunk or the quantised yaw actually
-                // changed.
+                // Re-key pending join columns after movement or facing changes:
+                // distance from the player's current column comes first, then
+                // the view cone (`join_scheduler::priority_key`). Read back the
+                // position and rotation updated by packet dispatch; unchanged
+                // center and quantized yaw leave the queue untouched.
                 if !join_stream.is_done() {
                     if let Some((x, _, z)) = player_pos {
                         join_stream.reprioritise(
@@ -13818,7 +12510,7 @@ where
                         );
                     }
                 }
-                // Issue #337: collect any drops this player is now standing in.
+                // Collect drops at the player's current position.
                 // Here, and not in `dispatch_play_packet`, for the same reason
                 // the position republish above is here: `player_pos` has just
                 // been updated by whichever movement packet arrived, and the
@@ -13921,11 +12613,9 @@ where
                         .await?;
                     }
                 }
-                // Issue #262: the same republish for facing. A separate
-                // `if let` rather than a third binding in the tuple above,
-                // because rotation and position arrive on different packets
-                // — requiring both to be `Some` would mean a player who has
-                // turned but not yet moved publishes neither.
+                // Republish facing separately because rotation and position
+                // arrive on different packets; requiring both values would
+                // omit a player who turns without moving.
                 if let (Some(ticket), Some(registry), Some(rotation)) =
                     (player_ticket.as_ref(), entities.players(), player_rot)
                 {
@@ -14000,11 +12690,7 @@ where
                     continue;
                 }
                 if pending_keep_alive.is_some() {
-                    // Issue #279: tell the client *why* before hanging up.
-                    // Vanilla sends its own translatable disconnect-timeout component
-                    // on exactly this path (its own common packet-listener)
-                    // — up to now we closed the socket silently and
-                    // a real client showed a generic "connection lost".
+                    // Tell the client why the connection is closing.
                     //
                     // The write is best-effort: a peer that stopped answering
                     // keep-alives may well be gone, so a failed write must still
@@ -14038,33 +12724,19 @@ where
                 keep_alive_sent_at = crate::tick::PlayTimerInstant::now();
                 watch.clear_unserviced();
                 apply(conn, &mut state, proto.encode_keep_alive(next_keep_alive_id)).await?;
-                // Issue #297/#619: vanilla's own ready-keep-alive routine, run from this
-                // connection's own keep-alive timer rather than from the world
-                // tick loop (`tick.rs` is off-limits to this arrangement, and the
-                // ticket graph's own read-driven check-in means there is no
-                // world-tick hook to add regardless — see
-                // `ChunkStore::maybe_tick_tickets`'s doc). A no-op, reported by
-                // its own `bool`, on every non-`IntegratedServer` entry point,
-                // whose `tickets` is a disconnected default that never held a
-                // spawn ticket to begin with.
+                // Refresh the world-spawn ticket from the connection's
+                // keep-alive timer. Compatibility entry points use a detached
+                // ticket handle, so this call is a no-op there.
                 player_ticket_guard.refresh_world_spawn();
                 watch.pass("keep_alive_tick");
             }
 
             _ = time_sync_tick.tick() => {
                 watch.enter();
-                // **Issue #323's fix, and it is one line's worth of value.** This
-                // used to send `ticks_since(play_start)` — wall-clock elapsed since
-                // *this connection* joined — with `None` for the day clock. Every
-                // link in the chain was green and a connected client's sky really did
-                // move, which is exactly why `cargo xtask connectedness` is blind to
-                // it: a fully-connected wire carrying the wrong value.
-                //
-                // The world's own clock is the source now, and the `day_time` is sent
-                // rather than left to the client's own extrapolation, because that is
-                // the only way `/gamerule advance_time false` can actually freeze the
-                // sun: an empty map means "keep the anchor you have", and the client
-                // keeps advancing it.
+                // **Use the shared world clock.** Encode its long `game_time`
+                // and optional day-time so every connection observes the same
+                // authoritative sky clock. Sending day-time also lets a frozen
+                // time rule keep the client's sun anchored.
                 let time = world.time();
                 apply(
                     conn,
@@ -14077,18 +12749,10 @@ where
 
             _ = vitals_tick.tick() => {
                 watch.enter();
-                // Issue #302: the periodic player save, on a counter rather than a
-                // clock. `PLAYER_SAVE_EVERY_VITALS_TICKS` of these 50 ms ticks, so
-                // no `Instant::now()` is involved — this crate links into a wasm32
-                // browser bundle where `Instant::now()` compiles and then panics at
-                // runtime under `panic = "abort"` with no log line.
-                //
-                // **This is not redundant with the disconnect save.** That one is
-                // reached on exactly one of this function's exit paths; every `?`,
-                // a keep-alive timeout, a task cancelled at shutdown and a crash
-                // all skip it. A player who alt-F4s (the common case, not the rare
-                // one) would otherwise lose the whole session, which is precisely
-                // the silent data loss #302 is about.
+                // Count periodic saves in 50 ms vitals ticks rather than wall
+                // time. This avoids unsupported wall-clock calls in wasm32.
+                // Periodic saves cover disconnect, cancellation, and crash paths
+                // that cannot run the disconnect cleanup.
                 player_save_countdown = player_save_countdown.saturating_sub(1);
                 if player_save_countdown == 0 {
                     player_save_countdown = PLAYER_SAVE_EVERY_VITALS_TICKS;
@@ -14107,18 +12771,11 @@ where
                     );
                 }
 
-                // Vanilla's own per-player game-mode tick's deferred-destroy pass,
-                // riding this timer because it is the one that already fires
-                // every 50ms — one server tick, exactly the cadence the
-                // continuation is counted in. This is what finishes an ordinary
-                // hold-and-release dig: `apply_block_action`'s `StopDestroy` arm
-                // defers a dig that fell short of 0.7 rather than refusing it,
-                // and nothing else in this loop would ever look at it again.
-                //
-                // `is_air` first, mirroring vanilla's own `blockState.isAir()`
-                // guard: something else (a random tick, another player) may have
-                // removed the block while the dig was deferred, and re-breaking
-                // air would roll a second set of drops.
+                // Advance deferred block breaks on each 50 ms vitals tick. This
+                // completes hold-and-release digs whose stop packet leaves
+                // progress below `0.7`. Skip the work when the block is air;
+                // another world update may have removed it, and re-breaking air
+                // would emit duplicate drops.
                 if let Some(dig) = pending_break.filter(|dig| {
                     dig.deferred_break_ready(
                         Some(u64::try_from(ticks_since(play_start)).unwrap_or(0)),
@@ -14162,10 +12819,10 @@ where
                     // The periodic eating/drinking sound —
                     // vanilla's own on-use-tick → emit-particles-and-sounds chain.
                     // **Sound only**: the crumbs are the client's own prediction,
-                    // because vanilla's own server-level add-particle routine is a no-op, and
+                    // because the server-side particle hook is a no-op, and
                     // the sound is *only* the server's, because
-                    // vanilla's own client-level play-seeded-sound routine drops a `playSound(null, …)`.
-                    // Splitting a single vanilla call across the two sides looks like
+                    // the client-side seeded-sound hook drops the particle-only call.
+                    // Splitting one game action across the two sides looks like
                     // an omission on each of them; it is the whole mechanism.
                     if now < started.finish_tick
                         && let Some(pos) = player_pos
@@ -14243,11 +12900,9 @@ where
                                 )
                                 .await?;
                             }
-                            // The food bar itself. `encode_set_health` is vanilla's
-                            // `ClientboundSetHealthPacket`, which carries all three
-                            // of health, food and saturation in one packet — so the
-                            // bar cannot move without re-sending the health beside
-                            // it.
+                            // The food bar frame carries health, food, and
+                            // saturation together, so resend all three values
+                            // whenever one of them changes.
                             apply(
                                 conn,
                                 &mut state,
@@ -14259,12 +12914,10 @@ where
                             )
                             .await?;
 
-                            // Vanilla's own consumable on-consume routine's `onConsumeEffects.forEach` —
-                            // issue #690's golden-apple/pufferfish/rotten-flesh/
-                            // spider-eye/poisonous-potato/chicken/honey-bottle gap.
-                            // Runs after the food-bar packet above rather than
-                            // folding into it: these are `update_mob_effect`/
-                            // `remove_mob_effect` packets, not health-bar fields.
+                            // Apply item-specific effects after the food-bar
+                            // frame. These use separate status-effect packets,
+                            // not health-bar fields; the supported item set is
+                            // defined by `food_consume_effects`.
                             for grant in crate::mob_effects::food_consume_effects(&started.item) {
                                 if drops_rng.next_f32() >= grant.probability {
                                     continue;
@@ -14448,18 +13101,16 @@ where
                 // than guess a spawn position this version-free crate does
                 // not otherwise track (see `crate::vitals`'s module docs).
                 if let Some((x, y, z)) = player_pos {
-                    // Issue #326 B1: border damage, applied *before* the
-                    // submersion test — vanilla's own base-tick routine runs
-                    // the border `else if` ahead of the water-breath block.
-                    // Snapshot the border once
-                    // per timer tick and ask it for the damage the tracked
-                    // position attracts; `apply_border_damage` is `Some` only
-                    // when the hit landed (a dead player is a no-op), and a
-                    // player past the safe zone takes `max(1, floor(d*0.2))`
-                    // *every* tick — the plan gate's per-tick cadence. With a
-                    // default full-size border the distance is far inside and
-                    // `damage_for_position` is always `None`: nothing is sent
-                    // and this costs one clone + one distance scan per 50ms.
+                    // Apply border damage before the submersion check because
+                    // the player timer processes the border branch first.
+                    // Read one border snapshot per timer tick and calculate
+                    // damage for the tracked position; `apply_border_damage`
+                    // returns `Some` only when the hit lands, while a dead
+                    // player is a no-op. A player outside the safe zone takes
+                    // `max(1, floor(d*0.2))` every tick. With a default
+                    // full-size border, `damage_for_position` is always `None`:
+                    // nothing is sent, at the cost of one clone and one
+                    // distance scan per 50 ms.
                     let border_state = border.get();
                     let invulnerable = Abilities::for_mode(game_mode).invulnerable;
                     if let Some(damage) =
@@ -14516,7 +13167,7 @@ where
                         .await?;
                     }
 
-                    // Issue #625: hostile-mob melee damage against this
+                    // hostile-mob melee damage against this
                     // player, drained from `MobSim::take_player_hits`. See
                     // that method's, and `PlayerHit`'s, own doc comments for
                     // how a mob's attack target position resolves to a
@@ -14574,18 +13225,10 @@ where
                     }
                 }
 
-                // Issue #232's disclosed remainder, closed: `MobSim
-                // ::take_mining_fatigue_auras` computed a real per-tick elder
-                // guardian pulse but had no drain at all, so the mining-fatigue
-                // debuff — a core part of the guardian temple fight — never
-                // once reached a real player. Same single-consumer/filter-by-
-                // uuid shape as `take_player_hits` just above and for the
-                // identical reason (the queue empties for whichever connection
-                // reads it first). `MiningFatigueAura`'s own doc comment names
-                // both obligations this drains: the effect application and the
-                // `GUARDIAN_ELDER_EFFECT` game event (kind `10`,
-                // vanilla's own game-event packet constant — read
-                // from the jar, not guessed).
+                // Drain elder-guardian pulses for this player. The queue uses
+                // the same single-consumer, UUID-filtered shape as
+                // `take_player_hits`; each matching pulse applies mining
+                // fatigue and emits game event kind `10`.
                 if matches!(game_mode, GameMode::Survival | GameMode::Adventure) {
                     for aura in mobs.with(|sim| sim.take_mining_fatigue_auras()) {
                         if aura.target.uuid != player_uuid {
@@ -14625,8 +13268,8 @@ where
                 // tracks. Reading the eye instead would let a player stand in fire
                 // unharmed up to their chin.
                 //
-                // `!invulnerable`: vanilla's guards are `fireImmune()` on the entity
-                // type and `abilities.invulnerable` inside the damage path; a creative
+                // `!invulnerable`: fire immunity applies to the entity type and
+                // `invulnerable` applies inside the damage path; a creative
                 // player is the second. Passed as `fire_immune` because the observable
                 // is the same — the fire goes out and nothing hurts — and this crate
                 // has no per-entity-type immunity table to consult.
@@ -14684,15 +13327,11 @@ where
                     }
                 }
 
-                // Beacons — issue #616's remainder. Vanilla's own 80-tick
-                // world-time gate (its own beacon-block-entity tick's
-                // `level.getGameTime() % 80L == 0L`), run per-connection
-                // rather than from a global tick loop: `effects`/the wire
-                // notify below are per-connection state, the same
-                // architecture the `effects.tick()` block right after this
-                // one already uses. **Not** gated on `!effects.is_empty()`
-                // the way that block is — a beacon must be able to apply a
-                // *first* effect to a player who currently has none.
+                // Beacon effects use an 80-tick world-time gate and run per
+                // connection because `effects` and the wire notification are
+                // connection state. The gate is independent of
+                // `effects.is_empty()`, allowing a beacon to apply a first
+                // effect to a player with no active effects.
                 if let Some((px, py, pz)) = player_pos
                     && world.time().game_time % 80 == 0
                 {
@@ -14722,11 +13361,10 @@ where
                         }
                         let (range, application) =
                             crate::beacon::beacon_effects(levels, primary.as_deref(), secondary.as_deref());
-                        // Vanilla's own box: `range` blocks horizontally,
+                        // The effect area reaches `range` blocks horizontally,
                         // from `range` below the beacon to the top of the
-                        // world above it (`AABB(pos).inflate(range)
-                        // .expandTowards(0, height, 0)`) — approximated as
-                        // "no lower than `range` below" with no upper bound,
+                        // world. Approximate the unbounded upper edge as
+                        // "no lower than `range` below" because
                         // since `ChunkSource` has no height accessor of its
                         // own (`crate::beacon`'s own module doc names the
                         // same gap).
@@ -14760,20 +13398,12 @@ where
                     }
                 }
 
-                // Issue #241's raid trigger, traced through the decompile:
-                // Vanilla's own bad-omen mob-effect apply-effect-tick routine converts Bad Omen into Raid
-                // Omen the moment its carrier (not a spectator, not on Peaceful)
-                // stands near an occupied village POI, remembering *where* that
-                // happened (`raid_omen_position`); its own raid-omen mob-effect
-                // apply-effect-tick routine, on Raid Omen's own last tick, spends that
-                // remembered position on vanilla's own raid create-or-extend routine
-                // (`MobSim::create_or_extend_raid`) — a flat 64-block radius query
-                // over occupied `#village` POIs, **not** `isVillage`'s own
-                // section-distance tracker, a different subsystem this port does
-                // not build (see `crate::mobs::villager`'s own module doc). Ahead
-                // of the generic `effects.tick()` block below, and reading
-                // `duration()` *before* it decrements — vanilla's own `tickCount`
-                // is the pre-decrement remaining duration.
+                // A qualifying player near an occupied village point converts
+                // Bad Omen into Raid Omen and records the player's position.
+                // When the effect reaches its final tick, that position feeds
+                // [`MobSim::create_or_extend_raid`], which queries occupied
+                // village points within 64 blocks. Read the duration before
+                // decrementing it so the final tick can perform the conversion.
                 if let Some((x, y, z)) = player_pos
                     && game_mode != GameMode::Spectator
                 {
@@ -14826,9 +13456,8 @@ where
                     }
                 }
 
-                // Issue #246's remaining gap, closed: vanilla's own per-raid tick's own
-                // `hero.addEffect(HERO_OF_THE_VILLAGE, 48000, raidOmenLevel - 1)`
-                // loop, fired the moment a raid this player earned a killing
+                // The raid-completion queue carries the effect a player earns for
+                // a killing blow. It fires when a raid this player earned a killing
                 // blow in reaches `RaidStatus::Victory`. That transition
                 // happens inside the shared background sim task, which has no
                 // connection's `ActiveEffects` to grant an effect onto —
@@ -14858,38 +13487,20 @@ where
                     .await?;
                 }
 
-                // Issue #276's post-kill controller, wired for real:
-                // `dragon::MobSim::record_dragon_death` (now reached from a
-                // real hit through `MobSim::attack_dragon`, and from the
-                // death-flight health-drive clause in `tick_one_dragon`)
-                // queues the exit-portal geometry and egg placement a kill
-                // needs but cannot apply itself — `MobSim` holds `world`
-                // immutably and owns no connection, the same reason
-                // `take_hero_of_the_village_grants` above is a queue rather
-                // than an inline effect. `home`, not `source`, resolves the
-                // sibling: it is "the only thing that knows the world's
-                // siblings" regardless of which dimension *this* connection
-                // currently occupies (`SourceRef::Dimension`'s own doc), so
-                // whichever connected player's tick reaches this first —
-                // not necessarily the one standing in the End — can apply it.
+                // The shared mob simulation queues exit-portal geometry and
+                // egg placement because it has no connection on which to
+                // publish world changes. Resolve the sibling world through
+                // `home`, so any connected player's timer can apply the queue.
                 for death in mobs.with(|sim| sim.take_dragon_deaths()) {
                     if let Some(destination) = home.get().sibling(crate::dimension::Dimension::End) {
                         for (pos, state) in &death.exit_portal_blocks {
                             destination.set_block(pos.x, pos.y, pos.z, state);
                         }
                         if death.outcome.place_dragon_egg {
-                            // Vanilla's own end-dimension fight controller's
-                            // dragon-killed routine's own
-                            // `level.getHeightmapPos(MOTION_BLOCKING,
-                            // its own end-podium-feature location getter (origin))` — the
-                            // highest solid block in the podium's own
-                            // column. Scanned for real (rather than assumed
-                            // to be the bedrock pole's own top) by walking
-                            // down from just above the portal's domed air
-                            // clearing (`exit_portal_blocks`'s own
-                            // `origin.y + 32` ceiling), so a column a player
-                            // has already built on still gets the real
-                            // surface.
+                            // Place the egg on the first solid surface above
+                            // the portal. Scan down from `origin.y + 33` so a
+                            // column that contains player-built blocks uses
+                            // its actual top surface.
                             let mut egg_y = death.origin.y + 33;
                             while egg_y > death.origin.y
                                 && destination.block_state(death.origin.x, egg_y, death.origin.z) == "minecraft:air"
@@ -14898,33 +13509,25 @@ where
                             }
                             destination.set_block(death.origin.x, egg_y + 1, death.origin.z, "minecraft:dragon_egg");
                         }
-                        // Issue #276/#689's remaining gap, closed: `outcome
-                        // .spawn_gateway`'s position formula and shuffled
-                        // 20-slice pool (`crate::dragon::fight::GatewayPool`)
-                        // are real now — `death.gateway_blocks` is already
-                        // resolved to real block writes by
-                        // `dragon::MobSim::record_dragon_death`, empty only
-                        // when `spawn_gateway` was false or the pool was
-                        // exhausted. **The teleport mechanic itself is still
-                        // not ported** — see `fight::gateway_blocks`'s own
-                        // doc for exactly what that means: a real, visible
-                        // structure appears, but standing in it does
-                        // nothing.
+                        // `death.gateway_blocks` contains the positions from
+                        // `outcome.spawn_gateway`'s formula and its shuffled
+                        // 20-slice pool. The list is empty when spawning is
+                        // disabled or the pool is exhausted. The visible
+                        // structure has no teleport behavior here.
                         for (pos, state) in &death.gateway_blocks {
                             destination.set_block(pos.x, pos.y, pos.z, state);
                         }
                     }
                 }
 
-                // Status effects, ahead of hunger — vanilla ticks `activeEffects` in
-                // its own per-tick AI step before its own per-player tick reaches
-                // `foodData.tick`, and the order matters for one arm: `hunger`
+                // Status effects, ahead of hunger. The order matters for one arm:
+                // `hunger`
                 // charges exhaustion, so it must land before the exhaustion is spent
                 // rather than a tick late.
                 //
-                // `game_tick` is the entity tick count `ActiveEffects::tick` needs
-                // **only** for an infinite effect (vanilla's `target.tickCount`); a
-                // finite one counts against its own remaining duration.
+                // `game_tick` is the entity tick count needed **only** for an
+                // infinite effect; a finite one counts against its remaining
+                // duration.
                 if !effects.is_empty() {
                     let out = effects.tick(
                         i32::try_from(world.time().game_time.max(0)).unwrap_or(i32::MAX),
@@ -14982,12 +13585,12 @@ where
 
                 // Hunger, after the air block — vanilla's own order
                 // (its own base-tick routine's water-breath block, then
-                // its own per-player tick routine's `foodData.tick`). Runs whether or not a
+                // the per-player hunger tick. Runs whether or not a
                 // position has been reported, unlike drowning: hunger needs no
                 // terrain, only the difficulty and a game rule, and a player who
                 // has not moved since joining still starves.
                 //
-                // `!invulnerable`: vanilla's guard is on `causeFoodExhaustion`, so a
+                // `!invulnerable`: the exhaustion gate means a
                 // creative player accumulates no exhaustion at all and their bar can
                 // never move. Skipping the whole tick is equivalent and cheaper —
                 // with no exhaustion there is nothing to spend, and the regeneration
@@ -15026,33 +13629,24 @@ where
                     }
                 }
 
-                // Portal travel, last in the tick so a player who is about to be
-                // moved has already taken this tick's damage and hunger — vanilla's
-                // own order (vanilla's own handle-portal routine runs from its own base-tick routine, after
-                // that same base-tick routine's damage block).
+                // Portal travel runs last, after this tick's damage and hunger
+                // updates have been applied.
                 //
-                // The counter is fed "which portal cell am I standing in", read at
-                // the player's **feet**, because vanilla's own nether-portal-block entity-inside routine is
-                // driven by the entity's bounding box and the feet cell is the one a
-                // standing player is always inside. Using the eye cell instead means
-                // a 3-tall portal only triggers on its middle row.
+                // Feed the portal counter with the block at the player's feet.
+                // A standing player occupies that cell even when the portal is
+                // three blocks tall; using the eye cell would miss the bottom row.
                 if let Some((x, y, z)) = player_pos {
                     let feet = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
                     let feet_state = source.get().block_state(feet.x, feet.y, feet.z);
-                    // An end portal shares this same counter — vanilla's
-                    // vanilla's own `portalProcess`/`portalCooldown` are generic across
-                    // portal types, not Nether-specific — so a player cannot be
-                    // simultaneously ramping up a Nether trip and an End trip.
+                    // End and Nether portals share one counter, so a player
+                    // cannot accumulate two transitions simultaneously.
                     let in_end_portal = crate::portal::is_end_portal(&feet_state);
                     let standing_in =
                         (in_end_portal || crate::portal::is_portal(&feet_state)).then_some(feet);
-                    // `getPortalTransitionTime`: `Portal`'s own default is 0 and
-                    // `EndPortalBlock` does not override it, so an end portal
-                    // fires on the very first tick inside — the Nether's
-                    // gamerule-configurable delay is `NetherPortalBlock`'s own
-                    // override, not the shared default. Read off the shared
-                    // rules, so a `/gamerule` change takes effect on the next
-                    // tick rather than at the next join.
+                    // End portals transition on the first tick inside. Nether
+                    // transitions use the creative or default delay from the
+                    // shared rules, which is read every tick so rule changes
+                    // take effect without reconnecting.
                     let rules = world.rules();
                     let transition = if in_end_portal {
                         0
@@ -15065,15 +13659,9 @@ where
                     if let Some(entry) = portal.tick(standing_in, transition) {
                         let entry_state = source.get().block_state(entry.x, entry.y, entry.z);
                         let trip = if crate::portal::is_end_portal(&entry_state) {
-                            // vanilla's own end-portal-block get-portal-destination routine's `fromEnd`
-                            // branch is not implemented (see
-                            // `travel_through_end_portal`'s own doc) — reached
-                            // only by standing in an end portal *inside* the
-                            // End, which does not happen without the
-                            // stronghold's exit portal. Guarding it here rather
-                            // than inside the tracker keeps that gap a single,
-                            // named "do nothing" rather than a wrong
-                            // destination.
+                            // There is no destination for an End portal that
+                            // is already inside the End, so leave that case
+                            // inert instead of selecting an invalid target.
                             if source.dimension() == crate::dimension::Dimension::End {
                                 None
                             } else {
@@ -15092,13 +13680,10 @@ where
                         } else if rules.allow_entering_nether_using_portals()
                             || source.dimension() == crate::dimension::Dimension::Nether
                         {
-                            // `allow_entering_nether_using_portals` is checked here
-                            // rather than inside the tracker: vanilla passes
-                            // `canUsePortal(false)` into `processPortalTeleportation`,
-                            // so the counter still climbs while travel is forbidden,
-                            // and turning the rule back on lets a player who has been
-                            // standing there travel immediately. The End has no such
-                            // gamerule gate in vanilla.
+                            // Check the Nether travel rule at the transition
+                            // point. The counter continues while travel is
+                            // disabled, so re-enabling the rule permits an
+                            // already-qualified player to travel immediately.
                             travel_through_portal(
                                 conn,
                                 proto,
@@ -15123,9 +13708,8 @@ where
                             ));
                             portal.begin_cooldown();
                             pending_travel = Some(trip.source);
-                            // The deferred join stream this trip installed has to
-                            // start a fresh batch, so close any batch the previous
-                            // dimension's stream left open.
+                            // The deferred join stream uses a fresh batch, so close
+                            // any batch left open by the outgoing dimension.
                             if join_batch_open {
                                 apply(
                                     conn,
@@ -15146,7 +13730,7 @@ where
                 watch.enter();
                 // The piece with no inbound packet driving it at all: the
                 // server's unified tick loop (`crate::tick::run_tick_loop`,
-                // issue #284) mutates the registry independently of any
+                // mutates the registry independently of any
                 // connection, so this connection needs its own timer to notice — see
                 // `sync_open_container`'s own doc comment.
                 if let Some(open) = open_container.as_mut() {
@@ -15157,33 +13741,23 @@ where
                         apply(conn, &mut state, directive).await?;
                     }
                 }
-                // Issues #307/#308: the world tick loop's random ticks (grass
-                // ↔ dirt, `crate::random_tick`) mutate the shared `ChunkSource`
-                // independently of this connection too — same shape as the
-                // block-entity registry above, so it rides the same timer
-                // rather than adding a seventh one (CLAUDE.md's own caution
-                // about growing the timer table). `BlockTickFeed::drain_all`
-                // is single-consumer (see that type's doc comment); this is
-                // the one connection that owns it for
-                // `open_in_memory_with_mobs`.
-                // **And the light for them, which this drain used to omit
-                // entirely.** `encode_block_update` carries no light, so before
-                // this every block change originating in the tick loop moved on the
-                // client and left its light behind — stale until the player
-                // rejoined and the column was re-encoded from scratch. The reported
-                // case was a torch placed underwater: `apply_use_item_on`'s own
-                // resend lights the column correctly for the placement, then the
-                // fluid tick destroys the torch a tick later and arrives *here*, so
-                // the torch vanished and its light did not. Fire, grass, crops, a
-                // redstone torch flipping `lit` and a landing falling block all ride
-                // this same drain.
+                // World random ticks (for example grass-to-dirt changes) mutate
+                // the shared `ChunkSource` independently of this connection.
+                // Drain their block updates on this timer; the feed has one
+                // consumer for each `open_in_memory_with_mobs` world.
+                // Include light for each changed column. `encode_block_update`
+                // carries no light, so a tick-driven change must be followed by
+                // a column-light resend. For example, a fluid tick can remove an
+                // underwater torch after placement; this drain updates both the
+                // block and its light. Fire, grass, crops, redstone torches, and
+                // landing falling blocks use this update flow.
                 //
                 // Deduplicated by column, and that is what makes it affordable: a
                 // fluid cascade rewrites many cells in one column in a single tick,
                 // and each relight is a whole-column flood. `send_column_light`
-                // rather than `resend_column_for_light` because the feed carries only
-                // the *new* state — see that function's own doc comment for why the
-                // missing old state means this cannot be predicated.
+                // is used because the feed carries only
+                // the replacement state; without a comparison baseline, a
+                // predicate cannot gate the resend.
                 let mut relight: Vec<(i32, i32)> = Vec::new();
                 for (x, y, z, block_state) in block_ticks.drain_all() {
                     apply(conn, &mut state, proto.encode_block_update(x, y, z, &block_state)).await?;
@@ -15192,26 +13766,21 @@ where
                         relight.push(column);
                     }
                 }
-                // `source.get()`, like every other non-batch read on this task: one
+                // `source.get()`, like every other non-batch read here: one
                 // column at a time has nothing to offload, and it is the same
                 // accessor `resend_column_for_light`'s callers already use.
                 for (cx, cz) in relight {
                     send_column_light(conn, proto, source.get(), &mut state, cx, cz).await?;
                 }
-                // Issue #530: the same feed's effect lane — every sound,
-                // particle and level event the world tick produced. This is what
-                // finally gives the server a way to say "play this here": before
-                // it, `ServerProtocol` had no sound encoder at all, so a mob
-                // could be beaten to death in silence and a redstone door opened
-                // without a click. Single-consumer for the reason the drain above
-                // is; see `BlockTickFeed`'s own doc comment.
+                // Drain the feed's effect lane: world-tick sounds, particles,
+                // and level events. These effects share the feed's single
+                // consumer, as described by `BlockTickFeed`.
                 for effect in block_ticks.drain_effects_for(player_uuid) {
-                    // Issue #694, item 4. `PistonPlayerPush` is the one
-                    // variant `encode_world_effect` never turns into a
-                    // packet (see that variant's own doc) — it is this
-                    // connection's own signal to maybe correct its own
-                    // last-known position, so it is intercepted here rather
-                    // than handed to the generic encoder below.
+                    // Handle piston pushes before generic world-effect
+                    // encoding. `PistonPlayerPush` has no packet
+                    // representation in `encode_world_effect`; it carries the
+                    // displacement needed to correct this connection's
+                    // tracked position, so intercept it here.
                     if let crate::effects::WorldEffect::PistonPlayerPush { source, dest, push_delta } = effect {
                         if let Some((px, py, pz)) = player_pos
                             && player_overlaps_piston_sweep(px, py, pz, source, dest)
@@ -15231,15 +13800,8 @@ where
                     }
                     apply(conn, &mut state, proto.encode_world_effect(&effect)).await?;
                 }
-                // Issue #425: same shape again, one timer tick later —
-                // `MobSim::tick` already calls `MobSim::explode` the tick a
-                // creeper's fuse completes; this is what finally turns that
-                // into a real `EXPLODE` packet reaching this connection.
-                // `ExplosionFeed::drain_all` is single-consumer for the same
-                // reason `BlockTickFeed::drain_all` is (see that type's own
-                // doc comment) — safe here for the same reason: exactly one
-                // connection task per feed instance under
-                // `open_in_memory_with_mobs`.
+                // Drain explosions emitted by the shared mob simulation. The
+                // feed has one consumer for each in-memory world instance.
                 for detonation in explosions.drain_all() {
                     apply(
                         conn,
@@ -15251,8 +13813,8 @@ where
                 // The per-entity animation cues for hits the mob sim resolved:
                 // vanilla's `broadcastDamageEvent` (which we send as
                 // `hurt_animation` — see `ServerProtocol::encode_hurt_animation`
-                // for why the route differs and the pixels do not) and
-                // vanilla's own entity-die routine's `broadcastEntityEvent(this, (byte)3)`.
+                // for why the route differs and the pixels do not). The entity
+                // death event carries the same byte value used by the client.
                 //
                 // Without this a mob beaten to death never flashed and never tipped
                 // over: it simply disappeared when the next entity diff dropped it,
@@ -15265,16 +13827,16 @@ where
                 // task (`apply_attack` mutates it from here), so a feed would add a
                 // hop and nothing else. It inherits the same single-consumer
                 // caveat: with two connections sharing one sim the first to reach
-                // this line takes the queue. That is not reachable today —
+                // this line takes the queue. The current LAN wiring gives
                 // `IntegratedServer::bind`'s LAN worlds get a `MobHandle::default`
                 // with no population — and a second player needs per-connection
                 // tracking here, not a feed.
                 for animation in mobs.with(crate::mobs::MobSim::take_entity_animations) {
                     let directive = match animation {
                         crate::mobs::MobAnimation::Hurt { entity_id } => {
-                            // `0.0` is vanilla's own value for a non-player, not a
-                            // placeholder: vanilla's own get-hurt-dir routine is a constant
-                            // and only `ServerPlayer` overrides it.
+                            // `0.0` is the fixed hurt-animation direction for a
+                            // non-player entity; player-specific direction data
+                            // is handled by the connection path.
                             proto.encode_hurt_animation(entity_id, 0.0)
                         }
                         crate::mobs::MobAnimation::Died { entity_id } => proto
@@ -15285,21 +13847,14 @@ where
                     };
                     apply(conn, &mut state, directive).await?;
                 }
-                // Issue #324: same shape again — the world tick loop's weather
-                // cycle (`crate::weather::WeatherState`, ticked inside
-                // `run_tick_loop`) has no packet driving it either, so this
-                // connection learns of a rain flip or a level ramp only when
-                // this timer drains the feed. `WeatherFeed::drain_all` is
-                // single-consumer for the same reason the two drains above
-                // are (see that type's own doc comment).
+                // Drain weather transitions published by the world tick loop.
+                // The feed has one consumer for each in-memory world instance.
                 for event in weather.drain_all() {
                     let (kind, value) = event.wire();
                     apply(conn, &mut state, proto.encode_game_event(kind, value)).await?;
                 }
-                // Issue #325: same shape again — the world tick loop's
-                // night-skip vote has no packet driving it either. Two duties,
-                // both here because this is the connection's only regular
-                // timer:
+                // Update the sleep vote and deliver night-skip notifications.
+                // Both use this connection's regular timer:
                 //
                 // 1. Feed the voter count. Vanilla excludes spectators
                 //    (vanilla's own update-sleeping-players routine); this crate has no
@@ -15330,34 +13885,21 @@ where
                         }
                     }
                 }
-                // Issue #334: same shape again — a resource pack push is
-                // published by the host (a config surface on `IntegratedServer`,
-                // or a future command), never by an inbound packet, so this
-                // connection learns of it only when this timer drains the feed.
-                // `ResourcePackPushFeed::drain_all` is single-consumer for the
-                // same reason the three drains above are (see that type's own
-                // doc comment).
+                // Drain server-initiated resource-pack pushes. The feed is
+                // published by host control paths and has one consumer for
+                // each in-memory world instance.
                 for push in resource_packs.drain_all() {
                     apply(conn, &mut state, proto.encode_resource_pack_push(&push)).await?;
                 }
-                // Issue #469: player chat, riding the same timer as the three
-                // above for the same reason. Unlike them this is *not* a
-                // drain-all feed — `chat_since` advances this connection's own
-                // cursor over a shared append-only log, which is what lets
-                // every connection read every line. A `drain_all` here would
-                // deliver each message to whichever connection's timer fired
-                // first and to nobody else, which is precisely the bug a
-                // broadcast must not have.
+                // Drain each connection's chat cursor from the shared
+                // append-only log, so every connection receives every line.
                 if let Some(registry) = entities.players() {
                     for line in registry.chat_since(&mut chat_cursor) {
                         apply(conn, &mut state, proto.encode_system_chat(&line.rendered()))
                             .await?;
                     }
-                    // Arm-swing broadcast, riding the same timer and the same
-                    // cursor-over-a-shared-log shape as chat just above. The
-                    // sender exclusion lives here, at the read site, rather
-                    // than at `PlayerRegistry::swing`'s write site — see that
-                    // method's own doc comment for why.
+                    // Broadcast arm swings from the same shared log while
+                    // excluding the connection that produced each event.
                     for event in registry.swings_since(&mut swing_cursor) {
                         if event.entity_id != player_entity_id {
                             apply(
@@ -15400,15 +13942,9 @@ where
                         .await?;
                     }
                 }
-                // Issue #335: same shape as chat above — a broadcast is
-                // host-published (a future #77 plugin, a command, a config
-                // surface), never an inbound packet, so this connection learns
-                // of it only when this timer drains the shared queue. Also like
-                // chat, it is *not* a drain-all feed: every connection reads
-                // every payload through its own cursor, filtered to the
-                // channels this client announced. See `outbound_since`'s doc
-                // comment for why a channel this client never registered is a
-                // skip, not a block.
+                // Drain host-published plugin-channel broadcasts through each
+                // connection's cursor, filtering to channels this client
+                // announced. Unsupported channels are skipped.
                 for (channel, data) in plugin_channels.outbound_since(
                     &mut plugin_channel_cursor,
                     client_channels,
@@ -15423,7 +13959,7 @@ where
                 watch.pass("container_sync_tick");
             }
         }
-        // Issue #302's shutdown-cancellation gap — see `live_publish_player`'s
+        // Publish the cancellation-safe snapshot — see `live_publish_player`'s
         // and `crate::live_save::LiveSaveSlot`'s own doc comments. Once per
         // iteration, after whichever arm above completed, so the mirror is at
         // most one packet or timer tick behind whatever the cancellation
@@ -15451,69 +13987,32 @@ where
     }
 }
 
-/// The player-`vitals` slice of the native loop's `vitals_tick` `select!` arm
-/// above — air supply/drowning, world-border damage, burning, the periodic
-/// beacon effect sweep, status effects, hunger, and finishing an
-/// in-progress eat/drink — ported to run off
-/// [`crate::browser_timer::BrowserInterval`] instead of `tokio::time::
-/// interval_at`, so the wasm32 [`serve_play`] loop below can drive it too
-/// (issue #636). The beacon sweep was the one piece `docs/beacon.md` had
-/// long recorded as a disclosed gap here ("the `wasm32` loop's own effects
-/// section... does not yet carry the same beacon sweep") — closed by the
-/// same block the native arm already runs, `block_entities` added as a
-/// parameter for exactly that reason.
+/// Advances player vitals for a `wasm32` connection: air supply and drowning,
+/// world-border damage, burning, beacon effects, status effects, hunger, and
+/// item-use completion. [`crate::browser_timer::BrowserInterval`] supplies the
+/// timer boundary, and the beacon sweep reads `block_entities` for eligible
+/// effects.
 ///
-/// # Why this is a new function rather than a shared extraction
+/// # Why this function is separate
 ///
-/// The native arm is left untouched rather than refactored to call this
-/// function: it is a single ~600-line block threading roughly two dozen
-/// mutable locals through one `tokio::select!` arm inside this crate's
-/// largest and most delicate file, and this crate's own root `CLAUDE.md`
-/// names `server.rs` a "known choke point" where a wholesale rewrite has
-/// silently dropped another agent's work before. Duplicating the call
-/// sequence into a smaller, purpose-built function for one target is the
-/// lower-risk trade against a 1387+1732-test native suite this change must
-/// not regress. Every call this function makes is to the same production
-/// types/methods the native arm calls (`PlayerVitals::tick`,
-/// `BurnState::tick`, `ActiveEffects::tick`, `finish_consuming`,
-/// `publish_health`, …), not a reimplementation of any of them.
+/// The helper keeps the browser timer boundary small while calling the
+/// production operations (`PlayerVitals::tick`, `BurnState::tick`,
+/// `ActiveEffects::tick`, `finish_consuming`, and `publish_health`).
 ///
-/// # What is deliberately excluded, and why
+/// # What it excludes
 ///
-/// - **The periodic player save.** There is no `PlayerDataStore` on `wasm32`
-///   at all (no filesystem) — see the native `serve_play`'s own comment on
-///   `player_store` for this target's reality, and this function's own lack
-///   of a `player_store` parameter.
-/// - **The deferred-break continuation**
-///   (`PendingBreak::deferred_break_ready`). `PendingBreak::defer` already
-///   returns `None` unconditionally when `start_tick` is `None`, and
-///   `dispatch_play_packet`'s `wasm32` call site passes `None` for that tick
-///   counter (see its own comment, "Issue #531") — so a dig can never even
-///   enter the deferred state on this target today, timer or not. Wiring the
-///   finish side alone would be exactly the "connected but nothing produces
-///   the input" island shape this repo's own `CLAUDE.md` warns about; making
-///   it reachable needs a second change (feeding a real tick count into
-///   `dispatch_play_packet` on this target), left for a follow-up.
-/// - **Hostile-mob melee damage against the player**
-///   (`MobHandle::take_player_hits`). Its only producer is `MobSim::tick`,
-///   which runs inside `crate::tick::run_tick_loop` — itself entirely
-///   `#[cfg(not(target_arch = "wasm32"))]` (see `integrated.rs`'s own module
-///   doc). No mob AI ticks on this target at all yet, so this queue is always
-///   empty here; wiring the drain would be the same island shape as above.
-/// - **Portal travel** (`PortalTracker::tick` firing a trip). A real trip
-///   mutates `join_stream`/`view`/the connection's own dimension mid-loop —
-///   genuine complexity this change does not take on for a mechanic none of
-///   the four originally reported symptoms (drops, fall damage, air supply,
-///   worldgen-past-spawn) name. A player standing in a portal on `wasm32`
-///   today simply never travels — a real, now-documented gap, not a silent
-///   one.
+/// - **Periodic player save.** `wasm32` has no filesystem or `PlayerDataStore`.
+/// - **Deferred block-break continuation.** The wasm32 caller passes `None` for
+///   `start_tick`, so `PendingBreak::defer` returns `None` and no deferred break
+///   enters this loop.
+/// - **Hostile-mob melee damage.** `MobHandle::take_player_hits` has no producer
+///   on wasm32, so its queue is empty.
+/// - **Portal travel.** This loop does not mutate the connection's dimension
+///   during a portal trip.
 ///
-/// World-border damage, burning, status effects and hunger *are* included
-/// even though this target still has no world-tick loop either, because each
-/// has a real, independent, packet-reachable producer already: `BorderFeed::
-/// with` is a command/config surface, not the tick loop; standing in
-/// fire/lava is a block read, not tick-loop state; and a potion/food item
-/// finishing its use is this same function's own `item_in_use` arm.
+/// World-border damage, burning, status effects, and hunger are included because
+/// each has a packet-reachable producer: border commands, block reads, or the
+/// `item_in_use` arm.
 #[allow(clippy::too_many_arguments)]
 #[cfg(target_arch = "wasm32")]
 async fn wasm_vitals_tick<T, P, S>(
@@ -15537,8 +14036,7 @@ async fn wasm_vitals_tick<T, P, S>(
     item_in_use: &mut Option<ItemInUse>,
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
-    // The beacon sweep's own read of every tracked `Beacon` block entity —
-    // see this function's own doc for why it was missing until now.
+    // Read every tracked beacon block entity for the per-connection sweep.
     block_entities: &BlockEntityHandle,
 ) -> Result<(), ServerError>
 where
@@ -15548,10 +14046,8 @@ where
 {
     let invulnerable = Abilities::for_mode(game_mode).invulnerable;
 
-    // Vanilla's own update-using-item routine — see the native arm's identical block
-    // (`server::serve_play`'s `vitals_tick`) for the full reasoning: the
-    // periodic eat/drink sound, then the finish once `finish_tick` is
-    // reached.
+    // Apply periodic eat/drink effects, then finish the item use when
+    // `finish_tick` is reached.
     if let Some(started) = item_in_use.clone() {
         let now = mobs.with(|sim| sim.tick_count());
         if now < started.finish_tick
@@ -15623,8 +14119,8 @@ where
                 )
                 .await?;
 
-                // Same `onConsumeEffects` producer the native arm wires — see
-                // that call site's own comment (issue #690).
+                // Apply supported food-consumption effects as status-effect
+                // frames.
                 for grant in crate::mob_effects::food_consume_effects(&started.item) {
                     if drops_rng.next_f32() >= grant.probability {
                         continue;
@@ -15763,8 +14259,7 @@ where
         }
     }
 
-    // Border damage, then drowning — vanilla's own order, same as the native
-    // arm.
+    // Apply border damage, then process drowning and air supply.
     if let Some((x, y, z)) = player_pos {
         let border_state = border.get();
         if let Some(damage) = border_state.damage_for_position(x, z).filter(|_| !invulnerable) {
@@ -15791,9 +14286,8 @@ where
             (y + EYE_HEIGHT).floor() as i32,
             z.floor() as i32,
         );
-        // Issue #636's named gap: air supply/drowning had no timer at all on
-        // this target. `!invulnerable &&`: a creative player's air bar does
-        // not deplete and they never drown, matching the native arm.
+        // `!invulnerable &&` keeps creative players from depleting air or
+        // drowning.
         let outcome = vitals.tick(!invulnerable && is_water(&eye_state));
         if let Some(air) = outcome.air_changed {
             apply(conn, state, proto.encode_air_supply_update(air)).await?;
@@ -15816,9 +14310,8 @@ where
         }
     }
 
-    // Burning — the ignition producer and the burn consumer in one place,
-    // same as the native arm's identical block and for the same reason (see
-    // its own comment).
+    // Burning reads the block at the player's feet, updates burn state, and
+    // publishes health when damage applies.
     if let Some((x, y, z)) = player_pos {
         let feet = source.get().block_state(x.floor() as i32, y.floor() as i32, z.floor() as i32);
         let standing_in = crate::burning::BurnSource::for_block(&feet);
@@ -15857,11 +14350,8 @@ where
         }
     }
 
-    // Beacons — same block as the native arm's identical comment (`server::
-    // serve_play`'s `vitals_tick` `select!` arm), ahead of the status-effect
-    // block below for the same reason: it feeds `effects`, and the ordering
-    // between them is unobservable either way since neither reads the
-    // other's output this tick. **Not** gated on `!effects.is_empty()` —
+    // Beacons run on an 80-tick cadence and feed `effects` before the status
+    // effect tick. **Not** gated on `!effects.is_empty()` —
     // a beacon must be able to apply a *first* effect to a player who
     // currently has none.
     if let Some((px, py, pz)) = player_pos
@@ -15911,9 +14401,8 @@ where
         }
     }
 
-    // Status effects, ahead of hunger — same order as the native arm, and
-    // for the same reason (see its own comment: `hunger` charges exhaustion,
-    // so it must land before the exhaustion is spent).
+    // Tick status effects before hunger so their exhaustion is included when
+    // hunger consumes exhaustion.
     if !effects.is_empty() {
         let out = effects.tick(
             i32::try_from(world.time().game_time.max(0)).unwrap_or(i32::MAX),
@@ -15945,8 +14434,7 @@ where
                 state,
                 proto,
                 vitals,
-                // No terrain read backs this arm — see the native arm's
-                // identical fallback comment.
+                // Terrain data is not needed for this health publication.
                 player_pos.map(|(x, y, z)| Vec3::new(x, y, z)).unwrap_or_default(),
                 LOCAL_PLAYER_ENTITY_ID,
                 username,
@@ -15959,9 +14447,7 @@ where
         }
     }
 
-    // Hunger, after the air block — vanilla's own order, same as the native
-    // arm. Runs whether or not a position has been reported, unlike
-    // drowning/burning above.
+    // Hunger runs after air checks and does not require a reported position.
     if !Abilities::for_mode(game_mode).invulnerable {
         let (difficulty, _) = world.difficulty();
         let food_out = vitals.tick_food(difficulty, world.natural_health_regeneration());
@@ -15986,35 +14472,17 @@ where
     Ok(())
 }
 
-/// `wasm32` counterpart of the native [`serve_play`] above — same signature,
-/// same [`dispatch_play_packet`] dispatch. Used to be degraded to a bare
-/// packet-driven-only loop with no timer at all (`tokio::time` is compiled in
-/// for this crate's wasm32 target but **hangs on its first poll** rather than
-/// firing — see `crate::browser_timer`'s module doc). Issue #636 gave it one
-/// real `tokio::select!` arm, racing the socket read against a single
-/// `crate::browser_timer::BrowserInterval` at the vitals cadence — see
-/// [`wasm_vitals_tick`] for exactly what that arm does and does not cover.
-/// See the native definition's doc comment for why the two forked instead of
-/// sharing one body with an internal `cfg`; that reasoning (no real
-/// `tokio::time` on this target) is why this loop still has only one timer
-/// where native has four, not zero.
+/// Drives a `wasm32` play connection with [`dispatch_play_packet`]. A
+/// `crate::browser_timer::BrowserInterval` handles status, effects, hunger,
+/// and item-consumption work, together with feed drains that have browser
+/// producers.
 ///
-/// Issue #619's world-spawn-ticket refresh (`PlayerTicketGuard::
-/// refresh_world_spawn`) is threaded through this target too, but nothing on
-/// this loop calls it — the native definition's own `keep_alive_tick` timer
-/// arm is the one caller, and this target's own timer (`vitals_interval`
-/// below) is not it, deliberately: a real socket on this target is an
-/// in-process `DuplexStream` between this same tab's client and server code,
-/// not a remote peer that can go quiet independently, so the failure mode
-/// `keep_alive_tick` exists to catch cannot occur here — see the loop body's
-/// own comment on `vitals_interval`. Real, not a bug this issue introduces:
-/// this target's `open_in_memory` join path is the one production
-/// `IntegratedServer` entry point where `PLAYER_SPAWN`'s 20-"tick" countdown (a
-/// `TicketStore::tick` unit, driven by `ChunkStore::maybe_tick_tickets`'s own
-/// read-cadence check-in — see that method's doc) can lapse with nobody
-/// refreshing it. The `PLAYER_LOADING`/`PLAYER_SIMULATION` pair this same
-/// guard grants is unaffected (`timeout: 0`, i.e. does not expire), so this
-/// only ever costs the world-spawn ring specifically, on this one target.
+/// Browser connections use an in-process `DuplexStream`, so the peer cannot go
+/// quiet independently and keep-alive expiration is not applicable. The
+/// world-spawn ticket still has a 20-tick countdown driven by
+/// `ChunkStore::maybe_tick_tickets`; the `PLAYER_LOADING`/`PLAYER_SIMULATION`
+/// pair uses `timeout: 0` and does not expire. A browser world therefore pays
+/// only for the world-spawn ring when no refresh reaches the ticket store.
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::too_many_arguments)]
 async fn serve_play<T, P, S, E>(
@@ -16026,126 +14494,68 @@ async fn serve_play<T, P, S, E>(
     mut state: State,
     mut streamer: EntityStreamer,
     mut player_list: PlayerListStreamer,
-    // Issue #438: see the native definition's identical parameter for why the
-    // ticket is owned rather than borrowed. Player streaming itself works
-    // identically on this target: it is entirely packet-driven, exactly like
-    // `FallTracker`, so it needs none of the timers this loop lacks.
+    // Keep the ticket guard alive for the entire connection. Player streaming
+    // is packet-driven through `FallTracker` and needs no timer here.
     player_ticket: Option<PlayerTicket>,
-    // Issue #619: same ownership shape as `player_ticket` just above, and for
-    // the same reason — this function's every exit path (clean disconnect,
-    // a propagated `?`, or task cancellation at shutdown) must withdraw this
-    // connection's `PLAYER_LOADING`/`PLAYER_SIMULATION` tickets, not just the
-    // happy path. `dispatch_play_packet` calls
-    // [`PlayerTicketGuard::move_to`] whenever the tracked view actually
-    // recentres or its radius changes, so residency follows the player
-    // rather than staying pinned to the join column.
+    // The guard withdraws this connection's `PLAYER_LOADING` and
+    // `PLAYER_SIMULATION` tickets when the task exits. Move it with each
+    // tracked-view recenter or radius change so residency follows the player.
     player_ticket_guard: PlayerTicketGuard,
     mut view: ViewTracker,
     username: String,
-    // Issue #329 / the death-screen respawn. The world spawn `serve_connection`
-    // already resolved for this join, carried forward rather than re-searched:
-    // `find_initial_spawn` is a real spiral over the source, and a respawn is not
-    // a good moment to pay for up to 121 columns again. Read only by
-    // `apply_client_command`'s `PERFORM_RESPAWN` arm — see its own comment for why
-    // it is the *world* spawn and not the per-player bed point.
+    // World spawn for death-screen respawn. The join computation may inspect up
+    // to 121 columns, so `apply_client_command` reuses this value when no
+    // usable per-player bed point exists.
     world_spawn: Vec3,
     mut chunks_sent: usize,
-    // The deferred half of the join view (`JOIN_PRESTREAM_RADIUS`). On the native
-    // loop this is a `select!` branch racing the socket read; **this target has no
-    // `select!` and no second thread**, so there is no concurrency to win and it is
-    // drained inline below, before the packet loop — the unchanged pre-split
-    // behaviour, one batch later in the sequence. A browser world therefore still
-    // pays the whole burst up front; that is the same documented `wasm32` gap as
-    // every timer this loop lacks, not a new one.
+    // The browser loop drains the finite join stream inline before packet
+    // dispatch. It has no second thread, so generation occupies this loop until
+    // the initial burst completes.
     mut join_stream: crate::join_scheduler::JoinChunkStream<S>,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
-    // Same gap as `vitals`/`container_sync` below for the *outbound*
-    // direction: forwarding a random tick's block change with no packet
-    // driving it needs `container_sync_tick`, a `tokio::time::interval` this
-    // target has none of (see this function's own doc comment). Accepted for
-    // signature parity with the native definition (`serve_connection` calls
-    // whichever compiles for the target) — a real, documented gap, not a
-    // silent one.
-    //
-    // The **inbound** direction (issue #465) has no such gap and is wired: a
-    // placement is packet-driven, so `dispatch_play_packet` can publish the
-    // neighbour-update request here exactly as it does natively. Whether
-    // anything drains it is a property of the host, not of this loop — a
-    // browser singleplayer world runs `run_tick_loop` over the same feed.
+    // Inbound placement packets publish neighbour-update requests here.
+    // Outbound random-tick changes require a container-sync timer, which this
+    // browser loop does not provide.
     block_ticks: &BlockTickFeed,
-    // Issue #425: same gap, same reason — a detonation has no packet driving
-    // it either, so this target simply never surfaces one.
+    // No packet produces explosion-feed entries on the browser target.
     _explosions: &ExplosionFeed,
-    // Issue #324: same gap as `_explosions`, same reason — a weather flip or
-    // level ramp has no packet driving it, so this target (which owns none of
-    // `container_sync_tick`, the native loop's drain point) never surfaces
-    // one. Accepted for signature parity, exactly like its two neighbours.
+    // Weather changes are world-tick events; this browser loop has no timer
+    // producer that drains the weather feed.
     _weather: &WeatherFeed,
-    // Issue #325, **inbound half wired** (same as the native definition): the
-    // `lay_down`/`get_up` arms in `dispatch_play_packet` are packet-driven, so
-    // a bed click and a wake-up vote identically on this target through the
-    // shared call below. The two timer-fed halves are gaps like `_weather`:
-    // `set_active` (the voter count) and the `SkippedNight` drain both ride
-    // the native loop's `container_sync_tick`, which this target owns none
-    // of — so the vote's roster never reaches a passing size here, and a skip
-    // would be published to a feed nobody drains. Accepted for signature
-    // parity with the native definition, exactly like its neighbours.
+    // Bed clicks and wake-up packets are handled here. Voter counts and
+    // skipped-night notifications require a container-sync timer, which is
+    // not present on the browser target.
     sleep_vote: &SleepVote,
     _sleep_feed: &SleepFeed,
-    // Issues #48/#464 — **not** a gap on this target. Commands are entirely
-    // packet-driven (a `chat_command` frame arrives, the sink answers, system
-    // chat goes back), so the missing timers cost nothing here and this loop
-    // dispatches commands identically to the native one.
+    // Commands are packet-driven: a chat-command frame arrives, the sink
+    // answers, and system chat is sent back through the same dispatch path.
     commands: CommandSession,
-    // Issue #338 — **not** a gap on this target. Advancements and statistics
-    // are entirely packet-driven (a criterion flips on an inbound packet, the
-    // reply rides the same packet), so the missing timers cost nothing here and
-    // this loop flushes and answers `REQUEST_STATS` identically to the native
-    // one. Same signature and same position as the native definition's pair.
+    // Advancements and statistics are packet-driven: inbound packets update
+    // criteria or request statistics, and the response uses the same dispatch
+    // path.
     mut advancements: AdvancementManager,
     player_uuid: uuid::Uuid,
-    // Issue #636: **wired**, unlike this parameter's neighbours below. Border
-    // damage needs no world-tick-loop producer — `BorderFeed::with` is a
-    // command/config surface, independent of `crate::tick::run_tick_loop` —
-    // so once this loop has any timer at all (`wasm_vitals_tick`, driven by
-    // `crate::browser_timer::BrowserInterval` below), there is nothing left
-    // stopping it. See that function's own doc for what else this loop's new
-    // timer does and does not cover.
+    // Border damage is produced by `BorderFeed::with`; the browser vitals
+    // timer applies it alongside drowning, burning, effects, and hunger.
     border: &BorderFeed,
-    // Issue #334: same gap as `_weather`/`_explosions`, same reason — a
-    // resource pack push has no packet driving it either, and the drain point
-    // is the native loop's `container_sync_tick`, which this target owns none
-    // of, so a browser singleplayer world never surfaces one. Accepted for
-    // signature parity with the native definition.
+    // Resource-pack pushes have no browser timer producer, so this feed is not
+    // drained by the browser loop.
     _resource_packs: &ResourcePackPushFeed,
-    // Issue #335. The *inbound* half (register/unregister + dispatch) is
-    // packet-driven, so it is wired identically on this target through the
-    // shared `dispatch_play_packet` call. The *outbound* half — draining
-    // `plugin_channels`'s broadcast queue — is the same gap as `_resource_packs`:
-    // it rides the native loop's `container_sync_tick`, which this target owns
-    // none of, so a browser singleplayer world never receives a broadcast
-    // until an inbound packet happens to flow. `plugin_channels` is passed
-    // through for signature parity and so the inbound dispatch reaches the
-    // shared registry.
+    // Channel registration and inbound dispatch are packet-driven here.
+    // Broadcast-queue draining requires a container-sync timer, so browser
+    // connections do not receive queued broadcasts from this loop.
     client_channels: &mut ClientChannels,
     plugin_channels: &PluginChannelRegistry,
-    // The mode this connection joined in (`serve_connection_inner`'s own), owned
-    // because the `change_game_mode` and `/gamemode` arms mutate it and nothing
-    // outside this loop reads it.
+    // The connection's game mode. The `change_game_mode` and `/gamemode` arms
+    // mutate it locally.
     mut game_mode: GameMode,
-    // Issues #327/#328/#323. The world's shared game rules, difficulty and clock —
-    // the same handle `run_tick_loop` ticks. Replaced the `WorldAdminState` local
-    // that used to be constructed right here, one per accepted socket.
+    // The world's shared game rules, difficulty, and clock; `run_tick_loop`
+    // updates this handle for every connection.
     world: &crate::world_state::WorldStateHandle,
-    // Accepted for signature parity with the native definition and with
-    // `serve_connection_inner`'s target-agnostic call, but never published to:
-    // this target has no `PlayerDataStore` at all — "there is no player store
-    // in the browser", per this loop's own experience-restore comment below —
-    // so there is nothing for `IntegratedServer::shutdown` to read back
-    // regardless. `LiveSaveSlot::publish` is itself native-only (see its own
-    // doc comment), so this parameter is unused on this target by
-    // construction, not by oversight.
+    // This target has no filesystem-backed player store. The slot remains in
+    // the signature so the shared connection setup can pass the same state;
+    // no browser code publishes it.
     _live_save: &crate::live_save::LiveSaveSlot,
 ) -> Result<ServeSummary, ServerError>
 where
@@ -16158,102 +14568,70 @@ where
     let mut pending_break: Option<PendingBreak> = None;
     let mut sprinting = false;
     let mut bow_draw: Option<BowDraw> = None;
-    // Issue #636: **finished here now**, unlike the doc below used to say —
-    // `wasm_vitals_tick`'s item-in-use arm (driven by the new
-    // `vitals_interval` below) is exactly the native loop's own finish logic,
-    // ported. A bite started on this target now lands.
+    // `wasm_vitals_tick` applies item-use completion rules from its browser
+    // timer, so a bite started here reaches its completion result.
     let mut item_in_use: Option<ItemInUse> = None;
-    // `player_pos`/`vitals` were tracked for parity only, before issue #636:
-    // `vitals` used to be ticked exclusively by the native loop's timer,
-    // which `tokio::time` has none of on `wasm32`. **That gap is now closed**
-    // for drowning/air supply, border damage, burning, status effects and
-    // hunger — see `wasm_vitals_tick`'s own doc for the mechanism and for
-    // what is *still* excluded (the periodic save, the deferred-break
-    // continuation, mob melee damage, portal travel) and why. Fall damage
-    // (`FallTracker`) never needed this: it is driven purely by inbound
-    // `PlayerMoved` packets, not a timer, so it already worked identically on
-    // both targets.
+    // `player_pos` feeds movement and vital checks. The browser timer applies
+    // drowning, border damage, burning, status effects, and hunger; fall damage
+    // remains driven by inbound `PlayerMoved` packets.
     let mut player_pos: Option<(f64, f64, f64)> = None;
-    // Issue #262, alongside `player_pos` — see `dispatch_play_packet`'s own
+    // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
     let mut player_rot: Option<Rotation> = None;
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
     let mut inventory = PlayerInventory::default();
-    // Same gap as `vitals` above, for the same reason: `sync_open_container`
-    // (the piece that pushes a furnace's own background-tick mutation to an
-    // open window with no packet driving it) only ever runs off
-    // `container_sync_tick`, a `tokio::time::interval` the native loop's
-    // `serve_play` owns and this target has none of. A window can still be
-    // *opened* and *clicked into* here (both packet-driven, and both go
-    // through the shared `dispatch_play_packet` call below identically to
-    // native) — only the no-click background sync is missing on `wasm32`.
+    // Opening and clicking a window are packet-driven here. Background
+    // container synchronization requires the native container-sync timer and
+    // is not run by the browser loop.
     let mut open_container: Option<OpenContainer> = None;
     let mut open_merchant: Option<OpenMerchant> = None;
     let mut container_sync = ContainerSync::default();
     let mut next_window_id: i32 = 0;
-    // Issue #249 — see the native `serve_play`'s identical binding: the
-    // composter roll stream has no timer and no wasm32 dependency, so it is
-    // wired identically on this target.
+    // Composter rolls have no timer or native-only dependency on this target.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
     let mut bone_meal_rng = SpawnRng::new(BONE_MEAL_BEHAVIOR_SEED);
-    // `default()`, unlike the native loop's restore: there is no `PlayerDataStore` on
-    // `wasm32` (no filesystem), so there is no saved player to read XP out of.
+    // Browser builds have no filesystem-backed player store, so experience
+    // starts at its default values.
     let mut experience = crate::experience::PlayerExperience::default();
     let mut take_xp_delay: i32 = 0;
     let mut effects = crate::mob_effects::ActiveEffects::new();
     let mut burn = crate::burning::BurnState::new();
-    // The `nextInt(1, 3)` ramp draw vanilla's own fire-block ignite routine makes on a player's
-    // contact tick. Its own stream, so standing in fire cannot shift which roll a
-    // later block drop or composter insert sees.
+    // The fire-contact ramp draws one value from the inclusive range `1..=3`.
+    // Keep that draw on its own stream so standing in fire cannot shift which
+    // roll a later block drop or composter insert sees.
     let mut burn_rng = SpawnRng::new(BURN_BEHAVIOR_SEED);
-    // Issue #337 — see the native `serve_play`'s identical binding: the
-    // block-drop roll stream has no timer and no wasm32 dependency either.
+    // Block-drop rolls have no timer or native-only dependency on this target.
     let mut drops_rng = SpawnRng::new(crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED);
-    // Issue #329 — see the native `serve_play`'s identical binding: the
-    // per-player respawn point has no timer and no wasm32 dependency, so it
-    // is wired identically on this target.
+    // The per-player respawn point has no timer or native-only dependency.
     let mut respawn: Option<RespawnPoint> = None;
-    // Issue #325 — see the native `serve_play`'s identical binding: the
-    // night-skip vote's roster key has no timer and no wasm32 dependency, so
-    // it is wired identically on this target (the vote's inbound arms are the
-    // only thing this target can drive).
+    // The night-skip vote uses the player's roster key. Browser packet handlers
+    // can register and wake voters; timer-fed vote counts remain native-only.
     let player_entity_id =
         player_ticket.as_ref().map_or(LOCAL_PLAYER_ENTITY_ID, |t| t.entity_id());
-    // See the native `serve_play`'s identical field for why this starts
-    // `true` (the initial join dump is itself an unacknowledged batch).
+    // The initial join dump is unacknowledged, so this gate begins `true`.
     let mut awaiting_chunk_batch_ack = true;
     let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
-    // Issue #469 — see the native loop's identical binding.
+    // Outgoing chat waits here until the shared broadcast queue can be drained.
     let mut outgoing_chat: Vec<String> = Vec::new();
-    // See the native loop's identical binding.
+    // Session announcements are stored for secure-profile validation.
     let mut chat_session: Option<crate::chat_session::ServerChatSession> = None;
 
-    // `ServerPlayer::initInventoryMenu` — see the native `serve_play`'s identical
-    // send and `join_inventory_snapshot`'s own doc comment. Placed *before* the
-    // inline join-stream drain below rather than after it, so the packet's position
-    // relative to the deferred chunks matches native: there the send happens before
-    // the `select!` loop that drains the stream. This target's `inventory` is always
-    // a fresh `PlayerInventory::default()` (there is no player store in the
-    // browser), so the snapshot is 46 empty slots today — sent anyway, because the
-    // client's `Menus` fold is what establishes the window-`0` menu it will
-    // reconcile every later click against, and a target-specific omission here is
-    // exactly how the two loops drift apart.
+    // Send the window-0 inventory snapshot before draining the inline join
+    // stream. Browser inventory has default values because no player store is
+    // available; the snapshot establishes the menu state used by later clicks.
     apply(conn, &mut state, join_inventory_snapshot(proto, &inventory)).await?;
-    // The first `SET_EXPERIENCE` — see the native `serve_play`'s identical send and
-    // `join_experience`'s own doc comment. `experience` is `default()` on both
-    // targets today (nothing restores it from disk), so this carries zeroes; it is
-    // sent anyway because the bar is drawn from the *last* values received and a
-    // client that is never sent any has nothing to draw.
+    // Send the initial experience snapshot. Browser experience has default
+    // values because no filesystem restore is available; explicit zeroes
+    // initialize the client's bar.
     apply(conn, &mut state, join_experience(proto, &experience)).await?;
     republish_experience(entities.players(), player_uuid, &experience);
-    // The armour bar's own packet — see the native `serve_play`'s identical
-    // send and `join_attributes`'s own doc comment. `inventory` is the same
-    // fresh-or-restored value the snapshot above already sent.
+    // Send the armor/attribute snapshot derived from the current inventory so
+    // the client can initialize its derived armor display.
     apply(conn, &mut state, join_attributes(proto, &inventory)).await?;
 
-    // The deferred join view, inline — see this function's `join_stream`
-    // parameter for why this target does not race it against anything.
+    // Drain the deferred join view inline; this loop has no separate worker
+    // branch for streaming it concurrently.
     if !join_stream.is_done() {
         apply(conn, &mut state, proto.begin_chunk_batch()).await?;
         let mut batch_size: i32 = 0;
@@ -16265,13 +14643,8 @@ where
         apply(conn, &mut state, proto.end_chunk_batch(batch_size)).await?;
     }
 
-    // Issue #636: this loop's one timer — see `crate::browser_timer`'s module
-    // doc for the mechanism (a real browser macrotask via `window.
-    // setTimeout`, never `tokio::time`, which hangs on this target rather
-    // than merely failing) and `wasm_vitals_tick`'s own doc for exactly what
-    // rides it and what does not. Anchored one period out, matching every
-    // native `interval_at` call in `serve_play` above (`BrowserInterval::
-    // new`'s own doc).
+    // The browser timer uses a macrotask via `window.setTimeout`; it drives
+    // `wasm_vitals_tick` once per `WASM_VITALS_TICK_INTERVAL` period.
     let mut vitals_interval =
         crate::browser_timer::BrowserInterval::new(WASM_VITALS_TICK_INTERVAL);
     loop {
@@ -16279,16 +14652,13 @@ where
             packet = conn.read_packet() => {
                 match packet? {
                     Some(p) => p,
-                    // Clean disconnect — same exit as the native loop's
-                    // `read_packet` arm, minus that arm's player-save call:
-                    // this target has no `PlayerDataStore` to save into (see
-                    // `inventory`'s own comment above).
+                    // Clean disconnect. Browser connections have no
+                    // filesystem-backed player store to persist here.
                     None => return Ok(ServeSummary { username, chunks_sent, inventory }),
                 }
             }
-            // Cancel-safe: `BrowserInterval::tick`'s own doc comment — losing
-            // this race to a ready packet leaves the interval's deadline
-            // untouched, so nothing is lost by not firing this iteration.
+            // Cancel-safe timer polling: a ready packet leaves the interval's
+            // deadline untouched, so no timer event is lost.
             _ = vitals_interval.tick() => {
                 wasm_vitals_tick(
                     conn,
@@ -16342,9 +14712,8 @@ where
             &mut sprinting,
             &mut awaiting_chunk_batch_ack,
             &mut pending_chunk_batches,
-            // `None`: this target has no `select!` branch draining the stream, so a
-            // column enqueued into it would never be sent. See the parameter's own
-            // comment on `dispatch_play_packet`.
+            // `None`: this loop drains the join stream inline, so no deferred
+            // stream is available to `dispatch_play_packet`.
             None,
             &commands,
             &mut advancements,
@@ -16368,38 +14737,25 @@ where
             player_entity_id,
             &username,
             world_spawn,
-            // Issue #531. `None`: this target has no `tokio::time`, so there is
-            // no tick counter to price a dig's duration against — the same gap
-            // as `vitals` and `container_sync` above. Hardness and range still
-            // validate; only the timing test is skipped.
+            // `None`: no timer tick counter is available for dig duration.
+            // Hardness and range still validate; only the timing check is
+            // skipped.
             None,
             &mut bow_draw,
             &mut item_in_use,
-            // This target has no portal travel (see `serve_play`'s own doc
-            // comment: no `select!`, no `home`, no `pending_travel`), so `source`
-            // is never `SourceRef::Dimension` here and this out-parameter can
-            // never come back `Some` — a throwaway local rather than a signal
-            // anything reads.
+            // This target has no portal-travel state, so `source` never uses
+            // `SourceRef::Dimension` and this out-parameter remains unused.
             &mut None,
             packet_id,
             &payload,
         )
         .await?;
-        // Issue #338 — identical to the native loop, and **not** a gap on this
-        // target: the advancement flush is packet-driven (a criterion flips on
-        // the packet just dispatched, the reply rides this same iteration), so
-        // the missing timers cost nothing here. See the native loop's comment.
+        // Flush advancement changes caused by the packet just dispatched.
         if let Some(update) = advancements.flush_dirty(player_uuid, true) {
             apply(conn, &mut state, proto.encode_update_advancements(&update)).await?;
         }
-        // Issue #469, identical to the native loop's publish. The *drain*,
-        // though, is a real gap on this target: it rides the native loop's
-        // `container_sync_tick`, which `tokio::time` gives this target none
-        // of — the same documented gap `vitals` and `sync_open_container`
-        // already have here. So a `wasm32`-served connection publishes chat
-        // that other connections receive, and receives none itself unless it
-        // is the sole connection (the no-registry echo below). Named rather
-        // than silent, exactly like its two neighbours.
+        // Publish chat to the shared registry when one exists. Without a
+        // registry, echo it directly to this connection.
         for message in outgoing_chat.drain(..) {
             let line = ChatLine {
                 sender: username.clone(),
@@ -16412,17 +14768,14 @@ where
                 }
             }
         }
-        // Issue #438, identical to the native loop — see its own comment for
-        // why this reads `player_pos` back instead of threading the ticket
-        // through `dispatch_play_packet`.
+        // Update the player's streamed position from the packet state.
         if let (Some(ticket), Some(registry), Some((x, y, z))) =
             (player_ticket.as_ref(), entities.players(), player_pos)
         {
             registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
         }
-        // Issue #337, identical to the native loop — the pickup sweep is
-        // packet-driven with no timer, so unlike `vitals`/`sync_open_container`
-        // this target loses nothing. See the native loop's comment.
+        // The pickup sweep is packet-driven, so run it after each dispatched
+        // packet while the player's position is available.
         if let Some((x, y, z)) = player_pos {
             let pickups = collect_nearby_items(
                 mobs,
@@ -16432,16 +14785,15 @@ where
                 player_uuid,
                 world.time().game_time.saturating_mul(50),
             );
-            // Before the slot writes and before `stream_pass`, for the reason the
-            // native loop's own comment gives: the client needs the item entity to
-            // still exist in order to animate it.
+            // Send pickup frames before slot updates and entity streaming so
+            // the client can animate an item entity that still exists.
             for take in &pickups.takes {
                 apply(
                     conn,
                     &mut state,
                     proto.encode_take_item_entity(
                         take.item_entity_id,
-                        // Self-facing, per the earlier native-loop call site.
+                        // Use the local player entity id for the pickup reply.
                         LOCAL_PLAYER_ENTITY_ID,
                         take.amount,
                     ),
@@ -16458,17 +14810,14 @@ where
                     .await?;
                 }
             }
-            // Orb absorption, identical to the native loop. Wired here too rather than
-            // left as a native-only feature: this sweep is packet-driven with no timer,
-            // so `wasm32` loses nothing, and a browser player who could see orbs and not
-            // absorb them would be the worse failure.
+            // Absorb nearby experience orbs as part of the packet-driven sweep;
+            // browser players receive the resulting pickup behavior here.
             if let Some(absorbed) =
                 collect_nearby_orbs(mobs, Vec3::new(x, y, z), &mut experience, &mut take_xp_delay)
             {
                 apply(
                     conn,
                     &mut state,
-                    // Self-facing, per the earlier native-loop call site.
                     proto.encode_take_item_entity(absorbed.orb_entity_id, LOCAL_PLAYER_ENTITY_ID, 1),
                 )
                 .await?;
@@ -16485,7 +14834,7 @@ where
                 .await?;
             }
         }
-        // Issue #262, identical to the native loop — see its own comment.
+        // Publish the latest player rotation to the entity registry.
         if let (Some(ticket), Some(registry), Some(rotation)) =
             (player_ticket.as_ref(), entities.players(), player_rot)
         {
@@ -16661,7 +15010,7 @@ mod tests {
     }
 
     /// **Control**: a slot outside the hotbar or off-hand must be refused —
-    /// vanilla's own `isHotbarSlot(slot) || slot == 40` gate.
+    /// the `hotbar || off-hand` slot gate (`slot == 40` is the off-hand).
     /// Without this, an implementation that skipped the slot check entirely
     /// would still pass the two tests above (both use in-range slots).
     #[test]
@@ -16725,9 +15074,9 @@ mod tests {
         assert!((toughness.base - 8.0).abs() < 1e-6, "toughness {}", toughness.base);
 
         // Control: an unarmoured player still publishes `minecraft:armor`
-        // explicitly, at `0.0` — **not** an absent entry. This is the exact
-        // owner-reported bug (removing the last piece left the HUD frozen at
-        // its last non-zero reading) and the reason
+        // explicitly, at `0.0` — **not** an absent entry. This verifies that
+        // removing the last piece resets the HUD value rather than leaving
+        // its last non-zero reading, and the reason
         // `player_attribute_snapshots` reads named attributes through
         // `AttributeMap::value` rather than iterating the sparse map: an
         // omitted attribute is "unchanged" to the client's merge
@@ -16744,15 +15093,13 @@ mod tests {
         );
     }
 
-    /// **The owner-reported bug, reproduced directly.** Equip a helmet and a
+    /// **The removal sequence, reproduced directly.** Equip a helmet and a
     /// chestplate (distinct per-piece values — `3.0` and `8.0` — so a
     /// transposition or an off-by-one cannot hide), remove them one at a
     /// time, and assert the *sequence* of published armour values: `11.0`
-    /// (both), `8.0` (helmet off — matches "it sort of updates when I remove
-    /// armour"), then `0.0` (chestplate off too — the transition the bug
-    /// dropped). Collected into one list and asserted on together, per
-    /// `CLAUDE.md`'s evidence standard, so a regression names *which* step
-    /// went stale rather than only "some step failed".
+    /// (both), `8.0` (helmet off), then `0.0` (chestplate off too). Collected
+    /// into one list and asserted together, so a failure identifies the
+    /// published value at the affected removal point.
     #[test]
     fn removing_the_last_piece_of_armor_publishes_an_explicit_zero() {
         let mut inv = PlayerInventory::new();
@@ -16794,16 +15141,10 @@ mod tests {
         );
     }
 
-    /// **The control for the assertion of absence above.** Reinstates the
-    /// original `AttributeMap::iter()`-only implementation (reading only
-    /// entries the map happens to hold, the exact code
-    /// `player_attribute_snapshots` had before this fix) and shows it
-    /// reproduces the owner-reported symptom at the final step of the same
-    /// removal sequence: `minecraft:armor` is omitted entirely once the last
-    /// piece comes off, rather than published at `0.0`. Proves the
-    /// `.expect("...must still publish minecraft:armor, explicitly")` above
-    /// would actually have fired against the old code, rather than the fix
-    /// happening to pass vacuously.
+    /// **Control for the explicit zero.** Iterates only attributes present in
+    /// the sparse map and verifies that the final removal omits
+    /// `minecraft:armor` instead of publishing `0.0`. The assertion requires
+    /// the explicit armor entry, so omitting the final publication fails.
     #[test]
     fn the_sparse_iteration_bug_is_caught_by_the_removal_sequence_above() {
         fn buggy_snapshots(inventory: &PlayerInventory) -> Vec<EntityAttributeSnapshot> {
@@ -16992,7 +15333,7 @@ mod tests {
         assert_eq!(sent(&out[0]), (ADD, [20u8].as_slice()));
     }
 
-    /// [`snap`] with a non-empty `metadata` — issue #425's own field list,
+    /// [`snap`] with a non-empty `metadata` — the metadata field list,
     /// generic to any entity (not creeper-specific: `EntityStreamer::sync`
     /// treats `metadata` uniformly, so a `CreeperSwellDir`/`CreeperIgnited`
     /// pair exercises the same code path the next mob's fields will).
@@ -17001,10 +15342,9 @@ mod tests {
     }
 
     /// A spawn whose snapshot already carries non-empty metadata must send
-    /// `ADD` followed by a metadata sync — vanilla's own `ServerEntity`
-    /// pairing behaviour (an initial non-default metadata sync right after
-    /// `ADD_ENTITY`), and the wiring this issue's report ("no swelling
-    /// animation") needed and did not have before.
+    /// `ADD` followed by a metadata sync. The separate metadata frame carries
+    /// the initial non-default values, including a visible "no swelling
+    /// animation" transition.
     #[test]
     fn spawn_with_non_empty_metadata_sends_add_then_metadata() {
         let mut s = EntityStreamer::default();
@@ -17056,7 +15396,7 @@ mod tests {
         assert!(out.is_empty(), "unchanged metadata must not re-send: {out:?}");
     }
 
-    /// [`snap`] with a `leash_link` already set — issue #236.
+    /// [`snap`] with a `leash_link` already set — the spawn-time link packet.
     fn snap_leashed(id: i32, x: f64, target: i32) -> EntitySnapshot {
         EntitySnapshot { leash_link: Some(target), ..snap(id, x) }
     }
@@ -17065,10 +15405,8 @@ mod tests {
     /// a client first spawns it — a fresh join, or walking back into view range
     /// after the attach happened — must still get the rope: `ADD` followed by
     /// `LINK`. A test that only ever leashes a mob the streamer has already sent
-    /// once (an `UPDATE`-path attach) would pass under a fix that only patched
-    /// the update branch and left the spawn branch blind, which is exactly the
-    /// "partial fix that looks complete during testing" this issue's own report
-    /// warns about — nobody would notice until a *second* client joined late.
+    /// once after spawn would not cover this branch. The snapshot therefore
+    /// includes the link at spawn and requires both records.
     #[test]
     fn a_mob_already_leashed_on_spawn_sends_add_then_link() {
         let mut s = EntityStreamer::default();
@@ -17357,7 +15695,7 @@ mod tests {
         assert!(inventory.click_state().carried.is_none());
     }
 
-    /// Issue #692, end to end through the production dispatch path (not just
+    /// This runs end to end through the production dispatch path (not just
     /// `container_click`'s own unit tests): a `ServerBound::SelectBundleItem`
     /// packet's consumer (`inventory.set_selected_bundle_item`) is exactly
     /// what `apply_container_clicked`'s later right-click-extract reads.
@@ -17514,7 +15852,7 @@ mod tests {
         assert!(inventory.crafting().result().is_none());
     }
 
-    /// The anvil end to end through the real click path (issue #254): place a
+    /// The anvil end to end through the real click path: place a
     /// damaged pickaxe and a repair material into the two input cells, take the
     /// derived result, and check both the item mutation and the input-slot
     /// consumption `container_click`'s `take_result` special-cases for
@@ -17567,18 +15905,10 @@ mod tests {
         );
     }
 
-    /// Issue #617: the anvil result can be taken for free without enough XP
-    /// levels, because `container_click` had no vanilla-style slot may-pickup gate at all.
-    /// End to end through `apply_container_clicked` (not just
-    /// `container_click`'s own unit tests): a 0-XP survival player must be
-    /// refused outright — item stays in the result slot, cursor stays empty,
-    /// nothing consumed — matching vanilla's own anvil-menu may-pickup gate's
-    /// `(hasInfiniteMaterials() || experienceLevel >= cost) && cost > 0`.
-    ///
-    /// Two companion arms make the refusal above meaningful rather than
-    /// vacuous: exactly enough levels succeeds, and creative with *zero*
-    /// levels succeeds too (the `hasInfiniteMaterials()` clause) — so this is
-    /// not merely "every anvil click above now fails".
+    /// The anvil result cannot be taken by a survival player without enough XP
+    /// levels. The end-to-end click leaves the result in place, keeps the cursor
+    /// empty, and consumes nothing; exactly enough XP and creative mode both
+    /// allow the take.
     #[test]
     fn a_0_xp_survival_player_cannot_take_a_costed_anvil_result_but_creative_and_enough_levels_can() {
         let same_repair_fixture = |inventory: &mut PlayerInventory| {
@@ -17669,8 +15999,8 @@ mod tests {
             );
         }
 
-        // Creative, 0 XP levels: succeeds unconditionally —
-        // `player.hasInfiniteMaterials()`'s own exemption clause.
+        // Creative, 0 XP levels: succeeds unconditionally because creative
+        // bypasses the experience-cost check.
         {
             let mut inventory = PlayerInventory::new();
             let block_entities = BlockEntityHandle::new();
@@ -17751,7 +16081,7 @@ mod tests {
         );
     }
 
-    /// The grindstone end to end (issue #254): a single enchanted item in one
+    /// The grindstone end to end: a single enchanted item in one
     /// slot strips to curses only, and taking it **fully clears** the input
     /// cell it came from — the grindstone's distinct-from-the-anvil take rule.
     #[test]
@@ -17796,7 +16126,7 @@ mod tests {
         assert_eq!(cells[1], None);
     }
 
-    /// The smithing table end to end (issue #255): a netherite upgrade through
+    /// The smithing table end to end: a netherite upgrade through
     /// the real click path, checking the generic shrink-by-1 take behaviour
     /// (shared with the crafting table) applies to all three input cells.
     #[test]
@@ -17838,11 +16168,8 @@ mod tests {
         assert!(cells.iter().all(Option::is_none), "each of the three inputs was a stack of one and is now consumed");
     }
 
-    /// Issue #253-#255's last mile, half one: typing an anvil name reaches
-    /// [`crate::anvil::compute`] for real (a pure rename costs exactly 1 XP
-    /// level — the number `docs/workstation-economy.md` named as the thing a
-    /// player could not yet see) and re-sending the identical name is a no-op,
-    /// matching vanilla's own anvil-menu item-name setter's own dedup.
+    /// The anvil action reaches [`crate::anvil::compute`] (a pure rename costs
+    /// exactly 1 XP level) and re-sending the identical name is a no-op.
     #[test]
     fn rename_item_prices_a_pure_rename_at_one_and_is_idempotent() {
         let mut inventory = PlayerInventory::new();
@@ -17887,11 +16214,8 @@ mod tests {
         assert!(again.is_empty(), "an unchanged name must not resend anything");
     }
 
-    /// Issue #253-#255's last mile, half two: choosing an enchanting-table
-    /// offer through the real click path actually enchants the item, spends
-    /// XP levels, consumes lapis, and rerolls the seed
-    /// (vanilla's own on-enchantment-performed routine) — the join
-    /// `docs/workstation-economy.md` named as the only thing still missing.
+    /// The enchanting-table action reaches the real click path: choosing an offer
+    /// enchants the item, spends XP levels, consumes lapis, and rerolls the seed.
     #[test]
     fn container_button_click_enchants_the_item_and_charges_xp_and_lapis() {
         struct AirWorld;
@@ -17986,7 +16310,7 @@ mod tests {
         assert!(refused.is_empty(), "an out-of-range button id must be refused");
     }
 
-    /// Issue #150, end to end through the real production dispatch: a
+    /// This runs end to end through the real production dispatch: a
     /// stonecutter menu opens with cobblestone in its input cell, a
     /// `ContainerButtonClick` selects one of the real offers
     /// `crate::stonecutting::matches` computes, and taking the result slot
@@ -18081,7 +16405,7 @@ mod tests {
         );
     }
 
-    /// Issue #150, end to end: a loom with a banner, a dye and a specific
+    /// This runs end to end: a loom with a banner, a dye and a specific
     /// pattern *item* auto-selects that item's one pattern — no
     /// `ContainerButtonClick` needed, matching vanilla's own loom-menu slots-changed routine's own
     /// auto-select branch — and taking the result consumes exactly one
@@ -18195,18 +16519,10 @@ mod tests {
         }
     }
 
-    /// Issue #150's plugin seam, end to end through the real production
-    /// dispatch: [`WiringProofDenySwordUpgrade`] — reproducing
-    /// `lodestone-crafting-warden`'s real, shipped `SmithingSwordBan` logic,
-    /// registered exactly the way a host would register a plugin's hook,
-    /// never called directly — vetoes one specific netherite upgrade by
-    /// driving the *actual* `apply_container_clicked` →
-    /// `apply_workstation_clicked` → `workstation_result` chain a player's
-    /// own smithing-table click goes through. A test calling `on_prepare`
-    /// directly (as `lodestone-crafting-warden`'s own unit tests do, for its
-    /// logic) would be the closed loop `CLAUDE.md` warns about: it would
-    /// prove the hook's answer is correct, never that production asks it
-    /// the question.
+    /// Exercises plugin hook registration through the production smithing
+    /// click path. `WiringProofDenySwordUpgrade` vetoes one netherite upgrade
+    /// when registered, while a sibling upgrade remains allowed, proving that
+    /// dispatch consults the hook for the derived menu result.
     #[test]
     fn a_registered_plugin_hook_vetoes_one_smithing_upgrade_and_allows_a_sibling_one() {
         let hooks = crate::plugin_crafting::CraftingStationHooks::new();
@@ -18286,13 +16602,9 @@ mod tests {
         assert_eq!(taken.item.to_string(), "minecraft:netherite_pickaxe");
     }
 
-    /// Issue #150's plugin seam, the `Replace` half: [`WiringProofBlessAnvilName`]
-    /// — reproducing `lodestone-crafting-warden`'s real, shipped
-    /// `AnvilBlessing` logic — tweaks a real anvil rename's result, driven
-    /// through the actual `apply_rename_item` → `apply_container_clicked` →
-    /// `apply_workstation_clicked` → `workstation_result` chain, exactly the
-    /// packets a real `RenameItem` then a real take produce, never a
-    /// hand-rolled shortcut.
+    /// Exercises the plugin replacement branch through the production anvil
+    /// click path. `WiringProofBlessAnvilName` adds a `[Blessed]` prefix to a
+    /// rename result before the player takes it.
     #[test]
     fn a_registered_plugin_hook_blesses_a_real_anvil_rename_take() {
         let hooks = crate::plugin_crafting::CraftingStationHooks::new();
@@ -18437,7 +16749,7 @@ mod tests {
     }
 
     /// **Control**: no payment item present must refuse the selection
-    /// entirely — vanilla's own `paymentSlot.hasItem()` gate. Without this,
+    /// entirely — a payment item is required. Without this,
     /// the happy-path test above (which does have payment) could not tell a
     /// correct gate from one that never checked at all.
     #[test]
@@ -18519,8 +16831,8 @@ mod tests {
         assert_eq!(after.payment, Some(stack("minecraft:diamond", 1)), "a refused submission must not spend payment");
     }
 
-    /// The crafting **table**'s 3×3 menu, which has no block entity at all (issue
-    /// #529 step 2): clicks reach the table's own grid and the server derives a 3×3
+    /// The crafting **table**'s 3×3 menu, which has no block entity at all:
+    /// clicks reach the table's own grid and the server derives a 3×3
     /// result the 2×2 player screen structurally cannot make.
     #[test]
     fn a_crafting_table_menu_derives_a_3x3_result() {
@@ -18829,7 +17141,7 @@ mod tests {
         );
     }
 
-    // -- brewing stand interaction (issue #252) --
+    // -- brewing stand interaction  --
 
     /// A brewing stand registered at `pos`, and a player inventory whose
     /// selected hotbar slot (0) holds `held`.
@@ -19068,7 +17380,7 @@ mod tests {
         assert_eq!(inventory.native(0), Some(&stack("minecraft:nether_wart", 1)));
     }
 
-    // -- the composter interaction (issue #249) --
+    // -- the composter interaction  --
 
     /// A composter at `pos`, and a player inventory whose selected hotbar slot
     /// (0) holds `held`. `MobHandle::default()` is an empty sim, so the first
@@ -19157,7 +17469,7 @@ mod tests {
 
     /// A non-compostable held item falls through without consuming anything or
     /// touching the composter — the caller's cue to try ordinary placement
-    /// (vanilla `super.useItemOn`).
+    /// so the ordinary placement path can handle it.
     #[test]
     fn a_non_compostable_item_falls_through_without_touching_anything() {
         let (block_entities, mut inventory, pos, mobs) =
@@ -19170,9 +17482,9 @@ mod tests {
         assert_eq!(composter_level(&block_entities, pos), 0);
     }
 
-    /// An empty hand on a not-yet-ready composter falls through too (vanilla
-    /// `useWithoutItem` PASSes below level 8) — you can still place a block on
-    /// top of a partially filled composter.
+    /// An empty hand on a composter below level 8 returns `PASS`, so the
+    /// placement logic may place a block on top of the partially filled
+    /// composter.
     #[test]
     fn an_empty_hand_on_a_not_ready_composter_falls_through() {
         let (block_entities, mut inventory, pos, mobs) =
@@ -19185,8 +17497,7 @@ mod tests {
     }
 
     /// A full (level 7, waiting on its scheduled tick) composter consumes the
-    /// click without touching the hand — vanilla `useItemOn` returns SUCCESS
-    /// at `fillLevel == 7` with nothing to add.
+    /// click without touching the hand at `fillLevel == 7` with nothing to add.
     #[test]
     fn level_seven_consumes_the_click_without_touching_the_hand() {
         let mut composter = Composter::new();
@@ -19242,8 +17553,8 @@ mod tests {
             "exactly one bone-meal item entity must spawn"
         );
         // The first spawn in a fresh `MobSim` is id 1 (its `next_id` starts at
-        // 1), and it must land where vanilla's
-        // `atLowerCornerWithOffset(pos, 0.5, 1.01, 0.5)` puts it.
+        // 1), and it must land at the block's centre with the measured
+        // `1.01`-block vertical offset.
         assert_eq!(
             mobs.with(|sim| sim.item_position(1)),
             Some(Vec3::new(4.5, 65.01, 4.5)),
@@ -19252,8 +17563,8 @@ mod tests {
     }
 
     /// **Control**: extraction reaches the player even with a compostable item
-    /// in hand — the item offer fails `fillLevel < 8` (returns `NotAccepting`)
-    /// and the `useWithoutItem` half extracts without consuming the hand.
+    /// in hand — the item offer fails below level 8 (returns `NotAccepting`)
+    /// and the hand-use half extracts without consuming the hand.
     #[test]
     fn extracting_a_ready_composter_works_even_with_an_item_in_hand() {
         let mut composter = Composter::new();
@@ -19283,8 +17594,8 @@ mod tests {
     }
 
     /// **Control**: a non-compostable item on a *ready* composter also extracts
-    /// — vanilla's item offer fails vanilla's own compostables-table containment guard and
-    /// the `useWithoutItem` half runs, without consuming the hand.
+    /// — the item offer fails the compostability check and the hand-use half
+    /// runs without consuming the hand.
     #[test]
     fn extracting_a_ready_composter_works_for_a_non_compostable_item_too() {
         let mut composter = Composter::new();
@@ -19440,7 +17751,7 @@ mod tests {
     /// (vanilla's own per-variant direction field table): yaw 0 = south, 90 = west, ±180 = north,
     /// -90 = east, split at the 45° midpoints (the value at which
     /// `floor(yaw / 90 + 0.5) & 3` rolls over). This is the facing a placed
-    /// diode then inverts so the block faces the player (issue #475).
+    /// diode then inverts so the block faces the player.
     #[test]
     fn horizontal_look_direction_matches_vanilla_from_y_rot() {
         assert_eq!(horizontal_look_direction(0.0), Direction::South);
@@ -19480,11 +17791,8 @@ mod tests {
     /// The three redstone families keep the full property set the signal model
     /// reads, and everything else falls through to `crate::block_placement`
     /// (whose own tests cover the per-block conventions). The observer is
-    /// deliberately **not** inverted: vanilla's own observer-block placement-state getter
-    /// applies `.getOpposite()` twice (vanilla's own observer-block placement state),
-    /// so it
-    /// watches in the player's look direction — unlike the diodes' single
-    /// inversion (vanilla's own diode-block placement state), which makes them face the player.
+    /// deliberately **not** inverted: it watches in the player's look direction,
+    /// unlike the diodes' single inversion, which makes them face the player.
     #[test]
     fn placed_block_state_faces_diodes_at_the_player_and_observers_with_the_player() {
         let looking = |yaw: Option<f32>| crate::block_placement::PlaceContext {
@@ -19529,18 +17837,15 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // `placement_obstructs_placer` — the server-side half of
-    // Vanilla's own item can-place → level unobstructed check. `apply_use_item_on` had
-    // no obstruction test of any kind before this: the only legality gate was
-    // "is the target cell air or a fluid", so a full block could be placed
-    // through a standing player. These test the pure geometry directly rather
+    // `placement_obstructs_placer` — the server-side obstruction check used by
+    // `apply_use_item_on`. A full block cannot be placed through a standing
+    // player. These tests exercise the pure geometry directly rather
     // than driving the whole `apply_use_item_on` pipeline, which needs a live
     // `ChunkSource`/`BlockEntityHandle`/`MobHandle` fixture this predicate
     // does not touch.
     // -----------------------------------------------------------------
 
-    /// The reported bug, most directly: a full block at the target cell the
-    /// player is standing in must be refused.
+    /// A full block at the target cell occupied by the player must be refused.
     #[test]
     fn placement_obstructs_placer_refuses_a_full_block_at_the_players_feet() {
         let target = BlockPos::new(0, 64, 0);
@@ -19551,8 +17856,8 @@ mod tests {
     /// The discriminating arm: a state with an **empty** collision shape must
     /// never be refused, even at the player's own feet — otherwise this is a
     /// blanket "nothing inside the player" rule rather than a real
-    /// obstruction test, and vanilla legitimately lets you plant a torch (or a
-    /// rail, a pressure plate, redstone dust…) where you stand.
+    /// obstruction test. Empty-shape blocks such as torches, rails, pressure
+    /// plates, and redstone dust remain placeable at those coordinates.
     #[test]
     fn placement_obstructs_placer_allows_an_empty_shape_at_the_players_feet() {
         let target = BlockPos::new(0, 64, 0);
@@ -19635,7 +17940,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // `apply_client_command`'s `dimension_reset` out-parameter — the fix for
+    // `apply_client_command`'s `dimension_reset` out-parameter — the reset for
     // "die in the Nether, respawn to nothing": `encode_respawn` always tells
     // the client `minecraft:overworld` (this crate's one respawn dimension),
     // but nothing reset the *server's* own dimension tracking, so the client
@@ -19708,7 +18013,7 @@ mod tests {
         assert!(handles.block_ticks.is_none());
     }
 
-    /// **The discriminating gate for issue #620.** A sibling with its own
+    /// **The discriminating gate for the validated break path.** A sibling with its own
     /// registry and feed must hand back *that exact instance*, not merely
     /// `Some(_)` — proven by writing a marker through the handle this
     /// function returns and reading it back through the sibling source's own
@@ -19789,15 +18094,14 @@ mod tests {
         assert!(handles.block_ticks.is_none());
     }
 
-    /// No saved player at all: falls back to the world spawn, exactly as
-    /// before this fix existed.
+    /// No saved player at all falls back to the world spawn.
     #[test]
     fn join_position_for_saved_player_is_world_spawn_with_no_save() {
         let spawn = Vec3::new(8.0, 71.0, 8.0);
         assert_eq!(join_position_for_saved_player(None, spawn), spawn);
     }
 
-    /// **The discriminating gate for issue #614's "buried in the ground"
+    /// **The discriminating gate for the "buried in the ground"
     /// report.** The same raw position, saved under two different dimension
     /// tags: the overworld-tagged save is trusted verbatim (predicted to
     /// equal the saved position exactly, not merely "differs from spawn"),
@@ -19848,9 +18152,8 @@ mod tests {
         );
     }
 
-    /// An unparseable/unknown dimension tag — every save written before this
-    /// field was captured accurately — must degrade the same way a genuine
-    /// non-overworld tag does, not be treated as trustworthy by default.
+    /// An unparseable or unknown dimension tag falls back like any other
+    /// non-overworld tag instead of being treated as trustworthy.
     #[test]
     fn join_position_for_saved_player_distrusts_an_unparseable_dimension_tag() {
         let spawn = Vec3::new(8.0, 71.0, 8.0);
@@ -19962,7 +18265,7 @@ mod tests {
         dimension_reset
     }
 
-    /// **The fix.** A death away from home must ask the caller to run the same
+    /// **Death away from home returns a reset request.** A death away from home must ask the caller to run the same
     /// dimension reset a portal trip home runs — carrying the resolved respawn
     /// position (here the world spawn, since no bed is set), or the connection
     /// loop never re-centres `view`/`join_stream` and the client sits at a
@@ -20025,8 +18328,8 @@ mod tests {
         assert_eq!(result, Some(target.entity_id()));
     }
 
-    /// **Control 1.** The identical setup, but not in spectator mode — vanilla
-    /// gates the whole feature on `player.isSpectator()`.
+    /// **Control 1.** The identical setup, but not in spectator mode — the
+    /// feature is restricted to spectator mode.
     #[test]
     fn spectator_action_does_nothing_outside_spectator_mode() {
         let registry = PlayerRegistry::new();
@@ -20090,12 +18393,10 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    /// Issue #241's ominous-bottle consumer half: drinking
-    /// `minecraft:ominous_bottle` to completion grants `minecraft:bad_omen`
-    /// (120000 ticks, amplifier 0 — see [`finish_drinking_ominous_bottle`]'s
-    /// own doc for the disclosed fixed-amplifier narrowing) and consumes the
-    /// bottle, mirroring [`finish_consuming`]'s `still_there`/`consume_one`
-    /// shape exactly.
+    /// Completing a `minecraft:ominous_bottle` use grants
+    /// `minecraft:bad_omen` for 120000 ticks at amplifier 0 and consumes the
+    /// bottle. The assertion covers both the effect result and the held-item
+    /// decrement.
     #[test]
     fn finish_drinking_ominous_bottle_grants_bad_omen_and_consumes_the_bottle() {
         let mut inv = PlayerInventory::new();
@@ -20148,7 +18449,7 @@ mod tests {
         s
     }
 
-    /// Issue #690's central gap: a real timed-effect potion (Strength II) must
+    /// A real timed-effect potion (Strength II) must
     /// land its full, **unscaled** duration and amplifier on the drinker and
     /// consume the bottle — the whole reason this function exists, since before
     /// it every potion in the game did nothing at all.
@@ -20241,7 +18542,7 @@ mod tests {
         assert!(finish_drinking_potion(&mut inv, &started, GameMode::Survival).is_none());
     }
 
-    /// Issue #690's milk gap: drinking milk clears every active effect and
+    /// Drinking milk clears every active effect and
     /// reports exactly the ids that were cleared, and consumes the bucket.
     #[test]
     fn finish_drinking_milk_clears_every_active_effect() {
@@ -20288,11 +18589,10 @@ mod tests {
         assert!(cleared.is_empty());
     }
 
-    /// Issue #694, item 4: `player_overlaps_piston_sweep` is the overlap test
-    /// behind a connection's own `PistonPlayerPush` self-correction. A player
-    /// standing in either the source or destination cell (matching
-    /// `crate::mobs::piston_shove`'s own two positive cases for a mob) must
-    /// overlap; one standing a full block clear of both must not.
+    /// `player_overlaps_piston_sweep` verifies the overlap test used for
+    /// connection-side piston self-correction. A player standing in either the
+    /// source or destination cell must overlap; one standing a full block clear
+    /// of both must not.
     #[test]
     fn player_overlaps_piston_sweep_matches_source_and_dest_but_not_clear_ground() {
         let source = BlockPos::new(4, 0, 0);

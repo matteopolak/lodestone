@@ -1,30 +1,29 @@
 //! `MobSim`'s lightning-bolt slice: the sidecar that turns a decided
 //! [`crate::lightning::Strike`] into a real, ticking, network-visible entity,
-//! and the per-tick effects (`thunderHit`) it plays on whatever else is
+//! and the per-tick effects it plays on whatever else is
 //! standing under it.
 //!
 //! # What it is
 //!
 //! `crates/lodestone-server/src/lightning.rs` already owns every rule here —
 //! strike-target selection, the bolt `life`/`flashes` state machine, and the
-//! `thunderHit` dispatch table — but that module has no entity type to spawn
+//! effect dispatch table — but that module has no entity type to spawn
 //! into (`MobSim` holds mobs and item entities only) and no world to mutate.
 //! This file is the missing "turn a decision into a mutation" half that
 //! module's own doc names as blocked on `crate::mobs`: a
 //! `lightning_bolts: HashMap<i32, LiveBolt>` sidecar beside the existing
-//! `orbs`/`item_state` maps, following [`super::orbs`]'s own shape (no
-//! [`lodestone_entity::ai::navigating_mob::NavigatingMob`]/`GoalSelector` body,
-//! because a bolt has no box and no AI).
+//! `orbs`/`item_state` maps, following [`super::orbs`]'s own shape. A bolt has
+//! no collision box or AI state.
 //!
 //! # How it works
 //!
 //! [`MobSim::spawn_lightning_bolts`] turns each [`Strike`] the driver's
-//! per-chunk `tick_thunder_for_chunk` pass decided on into a [`LiveBolt`] —
+//! per-chunk strike pass decided on into a [`LiveBolt`] —
 //! [`BoltState::new`]'s own `life`/`flashes` roll, this crate's own entity-id
 //! assignment. [`MobSim::tick_lightning`] is the per-tick driver: it runs
-//! [`lightning::tick_bolt`] for every live bolt (including one spawned this
-//! same tick — matching vanilla's own `tickChunks`-then-`entityTickList`
-//! order, the same reasoning `MobSim::tick_falling_blocks`'s caller in
+//! [`lightning::tick_bolt`] for every live bolt (including one spawned during
+//! the same tick — chunk-level lightning runs before entity ticks, the same
+//! ordering that `MobSim::tick_falling_blocks`'s caller in
 //! `crate::tick` already documents for a block-tick-spawned falling block),
 //! collects fire-ignition attempts for the driver, and — for a bolt whose
 //! `hit_entities` fired — resolves [`lightning::resolve_effect`] against every
@@ -42,43 +41,38 @@
 //!   (`crate::tick::run_tick_loop_with_weather`) is expected to test each
 //!   candidate with `crate::fire::can_survive` against the *live* world and
 //!   write `crate::fire::state_for_placement` only where the cell is air and
-//!   survives, matching `LightningBolt.spawnFire`'s own gate.
-//! - **The lightning-rod power pulse, copper waxing/weathering reset and the
-//!   `GAME_EVENT(LIGHTNING_STRIKE)`/thunder-sound pair are not applied.**
+//!   survives, matching the fire-placement gate.
+//! - **The lightning-rod power pulse, copper waxing/weathering reset, game-event
+//!   notification and thunder-sound pair are not applied.**
 //!   [`lightning::BoltTickEffects`] carries real flags for all four
 //!   (`power_lightning_rod`, `clear_copper`, `game_event`,
 //!   `play_thunder_sounds`); this file reads only `fire_attempts` and
 //!   `hit_entities` from it. A disclosed gap, not a silent one — none of the
 //!   four has a consumer here yet.
-//! - **`Creeper.DATA_IS_POWERED` is not streamed, and no "powered" state is
+//! - **The creeper powered flag is not streamed, and no "powered" state is
 //!   recorded anywhere.** [`super::CREEPER_EXPLOSION_RADIUS`]'s own doc
 //!   already discloses this gap for the doubled-explosion half;
-//!   [`LightningEffect::BecomeCharged`] applies the same damage as the
+//!   [`LightningEffect::BecomeCharged`] effect applies the same damage as the
 //!   default case for the same reason — the wire index this would need lives
-//!   in `crates/protocol/v770/src/server_protocol.rs`, off limits to this
-//!   change, and adding a field nothing reads would be exactly the "island"
+//!   in the protocol layer, which does not expose that field. Adding a field
+//!   nothing reads would be exactly the "island"
 //!   shape this repo's own evidence section warns against.
 //! - **A struck mob is not set alight.** `MobSim` has no burn state for a mob
 //!   at all — `crate::burning`'s own module doc: *"`MobSim` has no burn state
 //!   and streams no `on_fire` metadata flag"*, player-only, the same gap
-//!   drowning had before hunger landed. `Entity.thunderHit`'s damage half is
-//!   real here; its ignite half has nowhere to land.
+//!   drowning has no equivalent mob-side state. The damage effect is supported
+//!   here; mob ignition has no state to receive it.
 //! - **The mooshroom variant never actually flips.** No species in this crate
 //!   models a red/brown variant at all (`grep`ping `mobs/species.rs` for
 //!   "mooshroom" finds only diet/breeding/baby-scale tables). So
 //!   [`LightningEffect::ToggleMooshroomVariant`]'s handler records the guard
-//!   (`SimMob::last_lightning_bolt`) and nothing else — landing the guard now,
-//!   with nothing yet behind it to guard, is what keeps a future variant
-//!   field from double-toggling on day one instead of needing its own retrofit.
+//!   (`SimMob::last_lightning_bolt`) and nothing else. The recorded guard prevents
+//!   duplicate toggles if a variant field gains a consumer later.
 //! - **Pig→zombified-piglin and villager→witch conversion is real but
-//!   minimal.** [`convert_species`] is the "despawn-and-respawn primitive"
-//!   this change went looking for — `grep`ping `crate::mobs` for "convert" or
-//!   "ConversionParams" before this change was empty, so it did not exist and
-//!   this is a new, minimal version of it, not a placeholder. It does **not**
-//!   preserve health, equipment, age or leash state: vanilla's own
-//!   `ConversionParams` carries a `keepEquipment`/`preserveCanPickUpLoot` pair
-//!   this sim has no matching state for on the losing side either, so a
-//!   faithful carry-over is a larger unit than one lightning strike.
+//!   minimal.** [`convert_species`] replaces the source record with the target
+//!   species and deliberately does **not**
+//!   preserve health, equipment, age or leash state because this sim has no
+//!   matching transfer state for those fields.
 //!
 //! # Dependencies
 //!
@@ -98,16 +92,14 @@ use crate::mob_spawn::SpawnRng;
 
 use super::MobSim;
 
-/// One live `LightningBolt` sidecar — the lightning twin of
-/// [`super::orbs::OrbState`]: a lifecycle and a fixed position, no motion and
-/// no AI, because vanilla's own `LightningBolt` never moves once struck and
-/// carries no goals.
+/// One live lightning sidecar — the lightning twin of [`super::orbs::OrbState`]:
+/// a lifecycle and a fixed position, with no motion or AI after the strike.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct LiveBolt {
     pub(super) uuid: Uuid,
     pub(super) state: BoltState,
-    /// The bolt's own world position — `Vec3.atBottomCenterOf(pos)`, fixed
-    /// for the bolt's whole life.
+    /// The bolt's world position at the strike cell's bottom centre, fixed for
+    /// the bolt's whole life.
     pub(super) pos: Vec3,
     /// [`lightning::strike_ground_pos`] of `pos`, computed once at spawn since
     /// it never changes across the bolt's life (`tick_bolt`'s own doc
@@ -123,18 +115,18 @@ pub(super) fn lightning_bolt_entity_type() -> ResourceKey {
         .expect("`minecraft:lightning_bolt` is a valid resource key")
 }
 
-/// Floors a world position to the [`BlockPos`] it falls in — vanilla
-/// `BlockPos.containing`'s simple case (no half-open epsilon subtraction,
-/// unlike [`lightning::strike_ground_pos`]'s caller).
+/// Floors a world position to the [`BlockPos`] it falls in. This uses ordinary
+/// floor semantics with no half-open epsilon subtraction, unlike
+/// [`lightning::strike_ground_pos`]'s caller.
 pub(super) fn floor_block_pos(v: Vec3) -> BlockPos {
     BlockPos::new(v.x.floor() as i32, v.y.floor() as i32, v.z.floor() as i32)
 }
 
 impl<'w> MobSim<'w> {
     /// Turns every decided [`Strike`] into a live [`LiveBolt`] —
-    /// `LightningBolt`'s own constructor ([`BoltState::new`]'s `life = 2`,
-    /// `flashes = random.nextInt(3) + 1`) plus this crate's entity-id/uuid
-    /// assignment, the same pattern [`MobSim::spawn_orb`] establishes.
+    /// [`BoltState::new`]'s `life = 2` and `flashes = random.nextInt(3) + 1`,
+    /// followed by this crate's entity-id/UUID assignment, using the same
+    /// pattern as [`MobSim::spawn_orb`].
     pub fn spawn_lightning_bolts(&mut self, strikes: Vec<Strike>, rng: &mut SpawnRng) {
         for strike in strikes {
             let id = self.next_id;
@@ -185,13 +177,13 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// `entities.forEach(entity -> entity.thunderHit(level, this))` — every
-    /// live mob within [`lightning::DAMAGE_RADIUS`] of `bolt_pos`, dispatched
+    /// Every live mob within [`lightning::DAMAGE_RADIUS`] of `bolt_pos` is
+    /// dispatched
     /// through [`lightning::resolve_effect`]. Players are not hit here: this
     /// sim owns no player health (`crate::server`/`PlayerVitals` does), so a
-    /// struck player is a gap this change discloses rather than silently
-    /// drops — the same "mob-side only" boundary [`SimMob::apply_damage`]'s
-    /// every other caller in this file already has.
+    /// struck player is outside this sim's responsibility: player health lives in
+    /// `crate::server`/`PlayerVitals`, so this mob-side method drops that target
+    /// explicitly rather than guessing at player state.
     fn apply_lightning_hits(&mut self, bolt_id: i32, bolt_pos: Vec3, difficulty: Difficulty) {
         let radius_sqr = lightning::DAMAGE_RADIUS * lightning::DAMAGE_RADIUS;
         let targets: Vec<(i32, LightningEffect)> = self
@@ -284,14 +276,14 @@ mod tests {
         SpawnRng::new(0x11DE_7116_5EED_0003)
     }
 
-    /// **The discriminating gate this change exists for.** A strike published
+    /// **The production wiring gate.** A strike published
     /// during a thunderstorm reaches [`MobSim::snapshots`] as a real
     /// `minecraft:lightning_bolt` entity with empty metadata; a sim that never
     /// receives a strike (the "clear weather" arm — modelled here by simply
     /// not calling [`MobSim::spawn_lightning_bolts`], the only producer) never
     /// streams one. A gate that only checked the bolt state machine in
     /// isolation would pass even with nothing wired to `MobSim` at all — see
-    /// this module's own doc for the chain that used to stop exactly there.
+    /// this module's own doc for the complete producer-to-snapshot chain.
     #[test]
     fn a_strike_reaches_the_snapshot_stream_and_a_sim_with_no_strike_streams_none() {
         let world = flat_world();
@@ -381,7 +373,7 @@ mod tests {
         assert_eq!(far_health_after, far_health_before, "a mob far outside DAMAGE_RADIUS must be untouched");
     }
 
-    /// `Turtle.thunderHit` overrides the default with a lethal hit — a struck
+    /// The turtle species overrides the default with a lethal hit — a struck
     /// turtle dies outright rather than taking `DEFAULT_DAMAGE`.
     #[test]
     fn a_struck_turtle_dies_outright() {
@@ -397,10 +389,9 @@ mod tests {
         assert_eq!(sim.len(), 0, "Turtle.thunderHit's Float.MAX_VALUE hit must kill outright");
     }
 
-    /// `Pig.thunderHit`/`Villager.thunderHit` convert to
-    /// `minecraft:zombified_piglin`/`minecraft:witch` on any non-Peaceful
-    /// difficulty — the "despawn and respawn" primitive this change built,
-    /// exercised end to end rather than only unit-tested in isolation.
+    /// On any non-Peaceful difficulty, lightning converts a pig to a
+    /// zombified piglin and a villager to a witch. The test exercises the
+    /// replacement through the complete tick path.
     #[test]
     fn a_struck_pig_converts_to_a_zombified_piglin() {
         let world = flat_world();

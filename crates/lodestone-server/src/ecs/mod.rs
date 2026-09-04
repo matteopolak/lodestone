@@ -1,4 +1,4 @@
-//! The server's own `bevy_ecs::World` (issue [#433], Phase 0 of
+//! The server's own `bevy_ecs::World` (Phase 0 of
 //! `docs/plans/server-ecs-migration.md`).
 //!
 //! # What it is
@@ -61,7 +61,7 @@
 //!   `World` is still shallow.
 //! * **Assert against the production-built `World`, never a hand-built one.** A
 //!   test that builds its own `App` passes whether or not production wires
-//!   anything; that is precisely how #37 happened. The gate below therefore
+//!   anything; a production-wiring check is therefore required. The gate below
 //!   calls `IntegratedServer::open_in_memory_with_mobs`, not
 //!   `ServerApp::bootstrap`.
 //! * **Do not add `lodestone-ecs` to this crate without re-running
@@ -89,8 +89,6 @@
 //! migration free of a second threading model, and it is also why bevy
 //! dispatches these systems as direct calls.
 //!
-//! [#433]: https://github.com/matteopolak/lodestone/issues/433
-//! [#37]: https://github.com/matteopolak/lodestone/issues/37
 
 use bevy_app::App;
 use bevy_ecs::world::World;

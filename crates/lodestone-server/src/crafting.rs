@@ -1,29 +1,27 @@
-//! Server-authoritative crafting (issue #529).
+//! Server-authoritative crafting.
 //!
 //! ## What it is
 //!
 //! The crafting grid the server owns, plus the corpus it resolves a result
-//! against. Before this module the server had **no crafting concept at all**:
-//! [`crate::inventory::PlayerInventory`] dropped menu slots `0..=4` and
-//! `apply_container_clicked` applied whatever slot diff the client claimed,
-//! including the result slot — so a container diff could name any item as a
-//! crafting output and the server would store it.
+//! against. [`crate::inventory::PlayerInventory`] exposes menu slots `0..=4`,
+//! and `apply_container_clicked` treats the client slot diff as a claim rather
+//! than authority, including for the result slot. The server derives the
+//! output from the authoritative grid and recipe corpus.
 //!
-//! **What is still not here**: a crafting-*table* menu — nothing opens one, so the
-//! 3×3 [`CraftingState::table`] has no production caller yet. `PLACE_RECIPE` *is*
-//! here and is now reachable: [`recipe_book_entries`] plus
-//! `ServerProtocol::encode_recipe_book_add` hand out the `RecipeDisplayId`s a
-//! client echoes back (issue #547), and the join path sends the whole book.
+//! **What is still not here**: a crafting-*table* menu — no production path opens one, so the
+//! 3×3 [`CraftingState::table`] has no production caller yet. `PLACE_RECIPE` is
+//! implemented: [`recipe_book_entries`] supplies opaque `RecipeDisplayId`
+//! values, and the join path sends the complete recipe book that those values
+//! index.
 //!
 //! ## How it works
 //!
-//! [`CraftingState`] is vanilla's `CraftingContainer` + `ResultContainer` pair:
-//! `width * height` input cells and one result slot. Every mutation of an input
-//! cell goes through [`CraftingState::set_input`], which immediately re-derives
-//! the result from [`recipe_book`] — the same `RecipeBook` matcher the *client*
-//! uses for its prediction, deliberately not a second one. So the result slot is
-//! never written by anything the client sent — a claimed result is dropped and
-//! the server's own value pushed back in its place.
+//! [`CraftingState`] owns `width * height` input cells and one result slot. Every
+//! input mutation goes through [`CraftingState::set_input`], which immediately
+//! re-derives the result from [`recipe_book`]. The same corpus supports client
+//! prediction and server authority, so the result slot is never written by
+//! anything the client sent — a claimed result is dropped and the server's own
+//! value pushed back in its place.
 //!
 //! The corpus is bundled and embedded (`assets/recipe/`, `assets/tags/item/`, via
 //! `build.rs`), following the `assets/loot_table/` precedent, because the client
@@ -36,7 +34,7 @@
 //! ## How to change it
 //!
 //! To refresh the corpus, re-copy `crafting_shaped` + `crafting_shapeless` +
-//! `stonecutting` (issue #150 added the third — [`crate::stonecutting`] reads
+//! `stonecutting` (the bundled corpus includes the third — [`crate::stonecutting`] reads
 //! it back out of this same corpus, rather than a second bundle) from
 //! `.cache/mc/26.2/src/data/minecraft/recipe/` and all of
 //! `data/minecraft/tags/item/`, then update [`BUNDLED_CRAFTING_RECIPES`]. Both
@@ -63,8 +61,8 @@ include!(concat!(env!("OUT_DIR"), "/embedded_embedded_recipes.rs"));
 include!(concat!(env!("OUT_DIR"), "/embedded_embedded_item_tags.rs"));
 
 /// Number of bundled recipe JSON files — vanilla 26.2's full `crafting_shaped`
-/// (733) plus `crafting_shapeless` (323) set, plus (issue #150, for the
-/// stonecutter) the full `stonecutting` set (319) — 1,375 total. All three
+/// (733) plus `crafting_shapeless` (323) set, plus the full `stonecutting` set
+/// (319) — 1,375 total. All three
 /// live in the same `assets/recipe/` directory and the same
 /// [`EMBEDDED_RECIPES`] table; only the JSON's own `"type"` field
 /// distinguishes them, so no second bundling mechanism was needed to add the
@@ -102,9 +100,9 @@ pub fn recipe_book() -> &'static RecipeBook {
 /// `PLACE_RECIPE` packet's `RecipeDisplayId` refers to.
 ///
 /// **`RecipeDisplayId` is an opaque index the *server* assigns**, not a name:
-/// vanilla hands the client its whole book with `ClientboundRecipeBookAddPacket`
-/// and the client echoes back a position in that list. [`recipe_book_entries`]
-/// encodes that packet, walking this same id-sorted order, so the two index
+/// the server hands the client its whole book and the client echoes back a
+/// position in that list. [`recipe_book_entries`] encodes that packet, walking
+/// this same id-sorted order, so the two index
 /// spaces are one by construction — and
 /// `crates/protocol/v770/tests/recipe_book_add.rs`'s
 /// `every_entry_id_resolves_to_the_same_recipe` asserts it, because a drift here
@@ -114,10 +112,9 @@ pub fn recipe_at_index(index: usize) -> Option<(&'static lodestone_model::Identi
     recipe_book().iter().nth(index)
 }
 
-/// Vanilla's `SlotDisplay`, restricted to the variants a crafting recipe can
-/// produce (issue #547).
+/// The slot-display variants that a crafting recipe can produce.
 ///
-/// `SlotDisplay` is recursive and has eleven registered types; a shaped or
+/// Slot displays are recursive and have eleven registered types; a shaped or
 /// shapeless crafting recipe reaches exactly these five, because
 /// `Ingredient.display()` yields either a `tag` or a `composite` of `item`s, a
 /// result is an `item_stack`, an absent pattern cell is `empty`, and the crafting
@@ -126,7 +123,7 @@ pub fn recipe_at_index(index: usize) -> Option<(&'static lodestone_model::Identi
 /// furnace, brewing and smithing displays, which this corpus does not encode.
 ///
 /// **The variant order below is not the wire order.** Registry ids come from
-/// `SlotDisplays.bootstrap`, and the encoder is the one place that knows them.
+/// the protocol registry, and the encoder is the one place that knows them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlotDisplay {
     /// `empty` — an unfilled pattern cell.
@@ -394,36 +391,32 @@ fn grid_matches(
     })
 }
 
-/// Fills `grid` with `recipe`'s ingredients, taken out of `inventory` — vanilla's
-/// `ServerPlaceRecipe` (issue #529 step 4, the `PLACE_RECIPE` consumer).
+/// Fills `grid` with `recipe`'s ingredients, taken out of `inventory` for a
+/// `PLACE_RECIPE` request.
 ///
 /// # Repeated clicks accumulate, and that is the whole behaviour
 ///
-/// This used to clear the grid on **every** click and place exactly one craft, so
-/// clicking a recipe twice produced one craft's worth both times — the second
-/// click quietly returned the first click's items and took them straight back out.
-/// Vanilla accumulates: its own recipe-placement routine asks
-/// whether the grid already matches the recipe first, and its craft-amount
-/// calculation answers
-/// `smallestStackSize + 1` when it does, against `1` for a fresh grid.
-/// So:
+/// A fresh or different recipe clears the grid and places one craft. When the
+/// grid already matches the recipe, placement adds one more craft; shift-click
+/// placement takes as many ingredients as the inventory allows. The equivalent
+/// craft amounts are `smallest_stack_size + 1` for a matching grid and `1` for a
+/// fresh grid. So:
 ///
 /// | click | grid already holds | result |
 /// |---|---|---|
-/// | plain | nothing, or a different recipe | `clearGrid`, then **one** craft |
+/// | plain | nothing, or a different recipe | clear the inputs, then **one** craft |
 /// | plain | this same recipe | **one more** craft on top, grid not cleared |
 /// | shift (`use_max_items`) | either | as many as the ingredients allow, across multiple source stacks |
 ///
-/// Vanilla reaches the accumulate case by clearing and re-placing `n + 1`; this
-/// reaches it by not clearing and merging one more round, which is observationally
-/// the same and cannot lose items to `PlayerInventory::add`'s stack cap on the way
+/// This implementation reaches the accumulate case by not clearing and merging
+/// one more round, which is observationally the same and cannot lose items to
+/// `PlayerInventory::add`'s stack cap on the way
 /// through. That matters: `add` caps every write at 64 regardless of the item's own
 /// maximum (its own doc says so), so a round trip through the inventory is not
 /// free, and the fewer of them a top-up performs the better.
 ///
-/// **The grid is only cleared once a placement is actually going to happen**, which
-/// is vanilla's ordering too (`canCraft` is consulted *before* `clearGrid`). A click
-/// the player cannot afford must leave the grid alone rather than empty it into the
+/// **The grid is only cleared once a placement is actually going to happen.** A
+/// click the player cannot afford must leave the grid alone rather than empty it into the
 /// inventory — that is a visible change on a click that should have done nothing.
 ///
 /// Returns `false` when the recipe has no placement for this grid's dimensions (a
@@ -487,8 +480,8 @@ pub fn place_recipe(
             }
             break;
         }
-        // `clearGrid`, deferred to here: the first round that is going to succeed
-        // is the point at which vanilla clears, and a round that fails must not.
+        // Clearing is deferred until the first round that is going to succeed;
+        // a round that fails leaves the existing grid untouched.
         if !placed_any && !accumulating {
             for cell in 0..cells {
                 if let Some(existing) = grid.input(cell).cloned() {
@@ -514,12 +507,11 @@ pub fn place_recipe(
 /// The result a `width × height` grid of `cells` produces, from [`recipe_book`].
 ///
 /// The free function behind [`CraftingState::recompute`], extracted so the click
-/// machine can re-derive the result **inside** one `doClick`
-/// ([`crate::container_click::do_click_with`]) rather than only after it. That is
-/// vanilla's `slotsChanged` → `slotChangedCraftingGrid` hook, and it is what makes
-/// a shift-click on the result craft *repeatedly*: vanilla's `QUICK_MOVE` arm loops
-/// `quickMoveStack` while the result slot still holds the same item, which only
-/// terminates because the slot is refilled between iterations.
+/// machine can re-derive the result **inside** one click
+/// ([`crate::container_click::do_click_with`]) rather than only after it.
+/// Recomputing after each grid change makes a shift-click on the result craft
+/// repeatedly: the loop examines the refilled result until the grid or inventory
+/// cannot supply another craft.
 ///
 /// `cells` is row-major and must be `width * height` long; a shorter one is padded
 /// with empties rather than rejected, because the caller is a slot vector and a
@@ -547,8 +539,7 @@ pub fn derive_result(width: usize, height: usize, cells: &[Option<ItemStack>]) -
 /// The server's own crafting grid and the result *it* computed.
 ///
 /// One per open crafting menu. The player inventory screen's 2×2 and a crafting
-/// table's 3×3 are the same type at different dimensions, exactly as vanilla's
-/// `CraftingContainer` is.
+/// table's 3×3 are the same type at different dimensions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CraftingState {
     width: usize,
@@ -558,13 +549,13 @@ pub struct CraftingState {
 }
 
 impl CraftingState {
-    /// A 2×2 grid — the player inventory screen's own (`InventoryMenu`).
+    /// A 2×2 grid for the player inventory screen.
     #[must_use]
     pub fn player() -> Self {
         Self::new(2, 2)
     }
 
-    /// A 3×3 grid — a crafting table's (`CraftingMenu`).
+    /// A 3×3 grid for a crafting table.
     #[must_use]
     pub fn table() -> Self {
         Self::new(3, 3)
@@ -631,7 +622,7 @@ impl CraftingState {
         true
     }
 
-    /// Empty every input cell and the result — vanilla's behaviour on closing a
+    /// Empty every input cell and the result when closing a
     /// crafting menu (the grid's contents are returned to the player, and a
     /// closed menu keeps nothing).
     pub fn clear(&mut self) {
@@ -664,8 +655,8 @@ mod tests {
         assert_eq!(EMBEDDED_ITEM_TAGS.len(), 224);
     }
 
-    /// A real shaped recipe, with the expected result read from vanilla's own
-    /// datapack rather than from our matcher: `crafting_table.json` is four
+    /// A shaped recipe with the expected result read from the bundled datapack
+    /// rather than from the matcher: `crafting_table.json` is four
     /// `#minecraft:planks` in a 2×2 producing one `minecraft:crafting_table`.
     /// Both the shape and the tag resolution have to work for this to pass.
     #[test]
@@ -821,8 +812,7 @@ mod tests {
             "four planks left the source slot, not the whole stack"
         );
 
-        // The second click is the one that used to be a no-op in disguise: it
-        // returned the first click's four planks and took four straight back out.
+        // A second click on the same recipe adds another craft to the existing grid.
         assert!(place_recipe(&mut inventory, &mut grid, recipe, false));
         for cell in 0..4 {
             assert_eq!(
@@ -852,9 +842,8 @@ mod tests {
         }
     }
 
-    /// A **different** recipe clears the grid back into the inventory first, which
-    /// is the other half of the owner's spec ("otherwise roll back the previous one
-    /// or put the items back in general, then dispatch this one").
+    /// A **different** recipe clears the existing grid back into the inventory
+    /// before placing its own ingredients.
     ///
     /// This is the control for the test above: if `grid_matches` answered `true`
     /// unconditionally, that test would pass and this one would find planks still in

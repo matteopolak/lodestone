@@ -1,14 +1,11 @@
 //! The [`BlockPos`]-keyed registry that gives the four block-entity
 //! simulations (`composter`/`furnace`/`hopper`/`brewing`, `docs/block-entities.md`)
-//! somewhere to live in a running world — the first of that doc's three named
-//! gaps.
+//! somewhere to live in a running world.
 //!
-//! Before this module, all four types were plain values a test could
-//! construct and tick, but nothing kept one alive at a world position:
-//! `docs/block-entities.md`'s own words, "there is no `HashMap<BlockPos, T>`
-//! anywhere in this crate's chunk model." [`BlockEntityRegistry`] is that map,
-//! an enum ([`BlockEntity`]) over the four existing types rather than four
-//! separate maps — matching the doc's own suggestion.
+//! Each simulation type remains a plain value, while [`BlockEntityRegistry`]
+//! keeps one at its world position. The registry is an enum
+//! ([`BlockEntity`]) over the four existing types rather than four separate
+//! maps.
 //!
 //! [`BlockEntityHandle`] is the `Arc<Mutex<_>>`-backed, `Clone`, shareable
 //! handle a caller threads between a connection's own task (which needs to
@@ -20,15 +17,12 @@
 //!
 //! # What is deliberately not modeled yet
 //!
-//! * ~~**No redstone/power model.**~~ **Fixed (issue #321).** This claim was
-//!   true when written and is not any more, which is why it is struck through
-//!   rather than deleted: `crate::redstone::best_neighbor_signal` is the
-//!   `hasNeighborSignal` equivalent, and
-//!   [`BlockEntityRegistry::tick_all_with_hopper_lock`] takes each hopper's
-//!   `enabled` from the caller. `crate::random_tick` maintains that property on
-//!   the block state, as `HopperBlock.checkPoweredState` does. Note the
-//!   plain [`tick_all`](BlockEntityRegistry::tick_all) shorthand still ticks
-//!   every hopper unlocked, so a production caller that holds a world must use
+//! * **Hopper power is caller-supplied.** `crate::redstone::best_neighbor_signal`
+//!   provides the signal, and [`BlockEntityRegistry::tick_all_with_hopper_lock`]
+//!   passes each hopper's `enabled` flag into its tick. `crate::random_tick`
+//!   maintains that property on block state. The plain
+//!   [`tick_all`](BlockEntityRegistry::tick_all) shorthand still ticks every
+//!   hopper without the lock, so a production caller that holds a world must use
 //!   the locking form.
 //! * **Hopper adjacency only resolves another hopper.** A real container
 //!   (chest, furnace slots) at the adjacent position is not something this
@@ -44,12 +38,12 @@
 //! * **Partial visual sync.** A furnace's `lit` flip
 //!   ([`Furnace::is_lit`](crate::furnace::Furnace::is_lit), carried out of
 //!   this module as [`BlockEntity::tick_non_hopper`]'s `Option<bool>` return)
-//!   now reaches the client — `crate::tick::run_tick_loop` is the one caller
+//!   reaches the client — `crate::tick::run_tick_loop` is the one caller
 //!   holding both this registry and a `ChunkSource::set_block`, so that is
 //!   where the write happens, not here. Ticking a composter to ready
 //!   ([`Composter::is_ready`](crate::composter::Composter::is_ready)) still
-//!   does not write anything back — a real, separate, still-open gap, not
-//!   attempted here — this module's job is *simulating*, not *rendering*.
+//!   does not write anything back — this module's job is *simulating*, not
+//!   *rendering*.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -79,8 +73,8 @@ pub enum BlockEntity {
     /// chest or barrel. `id` is the block-entity type key, `slots` its
     /// [`CONTAINER_9X3_SIZE`] inventory.
     ///
-    /// It has no `tick`: vanilla's `ChestBlockEntity.lidAnimateTick` is client-side
-    /// animation only, and nothing about its contents changes on its own.
+    /// It has no `tick`: lid animation is client-side only, and nothing about
+    /// the container's contents changes on its own.
     Container {
         /// The `minecraft:block_entity_type` key (`minecraft:chest`, …).
         id: String,
@@ -88,17 +82,15 @@ pub enum BlockEntity {
         slots: Vec<Option<ItemStack>>,
     },
     /// A block entity this crate has no simulation for (vault, decorated pot,
-    /// …). `minecraft:spawner` used to be in this bucket; it is now
-    /// [`BlockEntity::Spawner`].
+    /// …). The full NBT payload is retained for these opaque types.
     /// The vanilla id and the full NBT compound are preserved verbatim so the entity
     /// round-trips through a save/load cycle unchanged.
     Opaque { id: String, nbt: Nbt },
-    /// `minecraft:command_block`/`chain_command_block`/`repeating_command_block`
-    /// (issue #48's remainder). The mode is derived from the block itself
+    /// `minecraft:command_block`/`chain_command_block`/`repeating_command_block`.
+    /// The mode is derived from the block itself
     /// (`crate::command_block::mode_for_block`), never stored here — see that
-    /// module's own doc for the data model, the pure tick semantics ported
-    /// from vanilla, and — importantly — exactly how far command blocks got in
-    /// this pass and what still has to wire them into a running tick loop.
+    /// module's own doc for the data model and the pure tick semantics. The
+    /// running tick loop supplies the player and world context separately.
     CommandBlock(crate::command_block::CommandBlockData),
     /// `minecraft:spawner`. See `crate::mob_spawner`'s own doc for the
     /// decision this state feeds, and `crate::tick::run_tick_loop` for the
@@ -107,20 +99,19 @@ pub enum BlockEntity {
     /// natural-spawn cycle: a spawner needs the player list and the live entity
     /// set, neither of which this registry has a handle to.
     Spawner(crate::mob_spawner::SpawnerState),
-    /// `minecraft:sign`/`minecraft:hanging_sign` (issue #616's `SIGN_UPDATE`
-    /// remainder). See [`SignData`] for the fields and [`apply_sign_update`]
+    /// `minecraft:sign`/`minecraft:hanging_sign` (`SIGN_UPDATE` handling).
+    /// See [`SignData`] for the fields and [`apply_sign_update`]
     /// for the editor gate `SIGN_UPDATE` is checked against.
     Sign(SignData),
-    /// `minecraft:beacon` (issue #616's `SET_BEACON` remainder). See
+    /// `minecraft:beacon` (`SET_BEACON` handling). See
     /// [`BeaconData`] for the fields and `crate::beacon` for the pyramid
     /// detection, effect-selection validation and periodic-application
     /// arithmetic this variant's own state feeds.
     Beacon(BeaconData),
-    /// `minecraft:crafter` — the 9-slot grid `CrafterBlockEntity` carries
-    /// plus its per-slot enabled/disabled bitmask (`CrafterBlockEntity`'s own
-    /// `ContainerData`, indices `0..9`). **Not modelled**: the actual
-    /// auto-crafting trigger (`CrafterBlock`'s redstone-pulse tick, recipe
-    /// matching, result dispensing into the world) — this closes
+    /// `minecraft:crafter` — a 9-slot grid plus its per-slot enabled/disabled
+    /// bitmask (`indices 0..9`). **Not modelled**: the actual auto-crafting
+    /// trigger (redstone-pulse tick, recipe matching, result dispensing into
+    /// the world) — this closes
     /// `CONTAINER_SLOT_STATE_CHANGED`'s own decode/wiring gap, not the
     /// block's mechanism, and `data_properties`'s own doc names `triggered`
     /// (index 9) as the disclosed always-`0` consequence.
@@ -163,18 +154,14 @@ pub struct BeaconData {
     /// The selected secondary power's canonical key (level-4 pyramids only —
     /// see [`crate::beacon::validate_beacon_effects`]), or `None`.
     pub secondary_effect: Option<String>,
-    /// The single payment-slot item, if any — vanilla's `BeaconMenu`'s own
-    /// one-slot `beacon` container. Consumed one at a time by a successful
-    /// `SET_BEACON` (`BeaconMenu.updateEffects`'s own `paymentSlot.remove(1)`).
+    /// The single payment-slot item, if any. It is consumed one at a time by
+    /// a successful `SET_BEACON` action.
     pub payment: Option<ItemStack>,
 }
 
-/// A placed sign's text and edit-permission state — vanilla's
-/// `SignBlockEntity`, reduced to what `SIGN_UPDATE` actually touches.
-/// `SignBlockEntity.updateSignText` only ever rewrites `messages` (plain
-/// strings, formatting codes already stripped by
-/// `ServerGamePacketListenerImpl.handleSignUpdate`'s
-/// `ChatFormatting::stripFormatting`), never `color`/`hasGlowingText` — those
+/// A placed sign's text and edit-permission state, reduced to what
+/// `SIGN_UPDATE` actually touches. The update rewrites `messages` (plain
+/// strings with formatting codes stripped), never `color`/`hasGlowingText` — those
 /// need a dye-interaction path this crate does not model, so they are not
 /// carried here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,16 +266,14 @@ pub fn apply_sign_update(
     true
 }
 
-/// Slot count of vanilla's `generic_9x3` menu — a chest, trapped chest or
-/// barrel (`ChestBlockEntity`'s `NonNullList.withSize(27, …)`).
+/// Slot count of the `generic_9x3` menu — a chest, trapped chest or barrel
+/// (a 27-slot container).
 pub const CONTAINER_9X3_SIZE: usize = 27;
 
-/// Slot count of vanilla's `generic_3x3` menu — a dispenser or dropper
-/// (`DispenserBlockEntity`'s `NonNullList.withSize(9, …)`). Issue #320: this
-/// gives both blocks real, persistent storage the same way the three
-/// `generic_9x3` blocks already have it; `crate::redstone_dispenser`'s own
-/// module doc names the remaining gap (nothing yet threads a live container
-/// into the scheduled fire tick).
+/// Slot count of the 3×3 menu used by a dispenser or dropper. This gives both
+/// blocks real, persistent storage alongside the three
+/// `generic_9x3` blocks; the scheduled fire tick receives no live container
+/// handle, so this storage is updated through explicit container operations.
 pub const CONTAINER_3X3_SIZE: usize = 9;
 
 /// The block-entity type key for a container block, or `None` if that block is
@@ -343,8 +328,8 @@ impl BlockEntity {
 impl BlockEntity {
     /// This entity's `minecraft:block_entity_type` registry key — the `id` field
     /// vanilla writes into the chunk NBT, and the key a protocol crate resolves
-    /// to the VarInt type id the chunk packet's block-entity array carries
-    /// (issue #520).
+    /// to the VarInt type id carried in the chunk packet's block-entity array.
+    /// The chunk writer uses this registry key for that conversion.
     ///
     /// Deliberately *not* [`menu_name`](Self::menu_name): those two agree for
     /// the furnace family and the hopper by coincidence, and disagree for every
@@ -437,7 +422,7 @@ impl BlockEntity {
                 FurnaceKind::BlastFurnace => "minecraft:blast_furnace",
             }),
             BlockEntity::Hopper(_) => Some("minecraft:hopper"),
-            // Issue #320: a dispenser/dropper's `generic_3x3` (9 slots) is
+            // A dispenser/dropper's `generic_3x3` (9 slots) is
             // narrower than a chest/trapped-chest/barrel's `generic_9x3` (27) —
             // the two `Container` shapes share one Rust variant but not one
             // vanilla menu, so this reads the id rather than assuming.
@@ -519,7 +504,7 @@ impl BlockEntity {
                     b.payment = item;
                 }
             }
-            // `CrafterBlockEntity.setItem`: writing *any* item into a slot —
+            // Writing *any* item into a slot —
             // even setting it back to empty, per vanilla's own unconditional
             // check before the write — re-enables it if it was disabled.
             BlockEntity::Crafter { slots, disabled } => {
@@ -535,16 +520,14 @@ impl BlockEntity {
         }
     }
 
-    /// `CrafterBlockEntity.setSlotState` — toggles a crafter's `slot`
+    /// Toggles a crafter's `slot`
     /// enabled/disabled, `CONTAINER_SLOT_STATE_CHANGED`'s own write surface.
     /// `None` (and a `false` return) for any variant other than
     /// [`Crafter`](Self::Crafter): a `CONTAINER_SLOT_STATE_CHANGED` reaching
-    /// a menu that is not really a crafter is exactly the case
-    /// `ServerGamePacketListenerImpl.handleContainerSlotStateChanged`'s own
-    /// `instanceof` chain refuses, reproduced here as the honest "did
-    /// nothing" rather than mutating the wrong shape.
+    /// a menu that is not really a crafter receives the honest "did nothing"
+    /// result rather than mutating the wrong shape.
     ///
-    /// `slotCanBeDisabled`'s own gate — in range *and* currently empty —
+    /// The slot gate — in range *and* currently empty —
     /// applies to **both** directions, not just disabling: vanilla's method
     /// takes an `enabled` bool and runs the identical check regardless of
     /// which way it points, so a slot holding an item cannot be toggled
@@ -577,17 +560,15 @@ impl BlockEntity {
     pub fn data_properties(&self) -> Vec<i32> {
         match self {
             BlockEntity::Furnace(f) => (0..4).map(|i| f.container_data(i)).collect(),
-            // `BeaconBlockEntity`'s own `ContainerData`: `DATA_LEVELS`,
-            // `DATA_PRIMARY`, `DATA_SECONDARY`, in that order
-            // (`BeaconBlockEntity.NUM_DATA_VALUES = 3`).
+            // Beacon data properties: level, primary effect, and secondary
+            // effect, in that order.
             BlockEntity::Beacon(b) => vec![
                 i32::from(b.levels),
                 crate::beacon::encode_beacon_effect(b.primary_effect.as_deref()),
                 crate::beacon::encode_beacon_effect(b.secondary_effect.as_deref()),
             ],
-            // `CrafterBlockEntity`'s own `ContainerData`: indices `0..9` are
-            // the per-slot `SLOT_ENABLED`(`0`)/`SLOT_DISABLED`(`1`) flags,
-            // index `9` is `DATA_TRIGGERED` — always `0` here, since nothing
+            // Indices `0..9` are the per-slot enabled (`0`)/disabled (`1`)
+            // flags; index `9` is the trigger flag — always `0` here, since nothing
             // in this crate ever sets it (the auto-crafting trigger itself is
             // not modelled; see this variant's own doc comment).
             BlockEntity::Crafter { disabled, .. } => {
@@ -915,10 +896,9 @@ impl BlockEntityRegistry {
     ///
     /// **Non-destructive, unlike every other route into the map**, which is the
     /// whole point: world saving has to read the entire registry without
-    /// disturbing the live simulation. Added for #468's remaining half — until
-    /// this existed, the save path could not see a single block entity, so
-    /// `chunk_nbt.rs` wrote an empty `block_entities` list for every chunk and
-    /// a saved chest came back empty.
+    /// disturbing the live simulation. The persistence path reads the complete
+    /// registry without removing entries, so `chunk_nbt.rs` can write every
+    /// block entity in each chunk.
     pub fn iter(&self) -> impl Iterator<Item = (&BlockPos, &BlockEntity)> {
         self.entities.iter()
     }
@@ -975,8 +955,7 @@ impl BlockEntityRegistry {
     }
 
     /// [`tick_all`](Self::tick_all), with each hopper's redstone lock supplied
-    /// by the caller (issue #321) **and the scan bounded by chunk residency**
-    /// (issue #504).
+    /// by the caller and the scan bounded by chunk residency.
     ///
     /// `enabled` receives a hopper's position and answers whether it may
     /// transfer this tick — `false` while redstone-powered. The caller reads it
@@ -1063,7 +1042,7 @@ impl BlockEntityRegistry {
         let mut below = self.entities.remove(&below_pos);
         let mut above = self.entities.remove(&above_pos);
 
-        // Issue #321: the redstone lock. `enabled` is read from the block state
+        // The redstone lock. `enabled` is read from the block state
         // the caller supplies rather than recomputed here, because the block
         // state *is* vanilla's source of truth for it —
         // vanilla's own powered-state check writes
@@ -1115,16 +1094,10 @@ impl BlockEntityHandle {
     }
 }
 
-/// Native tick-loop driver, the direct analogue of
-/// [`crate::mobs::run_mob_tick_loop`] for block entities: owns nothing but
-/// the handle, ticks every [`BLOCK_ENTITY_TICK_INTERVAL`], forever, until the
-/// task is aborted (by [`crate::IntegratedServer`]'s shutdown/drop, exactly
-/// like the mob tick task).
-///
-/// # Superseded as of issue #284 — no longer what production spawns
+/// # Block-state NBT representation
 ///
 /// Renders a canonical block-state string as the `{Name, Properties}` compound
-/// `BlockState.CODEC` reads — the shape any NBT field holding a block state takes.
+/// used by NBT fields that hold a block state.
 ///
 /// `Properties` is omitted entirely for a state with none, matching vanilla's own
 /// codec (an empty map would still decode, but writing one where vanilla writes
@@ -1459,7 +1432,7 @@ mod tests {
         assert_eq!(entity.container_slots()[1], Some(stack("minecraft:emerald", 1)));
     }
 
-    /// Issue #320: a dispenser and dropper each get a real 9-slot
+    /// A dispenser and dropper each get a real 9-slot
     /// `generic_3x3` container — distinct from a chest's 27-slot
     /// `generic_9x3`, which the `menu_name`/`container_slots` split by size
     /// must not collapse into one shape.
@@ -1610,7 +1583,7 @@ mod tests {
         assert_eq!(above.slots()[0], Some(stack("minecraft:diamond", 1)));
     }
 
-    /// Issue #504's fix, isolated from any world/store machinery: a position
+    /// The residency rule, isolated from any world/store machinery: a position
     /// `is_loaded` rejects must not tick at all — not the hopper path, not
     /// the plain `tick_non_hopper` path.
     #[test]
@@ -1650,11 +1623,11 @@ mod tests {
         assert!(f.is_lit(), "control: the identical furnace must light when `is_loaded` says yes");
     }
 
-    /// The other half of issue #504: for a hopper specifically, `enabled` —
-    /// the closure that in production reaches `world.block_state` and is what
-    /// used to generate a whole column per probe — must never even be
+    /// The hopper-specific half: `enabled` —
+    /// the closure that in production reaches `world.block_state` and would
+    /// otherwise generate a whole column per probe — must never even be
     /// *called* for a position `is_loaded` rejects. This is the control that
-    /// the fix bounds the expensive call itself, not just its visible effect:
+    /// the residency check bounds the expensive call itself, not just its visible effect:
     /// counting invocations rather than inferring "did it tick" from state.
     #[test]
     fn tick_all_with_hopper_lock_never_calls_enabled_for_an_unloaded_hopper() {
@@ -1781,8 +1754,8 @@ mod tests {
         assert_eq!(field("progress"), Nbt::Float(0.0), "`progressO`, not `progress`");
         assert_eq!(field("extending"), Nbt::Byte(1));
         assert_eq!(field("source"), Nbt::Byte(0));
-        // `BlockState.CODEC`: a `Name` string plus a `Properties` map whose values
-        // are all strings, including the boolean `short`.
+        // The block-state payload is a `Name` string plus a `Properties` map
+        // whose values are all strings, including the boolean `short`.
         assert_eq!(
             field("blockState"),
             Nbt::Compound(vec![
@@ -1811,10 +1784,9 @@ mod tests {
         );
     }
 
-    /// `run_block_entity_tick_loop` (the standalone background task this test
-    /// used to drive) was deleted as dead code once issue #284 folded block-
-    /// entity ticking into `crate::tick::run_tick_loop`'s own
-    /// `tick_all_with_hopper_lock` call — see that registry method's own doc.
+    /// `crate::tick::run_tick_loop` drives block-entity ticking through
+    /// `tick_all_with_hopper_lock`; this test exercises that registry call
+    /// directly and checks the lock-sensitive behavior.
     /// What this test actually exercises, a furnace advancing correctly over
     /// 200 real ticks of [`BlockEntityRegistry::tick_all`], is unchanged by
     /// which loop calls it, so it is driven directly here instead.
@@ -1866,7 +1838,7 @@ mod tests {
         assert_eq!(crafter.data_properties(), vec![0; 10]);
     }
 
-    /// `CrafterBlockEntity.slotCanBeDisabled`'s own gate applies to **both**
+    /// The slot-occupancy gate applies to **both**
     /// directions — a slot holding an item cannot be toggled either way,
     /// which is the specific case a fixture that only tried disabling could
     /// not see (an already-enabled slot with an item would look identical to
@@ -1906,7 +1878,7 @@ mod tests {
         );
     }
 
-    /// `CrafterBlockEntity.setItem`: placing an item into a disabled slot
+    /// Placing an item into a disabled slot
     /// re-enables it, matching vanilla's own unconditional check.
     #[test]
     fn set_container_slot_re_enables_a_disabled_crafter_slot() {

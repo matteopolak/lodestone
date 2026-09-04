@@ -1,4 +1,4 @@
-//! Sounds, particles and level events the **server** owns (issue #530).
+//! Sounds, particles and level events the **server** owns.
 //!
 //! # What it is
 //!
@@ -125,7 +125,7 @@ pub enum WorldEffect {
         /// The `getUpdateTag` payload, as a nameless compound.
         nbt: lodestone_core::Nbt,
     },
-    /// Issue #694, item 4: a **server-side-only** correction signal, not a
+    /// A **server-side-only** correction signal, not a
     /// wire-mirrored packet like every other variant above (that is why it is
     /// named a "push" rather than after a real clientbound packet, and why
     /// [`crate::ServerProtocol::encode_world_effect`]'s only real
@@ -172,7 +172,7 @@ pub const SOUND_BREWING_STAND_BREW: i32 = 1035;
 
 /// Vanilla's own `SOUND_ZOMBIE_CONVERTED` level-event constant — vanilla's
 /// own conversion-finish routine fires this (`data` unused) the instant a
-/// cured zombie villager becomes a real villager (issue #247).
+/// cured zombie villager becomes a real villager.
 pub const SOUND_ZOMBIE_CONVERTED: i32 = 1027;
 
 /// Strips any `[...]` property suffix, as every canonical-name comparison in
@@ -491,7 +491,7 @@ pub fn mob_ambient_sound(
 
 /// `ZombieVillager.startConverting`'s entity-event sound
 /// (`SoundEvents.ZOMBIE_VILLAGER_CURE`, `entity.zombie_villager.cure`) —
-/// issue #247, played the instant a golden apple starts the conversion
+/// played the instant a golden apple starts the conversion
 /// timer. Category is always `Hostile`, matching `Monster.getSoundSource`
 /// (a converting zombie villager is still a zombie until the timer
 /// completes).

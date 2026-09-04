@@ -1,4 +1,4 @@
-//! Zombie villager curing (issue #247): the conversion timer state machine —
+//! Zombie villager curing: the conversion timer state machine —
 //! vanilla's own zombie-villager start-converting/tick/conversion-progress port.
 //!
 //! # What it is
@@ -59,13 +59,14 @@
 //! # What is not built, named rather than silent
 //!
 //! - **No zombie-villager *spawning* is added here** — natural spawn odds
-//!   (`Zombie`'s own villager-variant roll on hard difficulty),
-//!   `natural_spawn.rs`/`mob_spawn.rs`/`spawn_egg.rs`, are off limits for
-//!   this change. `minecraft:zombie_villager` is already a registered
+//!   (the difficulty-dependent villager-variant roll),
+//!   `natural_spawn.rs`/`mob_spawn.rs`/`spawn_egg.rs` belong outside
+//!   this module. `minecraft:zombie_villager` is a registered
 //!   [`lodestone_data`] entity type and [`crate::mobs::MobSim::spawn_species`]
 //!   can already produce one generically (as a plain hostile zombie, with no
 //!   conversion behaviour) — only the golden-apple/weakness interaction and
-//!   the tick-driven timer this file and `MobSim`'s own wiring add are new.
+//!   the tick-driven timer in this file and `MobSim`'s wiring are the supported
+//!   conversion behavior.
 //! - **No initial-profession roll for a naturally-spawned zombie villager**
 //!   (`initializeZombieVillagerData`'s random profession pick) — the
 //!   `SimMob::profession` a converted villager ends up with is whatever the
@@ -104,9 +105,9 @@ pub struct ConversionState {
     pub remaining_ticks: i32,
 }
 
-/// `random.nextInt(2401) + 3600` — vanilla's own conversion-time roll.
-/// `next_int` takes the same `[0, bound)` contract as
-/// `super::gossip::GossipContainer::transfer_from`'s RNG parameter.
+/// A conversion-time roll in `[3600, 6000]` ticks.
+/// `next_int` receives a bound and returns one draw in `[0, bound)` from the
+/// conversion RNG stream supplied by the caller.
 #[must_use]
 pub fn roll_conversion_ticks(next_int: impl FnOnce(i32) -> i32) -> i32 {
     next_int(2401) + CONVERSION_WAIT_MIN
@@ -128,13 +129,10 @@ pub fn start_converting(starter: Option<Uuid>, next_int: impl FnOnce(i32) -> i32
 ///
 /// `next_f32` is **one** shared `nextFloat()`-shaped stream (`[0.0, 1.0)`),
 /// used for both the initial 1% gate and every block roll after it — matching
-/// vanilla exactly: every draw here is `this.random.nextFloat()` on the
-/// entity's own single `RandomSource`, not two independent streams. (An
-/// earlier version of this function took two separate `FnMut` closures for
-/// "clarity"; that does not compile at the call site once both need to share
-/// one real RNG — two closures each capturing the same `&mut` source
-/// simultaneously is a double-mutable-borrow. One stream is both the correct
-/// port and the only signature that is actually callable.)
+/// every draw here uses the entity's own single RNG stream, not two independent
+/// streams. One shared
+/// RNG stream is passed to both decisions, preserving the single-stream draw
+/// order without competing mutable closures.
 ///
 /// `nearby_special_blocks` is a **lazy** count ([`count_nearby_special_blocks`]'s
 /// result, already capped at [`MAX_SPECIAL_BLOCKS_COUNT`]) evaluated only

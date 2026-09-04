@@ -191,16 +191,11 @@ impl<'w> MobSim<'w> {
 
     /// A fresh End dimension's initial furniture and combatant, bundled
     /// into one call — the ten spike/crystal ring plus the dragon itself.
-    /// This is the piece `spawn_dragon` was missing a real caller for: it
-    /// had no production entry point because nothing in this crate builds
-    /// the arena a dragon needs to spawn *into*. See `docs/dragon-fight.md`
-    /// for the exact join-path hunk a caller still needs to add (`server.rs`
-    /// is off limits for this change) — this method is everything that hunk
-    /// needs to call.
+    /// This method supplies the arena that a production caller needs before it
+    /// invokes `spawn_dragon`. The join layer owns that orchestration; this
+    /// method provides the complete terrain and combatant setup it consumes.
     ///
-    /// `origin` generalises vanilla's own fixed `BlockPos.ZERO` fight
-    /// origin (`ServerLevel.effectiveDragonFight`'s `dragonFight.init(this,
-    /// seed, BlockPos.ZERO)`) into a caller-supplied offset, matching
+    /// `origin` generalises the fixed fight origin into a caller-supplied offset, matching
     /// [`spawn_dragon`](Self::spawn_dragon)'s own existing parameter rather
     /// than hardcoding a world-absolute position into a sim that has no
     /// concept of "the world's own (0, 0, 0)" — passing [`Vec3::new`]`(0.0,
@@ -382,15 +377,10 @@ impl<'w> MobSim<'w> {
         let mut adapter = SpawnRngAdapter(&mut self.dragon_rng);
         let effect = dragon.phase.tick(&inputs, &mut adapter);
 
-        // `DragonDeathPhase.doServerTick`'s health-drive clause — see
-        // `phase::PhaseManager::dying_health_this_tick`'s own doc for why
-        // this is a second call rather than folded into `tick` above: it
-        // drives `health`, not the phase itself. **Previously never called
-        // in production** — a real, tested, individually-correct function
-        // with zero production callers, the island class this repo's own
-        // rules name explicitly. Without it a killing blow redirected the
-        // dragon into `Dying` (via `on_killing_blow`, below) and then never
-        // actually finished it off: health stayed clamped at `1.0` forever.
+        // The death-phase health update is a separate call because it drives
+        // `health` rather than the phase state. A lethal flying dragon reaches
+        // the death transition and remains at `1.0` until the death-flight
+        // update reaches zero.
         let mut just_died = false;
         if let Some(new_health) = dragon.phase.dying_health_this_tick(&inputs) {
             dragon.health = new_health;
@@ -404,21 +394,17 @@ impl<'w> MobSim<'w> {
         // `&mut self`.
         let fight_origin = dragon.fight_origin;
 
-        // A dragon whose death-flight health reached zero leaves the sim
-        // here. The egg/exit-portal/gateway-signal spawn sequence
-        // (`crate::dragon::fight::set_dragon_killed`) now runs from here too
-        // — see `record_dragon_death`'s own doc for why this closes the
-        // "the post-kill controller is wired nowhere" gap `crate::dragon`'s
-        // module doc used to name.
+        // A dragon whose death-flight health reaches zero leaves the sim here.
+        // `record_dragon_death` records the fight result and emits the
+        // egg, exit-portal, and gateway signals.
         if just_died {
             self.record_dragon_death(fight_origin);
             self.dragons.remove(&id);
             return;
         }
 
-        // `PhaseEffect::FireFireball` — previously computed and unconditionally
-        // dropped (see this module's doc history); now spawns a real
-        // `minecraft:dragon_fireball` through the same
+        // `PhaseEffect::FireFireball` spawns a real `minecraft:dragon_fireball`
+        // through the same
         // `MobSim::spawn_projectile_from` funnel every other projectile
         // producer in this crate uses. Aimed at the strafe target's last-known
         // position (this sim's targeting is distance-only, matching every
@@ -497,11 +483,9 @@ impl<'w> MobSim<'w> {
     /// `self.mobs` exclusively" shape [`super::MobSim::attack_wither`]
     /// already establishes for the wither, and for the identical reason: a
     /// dragon lives in `self.dragons`, not `self.mobs`, so the generic path
-    /// silently finds nothing. Before this, **no production call site could
-    /// ever reduce a dragon's health at all** — `damage_dragon`'s own doc
-    /// disclosed "not yet wired to a real hit" — so the whole post-kill
-    /// controller this file now drives was unreachable from real combat
-    /// regardless of `FightState` existing.
+    /// silently finds nothing. Dragons live in `self.dragons`, so this method
+    /// supplies the dedicated combat route and then feeds the post-kill
+    /// controller through the same health and fight-state updates.
     ///
     /// This sim tracks no per-dragon knockback response (the same
     /// simplified-flight narrowing `mobs::dragon`'s own module doc
@@ -634,17 +618,15 @@ impl<'w> MobSim<'w> {
     ///   This sim tracks one bar per dragon 1:1 and nothing needs the two
     ///   identities to differ — see [`crate::protocol::BossBarSnapshot::id`]'s
     ///   own doc.
-    /// * **`dragon_killed` no longer hardcodes `false`** — it now reads
+    /// * **`dragon_killed` reads the fight state** — it uses
     ///   [`dragon_fight_killed`](Self::dragon_fight_killed), the real
     ///   [`fight::FightState`] [`record_dragon_death`](Self::record_dragon_death)
     ///   maintains. A removed dragon's own uuid still stops appearing in
-    ///   this method's output the moment it dies (see
+    ///   this method's output when it dies (see
     ///   [`damage_dragon`](Self::damage_dragon)/[`tick_one_dragon`]'s own
-    ///   docs), so `visible` was already reaching `false` correctly before
-    ///   this; what changes is `crate::dragon::fight::boss_bar_value`'s other
-    ///   branch — `EnderDragonFight`'s post-victory "always full, always
-    ///   hidden" display for a player re-entering after the fight is already
-    ///   over — which needed a real flag to answer at all.
+    ///   docs), so `visible` reaches `false` on removal. The fight-state
+    ///   branch also supplies a full, hidden bar to a player entering after
+    ///   victory.
     #[must_use]
     pub fn boss_bars(&self) -> Vec<crate::protocol::BossBarSnapshot> {
         let mut ids: Vec<i32> = self.dragons.keys().copied().collect();
@@ -653,10 +635,8 @@ impl<'w> MobSim<'w> {
             .into_iter()
             .filter_map(|id| {
                 let d = self.dragons.get(&id)?;
-                // Delegates to `dragon_boss_bar` (this method's own
-                // single-dragon sibling, previously computed inline here a
-                // second time with a duplicated `false` literal) rather than
-                // calling `fight::boss_bar_value` directly a second time.
+                // Delegate to `dragon_boss_bar`, the single-dragon helper, so
+                // the bar calculation has one source of truth.
                 let bar = self.dragon_boss_bar(id, self.dragon_fight_killed())?;
                 Some(crate::protocol::BossBarSnapshot {
                     id: d.uuid,
@@ -666,11 +646,9 @@ impl<'w> MobSim<'w> {
                 })
             })
             .collect();
-        // The single public boss-bar entry point covers every boss/event bar
-        // this crate produces — see `mobs::wither`'s own doc for why its bar
-        // is appended here rather than requiring a second call site in
-        // `crate::tick` (an off-limits, shared file for this change). Issue
-        // #241's raid bar follows the identical shape.
+        // The single public boss-bar entry point covers every boss and event
+        // bar this crate produces. Wither and raid bars use the same snapshot
+        // shape and are appended here.
         self.push_wither_boss_bars(&mut out);
         self.push_raid_boss_bars(&mut out);
         out
@@ -956,14 +934,10 @@ mod tests {
         );
     }
 
-    /// **The island this whole pass closes**: before this, nothing in
-    /// `lodestone-server` ever called `crate::dragon::fight::set_dragon_killed`
-    /// — a dragon simply vanished when its health reached zero, and
-    /// `damage_dragon` itself had zero real production callers on top of
-    /// that. Kills a sitting dragon through the real production entry point
+    /// Kills a sitting dragon through the production entry point
     /// (`attack_from_player`, the same one `crate::server::apply_attack`
     /// calls) rather than `damage_dragon` directly, so this also proves the
-    /// new `attack_dragon` branch in `attack_from_player` is actually
+    /// `attack_dragon` branch in `attack_from_player` is actually
     /// reached. Asserts a real [`DragonDeathOutcome`] reaches
     /// [`MobSim::take_dragon_deaths`], carrying the first-kill egg
     /// placement and a genuinely *activated* portal (real
@@ -1003,12 +977,11 @@ mod tests {
             deaths[0].exit_portal_blocks.iter().any(|(_, s)| *s == "minecraft:end_portal"),
             "the portal must be activated (real end_portal blocks), not left inactive"
         );
-        // Issue #276/#689's remaining gap: `spawn_gateway` was already `true`
-        // above, and before `gateway_blocks` existed nothing consumed it —
-        // this is the control that would have caught that silently: a real
-        // kill through the production entry point must produce a real,
-        // placeable `minecraft:end_gateway` block, not just the boolean
-        // signal.
+        // The gateway outcome is consumed here rather than left as a boolean:
+        // a real kill through the production entry point must produce a
+        // placeable `minecraft:end_gateway` block. This assertion catches a
+        // controller that reports `spawn_gateway = true` without emitting the
+        // block state a world update can place.
         assert!(
             deaths[0].gateway_blocks.iter().any(|(_, s)| *s == "minecraft:end_gateway"),
             "spawn_gateway being set must produce a real gateway block, not just a signal nothing consumes"

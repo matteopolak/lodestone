@@ -1,16 +1,13 @@
-//! Per-section point-of-interest persistence: the `poi/` region set (issue
-//! [#303](https://github.com/matteopolak/lodestone/issues/303)'s second half).
+//! Per-section point-of-interest persistence: the `poi/` region set and its
+//! interaction with the server's world-state behavior.
 //!
 //! # What it is
 //!
-//! The reader/writer for vanilla's third region-file set. Entities and terrain
-//! each have their own; a point of interest — a bed, a workstation, a bell, a
-//! lit nether portal — is a third, keyed by *section*, not by block or chunk,
-//! mirroring vanilla's own POI record/section/manager trio.
-//! Before this module, `grep`ping the workspace for `PoiRecord`/`PoiSection`/
-//! the manager name/`"poi"`/`/poi/` returned exactly one hit — a doc comment in
-//! `crate::portal` noting that vanilla indexes nether portals through
-//! `PoiManager`. No `poi/` region set was read or written anywhere.
+//! The reader/writer for the third region-file set. Entities and terrain each
+//! have their own; a point of interest — a bed, workstation, bell, or lit
+//! nether portal — is keyed by *section*, not by block or chunk. Region files
+//! under `poi/` are read and written with the same atomic replacement rules as
+//! the other persistent region sets.
 //!
 //! # `poi/` is a *third* parallel region set, and its chunk schema agrees with
 //! neither sibling
@@ -31,13 +28,12 @@
 //! }> } }
 //! ```
 //!
-//! `PoiSection.PoiSection.Packed.CODEC`'s `free_tickets` is
-//! `Codec.INT.optionalFieldOf("free_tickets", 0)`: Mojang's codec machinery
-//! omits a field on encode when it equals its declared default, so **absence
+//! `free_tickets` is an optional integer with default `0`; the encoder omits a
+//! field when it equals that default, so **absence
 //! means zero free tickets**, not "unclaimed" — the opposite of what the name
 //! suggests on a skim. The oracle world confirms this directly: every
 //! `minecraft:bee_nest` and `minecraft:nether_portal` record (both registered
-//! with `maxTickets 0`, `PoiTypes.bootstrap`) omits the field, and three
+//! with `maxTickets 0`) omits the field, and three
 //! `minecraft:meeting` (bell, `maxTickets 32`) records carry explicit `28` or
 //! `29` — a real village's bell partway claimed by villagers pathing to a
 //! meeting. A decoder that reads "absent" as "unclaimed" rather than "zero"
@@ -45,8 +41,8 @@
 //! having all 32 tickets free.
 //!
 //! **A POI chunk has no `Position` field of any kind** — unlike both terrain
-//! (`xPos`/`zPos`) and entities (`Position` IntArray[2]). Vanilla's own
-//! generic section storage never writes one; the chunk's coordinate is carried *only* by which slot in
+//! (`xPos`/`zPos`) and entities (`Position` IntArray[2]). The generic section
+//! storage never writes one; the chunk's coordinate is carried *only* by which slot in
 //! the region container it occupies. Code that goes looking for a `Position`
 //! or `xPos` key to double-check which chunk it decoded will find nothing —
 //! trust the region container's own `(local_x, local_z)`, exactly as
@@ -58,37 +54,31 @@
 //! `nether_portal`). `DataVersion` is `4903` in both, matching
 //! [`lodestone_anvil::level_dat::DATA_VERSION_26_2`]. Per-type census: 127
 //! `fisherman`, 43 `home`, 23 `bee_nest`, 6 `nether_portal`, 4 `farmer`, 3
-//! `meeting`, 3 `shepherd`, 1 `cartographer`. `poi_vanilla_oracle.rs` asserts
-//! this exactly, the same "an off-by-one is a wrong-type bug" argument
-//! `entity_nbt_vanilla_oracle.rs` already makes for entities.
+//! `meeting`, 3 `shepherd`, 1 `cartographer`. The committed POI oracle test
+//! asserts this exactly: an off-by-one selects the wrong POI type.
 //!
-//! # Occupancy: what `free_tickets` is for, and the bug a naive port ships
+//! # Occupancy: what `free_tickets` represents
 //!
 //! A POI's whole purpose is answering "is this claimable", and every type has
-//! a maximum simultaneous claim count — [`max_tickets`], transcribed from
-//! `PoiTypes.bootstrap`. [`PoiRecord::has_space`] (vanilla's
-//! `PoiManager.Occupancy.HAS_SPACE`) is the query a villager or a portal
+//! a maximum simultaneous claim count — [`max_tickets`]. [`PoiRecord::has_space`]
+//! is the query a villager or a portal
 //! search actually wants; [`PoiRecord::is_occupied`] is the inverse used for
-//! "does this village have a claimed bell" (`PoiManager.isVillageCenter`,
-//! not ported here — no village distance tracker exists in this codebase and
-//! nothing consumes it yet). **A gate that only checks "the POI was found"
-//! cannot tell a store that honours claims from one that hands out an
-//! all-tickets-taken record anyway** — `poi_persistence_round_trip.rs`'s
-//! occupancy test exists because of exactly that gap.
+//! "does this village have a claimed bell". **A gate that only checks "the POI
+//! exists" cannot tell a store that honours claims from one that hands out an
+//! all-tickets-taken record anyway.** `poi_persistence_round_trip.rs` checks
+//! this distinction through a full occupancy record.
 //!
 //! # How stored records are addressed, and why there is no identity-clearing
 //! logic here
 //!
-//! `crate::entity_storage`'s hardest problem is that an entity *moves*
-//! between chunks, so a save has to clear a mob's stale copy out of wherever
-//! it used to be — solved there by tracking every live UUID. A point of
-//! interest has no such problem: it is a fixed block position, and
+//! A point of interest is a fixed block position, and
 //! [`PoiRecord::pos`] *is* its identity. A caller that wants to persist the
 //! current POI state for a chunk hands [`PoiStorage::save`] the **complete**
 //! [`PoiChunk`] for every chunk it is authoritative for; any chunk **not**
 //! mentioned is left byte-for-byte untouched on disk, exactly like
 //! [`crate::region_source`]'s terrain writer treats an unloaded chunk. This is
-//! simpler than the entity case by construction, not by omission.
+//! this positional identity means the complete authoritative chunk state can
+//! be written without a UUID relocation ledger.
 //!
 //! # How to change it, and the gotchas
 //!
@@ -96,7 +86,7 @@
 //!   [`crate::entity_storage`] and [`crate::region_source`] both document:
 //!   untouched chunks are re-emitted as their original compressed bytes.
 //! - **The write is atomic per region** — temp file, then `rename`.
-//! - **`DataVersion` is checked on read** (issue #305), same as every other
+//! - **`DataVersion` is checked on read**, same as every other
 //!   region set here.
 //! - **Two dimensions, not one.** Unlike [`crate::entity_storage`] and
 //!   [`crate::region_source`], which are overworld-only by established scope,
@@ -111,10 +101,9 @@
 //!
 //! # What is *not* in scope, on purpose
 //!
-//! Nothing here populates a POI from a block scan
-//! (`PoiManager.checkConsistencyWithBlocks`) — nothing in this codebase
+//! Nothing here populates a POI from a block scan — no caller
 //! re-derives POI from placed blocks yet, so [`PoiSection::valid`] is carried
-//! through rather than acted on. What *is* wired: [`crate::integrated`] now
+//! through rather than acted on. What *is* wired: [`crate::integrated`]
 //! calls [`Self::load_all`] at world open (one store per dimension, restoring
 //! [`crate::portal::PortalIndex`] before the first connection is served) and
 //! [`Self::save`] on the same autosave interval and shutdown path
@@ -147,19 +136,16 @@ use lodestone_model::{BlockPos, ResourceKey};
 use crate::dimension::Dimension;
 use crate::region_source::Error;
 
-/// Vanilla's `RegionFileVersion.DEFAULT`, matching the other two region sets.
+/// Compression used by the three persistent region sets.
 const SCHEME: CompressionScheme = CompressionScheme::Zlib;
 
-/// `PoiTypes.bootstrap`'s `maxTickets`, by resource path (the namespace is
-/// always `minecraft` for every type vanilla registers, so matching on
-/// [`ResourceKey::path`] is sufficient and avoids allocating a full
-/// [`ResourceKey`] per arm).
+/// Maximum simultaneous claims by resource path. All built-in keys use the
+/// `minecraft` namespace, so matching on [`ResourceKey::path`] avoids
+/// allocating a full [`ResourceKey`] per arm.
 ///
-/// A type this table does not recognise — a datapack-added one, or a future
-/// vanilla addition this port has not caught up to — gets `0`, the same
-/// answer `PoiTypes.forState` gives for "not a POI block at all". That is the
-/// conservative direction: an unknown type can never be claimed rather than
-/// silently handing out claims a real server would refuse.
+/// An unrecognised type gets `0`, the same result as a block that is not a POI.
+/// This conservative default prevents an unknown type from handing out claims
+/// that the rest of the server cannot validate.
 #[must_use]
 pub fn max_tickets(poi_type: &ResourceKey) -> i32 {
     match poi_type.path() {
@@ -184,9 +170,7 @@ pub struct PoiRecord {
 }
 
 impl PoiRecord {
-    /// A freshly discovered POI — `PoiRecord`'s public constructor, which
-    /// starts every record at its type's full ticket count
-    /// (`poiType.value().maxTickets()`).
+    /// Creates a freshly discovered POI with its type's full ticket count.
     #[must_use]
     pub fn new(pos: BlockPos, poi_type: ResourceKey) -> Self {
         let free_tickets = max_tickets(&poi_type);
@@ -197,20 +181,19 @@ impl PoiRecord {
         }
     }
 
-    /// `PoiRecord.hasSpace` — `PoiManager.Occupancy.HAS_SPACE`'s test.
+    /// Returns whether at least one simultaneous claim remains.
     #[must_use]
     pub fn has_space(&self) -> bool {
         self.free_tickets > 0
     }
 
-    /// `PoiRecord.isOccupied` — true once *any* ticket has been claimed, not
-    /// only when every ticket has.
+    /// Returns whether at least one ticket has been claimed.
     #[must_use]
     pub fn is_occupied(&self) -> bool {
         self.free_tickets != max_tickets(&self.poi_type)
     }
 
-    /// `PoiRecord.acquireTicket`. `false` and unchanged if none remain.
+    /// Claims one ticket, returning `false` without mutation when none remain.
     pub fn acquire_ticket(&mut self) -> bool {
         if self.free_tickets <= 0 {
             return false;
@@ -219,8 +202,8 @@ impl PoiRecord {
         true
     }
 
-    /// `PoiRecord.releaseTicket`. `false` and unchanged if already at the
-    /// type's maximum.
+    /// Releases one ticket, returning `false` without mutation when already at
+    /// the type's maximum.
     pub fn release_ticket(&mut self) -> bool {
         if self.free_tickets >= max_tickets(&self.poi_type) {
             return false;
@@ -229,7 +212,7 @@ impl PoiRecord {
         true
     }
 
-    /// `PoiRecord.Packed.CODEC`'s encode side.
+    /// Encodes the record fields used by the POI interchange format.
     fn to_nbt(&self) -> Nbt {
         let mut fields = vec![
             (
@@ -238,18 +221,16 @@ impl PoiRecord {
             ),
             ("type".to_owned(), Nbt::String(self.poi_type.to_string())),
         ];
-        // `Codec.INT.optionalFieldOf("free_tickets", 0)`: omitted exactly when
-        // it equals the default. See the module doc for why this is not
-        // "omit when unclaimed".
+        // The optional field is omitted exactly at its default of zero. See
+        // the module doc for why absence means no free tickets.
         if self.free_tickets != 0 {
             fields.push(("free_tickets".to_owned(), Nbt::Int(self.free_tickets)));
         }
         Nbt::Compound(fields)
     }
 
-    /// `PoiRecord.Packed.CODEC`'s decode side. `None` if `pos`/`type` do not
-    /// parse — a single bad record must not cost the rest of the section, the
-    /// same argument [`crate::entity_storage::SavedEntity::from_nbt`] makes.
+    /// Decodes the record fields. `None` if `pos` or `type` do not parse; a
+    /// single bad record must not discard the rest of the section.
     fn from_nbt(nbt: &Nbt) -> Option<Self> {
         let pos = match field(nbt, "pos") {
             Some(Nbt::IntArray(parts)) if parts.len() == 3 => {
@@ -279,9 +260,8 @@ pub struct PoiSection {
     /// `PoiSection.isValid` — whether this section's records are believed to
     /// match the blocks currently there. Nothing in this codebase re-derives
     /// POI from a block scan yet (see the module doc's scope note), so a
-    /// section built here is always valid at construction; the field exists
-    /// so a real vanilla section round-trips its own flag rather than this
-    /// port silently normalising every section to one value.
+    /// Sections built here are valid at construction; the field preserves the
+    /// validity flag when an existing section is read and written again.
     pub valid: bool,
     /// Every record in the section, keyed by nothing but its own `pos` — see
     /// [`Self::add`] for how a collision at the same position is resolved.
@@ -298,15 +278,11 @@ impl PoiSection {
         }
     }
 
-    /// `PoiSection.add(BlockPos, Holder<PoiType>)`, inlined with the private
-    /// `add(PoiRecord)` it calls.
+    /// Adds a POI at `pos`, inlined with the record insertion it performs.
     ///
-    /// Three cases, matching vanilla exactly: nothing at `pos` yet inserts
-    /// and returns `true`; the same type already at `pos` is a no-op
-    /// returning `false`; a **different** type already at `pos` is vanilla's
-    /// "POI data mismatch" branch, which logs and then still overwrites —
-    /// ported here as an overwrite with no log, since nothing here consumes
-    /// game-log output.
+    /// Three cases are distinguished: a new position inserts and returns
+    /// `true`; the same type at the position is a no-op returning `false`; a
+    /// different type replaces the existing record and returns `true`.
     pub fn add(&mut self, pos: BlockPos, poi_type: ResourceKey) -> bool {
         if let Some(idx) = self.records.iter().position(|r| r.pos == pos) {
             if self.records[idx].poi_type == poi_type {
@@ -339,14 +315,14 @@ impl PoiSection {
         true
     }
 
-    /// `PoiSection.remove`. `true` if a record was actually there.
+    /// Removes the record at `pos`, returning `true` when one was present.
     pub fn remove(&mut self, pos: BlockPos) -> bool {
         let before = self.records.len();
         self.records.retain(|r| r.pos != pos);
         self.records.len() != before
     }
 
-    /// `PoiSection.getType`'s record, read-only.
+    /// Returns the record at `pos`, read-only.
     #[must_use]
     pub fn get(&self, pos: BlockPos) -> Option<&PoiRecord> {
         self.records.iter().find(|r| r.pos == pos)
@@ -358,12 +334,8 @@ impl PoiSection {
         self.records.iter_mut().find(|r| r.pos == pos)
     }
 
-    /// `PoiSection.getRecords(predicate, occupancy)`, minus vanilla's
-    /// `byType` index — this store is not hot-path enough anywhere in this
-    /// codebase yet to warrant it, and a linear scan over one section's
-    /// records (vanilla bounds a section's POI population implicitly by
-    /// "how many claimable blocks fit in 4096 cells") is not the bottleneck
-    /// [`crate::region_source::RegionCache`] was written for.
+    /// Returns records matching a type predicate and occupancy state. The
+    /// section is small enough that a linear scan is the appropriate index.
     pub fn records_matching<'a>(
         &'a self,
         mut type_predicate: impl FnMut(&ResourceKey) -> bool + 'a,
@@ -388,11 +360,8 @@ impl PoiSection {
         ])
     }
 
-    /// `Codec.BOOL.lenientOptionalFieldOf("Valid", false)`: an absent `Valid`
-    /// decodes to `false`, not `true` — the opposite default from
-    /// [`Self::new`]'s in-memory constructor, and real for the same reason
-    /// `free_tickets`'s default is: it is what the *codec* declares, and only
-    /// matters when the field is missing from a tree we did not write.
+    /// Reads the optional `Valid` flag; omission decodes to `false`, while
+    /// [`Self::new`] creates an in-memory section with `valid = true`.
     fn from_nbt(nbt: &Nbt) -> Self {
         let valid = matches!(field(nbt, "Valid"), Some(Nbt::Byte(b)) if *b != 0);
         let records = match field(nbt, "Records") {
@@ -405,15 +374,14 @@ impl PoiSection {
     }
 }
 
-/// `PoiManager.Occupancy` — which claim states a query wants back.
+/// Claim state a record query can require.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Occupancy {
-    /// `HAS_SPACE` — at least one ticket remains. What a villager, or a
-    /// portal placement, wants when it means to *take* the POI.
+    /// At least one ticket remains available for a new claim.
     HasSpace,
-    /// `IS_OCCUPIED` — at least one ticket has been claimed.
+    /// At least one ticket has been claimed.
     IsOccupied,
-    /// `ANY` — no filter.
+    /// No claim-state filter.
     Any,
 }
 
@@ -430,10 +398,8 @@ impl Occupancy {
 /// Every section of one chunk column — the root of one `poi/` chunk NBT tree.
 #[derive(Debug, Clone, Default)]
 pub struct PoiChunk {
-    /// Keyed by section Y (vanilla's signed section-Y range, e.g. `-4..=19`
-    /// for the overworld) — sections with no POI at all are simply absent
-    /// from the map, matching `SectionStorage.writeChunk`'s own skip of an
-    /// `Optional.empty()` section.
+    /// Keyed by signed section Y (for example, `-4..=19` in the overworld).
+    /// Sections with no POI are absent from the map.
     pub sections: BTreeMap<i32, PoiSection>,
 }
 
@@ -453,7 +419,7 @@ impl PoiChunk {
         ])
     }
 
-    /// Refuses an unreadable `DataVersion` (issue #305), same as every other
+    /// Refuses an unreadable `DataVersion`, same as every other
     /// region set.
     fn from_nbt(nbt: &Nbt) -> Result<Self, lodestone_anvil::Error> {
         lodestone_anvil::require_supported_data_version(match field(nbt, "DataVersion") {
@@ -689,24 +655,12 @@ impl PoiStorage {
         Ok(out)
     }
 
-    /// `PoiManager.getInRange(typePredicate, pos, radius, occupancy)` — every
-    /// POI matching `type_predicate`/`occupancy` whose block position lies
-    /// within `radius` blocks of `center` (real Euclidean distance, not a
-    /// chunk-taxicab approximation), read fresh from disk over exactly the
-    /// chunk-column range the radius can reach.
-    ///
-    /// This is issue #241 (raids)'s own missing primitive: the real trigger,
-    /// traced through the decompile, is `RaidOmenMobEffect.applyEffectTick`
-    /// on the omen's last tick calling `Raids.createOrExtendRaid`, whose own
-    /// village check is exactly this — a flat 64-block radius query over
-    /// occupied `#village`-tagged POIs — **not**
-    /// `isVillageCenter`/`sectionsToVillage`'s section-distance propagation,
-    /// a different subsystem this query does not touch. A caller wiring a
-    /// raid trigger passes `radius: 64`, `occupancy: Occupancy::IsOccupied`,
-    /// and a predicate matching the `#village` POI tag, then averages the
-    /// returned positions into a raid centre itself — this method has no
-    /// opinion about that, matching [`records_matching`](PoiSection::records_matching)'s
-    /// own "return records, let the caller reduce" shape.
+    /// Returns every POI matching `type_predicate` and `occupancy` whose block
+    /// position lies within `radius` blocks of `center`. Distance is Euclidean,
+    /// and the disk is read from exactly the chunk-column range it can reach.
+    /// A raid trigger uses `radius: 64` with `Occupancy::IsOccupied`, then
+    /// averages the returned village records into its raid center; this method
+    /// returns records without choosing that reduction.
     ///
     /// # Errors
     /// As [`Self::load_area`].
@@ -918,9 +872,8 @@ mod tests {
 
     #[test]
     fn max_tickets_matches_poi_types_bootstrap() {
-        // A handful of pairwise-distinct spot checks against
-        // `PoiTypes.bootstrap`'s literal arguments, not a re-derivation of
-        // the same table.
+        // Pairwise-distinct spot checks cover ordinary, multi-claim, portal,
+        // and unrecognised POI types.
         assert_eq!(max_tickets(&home_type()), 1);
         assert_eq!(
             max_tickets(&"minecraft:meeting".parse().expect("valid")),

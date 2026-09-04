@@ -1,9 +1,7 @@
-//! A restart must not turn a lit portal into a duplicate — the gap
-//! `crate::portal::PortalIndex`'s own doc used to name as "the one real
-//! gap", now closed by wiring `crate::poi_storage::PoiStorage` into
-//! `IntegratedServer::open_persistent_with_mobs`, its autosave task and its
-//! shutdown path (issue [#303](https://github.com/matteopolak/lodestone/issues/303)'s
-//! second half).
+//! A restart must not turn a lit portal into a duplicate. This requires
+//! `crate::poi_storage::PoiStorage` to be connected to
+//! `IntegratedServer::open_persistent_with_mobs`, its autosave task, and its
+//! shutdown path.
 //!
 //! # The chain this exercises
 //!
@@ -17,8 +15,8 @@
 //!
 //! # Both dimensions, on purpose
 //!
-//! `PoiStorage` is per-dimension (`crate::poi_storage`'s own doc explains
-//! why), so an implementation that restores only the overworld half compiles,
+//! `PoiStorage` is per-dimension, so an implementation that restores only the
+//! overworld half compiles,
 //! passes a single-dimension gate, and silently loses every Nether portal on
 //! restart. The overworld half below drives the *real* persistent terrain
 //! `IntegratedServer` returns, through the identical object
@@ -28,17 +26,16 @@
 //! `NetherGenerator` — `nether_portal_round_trip.rs` reserves that generator
 //! for an `#[ignore]`d gate because it is too slow to build here — but it
 //! shares the **one real `PortalIndex`** `server.portals()` hands back, so
-//! what is under test is exactly the property the module doc above names:
-//! whether that index carries the Nether's cells across a restart at all, not
-//! whether the Nether's terrain generates.
+//! this test isolates whether that index carries the Nether's cells across a
+//! restart, rather than whether the Nether's terrain generates.
 //!
 //! # The control
 //!
 //! Without the restored index, the identical distant return trip finds
 //! nothing, and [`portal::create_portal`] — what `resolve_destination` calls
 //! next — builds a second portal whose cells are disjoint from the first.
-//! That is the duplicate the bug report named, reproduced directly rather
-//! than asserted from a doc comment.
+//! This reproduces a duplicate directly rather than inferring its absence from
+//! implementation details.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -352,10 +349,10 @@ async fn a_portal_survives_restart_in_both_dimensions_and_is_reused_not_duplicat
          exactly here"
     );
 
-    // The real terrain persisted too (region/ saves, not this change's own
-    // wiring). Checked with **targeted** reads at the exact cells — not a
-    // search — because `RegionChunkSource` has no `ChunkStore` cache in front
-    // of it here (this crate's own docs measure ~909 ms per column through
+    // The real terrain persisted too. The exact cells receive **targeted**
+    // reads rather than a search because reads through `RegionChunkSource`
+    // have no `ChunkStore` cache in front of them here (this crate's own docs
+    // measure ~909 ms per column through
     // that path), and the reuse/control checks below run a search touching
     // hundreds of columns; doing that against the bare persistent source
     // turned this test into a multi-minute disk-bound scan on first sight.
@@ -381,9 +378,8 @@ async fn a_portal_survives_restart_in_both_dimensions_and_is_reused_not_duplicat
 
     // --- reuse, not duplication: overworld --------------------------------
     // 40 blocks away in x, 3 in z: beyond `FALLBACK_SCAN_RADIUS` (8) but well
-    // inside `OVERWORLD_SEARCH_RADIUS` (128) — precisely the band the module
-    // doc's bug report names: too far for the fallback scan, reachable only
-    // through the index.
+    // inside `OVERWORLD_SEARCH_RADIUS` (128): too far for the fallback scan,
+    // but reachable through the index.
     let overworld_origin = BlockPos::new(OVERWORLD_PORTAL.0 + 40, OVERWORLD_PORTAL.1, OVERWORLD_PORTAL.2 + 3);
     let reused = portal::find_exit_portal(
         &overworld_terrain2,

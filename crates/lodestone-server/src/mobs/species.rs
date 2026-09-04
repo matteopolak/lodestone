@@ -8,52 +8,31 @@ use lodestone_model::ResourceKey;
 
 use crate::mob_spawn::SpawnRng;
 
-/// Whether `entity_type` is one of the hostile "monster" species, for the
-/// purpose of picking its [`MobCategory`] and whether it resists natural
-/// despawn.
+/// Whether `entity_type` belongs to the hostile "monster" species category and
+/// therefore resists natural despawn.
 ///
-/// **This no longer decides anything about goals.** It used to be the
-/// hostile-versus-passive switch that gave a monster a `MeleeAttackGoal` and a
-/// farm animal nothing, which is why it was a literal 8-name string match; that
-/// job now belongs to [`lodestone_entity::ai::roster`], keyed per species and
-/// cited against the jar. What is left here is spawn-category data, and it stays
-/// here on purpose: species-to-category is version/registry knowledge, kept
-/// separate from [`crate::mob_spawn::MobCategory`] itself. That type used to be
-/// a second, independent 8-variant `MobCategory` (this crate's own, next to
-/// [`lodestone_entity::spawn::MobCategory`], with its own `check_despawn`) —
-/// issue #518 unified them: `crate::mob_spawn::MobCategory` is now a re-export
-/// of the `lodestone-entity` one, so this module and its callers see one type,
-/// not two.
+/// **This predicate does not select goals.** It answers the spawn-category
+/// question for the versioned species table; goal selection belongs to
+/// [`lodestone_entity::ai::roster`], keyed per species.
 ///
-/// # Where these names come from, and the heuristic that was wrong (issue #457)
+/// # Category membership
 ///
-/// Every path below was read from that species' own registration in
-/// vanilla's own entity-type registration table, which
-/// is where vanilla's `MobCategory` actually lives — `EntityType.Builder.of(X::new,
-/// MobCategory.MONSTER)`. The list previously held the original **eight** and its
-/// doc claimed it "covers exactly the families
-/// [`lodestone_entity::attribute::default_attributes`] templates as `Monster`".
-/// That heuristic is **not equivalent to vanilla's category**, and reading the
-/// registrations is what showed it:
+/// Every path below comes from the species registration table, the authoritative
+/// source for category membership. The attribute template does not determine
+/// category, so the list stays independent:
 ///
-/// * A **ghast** is `MobCategory.MONSTER` (vanilla's own registration) while its
-///   attribute builder is a bare `Mob.createMobAttributes()` with no
-///   `attack_damage` at all (vanilla's own ghast attribute registration). Deriving the category
-///   from the attribute template would have made it a persistent `Creature`.
-/// * A **snow golem** is `MobCategory.MISC` (vanilla's own registration) — neither
-///   `Monster` nor `Creature`. This function is a boolean, so it lands as
-///   `Creature`; that is *not* vanilla's category, merely the safe direction
-///   (`Misc` also never natural-despawns). Recorded here rather than papered
-///   over, because it is the one species in the roster this predicate cannot
-///   represent, and it is the argument for #221's category unification.
+/// * A **ghast** is hostile even though its attribute template has no
+///   `attack_damage`; deriving category from attributes would misclassify it.
+/// * A **snow golem** is neither hostile nor a persistent creature category. This
+///   boolean predicate takes the safe persistent direction for it, because the
+///   alternative would permit natural despawn.
 ///
 /// A species outside this list is still treated as a persistent `Creature`,
 /// which is the safe direction: it will not be despawned out from under a
 /// player. The failure mode this list has is therefore under-listing (a monster
 /// that never despawns), not over-listing.
 ///
-/// This is still a name list, and a name list still ages — see #455 for why the
-/// *goal* half took the structural route instead. What keeps this one honest is
+/// This remains a name list. What keeps it honest is
 /// `every_rostered_monster_is_categorised_hostile` below, which drives the
 /// roster's own species set through it rather than restating the names.
 pub(super) fn is_hostile_species(entity_type: &ResourceKey) -> bool {
@@ -96,8 +75,7 @@ pub(super) fn is_hostile_species(entity_type: &ResourceKey) -> bool {
 /// every species tagged `Enemy` (`Monster`'s whole hierarchy, plus `Ghast`,
 /// `Phantom` and `Shulker`, which implement it directly) refuses a lead, and
 /// every other `Mob` accepts one — **not a curated allowlist**, which is
-/// what an earlier draft of this issue assumed ("its own small vanilla
-/// table"). [`is_hostile_species`] already tracks exactly the `Enemy` set
+/// rather than a hand-curated table. [`is_hostile_species`] tracks the hostile set
 /// for every species this sim spawns today — checked per species against
 /// its own class hierarchy, not assumed from the name overlap — so this is
 /// a thin wrapper rather than a second table that could drift from it.
@@ -482,7 +460,7 @@ pub(super) fn mob_experience_reward(entity_type: &ResourceKey, rng: &mut SpawnRn
     }
 }
 
-/// Gates on [`is_hostile_species`] (issue #457), which stood at the original
+/// Gates on [`is_hostile_species`], which stood at the original
 /// eight names long after the roster grew to twenty-seven species.
 #[cfg(test)]
 mod hostility_category_tests {
@@ -532,9 +510,8 @@ mod hostility_category_tests {
         ("pig", false),
         ("chicken", false),
         ("rabbit", false),
-        // Vanilla's own entity-type registration table registers both the
-        // cat and the parrot as `MobCategory.CREATURE` — issue #229's cat and parrot, neither ever
-        // `MONSTER` however their taming interaction goes.
+        // The cat and parrot use the passive creature category; taming does
+        // not change either category.
         ("cat", false),
         ("parrot", false),
         // neutral — all four are non-`MONSTER` *or* conditionally hostile;
@@ -592,7 +569,7 @@ mod hostility_category_tests {
         );
     }
 
-    /// [`DEMO_SPECIES`]'s two invariants (issue #457): every entry is claimed
+    /// [`DEMO_SPECIES`]'s two invariants: every entry is claimed
     /// by a roster family, and the first six span all five families.
     ///
     /// The first half is what stops a typo or a plausible-but-unrostered name
@@ -600,9 +577,8 @@ mod hostility_category_tests {
     /// exercises nothing — `roster::registrations_for` answers `FALLBACK` for
     /// an unclaimed species rather than failing, so nothing else would notice.
     ///
-    /// The second half is the one that matters for the issue: seeding six
-    /// mobs of six *different monsters* would still leave four families at zero
-    /// pixels, which is the defect, not the fix.
+    /// The family-coverage assertion checks the rendering-sensitive invariant:
+    /// seeding six mobs of six *different monsters* must reach all five families.
     #[test]
     fn demo_species_are_all_rostered_and_span_every_family() {
         use lodestone_entity::ai::roster;

@@ -39,7 +39,7 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("embedded_worldgen.rs");
     fs::write(&out, code).unwrap();
 
-    // Issue #337: the bundled loot-table subset lives under `assets/loot_table/`
+    // The bundled loot-table subset lives under `assets/loot_table/`
     // and is embedded the same way, into its own generated table so the
     // worldgen table above stays byte-identical.
     println!("cargo::rerun-if-changed=assets/loot_table");
@@ -100,9 +100,9 @@ fn main() {
         PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("embedded_structures.rs");
     fs::write(&structure_out, structure_code).unwrap();
 
-    // Issue #529: the crafting corpus the server re-derives a crafting result
+    // The crafting corpus the server re-derives a crafting result
     // from. `assets/recipe/` is vanilla 26.2's `crafting_shaped` +
-    // `crafting_shapeless` set plus (issue #150) the `stonecutting` set —
+    // `crafting_shapeless` set plus the `stonecutting` set —
     // 1,375 files total, the only three recipe types this crate's own
     // matchers consume — and `assets/tags/item/` is the 224 item tags their
     // ingredients reference. **Both, or neither**: a recipe whose ingredient

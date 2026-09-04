@@ -1,39 +1,21 @@
 //! The join burst's generation scheduler: a **primed sliding window** over the
-//! wire order, replacing the per-ring barrier (`docs/plans/worldgen-rewrite.md`
-//! Unit 10).
+//! wire order, with a single-column first emission and bounded concurrency.
 //!
-//! # What the barrier was, and why it can go
+//! # Why the pipeline uses a bounded window
 //!
-//! `crate::server`'s join loop used to walk `crate::server`'s `join_view_rings`
-//! and, for each ring, spawn every one of its columns into the blocking pool and
-//! **wait for all of them** before asking for the next ring. That is a barrier:
-//! ring `r + 1` could not start until ring `r`'s *slowest* column finished, so the
-//! per-ring tails stacked. `5104adf` removed it by spawning all 289–361 columns at
-//! once and `4307b59` reverted that — *"cache contention with 289 concurrent
-//! generator calls"*.
+//! Join generation queues columns by priority and keeps only a bounded number
+//! in flight. The window is derived from `available_parallelism`, not the view
+//! radius ([`generation_window`]), so a large visible area cannot create an
+//! unbounded blocking-pool fan-out.
 //!
-//! Two separate defects were live in that revert, and only one of them was the
-//! cache:
-//!
-//! | defect | fixed by |
-//! |---|---|
-//! | two `Mutex`-guarded FIFO memo caches recomputing on a racing miss, ~5,000 lock attempts on one `Arc<Mutex>` | Unit 6's staged sharded store (`docs/worldgen-staged-store.md`) |
-//! | **in-flight column count scaling with *view radius*** — 289 concurrent blocking-pool threads on an 8-core machine | this module |
-//!
-//! Unit 6 removed the first: a stage now computes exactly once regardless of
-//! arrival order (measured 441/361 exactly, 3 of 3 concurrent 289-column bursts,
-//! against the old cache's varying 452/452/448 and 380/383/372). So the barrier's
-//! stated rationale — "ring 0 seeds the cache" — describes nothing.
-//!
-//! The second defect was never the cache's fault and removing the barrier alone
-//! would reintroduce it. So this module does not go back to `5104adf`'s flat
-//! fan-out: **the in-flight count is derived from `available_parallelism`, not
-//! from the view radius** ([`generation_window`]). That is the whole difference,
-//! and it is why this is a *scheduler* rather than a deletion.
+//! Each staged world-generation cache computes a column once even when several
+//! requests race. The scheduler handles a separate concern: limiting
+//! concurrent generation and preserving deterministic wire order while columns
+//! complete at different speeds.
 //!
 //! # The dependency edges it schedules on
 //!
-//! From the plan's parallel model. For a column `C`:
+//! The dependency model for a column `C` is:
 //!
 //! * fill / surface / carve depend on the seed alone — embarrassingly parallel;
 //! * `ore(C)` reads `pre_ore(3×3(C))`;
@@ -42,10 +24,9 @@
 //!
 //! So two columns at Chebyshev distance ≥ 5 share **no** store entry and are
 //! wholly independent; adjacent columns share 20 of their 25 pre-ore entries.
-//! Those shared entries are the real dependency edges, and Unit 6's per-entry
-//! `OnceLock` is what honours them: a second worker arriving mid-computation
-//! *waits for the value* instead of computing its own copy. **That is the
-//! synchronisation the barrier was standing in for**, and it is per-edge rather
+//! Those shared entries are the dependency edges, and each per-entry `OnceLock`
+//! honours them: a second worker arriving mid-computation *waits for the value*
+//! instead of computing its own copy. The synchronisation is per-edge rather
 //! than per-ring — two workers block only when they need the same chunk's same
 //! stage at the same instant.
 //!
@@ -56,22 +37,22 @@
 //!
 //! # Why "primed"
 //!
-//! Issue #453 is the property that the player's own column reaches the client
-//! after **one** column of generation, not after the whole view. A plain sliding
+//! The player's own column reaches the client after **one** column of
+//! generation, not after the whole view. A plain sliding
 //! window would break it: the window is filled *before* the head is awaited, so on
 //! a fast source the entire window completes before the first emit and
 //! "columns generated before the first chunk was encoded" jumps from 1 to `window`.
 //!
 //! So the window is **1 for the first column and `window` thereafter**
 //! ([`ColumnPipeline::next`]). The head column is generated alone, which is
-//! exactly the one-column serialisation #453 already bought and documented as a
+//! exactly the one-column serialisation documented as a
 //! deliberate trade; every column after it runs with the window fully open. The
-//! barrier is deleted for rings 1..=r and kept, deliberately, for the single
+//! barrier is absent for rings 1..=r and retained, deliberately, for the single
 //! column of ring 0.
 //!
 //! This is a **counter**, not a timing: `join_scheduler_gates.rs` asserts
-//! `columns_completed_before_first_emit == 1` on both arms and shows the pre-#453
-//! flat shape reporting 289.
+//! `columns_completed_before_first_emit == 1` on both arms, while the window
+//! keeps the remaining columns in flight behind that first emission.
 //!
 //! # Only the `SourceRef::Shared` arm is scheduled, and that is not an oversight
 //!
@@ -88,19 +69,18 @@
 //! across the two arms is the **wire order**, which is what the client sees and
 //! what both `805a1fb` gates assert.
 //!
-//! # The wire order, which this module now *does* decide
+//! # The wire order
 //!
-//! It used to be `crate::server`'s `join_view_rings` alone. Two things changed
-//! that, and neither weakens the property the gates protect:
+//! The pending stream uses two properties while preserving the wire order:
 //!
-//! * the join no longer finishes before the play loop starts — the innermost
-//!   rings go out inline and the rest becomes a [`JoinChunkStream`] the play loop
+//! * the join emits its innermost rings inline, and the rest becomes a
+//!   [`JoinChunkStream`] the play loop
 //!   drains, so the *pending* set outlives the moment its order was chosen;
 //! * a pending set that outlives that moment can be re-keyed, which is what
 //!   "generate where the player is looking, and re-sort when they move" needs
 //!   ([`ColumnQueue`], [`priority_key`]).
 //!
-//! So the order is now `(Chebyshev distance, in-frustum bonus, ring-walk index)`.
+//! The order is `(Chebyshev distance, in-frustum bonus, ring-walk index)`.
 //! With **no rotation known** — every client that has not yet sent a movement
 //! packet, which includes every ordering gate in this crate — that key reduces to
 //! the ring walk exactly, because distance *is* the ring index and the tie-break
@@ -549,7 +529,7 @@ fn yaw_sector(yaw_degrees: f32) -> i32 {
 /// together. `join_parallel_efficiency.rs`'s
 /// `a_small_window_shows_no_lock_on_the_shared_generator` is that assertion.
 ///
-/// That is why the coefficient is now 1 rather than a fitted 0.8: it is a
+/// The coefficient is 1 rather than a fitted 0.8 because it is a
 /// *machine-derived proxy* for a cache bound this code cannot query, it lands
 /// inside the measured floor, and the encode overlap the 2 was buying is worth far
 /// less than the capacity it spent. `join_parallel_efficiency.rs`'s
@@ -561,7 +541,7 @@ fn yaw_sector(yaw_degrees: f32) -> i32 {
 ///
 /// Each in-flight `column()` call pins its own pre-ore neighbourhood in the staged
 /// store — `COLUMN_CLOSURE_RADIUS + REFS_RADIUS = 10`, so 21×21 = 441 entries per
-/// column since #514 (§12.130), against a retention ceiling of 2,048 derived from
+/// column under the 2,048-entry retention ceiling derived from
 /// the 289-column burst's own 37×37 closure. At `P` in flight nothing is evicted
 /// for the duration of the burst, which is what licenses reading the stage counters
 /// as one-per-chunk; halving the window can only make that more true.
@@ -720,17 +700,13 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     ///
     /// # Why a join pipeline is the right home for a *move*
     ///
-    /// `crate::server`'s `ViewTracker` used to generate and encode the whole
-    /// newly-visible strip in one `await` on the connection task: `2r + 1` columns,
-    /// 33 at `view_radius = 16`, produced before a single one reached the wire.
-    /// Offloading that to the blocking pool moved the *work* but not the *latency* —
-    /// the connection task still had one suspension point covering all 33, so for its
-    /// whole duration the connection read nothing and wrote nothing. A join used to
-    /// have exactly that shape and does not any more; a move had it and kept it.
+    /// A newly visible strip contains `2r + 1` columns (`33` at
+    /// `view_radius = 16`). Enqueuing it here lets the connection task keep
+    /// reading and writing while the blocking pool generates the strip; one
+    /// await covers only the first strip segment.
     ///
-    /// Enqueueing into the live pipeline instead makes the two paths one path, which
-    /// buys three things beyond the latency: the strip is generated with the same
-    /// primed window rather than as one fan-out-and-join, it is re-keyed by
+    /// Enqueueing into the live pipeline gives the strip the same primed window
+    /// as the initial join, re-keys it through
     /// [`reprioritise`](Self::reprioritise) as the player keeps moving, and there is
     /// no second ordering rule to drift.
     ///
@@ -1433,7 +1409,7 @@ mod tests {
         );
     }
 
-    /// Issue #453, as a counter: exactly **one** column has been generated at the
+    /// As a counter, exactly **one** column has been generated at the
     /// moment the first one is emitted. This is what "primed" buys, and it is the
     /// property a plain sliding window would lose.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

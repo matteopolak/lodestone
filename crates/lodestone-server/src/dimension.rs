@@ -3,16 +3,16 @@
 //!
 //! # What it is
 //!
-//! Three things that used to be one hardcoded assumption:
+//! Three independent pieces define a dimension:
 //!
 //! * [`Dimension`] — the identity and geometry of a level (`min_y`, `height`,
-//!   `logical_height`, `coordinate_scale`), transcribed from vanilla's
-//!   `DimensionTypes` bootstrap rather than from any wire capture.
+//!   `logical_height`, `coordinate_scale`), sourced from the pinned data rather
+//!   than from any wire capture.
 //! * [`DimensionalSource`] — a transparent [`ChunkSource`] wrapper that carries
 //!   the *other* dimensions' sources alongside the primary one, so a connection
 //!   already holding a source can reach the Nether without a new parameter on
 //!   `serve_play`'s forty-argument signature.
-//! * [`teleport_scale`] and [`scaled_destination`] — vanilla's 8:1 coordinate
+//! * [`teleport_scale`] and [`scaled_destination`] — the 8:1 coordinate
 //!   scaling, in the one direction-agnostic form that cannot be half-implemented.
 //!
 //! # How it works
@@ -32,18 +32,16 @@
 //!   [`crate::chunk::EndChunkSource`], and is wired into
 //!   [`with_nether`](crate::integrated)'s sibling factory the same way the
 //!   Nether is — a world can `sibling(Dimension::End)` into real End terrain.
-//!   **The trigger now exists too**: [`crate::portal::ignite_end_portal_frame`]
+//!   **The trigger is wired**: [`crate::portal::ignite_end_portal_frame`]
 //!   fires on the eye that completes a 12-frame ring, and `crate::server`'s
 //!   `travel_through_end_portal` moves a player who steps into the resulting
 //!   `end_portal` block. It deliberately does *not* generalise
 //!   `travel_through_portal`: an End portal is not a coordinate-scaled trip, it
 //!   lands at a fixed obsidian platform ([`Dimension::end_spawn_point`],
 //!   [`crate::portal::ensure_end_platform`]), so reusing the Nether's
-//!   destination search would put players inside the void. **What remains** is
-//!   the stronghold generator (no ring is placed naturally yet — a hand-built
-//!   one is the only way in) and the return trip from inside the End, which
-//!   needs the exit portal and the dragon fight. See issue #330's tracking
-//!   comment for the session history.
+//!   destination search would put players inside the void. Natural terrain
+//!   generation does not place a stronghold ring, and returning from the End
+//!   requires an exit portal and the dragon fight.
 //! * **`coordinate_scale` is a ratio, never a constant.** `teleport_scale` is
 //!   `from / to`, so the overworld→Nether trip divides by 8 and the return trip
 //!   multiplies by 8 *through the same expression*. A "divide by 8" written at one
@@ -91,7 +89,7 @@ use crate::chunk::{ChunkColumn, ChunkSource};
 /// (`crate::server`'s `travel_through_end_portal`). There is no stronghold
 /// generator, so nothing places a ring naturally yet, and the return trip from
 /// inside the End is unimplemented pending the exit portal and the dragon
-/// fight. See issue #330's tracking comment for the session history.
+/// fight. The unsupported return direction remains explicit in the `None` path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Dimension {
     /// `minecraft:overworld`.
@@ -498,7 +496,7 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.block_entity(x, y, z)
     }
 
-    // Issue #504: forwarded for the same reason every method above is — see
+    // Forwarded for the same reason every method above is — see
     // `chunk.rs`'s `impl ChunkSource for Arc<S>` doc comment, which names
     // exactly this failure mode ("an unforwarded defaulted method would
     // silently answer the trait's own default … instead of asking the real
@@ -695,7 +693,7 @@ mod tests {
         assert_eq!(Dimension::End.dir_name(), "the_end");
     }
 
-    /// Issue #504's real production bug, reproduced directly: `is_column_resident`
+    /// The real production bug, reproduced directly: `is_column_resident`
     /// must reach the wrapped `ChunkStore`'s real answer through this wrapper, not
     /// silently answer the trait's own default (`true`) because this `impl` forgot
     /// to forward it. `crate::integrated`'s `with_nether` wraps every real

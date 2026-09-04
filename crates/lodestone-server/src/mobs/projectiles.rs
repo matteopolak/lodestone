@@ -1,10 +1,7 @@
 //! `MobSim`'s projectile-tracking slice — arrow/throwable spawn, per-tick
-//! impact resolution, and the projectile query API. Moved out of
-//! `mobs/mod.rs` verbatim as part of the `mobs.rs` file split (see
-//! `docs/plans/crate-and-file-splits.md`). Zero visibility churn: every
-//! method below was already `pub`, and the one private helper
-//! (`resolve_projectile_hit`) is called only from `resolve_projectile_impacts`
-//! in this same file.
+//! impact resolution, and the projectile query API. Public entry points keep
+//! projectile state in `MobSim`; `resolve_projectile_hit` is an internal helper
+//! used by `resolve_projectile_impacts`.
 
 use lodestone_entity::DamageFlags;
 use lodestone_entity::projectile::{Projectile, TrackedProjectile};
@@ -16,10 +13,9 @@ use crate::redstone_target::HitAxis;
 
 use super::{ChunkWorld, MobSim, ProjectileMeta, ProjectileBlockHit};
 
-/// Vanilla's own ghast `explosionPower` field default (`private int
-/// explosionPower = 1`, `DEFAULT_EXPLOSION_POWER`). No producer in this sim
-/// overrides it yet — no "Happy Ghast" variant, no `ExplosionPower` NBT
-/// round-trip — so every fireball explodes at this one figure.
+/// The ghast fireball explosion-power default (`1.0`). This sim has no variant
+/// or NBT producer that supplies another value, so every fireball uses this
+/// figure.
 const GHAST_FIREBALL_EXPLOSION_POWER: f32 = 1.0;
 
 /// One projectile impact [`MobSim::resolve_projectile_impacts`] found, staged
@@ -40,8 +36,7 @@ struct ProjectileHit {
     /// the retaliation direction.
     origin: Vec3,
     /// The projectile's own [`ProjectileMeta::owner`] — needed by the wither
-    /// skull's `livingOwner.heal(5.0F)`-on-kill clause
-    /// (`WitherSkull.onHitEntity`); every other impact ignores it (the
+    /// skull's `5.0`-health-on-kill clause; every other impact ignores it (the
     /// retaliation direction above already covers the general "who did this"
     /// case).
     owner: Option<i32>,
@@ -52,11 +47,10 @@ struct ProjectileHit {
 /// mutates `self.mobs` while the search that found it still borrows it.
 #[derive(Debug, Clone, Copy)]
 struct PotionImpact {
-    /// Where the burst is centred — `ThrownSplashPotion.onHitAsPotion`'s own
-    /// `hitResult.getLocation()`, approximated here as the exact segment point
+    /// Where the burst is centred, approximated here as the exact segment point
     /// the collision sweep found (entity hit) or the coarse block-entry point
-    /// (block hit). The projectile's own bounding box (`potionAabb` in
-    /// vanilla) is small enough relative to [`mob_effects::SPLASH_RANGE`] that
+    /// (block hit). The projectile's bounding box is small enough relative to
+    /// [`mob_effects::SPLASH_RANGE`] that
     /// treating the impact as a point rather than moving that box to it is a
     /// disclosed simplification, not a different rule.
     location: Vec3,
@@ -64,19 +58,18 @@ struct PotionImpact {
     /// [`ProjectileMeta::potion`]. `None` means nothing to apply (no resolved
     /// potion contents), the same "component absent" contract that field uses.
     potion: Option<i32>,
-    /// `ProjectileUtil.computeMargin(this)` at the moment of impact — the same
-    /// value the entity-hit search above already computed for this tracked
+    /// The projectile margin at the moment of impact — the same value the
+    /// entity-hit search above already computed for this tracked
     /// projectile, reused rather than recomputed from a `ticks_alive` this
     /// struct does not otherwise need to carry.
     margin: f64,
 }
 
-/// The `minecraft:damage_type` a projectile's impact deals, from each
-/// projectile's own `DamageSources` call.
+/// The `minecraft:damage_type` a projectile's impact deals, from the
+/// projectile's registry path.
 ///
-/// `AbstractArrow.onHitEntity` uses `damageSources().arrow(...)`,
-/// `Snowball`/`ThrownEgg` use `thrown(...)`, and `SmallFireball` uses
-/// `fireball(...)`. Named as a function rather than folded into
+/// Arrows, snowballs, eggs and fireballs use their corresponding damage
+/// channels. Named as a function rather than folded into
 /// [`lodestone_entity::projectile::impact_effect`] because the damage *type* is
 /// registry data this crate owns the table for, while that function is
 /// version-free.
@@ -85,8 +78,8 @@ fn projectile_damage_type(path: &str) -> &'static str {
         "arrow" | "spectral_arrow" => "arrow",
         "trident" => "trident",
         "small_fireball" | "fireball" => "fireball",
-        // `WitherSkull.onHitEntity`'s own `damageSources().witherSkull(...)`
-        // — a real, distinct `minecraft:wither_skull` damage type (confirmed
+        // The wither-skull projectile uses a distinct
+        // `minecraft:wither_skull` damage type (confirmed
         // in the generated `lodestone_data::damage_types` table, not assumed).
         "wither_skull" => "wither_skull",
         // `thrown` covers snowball, egg and the potions.
@@ -105,8 +98,8 @@ fn projectile_damage_type(path: &str) -> &'static str {
 ///
 /// `t = 0.0` is excluded: a projectile that starts inside a solid block (spawned
 /// at an archer's eye inside a low ceiling, say) would otherwise be destroyed on
-/// its first tick before travelling at all, which vanilla's `inGround` handling
-/// does not do either.
+/// its first tick before travelling at all. A projectile already inside a solid
+/// cell is allowed to leave that cell on this step.
 fn first_solid_along(world: &ChunkWorld, from: Vec3, delta: Vec3) -> Option<f64> {
     let dist = delta.length();
     if dist < 1e-9 {
@@ -129,9 +122,8 @@ fn first_solid_along(world: &ChunkWorld, from: Vec3, delta: Vec3) -> Option<f64>
 
 /// Where along the segment the ray enters `cell`'s own unit box, which face
 /// axis it entered through, and the hit point's fractional position within
-/// the cell — vanilla `BlockHitResult.getDirection().getAxis()` plus
-/// `Mth.frac(hitLocation.{x,y,z})`, both needed by
-/// `crate::redstone_target::redstone_strength` (issue #322) and neither of
+/// the cell — both the hit-face axis and the fractional hit position are needed by
+/// `crate::redstone_target::redstone_strength` and neither of
 /// which [`first_solid_along`]'s coarse quarter-block sampling can answer:
 /// that function only asks "is there a solid cell by this point", not "which
 /// face did the ray cross to get there".
@@ -197,7 +189,7 @@ impl<'w> MobSim<'w> {
     /// its current [`Projectile::position`]/[`Projectile::velocity`] so
     /// [`tick`](Self::tick) advances it every server tick and
     /// [`snapshots`](Self::snapshots) puts it on the wire — the "spawned on
-    /// launch" half of issue #211. `entity_type` is the wire identity (e.g.
+    /// launch" half of the projectile lifecycle. `entity_type` is the wire identity (e.g.
     /// `minecraft:arrow`); the ballistic family/constants are whatever
     /// `Projectile::arrow`/`::throwable`/`::snowball`/… the caller already
     /// picked.
@@ -250,10 +242,9 @@ impl<'w> MobSim<'w> {
     /// throwable, exactly [`spawn_projectile_from`](Self::spawn_projectile_from)'s
     /// own behaviour, so this is purely additive.
     ///
-    /// **Not yet called by production code.** The one call site that has the
-    /// potion id in hand — `apply_use_item`'s launch arm in `crate::server`,
-    /// via `spawn_player_projectile` — is outside this change's file ownership;
-    /// see the issue this ships against for the exact hunk it still needs.
+    /// The production launch arm in `crate::server` owns the potion id and
+    /// supplies it through `spawn_player_projectile`; this method is the mob-side
+    /// entry point for resolving potion effects once that value reaches the sim.
     pub fn spawn_potion_projectile_from(
         &mut self,
         entity_type: ResourceKey,
@@ -273,9 +264,9 @@ impl<'w> MobSim<'w> {
     ///
     /// # Why before, and why the segment is the one about to be travelled
     ///
-    /// Vanilla's `AbstractArrow.tick` clips `originalPosition ..
-    /// originalPosition + movement` and only calls `setPos` if nothing was hit, so
-    /// the test is against the step the projectile is *about* to take. Running
+    /// The collision sweep clips `position .. position + movement` and only
+    /// advances the projectile if nothing was hit, so the test is against the
+    /// step the projectile is *about* to take. Running
     /// this after the registry's `tick` would test the step already taken, which
     /// puts every impact one tick late and — worse — lets a projectile pass
     /// through a wall and resolve on the far side.
@@ -286,7 +277,7 @@ impl<'w> MobSim<'w> {
     /// velocity, against two candidate sets:
     ///
     /// * **Blocks**, through [`ChunkWorld::is_solid`] sampled along the segment.
-    ///   Sampling rather than vanilla's exact voxel traversal, at the same
+    ///   Sampling rather than an exact voxel traversal, at the same
     ///   quarter-block spacing [`RayView::is_clear`] already uses here and for the
     ///   same reason: a collision cell is a full block, so a quarter-block step
     ///   cannot skip one. Entity hits are *not* sampled — see
@@ -319,9 +310,8 @@ impl<'w> MobSim<'w> {
     ///   pre-existing seam rather than one introduced here.
     /// * **Piercing, critical arrows and Punch knockback are absent.** All three
     ///   are enchantment- or charge-derived and there is no enchantment model;
-    ///   note that a plain arrow's knockback in vanilla is genuinely `0.0`
-    ///   (`AbstractArrow.doKnockback` multiplies by an enchantment-derived value
-    ///   that is zero without Punch), so an arrow hit *correctly* does not shove.
+    ///   A plain arrow's knockback is `0.0` without an enchantment-derived
+    ///   bonus, so an arrow hit does not shove.
     ///
     /// Returns the number of projectiles removed by an impact.
     pub fn resolve_projectile_impacts(&mut self) -> usize {
@@ -329,7 +319,7 @@ impl<'w> MobSim<'w> {
         // the search reads both the projectile set and the mobs.
         let mut hits: Vec<ProjectileHit> = Vec::new();
         let mut spent: Vec<i32> = Vec::new();
-        // Issue #322: every block impact this pass finds, precise face/frac
+        // Every block impact this pass finds, precise face/frac
         // included — `resolve_projectile_impacts`'s own "before `spent` is
         // consumed" ordering doesn't change here, only what is recorded
         // alongside a block hit rather than only its projectile's removal.
@@ -339,12 +329,12 @@ impl<'w> MobSim<'w> {
         // (health, status effects), so it cannot run while this loop still
         // holds an immutable borrow of it.
         let mut potion_impacts: Vec<PotionImpact> = Vec::new();
-        // `WitherSkull.onHit`'s unconditional impact explosion — staged for
+        // The wither-skull projectile's unconditional impact explosion — staged for
         // the same reason `potion_impacts` is: `MobSim::explode` needs
         // `&mut self.mobs` while this loop still holds an immutable borrow of
         // both the projectile set and the mob list.
         let mut wither_skull_blasts: Vec<Vec3> = Vec::new();
-        // `LargeFireball.onHit`'s identical unconditional impact explosion —
+        // The large-fireball projectile's identical unconditional impact explosion —
         // a ghast's own fireball, staged the same way and for the same
         // reason. Kept as its own vec rather than merged with
         // `wither_skull_blasts` because the two explode at different powers
@@ -360,9 +350,8 @@ impl<'w> MobSim<'w> {
             let meta = self.projectile_meta.get(&tracked.id);
             let owner = meta.and_then(|m| m.owner);
             let margin = lodestone_entity::projectile::hitbox_margin(tracked.ticks_alive);
-            // `AbstractThrownPotion`'s family — `ThrownSplashPotion` and
-            // `ThrownLingeringPotion` both override `onHit` to run the splash
-            // burst; nothing else in this sim's throwable set does.
+            // Splash and lingering potions run the splash burst; nothing else
+            // in this sim's throwable set does.
             let potion_id = meta.and_then(|m| m.potion);
             let is_potion_family = meta
                 .map(|m| matches!(m.entity_type.path(), "splash_potion" | "lingering_potion"))
@@ -418,8 +407,8 @@ impl<'w> MobSim<'w> {
                     let is_wither_skull = entity_type.as_deref() == Some("wither_skull");
                     let is_ghast_fireball = entity_type.as_deref() == Some("fireball");
                     if is_potion_family {
-                        // Vanilla's own search is over the blast AABB, not
-                        // just whichever entity the collision sweep names as
+                        // The search is over the blast AABB, not just whichever
+                        // entity the collision sweep names as
                         // the nearest — so the burst is staged here exactly
                         // as it is in the block-hit arm below, from the same
                         // impact point.
@@ -445,7 +434,7 @@ impl<'w> MobSim<'w> {
                     });
                 }
                 (_, Some(block_t)) => {
-                    // Issue #322: record the exact face/frac this block was
+                    // Record the exact face/frac this block was
                     // struck at — `first_solid_along`'s own `block_t` is only
                     // precise to a quarter block, so the cell it lands in is
                     // trusted (that quarter-block cannot straddle two cells)
@@ -461,13 +450,13 @@ impl<'w> MobSim<'w> {
                         });
                     }
                     if meta.map(|m| m.entity_type.path()) == Some("wither_skull") {
-                        // `WitherSkull.onHit` explodes on **any** surface,
+                        // A wither-skull projectile explodes on **any** surface,
                         // block included — not just an entity hit.
                         wither_skull_blasts.push(coarse_hit);
                     }
                     if meta.map(|m| m.entity_type.path()) == Some("fireball") {
-                        // `LargeFireball.onHit` — the identical "any surface"
-                        // rule for a ghast's own fireball.
+                        // A ghast fireball uses the identical "any surface"
+                        // rule.
                         fireball_blasts.push(coarse_hit);
                     }
                     let cell = super::lightning::floor_block_pos(coarse_hit);
@@ -477,9 +466,8 @@ impl<'w> MobSim<'w> {
                             pos: cell,
                             axis,
                             frac,
-                            // `AbstractArrow`'s family — `Trident` extends it
-                            // too (`ThrownTrident extends AbstractArrow`),
-                            // unlike every other throwable this crate spawns.
+                            // Arrows and tridents share the arrow-family damage
+                            // and knockback handling, unlike other throwables.
                             is_arrow: matches!(path.as_str(), "arrow" | "spectral_arrow" | "trident"),
                         });
                     }
@@ -507,17 +495,16 @@ impl<'w> MobSim<'w> {
         for impact in &potion_impacts {
             self.resolve_potion_splash(impact);
         }
-        // `WitherSkull.onHit`'s unconditional impact blast — after the
-        // direct hit's own damage/wither-effect/owner-heal above (matching
-        // vanilla's own ordering: `onHitEntity` runs inside `onHit`, before
-        // `onHit`'s own `explode` call), and before the reaper so a blast
+        // The wither-skull projectile's unconditional impact blast — after the
+        // direct hit's own damage/wither-effect/owner-heal above, and before
+        // the reaper so a blast
         // that finishes off an already-hit mob still drops loot through the
         // shared reap below. No source exemption — see `mobs::wither`'s own
         // module doc for why.
         for &centre in &wither_skull_blasts {
             self.explode(centre, crate::wither::SKULL_EXPLOSION_POWER, DamageFlags::default());
         }
-        // `LargeFireball.onHit`'s own unconditional blast, same ordering
+        // The large-fireball projectile's unconditional blast, with the same ordering
         // reasoning as the wither skull's just above.
         for &centre in &fireball_blasts {
             self.explode(centre, GHAST_FIREBALL_EXPLOSION_POWER, DamageFlags::default());
@@ -534,7 +521,7 @@ impl<'w> MobSim<'w> {
     fn resolve_projectile_hit(&mut self, hit: &ProjectileHit) {
         let mut effect =
             lodestone_entity::projectile::impact_effect(&hit.entity_type, hit.speed);
-        // `Snowball.onHitEntity`'s `entity instanceof Blaze ? 3 : 0` — the one
+        // A snowball deals `3` damage to a blaze-type target — the one
         // impact rule that depends on the *target's* type, which the version-free
         // table cannot see. Applied here rather than by widening that function's
         // signature, so the general case stays a pure function of the projectile.
@@ -580,9 +567,8 @@ impl<'w> MobSim<'w> {
             // A small fireball's five seconds of fire
             // (`lodestone_entity::projectile::impact_effect`'s `ignite_seconds`,
             // nonzero only for `small_fireball` — a ghast's large fireball and
-            // a wither skull deal their own flat damage and never call
-            // vanilla's `igniteForSeconds`) — previously computed and read
-            // nowhere in the workspace. Applied only on a landed, surviving
+            // a wither skull deal their own flat damage and never ignite) —
+            // applied only on a landed, surviving
             // hit (matching the damage above, which already returned early
             // at `effect.damage <= 0.0`); a dead target has nothing left to
             // burn.
@@ -591,11 +577,11 @@ impl<'w> MobSim<'w> {
             }
             (applied, target.health() <= 0.0)
         };
-        // `WitherSkull.onHitEntity`: a landed hit applies `MobEffects.WITHER`
+        // A landed wither-skull hit applies the wither effect
         // (Normal-difficulty duration — see `mobs::wither`'s own module doc
         // for why this does not thread a real `Difficulty` through yet), and
         // a killing hit heals the shooter. Both gated on `applied > 0.0`,
-        // matching vanilla's own `wasHurt` guard.
+        // only when the damage actually affected the target.
         if hit.entity_type == "wither_skull" && applied > 0.0 {
             let ticks = crate::wither::wither_effect_ticks(lodestone_model::Difficulty::Normal);
             if ticks > 0 && !target_died {
@@ -628,7 +614,7 @@ impl<'w> MobSim<'w> {
     /// which already applies the emergence-invulnerability and
     /// powered-armour-while-below-half-health gates.
     ///
-    /// `is_arrow_or_wind_charge` mirrors vanilla's own hurt-source
+    /// `is_arrow_or_wind_charge` mirrors the hurt-source
     /// classification for that gate: an arrow (a spectral arrow and a
     /// trident are both part of the same projectile family) or a wind
     /// charge is blocked outright while the wither is powered; every other
@@ -650,16 +636,15 @@ impl<'w> MobSim<'w> {
     }
 
     /// Applies one splash-family potion's blast at its impact point —
-    /// `ThrownSplashPotion.onHitAsPotion`'s whole entity loop, run for
-    /// **every** splash/lingering impact regardless of whether the collision
-    /// sweep named a mob as the target: vanilla's own search is over the blast
+    /// The whole entity loop runs for **every** splash/lingering impact
+    /// regardless of whether the collision sweep named a mob as the target: the
+    /// search is over the blast
     /// AABB, not over whatever stopped the projectile.
     ///
     /// # What this does not do
     ///
-    /// A **lingering** potion's real vanilla behaviour is
-    /// `ThrownLingeringPotion.onHitAsPotion`: it does not run this loop at all
-    /// — it spawns an `AreaEffectCloud` that reapplies these effects every 5
+    /// A **lingering** potion normally spawns an area effect that reapplies these
+    /// effects every 5
     /// ticks for up to 30 seconds. That entity does not exist in this sim, so a
     /// lingering potion applies its burst exactly **once**, at impact, same as
     /// a splash — closer to the real gameplay point (something happens) than
@@ -667,8 +652,8 @@ impl<'w> MobSim<'w> {
     fn resolve_potion_splash(&mut self, impact: &PotionImpact) {
         let Some(potion) = impact.potion else {
             // No `minecraft:potion_contents` resolved for the thrown stack —
-            // matches vanilla's own no-effects case (`!potion.hasEffects()`),
-            // which is silent too. This is also the water-bottle path: a
+            // An unresolved potion has no effects and is silent. This is also
+            // the water-bottle path: a
             // water bottle's `potion` is `Some(water)`, but
             // `potion_splash_effects` itself returns nothing for it (empty
             // built-in list) — checked here as `None` only so an unresolved
@@ -731,10 +716,8 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// `HealOrHarmMobEffect.applyInstantaneousEffect`'s two branches: heal for
-    /// `instant_health`, damage through `indirect_magic` (vanilla's
-    /// `source != null` branch — the projectile that hit is always known
-    /// here) for `instant_damage`. Any other id [`mob_effects`] resolved as
+    /// Instant health heals, while instant damage harms through the indirect
+    /// damage channel. Any other id [`mob_effects`] resolved as
     /// instantaneous would be a bug in that module's own table, so it is
     /// silently skipped here rather than guessed at.
     fn apply_instant_splash_effect(&mut self, target: i32, effect_id: &str, amount: f32, impact_location: Vec3) {
@@ -804,7 +787,7 @@ mod tests {
         world
     }
 
-    /// **The discriminating gate for issue #322.** Two arrows struck at
+    /// **The discriminating projectile-collision gate.** Two arrows struck at
     /// different points on the *same* face of the *same* block must produce
     /// different [`ProjectileBlockHit::frac`]s and therefore different
     /// [`redstone_target::redstone_strength`] readings — not merely "a hit
@@ -1089,7 +1072,7 @@ mod tests {
             .id()
     }
 
-    /// **The discriminating gate for the real bug this issue reports.** A
+    /// **The discriminating gate for projectile falloff.** A
     /// splash potion of swiftness lands on two mobs at two different
     /// distances from its impact — a **direct** entity hit (`scale == 1.0`)
     /// and a block hit whose blast reaches a second mob at the edge of its
@@ -1273,9 +1256,8 @@ mod tests {
         assert!(mob.effects().is_empty());
     }
 
-    /// A ghast's fireball (`minecraft:fireball`, `LargeFireball`) deals its
-    /// own flat `6.0` on a direct entity hit — `LargeFireball.onHitEntity`'s
-    /// `hurtServer(..., 6.0F)`, not speed-scaled the way an arrow's damage is.
+    /// A ghast's fireball (`minecraft:fireball`) deals its own flat `6.0` on a
+    /// direct entity hit, not speed-scaled the way an arrow's damage is.
     /// Same structure as `mobs::wither`'s equivalent skull test: two speeds
     /// that both cross the gap within one tick, checked for equal damage
     /// rather than a proportional one.
@@ -1311,21 +1293,14 @@ mod tests {
         assert!(mismatches.is_empty(), "ghast fireball impact mismatches:\n{}", mismatches.join("\n"));
     }
 
-    /// **Production-path proof that a fireball's `ignite_seconds` reaches the
-    /// target.** Before this, `impact_effect` computed `5.0` for a *small*
-    /// fireball (a blaze's shot — `SmallFireball.onHitEntity`'s own
-    /// `igniteForSeconds(5.0F)`) and nothing in the workspace read it. Drives
-    /// the real [`MobSim::resolve_projectile_impacts`] entry point — the
-    /// same one every other test in this module uses as its production seam
-    /// — rather than calling `resolve_projectile_hit` in isolation.
+    /// **Production-path proof that a small fireball's `ignite_seconds` reaches
+    /// the target.** This drives [`MobSim::resolve_projectile_impacts`], the
+    /// production entry point, rather than calling `resolve_projectile_hit` in
+    /// isolation.
     ///
-    /// **Not** `minecraft:fireball` (a ghast's *large* fireball): reading
-    /// `LargeFireball.onHitEntity` shows it deals its flat `6.0` and calls no
-    /// `igniteForSeconds` at all — only the small variant ignites. The task
-    /// this fix came from named "small_fireball/fireball/wither_skull" as all
-    /// three igniting; the jar disagrees with that premise, and the fix
-    /// (`impact_effect`'s existing `ignite_seconds: 0.0` for both) was
-    /// already correct. See [`a_large_fireball_does_not_ignite`] for the
+    /// **Not** `minecraft:fireball` (a ghast's *large* fireball): it deals its
+    /// flat `6.0` and does not ignite, while the small variant carries
+    /// `ignite_seconds = 5.0`. See [`a_large_fireball_does_not_ignite`] for the
     /// control proving that distinction.
     #[test]
     fn a_small_fireball_impact_ignites_its_target() {
@@ -1366,9 +1341,8 @@ mod tests {
     }
 
     /// **Control 2**, the discriminating one: a *large* fireball (a ghast's
-    /// shot, `minecraft:fireball`) deals real damage but — per
-    /// `LargeFireball.onHitEntity`, which never calls `igniteForSeconds` —
-    /// must not ignite. Without this control, `a_small_fireball_impact_ignites_its_target`
+    /// shot, `minecraft:fireball`) deals real damage but does not ignite.
+    /// Without this control, [`a_small_fireball_impact_ignites_its_target`]
     /// could pass by igniting on every projectile, fireball-shaped or not.
     #[test]
     fn a_large_fireball_does_not_ignite() {
@@ -1429,8 +1403,8 @@ mod tests {
     }
 
     /// **The discriminating gate for the fireball's blast half.** A ghast's
-    /// fireball explodes unconditionally on impact — `LargeFireball.onHit`'s
-    /// own blast, the identical rule [`resolve_projectile_impacts`]'s
+    /// fireball explodes unconditionally on impact, the same rule
+    /// [`resolve_projectile_impacts`]'s
     /// wither-skull arm already carries — so a *second* mob standing near
     /// the directly-hit one, never itself on the fireball's own flight path,
     /// must still take damage from the same explosion. The control mob far

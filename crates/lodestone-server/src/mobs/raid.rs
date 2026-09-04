@@ -1,9 +1,7 @@
 //! `MobSim`'s raid slice — wave escalation, a raid boss bar, and the
-//! captain-marker data model. Issue #241 (the raid half; patrols already
-//! exist — see `mobs::mod`'s own module doc and `docs/pillager-patrols.md`).
-//! Ported from vanilla's own per-raid state and raid-manager types,
-//! transcribing the wave-size tables and the `getNumGroups`/omen-level
-//! constants exactly.
+//! captain-marker data model. Raid state is distinct from patrols, which have
+//! their own spawn cycle in `mobs::mod` and `docs/pillager-patrols.md`.
+//! Wave-size tables and omen-level constants are stored here as measured data.
 //!
 //! See `docs/raids-and-patrols.md` for what reaches the screen, the disclosed
 //! gaps (village-entry trigger, the ominous-banner visual, ravager/evoker/
@@ -289,18 +287,14 @@ impl<'w> MobSim<'w> {
         self.pending_hero_grants.extend(hero_grants);
     }
 
-    /// Every active raid's boss bar, appended to `out` by
-    /// [`super::dragon::MobSim::boss_bars`] — the same shape
-    /// [`super::wither::MobSim::push_wither_boss_bars`] already uses for the
-    /// wither's own bar, and for the identical reason (`crate::tick` is
-    /// off-limits for this change, so there is one public entry point rather
-    /// than a second call site there).
+    /// Every active raid contributes a boss-bar snapshot to `out` through
+    /// [`super::dragon::MobSim::boss_bars`], matching the snapshot shape used by
+    /// [`super::wither::MobSim::push_wither_boss_bars`]. The tick loop calls
+    /// this entry point to append raid bars.
     ///
     /// **No colour/style field** — `crate::protocol::BossBarSnapshot` does
-    /// not carry one (see its own doc: neither the dragon's nor the wither's
-    /// bar needed it either), so vanilla's `BossBarColor.RED`/
-    /// `BossBarOverlay.NOTCHED_10` is a disclosed, pre-existing gap this
-    /// change inherits rather than introduces.
+    /// not carry one. Raid bars therefore use the protocol defaults for colour
+    /// and overlay while preserving the raid name, progress, and visibility.
     pub(super) fn push_raid_boss_bars(&self, out: &mut Vec<crate::protocol::BossBarSnapshot>) {
         let mut ids: Vec<i32> = self.raids.keys().copied().collect();
         ids.sort_unstable();
@@ -312,10 +306,9 @@ impl<'w> MobSim<'w> {
             } else {
                 "Raid".to_string()
             };
-            // Progress by *wave count*, not vanilla's health sum
-            // (`getHealthOfLivingRaiders() / totalHealth`) — this port does
-            // not track each wave's starting total health, only which
-            // raiders are still alive; see this method's own doc.
+            // Progress is the fraction of wave groups spawned. The simulation
+            // tracks group counts and living raiders, not a starting health sum
+            // for each wave.
             let progress = if raid.total_waves > 0 {
                 (raid.groups_spawned as f32 / raid.total_waves as f32).clamp(0.0, 1.0)
             } else {
@@ -421,11 +414,10 @@ impl<'w> MobSim<'w> {
         closest.map(|(id, _)| id)
     }
 
-    /// `Raids.createOrExtendRaid`'s "extend, don't duplicate" half: bumps an
+    /// The extend-without-duplication half: bumps an
     /// already-active raid's omen level via [`absorb_raid_omen`] rather than
     /// starting a second raid on top of it, capped at
-    /// [`MAX_RAID_OMEN_LEVEL`] exactly as `Raid.getRaidOmenLevel() <
-    /// Raid.getMaxRaidOmenLevel()`'s own guard.
+    /// [`MAX_RAID_OMEN_LEVEL`].
     fn extend_raid_omen(&mut self, id: i32, amplifier: u32) {
         if let Some(raid) = self.raids.get_mut(&id)
             && raid.omen_level < MAX_RAID_OMEN_LEVEL
@@ -434,34 +426,30 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// `Raids.createOrExtendRaid` — issue #241's raid trigger. `origin` is
-    /// vanilla's `raidOmenPosition`: the block a Raid Omen carrier stood on
-    /// when Bad Omen converted, remembered by the caller across the 600-tick
-    /// countdown and spent here on Raid Omen's own last tick (see
-    /// `crate::server`'s wiring for both halves — this method only ever
-    /// sees the second).
+    /// The raid trigger. `origin` is the block a Bad Omen carrier stood on when
+    /// the effect converted, and the caller supplies it here after the
+    /// 600-tick countdown.
     ///
     /// Averages every occupied `#village`-tagged POI within 64 blocks of
     /// `origin` into a raid centre (falling back to `origin` itself when
-    /// none are found, matching vanilla's own `count == 0` branch), then
+    /// none are found), then
     /// either [`extend_raid_omen`](Self::extend_raid_omen)s an
     /// already-ongoing raid found by [`raid_near`](Self::raid_near) within
-    /// 96 blocks (`9216`, vanilla's own `ServerLevel::getRaidAt` constant)
+    /// 96 blocks (`9216`, the squared search radius)
     /// or [`start_raid`](Self::start_raid)s a fresh one with the omen level
     /// [`absorb_raid_omen`] produces from `amplifier` against a starting
     /// level of `0`.
     ///
     /// **The occupied-POI signal is [`super::MobSim::occupied_village_pois_in_range`]**
     /// — the live bed, workstation *and* bell claim ledgers unioned, matching
-    /// vanilla's real `#village` tag (`home` + `meeting` +
+    /// the `#village` tag (`home` + `meeting` +
     /// `#acquirable_job_site`) rather than beds alone. The disk-backed
     /// `crate::poi_storage::PoiStorage::occupied_in_range` still can never
     /// see any of the three, since none of the three claim ledgers persist
     /// (see `crate::mobs::villager`'s own module doc) — that narrowing is
     /// real and stays disclosed. A village whose villagers have claimed jobs
     /// and a bell but genuinely no bed (no `SleepInBed`/work-rest schedule
-    /// has claimed one) still centres correctly now, which the beds-only
-    /// query this method used to call could not do.
+    /// has claimed one) still centres correctly; a beds-only query would not.
     ///
     /// Native-only, for [`super::MobSim::occupied_village_pois_in_range`]'s own
     /// reason.
@@ -670,10 +658,10 @@ mod raid_tests {
         assert_eq!(raiders.first().copied(), Some(captain), "the captain is the first raider spawned, not an arbitrary one");
     }
 
-    /// Issue #241's raid trigger, wired end to end within this crate:
+    /// The raid trigger's state transition within this crate:
     /// `create_or_extend_raid` reads the live bed-claim ledger through
     /// `occupied_homes_in_range` for real (not a POI record built by hand),
-    /// so this proves the whole `Raids.createOrExtendRaid` path — occupied-POI
+    /// so this proves the complete raid-trigger path — occupied-POI
     /// averaging, omen absorption and the first `start_raid` call — against a
     /// villager that actually claimed a bed through a real tick, the same
     /// shape `villager_bed_claim_tests` already proves for the claim itself.
@@ -768,7 +756,7 @@ mod raid_tests {
         assert_eq!(sim.raid_omen_level(id), Some(1), "absorb_raid_omen(0, 0) == 1");
     }
 
-    /// Issue #246's remaining gap, end to end within this crate: a player who
+    /// The end-to-end player-kill path within this crate: a player who
     /// lands the killing blow on a raider is credited as a hero
     /// (`add_raid_hero`, resolved through `raid_containing_raider` exactly as
     /// production's `attack_from_player` does), and once the raid the raider

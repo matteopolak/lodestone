@@ -1,9 +1,7 @@
-//! `MobSim`'s fishing-bobber slice — cast, the bob/bite/hook state machine,
-//! the fish/junk/treasure loot roll, and reeling in a real item entity.
-//! Issue #257. Ported from vanilla's own fishing-hook entity and fishing-rod item,
-//! and the three
-//! `data/minecraft/loot_table/gameplay/fishing{,/fish,/junk,/treasure}.json`
-//! tables, which this file transcribes exactly (weights, quality, item ids).
+//! `MobSim`'s fishing-bobber slice: casting, the bob/bite/hook state machine,
+//! fish/junk/treasure loot rolls, and reeling in a real item entity. The server
+//! applies fishing-rod rules and the three bundled fishing loot tables, with
+//! their measured weights, quality values, and item ids preserved.
 //!
 //! See `docs/fishing.md` for what reaches the screen, the disclosed gaps and
 //! how to change it.
@@ -322,14 +320,12 @@ impl<'w> MobSim<'w> {
     /// item(s) as real, flying-toward-the-owner item entities via
     /// [`MobSim::spawn_item`] and an experience orb via
     /// [`MobSim::award_experience`] (both this sim's own producers — the
-    /// "feeds the Phase A item-entity lifecycle issue" half of #257), and
+    /// item-entity lifecycle handoff), and
     /// discards the bobber either way.
     ///
-    /// `owner_pos`/`owner_luck` are the reeling player's current position
-    /// (the item's pull target — vanilla's `owner.getX()` etc, read at
-    /// retrieve time, not cast time) and their own `Attributes.LUCK` value
-    /// (`owner.getLuck()`), added to the rod's own luck exactly as vanilla's
-    /// `this.luck + owner.getLuck()` does; `0` for a caller with no luck
+    /// `owner_pos`/`owner_luck` are the reeling player's current position (the
+    /// item's pull target, read at retrieve time rather than cast time) and
+    /// luck value, added to the rod's own luck; `0` for a caller with no luck
     /// effect modelled yet.
     ///
     /// Returns `None` if `id` is not a tracked bobber.
@@ -763,8 +759,7 @@ mod fishing_tests {
     }
 
     /// **Reeling in a bite spawns a real item entity flying toward the
-    /// owner** — the "feeds the Phase A item-entity lifecycle issue" half of
-    /// #257, asserted against the actual producer rather than assumed from
+    /// owner** — the item-entity lifecycle handoff, asserted against the actual producer rather than
     /// the loot roll alone.
     #[test]
     fn retrieving_a_bite_spawns_a_real_item_entity_and_xp() {

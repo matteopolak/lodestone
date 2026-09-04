@@ -1,36 +1,35 @@
 //! Pistons: the structure resolver, the quasi-connectivity signal rule, and the
-//! move (issue #316).
+//! move.
 //!
 //! ## What it is
 //!
-//! Vanilla `PistonBaseBlock` + `PistonStructureResolver`, ported as pure decisions
-//! over a `Fn(BlockPos) -> WorldState` world lookup — the same shape every other
+//! Piston behavior is expressed as pure decisions over a `Fn(BlockPos) -> WorldState`
+//! lookup — the same shape every other
 //! module in the `redstone*` family takes, so the wiring in
 //! [`crate::random_tick`] reaches it exactly as it reaches a repeater.
 //!
-//! Nothing modelled pistons anywhere in this tree before: `lodestone-physics`'s
-//! own comment noted it deliberately excludes `PISTON` as a type "this crate has
-//! no equivalent of".
+//! The module owns piston structure resolution, signal checks, and movement
+//! state; entity reactions are handled by the mob simulation.
 //!
 //! ## How it works
 //!
 //! Three pieces, in dependency order.
 //!
-//! **1. [`push_reaction`] and [`is_pushable`].** `PushReaction` is per block, from
-//! vanilla's own block registration table's `pushReaction(...)` calls — 200 `DESTROY`, 11 `BLOCK`, 16
+//! **1. [`push_reaction`] and [`is_pushable`].** `PushReaction` is per block —
+//! 200 `DESTROY`, 11 `BLOCK`, 16
 //! `PUSH_ONLY` (the glazed terracottas), everything else `NORMAL` by default. The
-//! four hard-coded exceptions in `PistonBaseBlock.isPushable` (obsidian, crying
+//! four hard-coded exceptions for obsidian, crying
 //! obsidian, respawn anchor, reinforced deepslate) are exceptions *there*, not
 //! `BLOCK` entries, and are reproduced as such.
 //!
-//! **2. [`resolve`] — `PistonStructureResolver`.** The 12-block limit, the
+//! **2. [`resolve`].** The 12-block limit, the
 //! slime/honey sticky run, the perpendicular branching, and
-//! `reorderListAtCollision`. **This is the order-sensitive part**, and the reason
+//! collision reordering. **This is the order-sensitive part**, and the reason
 //! the port is literal: the *order* of `to_push` decides which block ends up where
 //! when two sticky lines collide, and an "obviously equivalent" rewrite of that
 //! reorder produces a contraption that works for one shape and not another.
 //!
-//! **3. [`has_extend_signal`] — quasi-connectivity.** `getNeighborSignal` checks
+//! **3. [`has_extend_signal`] — quasi-connectivity.** The signal query checks
 //! the piston's own position from all six directions *except the push direction*,
 //! then its own position from `DOWN`, then **`pos.above()`** from all directions
 //! except `DOWN`. That last block is QC: a piston reacts to a signal one block
@@ -39,42 +38,38 @@
 //! contraptions.
 //!
 //! **4. The two-phase move.** [`begin_move`] and [`finish_move`] split
-//! [`apply_move`]'s one-step writes into vanilla's `moving_piston` phase and its
+//! [`apply_move`]'s one-step writes into a `moving_piston` phase and its
 //! commit, [`PISTON_MOVE_DELAY`] ticks later. The second phase is *derived from*
 //! the one-step writes rather than recomputed, so the world two ticks after a push
 //! is byte-identical to what the one-step path produced — the property
 //! `two_phase_world_matches_the_one_step_path` asserts cell by cell.
 //!
-//! ## What is deliberately not here, and why #316 stays open
+//! ## What this module does not model
 //!
-//! The intermediate state now exists, so a push animates, and a move **is**
-//! interruptible: [`interrupt`] (`PistonMovingBlockEntity.finalTick`) fires from
-//! two sites [`crate::random_tick`] wires on the retract path — the piston's own
-//! arm cell, always, and (sticky only) [`relative_n`]`(pos, facing, 2)`, the cell
-//! a sticky pull would grab from, which can belong to a *different* piston's
-//! still-extending head two cells away. See [`interrupt`]'s own doc for the
-//! `source`-vs-carried write split, and `docs/redstone-pistons.md` for the
-//! live-oracle and hermetic evidence each site has. What is still missing:
+//! The intermediate state animates a push, and [`interrupt`] handles the two
+//! retract sources: the piston arm cell and, for sticky pistons,
+//! [`relative_n`](crate::piston::relative_n) with `(pos, facing, 2)`. The latter is the cell a sticky
+//! pull would grab from and can belong to another piston two cells away. See
+//! [`interrupt`]'s doc for the `source`-versus-carried write split, and
+//! `docs/redstone-pistons.md` for the oracle evidence.
 //!
-//! * `TRIGGER_DROP` (block event 2) has no distinct behaviour: nothing routes a
+//! * `TRIGGER_DROP` (block event 2) has no distinct behavior: nothing routes a
 //!   piston block *event* at all, so the "head is mid-extension, drop it" case is
 //!   unreachable rather than merely unimplemented — though nothing needs it, since
 //!   the interrupt logic above already covers what `TRIGGER_DROP` names.
-//! * **Mobs in the push path are now shoved (issue #694)** —
+//! * **Mobs in the push path are shoved** —
 //!   `crate::mobs::piston_shove::MobSim::shove_from_piston`, called from
-//!   `crate::tick`'s own `propagate_and_react_with_entities` consumers
+//!   the shared tick consumer
 //!   rather than from this module: the shared reaction surface below stays
 //!   entity-agnostic on purpose (see that module's own doc for why, and for
 //!   the disclosed "one discrete shove, not vanilla's continuous sweep"
-//!   narrowing). **Players are not** — a connected player's position is
-//!   client-reported, not server-owned state this sim can translate; that
-//!   needs a server-authoritative correction sent to the client, a
-//!   mechanism this crate has nowhere else either, and is scoped as a
-//!   separate follow-up by #694 itself.
-//! * A `moving_piston` cell has **no collision shape** here. Vanilla's
-//!   `MovingPistonBlock.getCollisionShape` delegates to the block entity's
-//!   interpolated shape, so a player rides a moving block; here the cell is empty
-//!   for two ticks and a player standing on a pushed block briefly falls through.
+//!   narrowing). **Players receive a correction effect** — the shared tick path
+//!   publishes [`crate::effects::WorldEffect::PistonPlayerPush`], and the server
+//!   connection task checks the overlap before applying the resulting teleport
+//!   correction. Player movement therefore stays in the connection layer while
+//!   mob movement remains in the simulation.
+//! * A `moving_piston` cell has **no collision shape** here. Its cell is empty
+//!   for two ticks, so a player standing on a pushed block briefly falls through.
 //!
 //! **A push cannot cross a chunk border.** [`crate::random_tick`]'s reaction
 //! surface is column-local (`redstone::make_lookup` reads air outside its own
@@ -82,11 +77,10 @@
 //! That is a property of the whole redstone family here, not of this module, and
 //! the resolver itself is border-agnostic — it is the lookup that is not.
 //!
-//! So: contraption **resolution** is faithful and tested; the interrupt is
-//! faithful, live-verified for the arm site and hermetically verified for the
-//! two-cell sticky site; a captured, tick-for-tick trace of a full community
-//! contraption (BUD switch, 0-tick pulse generator) does not exist. That
-//! remaining verification is what #316 stays open on.
+//! Contraption resolution is tested; the interrupt has live evidence for the arm
+//! site and hermetic evidence for the two-cell sticky site. A captured,
+//! tick-for-tick trace of a full community contraption is not part of the test
+//! corpus, so validation uses the resolver invariants and focused fixtures.
 //!
 //! ## How to change it
 //!
@@ -760,11 +754,9 @@ pub fn direction_named(name: &str) -> Option<Direction> {
 /// draws there comes from the block entity below.
 pub const MOVING_PISTON: &str = "minecraft:moving_piston";
 
-/// The `minecraft:block_entity_type` key `moving_piston` owns
-/// (`MovingPistonBlock.getTicker` names `BlockEntityTypes.PISTON`). **It is not
-/// `minecraft:moving_piston`** — the block and its block entity have different
-/// registry keys, and sending the block's name as the type id resolves to some
-/// other entity or to nothing.
+/// The moving-piston block entity uses registry key `minecraft:piston` for its
+/// ticker. This is distinct from block key `minecraft:moving_piston`; using the
+/// block key as the entity type id resolves to a different entity or to none.
 pub const PISTON_BLOCK_ENTITY: &str = "minecraft:piston";
 
 /// `PistonMovingBlockEntity.tick`'s `progress += 0.5F`, so a whole travel is two

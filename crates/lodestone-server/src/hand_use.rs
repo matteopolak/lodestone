@@ -1,30 +1,26 @@
-//! Right-click block interaction — vanilla's `BlockBehaviour::useWithoutItem`
-//! (issue #532).
+//! Right-click block interaction for blocks whose state changes without an item.
 //!
-//! # What was missing
+//! # Hand interaction
 //!
-//! The *redstone-driven* half of these blocks has worked since #319:
 //! [`crate::redstone_openable`] opens a door when a lever powers it, and
-//! `random_tick::react_to_notification` reaches it from the world tick loop. The
-//! **hand** half did not exist at all — `apply_use_item_on` had exactly one
-//! block-family guard (`is_bed_block`), so a right-click on a door fell through to
-//! the placement branch, found the cell non-replaceable, and returned. A player
-//! could not open a door, flip a lever or press a button on our own server.
+//! `random_tick::react_to_notification` reaches it from the world tick loop.
+//! `apply_use_item_on` handles the hand interaction for doors, trapdoors, fence
+//! gates, levers, buttons, and note blocks before attempting item placement.
 //!
-//! That is worse than it sounds, because it makes the whole of #314/#315/#319
-//! unreachable by hand: `redstone.rs` would happily propagate a lever's signal if
-//! something set it, and nothing could.
+//! Hand interaction changes the block state while preserving the separate
+//! redstone power state; the world tick loop then propagates any resulting
+//! neighbor updates.
 //!
-//! # The five families, and where each rule comes from
+//! # Hand-interaction families
 //!
-//! | family | vanilla | rule |
-//! |---|---|---|
-//! | door | `DoorBlock.useWithoutItem` (`:200-210`) | `state.cycle(OPEN)`, both halves |
-//! | trapdoor | `TrapDoorBlock.useWithoutItem` (`:86-95`) | `toggle` → cycle `open` |
-//! | fence gate | `FenceGateBlock.useWithoutItem` (`:143-159`) | cycle `open`, and re-face toward the player when opening |
-//! | lever | `LeverBlock.useWithoutItem` (`:63-76`) → `pull` | cycle `powered` |
-//! | button | `ButtonBlock.useWithoutItem` (`:86-95`) → `press` | set `powered = true`, schedule a release |
-//! | note block | vanilla's own empty-hand-use handler → `changePitch` | cycle `note`, wrapping `24` back to `0` |
+//! | family | rule |
+//! |---|---|
+//! | door | toggle `open` on both halves |
+//! | trapdoor | toggle `open` |
+//! | fence gate | toggle `open`, and face the player when opening |
+//! | lever | toggle `powered` |
+//! | button | set `powered = true`, then schedule a release |
+//! | note block | cycle `note`, wrapping `24` back to `0` |
 //!
 //! **`open` alone, not `open` *and* `powered`.** [`crate::redstone_openable`]'s
 //! `with_open_and_powered` writes both, because for the redstone path they move
@@ -32,25 +28,21 @@
 //! `powered` alone, or opening a door by hand would make it read as
 //! redstone-powered and the next neighbour notification would slam it shut.
 //!
-//! **Iron cannot be opened by hand.** `BlockSetType`'s first boolean field is
-//! `canOpenByHand`, and it is `false` for exactly two sets, `iron` and `gold`
-//! (vanilla's own block-set-type registration lists this field first; the `false` values are on the
-//! `iron` and `gold` registrations). Only iron has a door and a trapdoor, so
-//! `minecraft:iron_door` and `minecraft:iron_trapdoor` are the two blocks a hand
-//! click must refuse. Copper doors *can* be opened by hand — copper's own
-//! `canOpenByHand` is `true`, which is easy to get backwards because copper is a
-//! metal and its `canButtonBeActivatedByArrows` is the `false` one.
+//! **Iron cannot be opened by hand.** The block-set data marks both `iron` and
+//! `gold` as hand-locked; only iron has a door or trapdoor. Copper doors are
+//! hand-openable, so the refusal set is exactly `minecraft:iron_door` and
+//! `minecraft:iron_trapdoor`.
 //!
 //! # What is deliberately not modelled
 //!
 //! * **The open/close sound.** It is a `LEVEL_EVENT`, and `ServerProtocol` has no
-//!   encoder for one at all. Named in #532's own scope list; the block state is
+//!   encoder for one at all. The block state is
 //!   what makes the door usable, the sound is cosmetic.
 //! * **Pressure plates.** A collision trigger, not a right-click — it needs the
-//!   player-AABB-vs-block work #532 puts out of scope.
-//! * **`GameEvent.BLOCK_OPEN`/`BLOCK_CLOSE`.** Sculk sensors are not modelled.
-//! * **Vanilla's `isClientSide` split in `LeverBlock`.** The particle half is the
-//!   client's; the `pull` half is what a server does, and that is this.
+//!   player-AABB-vs-block work remains out of scope.
+//! * **Open/close game events.** Sculk sensors are not modelled.
+//! * **Client-only lever particles.** The server-side state toggle is modelled;
+//!   the client-side particles are cosmetic.
 
 use lodestone_model::BlockPos;
 
@@ -61,14 +53,13 @@ use crate::redstone::with_property;
 /// already use. `tick::run_tick_loop`'s drain dispatches on it.
 pub const TICK_BUTTON: &str = "lodestone:button_release";
 
-/// The button's own ticks-to-stay-pressed for the stone family — vanilla's own block
-/// registration: `new ButtonBlock(BlockSetType.STONE, 20, p)`. Also the value for
-/// `polished_blackstone_button`, which registers against the **stone** set.
+/// The button's ticks-to-stay-pressed for the stone family: `20`. This also
+/// covers `polished_blackstone_button`, which uses the stone timing family.
 pub const STONE_BUTTON_TICKS: u64 = 20;
 
-/// `ButtonBlock`'s `ticksToStayPressed` for every wooden family (oak, spruce,
-/// birch, jungle, acacia, cherry, dark_oak, pale_oak, mangrove, bamboo, crimson,
-/// warped) — all registered at `30`.
+/// The ticks-to-stay-pressed value for every wooden family (oak, spruce, birch,
+/// jungle, acacia, cherry, dark_oak, pale_oak, mangrove, bamboo, crimson,
+/// warped): `30`.
 pub const WOODEN_BUTTON_TICKS: u64 = 30;
 
 /// What a right-click does to a block.
@@ -124,10 +115,8 @@ pub fn button_release_delay(state: &str) -> u64 {
     }
 }
 
-/// Whether a hand click may open this block — vanilla's
-/// `BlockSetType.canOpenByHand`, which is `false` only for the `iron` and `gold`
-/// sets. Gold has neither a door nor a trapdoor, so these two names are the whole
-/// refusal set.
+/// Whether a hand click may open this block. Gold has neither a door nor a
+/// trapdoor, so the only refused names are the two iron blocks.
 #[must_use]
 pub fn can_open_by_hand(state: &str) -> bool {
     !matches!(base(state), "minecraft:iron_door" | "minecraft:iron_trapdoor")
@@ -143,7 +132,7 @@ pub fn can_open_by_hand(state: &str) -> bool {
 /// and for a door whose partner is missing.
 ///
 /// `player_yaw` is used only by the fence-gate arm, to re-face the gate toward the
-/// player as vanilla does. `None` (no rotation reported yet) keeps the existing
+/// player. `None` (no rotation reported yet) keeps the existing
 /// facing, which is the same fallback `placed_block_state` uses.
 #[must_use]
 pub fn hand_use(
@@ -153,9 +142,8 @@ pub fn hand_use(
     player_yaw: Option<f32>,
 ) -> Option<HandUse> {
     if is_button(state) {
-        // `ButtonBlock.useWithoutItem` returns CONSUME without pressing when the
-        // button is already down, so a second click neither re-powers it nor
-        // extends its timer.
+        // A pressed button consumes a second click without changing state, so
+        // the click neither re-powers it nor extends its timer.
         if crate::redstone_openable::powered(state) {
             return None;
         }
@@ -172,8 +160,8 @@ pub fn hand_use(
         });
     }
     if is_note_block(state) {
-        // `NoteBlock.useWithoutItem` → `changePitch`: `state.cycle(NOTE)`, wrapping
-        // 24 back to 0. The `playNote` half of `changePitch` is not modelled — see
+        // Cycle the note value, wrapping 24 back to 0. The sound side is not
+        // modelled — see
         // `crate::redstone_note_block`'s own module doc for why the pulse sound has
         // no wire path here yet (the same `LEVEL_EVENT`/block-event gap its
         // neighbour-triggered pulse already discloses).
@@ -188,8 +176,8 @@ pub fn hand_use(
     let mut changes = Vec::with_capacity(2);
     let mut primary = with_property(state, "open", if opening { "true" } else { "false" });
     if crate::redstone_openable::is_fence_gate(state) && opening {
-        // `FenceGateBlock.useWithoutItem`'s middle branch: when the gate is
-        // opening and its `facing` is the *opposite* of where the player is
+        // When the gate is opening and its `facing` is the *opposite* of where
+        // the player is
         // looking, it swings to face them instead. Skipped when the yaw is
         // unknown, and a no-op when the facings already agree.
         if let Some(yaw) = player_yaw {
@@ -203,9 +191,8 @@ pub fn hand_use(
     }
     changes.push((pos, primary));
 
-    // A door is two blocks and vanilla moves both: `DoorBlock.setOpen` writes the
-    // clicked half, and the other half follows because both halves carry `open`
-    // and `DoorBlock.neighborChanged` keeps them in step. Writing only the clicked
+    // A door is two blocks and both halves must receive the same `open` value.
+    // Writing only the clicked
     // half leaves a visibly half-open door.
     if crate::redstone_openable::is_door(state)
         && let Some((other_pos, other_state)) = other_half
@@ -256,8 +243,8 @@ fn property<'a>(state: &'a str, key: &str) -> Option<&'a str> {
         .map(|(_, v)| v)
 }
 
-/// The horizontal `Direction` a yaw points at, matching vanilla's
-/// `Direction.fromYRot` — the same quadrant arithmetic `placed_block_state`
+/// The horizontal direction a yaw points at, using the same quadrant arithmetic
+/// `placed_block_state`
 /// already uses for the redstone directional families.
 fn facing_from_yaw(yaw: f32) -> &'static str {
     match (((yaw / 90.0) + 0.5).floor() as i32).rem_euclid(4) {
@@ -354,8 +341,8 @@ mod tests {
             "a stone button stays pressed 20 ticks"
         );
 
-        // Already pressed: vanilla returns CONSUME without pressing, so the timer
-        // is not extended and no block update is produced.
+        // Already pressed: the click is consumed without changing state, so the
+        // timer is not extended and no block update is produced.
         assert_eq!(hand_use(pos(0, 0, 0), &pressed.changes[0].1, None, None), None);
 
         let wooden = "minecraft:oak_button[face=wall,facing=north,powered=false]";
@@ -380,7 +367,7 @@ mod tests {
 
     #[test]
     fn an_opening_fence_gate_swings_to_face_the_player() {
-        // Gate faces north; a player looking north is at yaw 180 in Minecraft's
+        // Gate faces north; a player looking north is at yaw 180 in the protocol's
         // convention, so the gate's facing is the opposite of the player's and must
         // swing.
         let gate = "minecraft:oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]";

@@ -1,34 +1,31 @@
 //! One shared, persistable store for the world's *scalars*: game rules,
-//! difficulty, and the clock (issues #327, #328, #323).
+//! difficulty, and the clock.
 //!
 //! # What it is
 //!
 //! [`WorldStateHandle`] is the world-scoped counterpart of
 //! [`crate::BlockEntityHandle`]: a cheap clone, one store. It holds
 //! [`crate::game_rules::GameRules`], the difficulty and its lock, and the two
-//! halves of vanilla's clock (`gameTime` and `dayTime`).
+//! world-clock counters (`game_time` and `day_time`).
 //!
-//! Three issues converge here because they were the same defect three times:
-//! **stored-and-broadcast is not enforced, and per-connection is not stored.**
+//! These domains live together because connections and the world tick loop must
+//! read the same stored values.
 //!
-//! | issue | what existed | what was wrong |
+//! | state domain | stored value | consumers |
 //! |---|---|---|
-//! | #327 game rules | a typed `GameRules` registry with `/gamerule` and typed accessors | **zero production constructors** — `GameRulesHandle::new()` was called only under `#[cfg(test)]`, while the live `SET_GAME_RULE` path wrote a separate, unvalidated, **per-connection** `HashMap<String, String>` |
-//! | #328 difficulty | decode → store → confirm, gated by a real test | stored on the same per-connection struct, and read by nothing. **Now four readers** — see [`monsters_may_spawn`](WorldStateHandle::monsters_may_spawn) and `docs/world-state.md`'s difficulty table |
-//! | #323 world time | `SET_TIME` decoded, and a connected client's sky really moved | the **value** was `ticks_since(play_start)` — wall-clock elapsed since *this connection* joined. `tick.rs`'s real counter never reached the encoder |
+//! | game rules | typed [`GameRules`] values | command handlers and tick-time decisions |
+//! | difficulty | current difficulty and its lock | spawn admission, damage rules, and client updates |
+//! | world time | monotonically increasing `game_time` and `day_time` | tick progression and time packets |
 //!
-//! #323 is the shape `cargo xtask connectedness` structurally cannot see: every
-//! link green, wrong value on the wire. So the fix is not a new wire — it is
-//! making the world own the clock and the broadcast read it.
+//! The world owns these values, while connection tasks only read snapshots and
+//! enqueue requests that the world tick loop applies.
 //!
 //! # How it works
 //!
 //! `run_tick_loop` calls [`WorldStateHandle::tick_time`] once per world tick.
 //! `game_time` always advances; `day_time` advances **only** when the
-//! `advance_time` rule is on — vanilla's `ServerLevel.tickTime`, where
-//! `gameTime` is unconditional and `setDayTime` is gated by the rule. That one
-//! asymmetry is what makes `/gamerule advance_time false` freeze the sun without
-//! freezing anything measured in game ticks.
+//! `advance_time` rule is on. This asymmetry makes `/gamerule advance_time false`
+//! freeze the sun without freezing anything measured in game ticks.
 //!
 //! Every connection reads the same store, so a rule set by one LAN player is the
 //! rule every player and the tick loop sees.
@@ -41,24 +38,21 @@
 //!   the island this whole module exists to stop creating.
 //! * **Persisting another scalar**: [`WorldStateHandle::level_data_fields`] and
 //!   [`WorldStateHandle::load_level_data`] are the pair, and they must stay
-//!   inverse. Both use vanilla's own `level.dat` field names
-//!   (`GameRules`, `Time`, `DayTime`, `difficulty_settings`), so a world this
-//!   server writes is readable by a real 26.2 server and vice versa.
+//!   inverse. Both use the established `level.dat` field names (`GameRules`,
+//!   `Time`, `DayTime`, `difficulty_settings`), so worlds written here retain
+//!   the same interchange format.
 //!
 //! ## Gotchas
 //!
 //! * **`GameRules` in `level.dat` is a compound of *string* values**, even for an
-//!   integer rule (vanilla's own game-rules table's `serialize`/`deserialize` go through
-//!   `String`). Writing `Nbt::Int` there produces a file vanilla silently drops
-//!   every rule from.
+//!   integer rule. Writing `Nbt::Int` there produces a file readers silently
+//!   drop every rule from.
 //! * **A locked difficulty refuses a change** ([`set_difficulty`](WorldStateHandle::set_difficulty)
-//!   returns `false`), which vanilla enforces in `MinecraftServer.setDifficulty`'s
-//!   `if (level.getLevelData().isDifficultyLocked())` guard. Applying it anyway
-//!   and only *displaying* the lock is the failure that looks like it works.
-//! * **The clock is `i64` and `day_time` is not reduced mod 24000.** Vanilla
-//!   keeps a monotonically growing `dayTime` too and the client takes the
-//!   remainder for rendering; truncating it here would break "how many days has
-//!   this world existed".
+//!   returns `false`). Applying it anyway and only *displaying* the lock would
+//!   leave the stored difficulty unchanged while presenting a misleading result.
+//! * **The clock is `i64` and `day_time` is not reduced mod 24000.** The stored
+//!   value grows monotonically and the client uses its fractional day position for rendering;
+//!   truncating it here would break "how many days has this world existed".
 //!
 //! # Dependencies
 //!
@@ -72,12 +66,12 @@ use lodestone_model::{Difficulty, GameMode};
 
 use crate::game_rules::{GameRuleError, GameRuleValue, GameRules};
 
-/// Ticks in one vanilla day (`Level.TICKS_PER_DAY`). The client takes
-/// `day_time % 24000` to place the sun; nothing here needs to.
+/// Ticks in one full day (`24_000`). The client takes `day_time % 24000` to
+/// place the sun; nothing here needs to.
 pub const TICKS_PER_DAY: i64 = 24_000;
 
-/// A `/weather` command's request, applied by the world tick loop's own
-/// [`crate::weather::WeatherState`] the pass after it is queued.
+/// A `/weather` command's request, applied by the world tick loop's
+/// [`crate::weather::WeatherState`] on the next pass.
 ///
 /// # Why a request queue rather than a direct write
 ///
@@ -89,12 +83,9 @@ pub const TICKS_PER_DAY: i64 = 24_000;
 /// request here instead, and the loop is the only thing that ever turns one
 /// into a field write.
 ///
-/// Mirrors `MinecraftServer::setWeatherParameters`'s three call shapes
-/// (`WeatherCommand.setClear`/`setRain`/`setThunder`), each of which sets the
-/// clear/rain/thunder timers and both booleans **directly** rather than
-/// waiting for the timer to count down — the loop applies it the same way
-/// (see its own call site's comment), which is what makes the transition
-/// visible on the very next world tick instead of up to 180,000 ticks later.
+/// Each request sets the clear/rain/thunder timers and both booleans
+/// **directly**, so the transition is visible on the very next world tick
+/// instead of waiting for an existing timer to expire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeatherRequest {
     /// `/weather clear [<duration>]` — force clear weather.
@@ -114,13 +105,13 @@ pub enum WeatherRequest {
     },
 }
 
-/// The two halves of vanilla's clock, as [`WorldStateHandle::time`] reports them.
+/// The two world-clock counters, as [`WorldStateHandle::time`] reports them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WorldTime {
-    /// `gameTime` — total world ticks, **always** advancing. What a `SET_TIME`
-    /// packet's monotonic first field carries.
+    /// `game_time` — total world ticks, **always** advancing. The `SET_TIME`
+    /// packet's monotonic first field carries this value.
     pub game_time: i64,
-    /// `dayTime` — the day/night anchor, frozen while `advance_time` is off.
+    /// `day_time` — the day/night anchor, frozen while `advance_time` is off.
     pub day_time: i64,
 }
 
@@ -139,8 +130,8 @@ pub struct WorldState {
     /// yet searched", which is what a brand-new world is — see
     /// [`WorldStateHandle::world_spawn`] for why the distinction matters.
     spawn: Option<crate::world_spawn::WorldSpawn>,
-    /// The game mode a **new** player joins in (`/defaultgamemode`) —
-    /// `LevelSettings.DEFAULT`'s `GameType`. Distinct from any joined player's
+    /// The game mode a **new** player joins in (`/defaultgamemode`) — the
+    /// default setting in the world data. Distinct from any joined player's
     /// own `game_mode` local: a returning player's saved mode always wins over
     /// this (see `crate::server::serve_connection_inner`'s join arm), so this
     /// field only ever decides a *fresh* player's first mode.
@@ -155,12 +146,12 @@ impl Default for WorldState {
     fn default() -> Self {
         Self {
             rules: GameRules::new(),
-            // `LevelSettings.DEFAULT`'s difficulty.
+            // Fresh worlds start at Normal difficulty.
             difficulty: Difficulty::Normal,
             difficulty_locked: false,
             time: WorldTime::default(),
             spawn: None,
-            // `LevelSettings.DEFAULT`'s game type.
+            // Fresh players start in Survival mode.
             default_game_mode: GameMode::Survival,
             weather_request: None,
         }
@@ -169,8 +160,8 @@ impl Default for WorldState {
 
 /// A cheap, cloneable handle to **one** world's [`WorldState`].
 ///
-/// Deliberately has no `subscriber()`: every clone shares the store, which is the
-/// whole point (a per-connection copy is the bug #327 and #328 were reported for).
+/// Deliberately has no `subscriber()`: every clone shares the store, so updates
+/// from one connection remain visible to the world's tick loop.
 #[derive(Debug, Clone, Default)]
 pub struct WorldStateHandle {
     state: Arc<Mutex<WorldState>>,
@@ -227,7 +218,7 @@ pub struct WorldStateHandle {
     /// `crate::commands::stopwatch_store`'s module doc.
     stopwatches: crate::commands::stopwatch_store::StopwatchHandle,
     /// This world's plugin-facing crafting-station (anvil/grindstone/
-    /// smithing/loom/stonecutter) result hooks (issue #150), a sibling of
+    /// smithing/loom/stonecutter) result hooks, a sibling of
     /// `state`/`scoreboard`/`teams`/`nbt_storage`/`stopwatches` for the
     /// identical reason: `WorldStateHandle` is already threaded to
     /// `crate::server::dispatch_play_packet`, which is where every one of
@@ -235,8 +226,8 @@ pub struct WorldStateHandle {
     /// parameter added to the `serve_connection*` wrappers. See
     /// `crate::plugin_crafting`'s own module doc.
     crafting_hooks: crate::plugin_crafting::CraftingStationHooks,
-    /// This world's loaded datapack functions and function tags (issue #48's
-    /// remainder), a sibling of `state`/`scoreboard`/`teams`/`nbt_storage`/
+    /// This world's loaded datapack functions and function tags, a sibling of
+    /// `state`/`scoreboard`/`teams`/`nbt_storage`/
     /// `stopwatches`/`crafting_hooks` for the identical reason: every command
     /// entry point already receives this handle. See
     /// `crate::commands::function_store`'s module doc.
@@ -244,7 +235,7 @@ pub struct WorldStateHandle {
 }
 
 impl WorldStateHandle {
-    /// A handle to a fresh world: every rule at its vanilla default, Normal
+    /// A handle to a fresh world: every rule at its default, Normal
     /// difficulty unlocked, clock at zero.
     #[must_use]
     pub fn new() -> Self {
@@ -358,7 +349,7 @@ impl WorldStateHandle {
     }
 
     /// Sets the difficulty, returning `false` if the world's difficulty is
-    /// **locked** — vanilla's `MinecraftServer.setDifficulty` guard.
+    /// **locked** — the lock check rejects changes while this flag is set.
     pub fn set_difficulty(&self, difficulty: Difficulty) -> bool {
         self.with(|state| {
             if state.difficulty_locked {
@@ -369,8 +360,8 @@ impl WorldStateHandle {
         })
     }
 
-    /// Locks or unlocks the difficulty. Vanilla only ever *locks* (the button is
-    /// one-way in the UI), but the packet carries a boolean, so both are honoured.
+    /// Locks or unlocks the difficulty. Hosts may use this to mirror the
+    /// level-data property or to configure a test world.
     pub fn set_difficulty_locked(&self, locked: bool) {
         self.with(|state| state.difficulty_locked = locked);
     }
@@ -401,7 +392,7 @@ impl WorldStateHandle {
         self.with(|state| state.rules.advance_time())
     }
 
-    /// `random_tick_speed` — random ticks per section per tick (issue #508).
+    /// `random_tick_speed` — random ticks per section per tick.
     #[must_use]
     pub fn random_tick_speed(&self) -> u32 {
         self.with(|state| state.rules.random_tick_speed())
@@ -472,19 +463,11 @@ impl WorldStateHandle {
         self.with(|state| state.rules.spawn_wandering_traders())
     }
 
-    /// Whether mobs vanilla marks `notInPeaceful` may exist — false on `Peaceful`.
-    ///
-    /// Difficulty's **first** real consumer: before this, nothing read the stored
-    /// value at all, which is why #328 was "stored and broadcast, not enforced".
-    /// There are now four (peaceful eviction, peaceful spawn refusal, the
-    /// starvation floor, fire spread odds); `docs/world-state.md` carries the
-    /// table and the two parts deliberately left.
-    ///
-    /// **This is only half of a peaceful check.** It answers the *difficulty*
-    /// question; the *species* question is
-    /// [`crate::mob_spawn::allowed_in_peaceful`], and both are needed —
-    /// `MobCategory.MONSTER` is not the same set, and vanilla keeps seven monsters
-    /// on Peaceful. `run_tick_loop` and `crate::spawn_egg` each pair the two.
+    /// Whether the difficulty permits hostile mobs to exist. This returns false
+    /// for [`Difficulty::Peaceful`]; callers pair it with the species-specific
+    /// [`crate::mob_spawn::allowed_in_peaceful`] check because difficulty and
+    /// entity category are separate admission rules. The tick loop and
+    /// [`crate::spawn_egg`] apply both checks.
     #[must_use]
     pub fn monsters_may_spawn(&self) -> bool {
         self.with(|state| state.difficulty != Difficulty::Peaceful)
@@ -510,7 +493,7 @@ impl WorldStateHandle {
     /// pass — see [`WeatherRequest`]'s own doc for why this cannot be a direct
     /// write. Overwrites whatever the loop has not yet consumed: `/weather
     /// rain` immediately followed by `/weather clear` before the next tick must
-    /// land on clear, matching vanilla's single mutable `WeatherData` field.
+    /// land on clear, matching the single mutable weather state stored here.
     pub fn request_weather(&self, request: WeatherRequest) {
         self.with(|state| state.weather_request = Some(request));
     }
@@ -523,22 +506,10 @@ impl WorldStateHandle {
         self.with(|state| state.weather_request.take())
     }
 
-    /// The world spawn point, or `None` if nothing has resolved one for this world
-    /// yet.
-    ///
-    /// # Why this is stored on the world rather than derived per join
-    ///
-    /// `crate::world_spawn::find_initial_spawn` is a 121-iteration spiral over
-    /// generated columns — vanilla's `MinecraftServer.setInitialSpawn`, which runs
-    /// **once, at world creation**, and writes its answer to `level.dat`. This
-    /// crate ran it in every connection's `ConfigurationFinished` arm instead, and
-    /// read the persisted value back nowhere, so every join re-paid for the search
-    /// and a `/setworldspawn` could never stick.
-    ///
-    /// So `None` is meaningful: it is "no search has happened", and the first join
-    /// to a fresh world resolves it and calls
-    /// [`set_world_spawn`](Self::set_world_spawn). Every later join and every later
-    /// session reads it back through [`load_level_data`](Self::load_level_data).
+    /// The world spawn point, or `None` when no spawn has been resolved. A
+    /// missing value tells the first join to run
+    /// [`crate::world_spawn::find_initial_spawn`]; a resolved value is reused
+    /// by later joins and persisted through [`Self::level_data_fields`].
     #[must_use]
     pub(crate) fn world_spawn(&self) -> Option<crate::world_spawn::WorldSpawn> {
         self.with(|state| state.spawn)
@@ -562,8 +533,8 @@ impl WorldStateHandle {
         self.with(|state| state.spawn = None);
     }
 
-    /// The fields this world contributes to `level.dat`'s `Data` compound, using
-    /// vanilla's own names so a real 26.2 server can read the world back.
+    /// The fields this world contributes to `level.dat`'s `Data` compound,
+    /// using the 26.2 interchange names.
     ///
     /// `difficulty_settings` is written whole (difficulty + lock) because that is
     /// how 26.2 nests them; the other three are flat.
@@ -607,7 +578,8 @@ impl WorldStateHandle {
             // **The field is `spawn`, a nested compound — not the flat
             // `SpawnX`/`SpawnY`/`SpawnZ` ints.** Those are pre-1.21; 26.2 nests
             // them, and `lodestone_anvil::level_dat::Spawn` is the measured shape.
-            // Writing the old names produces a world vanilla opens at the origin.
+            // Writing flat coordinate names would produce an origin spawn when
+            // read as the nested 26.2 shape.
             if let Some(spawn) = state.spawn {
                 fields.push((
                     "spawn".to_owned(),
@@ -635,9 +607,8 @@ impl WorldStateHandle {
 
     /// Loads whatever of [`level_data_fields`](Self::level_data_fields) is present
     /// in a `level.dat` `Data` compound. **Total and non-failing**: a missing or
-    /// malformed field leaves that scalar at its current value, so a world written
-    /// by an older build (or by vanilla, with rules this server does not model)
-    /// still loads. An unknown rule name is dropped by
+    /// malformed field leaves that scalar at its current value, and an unknown
+    /// rule name is dropped by
     /// [`GameRules::set`](crate::game_rules::GameRules::set)'s own validation.
     pub fn load_level_data(&self, data: &Nbt) {
         let Nbt::Compound(fields) = data else { return };
@@ -659,9 +630,8 @@ impl WorldStateHandle {
             if let Some(Nbt::Long(day)) = field("DayTime") {
                 state.time.day_time = *day;
             }
-            // The nested 26.2 `spawn` compound. Read leniently: a world written by
-            // a build before this field existed simply leaves `spawn` at `None` and
-            // the next join searches, which is the correct degradation.
+            // The nested 26.2 `spawn` compound. Read leniently: a missing or
+            // malformed value leaves `spawn` at `None`, so the next join searches.
             if let Some(Nbt::Compound(spawn)) = field("spawn") {
                 let sub = |name: &str| spawn.iter().find(|(key, _)| key == name).map(|(_, v)| v);
                 if let Some(Nbt::IntArray(pos)) = sub("pos") {
@@ -728,12 +698,9 @@ mod tests {
     /// The clock's one asymmetry, which is the whole of `advance_time`'s meaning:
     /// `game_time` counts every tick, `day_time` only counts while the rule is on.
     ///
-    /// The expected values come from the record definition, not from our producer:
-    /// `ServerLevel.tickTime` increments `gameTime` unconditionally and calls
-    /// `setDayTime` only under `GameRules.RULE_DAYLIGHT`. So after `n` ticks with
-    /// the rule off for `k` of them, `game_time == n` and `day_time == n - k`
-    /// exactly — a gate asserting only "the sun stopped" is satisfied by a clock
-    /// that froze both.
+    /// For `n` ticks with the rule disabled for `k` of them,
+    /// `game_time == n` and `day_time == n - k` exactly. Testing both counters
+    /// distinguishes the daylight gate from a clock that freezes both values.
     #[test]
     fn advance_time_freezes_the_day_clock_and_not_the_game_clock() {
         let world = WorldStateHandle::new();
@@ -836,8 +803,8 @@ mod tests {
         );
     }
 
-    /// Every clone is the same store — the property both #327 and #328 were
-    /// reported for, with `is_same_store` as the control (two fresh handles at the
+    /// Every clone is the same store — a property checked by `is_same_store` (two
+    /// fresh handles at the
     /// same default would otherwise look identical).
     #[test]
     fn every_clone_shares_one_store() {
@@ -854,8 +821,8 @@ mod tests {
         assert_eq!(separate.random_tick_speed(), 3, "an unrelated world is untouched");
     }
 
-    /// Persistence round-trips through vanilla's own `level.dat` field names, and
-    /// the pair is inverse.
+    /// Persistence round-trips through the `level.dat` field names, and the
+    /// encoder/decoder pair is inverse.
     #[test]
     fn level_data_round_trips_rules_difficulty_and_the_clock() {
         let saved = WorldStateHandle::new();
@@ -885,8 +852,8 @@ mod tests {
         assert_eq!(loaded.rule_entries(), saved.rule_entries());
     }
 
-    /// An integer rule must be stored as a **string** in `level.dat`; an `Nbt::Int`
-    /// there is a file vanilla drops every rule from.
+    /// An integer rule must be stored as a **string** in `level.dat`; writing
+    /// `Nbt::Int` causes the file reader to drop every rule.
     #[test]
     fn game_rules_persist_as_strings_even_for_an_integer_rule() {
         let world = WorldStateHandle::new();
@@ -958,8 +925,8 @@ mod tests {
         assert_eq!(restored.pos, lodestone_model::Vec3::new(136.0, 71.0, -24.0));
 
         // The control: a `Data` compound with no `spawn` field must leave the
-        // loading world at `None` rather than at some default, or a world written by
-        // an older build would silently spawn everyone at the origin.
+        // loading world at `None` rather than at some default, or every join
+        // would silently spawn at the origin.
         let older = WorldStateHandle::new();
         older.load_level_data(&Nbt::Compound(vec![(
             "Time".to_owned(),

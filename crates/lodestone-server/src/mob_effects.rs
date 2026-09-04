@@ -262,14 +262,9 @@ pub fn splash_scale(distance_sq: f64) -> f64 {
     1.0 - distance_sq.sqrt() / SPLASH_RANGE
 }
 
-/// `MobEffect.isInstantaneous()` for exactly the effects a potion in this
-/// build's registry can carry.
-///
-/// `true` only for `instant_health`/`instant_damage` — vanilla's own
-/// heal-or-harm effect class is the sole instantaneous-effect subclass any of vanilla's own potion registrations ever
-/// grants (the jar's *other* instantaneous effect, `saturation`, backs no
-/// potion). Accepts a bare path as well as a namespaced id, matching
-/// [`periodic_effect`]'s own input handling.
+/// Returns `true` for the two instantaneous potion effects in this build's
+/// registry: `instant_health` and `instant_damage`. A bare path and a
+/// namespaced id are both accepted, matching [`periodic_effect`].
 #[must_use]
 pub fn effect_is_instantaneous(effect_id: &str) -> bool {
     matches!(
@@ -278,62 +273,53 @@ pub fn effect_is_instantaneous(effect_id: &str) -> bool {
     )
 }
 
-/// `HealOrHarmMobEffect.applyInstantaneousEffect`'s scaled amount:
-/// `(int)(scale * base_amount + 0.5)`, where `base_amount` is
-/// [`instant_health_amount`]/[`instant_damage_amount`] at the instance's own
-/// amplifier. Truncation via `as f32` on a non-negative value is `floor`, which
-/// is what Java's `(int)` cast does here since `scale` and `base_amount` are
-/// both non-negative.
+/// Computes an instantaneous splash amount as
+/// `(scale * base_amount + 0.5).floor()`, where `base_amount` is
+/// [`instant_health_amount`] or [`instant_damage_amount`] at the effect's
+/// amplifier. Both operands are non-negative, so truncation is well-defined.
 #[must_use]
 pub fn splash_instant_amount(base_amount: f32, scale: f64) -> f32 {
     ((scale * f64::from(base_amount)) + 0.5).floor() as f32
 }
 
-/// `MobEffectInstance.mapDuration(d -> (int)(scale * d * durationScale + 0.5))`
-/// — the timed-effect duration after splash falloff and the item's own
-/// `minecraft:potion_duration_scale` (pass `1.0` for the default — this build's
-/// `ItemComponents` does not model that component, so every splash uses the
-/// unscaled potion duration; see the module doc's disclosed gap).
+/// Computes a timed-effect duration after splash falloff and the item's
+/// `minecraft:potion_duration_scale`: `(scale * d * duration_scale + 0.5).floor()`.
+/// Pass `1.0` for the default; this build does not model a separate duration
+/// component, so ordinary splashes use the unscaled duration.
 #[must_use]
 pub fn splash_timed_duration(base_duration_ticks: u32, scale: f64, duration_scale: f32) -> i32 {
     ((scale * f64::from(base_duration_ticks) * f64::from(duration_scale)) + 0.5).floor() as i32
 }
 
-/// `MobEffectInstance.endsWithin(20)` — a splashed timed effect scaled down to
-/// this short or shorter is **dropped entirely**, not applied at a token
-/// duration. [`INFINITE_DURATION`] never qualifies, matching `endsWithin`'s own
-/// `!isInfiniteDuration() && …` guard (no potion's built-in list is infinite, but
-/// the check is here for the same reason `EffectInstance` carries it generally).
+/// A timed splash with duration `20` or less is **dropped entirely**, rather
+/// than applied at a token duration. [`INFINITE_DURATION`] never qualifies;
+/// the sentinel remains available for non-expiring effects.
 #[must_use]
 pub fn splash_would_be_dropped(duration: i32) -> bool {
     duration != INFINITE_DURATION && duration <= 20
 }
 
-/// One potion effect as it lands on one entity after splash falloff — the two
-/// arms `onHitAsPotion`'s loop takes per `MobEffectInstance`.
+/// One potion effect as it lands on one entity after splash falloff.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SplashEffect {
-    /// `MobEffect.applyInstantaneousEffect`'s branch: `effect_id` is
-    /// `instant_health` or `instant_damage`, `amount` is already
-    /// distance-scaled ([`splash_instant_amount`]) and ready to heal or damage
-    /// with directly.
+    /// `effect_id` is `instant_health` or `instant_damage`; `amount` is already
+    /// distance-scaled ([`splash_instant_amount`]) and ready to heal or damage.
     Instant {
         /// Canonical `minecraft:*` mob-effect id.
         effect_id: String,
         /// Already scaled by distance; never negative.
         amount: f32,
     },
-    /// The `entity.addEffect(newEffect, effectSource)` branch: a fresh
-    /// [`EffectInstance`]'s `(duration, amplifier)`, ready for
-    /// [`ActiveEffects::apply`]. Already passed the [`splash_would_be_dropped`]
-    /// filter, so every `Timed` this module hands back is meant to land.
+    /// A fresh [`EffectInstance`]'s `(duration, amplifier)`, ready for
+    /// [`ActiveEffects::apply`]. It has passed [`splash_would_be_dropped`], so
+    /// every `Timed` value this module returns is meant to land.
     Timed {
         /// Canonical `minecraft:*` mob-effect id.
         effect_id: String,
         /// Distance-scaled duration in ticks, always `> 20`.
         duration: i32,
-        /// Unscaled — vanilla's falloff never touches the amplifier, only the
-        /// duration and (for instant effects) the amount.
+        /// Unscaled: falloff affects only duration and, for instant effects,
+        /// amount.
         amplifier: u32,
     },
 }
@@ -390,15 +376,10 @@ pub fn potion_splash_effects(potion_registry_id: i32, scale: f64, duration_scale
         .collect()
 }
 
-/// One effect grant from a food's `Consumable.onConsumeEffects` list —
-/// `ApplyStatusEffectsConsumeEffect`'s own `(MobEffectInstance, probability)`,
-/// `probability` defaulting to `1.0` when the Java constructor omits it.
-///
-/// Distinct from [`SplashEffect`]: a food grant is never distance-scaled and
-/// never instantaneous (no entry in vanilla's own consumables table names `instant_health`/
-/// `instant_damage`), so this is the plain `(effect, duration, amplifier)`
-/// triple `ActiveEffects::apply` already takes, plus the probability
-/// [`food_consume_effects`]'s caller must roll.
+/// One effect grant from a food item. A food grant is never distance-scaled and
+/// never instantaneous, so this is the plain `(effect, duration, amplifier)`
+/// triple [`ActiveEffects::apply`] takes, plus the probability that the caller
+/// must roll.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FoodEffectGrant {
     /// Canonical `minecraft:*` mob-effect id.
@@ -411,24 +392,18 @@ pub struct FoodEffectGrant {
     pub probability: f32,
 }
 
-/// Vanilla's own consumables table's per-food status-effect-on-consume
-/// lists, transcribed exactly (issue #690) — every such
+/// The per-food status-effect-on-consume lists, transcribed exactly — every
 /// registration in that table except `CHICKEN`'s duplicate-looking-but-distinct
 /// entry, which *is* included below. Sorted by item for [`food_consume_effects`]'s
 /// linear scan (the table is seven rows; a binary search would be a second thing to
 /// keep sorted for no measured benefit).
 ///
-/// **Formerly-disclosed gap, now closed (issue #690)**: `resistance`'s damage
-/// reduction and `absorption`'s extra hit points used to be granted here and
-/// never consumed — `Defenses` was built from `PlayerInventory::combat_stats`
-/// alone, with `resistance_amplifier` always `None` and `absorption` always
-/// `0.0`, at the one real player-damage call site. [`ActiveEffects::overlay_
-/// defenses`] now overlays both onto the equipment-derived `Defenses` before
+/// `resistance`'s damage reduction and `absorption`'s extra hit points are
+/// granted here and consumed by the damage path. [`ActiveEffects::overlay_
+/// defenses`] overlays both onto the equipment-derived `Defenses` before
 /// every real hit, so a granted Resistance or Absorption effect measurably
-/// reduces damage rather than sitting inert in the HUD. `fire_resistance` and
-/// `regeneration` are **not** in this category: both already have a real
-/// consumer (`crate::burning`'s `fire_resistance` flag, `ActiveEffects::tick`'s
-/// heal), so granting those two is a complete fix end to end.
+/// reduces damage. `fire_resistance` and `regeneration` use their own consumers
+/// (`crate::burning`'s `fire_resistance` flag and `ActiveEffects::tick`'s heal).
 static FOOD_EFFECTS: &[(&str, &[FoodEffectGrant])] = &[
     (
         "minecraft:chicken",
@@ -771,17 +746,14 @@ impl ActiveEffects {
             .collect()
     }
 
-    /// Overlays this entity's live Resistance amplifier and Absorption pool onto
-    /// equipment-derived `Defenses` (`PlayerInventory::combat_stats().defenses` at
-    /// the caller), closing the gap the food-effects table's own doc named:
-    /// `Defenses` used to come from armour alone, so a Resistance potion reduced
-    /// nothing and Absorption's extra hearts never soaked a hit (issue #690).
+/// Overlays this entity's live Resistance amplifier and Absorption pool onto
+/// equipment-derived `Defenses` (`PlayerInventory::combat_stats().defenses` at
+/// the caller), so food-granted defenses affect the damage path. The overlay
+/// contributes the active Resistance reduction and Absorption pool to each hit.
     ///
-    /// `resistance_amplifier` is a direct read of the active amplifier —
-    /// `CombatRules.getDamageAfterMagicAbsorb` (`lodestone_entity::damage_after_
-    /// resistance`) takes exactly that. `absorption` is `MobEffects.ABSORPTION`'s
-    /// own `MAX_ABSORPTION` attribute modifier, `4.0 * (amplifier + 1)`
-    /// (`AttributeModifier.Operation.ADD_VALUE` at base `4.0`, scaled by level).
+/// `resistance_amplifier` is a direct read of the active amplifier consumed by
+/// [`lodestone_entity::damage_after_resistance`]. `absorption` is the active
+/// pool, `4.0 * (amplifier + 1)` at base `4.0`, scaled by level.
     ///
     /// **Disclosed simplification**: vanilla drains a separate `AbsorptionAmount`
     /// pool across hits within one effect's duration — a hit that only partially
@@ -804,11 +776,9 @@ impl ActiveEffects {
         }
     }
 
-    /// Applies an effect — `LivingEntity.addEffect`, which forwards to
-    /// [`EffectInstance::update`] when one is already present.
-    ///
-    /// Returns `true` when something changed, matching `addEffect`'s own return so a
-    /// caller can decide whether to send an update packet.
+    /// Applies an effect, updating an existing [`EffectInstance`] when one is
+    /// already present. Returns `true` when the stored state changed, allowing
+    /// the caller to decide whether to send an update packet.
     pub fn apply(&mut self, effect_id: &str, duration: i32, amplifier: u32) -> bool {
         let incoming = EffectInstance::new(duration, amplifier);
         match self.0.get_mut(effect_id) {
@@ -1463,7 +1433,7 @@ mod tests {
         );
     }
 
-    // ---- food consume effects (issue #690) ----
+    // ---- food consume effects  ----
 
     /// A golden apple grants exactly regeneration II (100 ticks) and
     /// absorption I (2400 ticks) — the two-row list `Consumables.GOLDEN_APPLE`
