@@ -609,9 +609,8 @@ pub trait ModelSectionView {
     /// where a derivation from the collision shape alone is wrong, in both
     /// directions — see `lodestone_data::shade_brightness`.
     ///
-    /// The player-visible symptom of getting this wrong is the one issue #22's
-    /// remaining divergence named: the underside of a tree canopy stays
-    /// full-bright, where vanilla renders it markedly dimmer.
+    /// The player-visible symptom of getting this wrong: the underside of a
+    /// tree canopy stays full-bright, where vanilla renders it markedly dimmer.
     ///
     /// Only the **AO** half of [`quad_corner_sample`] consults this. The
     /// *light* half keeps using [`occludes_at`](Self::occludes_at), because
@@ -1540,10 +1539,10 @@ fn should_render_backward_up_face_in(
 /// caller that genuinely wants the dynamic form (`dyn Trait: Trait` holds), so
 /// this is source-compatible — it just stops being the *default*.
 ///
-/// Note this was the *second* axis issue #542 proposed, on the stated grounds
-/// that "`mesh_models` is generic and inlines". **That premise is false** —
-/// `mesh_models` above is `&dyn` too. The conclusion survives (measured 9.5% of
-/// the term, `DESIGN.md` §12.124); the reasoning behind it did not.
+/// Note the premise "`mesh_models` is generic and inlines" is **false** —
+/// `mesh_models` above is `&dyn` too. The conclusion that generic dispatch
+/// here is worth taking survives regardless (measured 9.5% of
+/// the term, `DESIGN.md` §12.124); that particular reasoning for it did not.
 #[must_use]
 pub fn mesh_fluids<V: FluidSectionView + ?Sized>(view: &V) -> FluidMeshes {
     let mut out = FluidMeshes::default();

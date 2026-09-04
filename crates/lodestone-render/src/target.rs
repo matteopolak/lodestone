@@ -71,7 +71,7 @@ impl AcquiredFrame {
     /// no per-frame texture to hand back.
     ///
     /// This exists so a caller can `copy_texture_to_buffer` out of the window's
-    /// own frame (`key.screenshot`, issue #16). [`Self::view`] cannot serve:
+    /// own frame, to serve `key.screenshot`'s read-back. [`Self::view`] cannot serve:
     /// a [`wgpu::TextureView`] is not a valid copy source. Reading it is only
     /// legal because [`SurfaceTarget::new`] ORs [`wgpu::TextureUsages::COPY_SRC`]
     /// into the swapchain config — without that flag the copy is a validation
@@ -439,7 +439,7 @@ impl<'window> SurfaceTarget<'window> {
         let mut config = surface.get_default_config(adapter, width.max(1), height.max(1))?;
         // `get_default_config` returns `RENDER_ATTACHMENT` alone. `COPY_SRC` is
         // what makes `AcquiredFrame::texture` usable as a `copy_texture_to_buffer`
-        // source, which is the whole of `key.screenshot`'s read-back (issue #16);
+        // source, which is the whole of `key.screenshot`'s read-back;
         // without it the copy is a validation error rather than a black image.
         // OR rather than assign, so a backend that already asked for more keeps it.
         //

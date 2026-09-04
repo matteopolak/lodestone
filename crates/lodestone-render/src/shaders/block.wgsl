@@ -6,11 +6,10 @@
 // model paths structurally cannot disagree about fog or the clock.
 //
 // This used to be `{ view_proj, section_origin }` written **per section, per
-// frame** — the exact shape issue #75 profiled at ~4000 `queue.write_buffer`
-// calls/frame and 52.9% of main-thread CPU on the model path. #75 fixed the
-// model path and deliberately left this one (issue #76): the origin is constant
-// for a section's life, so it moved to binding 1 behind a dynamic offset and is
-// written once, at upload. See `docs/section-camera-uniform.md`.
+// frame** — the exact shape that once profiled at ~4000 `queue.write_buffer`
+// calls/frame and 52.9% of main-thread CPU on the model path. The origin is
+// constant for a section's life, so it moved to binding 1 behind a dynamic
+// offset and is written once, at upload. See `docs/section-camera-uniform.md`.
 struct Camera {
     view_proj: mat4x4<f32>,
     fog_eye: vec4<f32>,
@@ -43,8 +42,8 @@ struct Origin {
 // [0.24, 1.0], so 0.0 is never legitimate.
 //
 // Only the sky half is scaled -- block light is a torch and does not dim at dusk.
-// Issue #400's first divergence: this path had no such term at all, so the demo
-// world and every headless gate rendered at a fixed permanent noon.
+// Without this term, the demo world and every headless gate would render at a
+// fixed permanent noon regardless of the clock.
 fn sky_darken() -> f32 {
     let raw = camera.fog_end_enabled.z;
     return select(raw, 1.0, raw <= 0.0);
@@ -79,9 +78,8 @@ struct VsOut {
     // The sprite's atlas sub-rect (min.xy, size.zw). Constant across the quad, so
     // interpolate it flat to avoid drift and let the fragment stage do the wrap.
     @location(2) @interpolate(flat) rect: vec4<f32>,
-    // World position, for the fragment stage's per-fragment fog distance. Issue
-    // #400's second divergence: this path had no fog lanes at all, so nothing ever
-    // faded with distance.
+    // World position, for the fragment stage's per-fragment fog distance —
+    // without it, nothing in this path would fade with distance.
     @location(3) world: vec3<f32>,
 };
 
@@ -109,14 +107,14 @@ fn vs_main(@location(0) packed: vec3<u32>) -> VsOut {
     // AO already carries vanilla's 0.4..1.0 range; light lifts a dark floor so
     // unlit faces are dim rather than black.
     //
-    // `sky * sky_darken()`, not a bare `sky`: `model.wgsl:121` scales the sky half
-    // by the clock before the `max`, and this path did not (issue #400). At
-    // midnight `sky_darken` is 0.24, so a fully sky-lit face goes from
+    // `sky * sky_darken()`, not a bare `sky`: `model.wgsl`'s equivalent term
+    // scales the sky half by the clock before the `max`, and this path matches
+    // it. At midnight `sky_darken` is 0.24, so a fully sky-lit face goes from
     // `0.2 + 0.8*1.00 = 1.000` to `0.2 + 0.8*0.24 = 0.392`.
     //
     // This is still the simple `0.2 + 0.8*l` ramp rather than `model.wgsl`'s full
     // `lightmap.fsh` port -- the packed path meshes full cubes for the demo world
-    // and closing that second gap is not part of #400.
+    // and closing that second gap remains out of scope for this path.
     let light_term = 0.2 + 0.8 * max(sky * sky_darken(), block);
 
     var out: VsOut;
@@ -132,8 +130,7 @@ fn vs_main(@location(0) packed: vec3<u32>) -> VsOut {
 // `model.wgsl` — see that file's copy for the full derivation. Vanilla's
 // shade multiply is a non-colour-managed multiply on gamma bytes, not a
 // linear-light one; this packed path used to skip the round-trip entirely
-// (`tex.rgb * in.shade` in linear space), which is issue #400's third
-// divergence and was not previously recorded anywhere before that issue.
+// (`tex.rgb * in.shade` in linear space).
 // Doing the multiply in linear space pulls every shade factor toward 1.0 —
 // at midnight (`light_term = 0.392`) a mid-grey 128 texel reads as **82**
 // once re-encoded, where the gamma-space round-trip below reads **50**: the

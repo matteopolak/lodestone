@@ -94,8 +94,8 @@ pub type SunriseVertex = SkyVertex;
 /// All three non-positional attributes are identical across all ten vertices —
 /// they are attributes rather than a uniform purely to avoid adding a second bind
 /// group to a pass whose whole design note is staying far under the 4-group
-/// floor. `fog_end` joined them for the same reason in issue #399, when it
-/// stopped being a shader `const`.
+/// floor. `fog_end` joined them for the same reason once it
+/// stopped being a shader `const` and became a per-render-distance value.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct SkyDiscVertex {
@@ -302,7 +302,7 @@ const PASSTHROUGH_COLOR_WGSL: &str = include_str!("shaders/sky_passthrough_color
 /// Vanilla computes `sphericalVertexDistance = length(Position)` in `sky.vsh`,
 /// i.e. once per vertex on a ten-vertex fan, and lets the rasteriser
 /// interpolate the resulting *fog factor* across triangles hundreds of blocks
-/// wide — which is the banding issue #96 names. This interpolates `local_pos`
+/// wide — which shows up as visible gradient banding. This interpolates `local_pos`
 /// and takes the `length` here instead. See `crate::sky::SKY_FOG_END_DISTANCE`
 /// for the full derivation, including why vanilla's second (cylindrical) fog
 /// term is provably dead for this geometry and is therefore absent below.
@@ -772,13 +772,13 @@ pub struct SkyFrame {
     /// In vanilla this is the standing biome's `minecraft:visual/sky_color`, and
     /// **it is now that** on a live server: the shell resolves the biome under
     /// the camera and passes its colour through
-    /// [`crate::fog::FogSettings::sky_color`]. `#96` is closed.
+    /// [`crate::fog::FogSettings::sky_color`].
     ///
     /// A caller with no biome to offer passes the same colour as
     /// [`day_fog_color`](Self::day_fog_color), which every `FogSettings`
     /// constructor does by default — one flat colour for both ends of the
     /// gradient, distinguished only by the two day/night tracks. That is the
-    /// pre-#96 behaviour and it is byte-identical to it.
+    /// no-biome fallback behaviour, and it is byte-identical to it.
     ///
     /// # Two blockers were recorded here and both were stale; keep the shape
     ///
@@ -787,8 +787,8 @@ pub struct SkyFrame {
     ///
     /// 1. It said biome ids "arrive as datapack-registry indices in the
     ///    configuration-phase `registry_data` packet, **which this client does
-    ///    not decode**". True when written; #288 landed that ingest within the
-    ///    hour.
+    ///    not decode**". True when written; `registry_data` decoding landed
+    ///    shortly after.
     /// 2. It then said the decoded **names** had no caller across the
     ///    version-free seam, and that the fix was to carry them on `Login` and
     ///    look the colour up in a jar-derived table — "four edits". The missing
@@ -838,8 +838,8 @@ pub struct SkyFrame {
     /// [`day_sky_color`](Self::day_sky_color) to
     /// [`day_fog_color`](Self::day_fog_color) — vanilla's `fog.skyEnd`.
     ///
-    /// **This is a function of the player's render distance, not a constant**
-    /// (issue #399). Set it with
+    /// **This is a function of the player's render distance, not a constant.**
+    /// Set it with
     /// [`with_render_distance`](Self::with_render_distance), which applies
     /// vanilla's atmospheric-fog-environment attribute's
     /// `min(renderDistanceInBlocks, SKY_FOG_END_DISTANCE)`. It is *not* the
@@ -852,7 +852,7 @@ pub struct SkyFrame {
     /// is the attribute's registered default and therefore correct at render
     /// distance 32 and above. A caller that knows the render distance and does not
     /// say so gets a gradient stretched by `512 / (rd_chunks * 16)`, which at the
-    /// client default of 8 chunks is 4x — the whole of #399. Prefer
+    /// client default of 8 chunks is 4x too far. Prefer
     /// `with_render_distance` at every site that has the number.
     pub sky_fog_end: f32,
     /// OFF (no cloud geometry), FAST (one alpha-tested quad) or FANCY (real
@@ -882,7 +882,7 @@ pub struct SkyFrame {
 
 impl SkyFrame {
     /// A frame with the fog colour equal to the sky colour and no void fog —
-    /// the pass's pre-#96 behaviour, for a caller that has only ever had one
+    /// the pass's single-flat-colour fallback, for a caller that has only ever had one
     /// sky colour to give.
     #[must_use]
     pub fn new(time_of_day: i64, day_sky_color: [f32; 3]) -> Self {
@@ -949,8 +949,7 @@ impl SkyFrame {
 
     /// Sets [`sky_fog_end`](Self::sky_fog_end) from the player's render distance
     /// in chunks, via [`crate::sky::sky_fog_end_for_render_distance`] — the
-    /// builder every caller that knows the render distance should use (issue
-    /// #399).
+    /// builder every caller that knows the render distance should use.
     #[must_use]
     pub fn with_render_distance(mut self, render_distance_chunks: u32) -> Self {
         self.sky_fog_end = crate::sky::sky_fog_end_for_render_distance(render_distance_chunks);
@@ -1154,7 +1153,7 @@ impl SkyRenderer {
             atlas.height,
             &atlas.rgba,
             wgpu::AddressMode::ClampToEdge,
-            // Nearest, not Linear — vanilla does not filter these (issue #372).
+            // Nearest, not Linear — vanilla does not filter these.
             //
             // There is no `.mcmeta` anywhere under
             // `assets/minecraft/textures/environment/`, so nothing there sets
@@ -1449,7 +1448,7 @@ impl SkyRenderer {
         //
         // `fog_end` is the same on all ten vertices; the fragment stage divides
         // by it, so a shortened render distance saturates the outer disc to the
-        // fog colour rather than moving any geometry (issue #399).
+        // fog colour rather than moving any geometry.
         let disc_verts: Vec<SkyDiscVertex> = sky_disc_positions(16.0)
             .into_iter()
             .map(|position| SkyDiscVertex {
@@ -1542,7 +1541,7 @@ impl SkyRenderer {
         // between `FLAT_CLOUDS` and `CLOUDS`.
         let cloud_tint = cloud_color;
 
-        // OFF/FAST/FANCY selection (issue #403) — vanilla's own three states. Only
+        // OFF/FAST/FANCY selection — vanilla's own three states. Only
         // the selected mode's vertex buffer is written; the other pipeline is
         // simply not bound below, and `Off` binds neither.
         //
@@ -1742,7 +1741,7 @@ mod tests {
         );
     }
 
-    /// Issue #399's anti-island check, and the only one in the tree that needs no
+    /// An anti-island check, and the only one in the tree that needs no
     /// GPU adapter: the render distance can only reach the disc if the *shader*
     /// takes it as a vertex input. A `SkyFrame` field, a builder and a vertex
     /// struct field can all be correct while `sky_disc.wgsl` still divides by its
@@ -1766,8 +1765,8 @@ mod tests {
         // needle matches only a float literal.
         assert!(
             !SKY_DISC_WGSL.contains("512.0"),
-            "sky_disc.wgsl has regained a 512.0 literal — the hardcoded fog end \
-             that #399 replaced. The value must come from the vertex attribute"
+            "sky_disc.wgsl has regained a 512.0 literal — a hardcoded fog end \
+             instead of one that comes from the vertex attribute"
         );
     }
 
@@ -1800,7 +1799,7 @@ mod tests {
     }
 
     /// `new` must stay at the attribute's registered default so that the
-    /// pre-#399 behaviour is exactly recoverable, and `with_render_distance` must
+    /// unclamped-constant behaviour is exactly recoverable, and `with_render_distance` must
     /// be the thing that changes it.
     #[test]
     fn sky_frame_carries_a_render_distance_derived_fog_end() {
@@ -1871,13 +1870,13 @@ mod tests {
             bug[2] / bug[0]
         );
 
-        // Night keeps its own non-black track (#191926) rather than following the
+        // Night keeps its own non-black track (0x191926) rather than following the
         // sky to true black, and the alpha does not move: every CLOUD_COLOR
         // keyframe has alpha 0xff, so the per-tick multiply leaves 0.8 alone.
         let night = SkyFrame::new(18_000, sky_blue).resolve_colors(64.0).2;
         assert!(
             night[0] > 0.0 && night[2] > night[0],
-            "night clouds must stay visible and faintly blue (#191926): {night:?}"
+            "night clouds must stay visible and faintly blue (0x191926): {night:?}"
         );
         assert!((night[3] - 0.8).abs() < 1e-6, "night cloud alpha: {}", night[3]);
         assert!(
@@ -1935,7 +1934,7 @@ mod tests {
             day.clear_color(64.0),
             night.clear_color(64.0)
         );
-        // But never black: `FOG_COLOR_TRACK` bottoms out at #161616, which is
+        // But never black: `FOG_COLOR_TRACK` bottoms out at 0x161616, which is
         // why the night horizon reads faintly blue-grey. A black clear here is
         // the reported defect.
         assert!(

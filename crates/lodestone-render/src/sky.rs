@@ -2,11 +2,11 @@
 //! star field and cloud plane. GPU-free and headlessly testable by design (see
 //! [`crate::sky_pipeline`] for the GPU-owning half).
 //!
-//! # This subsystem did not exist before this change
+//! # This is a genuinely new subsystem, not a reconnected island
 //!
-//! A tree-wide grep for sky/celestial/star/moon/cloud rendering before writing
-//! any of this turned up only *sky light* (`world.rs`'s `sky_light` nibble) and
-//! *fog* (`fog.rs`'s distance-fade colour) — real, wired subsystems that happen
+//! A tree-wide grep for sky/celestial/star/moon/cloud rendering turns up only
+//! *sky light* (`world.rs`'s `sky_light` nibble) and *fog* (`fog.rs`'s
+//! distance-fade colour) — real, wired subsystems that happen
 //! to share the word "sky", not a dormant celestial renderer. There is no
 //! island to reconnect here: the night sky is a genuinely new subsystem, built
 //! from nothing.
@@ -22,7 +22,7 @@
 //!
 //! [`celestial_angle_for_time_of_day`] is the *same* angle-of-day formula
 //! [`crate::entity::sky_darken_for_time_of_day`] computes as a private
-//! intermediate — but `entity.rs` was a held file outside this change's scope,
+//! intermediate — but `entity.rs` is a file this module does not own,
 //! so this is a second, independently-written copy rather than an import. If
 //! either copy changes, the other must change with it, or the sun's screen
 //! position and the lightmap's darken factor will visibly disagree about what
@@ -34,12 +34,13 @@
 //! hundred lines away — invisible to every `cargo check`, since none of them
 //! compile documentation.
 //!
-//! # Which formulas here are timeline-exact and which are still 1.21's (#49)
+//! # Which formulas here are timeline-exact and which are still the 1.21 cosine curve
 //!
 //! 26.2 replaced the classic cosine angle-of-day and sky-darken formulas with
 //! a keyframed timeline of tracks driving the sun/moon/star angles, the star
 //! brightness, the sky and fog colours, the sunrise/sunset colour, and the
-//! moon phase. The split as of #96:
+//! moon phase. The current split between what is timeline-exact here and what
+//! is still the classic formula:
 //!
 //! * **Timeline-exact, gated against a JVM dump of the real sampler**
 //!   ([`crate::sky_pipeline`]'s consumers of them included):
@@ -49,7 +50,7 @@
 //!   [`sky_color_for_time_of_day`] / [`fog_color_for_time_of_day`], which are
 //!   thin gamma-space compositions of those multipliers. See
 //!   `crates/lodestone-render/tests/sunrise_sunset_timeline.rs`.
-//! * **Still the classic 1.21 cosine, i.e. still #49**:
+//! * **Still the classic 1.21 cosine**:
 //!   [`celestial_angle_for_time_of_day`] (drives the sun/moon/star *positions*)
 //!   and [`star_brightness_for_time_of_day`]. Both match their plateaus and
 //!   diverge on the ramp shape.
@@ -150,7 +151,7 @@ const SUNRISE_SUNSET_TRACK: [(i32, u32); 32] = [
 /// in vanilla, the renderer's existing sky constant here.
 ///
 /// White through the whole day, pure black across the night: vanilla's night
-/// sky *disc* is genuinely `#000000`, and the dark-blue night sky people
+/// sky *disc* is genuinely `0x000000`, and the dark-blue night sky people
 /// remember is [`FOG_COLOR_TRACK`] showing through at the horizon via the
 /// disc's own fog gradient (see [`SKY_FOG_END_DISTANCE`]). Alpha is `0xff`
 /// throughout because the underlying colour codec parses a 6-digit
@@ -164,7 +165,7 @@ const SKY_COLOR_TRACK: [(i32, u32); 4] = [
 
 /// `minecraft:visual/fog_color`, same file, same `multiply` modifier as
 /// [`SKY_COLOR_TRACK`]. Unlike the sky's, this one does **not** reach black:
-/// `#0c0c16` at dusk and `#161616` at deep night, which is why the night
+/// `#0c0c16` at dusk and `0x161616` at deep night, which is why the night
 /// horizon reads faintly blue-grey rather than as a hard edge against a black
 /// zenith.
 const FOG_COLOR_TRACK: [(i32, u32); 4] = [
@@ -178,10 +179,10 @@ const FOG_COLOR_TRACK: [(i32, u32); 4] = [
 /// in `day.json` as raw signed ARGB ints rather than hex strings (`-1` day,
 /// `-15132378` night); `-15132378 as u32` is `0xff191926`, a dark blue-grey.
 ///
-/// This track is only *incidentally* part of #96, and it is here because the
-/// sky change would otherwise have caused a regression: the cloud tint used to
+/// This track exists to prevent a regression from the sky colour becoming
+/// timeline-exact: the cloud tint used to
 /// be `sky_color * 0.9`, and now that [`SKY_COLOR_TRACK`] correctly reaches
-/// `#000000` at night, that expression makes night clouds exactly invisible.
+/// `0x000000` at night, that expression makes night clouds exactly invisible.
 /// Vanilla keeps them visible with their own non-black track, so the tint reads
 /// this instead of the sky.
 const CLOUD_COLOR_TRACK: [(i32, u32); 4] = [
@@ -228,8 +229,7 @@ fn srgb_lerp(alpha: f32, from: u32, to: u32) -> u32 {
 /// * the easing is **linear**. The track builder defaults to linear easing and
 ///   none of the three tracks in this module declares an `ease` in the day
 ///   timeline's own data — only the neighbouring sun-angle/moon-angle/star-angle
-///   tracks opt into a cubic bezier. Issue #49's own text once said these were
-///   bezier-eased; that was a transcription error.
+///   tracks opt into a cubic bezier.
 fn sample_argb_track(track: &[(i32, u32)], time_of_day: i64) -> u32 {
     debug_assert!(track.len() >= 2, "a periodic track needs at least two keyframes");
     let period = DAY_PERIOD_TICKS as i32;
@@ -297,7 +297,7 @@ pub fn sky_color_multiplier_for_time_of_day(time_of_day: i64) -> [u8; 3] {
 
 /// The fog-colour track's per-tick multiplier, as sRGB bytes. See
 /// [`sky_color_multiplier_for_time_of_day`]; this one bottoms out at
-/// `#0c0c16`/`#161616` rather than black.
+/// `#0c0c16`/`0x161616` rather than black.
 #[must_use]
 pub fn fog_color_multiplier_for_time_of_day(time_of_day: i64) -> [u8; 3] {
     let argb = sample_argb_track(&FOG_COLOR_TRACK, time_of_day);
@@ -335,7 +335,7 @@ pub fn cloud_color_for_time_of_day(time_of_day: i64, day_cloud: [f32; 3]) -> [f3
 ///
 /// This replaced a hand-rolled blend toward a fixed dark-navy `NIGHT` constant.
 /// Two things changed measurably: night is now exactly black rather than
-/// `[0.006, 0.008, 0.02]` (which is what vanilla's `#000000` keyframe says),
+/// `[0.006, 0.008, 0.02]` (which is what vanilla's `0x000000` keyframe says),
 /// and the dusk/dawn ramp follows the track's `11867 -> 13670` /
 /// `22330 -> 133` linear segments rather than a cosine. The visible night sky
 /// is *not* black as a result: the horizon end of the disc's gradient is
@@ -373,8 +373,8 @@ pub fn star_brightness_for_time_of_day(time_of_day: i64) -> f32 {
 /// order. Vanilla fixes each phase's start tick to `index * 24000`, which fixes
 /// the mapping: the phase active on world-day `d` (`d = time_of_day / 24000`)
 /// is enum index `d % 8`. This is a per-day integer cycle, not a continuous
-/// keyframe track, so unlike the ramp-shaped formulas above it is not subject
-/// to the #49 divergence.
+/// keyframe track, so unlike the ramp-shaped formulas above it does not
+/// diverge from the timeline-exact 26.2 behaviour.
 #[must_use]
 pub fn moon_phase_index_for_time_of_day(time_of_day: i64) -> u8 {
     time_of_day.div_euclid(24_000).rem_euclid(8) as u8
@@ -393,7 +393,7 @@ pub const SKY_DISC_RADIUS: f32 = 512.0;
 ///
 /// # This is a ceiling, not the value. Use [`sky_fog_end_for_render_distance`]
 ///
-/// It was a plain constant here until issue #399, and that was wrong for every
+/// Used directly, it is wrong for every
 /// render distance below 32 chunks: vanilla clamps the attribute to the render
 /// distance (in *blocks*, not chunks — converted from the render-distance-in-
 /// chunks setting before the shader ever sees it) before the shader ever sees
@@ -437,7 +437,7 @@ pub const SKY_DISC_RADIUS: f32 = 512.0;
 /// Vanilla computes the spherical distance in the **vertex** shader, over a
 /// 10-vertex, 8-triangle fan whose triangles are hundreds of blocks across, so
 /// it interpolates the fog *factor* barycentrically and the ramp shows as
-/// flat-shaded wedges — the banding in issue #96's title. `SKY_DISC_WGSL`
+/// visible flat-shaded wedges — gradient banding. `SKY_DISC_WGSL`
 /// interpolates the camera-relative *position* instead and takes `length()`
 /// per fragment, which costs one `sqrt` per pixel and removes the banding
 /// entirely. It is a closer approximation of the radial gradient vanilla is
@@ -450,7 +450,7 @@ pub const SKY_FOG_END_DISTANCE: f32 = 512.0;
 ///
 /// Worked values, so the curve is legible without running it: RD 2 → 32; RD 4 →
 /// 64; RD 8 → **128**; RD 16 → 256; RD 32 → 512; RD 48 → 512 (clamped). The
-/// clamp only binds at and above 32 chunks, which is why the pre-#399 constant
+/// clamp only binds at and above 32 chunks, which is why the unclamped constant
 /// `512` looked right to whoever last checked it on a long view distance and was
 /// 4x too long at the client default.
 ///
@@ -676,7 +676,8 @@ pub fn sunrise_fan_indices() -> Vec<u32> {
 /// # Only the *sign* of `sin(sun_angle_rad)` is consumed
 ///
 /// The `flip` picks dawn (`+X`) or dusk (`-X`). That makes this function immune
-/// to the #49 ramp-shape divergence in [`celestial_angle_for_time_of_day`]: the
+/// to [`celestial_angle_for_time_of_day`]'s ramp-shape divergence from the
+/// timeline-exact curve: the
 /// sign is stable across the whole of each band's non-zero-alpha window
 /// (measured on the dump: dusk `11302..=14175` has `sin > 0` throughout, dawn
 /// `21825..=702` has `sin < 0` throughout), so a slightly-wrong ramp cannot make
@@ -831,7 +832,7 @@ pub const CLOUD_CELL_BLOCKS: f32 = 12.0;
 /// packed colour whose RGB channels are `0xFFFFFF` — so the RGB is
 /// **pure white**, and only the alpha is `0.8`. Vanilla's clouds are
 /// white geometry at 80% opacity, tinted per-tick by [`CLOUD_COLOR_TRACK`]'s
-/// `multiply` modifier (`#FFFFFF` by day, `#191926` at night).
+/// `multiply` modifier (`#FFFFFF` by day, `0x191926` at night).
 ///
 /// This is the base [`cloud_color_for_time_of_day`] must be given. It used to be
 /// handed `SkyFrame::day_sky_color` and then scaled by an invented `0.9`, which
@@ -976,7 +977,7 @@ impl SkyMode {
 }
 
 // ---------------------------------------------------------------------------
-// FANCY clouds (issue #403) — real extruded geometry, built on
+// FANCY clouds — real extruded geometry, built on
 // `crate::cloud_mesh`'s pure face enumeration.
 // ---------------------------------------------------------------------------
 
@@ -1049,7 +1050,7 @@ pub const CLOUD_FANCY_THICKNESS: f32 = 4.0;
 /// Vanilla's own radius is `ceil(cloudRange * 16 / 12)`, where `cloudRange` is
 /// a **persisted, player-configurable** option (`Options`'s own decompiled source default
 /// `128` chunks — 2048 blocks). This client has no persisted graphics options
-/// yet (`#403`'s "Making the option live" — only 2 of 93 survive a restart),
+/// yet (only 2 of 93 survive a restart),
 /// and a vanilla-scale radius would rebuild tens of thousands of faces from
 /// scratch every frame, a different cost class from everything else this
 /// module rebuilds per frame (today's largest, the star field, is ~1500 quads
@@ -1362,7 +1363,7 @@ mod tests {
     }
 
     /// The night disc is now *exactly* black, which is what `SKY_COLOR`'s
-    /// `#000000` keyframe says — the previous hand-rolled `NIGHT` constant
+    /// `0x000000` keyframe says — the previous hand-rolled `NIGHT` constant
     /// `[0.006, 0.008, 0.02]` was a guess. The fog track is what keeps the
     /// night horizon from being black too.
     #[test]
@@ -1372,7 +1373,7 @@ mod tests {
         let fog = fog_color_for_time_of_day(18_000, day);
         assert!(
             fog.iter().any(|c| *c > 0.0),
-            "the night fog multiplier is #161616, never black: {fog:?}"
+            "the night fog multiplier is 0x161616, never black: {fog:?}"
         );
         // ...and it is much darker than day, so this is not just "unchanged".
         assert!(fog[2] < day[2] * 0.05, "{fog:?}");
@@ -1562,7 +1563,7 @@ mod tests {
         assert_eq!(moon_phase_index_for_time_of_day(24_000 * 8 + 12_000), 0);
     }
 
-    /// Issue #399. Every expected value here is `Math.min(chunks * 16, 512)`
+    /// Every expected value here is `Math.min(chunks * 16, 512)`
     /// worked by hand from `AtmosphericFogEnvironment`'s own decompiled source +
     /// `FogRenderer`'s own decompiled source, never by calling the function under test with a
     /// rearranged argument.
@@ -1573,7 +1574,7 @@ mod tests {
         assert_eq!(sky_fog_end_for_render_distance(8), 128.0);
         assert_eq!(sky_fog_end_for_render_distance(16), 256.0);
         // 32 chunks is where the clamp starts binding: the only render distance
-        // at which the pre-#399 constant was correct.
+        // at which the unclamped constant was correct.
         assert_eq!(sky_fog_end_for_render_distance(32), SKY_FOG_END_DISTANCE);
         assert_eq!(sky_fog_end_for_render_distance(48), SKY_FOG_END_DISTANCE);
         assert_eq!(sky_fog_end_for_render_distance(1_000), SKY_FOG_END_DISTANCE);
@@ -1595,7 +1596,7 @@ mod tests {
         assert_ne!(
             rd8, SKY_FOG_END_DISTANCE,
             "the clamp is inert: the attribute default is being used at RD 8, \
-             which is #399 unfixed"
+             i.e. unclamped"
         );
     }
 
