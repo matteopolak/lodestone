@@ -1027,12 +1027,6 @@ impl FocusSet {
         &self.children
     }
 
-    /// `Screen.renderables` — draw order.
-    #[must_use]
-    pub fn renderables(&self) -> &[usize] {
-        &self.renderables
-    }
-
     /// `Screen.narratables`.
     #[must_use]
     pub fn narratables(&self) -> &[usize] {
