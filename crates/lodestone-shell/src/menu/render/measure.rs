@@ -25,6 +25,7 @@ pub fn logical_canvas(gui_scale: u32, framebuffer_width: u32, framebuffer_height
     )
 }
 
+
 /// Per-glyph horizontal advance at `scale` (fixed advance: cell plus one column).
 pub(super) fn advance(scale: f32) -> f32 {
     (GLYPH_W as f32 + 1.0) * scale
@@ -117,50 +118,29 @@ pub fn menu_row_under(
 #[must_use]
 pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(f32, f32, f32, f32)> {
     let row = rows.get(i)?;
-    // A multiplayer-list entry (#396) is placed by `AbstractSelectionList`'s
-    // arithmetic, which a `Slot` cannot express: `getRowLeft()` halves the canvas
-    // width and the row width *separately* with integer division, so it is not
-    // `anchor + dx` for any anchor. Answered here rather than in the caller for
-    // this function's whole reason — `app.rs`'s hit-test reads it too, so a second
-    // definition is how a click lands on a row the draw put somewhere else.
-    //
-    // #402: gated on `server_row_visible` first, so a row that is scrolled out
-    // of the band or would overflow into the footer reports **no** rect at all,
-    // rather than one nothing draws at. That is what keeps a click from landing
-    // on a row that is not on screen — `menu_row_at`'s `find` simply keeps
-    // scanning past a `None` the same way it already does past the end of
-    // `rows`. Contrast the account-row arm below, which still has this gap.
+    // Multiplayer-list rows use separately floored canvas and row half-widths;
+    // a fixed `Slot` cannot represent that placement. Keeping the calculation
+    // here lets drawing and hit-testing use the same rect. The visibility check
+    // rejects rows outside the list band or beneath the footer, so an off-screen
+    // row cannot receive a hit.
     if let Some(view) = row.entry.as_ref() {
         if !server_row_visible(view.index, height, view.scroll) {
             return None;
         }
         return Some(server_row_rect(view.index, width, view.scroll));
     }
-    // An account row (#66/#402) is placed the same way and for the same reason —
-    // `floor(width / 2) - floor(305 / 2)` is two integer divisions, not
-    // `anchor + dx`. Answered here so the draw and `app.rs`'s hit-test read one
-    // definition.
-    //
-    // **The visibility gate is no longer the gap the comment above used to record.**
-    // It became load-bearing rather than merely tidy when the account frame stopped
-    // slicing its rows: `accounts_idle_frame` now emits *every* logical row and
-    // positions them by pixel offset, exactly as the multiplayer list does, so
-    // without this a click below a scrolled list would hit-test onto a row that is
-    // nowhere near the cursor. Same shape as the arm above, and `menu_row_at`'s
-    // `find` already scans past a `None`.
+    // Account rows use the same separately floored canvas and row half-widths.
+    // Their rect and visibility check stay in this shared path so drawing and
+    // hit-testing agree when the account list is scrolled.
     if let Some(view) = row.account.as_ref() {
         if !accounts_row_visible(view.index, height, view.scroll) {
             return None;
         }
         return Some(accounts_row_rect(view.index, width, view.scroll));
     }
-    // A world-list row (the save list) is placed the same way and for the same
-    // reason again — `getRowLeft()` is `floor(width / 2) - floor(270 / 2)`, two
-    // integer divisions rather than `anchor + dx`. The visibility gate is
-    // load-bearing here rather than tidy: since #541 this list **scrolls**, so a
-    // row scrolled out of the band must report no rect at all — otherwise a click
-    // below the last visible row would land on a row that is nowhere near the
-    // cursor, and (in the other direction) a focusable row could sit off-screen.
+    // World-list rows also use separately floored canvas and row half-widths.
+    // Recompute the clamped scroll offset used by drawing before checking
+    // visibility, so a scrolled-out row returns no hit rect.
     if let Some(view) = row.world.as_ref() {
         // The **re-clamped** offset, not `view.scroll`: see
         // `world_list_scroll_for`. The draw reads the same function, so the rect a
@@ -171,19 +151,10 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
         }
         return Some(world_list_row_rect(view.index, width, scroll));
     }
-    // A tab-bar row (issue #564, and second consumer) is placed
-    // by `MenuTabBar.arrangeElements`'s arithmetic, which a `Slot` cannot
-    // express either — not because of an integer division like the three arms
-    // above, but because the row's own *width* is a function of the canvas
-    // (`layout::tab_bar_geometry`'s `min(400, width)` clamp), and `Slot::w` is
-    // a fixed field. Answered here for this function's whole reason: the draw
-    // and `app.rs`'s hit-test must read one definition of where a tab is.
-    //
-    // Resolved through `layout::tab_bar_row_rect` directly, off the row's own
-    // `index`/`count`, rather than by calling into a screen module (this used
-    // to hard-code `super::stats::tab_row_rect`) — that hard-code was exactly
-    // what left Create New World's own tab bar with no generic geometry to
-    // resolve against when it became this type's second consumer.
+    // Tab rows have canvas-dependent widths, including a maximum-width clamp,
+    // so a fixed `Slot` cannot represent them. Resolve the rect from the tab's
+    // index and count through the shared layout helper; drawing and hit-testing
+    // then use the same geometry on every canvas size.
     if let Some(tab) = row.tab.as_ref() {
         return Some(super::layout::tab_bar_row_rect(tab.index, tab.count, width));
     }
@@ -345,4 +316,3 @@ pub fn field_row_rects(width: f32, height: f32) -> [(f32, f32, f32, f32); 2] {
         manage_server_slot(ADDRESS_FIELD).resolve(width, height),
     ]
 }
-

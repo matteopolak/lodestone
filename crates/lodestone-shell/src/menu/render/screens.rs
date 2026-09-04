@@ -321,24 +321,14 @@ pub fn death_run_at(
     })
 }
 
-/// Builds the command block edit screen's overlay frame: vanilla's
-/// `CommandBlockEditScreen` — see [`super::command_block`]'s module doc for
-/// the full geometry citation and the two named islands (no tree ever reaches
-/// this client yet; nothing yet opens this screen from a real interaction).
+/// Builds the command-block edit screen's overlay frame. The optional command
+/// tree supplies completion data when available; without a tree, the frame
+/// draws no suggestion popup rather than inventing one.
 ///
-/// Like [`pause_frame`]/[`death_frame`], not gated by [`owns_frame`]: the
-/// world keeps rendering (and, on a live server, ticking) behind it, matching
-/// vanilla's own `isInGameUi() == true`.
-///
-/// `tree` carries the real server's command tree. This used to read "threaded
-/// through purely so this function is testable — every production caller passes
-/// `None` today", which was true when written and is not now: #470 decodes
-/// clientbound `COMMANDS`, #471 routes it to the shell, and `app/redraw.rs`'s
-/// overlay block (#474) passes `self.nav.command_tree()` here.
-///
-/// `None` remains the honest state before a tree arrives — a session that has
-/// not received one, or a hermetic test — and draws no suggestion popup at all
-/// rather than a fabricated one.
+/// Like the other in-world overlays, it is not gated by [`owns_frame`], so the
+/// world continues rendering behind it. `None` is valid before a session has
+/// received command metadata and in hermetic tests; it simply leaves the
+/// suggestion area empty.
 #[must_use]
 pub fn command_block_frame(
     state: &command_block::CommandBlockState,
@@ -502,10 +492,10 @@ pub fn command_block_frame(
         ..Default::default()
     });
 
-    // The suggestion popup (vanilla's `CommandSuggestions.SuggestionsList`) —
-    // appended past every real control, so its row indices never collide with
-    // `COMMAND_BLOCK_ROWS`'s. Only ever non-empty in a test today; see this
-    // function's own doc on why `tree` is always `None` in production.
+    // Completion rows are appended after every real control, so their indices
+    // never collide with `COMMAND_BLOCK_ROWS`'s. They appear only when the
+    // supplied command tree yields local candidates; production passes
+    // `nav.command_tree()`, while a missing tree leaves this section empty.
     if let Completion::Local { start, candidates } = state.completions(tree) {
         let popup_w = candidates
             .iter()
@@ -924,10 +914,8 @@ fn rgb_text_colour(rgb: u32) -> [f32; 4] {
     ]
 }
 
-/// Builds the Spectator Menu's overlay frame (issue #613's
-/// `TeleportToEntity` remainder — see [`spectator_menu`]'s module doc for
-/// what the vertical-list layout deliberately simplifies against vanilla's
-/// paginated icon-slot bar).
+/// Builds the spectator-menu overlay as a vertical list. The list keeps one
+/// predictable row per visible entry or category instead of an icon grid.
 ///
 /// Row indices match [`spectator_menu::SpectatorMenuState::visible`]'s own
 /// index space exactly — row 0 is either the first root entry, or (while a
@@ -1113,21 +1101,15 @@ pub fn loading_frame_with_progress(
     loading_frame_with_progress_and_grid(text, progress, None)
 }
 
-/// The gap between the chunk grid's bottom edge and the phase label above it,
-/// in logical pixels. Vanilla puts its own text *above* a grid centred on
-/// the screen (`LevelLoadingScreen.extractRenderState`:
-/// `textTop = yCenter - statusView.radius() * 2 - 9 * 3`); this frame instead
-/// keeps the existing label/bar/count block exactly where issue #449 put it
-/// (screen centre) and stacks the grid above *that* block, since this frame
-/// also draws a raw count line vanilla's screen does not. The two arrangements
-/// agree on the part that matters — the grid sits above the text, never
-/// overlapping the bar or the count — without re-deriving vanilla's own
-/// vertical arithmetic for a layout this frame no longer has.
+/// The gap between the chunk grid's bottom edge and the phase label below it,
+/// in logical pixels. The grid is stacked above the label, progress bar, and
+/// count block; keep this spacing positive so the grid never overlaps any of
+/// those elements. [`chunk_grid_dy`] derives its centre from this constant.
 const CHUNK_GRID_GAP: f32 = 6.0;
 
 /// The chunk grid's vertical centre for a grid of the given `radius`, in the
 /// same "logical pixels from screen centre" convention [`MenuProgress::dy`]
-/// uses — placed so its bottom edge sits [`CHUNK_GRID_GAP`] above the phase
+/// uses — placed so its bottom edge sits `CHUNK_GRID_GAP` above the phase
 /// label, for any radius.
 ///
 /// A free function, not inlined into [`loading_frame_with_progress_and_grid`],
