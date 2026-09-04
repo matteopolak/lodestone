@@ -657,9 +657,7 @@ impl RenderState {
             queue,
             camera,
             entities,
-            map_eye,
             map_view_projection,
-            map_eye,
             map_view_projection,
         );
         // The world glint's group 0, written here (the `&self` + queue point of the
