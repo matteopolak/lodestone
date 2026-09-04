@@ -48,6 +48,26 @@ two-slot array of `OnceLock`s indexed the same way `ids_for` resolves a table.
 756's table does not fail construction on a stale entry and 758's does not fail
 on an unlisted id.
 
+### Hosted protocol 756
+
+`V756ServerProtocol` is the hosted half for 1.17.1. It uses the protocol-756
+table for handshake, login, join, position, chunk, block-update and break
+packets, then transitions directly from login success to Play because this
+revision has no configuration acknowledgement. The chunk encoder projects the
+canonical y=0 through y=255 window into 756's long-array section mask,
+column-wide 3-D biome array and separate section body. A column must cover
+that window, contain no block entities, and contain only plains biomes; every
+other source shape is an explicit encoding error. Canonical block states are
+looked up through the inverse of the committed jar-backed table; missing or
+ambiguous states are rejected rather than substituted.
+
+The registry exposes only protocol 756 through
+`server_protocol_for_protocol(756)`. Protocol 758 has a materially different
+join and chunk layout, including an extra join field and per-section biomes
+and light, so it remains a separate future host. The in-memory control joins
+through the registry, reads a known chunk block and observes its block update
+after a break. A real 1.17.1 client session remains required validation.
+
 ### One block-state table and one entity table, which is not what the era below needs
 
 The 1.14 era needs three of each, because every release inserts blocks and
@@ -251,8 +271,8 @@ weaker control.
 ## Configuration
 
 None new. The era is selected by a `v1-17` feature on `lodestone-registry`; the
-registry reads `PROTOCOLS` from the crate, so both protocols became resolvable
-without a registry edit. Oracle ports live in
+client registry reads `PROTOCOLS` from the crate, while the server registry
+currently exposes only protocol 756. Oracle ports live in
 [`scripts/live-oracles/legacy.sh`](../scripts/live-oracles/legacy.sh) (1.17.1
 game `25592` / RCON `25593`, 1.18.2 game `25594` / RCON `25595`) and are read
 from there by `tests/capture_join.rs`'s `MEMBERS` table. Both rows use

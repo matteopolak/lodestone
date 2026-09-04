@@ -63,7 +63,9 @@ pub mod adapter;
 pub mod canonical;
 pub mod entity_types;
 pub mod packets;
+pub mod server_protocol;
 
 pub use adapter::{
     PROTOCOL, PROTOCOL_1_17_1, PROTOCOL_1_18_2, PROTOCOLS, V756Adapter, adapter, adapter_for,
 };
+pub use server_protocol::V756ServerProtocol;
