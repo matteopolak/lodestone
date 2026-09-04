@@ -53,6 +53,8 @@ needs. Whole-tree placement goes through `align_in_rectangle`; centred placement
 with `0.5` on both axes, so it does not have a second convenience entry point to keep in sync.
 `FrameLayout` minimum bounds are likewise changed through the per-axis `set_min_width` and
 `set_min_height` methods; callers that need both set both explicitly.
+Its centred child baseline is exposed by value through `new_child_layout_settings`; callers that need
+different placement pass per-child settings instead of mutating the baseline through a second API.
 `LayoutSettings` keeps the general `align` builder and the live horizontal-centre shorthand;
 direction-specific forwarding aliases are omitted until a screen actually needs one.
 `SpacerElement` keeps its general two-axis constructor and its vertical-only shorthand; there is no
