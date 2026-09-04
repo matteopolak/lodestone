@@ -1,19 +1,17 @@
 //! Pixel gate: a conduit must **draw**, in its own screen rect, through the
-//! real [`RenderState::render`] path — issue #23's last unbuilt
-//! `BlockEntityRenderer`.
+//! real [`RenderState::render`] path.
 //!
 //! # Why "something drew" is not the interesting claim here
 //!
-//! `ConduitBlockEntity.clientTick` computes `isActive`/`isHunting` **client
-//! side**, from a 3×3×3-then-5×5×5 block-store scan — never off the wire (see
+//! Conduit activity and hunting state are computed **client side**, from a
+//! 3×3×3-then-5×5×5 block-store scan rather than from the wire (see
 //! `lodestone_render::block_entity::conduit_frame_scan`'s doc). The CPU-level
 //! tests in `lodestone-render` (`conduit_frame_scan_*`,
 //! `resolve_conduit_*`) already predict that scan and the exact geometry
-//! `ConduitRenderer.submit` produces at every input. What only a real render
-//! can prove is that flipping `active`/`hunting` actually **repaints
-//! different pixels**, not merely produces a different `BlockEntityInstance`
-//! that some untested branch drops on the floor — the island shape
-//! `CLAUDE.md` calls out for the menu tab widget and the `frame_for` chrome.
+//! emitted for every input. What only a real render can prove is that
+//! flipping `active`/`hunting` actually **repaints different pixels**, not
+//! merely produces a different `BlockEntityInstance` that a disconnected
+//! branch drops on the floor.
 //!
 //! Three claims, each localised to a screen rect derived from the real baked
 //! vertices (never a remembered literal):
@@ -24,23 +22,19 @@
 //!    cage is a real 8×8×8 box against the inactive shell's 6×6×6, so the
 //!    active silhouette must be strictly larger, not merely different.
 //! 3. **Hunting** changes pixels inside the eye's own small rect (and
-//!    nowhere else nearby): `closed_eye`/`open_eye` are different sprites.
+//!    nowhere else nearby): the closed-eye and open-eye sprites differ.
 //!
 //! # What this does not prove
 //!
-//! Same scope note `bell_block_entity_pixels.rs`/`decorated_pot_block_entity_pixels.rs`
-//! carry: this gate calls `RenderState::set_conduit_source` directly with a
-//! hand-built closure, proving the render pass is correct and reachable. **The
-//! world→spawn adapter (`crate::block_entities::conduit_positions`/
-//! `conduit_spawns`, `ConduitTicks`) and its `Sim::conduit_source`/`app.rs`
-//! live-per-frame install are landed** (`fff5ed7e`) — see
-//! `sim::tests::conduit_source_tracks_connection_state_and_is_safe_before_login`
-//! and `stepping_ticks_conduits_without_panicking_before_login`, and
-//! `docs/block-entity-renderers.md`'s conduit section. What remains unproven
-//! **by any gate in this crate, for chest, skull, sign, bell or conduit
-//! alike** is a real client drawing one through an actual login handshake and
-//! a live `ClientHandle` — pre-existing test-infrastructure scope, not
-//! specific to conduit.
+//! As with the other block-entity pixel gates, this test calls
+//! `RenderState::set_conduit_source` directly with a hand-built closure. That
+//! proves the render pass is reachable and correct for the supplied instances;
+//! separate simulation tests cover the world-to-spawn adapter
+//! (`crate::block_entities::conduit_positions`/`conduit_spawns`,
+//! `ConduitTicks`) and the `Sim::conduit_source` lifecycle. No gate in this
+//! crate draws a block entity through a real login handshake and live
+//! `ClientHandle`, so that client-session integration remains outside this
+//! test's scope.
 //!
 //! ```text
 //! cargo test -p lodestone-shell --test conduit_block_entity_pixels -- --ignored --nocapture
@@ -429,7 +423,7 @@ fn activating_the_conduit_grows_the_silhouette_and_repaints_inside_the_active_re
     );
 }
 
-/// Hunting swaps the eye's own sprite (`open_eye` vs `closed_eye`) — checked
+/// Hunting swaps the eye's own open/closed sprite — checked
 /// as pixels changing **inside the eye's own small rect**, not merely
 /// "somewhere in the active silhouette", since the cage/wind geometry is
 /// identical in both frames and must not itself register as changed.

@@ -46,21 +46,6 @@ owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
 
 [[allow]]
-file = "crates/lodestone-shell/tests/block_entities/conduit_block_entity_pixels.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
-file = "crates/lodestone-shell/tests/block_entities/decorated_pot_block_entity_pixels.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
-file = "crates/lodestone-shell/tests/containers/container_background_pixels.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
 file = "crates/lodestone-shell/tests/entities/aggressive_bow_pose_pixels.rs"
 owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"

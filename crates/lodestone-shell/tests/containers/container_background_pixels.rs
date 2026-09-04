@@ -1,9 +1,8 @@
-//! Pixel gate: **the container screen looks like vanilla, and the
-//! hotbar dims behind it (that fix's leftover).**
+//! Pixel gate: **the container screen uses its background art, and the
+//! hotbar dims behind an open screen.**
 //!
-//! Two claims, two negative controls, per `CLAUDE.md`'s evidence standard
-//! ("prove pixels changed... with a negative control that must fail the same
-//! assertion").
+//! Two claims, two negative controls: each visual claim is paired with a
+//! control that isolates the rendering path being measured.
 //!
 //! # Claim 1: the real `container/*.png` art draws, not the flat fill
 //!
@@ -17,8 +16,8 @@
 //! A real [`HudRenderer`] draws one bright hotbar item into the target first —
 //! standing in for "the HUD, which draws unconditionally behind a
 //! world-following screen". [`ContainerRenderer`] then draws on top,
-//! **after** the HUD, exactly as `app.rs`'s per-frame draw now orders the two
-//! passes. With a menu open, the container's full-canvas dim gradient must
+//! **after** the HUD, matching the shell's per-frame pass order. With a menu
+//! open, the container's full-canvas dim gradient must
 //! darken that hotbar pixel. The negative control is the same two-pass sequence
 //! with the container frame **closed** (`ContainerFrame::empty()`): nothing
 //! should draw, and the hotbar pixel must be unchanged from the HUD-only shot —
@@ -228,7 +227,7 @@ fn the_real_container_art_draws_and_it_dims_the_hotbar_behind_it() {
     let hud_only_brightness = mean_brightness(&hud_only, hotbar_rect);
 
     // Subject: HUD, then the container overlay **with a menu open** — the
-    // real `app.rs` per-frame order after this change (container after HUD).
+    // shell's per-frame order keeps the container pass after the HUD.
     let mut dim_lit = ContainerRenderer::new(device, format);
     dim_lit.attach_background(device, queue, format, background);
     let acquired = target.acquire().expect("headless acquire");
