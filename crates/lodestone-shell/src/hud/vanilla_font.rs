@@ -47,8 +47,7 @@
 //! * **Bold, italic, underline, strikethrough and obfuscated *are* drawn**, in
 //!   [`draw_legacy`](VanillaFont::draw_legacy) — see
 //!   [`resolve_legacy`](VanillaFont::resolve_legacy) and
-//!   [`glyph_styled`](VanillaFont::glyph_styled). This used to be the one
-//!   documented gap in this module: the metrics existed
+//!   [`glyph_styled`](VanillaFont::glyph_styled). The metrics already exist
 //!   (`Font::advance_bold`, `metrics::ITALIC_SHEAR`) and `§l`/`§o`/`§n`/`§m`/`§k`
 //!   were parsed for **width** (`Font::legacy_width`), but the draw side treated
 //!   every flag as zero-width state and dropped it, so a bold or italic name
@@ -65,19 +64,15 @@
 //!   three sheets nor `unifont.zip` cover: astral-plane emoji, and anything a
 //!   `ttf` provider would have supplied. See [`jar_manager`] for why this needs
 //!   the asset-object store and not just the jar.
-//! * **A unihex glyph's shadow now lags by its own 0.5 px, not the sheet
-//!   default's 1 px.** [`draw_legacy`](VanillaFont::draw_legacy) and
-//!   [`draw_spans`](VanillaFont::draw_spans) used to add one offset before
-//!   either pass began, which was only correct because every glyph shared it;
-//!   [`draw_resolved`](VanillaFont::draw_resolved) now looks up
+//! * **A unihex glyph's shadow uses its own 0.5 px offset, not the sheet
+//!   default's 1 px.** [`draw_resolved`](VanillaFont::draw_resolved) looks up
 //!   [`Font::shadow_offset`](lodestone_assets::font::Font::shadow_offset)
 //!   per glyph, matching bold's second pass (already per-glyph via
 //!   `Font::bold_offset`) rather than trailing it.
 //! * **Right-to-left runs are now reordered for display; shaping is not.**
 //!   [`bidi_reorder`] applies the paragraph-level and explicit-embedding rules
-//!   of the Unicode Bidirectional Algorithm (UAX #9) to lay Arabic/Hebrew runs
-//!   right-to-left among any surrounding LTR text, mirroring vanilla's
-//!   `Language.getVisualOrder` (`Bidi`-backed). It reorders **codepoints**, not
+//!   of the Unicode Bidirectional Algorithm to lay Arabic/Hebrew runs
+//!   right-to-left among any surrounding LTR text. It reorders **codepoints**, not
 //!   glyphs: Arabic's per-position joining forms (isolated/initial/medial/
 //!   final) are not selected, so a reordered Arabic run draws its isolated-form
 //!   glyphs in the right left-to-right screen order rather than the wrong one,
@@ -167,9 +162,9 @@ struct ResolvedGlyph {
 }
 
 /// Reorders `glyphs` in place for display, applying the Unicode
-/// Bidirectional Algorithm (UAX #9) to the codepoints it already holds —
-/// vanilla's `Language.getVisualOrder`. A no-op for the overwhelmingly common
-/// case (every built-in string, most chat) where every character is ASCII,
+/// Bidirectional Algorithm to the codepoints it already holds. It is a no-op
+/// for the overwhelmingly common case (every built-in string, most chat) where
+/// every character is ASCII,
 /// since a default-LTR paragraph with no bidi classes beyond `L`/neutral
 /// reorders to itself; the full algorithm only runs once a non-ASCII
 /// character is actually present.
@@ -200,7 +195,7 @@ fn bidi_reorder_glyphs(glyphs: &mut Vec<ResolvedGlyph>) {
 }
 
 /// The **char**-index permutation that puts `text`'s codepoints into
-/// left-to-right screen order per UAX #9: `order[visual_position]` is the
+/// left-to-right screen order: `order[visual_position]` is the
 /// logical (source) char index that belongs there.
 ///
 /// `unicode_bidi`'s own levels and ranges are byte-indexed (a multi-byte
@@ -216,8 +211,8 @@ fn bidi_visual_order(text: &str) -> Vec<usize> {
     let bidi_info = BidiInfo::new(text, None);
     if bidi_info.paragraphs.len() > 1 {
         // An embedded hard paragraph break (e.g. a multi-line kick reason).
-        // UAX #9 never reorders paragraphs relative to each other, only the
-        // characters inside one, so each is resolved independently against
+        // The bidirectional rules never reorder paragraphs relative to each
+        // other, only the characters inside one, so each is resolved independently against
         // its own substring and the results are concatenated in source
         // order. This recurses at most once per paragraph: a paragraph's own
         // `range` spans exactly one paragraph, so the recursive call always
@@ -599,8 +594,8 @@ impl VanillaFont {
 
     /// Which [`RasterFont`] actually supplies `cp`'s pixels: `custom` when it
     /// declares coverage for that codepoint, else the default. This is the
-    /// per-glyph fallback issue #679 asks for — a pack font that only defines
-    /// a handful of icon codepoints still draws ordinary Latin text from the
+    /// Per-glyph fallback lets a pack font that only defines a handful of icon
+    /// codepoints still draw ordinary Latin text from the
     /// default font rather than the missing-glyph box, while a codepoint the
     /// custom font *does* define wins even where the default font would also
     /// have drawn something there (matching vanilla's own provider-priority
@@ -1351,13 +1346,8 @@ fn build_obfuscation_pool(raster: &RasterFont) -> HashMap<u32, Vec<char>> {
 /// The one vanilla `client.jar` [`ResourceManager`], from
 /// [`crate::resources::vanilla_manager`].
 ///
-/// **This used to be a hand-copied duplicate of that function** — its own pack
-/// discovery (`LODESTONE_ASSETS`, else the highest-sorting `.cache/mc/<version>`
-/// holding both `client.jar` and `generated/reports/blocks.json`), its own
-/// `std::fs::read` of the jar, and a doc comment explaining that the duplication
-/// existed only because `resources::vanilla_manager` was `#[cfg(test)]` and asking for
-/// that attribute to be dropped. It is no longer `#[cfg(test)]`, and that comment had
-/// gone stale: `resources`' own doc now invites exactly this collapse.
+/// This delegates pack discovery and jar loading to
+/// [`crate::resources::vanilla_manager`], the shared resource-manager entry point.
 ///
 /// Deleting the copy is what makes the font work in a browser, and it is worth being
 /// precise about why, because it is not a tidy-up: the browser's jar arrives as
@@ -1969,9 +1959,8 @@ mod tests {
             .expect("native test worker starts");
         second_call_rx.recv().expect("second lookup started");
 
-        // Before the fix the second call reaches its loader while the first
-        // one waits above. With the mutex held, it cannot get past the cache
-        // lookup until the first call stores its negative result.
+        // Holding the mutex through the loader keeps the second lookup from
+        // reaching its loader before the first lookup stores its negative result.
         let duplicate_load = second_loader_rx.recv_timeout(Duration::from_millis(100));
         release_first_tx.send(()).expect("first loader is waiting");
         assert!(first.join().expect("first worker did not panic").is_none());
@@ -2018,9 +2007,9 @@ mod tests {
     /// Pure right-to-left text (no LTR characters at all) auto-detects an RTL
     /// paragraph and reverses as one run: the leftmost glyph on screen
     /// (visual position 0) is the **last** logical character. Values are the
-    /// `unicode-bidi` crate's own output for this input, not a hand-derived
-    /// guess — `unicode-bidi` is an outside implementation of UAX #9, so this
-    /// is the "captured bytes from an independent source" species of
+    /// `unicode-bidi` crate's output for this input, not a hand-derived guess —
+    /// it is an independent implementation of the Unicode bidirectional rules,
+    /// so this is the "captured bytes from an independent source" species of
     /// expected value, not `decode(encode(x)) == x`.
     #[test]
     fn bidi_reverses_a_pure_rtl_run() {
@@ -2379,11 +2368,11 @@ mod tests {
     }
 }
 
-/// Pixel-geometry gates for issue #117: bold, italic, underline, strikethrough
+/// Pixel-geometry gates for styled text: bold, italic, underline, strikethrough
 /// and obfuscated must draw real geometry, not just measure zero-width. Each
-/// test predicts an exact value from a formula transcribed from
-/// `.cache/mc/26.2/client-src` (quoted per-test), not merely a sign or a
-/// "something painted" check — the CLAUDE.md *magnitude* species repair.
+/// test predicts an exact value from a reference formula (quoted per-test), not
+/// merely a sign or a "something painted" check — the CLAUDE.md *magnitude*
+/// species repair.
 ///
 /// These need the real vanilla font (real `ascii.png` glyph shapes and
 /// advances), so they are gated on the jar like every sibling GPU/asset gate

@@ -3,42 +3,18 @@
 //!
 //! # What this is
 //!
-//! Stage 5 of `docs/bevy-migration.md`. Before it, `Sim` held `target`,
-//! `mining`, `placement`, `attacking`, `particles` and `version_data` as fields,
-//! and drove the first four from a hand-written `drive_interaction()` call
-//! *after* the `GameTick` schedule. Stage 2's report recorded why they had not
-//! moved: their inputs were "Stage 3/4 residents", so a system would have needed
-//! them mirrored into resources.
+//! Interaction state is stored as ECS resources and components. The per-frame
+//! ray targets are written by `Sim::update_target`; per-tick systems consume
+//! those targets, run the mining and placement predictors, and queue resulting
+//! actions for the network driver. The particle simulation remains a resource
+//! because the interaction systems emit its effects during the tick.
 //!
-//! That reasoning turned out to name the wrong blocker. Three of the four inputs
-//! (`Sim.target`, `version_data`, the particle emitter) were plain owned values
-//! that could have become resources at any point; the live block store stopped
-//! being a blocker at Stage 4. What actually kept `drive_mining` out of a system
-//! was that it reached the client through `&NetClient`, and `NetClient` holds an
-//! `mpsc::Receiver`, which is `Send` but **not `Sync`** — so it can never be a
-//! `Resource`. The fix is not to move `NetClient`: every read `drive_mining`
-//! needs already goes through [`crate::net::SharedHandle`], which *is*
-//! `Send + Sync + 'static`, and every write already has a sanctioned egress in
-//! `lodestone_ecs::ActionQueue`. See `docs/sim-dissolution.md`.
-//!
-//! # The freeze that shipped with Stage 5, and what it cost
-//!
-//! "Every read goes through `SharedHandle`" was true and **not sufficient**, and
-//! this is the correction. A `GameTick` system runs inside the `World` **write**
-//! guard, and most of `ClientHandle`'s read-model accessors take a *read* guard on
-//! that same `parking_lot::RwLock`. `drive_mining` called one — `player_menu`, for
-//! the held item — so the client hard-froze on the first tick of the first dig:
-//! no panic, no log line, just a window that stopped.
-//!
-//! The §4.1(c) audit had narrowed the lock rule to "the *chunk*-backed reads take
-//! only the chunk lock", which is **correct** ([`NetHandle::block_at`] is one) and
-//! was read as clearing `ClientHandle` generally. It does not: `player_menu`,
-//! `open_menu`, `scoreboard`, `tab_list_view`, `boss_bars`, `health`, `player` and
-//! the rest read `SharedState.ecs`. The lesson is the one §4.1(c) itself
-//! implies — **there is one `World`, so a system should read the component, not
-//! call the client** — and [`NetHandle::get`] is private now so the shape cannot
-//! come back. `tests/mining_deadlock.rs` is the gate, with a control that
-//! observes `player_menu` wedging under the guard.
+//! Systems must not call client read-model accessors that acquire the shared ECS
+//! read lock while a `GameTick` system holds the world write lock. The systems
+//! therefore read components such as [`SessionMenus`] directly, while
+//! [`NetHandle::block_at`] exposes only the independently locked chunk store.
+//! All outgoing actions use [`lodestone_ecs::ActionQueue`], preserving the
+//! ordering established by the tick schedule. See `docs/sim-dissolution.md`.
 //!
 //! # How it works
 //!
@@ -53,21 +29,12 @@
 //! 4. [`drive_mining`] — one tick of the hold-to-mine predictor.
 //! 5. [`drive_placement`] — one tick of the placement predictor.
 //!
-//! **This list said "two systems" and named two while the code registered
-//! three, and `drive_placement` was registered in no schedule at all** — found
-//! by that fix's island sweep. Prose and code agreed with each other and both were
-//! wrong, which is why nothing looked amiss: the only `add_systems` naming
-//! `drive_placement` lived in `tests/place_intent.rs`'s hand-built `Schedule`,
-//! so a plugin's `PlaceIntent` sat unconsumed forever while `BreakIntent`
-//! worked. Human placement was unaffected throughout, going through
-//! `Sim::use_item_live` rather than this path — which is what kept it hidden.
 //! **If you add a system here, update this list in the same edit.**
 //!
 //! Both queue into [`ActionQueue`], which the driver drains to the socket once
-//! per tick. **That is what preserves wire order**: before Stage 5 these two ran
-//! after the queue was already drained, so their packets followed the tick's
-//! movement packet; queueing them at the end of `TickSet::Send` puts them in the
-//! same place in the same single ordered stream. Sending through
+//! per tick. **That is what preserves wire order**: queueing them at the end of
+//! `TickSet::Send` places them in the same ordered stream as the tick's movement
+//! packet. Sending through
 //! `ClientHandle::send_action` directly instead would have been a real
 //! regression — that bypasses the net thread's action channel, so a mining
 //! packet could overtake the movement packet queued microseconds earlier.
@@ -80,11 +47,9 @@
 //! * **Adding a per-*frame*, input-driven interaction** (a click handler):
 //!   `ActionQueue` is drained inside the driver's tick loop, so a frame that runs
 //!   no tick does not drain it — an action queued from a click can sit for up to
-//!   one tick period. That is what vanilla does (input is handled in the tick),
-//!   but it is *not* what this shell did before Stage 5, so
-//!   `Sim::{end_attack, use_item_live, send_chat}` deliberately still send
-//!   through `NetClient` directly rather than queueing. Changing that is a
-//!   latency change, not a refactor.
+//!   one tick period because input-driven actions are consumed by the tick loop.
+//!   The latency-sensitive `Sim::{end_attack, use_item_live, send_chat}` paths
+//!   therefore continue to send through `NetClient` directly.
 //! * **The pick target** ([`RayTarget`]) is written once per frame by
 //!   `Sim::update_target`, before the tick loop, and read by both systems here.
 //!   It is not a `GameTick` product; do not move it into one, because mouse-look
@@ -96,9 +61,7 @@
 //! machines the systems call — §8: verified logic stays a library),
 //! `lodestone_ecs` for the sets/resources/components, `crate::particles` for the
 //! emitter, `crate::net::SharedHandle` for every read of the client-owned
-//! world, and — since issue #596 gave [`drive_mining`] its own local
-//! block-edit prediction, the same as [`drive_placement`] already had —
-//! `crate::mesher::TerrainMesh` plus [`lodestone_ecs::ChunkWorld`]/
+//! world, and `crate::mesher::TerrainMesh` plus [`lodestone_ecs::ChunkWorld`]/
 //! [`lodestone_ecs::ChunkWorldWrite`] for the write and the re-mesh it makes
 //! visible.
 
@@ -232,7 +195,7 @@ const REDIRECTABLE_PROJECTILE_PATHS: &[&str] = &["breeze_wind_charge", "fireball
 /// invalid entity") whenever the named target is an item entity, an
 /// experience orb, the player themselves, or a non-attackable arrow.
 ///
-/// That is the whole reported bug: killing a mob spawns its drops and its
+/// This prevents a common failure mode: killing a mob spawns its drops and its
 /// experience orbs inside the hitbox the mob just vacated, so the very next
 /// left-click resolved to a drop and got the session kicked. Note what it is
 /// **not** — a *removed* entity id is harmless, because vanilla's own
@@ -288,7 +251,7 @@ const REDIRECTABLE_PROJECTILE_PATHS: &[&str] = &["breeze_wind_charge", "fireball
 /// `false` — matching vanilla's own base is-pickable default. That is not
 /// a new restriction: the pick loop already drops any entity
 /// `VersionData::entity_facts` cannot size, and that table is the same 26.2
-/// census, so an unknown type was unpickable before this predicate existed.
+/// census, so an unknown type remains unpickable under the same default-deny rule.
 #[must_use]
 pub fn entity_type_can_be_picked(kind: &lodestone_model::ResourceKey) -> bool {
     if kind.namespace() != "minecraft" {
@@ -355,9 +318,9 @@ pub struct PlacementPredictor(pub Placement);
 
 /// The vanilla particle simulation.
 ///
-/// A resource rather than a `Sim` field since Stage 5, which is what lets
-/// [`drive_mining`] emit the per-tick mining chip from inside a system. Its
-/// *tick* is deliberately still driven by the shell rather than being a
+/// A resource so [`drive_mining`] can emit the per-tick mining chip from inside
+/// a system. Its *tick* is deliberately still driven by the shell rather than
+/// being a
 /// `TickSet::Animate` system — see `Sim::tick_particles` for the two documented
 /// ways its collision decision differs from the player's, which is a behaviour
 /// question and not this stage's to settle.
@@ -368,10 +331,10 @@ pub struct ParticleSim(pub Particles);
 /// thread publishes its [`lodestone_client::ClientHandle`] into once login
 /// completes.
 ///
-/// This is the resource that unblocked Stage 5's interaction systems. `NetClient`
-/// itself can never be one — it holds an `mpsc::Receiver`, which is `!Sync` — but
-/// every *read* on `NetClient` other than `poll()` is already a delegation to
-/// this handle, so a system needs nothing else. `None` before
+/// This is the thread-safe resource used by interaction systems. `NetClient`
+/// itself cannot be one — it holds an `mpsc::Receiver`, which is `!Sync` — but
+/// every *read* on `NetClient` other than `poll()` is delegated to this handle.
+/// `None` before
 /// `Sim::attach_net`; `Some` holding an unfilled `OnceLock` between attach and
 /// login, which reads exactly like "no data yet" everywhere.
 #[derive(Resource, Debug, Default)]
@@ -380,7 +343,7 @@ pub struct NetHandle(pub Option<SharedHandle>);
 impl NetHandle {
     /// The published client handle, or `None` before login.
     ///
-    /// # Deliberately private, and this is the whole bug fix
+    /// # Deliberately private
     ///
     /// A `GameTick` system runs inside `run_schedule(GameTick)`, which the driver
     /// runs inside [`lodestone_ecs::hold_write`] — i.e. under the `World`
@@ -391,12 +354,7 @@ impl NetHandle {
     /// reentrant. Calling one from a system is an immediate, silent, permanent
     /// deadlock — no panic, no log line, the window simply stops.
     ///
-    /// That is exactly what shipped: `drive_mining` resolved the held item with
-    /// `net.get().map(ClientHandle::player_menu)`, so the client froze on the
-    /// first tick of the first dig. It reproduces hermetically in
-    /// `tests/mining_deadlock.rs`.
-    ///
-    /// So the handle does not leave this type. What the accessors below expose is
+    /// The handle therefore does not leave this type. The accessors below expose
     /// exactly the set that is **chunk**-backed — a different lock, taken and
     /// released inside the call, never nested with the `World` guard. Adding one
     /// here is safe only after checking `lodestone_client::state`: if the body
@@ -442,9 +400,8 @@ impl NetHandle {
 /// Same rule as `send_player_input`, and for the same reason: a system that ran
 /// while disconnected would record the current value into [`LastSprintingSent`]
 /// as "already sent", and the first real change after connecting would then be
-/// suppressed as a redundant resend. Before Stage 5 the equivalent gate was the
-/// `if phase == Connected && is_live()` around `Sim::drive_interaction`, which is
-/// exactly what [`Egress`]'s two bits are.
+/// suppressed as a redundant resend. The [`Egress`] resource's two bits encode
+/// the same connected-and-live condition used by the input driver.
 pub fn send_sprint_command(
     egress: Res<Egress>,
     mut queue: ResMut<ActionQueue>,
@@ -495,8 +452,8 @@ pub fn send_sprint_command(
 /// either teleports us back or eventually disconnects us with
 /// `multiplayer.disconnect.flying`.
 ///
-/// `ClientAction::SetFlying` was an **island** before this: four protocol
-/// adapters encode it, nothing produced it. This is its first producer.
+/// `ClientAction::SetFlying` is produced here and encoded by the version
+/// adapters, so the local flight toggle reaches the server.
 ///
 /// # Edge-triggered, and the latch is gated on `Egress`
 ///
@@ -726,11 +683,9 @@ pub fn drive_mining(
     target: Res<RayTarget>,
     net: Res<NetHandle>,
     version: Res<VersionData>,
-    // The chunk store's two halves, for the local block-edit prediction (issue
-    // #596) — the same pair [`drive_placement`] already takes, for the same
-    // reason: the read handle for the re-mesh, the write handle because only
-    // the store's legitimate writers may hold one (see [`ChunkWorldWrite`]'s
-    // own docs).
+    // The chunk store's two halves support local block-edit prediction: the
+    // read handle is used for the re-mesh, while only the write handle may
+    // mutate the store (see [`ChunkWorldWrite`]'s own docs).
     chunk_world: Res<ChunkWorld>,
     write: Res<ChunkWorldWrite>,
     clock: Res<FrameClock>,
@@ -739,8 +694,8 @@ pub fn drive_mining(
     mut particles: ResMut<ParticleSim>,
     mut audio: ResMut<AudioEngine>,
     mut queue: ResMut<ActionQueue>,
-    // That fix's veto registry. `Option`, so this system is unchanged for a
-    // client that installed no plugin.
+    // Optional veto registry; a client without a protection plugin has no
+    // resource and follows the same path without an extra registry lookup.
     vetoes: Option<Res<ActionVetoes>>,
     mut players: Query<
         (
@@ -764,7 +719,7 @@ pub fn drive_mining(
     else {
         return;
     };
-    // `Abilities.instabuild` — vanilla's own creative-instant-break check,
+    // `Abilities.instabuild` — the creative-instant-break check,
     // consulted by `Mining::start` ahead of the hardness formula. `Option`
     // because `Abilities` only arrives once the login `PLAYER_ABILITIES`
     // packet lands; `false` (ordinary survival formula) until then, which is
@@ -876,9 +831,8 @@ pub fn drive_mining(
         creative,
     );
 
-    // That fix's block-break veto, asked *before* `continue_` advances the dig
-    // state machine — a plugin that finds out afterward is too late, which is the
-    // whole complaint the issue opens with. A denial aborts any live dig via the
+    // The block-break veto is checked *before* `continue_` advances the dig
+    // state machine. A denial aborts any live dig via the
     // same idempotent `stop()` every other early return above uses, so a
     // protection plugin denying mid-hold sends one ABORT rather than stranding
     // the predictor with a dig the server will never see finished.
@@ -932,22 +886,20 @@ pub fn drive_mining(
     // level
     // broadcasts a `levelEvent` to everyone *except* that player.
     //
-    // This originally scanned `actions` for `BlockActionKind::StopDestroy`,
-    // which is one of the four ways vanilla reaches `destroyBlock` rather than
-    // the funnel itself — and it is the one an **instant break never takes**.
+    // The destruction result is the canonical trigger rather than a scan of
+    // `actions` for `BlockActionKind::StopDestroy`, which an **instant break
+    // never takes**.
     // `Mining::start`'s `progress_per_tick() >= 1.0` branch emits
     // `StartDestroy` and nothing more, because the block is already gone, so
     // grass, saplings and flowers threw no debris at all while stone did
-    // (reported from play). `Mining::take_destroyed` is the funnel:
+    // `Mining::take_destroyed` is the funnel:
     // both `start`'s instant-break branch and `continue_`'s progress-reached-1.0
     // branch latch it, so keying on it removes the class instead of
     // special-casing one-shot blocks.
     //
-    // Before this, the **only** burst trigger anywhere in the shell was the
-    // server-driven `NetUpdate::BlockDestroyed` arm (`Sim::step`'s live-update
-    // match, fed by `ClientboundLevelEventPacket` id `2001`) — which
-    // structurally **never fires for our own break**, verified against
-    // `.cache/mc/26.2/src` rather than assumed:
+    // The server-driven `NetUpdate::BlockDestroyed` arm (`Sim::step`'s
+    // live-update match, fed by `ClientboundLevelEventPacket` id `2001`)
+    // structurally **never fires for our own break**:
     // vanilla's own server-side player-game-mode destroy-block (the server's
     // handler for a player's own break) calls
     // `this.level.removeBlock(pos, false)` — a plain block-state write with no
@@ -958,7 +910,7 @@ pub fn drive_mining(
     // instead — and that call broadcasts to **every** nearby player
     // unconditionally, our own client included, which is exactly the
     // "cascaded breaks already showed particles, my own break never did"
-    // asymmetry that was reported. There is no player-exclusion filter to rely
+    // asymmetry. There is no player-exclusion filter to rely
     // on; the two break paths are simply different methods, and only one of
     // them ever touches `levelEvent` at all.
     //
@@ -978,11 +930,8 @@ pub fn drive_mining(
     // block to air *locally, synchronously*
     // (`level.setBlock(pos, fluidState.createLegacyBlock(), 11)`),
     // before any server round trip. This shell
-    // used to predict only the particle burst and leave the actual block-state
-    // write to the server's `BLOCK_UPDATE` ack: on a laggy connection that
-    // showed the normal break animation completing and then the block vanishing
-    // only once the ack landed, rather than disappearing on the same tick a
-    // real client would. Writing the state here — through the same
+    // The predictor writes the actual block state locally instead of waiting
+    // for the server's `BLOCK_UPDATE` ack. Writing the state here — through the same
     // [`write_predicted_block`] + [`crate::mesher::TerrainMesh::remesh_around`]
     // pair [`drive_placement`] uses for its own predicted edit — closes that
     // gap: the cell reads as air, and the mesh reflects it, on the exact tick
@@ -1130,7 +1079,7 @@ pub fn drive_placement(
     mut terrain: ResMut<TerrainMesh>,
     mut audio: ResMut<AudioEngine>,
     mut queue: ResMut<ActionQueue>,
-    // That fix's veto registry -- see `drive_mining`'s own parameter.
+    // Optional veto registry, matching `drive_mining`'s parameter.
     vetoes: Option<Res<ActionVetoes>>,
     mut commands: Commands,
     mut players: Query<
@@ -1200,8 +1149,7 @@ pub fn drive_placement(
 
     // `Menus::player_native`, never `player().player_native(..)`: the one
     // inventory is owned by the *open container's* menu while a screen is up
-    // — the exact fix `drive_mining`'s own docs describe for that fix,
-    // generalised to placement.
+    // — the same inventory rule used by `drive_mining`, applied to placement.
     let main = menus
         .and_then(|menus| menus.0.player_native(slot.0))
         .filter(|stack| !stack.is_empty())
@@ -1252,7 +1200,7 @@ pub fn drive_placement(
     // same reason `PlacementFacts` gives — but here there is only ever one
     // guard (`placement`, already held as a system parameter), so the two
     // reads are already disjoint by construction rather than by ordering.
-    // That fix's block-place veto, asked *before* `use_on` -- which threads the
+    // The block-place veto is checked *before* `use_on` -- which threads the
     // block-prediction `sequence` counter and so cannot be called speculatively
     // and then discarded (`docs/baritone-port.md` §3.6 forbids forking that
     // counter outright). Denying here leaves the counter untouched.
@@ -1333,12 +1281,10 @@ pub fn drive_placement(
 /// `START` that overtook it would be judged against the previous tick's crouch.
 ///
 /// Deliberately **does not** insert `ControllerPlugin` for itself, even though it
-/// orders against one of its systems. `add_systems` does not deduplicate — Stage 3
-/// shipped a total ingest blackout because two copies of one system ran in
-/// sequence and the second cleared what the first filled — so a plugin that
-/// unconditionally added another plugin's systems would be the same hazard. The
-/// caller composes both; [`InteractPlugin::build`] panics loudly if it was added
-/// without one.
+/// orders against one of its systems. `add_systems` does not deduplicate, so
+/// installing another plugin's systems here could run duplicate ingestion and
+/// clear state populated by the first copy. The caller composes both;
+/// [`InteractPlugin::build`] panics loudly if it was added without one.
 #[derive(Debug, Default)]
 pub struct InteractPlugin;
 
@@ -1378,14 +1324,6 @@ pub(crate) fn add_presentation_systems(world: &mut lodestone_ecs::ecs::world::Wo
         .resource_mut::<lodestone_ecs::ecs::schedule::Schedules>()
         .add_systems(
             GameTick,
-            // `drive_placement` was defined but registered in **no** schedule
-            // until that fix's island sweep found it: its only `add_systems` was a
-            // hand-built `Schedule` in `tests/place_intent.rs`. A plugin's
-            // `PlaceIntent` therefore sat unconsumed forever while `BreakIntent`
-            // worked. Player impact was nil — human placement goes through
-            // `Sim::use_item_live` — so nothing looked wrong, and this module's
-            // own doc agreed with the code by listing the wrong count.
-            //
             // It must stay **inside** the `.chain()`: it shares
             // `ResMut<ActionQueue>` with `drive_mining`, and this app runs with
             // `ambiguity_detection: LogLevel::Error`.
