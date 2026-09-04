@@ -1009,7 +1009,8 @@ impl VersionAdapter for V770Adapter {
         // directly. The returned `correct_tool` is already the equivalent of
         // vanilla's own correct-tool-for-drops check, block requirement
         // folded in, so the caller has nothing left to invert.
-        lodestone_data::tool::mining(held, state_id)
+        let state_id = lodestone_data::block_states::StateId::new(state_id)?;
+        Some(lodestone_data::tool::mining(held, state_id))
     }
 
     fn block_collision(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
@@ -1089,5 +1090,25 @@ impl VersionAdapter for V770Adapter {
             .iter()
             .find(|(name, _)| *name == "drag")
             .map(|(_, value)| *value == "true")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lodestone_client::VersionAdapter;
+
+    use super::adapter;
+
+    #[test]
+    fn tool_mining_validates_raw_state_ids_at_the_adapter_boundary() {
+        let adapter = adapter();
+
+        assert!(adapter.tool_mining(None, 0).is_some());
+        assert!(
+            adapter
+                .tool_mining(None, lodestone_data::block_states::STATE_COUNT)
+                .is_none()
+        );
+        assert!(adapter.tool_mining(None, u32::MAX).is_none());
     }
 }

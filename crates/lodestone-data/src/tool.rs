@@ -194,14 +194,13 @@ pub fn default_tool(item: &str) -> Option<&'static ToolDef> {
 /// own item-stack "get destroy speed" accessor and player "has correct tool
 /// for drops" check.
 ///
-/// `held` is the main-hand stack; `None` is the bare hand. Returns `None` only
-/// when `state_id` is not a state this version knows.
+/// `held` is the main-hand stack; `None` is the bare hand. `state_id` is
+/// validated by [`StateId::new`] at the version or wire boundary.
 ///
 /// The returned `correct_tool` is the **player's** flag, already folded with the
 /// block's own "requires correct tool for drops" flag — see [`ToolMining::correct_tool`].
 #[must_use]
-pub fn mining(held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
-    let state_id = StateId::new(state_id)?;
+pub fn mining(held: Option<&ItemStack>, state_id: StateId) -> ToolMining {
     let requires_correct_tool = crate::hardness::hardness(state_id).requires_correct_tool;
     let block = state_id.block().registry_id();
 
@@ -210,7 +209,7 @@ pub fn mining(held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
     // says anything, otherwise the item's prototype.
     let patch = held.map_or(&ToolPatch::Inherited, |stack| &stack.components.tool);
     match patch {
-        ToolPatch::Set(tool) => Some(evaluate(
+        ToolPatch::Set(tool) => evaluate(
             tool.rules.len(),
             |index| {
                 let rule: &ToolRule = &tool.rules[index];
@@ -223,14 +222,14 @@ pub fn mining(held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
             tool.default_mining_speed(),
             tool.damage_per_block,
             requires_correct_tool,
-        )),
-        ToolPatch::Removed => Some(bare_handed(requires_correct_tool)),
+        ),
+        ToolPatch::Removed => bare_handed(requires_correct_tool),
         ToolPatch::Inherited => {
             let Some(item) = held else {
-                return Some(bare_handed(requires_correct_tool));
+                return bare_handed(requires_correct_tool);
             };
             match default_tool(&item.item.to_string()) {
-                Some(tool) => Some(evaluate(
+                Some(tool) => evaluate(
                     tool.rules.len(),
                     |index| {
                         let rule = &tool.rules[index];
@@ -243,8 +242,8 @@ pub fn mining(held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
                     tool.default_mining_speed,
                     tool.damage_per_block,
                     requires_correct_tool,
-                )),
-                None => Some(bare_handed(requires_correct_tool)),
+                ),
+                None => bare_handed(requires_correct_tool),
             }
         }
     }

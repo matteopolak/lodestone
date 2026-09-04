@@ -51,8 +51,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use lodestone_model::{ItemStack, ItemTool, ToolBlocks, ToolPatch, ToolRule};
 use lodestone_data::{block_states::{self, StateId}, hardness, item::Item, tool};
+use lodestone_model::{ItemStack, ItemTool, ToolBlocks, ToolMining, ToolPatch, ToolRule};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -720,9 +720,10 @@ fn generator_emits_strictly_ascending_u16_item_tool_ids() {
 
 /// Finds the first state id whose block name matches `name`, via the committed
 /// block-state table — robust to id shifts across data bumps.
-fn state_named(name: &str) -> u32 {
+fn state_named(name: &str) -> StateId {
     (0..block_states::STATE_COUNT)
         .find(|&id| block_states::block_name(id) == Some(name))
+        .and_then(StateId::new)
         .unwrap_or_else(|| panic!("{name} is not in the committed block-state table"))
 }
 
@@ -893,8 +894,8 @@ fn every_block_state_maps_to_its_own_block() {
 
 #[test]
 fn typed_block_tag_membership_uses_the_state_block_identity() {
-    let short_grass = StateId::new(state_named("minecraft:short_grass")).expect("known state");
-    let stone = StateId::new(state_named("minecraft:stone")).expect("known state");
+    let short_grass = state_named("minecraft:short_grass");
+    let stone = state_named("minecraft:stone");
 
     assert!(
         tool::block_tag_contains("minecraft:edible_for_sheep", short_grass.block()),
@@ -912,13 +913,13 @@ fn typed_block_tag_membership_uses_the_state_block_identity() {
 fn diamond_pickaxe_mines_stone_in_six_ticks() {
     let stone = state_named("minecraft:stone");
     let pickaxe = stack("minecraft:diamond_pickaxe");
-    let mining = tool::mining(Some(&pickaxe), stone).expect("stone resolves");
+    let mining = tool::mining(Some(&pickaxe), stone);
 
     assert_eq!(mining.speed, 8.0, "diamond tier mines pickaxe blocks at 8x");
     assert!(mining.correct_tool, "a pickaxe drops stone");
     assert_eq!(mining.damage_per_block, 1);
 
-    let hardness = hardness::hardness_raw(stone).expect("stone hardness").hardness;
+    let hardness = hardness::hardness(stone).hardness;
     assert_eq!(
         ticks_to_break(hardness, mining.speed, mining.correct_tool),
         6,
@@ -932,7 +933,7 @@ fn diamond_pickaxe_mines_stone_in_six_ticks() {
 #[test]
 fn bare_hand_on_stone_is_151_ticks_not_45() {
     let stone = state_named("minecraft:stone");
-    let mining = tool::mining(None, stone).expect("stone resolves");
+    let mining = tool::mining(None, stone);
 
     assert_eq!(mining.speed, 1.0, "a bare hand mines at 1x");
     assert!(
@@ -941,7 +942,7 @@ fn bare_hand_on_stone_is_151_ticks_not_45() {
     );
     assert_eq!(mining.damage_per_block, 0, "a bare hand has no durability cost");
 
-    let hardness = hardness::hardness_raw(stone).expect("stone hardness").hardness;
+    let hardness = hardness::hardness(stone).hardness;
     assert_eq!(
         ticks_to_break(hardness, mining.speed, mining.correct_tool),
         151,
@@ -961,7 +962,7 @@ fn bare_hand_on_stone_is_151_ticks_not_45() {
 #[test]
 fn bare_hand_is_correct_for_dirt() {
     let dirt = state_named("minecraft:dirt");
-    let mining = tool::mining(None, dirt).expect("dirt resolves");
+    let mining = tool::mining(None, dirt);
     assert!(mining.correct_tool, "dirt drops for anything, including a fist");
     assert_eq!(mining.speed, 1.0);
 }
@@ -973,7 +974,7 @@ fn bare_hand_is_correct_for_dirt() {
 fn a_pickaxe_on_dirt_is_slow_but_still_drops() {
     let dirt = state_named("minecraft:dirt");
     let pickaxe = stack("minecraft:diamond_pickaxe");
-    let mining = tool::mining(Some(&pickaxe), dirt).expect("dirt resolves");
+    let mining = tool::mining(Some(&pickaxe), dirt);
     assert_eq!(mining.speed, 1.0, "dirt is not in #mineable/pickaxe");
     assert!(mining.correct_tool, "dirt does not require a correct tool");
 }
@@ -984,7 +985,7 @@ fn a_pickaxe_on_dirt_is_slow_but_still_drops() {
 fn a_shovel_does_not_drop_stone() {
     let stone = state_named("minecraft:stone");
     let shovel = stack("minecraft:diamond_shovel");
-    let mining = tool::mining(Some(&shovel), stone).expect("stone resolves");
+    let mining = tool::mining(Some(&shovel), stone);
     assert_eq!(mining.speed, 1.0);
     assert!(!mining.correct_tool, "a shovel must not drop stone");
 }
@@ -996,19 +997,17 @@ fn a_shovel_does_not_drop_stone() {
 #[test]
 fn a_wooden_pickaxe_speeds_up_obsidian_but_never_drops_it() {
     let obsidian = state_named("minecraft:obsidian");
-    let wooden = tool::mining(Some(&stack("minecraft:wooden_pickaxe")), obsidian)
-        .expect("obsidian resolves");
+    let wooden = tool::mining(Some(&stack("minecraft:wooden_pickaxe")), obsidian);
     assert_eq!(wooden.speed, 2.0, "wood tier still applies its #mineable/pickaxe speed");
     assert!(
         !wooden.correct_tool,
         "obsidian is in #incorrect_for_wooden_tool, so wood never drops it"
     );
 
-    let diamond = tool::mining(Some(&stack("minecraft:diamond_pickaxe")), obsidian)
-        .expect("obsidian resolves");
+    let diamond = tool::mining(Some(&stack("minecraft:diamond_pickaxe")), obsidian);
     assert!(diamond.correct_tool, "diamond drops obsidian");
 
-    let hardness = hardness::hardness_raw(obsidian).expect("obsidian hardness").hardness;
+    let hardness = hardness::hardness(obsidian).hardness;
     assert_eq!(
         ticks_to_break(hardness, wooden.speed, wooden.correct_tool),
         2500,
@@ -1035,7 +1034,7 @@ fn a_wooden_pickaxe_speeds_up_obsidian_but_never_drops_it() {
 #[test]
 fn shears_match_cobweb_through_an_explicit_block_set() {
     let cobweb = state_named("minecraft:cobweb");
-    let mining = tool::mining(Some(&stack("minecraft:shears")), cobweb).expect("cobweb resolves");
+    let mining = tool::mining(Some(&stack("minecraft:shears")), cobweb);
     assert_eq!(mining.speed, 15.0, "shears cut cobweb at 15x");
     assert!(mining.correct_tool);
 }
@@ -1057,7 +1056,7 @@ fn a_wire_supplied_tool_overrides_the_prototype() {
         3,
         true,
     ));
-    let mining = tool::mining(Some(&pickaxe), stone).expect("stone resolves");
+    let mining = tool::mining(Some(&pickaxe), stone);
     assert_eq!(mining.speed, 2.0, "the patch's speed must win over the prototype's 8.0");
     assert!(!mining.correct_tool, "the patch says this tool does not drop stone");
     assert_eq!(mining.damage_per_block, 3);
@@ -1068,10 +1067,7 @@ fn a_wire_supplied_tool_overrides_the_prototype() {
 #[test]
 fn a_wire_supplied_rule_can_name_blocks_by_registry_id() {
     let stone = state_named("minecraft:stone");
-    let stone_block = StateId::new(stone)
-        .expect("stone is in range")
-        .block()
-        .registry_id();
+    let stone_block = stone.block().registry_id();
     let mut wand = stack("minecraft:stick");
     wand.components.tool = ToolPatch::Set(ItemTool::new(
         vec![ToolRule::new(
@@ -1083,7 +1079,7 @@ fn a_wire_supplied_rule_can_name_blocks_by_registry_id() {
         0,
         true,
     ));
-    let mining = tool::mining(Some(&wand), stone).expect("stone resolves");
+    let mining = tool::mining(Some(&wand), stone);
     assert_eq!(mining.speed, 100.0);
     assert!(mining.correct_tool);
 }
@@ -1095,7 +1091,7 @@ fn removing_the_tool_component_reverts_to_bare_hands() {
     let stone = state_named("minecraft:stone");
     let mut pickaxe = stack("minecraft:diamond_pickaxe");
     pickaxe.components.tool = ToolPatch::Removed;
-    let mining = tool::mining(Some(&pickaxe), stone).expect("stone resolves");
+    let mining = tool::mining(Some(&pickaxe), stone);
     assert_eq!(mining.speed, 1.0);
     assert!(!mining.correct_tool);
     assert_eq!(mining.damage_per_block, 0);
@@ -1105,8 +1101,8 @@ fn removing_the_tool_component_reverts_to_bare_hands() {
 #[test]
 fn a_non_tool_item_mines_like_a_bare_hand() {
     let stone = state_named("minecraft:stone");
-    let held = tool::mining(Some(&stack("minecraft:dirt")), stone).expect("stone resolves");
-    let empty = tool::mining(None, stone).expect("stone resolves");
+    let held = tool::mining(Some(&stack("minecraft:dirt")), stone);
+    let empty = tool::mining(None, stone);
     assert_eq!(held, empty);
 }
 
@@ -1127,26 +1123,28 @@ fn an_unknown_tag_matches_nothing() {
         1,
         true,
     ));
-    let mining = tool::mining(Some(&odd), stone).expect("stone resolves");
+    let mining = tool::mining(Some(&odd), stone);
     assert_eq!(mining.speed, 1.0, "no rule matched, so the default applies");
     assert!(!mining.correct_tool);
 }
 
 #[test]
-fn unknown_states_do_not_resolve() {
-    assert_eq!(tool::mining(None, block_states::STATE_COUNT), None);
-    assert_eq!(tool::mining(None, u32::MAX), None);
+fn mining_accepts_only_validated_state_ids() {
+    let lookup: fn(Option<&ItemStack>, StateId) -> ToolMining = tool::mining;
+    let stone = state_named("minecraft:stone");
+
+    assert_eq!(lookup(None, stone).speed, 1.0);
+    assert!(StateId::new(block_states::STATE_COUNT).is_none());
+    assert!(StateId::new(u32::MAX).is_none());
 }
 
 #[test]
 fn every_state_resolves_for_a_pickaxe_and_a_fist() {
     let pickaxe = stack("minecraft:diamond_pickaxe");
     for state in 0..block_states::STATE_COUNT {
-        assert!(tool::mining(None, state).is_some(), "state {state} bare-handed");
-        assert!(
-            tool::mining(Some(&pickaxe), state).is_some(),
-            "state {state} with a pickaxe"
-        );
+        let state_id = StateId::new(state).expect("loop only visits known states");
+        let _ = tool::mining(None, state_id);
+        let _ = tool::mining(Some(&pickaxe), state_id);
     }
 }
 

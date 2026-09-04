@@ -440,7 +440,10 @@ pub fn drops_are_allowed(block_state: &str, held: Option<&ItemStack>) -> bool {
     let Some(state_id) = crate::mobs::block_state_id(block_state) else {
         return true;
     };
-    lodestone_data::tool::mining(held, state_id).is_none_or(|mining| mining.correct_tool)
+    let Some(state_id) = lodestone_data::block_states::StateId::new(state_id) else {
+        return true;
+    };
+    lodestone_data::tool::mining(held, state_id).correct_tool
 }
 
 /// Rolls `block_state`'s loot table and returns one [`PoppedItem`] per
