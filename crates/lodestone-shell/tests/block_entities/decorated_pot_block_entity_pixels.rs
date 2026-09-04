@@ -4,18 +4,17 @@
 //!
 //! # Why "a pot drew" is not the interesting claim here
 //!
-//! Issue #23's real blocker for this type was never "port the geometry": it
-//! is that vanilla's `DecoratedPotRenderer.submit` draws **four
-//! independently-textured sides** (`front`/`back`/`left`/`right`, from NBT
-//! `sherds`) on one block, and this crate's block-entity batch key is
-//! `(model, texture)` — one texture per *instance*, not per face. A gate that
-//! only asserted "something non-sky appears where the pot is" would pass
-//! under a wrong implementation that drew all four sides with the *same*
-//! sherd repeated (or, worse, transposed two sides) — see
+//! A decorated pot draws **four independently-textured sides**
+//! (`front`/`back`/`left`/`right`, from the stored `sherds`) on one block, and
+//! this crate's block-entity batch key is `(model, texture)` — one texture per
+//! *instance*, not per face. A gate that only asserted "something non-sky
+//! appears where the pot is" would pass under a wrong implementation that
+//! drew all four sides with the *same* sherd repeated (or, worse, transposed
+//! two sides) — see
 //! `lodestone_render::block_entity::BlockEntityModelSet::resolve_decorated_pot`'s
 //! doc for the decomposition this actually uses (a base instance plus four
-//! single-quad side instances, each its own `(model, texture)` pair, so no
-//! bind-group or shader change was needed at all).
+//! single-quad side instances, each its own `(model, texture)` pair, which
+//! keeps the existing bind-group and shader interfaces sufficient).
 //!
 //! `four_distinct_sherds_produce_four_distinct_textures_on_the_right_faces`
 //! and the sibling CPU-level tests in `lodestone-render`/`lodestone-assets`
@@ -23,15 +22,14 @@
 //! named model and the right rest pose to the right named side. What only a
 //! real render can prove is that changing one **named** side's stored sherd
 //! repaints the correct half of the screen and *only* that half — the
-//! transposition trap CLAUDE.md warns two adjacent same-typed fields are
-//! prone to.
+//! transposition trap that makes adjacent same-typed fields easy to confuse.
 //!
 //! # The camera geometry, derived rather than guessed
 //!
 //! At `facing_yaw_deg = 0.0` (south, [`horizontal_facing_yaw`]'s
 //! convention), [`decorated_pot_placement_matrix`]'s rotation term is
 //! `180° - 0° = 180°` — **not** the identity chest's own matrix would give at
-//! the same yaw, because of the jar's own extra `180°` term (see that
+//! the same yaw, because of the pot's own extra `180°` term (see that
 //! function's doc). Working the rotation through by hand
 //! (`front`'s rest pivot sits at local `(0.0625, ~, 0.9375)`, i.e. offset
 //! `(-0.4375, ~, +0.4375)` from the pot's centre pivot; a `180°` `Y` rotation
