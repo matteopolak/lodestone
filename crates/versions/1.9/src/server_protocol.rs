@@ -17,7 +17,7 @@ use lodestone_server::{
 use uuid::Uuid;
 
 use crate::PROTOCOL;
-use crate::adapter::PROTOCOL_1_11_2;
+use crate::adapter::{PROTOCOL_1_10_2, PROTOCOL_1_11_2};
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGame};
 use crate::packets::handshake::SetProtocol;
@@ -25,6 +25,9 @@ use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
 
 const CTX_340: Ctx = Ctx { version: PROTOCOL };
+const CTX_210: Ctx = Ctx {
+    version: PROTOCOL_1_10_2,
+};
 const CTX_316: Ctx = Ctx {
     version: PROTOCOL_1_11_2,
 };
@@ -39,6 +42,10 @@ const PLAINS_BIOME_ID: u8 = 1;
 /// Server implementation for protocol 340.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct V340ServerProtocol;
+
+/// Server implementation for protocol 210.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct V210ServerProtocol;
 
 /// Server implementation for protocol 316.
 #[derive(Clone, Copy, Debug, Default)]
@@ -79,6 +86,18 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     position: crate::packet_ids_316::play::clientbound::POSITION,
     map_chunk: crate::packet_ids_316::play::clientbound::MAP_CHUNK,
     block_change: crate::packet_ids_316::play::clientbound::BLOCK_CHANGE,
+};
+
+const IDS_210: ServerPacketIds = ServerPacketIds {
+    handshake: crate::packet_ids_210::handshaking::serverbound::SET_PROTOCOL,
+    login_start: crate::packet_ids_210::login::serverbound::LOGIN_START,
+    compression: crate::packet_ids_210::login::clientbound::COMPRESS,
+    login_success: crate::packet_ids_210::login::clientbound::SUCCESS,
+    block_dig: crate::packet_ids_210::play::serverbound::BLOCK_DIG,
+    join: crate::packet_ids_210::play::clientbound::LOGIN,
+    position: crate::packet_ids_210::play::clientbound::POSITION,
+    map_chunk: crate::packet_ids_210::play::clientbound::MAP_CHUNK,
+    block_change: crate::packet_ids_210::play::clientbound::BLOCK_CHANGE,
 };
 
 fn send<T: Encode>(packet_id: i32, packet: &T, ctx: Ctx, protocol: i32) -> ServerDirective {
@@ -144,7 +163,12 @@ fn legacy_state(protocol: i32, state: u32) -> Result<u32, ChunkEncodeError> {
         ))
     })?;
     let block_id = legacy >> 4;
-    if protocol == PROTOCOL_1_11_2 && !(block_id <= 234 || block_id == 255) {
+    let supported = match protocol {
+        PROTOCOL_1_10_2 => block_id <= 212 || block_id == 255,
+        PROTOCOL_1_11_2 => block_id <= 234 || block_id == 255,
+        _ => true,
+    };
+    if !supported {
         return Err(ChunkEncodeError::new(format!(
             "canonical state {state} has no exact protocol-{protocol} representation"
         )));
@@ -275,6 +299,30 @@ impl V340ServerProtocol {
         payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
         Ok(ServerDirective::Send {
             packet_id: IDS_340.block_change,
+            payload: payload.into_vec(),
+        })
+    }
+}
+
+impl V210ServerProtocol {
+    /// Converts and encodes a block update, preserving a failure when the
+    /// canonical state has no exact protocol-210 representation.
+    pub fn try_encode_block_update(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: &str,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        let canonical = lodestone_data::block_states::state_id(state).ok_or_else(|| {
+            ChunkEncodeError::new(format!("unknown canonical block state {state}"))
+        })?;
+        let legacy = legacy_state(PROTOCOL_1_10_2, canonical)?;
+        let mut payload = Writer::default();
+        payload.i64(pack_position(BlockPos::new(x, y, z)));
+        payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
+        Ok(ServerDirective::Send {
+            packet_id: IDS_210.block_change,
             payload: payload.into_vec(),
         })
     }
@@ -506,4 +554,5 @@ macro_rules! impl_server_protocol {
 }
 
 impl_server_protocol!(V340ServerProtocol, PROTOCOL, IDS_340, CTX_340);
+impl_server_protocol!(V210ServerProtocol, PROTOCOL_1_10_2, IDS_210, CTX_210);
 impl_server_protocol!(V316ServerProtocol, PROTOCOL_1_11_2, IDS_316, CTX_316);
