@@ -305,11 +305,19 @@ impl ClientHandle {
     /// (`container_set_slot`, `set_cursor_item`, ...) reconcile over the same
     /// prediction rather than a stale copy.
     ///
+    /// A registered `InventoryClick` veto turns this call into a successful
+    /// no-op: no prediction is made and no action is queued.
+    ///
     /// # Errors
     ///
-    /// Returns [`ClientClosed`] if the session has already ended.
+    /// Returns [`ClientClosed`] if an allowed click is submitted after the
+    /// session has ended. A denied click is always a successful no-op, including
+    /// after closure, because it never consults the action channel.
     pub fn menu_click(&self, click: Click, ctx: PlayerCtx) -> Result<(), ClientClosed> {
-        self.send_action(self.state.menu_click(click, ctx))
+        match self.state.menu_click(click, ctx) {
+            Some(action) => self.send_action(action),
+            None => Ok(()),
+        }
     }
 
     /// Predicts a `key.drop` press (`Q` / `Ctrl`+`Q`) on the selected hotbar

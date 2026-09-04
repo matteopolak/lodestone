@@ -1192,8 +1192,8 @@ impl SharedState {
         })
     }
 
-    /// Predicts `click` against the live menu session and returns the
-    /// [`ClientAction`] to transmit.
+    /// Asks the optional inventory-click veto, then predicts `click` against
+    /// the live menu session and returns the [`ClientAction`] to transmit.
     ///
     /// This **must** run here rather than on a snapshot: prediction mutates
     /// the one authoritative [`SessionMenus`] component (slots, the carried
@@ -1201,20 +1201,47 @@ impl SharedState {
     /// [`player_menu`](Self::player_menu) hand out *clones* with nowhere for
     /// that mutation to land. A caller holding only a snapshot cannot predict
     /// a click; it can only ask this state to do it.
-    pub(crate) fn menu_click(&self, click: Click, ctx: PlayerCtx) -> ClientAction {
+    ///
+    /// `None` means a registered veto denied the click. The ask happens before
+    /// [`SessionMenus::click_action`], so denial cannot change a slot, cursor,
+    /// drag state, or menu state id.
+    pub(crate) fn menu_click(&self, click: Click, ctx: PlayerCtx) -> Option<ClientAction> {
         let action = lodestone_ecs::hold_write(&self.ecs, |world| {
-            world
+            let window_id = world
+                .get::<SessionMenus>(self.session)
+                .expect("the session entity always carries SessionMenus")
+                .0
+                .opened_window_id()
+                .unwrap_or(0);
+            let veto = lodestone_ecs::VerbContext::InventoryClick {
+                window_id,
+                slot: click.slot,
+                button: click.button,
+            };
+            if world
+                .get_resource::<lodestone_ecs::ActionVetoes>()
+                .is_some_and(|vetoes| {
+                    vetoes.allows(&veto) == lodestone_ecs::veto::Verdict::Deny
+                })
+            {
+                return None;
+            }
+
+            Some(
+                world
                 .get_mut::<SessionMenus>(self.session)
                 .expect("the session entity always carries SessionMenus")
                 .0
-                .click_action(click, ctx)
+                .click_action(click, ctx),
+            )
         });
+        let action = action?;
         // The prediction just changed slot contents/the carried stack the UI
         // reads every frame; wake any `wait_for` waiter the same way every
         // other mutator on this state does, so a bot awaiting an inventory
         // change is not left hanging on a lost wakeup.
         self.wake();
-        action
+        Some(action)
     }
 
     /// Predicts a `key.drop` press against the one authoritative
@@ -1403,6 +1430,133 @@ mod tests {
         SessionSpawnPoint, SessionTabList, SessionWorldBorder,
     };
     use lodestone_model::Difficulty;
+
+    fn state_with_inventory_click_veto(
+        verdict: lodestone_ecs::veto::Verdict,
+        window_id: i32,
+        slot: i32,
+    ) -> SharedState {
+        let state = SharedState::default();
+        let mut vetoes = lodestone_ecs::ActionVetoes::default();
+        vetoes.register(
+            lodestone_ecs::Verb::InventoryClick,
+            "inventory-test",
+            0,
+            move |ctx| {
+                assert_eq!(
+                    *ctx,
+                    lodestone_ecs::VerbContext::InventoryClick {
+                        window_id,
+                        slot,
+                        button: 0,
+                    },
+                    "the veto must receive the active window and the raw click coordinates"
+                );
+                verdict
+            },
+        );
+        state.ecs.write().insert_resource(vetoes);
+        state
+    }
+
+    fn seed_clickable_hotbar_stack(state: &SharedState) {
+        let mut items = vec![None; 46];
+        items[36] = Some(ItemStack {
+            item: "minecraft:diamond".parse().unwrap(),
+            count: 5,
+            components: lodestone_model::ItemComponents::default(),
+        });
+        state.apply(&ClientEvent::ContainerContent {
+            window_id: 0,
+            state_id: 7,
+            items,
+            carried_item: None,
+        });
+    }
+
+    fn seed_clickable_open_menu(state: &SharedState) {
+        state.apply(&ClientEvent::ScreenOpened {
+            window_id: 5,
+            menu_type: "minecraft:generic_9x1".parse().unwrap(),
+            title: Text::literal("Chest"),
+        });
+        let mut items = vec![None; 45];
+        items[0] = Some(ItemStack {
+            item: "minecraft:diamond".parse().unwrap(),
+            count: 5,
+            components: lodestone_model::ItemComponents::default(),
+        });
+        state.apply(&ClientEvent::ContainerContent {
+            window_id: 5,
+            state_id: 7,
+            items,
+            carried_item: None,
+        });
+    }
+
+    #[tokio::test]
+    async fn denied_inventory_click_does_not_predict_or_wake_waiters() {
+        let state = state_with_inventory_click_veto(lodestone_ecs::veto::Verdict::Deny, 5, 0);
+        seed_clickable_open_menu(&state);
+        let before = state.open_menu().expect("the test container is open");
+
+        let notified = state.notifier().notified_owned();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let _ = state.menu_click(Click::left(0), PlayerCtx::survival());
+
+        assert_eq!(
+            state.open_menu(),
+            Some(before),
+            "denial must leave slots, cursor, and menu state id unchanged"
+        );
+        assert_eq!(
+            state.ecs.read().resource::<lodestone_ecs::ActionVetoes>().stats(),
+            lodestone_ecs::VetoStats {
+                invocations: 1,
+                asked: 1,
+                denied: 1,
+            },
+            "the production path must actually ask the registered veto"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), notified)
+                .await
+                .is_err(),
+            "a denied no-op must not wake read-model waiters"
+        );
+    }
+
+    #[tokio::test]
+    async fn allowed_inventory_click_still_predicts_and_wakes_waiters() {
+        let state = state_with_inventory_click_veto(lodestone_ecs::veto::Verdict::Allow, 0, 36);
+        seed_clickable_hotbar_stack(&state);
+
+        let notified = state.notifier().notified_owned();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let _ = state.menu_click(Click::left(36), PlayerCtx::survival());
+
+        let menu = state.player_menu();
+        assert!(menu.slot_item(36).is_none(), "the clicked stack moved off its slot");
+        assert_eq!(
+            menu.carried().map(lodestone_game::item::ItemStack::count),
+            Some(5),
+            "the allowed prediction moved the stack onto the cursor"
+        );
+        assert_eq!(menu.state_id(), 8, "the allowed predictor advanced its state");
+        assert_eq!(
+            state.ecs.read().resource::<lodestone_ecs::ActionVetoes>().stats(),
+            lodestone_ecs::VetoStats {
+                invocations: 1,
+                asked: 1,
+                denied: 0,
+            }
+        );
+        tokio::time::timeout(std::time::Duration::from_millis(20), notified)
+            .await
+            .expect("an allowed prediction must wake read-model waiters");
+    }
 
     /// **The real path, not the fold called directly and not the `NetIngest`
     /// schedule run by hand.** `SharedState::apply` is the exact method the

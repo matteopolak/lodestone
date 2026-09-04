@@ -87,13 +87,19 @@ direction — there is no equivalent inbound hook for a plugin command arriving 
 
 `ActionVetoes` (`crates/lodestone-ecs/src/veto.rs`) is the veto point for interaction verbs a
 protection or anti-grief plugin needs to cancel *before* they commit — `BlockBreak`,
-`BlockPlace`, `EntityDamage`, and `PlayerMove` are wired today; `InventoryClick` and
-`PlayerInteract` are deferred because their commitment sites either hold a `World` write guard
-already or must not fork a block-prediction sequence number ahead of the ask. A plugin
+`BlockPlace`, `EntityDamage`, `InventoryClick`, and `PlayerMove` are wired today;
+`PlayerInteract` is deferred because its commitment sites must not fork a block-prediction
+sequence number ahead of the ask. A plugin
 registers a predicate per verb, keyed by priority; the first `Deny` short-circuits, and later
 predicates cannot un-deny. The predicate receives only a typed `VerbContext`, never the
 `World`, for the same reentrancy reason `EgressFilters`' callback does not get one — the verb's
 commit site is often a plain method already holding a guard.
+
+`InventoryClick` is asked inside `SharedState::menu_click` while its existing world write guard
+is held, before `SessionMenus::click_action` runs. The context carries the active window id plus
+the raw slot and button. A denial is a successful no-op at `ClientHandle::menu_click`: it leaves
+the predicted slots, cursor, drag state, and menu state id untouched, does not wake read-model
+waiters, and never places a `ClientAction` on the driver's channel.
 
 This is a different layer from `EgressFilters`, not a redundant one: `ActionVetoes` stops a
 verb before its effect is computed at all, so client state never diverges; `EgressFilters`
@@ -138,6 +144,7 @@ a special case of the egress hook.
   `protocol/v26-2/src/server_protocol.rs` (the decode arms) for serverbound wiring.
 - `docs/event-routing.md` and `lodestone-model/src/event.rs` for clientbound routing.
 - `lodestone-ecs/src/egress.rs` and `veto.rs`, both depending only on `bevy_app`/`bevy_ecs`/
-  `lodestone-model`; ask/drain call sites live in `lodestone-shell` and `lodestone-controller`.
+  `lodestone-model`; ask/drain call sites live in `lodestone-client`, `lodestone-shell`, and
+  `lodestone-controller`.
 - `cargo xtask connectedness` for the decoded/connected measurement this doc's gates
   complement.
