@@ -1,4 +1,4 @@
-# Java plugin bridge: backing Paper's own internal calls with Rust
+# Java plugin bridge: backing Paper's static internal bytecode uses with Rust
 
 ## What it is
 
@@ -41,44 +41,52 @@ repo targets, so the census lines up with the decompiled source already under `.
 | classes parsed | 10,353 |
 | **parse failures** | **0** |
 | vanilla-internal classes defined in the jar | 7,492 |
-| **distinct NMS members the Bukkit layer references** | **6,991** |
-| distinct NMS classes it touches | 1,400 |
-| external reference sites | 10,938 |
-| *all* NMS references including engine-internal | 189,914 across 88,140 members |
+| **distinct static NMS member operations encoded by the Bukkit layer** | **7,179** |
+| distinct NMS classes carrying those operations | 1,395 |
+| external static instruction sites | 16,853 |
+| symbolic pool members from the Bukkit layer | 6,991 |
+| *all* static NMS instruction sites including engine-internal | 379,852 |
 
-**The ratio is the finding.** Paper's own bytecode makes 189,914 NMS references across 88,140
-distinct members — but 88,140 is the size of *Minecraft*, not the size of this project. The members
-reached from **outside** vanilla's own internal package (i.e. from CraftBukkit's and Paper's own
-code) number **6,991**, a **12.6× reduction**. That number is what separates "reimplement the
-game" from "implement a bounded, enumerable API".
+**The ratio is the finding.** Paper's own bytecode encodes 379,852 NMS member instruction sites,
+but that is the size of the game engine, not the bridge. The external layer encodes 16,853 static
+sites across **7,179 distinct member-operation keys**. The all-package table has 106,095 distinct
+keys, so the distinct-operation surface is a **14.8× reduction**. That number is what separates
+"reimplement the game" from "implement a bounded, enumerable API".
 
-Refining further by also treating Paper's rewritten chunk system and data converters
-(`ca.spottedleaf.*`) as engine internals — a Rust-backed server replaces those outright rather than
-shimming them — moves it only to **6,692 members / 1,352 classes**. So the headline is robust: the
-bulk genuinely is the Bukkit bridge layer, not incidental callers.
+The scanner retains the former **6,991 symbolic pool members** separately. A pool entry can be
+needed by a descriptor or bootstrap path without a `get*`, `put*`, or `invoke*` instruction in that
+class, so it is useful context but not a static-site work count.
 
 ### 1.2 Composition of the surface
 
-| kind | count |
-|---|---|
-| methods | 4,318 |
-| **fields** | **2,167** |
-| interface methods | 506 |
-| (of which constructors, `<init>`) | 421 |
+| static instruction kind | distinct operations | external sites |
+|---|---:|---:|
+| `invokevirtual` | 3,466 | 8,619 |
+| `invokespecial` | 419 | 944 |
+| `invokestatic` | 427 | 1,218 |
+| `invokeinterface` | 474 | 1,091 |
+| `getfield` | 533 | 1,653 |
+| `getstatic` | 1,552 | 2,882 |
+| `putfield` | 305 | 441 |
+| `putstatic` | 3 | 5 |
 
-**The 2,167 field references are the uncomfortable part** and are called out because they change the
-shape of the work rather than its size. A method can be backed by a `native` shim; a `getfield` /
-`putfield` cannot. A shim class must either *declare a real Java field* whose value is kept in sync
-with Rust-owned state, or field access must be rewritten to accessor calls during classload
-transformation. The first is cheap for immutable-after-construction data and wrong for live state;
-the second turns "supply shim classes" into "supply shim classes *and* a bytecode rewriter", which
-is a materially larger project. **This is unresolved and is the largest single design risk below.**
+**The 4,535 static field reads and 446 writes are the uncomfortable part.** A method can be
+backed by a `native` shim; a field operation cannot. A shim class must either *declare a real Java
+field* whose value is kept in sync with Rust-owned state, or field access must be rewritten to
+accessor calls during classload transformation. The first is cheap for immutable-after-construction
+data and wrong for live state; the second turns "supply shim classes" into "supply shim classes
+*and* a bytecode rewriter", which is a materially larger project. **This is unresolved and is the
+largest single design risk below.**
 
-### 1.3 Where the work is, by subsystem
+### 1.3 Symbolic context retained from the former pool census
 
-External member references by internal subsystem (top of 6,991):
+The following grouped ranking is the **former symbolic-pool census** (6,991 members), retained as
+context only. It does not rank the 7,179 static instruction operations above: one symbolic member
+can have no instruction site in a class, while one member can occur in several instruction forms.
+Do not use this table to choose implementation order until the static sites are grouped by
+subsystem too.
 
-| subsystem | members |
+| subsystem | symbolic members |
 |---|---|
 | entities | 1,924 |
 | world/level | 1,829 |
@@ -91,18 +99,18 @@ External member references by internal subsystem (top of 6,991):
 | network protocol | 97 |
 | chat networking | 86 |
 
-Entities and world/level are **54%** of the surface between them. That is the good news the
+Entities and world/level are **54%** of that symbolic surface. That is the good news the
 issue predicted: those are precisely the subsystems this repo already implements, so Java-plugin
 compatibility really does reduce largely to server parity rather than being a separate project.
 
-Most-referenced types, by rough category: the base entity type (274 refs), the item-data-component
+Most-referenced symbolic types, by rough category: the base entity type (274 refs), the item-data-component
 registry (257), the server-side player type (223), the server-side level/world type (212), the
 server singleton (207), the generic compound-tag/NBT container (191), the entity-type registry
 (191), the world-generation-facing level view (170), the registry-of-registries type (165), and
 the block-state type (152).
 
-Most-referenced individual members, which give the natural implementation order — all simple
-accessors or constructors, not behaviour: a server-singleton getter (55 refs), a block-state
+Most-referenced symbolic members are historical context, not a static-site ordering: a
+server-singleton getter (55 refs), a block-state
 property's bound (50, a field), a registry-key accessor (39), a holder unwrap (31), a
 default-block-state constructor (30), a wrapper-object accessor that hands back the Bukkit-facing
 object for a given internal one (28), a state-to-block accessor (24), and a chunk-source accessor
@@ -110,7 +118,7 @@ on the server-side level type (23).
 
 ### 1.4 The finding that most changes the design: Paper-injected members
 
-**143 of the 6,991 members have Bukkit-facing types in their own signature.** Examples of the
+**143 of the 6,991 symbolic members have Bukkit-facing types in their own signature.** Examples of the
 shape: an entity's internal type gaining an accessor that hands back its Bukkit-facing wrapper
 object; a block-state type gaining an accessor that hands back Bukkit-facing block data; a
 server-side level type gaining an accessor that hands back its Bukkit-facing world object; the
@@ -161,25 +169,25 @@ download. **The Paper jar is a local measurement input: it is not committed, not
 
 ### 1.7 How far to trust the scanner
 
-`crates/lodestone-nms-census` is a constant-pool reader (JVMS chapter 4), no JVM involved. Evidence
-it is correct, in the order it was gathered:
+`crates/lodestone-nms-census` is a class-file reader (JVMS chapter 4), no JVM involved. It walks
+method `Code` bytecode instruction by instruction; it never searches raw bytes, so opcode-valued
+operands and variable-width switch payloads cannot become false uses. Evidence it is correct, in
+the order it was gathered:
 
 - **Hermetic**, against a class file hand-expanded from the specification —
-  `tests/classfile_fixture.rs`. The fixture deliberately contains a `CONSTANT_Long`, because a
-  `Long` occupies **two** pool slots and a parser that advances one slot per entry silently resolves
-  every later index to its neighbour. A fixture without one passes under both the correct and the
-  incorrect reading.
-- **At scale**, against the real vanilla 26.2 server: **30,563 classes, 0 parse failures**, and the
-  most-referenced members come out as exactly the kind of thing dense server code calls
-  constantly: a random-number roll, a block position's coordinate accessors, a default-block-state
-  constructor, a block-state get/set pair, and a level's client-side check. Those being
-  *semantically* what server code does is stronger evidence than the counts.
-- **End to end**, a jar built in-test containing the fixture, censused back to exactly one external
-  reference attributed to the right referrer.
+  `tests/classfile_fixture.rs`. The fixture contains a two-slot `Long`, a repeated member use, all
+  four field directions, an opcode-valued operand, both variable-width switch forms, and `wide`.
+  Each case makes a common parser shortcut produce a different count.
+- **At scale**, against the local pinned Paper 26.2 server: **10,353 classes, 0 parse failures,
+  7,179 external static member operations, and 16,853 external instruction sites**. The ignored
+  `tests/vanilla_jar.rs` gate records those exact values for deliberate reruns.
+- **End to end**, a jar built in-test containing the fixture preserves three symbolic pool entries,
+  counts ten static uses, and exposes eight distinct operations attributed to the right referrer.
 
-What it does **not** answer: it counts *symbolic references*, so an NMS member reached purely
-through reflection or a `MethodHandle` bootstrap is invisible to it. Paper uses reflection sparingly
-in the Bukkit-facing wrapper layer, but "6,991" is a lower bound rather than a total.
+What it does **not** answer: a member reached purely through reflection or a `MethodHandle`
+bootstrap has no member instruction, so it is invisible to the static-site table. The symbolic table
+retains descriptor and bootstrap context, but neither table can discover a reflective target. The
+7,179 static-operation baseline is therefore a lower bound rather than a total.
 
 ---
 
@@ -567,8 +575,8 @@ pairs with `release()`. That needs a JVM to develop against.
   be traced to an exact input; update the pin and the numbers together.
 - **A census of the paperclip download is not a census.** See §1.5. If the numbers come back tiny,
   that is the bug.
-- **The 6,991 is a lower bound**, not a total: reflection and `MethodHandle` bootstraps are outside
-  what a constant-pool walk can see.
+- **The 7,179 static-operation count is a lower bound**, not a total: reflection and
+  `MethodHandle` bootstraps are outside what an instruction walk can see.
 
 ## 8. Configuration
 

@@ -4,10 +4,9 @@
 //!
 //! Enough of the JVM class-file format (JVMS chapter 4) to answer one question:
 //! *which members of which classes does this class file reference?* It parses
-//! the magic, the version, and the constant pool, and then stops — the field,
-//! method and attribute tables that follow are never read, because every
-//! symbolic reference a class makes already lives in the constant pool by
-//! construction. `Code` attributes hold *indices* into that pool, not names.
+//! the magic, version, constant pool, and method `Code` attributes. The pool
+//! records every symbolic possibility; the instructions name the members code
+//! actually uses. `Code` attributes hold *indices* into that pool, not names.
 //!
 //! No JVM is involved and none is needed: this is a byte-format reader, the
 //! same way `lodestone-anvil` reads region files without a server.
@@ -37,12 +36,11 @@
 //!
 //! # How to change it
 //!
-//! If a future need requires the method table (for example, to distinguish a
-//! member a class *declares* from one it *calls*), parse it after the pool: the
-//! layout is `access_flags u2`, `this_class u2`, `super_class u2`, then the
-//! interface, field, method and attribute tables. Nothing here consumes past
-//! the pool, so the cursor is left at exactly that point — [`ClassFile::rest`]
-//! exposes it.
+//! The reader walks every method attribute, parsing `Code` and safely skipping
+//! every other attribute by its declared length. Add a new static-use kind
+//! in [`MemberUseKind`] and its opcode in `walk_code`; do not search the raw
+//! byte stream, because instruction operands and switch payloads can equal an
+//! opcode value.
 //!
 //! Unknown constant tags are a hard error rather than a skip: an unrecognised
 //! tag has an unknown *width*, so continuing past one would desynchronise the
@@ -72,8 +70,11 @@ pub struct ClassFile {
     /// internal to the layer being replaced, while the same call from
     /// `org.bukkit.craftbukkit` is a member the bridge must actually provide.
     pub this_class: u16,
-    /// Byte offset just past the constant pool — where `access_flags` begins.
-    rest: usize,
+    /// Static member instruction sites decoded from method bytecode.
+    member_uses: Vec<MemberUse>,
+    /// `invokedynamic` pool indices, retained only to validate their required
+    /// constant-pool kind without treating a bootstrap site as a member use.
+    invoke_dynamic_uses: Vec<(usize, u16)>,
 }
 
 impl ClassFile {
@@ -92,17 +93,20 @@ impl ClassFile {
         let minor = cursor.u16()?;
         let major = cursor.u16()?;
         let pool = ConstantPool::parse(&mut cursor)?;
-        let rest = cursor.at;
         // `access_flags u2`, then `this_class u2` — four bytes past the pool.
         cursor.skip(2)?;
         let this_class = cursor.u16()?;
-        Ok(Self {
+        let mut class = Self {
             major,
             minor,
             pool,
             this_class,
-            rest,
-        })
+            member_uses: Vec::new(),
+            invoke_dynamic_uses: Vec::new(),
+        };
+        class.parse_body(&mut cursor)?;
+        class.validate_member_uses()?;
+        Ok(class)
     }
 
     /// This class's own internal-form name, e.g.
@@ -115,13 +119,75 @@ impl ClassFile {
         self.pool.class_name(self.this_class)
     }
 
-    /// Byte offset of `access_flags`, immediately after the constant pool.
+    /// Actual `get*`, `put*`, and invocation instructions from every method.
     ///
-    /// Nothing in this module reads past here; this is the hook for a caller
-    /// that needs the field/method tables.
+    /// A pool reference without an instruction remains symbolic only and is
+    /// therefore absent here.
     #[must_use]
-    pub const fn rest(&self) -> usize {
-        self.rest
+    pub fn member_uses(&self) -> &[MemberUse] {
+        &self.member_uses
+    }
+
+    fn parse_body(&mut self, cursor: &mut Cursor<'_>) -> Result<(), ClassFileError> {
+        cursor.skip(2)?; // super_class
+        let interfaces = usize::from(cursor.u16()?);
+        cursor.skip(interfaces.checked_mul(2).ok_or(ClassFileError::Truncated { at: cursor.at })?)?;
+        let fields = usize::from(cursor.u16()?);
+        for _ in 0..fields {
+            cursor.skip(6)?; // access_flags, name_index, descriptor_index
+            skip_attributes(cursor, &self.pool)?;
+        }
+        let methods = usize::from(cursor.u16()?);
+        for _ in 0..methods {
+            cursor.skip(6)?; // access_flags, name_index, descriptor_index
+            self.parse_method_attributes(cursor)?;
+        }
+        skip_attributes(cursor, &self.pool)?;
+        Ok(())
+    }
+
+    fn parse_method_attributes(&mut self, cursor: &mut Cursor<'_>) -> Result<(), ClassFileError> {
+        let count = usize::from(cursor.u16()?);
+        for _ in 0..count {
+            let name_index = cursor.u16()?;
+            let length = usize::try_from(cursor.u32()?)
+                .map_err(|_| ClassFileError::Truncated { at: cursor.at })?;
+            let info = cursor.take(length)?;
+            if self.pool.utf8(name_index)? == "Code" {
+                parse_code_attribute(info, &mut self.member_uses, &mut self.invoke_dynamic_uses)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_member_uses(&self) -> Result<(), ClassFileError> {
+        for use_ in &self.member_uses {
+            let member = self.pool.member_ref(use_.pool_index)?;
+            let valid = match use_.kind {
+                MemberUseKind::GetField
+                | MemberUseKind::PutField
+                | MemberUseKind::GetStatic
+                | MemberUseKind::PutStatic => member.kind == RefKind::Field,
+                MemberUseKind::InvokeVirtual => member.kind == RefKind::Method,
+                MemberUseKind::InvokeSpecial | MemberUseKind::InvokeStatic => {
+                    matches!(member.kind, RefKind::Method | RefKind::InterfaceMethod)
+                }
+                MemberUseKind::InvokeInterface => member.kind == RefKind::InterfaceMethod,
+            };
+            if !valid {
+                return Err(ClassFileError::WrongInstructionReferenceKind {
+                    at: use_.at,
+                    index: use_.pool_index,
+                    operation: use_.kind.label(),
+                });
+            }
+        }
+        for &(at, index) in &self.invoke_dynamic_uses {
+            if !self.pool.is_invoke_dynamic(index) {
+                return Err(ClassFileError::WrongInvokeDynamicReference { at, index });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -158,6 +224,72 @@ pub enum ClassFileError {
         /// The index whose contents were unexpected.
         index: u16,
     },
+    /// A `CONSTANT_Long` or `CONSTANT_Double` occupies the final declared pool
+    /// slot, leaving no second unusable slot for the format to reserve.
+    TwoSlotConstantAtPoolEnd {
+        /// The first slot of the invalid two-slot constant.
+        index: u16,
+    },
+    /// An opcode reserved or undefined by the class-file format appeared in a
+    /// method's `Code` bytes.
+    InvalidOpcode {
+        /// Offset within the `Code` byte array.
+        at: usize,
+        /// The invalid byte.
+        opcode: u8,
+    },
+    /// A fixed-width instruction did not carry all of its operands.
+    TruncatedInstruction {
+        /// Offset within the `Code` byte array.
+        at: usize,
+        /// The instruction byte.
+        opcode: u8,
+        /// Bytes required by that complete instruction.
+        needed: usize,
+    },
+    /// An otherwise complete instruction has an invalid fixed operand.
+    MalformedInstruction {
+        /// Offset within the `Code` byte array.
+        at: usize,
+        /// The instruction byte.
+        opcode: u8,
+        /// Why the operand layout is invalid.
+        reason: &'static str,
+    },
+    /// A `wide` prefix was applied to an instruction it cannot modify.
+    MalformedWide {
+        /// Offset of the `wide` prefix within the `Code` byte array.
+        at: usize,
+        /// The modified opcode.
+        opcode: u8,
+    },
+    /// A variable-width switch has an invalid range or pair count.
+    MalformedSwitch {
+        /// Offset of the switch opcode within the `Code` byte array.
+        at: usize,
+        /// The switch opcode.
+        opcode: u8,
+        /// Why its layout is impossible.
+        reason: &'static str,
+    },
+    /// An instruction's pool index does not have the reference kind its opcode
+    /// requires.
+    WrongInstructionReferenceKind {
+        /// Offset within the `Code` byte array.
+        at: usize,
+        /// The referenced pool index.
+        index: u16,
+        /// The decoded operation name.
+        operation: &'static str,
+    },
+    /// An `invokedynamic` instruction did not point at an `InvokeDynamic`
+    /// constant-pool entry.
+    WrongInvokeDynamicReference {
+        /// Offset within the `Code` byte array.
+        at: usize,
+        /// The referenced pool index.
+        index: u16,
+    },
 }
 
 impl fmt::Display for ClassFileError {
@@ -174,6 +306,41 @@ impl fmt::Display for ClassFileError {
             Self::WrongConstantKind { index } => {
                 write!(f, "constant at index {index} is not the expected kind")
             }
+            Self::TwoSlotConstantAtPoolEnd { index } => write!(
+                f,
+                "two-slot constant at pool index {index} has no declared second slot"
+            ),
+            Self::InvalidOpcode { at, opcode } => {
+                write!(f, "invalid bytecode opcode {opcode:#04x} at Code offset {at}")
+            }
+            Self::TruncatedInstruction { at, opcode, needed } => write!(
+                f,
+                "truncated bytecode instruction {opcode:#04x} at Code offset {at}; need {needed} bytes"
+            ),
+            Self::MalformedInstruction { at, opcode, reason } => write!(
+                f,
+                "malformed bytecode instruction {opcode:#04x} at Code offset {at}: {reason}"
+            ),
+            Self::MalformedWide { at, opcode } => write!(
+                f,
+                "malformed wide instruction at Code offset {at}: {opcode:#04x} cannot be widened"
+            ),
+            Self::MalformedSwitch { at, opcode, reason } => write!(
+                f,
+                "malformed switch {opcode:#04x} at Code offset {at}: {reason}"
+            ),
+            Self::WrongInstructionReferenceKind {
+                at,
+                index,
+                operation,
+            } => write!(
+                f,
+                "{operation} at Code offset {at} refers to incompatible constant pool entry {index}"
+            ),
+            Self::WrongInvokeDynamicReference { at, index } => write!(
+                f,
+                "invokedynamic at Code offset {at} refers to non-InvokeDynamic constant pool entry {index}"
+            ),
         }
     }
 }
@@ -210,6 +377,9 @@ pub enum Entry {
         /// Pool index of the member's descriptor.
         descriptor_index: u16,
     },
+    /// `CONSTANT_InvokeDynamic` (tag 18), whose bootstrap target is not an
+    /// static member use but whose tag must agree with `invokedynamic`.
+    InvokeDynamic,
     /// A constant whose contents this scanner does not read, but whose slot
     /// must exist so later indices resolve correctly.
     Other,
@@ -230,6 +400,55 @@ pub enum RefKind {
     Method,
     /// `CONSTANT_InterfaceMethodref` — a call through an interface.
     InterfaceMethod,
+}
+
+/// The direction or invocation form of one static member instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MemberUseKind {
+    /// `getfield` (`0xb4`).
+    GetField,
+    /// `putfield` (`0xb5`).
+    PutField,
+    /// `getstatic` (`0xb2`).
+    GetStatic,
+    /// `putstatic` (`0xb3`).
+    PutStatic,
+    /// `invokevirtual` (`0xb6`).
+    InvokeVirtual,
+    /// `invokespecial` (`0xb7`).
+    InvokeSpecial,
+    /// `invokestatic` (`0xb8`).
+    InvokeStatic,
+    /// `invokeinterface` (`0xb9`).
+    InvokeInterface,
+}
+
+impl MemberUseKind {
+    /// A short, stable report label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::GetField => "getfield",
+            Self::PutField => "putfield",
+            Self::GetStatic => "getstatic",
+            Self::PutStatic => "putstatic",
+            Self::InvokeVirtual => "invokevirtual",
+            Self::InvokeSpecial => "invokespecial",
+            Self::InvokeStatic => "invokestatic",
+            Self::InvokeInterface => "invokeinterface",
+        }
+    }
+}
+
+/// One validated static instruction use of a constant-pool member entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemberUse {
+    /// Offset within the containing method's `Code` byte array.
+    pub at: usize,
+    /// The one-based constant-pool index read by this instruction.
+    pub pool_index: u16,
+    /// Field direction or invocation opcode.
+    pub kind: MemberUseKind,
 }
 
 impl RefKind {
@@ -261,6 +480,9 @@ impl ConstantPool {
         let mut index: u16 = 1;
         while index <= declared {
             let tag = cursor.u8()?;
+            if matches!(tag, 5 | 6) && index == declared {
+                return Err(ClassFileError::TwoSlotConstantAtPoolEnd { index });
+            }
             let entry = match tag {
                 1 => {
                     let len = usize::from(cursor.u16()?);
@@ -305,14 +527,18 @@ impl ConstantPool {
                     cursor.skip(3)?;
                     Entry::Other
                 }
-                // Dynamic (17), InvokeDynamic (18): u2 bootstrap index + u2
+                // Dynamic (17): u2 bootstrap index + u2
                 // name_and_type index. The name/type half *can* name an NMS
                 // descriptor, so it is reachable, but the call target is a
                 // bootstrap method rather than a member of the named class —
                 // counted through descriptors, not as a member reference.
-                17 | 18 => {
+                17 => {
                     cursor.skip(4)?;
                     Entry::Other
+                }
+                18 => {
+                    cursor.skip(4)?;
+                    Entry::InvokeDynamic
                 }
                 other => {
                     return Err(ClassFileError::UnknownConstantTag { tag: other, index });
@@ -424,6 +650,10 @@ impl ConstantPool {
             descriptor: self.utf8(*descriptor_index)?,
         })
     }
+
+    fn is_invoke_dynamic(&self, index: u16) -> bool {
+        matches!(self.get(index), Some(Entry::InvokeDynamic))
+    }
 }
 
 /// A resolved symbolic reference: "this class file calls/reads
@@ -438,6 +668,205 @@ pub struct MemberRef<'a> {
     pub name: &'a str,
     /// The member's descriptor (`(Lnet/minecraft/core/BlockPos;)V`).
     pub descriptor: &'a str,
+}
+
+/// Skip an attribute table without interpreting its payloads.
+fn skip_attributes(cursor: &mut Cursor<'_>, pool: &ConstantPool) -> Result<(), ClassFileError> {
+    let count = usize::from(cursor.u16()?);
+    for _ in 0..count {
+        let name_index = cursor.u16()?;
+        // Resolving the name catches a malformed table before its length can
+        // make us appear to have consumed a valid following member.
+        pool.utf8(name_index)?;
+        let length = usize::try_from(cursor.u32()?)
+            .map_err(|_| ClassFileError::Truncated { at: cursor.at })?;
+        cursor.skip(length)?;
+    }
+    Ok(())
+}
+
+/// Parse one method `Code` attribute and collect its static member uses.
+fn parse_code_attribute(
+    bytes: &[u8],
+    uses: &mut Vec<MemberUse>,
+    dynamic_uses: &mut Vec<(usize, u16)>,
+) -> Result<(), ClassFileError> {
+    let mut cursor = Cursor::new(bytes);
+    cursor.skip(4)?; // max_stack, max_locals
+    let code_length = usize::try_from(cursor.u32()?)
+        .map_err(|_| ClassFileError::Truncated { at: cursor.at })?;
+    let code = cursor.take(code_length)?;
+    walk_code(code, uses, dynamic_uses)?;
+    let handlers = usize::from(cursor.u16()?);
+    cursor.skip(
+        handlers
+            .checked_mul(8)
+            .ok_or(ClassFileError::Truncated { at: cursor.at })?,
+    )?;
+    // Nested attributes have no static member instructions; their declared lengths
+    // still need checking so a truncated stack-map table is never accepted.
+    let nested = usize::from(cursor.u16()?);
+    for _ in 0..nested {
+        cursor.skip(2)?; // attribute_name_index; no pool access is needed here
+        let length = usize::try_from(cursor.u32()?)
+            .map_err(|_| ClassFileError::Truncated { at: cursor.at })?;
+        cursor.skip(length)?;
+    }
+    if cursor.at != bytes.len() {
+        return Err(ClassFileError::MalformedSwitch {
+            at: cursor.at,
+            opcode: 0,
+            reason: "Code attribute has trailing bytes",
+        });
+    }
+    Ok(())
+}
+
+/// Decode the instruction stream without ever searching its bytes by value.
+fn walk_code(
+    code: &[u8],
+    uses: &mut Vec<MemberUse>,
+    dynamic_uses: &mut Vec<(usize, u16)>,
+) -> Result<(), ClassFileError> {
+    let mut at = 0;
+    while at < code.len() {
+        let opcode = code[at];
+        let length = match opcode {
+            0x00..=0x0f | 0x1a..=0x35 | 0x3b..=0x83 | 0x85..=0x98 | 0xac..=0xb1
+            | 0xbe | 0xbf | 0xc2 | 0xc3 => 1,
+            0x10 | 0x12 | 0x15..=0x19 | 0x36..=0x3a | 0xa9 | 0xbc => 2,
+            0x11 | 0x13 | 0x14 | 0x84 | 0x99..=0xa8 | 0xb2..=0xb8 | 0xbb | 0xbd
+            | 0xc0 | 0xc1 | 0xc6 | 0xc7 => 3,
+            0xb9 | 0xba | 0xc8 | 0xc9 => 5,
+            0xc5 => 4,
+            0xaa => switch_length(code, at, opcode, true)?,
+            0xab => switch_length(code, at, opcode, false)?,
+            0xc4 => wide_length(code, at)?,
+            _ => return Err(ClassFileError::InvalidOpcode { at, opcode }),
+        };
+        ensure_instruction(code, at, opcode, length)?;
+        validate_instruction_operands(code, at, opcode)?;
+        let pool_index = |offset: usize| u16::from_be_bytes([code[at + offset], code[at + offset + 1]]);
+        let kind = match opcode {
+            0xb2 => Some(MemberUseKind::GetStatic),
+            0xb3 => Some(MemberUseKind::PutStatic),
+            0xb4 => Some(MemberUseKind::GetField),
+            0xb5 => Some(MemberUseKind::PutField),
+            0xb6 => Some(MemberUseKind::InvokeVirtual),
+            0xb7 => Some(MemberUseKind::InvokeSpecial),
+            0xb8 => Some(MemberUseKind::InvokeStatic),
+            0xb9 => Some(MemberUseKind::InvokeInterface),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            uses.push(MemberUse {
+                at,
+                pool_index: pool_index(1),
+                kind,
+            });
+        }
+        if opcode == 0xba {
+            dynamic_uses.push((at, pool_index(1)));
+        }
+        at += length;
+    }
+    Ok(())
+}
+
+fn validate_instruction_operands(code: &[u8], at: usize, opcode: u8) -> Result<(), ClassFileError> {
+    let malformed = |reason| ClassFileError::MalformedInstruction { at, opcode, reason };
+    match opcode {
+        0xb9 if code[at + 3] == 0 => Err(malformed("invokeinterface count is zero")),
+        0xb9 if code[at + 4] != 0 => Err(malformed("invokeinterface reserved byte is nonzero")),
+        0xba if code[at + 3] != 0 || code[at + 4] != 0 => {
+            Err(malformed("invokedynamic reserved bytes are nonzero"))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn ensure_instruction(
+    code: &[u8],
+    at: usize,
+    opcode: u8,
+    needed: usize,
+) -> Result<(), ClassFileError> {
+    if code.len().saturating_sub(at) < needed {
+        return Err(ClassFileError::TruncatedInstruction { at, opcode, needed });
+    }
+    Ok(())
+}
+
+fn wide_length(code: &[u8], at: usize) -> Result<usize, ClassFileError> {
+    ensure_instruction(code, at, 0xc4, 2)?;
+    match code[at + 1] {
+        0x15..=0x19 | 0x36..=0x3a | 0xa9 => Ok(4),
+        0x84 => Ok(6),
+        opcode => Err(ClassFileError::MalformedWide { at, opcode }),
+    }
+}
+
+fn switch_length(
+    code: &[u8],
+    at: usize,
+    opcode: u8,
+    table: bool,
+) -> Result<usize, ClassFileError> {
+    let padding = (4 - ((at + 1) % 4)) % 4;
+    let header = 1 + padding + if table { 12 } else { 8 };
+    ensure_instruction(code, at, opcode, header)?;
+    let read_i32 = |offset: usize| {
+        i32::from_be_bytes([
+            code[at + offset],
+            code[at + offset + 1],
+            code[at + offset + 2],
+            code[at + offset + 3],
+        ])
+    };
+    let entries = if table {
+        // default, low, high follow padding. `high < low` is malformed rather
+        // than a huge count after unsigned conversion.
+        let low = read_i32(1 + padding + 4);
+        let high = read_i32(1 + padding + 8);
+        if high < low {
+            return Err(ClassFileError::MalformedSwitch {
+                at,
+                opcode,
+                reason: "tableswitch high is below low",
+            });
+        }
+        let entries = high
+            .checked_sub(low)
+            .and_then(|span| span.checked_add(1))
+            .ok_or(ClassFileError::MalformedSwitch {
+                at,
+                opcode,
+                reason: "tableswitch entry count overflows",
+            })?;
+        usize::try_from(entries).map_err(|_| ClassFileError::MalformedSwitch {
+            at,
+            opcode,
+            reason: "tableswitch entry count does not fit",
+        })?
+    } else {
+        let pairs = read_i32(1 + padding + 4);
+        usize::try_from(pairs).map_err(|_| ClassFileError::MalformedSwitch {
+            at,
+            opcode,
+            reason: "lookupswitch pair count is negative or does not fit",
+        })?
+    };
+    let per_entry = if table { 4 } else { 8 };
+    let tail = entries.checked_mul(per_entry).ok_or(ClassFileError::MalformedSwitch {
+        at,
+        opcode,
+        reason: "switch entry count overflows bytecode length",
+    })?;
+    header.checked_add(tail).ok_or(ClassFileError::MalformedSwitch {
+        at,
+        opcode,
+        reason: "switch length overflows bytecode length",
+    })
 }
 
 /// Decode JVMS 4.4.7 *modified* UTF-8.

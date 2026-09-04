@@ -1,11 +1,11 @@
 //! `nms-census` — report every `net.minecraft.*` member a jar's bytecode
-//! references, with call counts.
+//! contains, with static instruction-site counts and field directions.
 //!
 //! ```text
 //! cargo run -p lodestone-nms-census --bin nms-census -- <jar> [flags]
 //! ```
 //!
-//! See [`lodestone_nms_census`] for what the three populations mean and why
+//! See [`lodestone_nms_census`] for what the four populations mean and why
 //! "who is referring" is the number that matters. `--help` lists the flags.
 
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use lodestone_nms_census::{Census, ScanOptions};
 
 const USAGE: &str = "\
-nms-census — census the NMS surface a jar's bytecode references
+nms-census — census the NMS member instruction sites a jar contains
 
 USAGE:
     nms-census <jar> [OPTIONS]
@@ -138,19 +138,24 @@ fn main() -> Result<()> {
     );
 
     let external_members = census.external_members();
-    let external_calls: u64 = external_members.iter().map(|(_, s)| s.external).sum();
-    let total_calls: u64 = census.members.values().map(|s| s.total()).sum();
+    let external_uses: u64 = external_members.iter().map(|(_, s)| s.external).sum();
+    let total_uses: u64 = census.members.values().map(|s| s.total()).sum();
+    let external_symbolic = census.external_symbolic_members();
     let external_classes = census.external_classes();
 
     println!();
-    println!("== the surface an external caller reaches for ==");
-    println!("distinct members referenced:   {}", external_members.len());
+    println!("== static Code instruction surface an external caller reaches for ==");
+    println!("distinct member operations:    {}", external_members.len());
     println!("distinct classes touched:      {}", external_classes.len());
-    println!("external reference count:      {external_calls}");
+    println!("external static instruction sites: {external_uses}");
     println!(
-        "(all references, incl. internal: {} across {} members)",
-        total_calls,
+        "(all static instruction sites, incl. internal: {} across {} member operations)",
+        total_uses,
         census.members.len()
+    );
+    println!(
+        "symbolic pool members (external): {} (kept separately; not static-site counts)",
+        external_symbolic.len()
     );
     println!(
         "classes named in a `new`/cast/catch: {}",
@@ -168,7 +173,7 @@ fn main() -> Result<()> {
 
     if !external_classes.is_empty() {
         println!();
-        println!("== most-referenced classes (external references) ==");
+        println!("== classes with most external static sites ==");
         let mut rows: Vec<_> = external_classes.iter().collect();
         rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         for (class, count) in rows.iter().take(limit) {
@@ -181,7 +186,7 @@ fn main() -> Result<()> {
 
     if !args.classes_only && !external_members.is_empty() {
         println!();
-        println!("== most-referenced members (external references) ==");
+        println!("== member operations with most external static sites ==");
         for (key, stat) in external_members.iter().take(limit) {
             println!(
                 "{:>8}  {}  {}.{}{}",
