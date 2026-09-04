@@ -55,3 +55,5 @@ mod combat_live;
 mod drowning;
 #[path = "server/entity_streaming_live.rs"]
 mod entity_streaming_live;
+#[path = "server/server_protocol_decorator_escape_hatch.rs"]
+mod server_protocol_decorator_escape_hatch;
