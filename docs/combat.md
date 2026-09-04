@@ -219,9 +219,10 @@ Punching a mob on the integrated server reaches real damage and knockback:
 `lodestone_physics::knockback::knockback_impulse` →
 `NavigatingMob::apply_knockback`. No reply packet is sent — the existing
 `EntityStreamer::sync` carries the result to every connection tracking the
-mob. `PLAYER_BARE_HAND_ATTACK_DAMAGE = 1.0` is the only damage today (no
-server-side attack-strength ticker or weapon model, so every hit is flat,
-full-strength, no crit).
+mob. `lodestone_entity::equipment::PLAYER_BASE_ATTACK_DAMAGE = 1.0` is the
+empty-hand base. The selected weapon's attribute modifiers feed
+`PlayerInventory::combat_stats`; there is no server-side attack-strength
+ticker, so every hit uses full strength and no critical-hit multiplier.
 
 Mob-on-player damage is a live trigger once pursuit AI connects: `MobSim`
 matches an attack's target position against its fed player list, queues a
@@ -272,8 +273,9 @@ different packet than a real vanilla client would see.
   `4.0` unarmed speed (`lodestone-entity/src/attribute.rs`).
 - `InputAction::Drop` default `KeyQ` (`keybinds.rs`).
 - Crit particle candidate count: `16` per tick, not configurable.
-- `PLAYER_BARE_HAND_ATTACK_DAMAGE = 1.0`, `SPRINT_ATTACK_KNOCKBACK_POWER =
-  0.5` (`lodestone-server/src/server.rs`).
+- `lodestone_entity::equipment::PLAYER_BASE_ATTACK_DAMAGE = 1.0`;
+  `SPRINT_ATTACK_KNOCKBACK_POWER = 0.5` lives in
+  `lodestone-server/src/server.rs`.
 - Damage types: no env vars/features, table is compiled in. `LODESTONE_
   REGEN=1` switches the drift test from assert to regenerate.
 
