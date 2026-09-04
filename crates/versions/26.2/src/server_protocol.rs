@@ -66,8 +66,8 @@ use lodestone_model::command_tree::{
 };
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
-    ItemComponents, ItemStack, RecipeBookType, ResourceKey, Rotation, SoundCategory, Text,
-    TextContent, Vec3, Vec3f, WrittenBookContent,
+    ItemComponents, ItemStack, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation,
+    SoundCategory, Text, TextContent, Vec3, Vec3f, WrittenBookContent,
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot, HOTBAR_SIZE,
@@ -4226,8 +4226,26 @@ impl ServerProtocol for V770ServerProtocol {
                 decode_custom_payload(payload).unwrap_or(ServerBound::Ignored)
             }
             State::Play if packet_id == play::serverbound::RESOURCE_PACK => {
-                let _ = decode_full::<ResourcePackResponse>(payload);
-                ServerBound::Ignored
+                match decode_full::<ResourcePackResponse>(payload).and_then(|packet| {
+                    let response = match packet.action {
+                        0 => ResourcePackResponseKind::SuccessfullyLoaded,
+                        1 => ResourcePackResponseKind::Declined,
+                        2 => ResourcePackResponseKind::FailedDownload,
+                        3 => ResourcePackResponseKind::Accepted,
+                        4 => ResourcePackResponseKind::Downloaded,
+                        5 => ResourcePackResponseKind::InvalidUrl,
+                        6 => ResourcePackResponseKind::FailedReload,
+                        7 => ResourcePackResponseKind::Discarded,
+                        _ => return None,
+                    };
+                    Some(ServerBound::ResourcePackResponse {
+                        id: packet.id,
+                        response,
+                    })
+                }) {
+                    Some(response) => response,
+                    None => ServerBound::Ignored,
+                }
             }
             // A chunk-streaming regression investigation found this
             // arm and `CHUNK_BATCH_RECEIVED` below used to decode-then-drop

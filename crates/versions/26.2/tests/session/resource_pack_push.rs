@@ -205,6 +205,14 @@ async fn a_pushed_resource_pack_reaches_the_client_and_round_trips() {
         !server.is_finished(),
         "the server must not drop the connection after the client's resource pack response"
     );
+    let responses = resource_packs.drain_responses();
+    assert_eq!(responses.len(), 2, "the server must expose both decoded responses");
+    assert!(responses.iter().any(|response| {
+        response.id == id && response.response == ResourcePackResponseKind::FailedDownload
+    }));
+    assert!(responses.iter().any(|response| {
+        response.id == id && response.response == ResourcePackResponseKind::Accepted
+    }));
 
     handle.shutdown();
     server.abort();
