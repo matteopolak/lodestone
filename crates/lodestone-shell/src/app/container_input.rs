@@ -79,8 +79,8 @@ impl WindowApp {
             PlayerCtx::survival().with_furnace_input_items(items)
         });
         // `Sim` has no game-mode accessor to source a real `PlayerCtx` from
-        // (see the report on this change) — hardcoded survival, matching the
-        // only existing production-shaped precedent
+        // at this call site, so use the conservative survival context. This
+        // matches the only existing production-shaped precedent
         // (`container.rs`'s own click-driving tests use `PlayerCtx::survival()`
         // /`::creative()` explicitly rather than reading one off anything).
         let _ = handle.menu_click(click, ctx);
@@ -339,8 +339,8 @@ impl WindowApp {
 
     /// One `MouseWheel` notch over a slot holding a bundle: scroll-selects
     /// which of its contents is highlighted and reports the new selection to
-    /// the server (`BUNDLE_ITEM_SELECTED` / #613's
-    /// `SelectBundleItem` remainder — see `crate::container::bundle`'s module
+    /// the server (the bundle-item selection action — see
+    /// `crate::container::bundle`'s module
     /// doc for the algorithm and why the tracked selection lives on
     /// `WindowApp` rather than mutated into the stack itself). Returns
     /// whether the notch was consumed, the same "did this surface claim it"
@@ -399,14 +399,13 @@ impl WindowApp {
         true
     }
 
-    /// The enchanting table's three enchant-offer rows (issue #613's
-    /// `ContainerButtonClick` remainder). Unlike the beacon's power buttons,
+    /// The enchanting table's three enchant-offer rows. Unlike the beacon's
+    /// power buttons,
     /// there is no local pending state to update here — a hit *is* the send,
     /// gated the same way [`crate::container::enchant::offer_clickable`]
-    /// gates it client-side in vanilla (`EnchantmentMenu.clickMenuButton`,
-    /// run — and only ever gates, never mutates — on the client's own menu
-    /// mirror too). The screen stays open afterwards, matching
-    /// `EnchantmentScreen`: pressing an offer never closes it.
+    /// gates it client-side: it checks the local menu mirror, never mutates
+    /// it, and only then sends the action. The screen stays open afterwards;
+    /// pressing an offer never closes it.
     pub(super) fn handle_enchant_click(&mut self, menu: &Menu, w: u32, h: u32) -> bool {
         if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Enchanting) {
             return false;

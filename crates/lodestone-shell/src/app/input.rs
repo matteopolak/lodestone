@@ -226,8 +226,7 @@ pub(crate) enum KeyOutcome {
     TogglePerspective,
     /// Select hotbar slot `0..=8`.
     SelectSlot(usize),
-    /// A hotbar-number key while spectating (issue #613's
-    /// `TeleportToEntity` remainder) — opens
+    /// A hotbar-number key while spectating — opens
     /// [`crate::menu::spectator_menu`]'s screen instead of selecting a
     /// (meaningless, for a spectator) hotbar slot. See [`KeyGate::spectator`].
     OpenSpectatorMenu,
@@ -250,8 +249,9 @@ pub(crate) enum KeyOutcome {
     /// `key.swapOffhand` pressed with **no screen open**.
     ///
     /// A different mechanism from [`Self::ContainerSwap`], not a variation on
-    /// it, and conflating the two is the trap this issue exists to avoid.
-    /// Vanilla has two entirely separate code paths for the same physical key:
+    /// it, and conflating the two would route a container click through the
+    /// wrong state machine. The two actions have separate paths for the same
+    /// physical key:
     ///
     /// | context | mechanism |
     /// |---|---|
@@ -372,8 +372,8 @@ fn profiler_chart_digit(code: KeyCode) -> Option<Option<usize>> {
 /// someone to "fix" it by moving it up.
 ///
 /// **A plugin's `Consume` claim (`plugin_mode`) is checked immediately after
-/// the container arm, ahead of every gameplay binding below it** (issue
-/// #162). That rank is deliberate on both sides: behind chat/menu/container,
+/// the container arm, ahead of every gameplay binding below it.** That rank is
+/// deliberate on both sides: behind chat/menu/container,
 /// which keep first claim on the keyboard regardless of what a plugin wants
 /// (`docs/plugin-api.md`'s doctrine clause 4 — a human's own input always
 /// outranks installed intent, and an open chat box or container screen *is*
@@ -586,8 +586,8 @@ pub(crate) fn resolve_key(
     } else if binds.is(InputAction::TogglePerspective, code.into()) && pressed && gate.gameplay {
         Some(KeyOutcome::TogglePerspective)
     } else if hotbar_slot_for(binds, code).is_some() && pressed && gate.gameplay && gate.spectator {
-        // Issue #613's `TeleportToEntity` remainder: while spectating, every
-        // hotbar-number key opens the Spectator Menu instead of selecting a
+        // While spectating, every hotbar-number key opens the Spectator Menu
+        // instead of selecting a
         // slot — see [`KeyOutcome::OpenSpectatorMenu`]'s own doc for why
         // this ranks *ahead of* the ordinary `SelectSlot` arm immediately
         // below rather than folding a branch into it. A spectator's hotbar
