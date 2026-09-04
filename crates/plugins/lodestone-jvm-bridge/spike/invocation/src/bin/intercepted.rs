@@ -1,5 +1,4 @@
 use std::ffi::c_void;
-use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle, ThreadId};
@@ -11,18 +10,14 @@ use jni::sys::{jint, jlong, jobject};
 use jni::vm::{InitArgsBuilder, JavaVM};
 use jni::{Env, EnvUnowned, JNIVersion, JValue, NativeMethod, jni_sig, jni_str};
 use lodestone_jvm_bridge::{
-    ObjectKind, ObjectRef, ObjectRegistry, PortServicer, ResolveError, WorldPort, channel,
+    CallbackDepthGuard, ObjectKind, ObjectRef, ObjectRegistry, PortServicer, ResolveError,
+    WorldPort, channel,
 };
 
 const REQUEST_DEADLINE: Duration = Duration::from_millis(150);
 const PANIC_INPUT: i32 = 19;
-const MAX_REENTRANT_DEPTH: u32 = 4;
 
 static CALLBACK_PORT: OnceLock<WorldPort<Request, Response>> = OnceLock::new();
-
-thread_local! {
-    static CALLBACK_DEPTH: Cell<u32> = const { Cell::new(0) };
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scenario {
@@ -92,34 +87,6 @@ impl std::fmt::Display for CallbackError {
 }
 
 impl std::error::Error for CallbackError {}
-
-#[derive(Debug)]
-struct CallbackDepthGuard {
-    level: u32,
-}
-
-fn enter_callback_depth() -> Result<CallbackDepthGuard, CallbackError> {
-    CALLBACK_DEPTH.with(|depth| {
-        let current = depth.get();
-        if current >= MAX_REENTRANT_DEPTH {
-            return Err(CallbackError(format!(
-                "reentrant callback depth limit {MAX_REENTRANT_DEPTH} exceeded"
-            )));
-        }
-        let level = current + 1;
-        depth.set(level);
-        Ok(CallbackDepthGuard { level })
-    })
-}
-
-impl Drop for CallbackDepthGuard {
-    fn drop(&mut self) {
-        CALLBACK_DEPTH.with(|depth| {
-            debug_assert_eq!(depth.get(), self.level);
-            depth.set(self.level - 1);
-        });
-    }
-}
 
 impl From<jni::errors::Error> for CallbackError {
     fn from(error: jni::errors::Error) -> Self {
@@ -203,9 +170,10 @@ extern "system" fn native_reentrant_depth<'local>(
                     "reentrant callback depth must be nonnegative".to_owned(),
                 ));
             }
-            let depth = enter_callback_depth()?;
+            let depth = CallbackDepthGuard::enter()
+                .map_err(|error| CallbackError(error.to_string()))?;
             if remaining == 0 {
-                return Ok(env.new_string(format!("REENTRANT:OK:{}", depth.level))?.into_raw());
+                return Ok(env.new_string(format!("REENTRANT:OK:{}", depth.level()))?.into_raw());
             }
             let argument = JValue::Int(remaining - 1);
             let result = env.call_static_method(
@@ -679,20 +647,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn callback_depth_limit_rejects_overflow_and_unwinds() {
-        let first = enter_callback_depth().expect("first depth is allowed");
-        let second = enter_callback_depth().expect("second depth is allowed");
-        let third = enter_callback_depth().expect("third depth is allowed");
-        let fourth = enter_callback_depth().expect("limit depth is allowed");
-        let error = enter_callback_depth().expect_err("the next depth must be rejected");
-        assert_eq!(error.to_string(), "reentrant callback depth limit 4 exceeded");
-
-        drop(fourth);
-        drop(third);
-        drop(second);
-        drop(first);
-        let after_unwind = enter_callback_depth().expect("the guard must restore the budget");
-        drop(after_unwind);
-    }
 }

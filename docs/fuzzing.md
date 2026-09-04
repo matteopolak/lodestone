@@ -301,6 +301,22 @@ What exists:
   packets each, 8 entity scripts with 8 packets each, and 8 inventory scripts
   with 8 packets each. That is 416 packet replays against independent maps,
   with a first-divergence control for every dimension.
+- `tests/differential_captured_client_state.rs` — a fixed captured-packet
+  lane through the real 26.2 adapter and the public client read model. It
+  replays server-authored pickaxe and potion slot packets from checked-in
+  fixtures, compares the resulting item identity and count to each fixture's
+  external annotation, and includes a wrong-item detector control.
+- `tests/differential_generated_gravity.rs` — a bounded generated gravity
+  action domain through `IntegratedServer`, covering sand, red sand and gravel.
+  It injects the public `BlockTickFeed` schedule, reads the server's retained
+  `ChunkSource`, and compares every tick with an independent model of the
+  two-tick delay, gravity, drag and landing on a fixed floor; a wrong-read
+  control proves the detector reports the first divergence.
+- `tests/differential_generated_waterlogging.rs` — a bounded source-water
+  action sequence through `IntegratedServer` that fills a dry slab between two
+  source blocks. It injects the public `BlockTickFeed` schedule, reads the
+  retained `ChunkSource`, and compares the slab and surrounding trench against
+  an independent map; a wrong-read control proves first-divergence reporting.
 - `differential::state_matches` — gives the in-process side the vanilla side's
   matching semantics, so `minecraft:water` matches `minecraft:water[level=3]`
   on both and the two sides answer in one alphabet.
@@ -575,24 +591,32 @@ host that bursts through unobserved reference ticks cannot manufacture either
 agreement or disagreement.
 
 ### What Track B still does not do
-- **The generated client-state campaign is hermetic and bounded.** It compares
-  generated block, entity and inventory scripts against independent maps, but
-  does not yet replay captured or live packet corpora. It is separate from
-  rendered-frame comparison, where renderer differences are not themselves
-  client-state bugs.
+- **The client-state packet corpus is still small.** The captured lane covers
+  two inventory slot payloads; it does not yet cover captured chunk or broader
+  inventory packet sequences. The two committed item-entity fixtures are
+  metadata-only `SET_ENTITY_DATA` payloads with session-scoped ids, not a
+  complete spawn/metadata/move/remove sequence, so they cannot independently
+  drive `ClientHandle::entity`. A future entity lane needs that paired capture;
+  manufacturing an `ADD_ENTITY` prefix would remove the corpus's independent
+  provenance. The generated block/entity/inventory campaign remains hermetic
+  and bounded; it compares client state rather than rendered frames, because
+  renderer differences are not themselves client-state bugs.
 - **Generated live cases cover fluids and redstone.** Both have bounded
-  generated action domains, but no generated piston, falling-block, container
-  or waterlogging action domain exists. Every generated live comparison still
-  covers only block states over a caller-named region. The client read-model
-  has no scheduled-tick queue to compare: inbound ticking metadata folds into
-  session server information, while world reactions belong to the server-side
-  scheduler rather than the client state exposed by `ClientHandle`.
+  generated action domains. Falling blocks and source-water waterlogging each
+  additionally have a bounded hermetic `IntegratedServer` action proof, but no
+  generated live piston or container action domain exists. Every generated live
+  comparison still covers only block states over a caller-named region. The
+  client read-model has no scheduled-tick queue to compare: inbound ticking
+  metadata folds into session server information, while world reactions belong
+  to the server-side scheduler rather than the client state exposed by
+  `ClientHandle`.
 - **The live comparison still uses the fluid model for its our-side world.**
   `FluidModelOracle` drives `lodestone_server::fluid`'s production
-  scheduled-tick entry point over a sparse world. The separate hermetic
-  `IntegratedServer` proof reads a retained `ChunkSource` directly and proves
-  tick alignment, but it does not yet replace the live RCON path or cover the
-  broader redstone, piston, falling-block, waterlogging or container domains.
+  scheduled-tick entry point over a sparse world. The hermetic
+  `IntegratedServer` proofs read a retained `ChunkSource` directly: one proves
+  tick alignment for edits, one exercises falling-block scheduling and landing,
+  and one exercises two-source waterlogging of a slab. They do not replace the
+  live RCON path or cover the broader redstone, piston or container domains.
   A direct source read also preserves full canonical state properties that an
   `execute if block` command probe intentionally reduces.
 

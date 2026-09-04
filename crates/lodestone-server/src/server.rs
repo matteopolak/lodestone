@@ -70,7 +70,7 @@ use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, EntityAttributeSnapshot, GameMode, ItemStack,
     ResourceKey, Rotation, Text, TextContent, Vec3, Vec3f, WrittenBookContent,
 };
-use lodestone_data::block_items;
+use lodestone_data::{block::Block, block_items, item::Item};
 use lodestone_net::{Connection, NetError, Transport};
 // Encryption half: the server-side RSA keypair/decrypt and the
 // verify-token generator. Native-only for the same reason `crate::access` is
@@ -6286,7 +6286,7 @@ fn apply_composter_use(
 ///
 /// **Placement honours the held item for every block in the game.**
 /// `inventory`'s currently selected item is resolved through
-/// [`lodestone_data::block_items::block_for_item`] — the 26.2 census of
+/// [`lodestone_data::block_items::block_placed_by`] — the 26.2 census of
 /// vanilla's own block-item block getter, dumped from the real jar — which decides both
 /// whether a placement happens and which block it writes.
 ///
@@ -6374,6 +6374,17 @@ fn placement_obstructs_placer(target: BlockPos, state: &str, feet: Vec3) -> bool
         // the client's own (coarser, full-cell) prediction of this same rule.
         bx1 > px0 && bx0 < px1 && by1 > py0 && by0 < py1 && bz1 > pz0 && bz0 < pz1
     })
+}
+
+/// Resolves the selected stack's built-in item once for a placement attempt.
+///
+/// Custom registry entries have no built-in [`Item`] value, so they cannot
+/// enter the built-in placement census.
+fn selected_placement_item(inventory: &PlayerInventory, native_slot: usize) -> Option<Item> {
+    let item = &inventory.native(native_slot)?.item;
+    (item.namespace() == "minecraft")
+        .then(|| Item::from_name(item.path()))
+        .flatten()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6842,7 +6853,7 @@ where
     } else {
         usize::from(inventory.selected_hotbar_slot())
     };
-    let held_item = inventory.native(hand_native).map(|stack| stack.item.to_string());
+    let held_item = selected_placement_item(inventory, hand_native);
 
     // Spawn-egg handling runs between clicked-block hand use and generic block
     // placement: an egg held over air must not place a block, while a lever
@@ -6853,14 +6864,14 @@ where
     // A block entity at the clicked position is consulted first. Spawners are
     // not simulated here, so the guard is "there is a spawner here, do
     // nothing"; it prevents the egg from creating an unsupported mob.
-    if let Some(item) = held_item.as_deref() {
+    if let Some(item) = held_item {
         let spawner_here = block_entities.with(|reg| {
             reg.get(pos)
                 .is_some_and(|entity| entity.type_id() == "minecraft:spawner")
         });
         if !spawner_here {
             match crate::spawn_egg::apply_spawn_egg(
-                item,
+                item.name(),
                 difficulty,
                 pos,
                 face,
@@ -6903,8 +6914,8 @@ where
     // generic block-placement branch: a minecart item is not a block, so that
     // branch cannot place one. A non-rail target is refused rather than falling
     // through to anything else.
-    if let Some(item) = held_item.as_deref() {
-        if let Some(kind) = crate::mobs::minecart::MinecartKind::from_item(item) {
+    if let Some(item) = held_item {
+        if let Some(kind) = crate::mobs::minecart::MinecartKind::from_item(item.name()) {
             let clicked = source.block_state(pos.x, pos.y, pos.z);
             if crate::mobs::minecart::is_rail_block(&clicked) {
                 let shape = crate::mobs::minecart::rail_shape(&clicked);
@@ -6945,7 +6956,7 @@ where
     // lights portals and nothing else here, and it takes no durability damage — both
     // gaps, both documented in `docs/nether-portals.md`, neither a regression (this
     // item did nothing at all before).
-    if held_item.as_deref() == Some("minecraft:flint_and_steel") {
+    if held_item == Some(Item::FlintAndSteel) {
         let dimension = source
             .dimension()
             .unwrap_or(crate::dimension::Dimension::Overworld);
@@ -6979,10 +6990,7 @@ where
     // takes no durability-damage gate either (this crate's own item stacks
     // carry no durability at all — see that arm's own comment). Both are
     // therefore true unconditionally, which is the default here.
-    if matches!(
-        held_item.as_deref(),
-        Some("minecraft:flint_and_steel" | "minecraft:fire_charge")
-    ) {
+    if matches!(held_item, Some(Item::FlintAndSteel | Item::FireCharge)) {
         let clicked = source.block_state(pos.x, pos.y, pos.z);
         let base = clicked
             .split_once('[')
@@ -7003,7 +7011,7 @@ where
             });
             // A fire charge consumes one stack item. Flint and steel wear is
             // outside this crate's item model, so only the charge is shrunk.
-            if held_item.as_deref() == Some("minecraft:fire_charge")
+            if held_item == Some(Item::FireCharge)
                 && consume_one(inventory, hand_native, game_mode)
                 && game_mode != GameMode::Creative
             {
@@ -7031,7 +7039,7 @@ where
     // always writes `eye=true` and consumes the eye on any unfired frame,
     // whether or not a ring completes; the 3x3 `end_portal` fill only follows
     // when this eye is the twelfth.
-    if held_item.as_deref() == Some("minecraft:ender_eye") {
+    if held_item == Some(Item::EnderEye) {
         if let Some(ignition) = crate::portal::ignite_end_portal_frame(source, pos) {
             let (frame_pos, frame_state) = &ignition.frame;
             source.set_block(frame_pos.x, frame_pos.y, frame_pos.z, frame_state);
@@ -7074,13 +7082,12 @@ where
     // the live `BlockEntity` for
     // the six items this crate ticks, and is consulted second.
     let placed = held_item
-        .as_deref()
-        .and_then(|item| block_items::block_for_item(item).map(|block| (item, block)));
+        .and_then(|item| block_items::block_placed_by(item).map(|block| (item, block)));
     // Vanilla's own slab-block can-be-replaced check is the one
     // `canBeReplaced` override a hand placement can hit, and without it a slab
     // clicked onto a matching half-slab lands in the cell *above* instead of
     // doubling. Every other block reaches the plain air-or-fluid test.
-    let doubling_slab = placed.is_some_and(|(_, block)| slab_doubles(&clicked, block, face, cursor));
+    let doubling_slab = placed.is_some_and(|(_, block)| slab_doubles(&clicked, block.name(), face, cursor));
     let target = if is_air_or_fluid(&clicked) || doubling_slab {
         pos
     } else {
@@ -7100,7 +7107,8 @@ where
     // below — so `apply` cannot be reached from inside it.
     let mut placement_remainder: Option<Option<ItemStack>> = None;
     if is_air_or_fluid(&target_state) || doubling_slab {
-        if let Some((item, block_name)) = placed {
+        if let Some((item, block)) = placed {
+            let block_name = block.name();
             // `placed_block_state` applies the block's own
             // `getStateForPlacement` convention (`crate::block_placement`);
             // a block with no convention keeps the census's bare default
@@ -7132,7 +7140,7 @@ where
             // gap.
             let obstructed = player_pos.is_some_and(|feet| placement_obstructs_placer(target, &state, feet));
             if !obstructed {
-            if let Some((entity_block, mut entity)) = block_entity_for_item(item) {
+            if let Some((entity_block, mut entity)) = block_entity_for_item(item.name()) {
                 // The two sources must agree on the block name, or we would
                 // register a furnace at a position holding some other block.
                 // `lodestone-data`'s `the_block_entity_blocks_still_resolve_
@@ -7141,7 +7149,7 @@ where
                 // the older table.
                 debug_assert_eq!(
                     entity_block, block_name,
-                    "block-entity table and item census disagree on {item}"
+                    "block-entity table and item census disagree on {item:?}"
                 );
                 // A newly placed sign records the placing player as its editor,
                 // allowing the following sign-update packet to pass validation.
@@ -7185,8 +7193,7 @@ where
             // A carved pumpkin or jack o'lantern can complete a snow- or
             // iron-golem pattern. The mob simulation reports the consumed
             // pattern cells; this caller clears them to air.
-            if block_name == "minecraft:carved_pumpkin" || block_name == "minecraft:jack_o_lantern"
-            {
+            if matches!(block, Block::CarvedPumpkin | Block::JackOLantern) {
                 let construction = mobs.with(|sim| {
                     sim.try_construct_golem(
                         &|x, y, z| source.block_state(x, y, z).to_owned(),
@@ -7203,9 +7210,7 @@ where
             // A wither skeleton skull or wall skull can complete the
             // soul-sand-and-skull pattern. The mob simulation reports consumed
             // cells; this caller clears them to air.
-            if block_name == "minecraft:wither_skeleton_skull"
-                || block_name == "minecraft:wither_skeleton_wall_skull"
-            {
+            if matches!(block, Block::WitherSkeletonSkull | Block::WitherSkeletonWallSkull) {
                 let construction = mobs.with(|sim| {
                     sim.try_construct_wither(
                         &|x, y, z| source.block_state(x, y, z).to_owned(),
@@ -15761,6 +15766,31 @@ mod tests {
 
     fn stack(item: &str, count: u32) -> ItemStack {
         ItemStack::new(item.parse().expect("valid resource key"), count)
+    }
+
+    #[test]
+    fn selected_placement_item_validates_the_held_stack_once() {
+        let mut inventory = PlayerInventory::new();
+        inventory.set_native(0, Some(stack("minecraft:redstone", 1)));
+
+        assert_eq!(
+            selected_placement_item(&inventory, 0),
+            Some(Item::Redstone),
+            "a built-in held item must enter placement as its registry type"
+        );
+
+        inventory.set_native(
+            0,
+            Some(ItemStack::new(
+                ResourceKey::new("example", "custom_block").expect("valid custom key"),
+                1,
+            )),
+        );
+        assert_eq!(
+            selected_placement_item(&inventory, 0),
+            None,
+            "an item outside the built-in registry cannot enter the typed placement path"
+        );
     }
 
     const SLOT: i32 = 20;

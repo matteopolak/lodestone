@@ -39,8 +39,7 @@
 //!   doors, and redstone dust all place with orientation or connection state
 //!   derived from the click face, cursor position and neighbours. Consumers
 //!   that need a state id must resolve one themselves (the shell's
-//!   `sim::placement` census does); this table hands back the block's
-//!   canonical name only.
+//!   `sim::placement` census does); this table hands back the typed [`Block`].
 //!
 //! # Dependencies
 //!
@@ -55,56 +54,16 @@ use crate::item::Item;
 
 pub use generated::ITEM_COUNT;
 
-/// The block that the item with **network registry id** `id` places, or `None`
-/// when that item places no block — either because it is not a block item
-/// (a sword, a bucket, a spawn egg) or because `id` is outside
-/// `0..`[`ITEM_COUNT`].
+/// The block that `item` places, or `None` when it is not a block item.
 ///
-/// O(1). This is the hot path: a decoded item stack already holds the registry
-/// id.
-///
-/// The two `None` reasons are deliberately not distinguished: every caller
-/// this exists for (placement) does the same thing with both, and an unknown
-/// id is exactly as unplaceable as a sword.
+/// O(1): [`Item`]'s discriminant is the registry id, so this indexes the
+/// generated column directly.
 #[must_use]
-pub fn block_for_item_id(id: i32) -> Option<Block> {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| generated::BLOCK_FOR_ITEM.get(index))
-        .copied()
-        .flatten()
+pub fn block_placed_by(item: Item) -> Option<Block> {
+    generated::BLOCK_FOR_ITEM[item.registry_id() as usize]
 }
 
-/// The block that `item` (for example `"minecraft:dirt"` or
-/// `"minecraft:redstone"`) places, or `None` for an item that places no block
-/// and for an item this version does not know.
-///
-/// Resolves the name through [`crate::items::item_id`], so it costs one linear
-/// scan of the item-name table — the same trade
-/// [`crate::item_prototypes::prototype`] makes, and for the same reason:
-/// placement is a per-right-click query, not a per-tick one, and minting a
-/// second name index here could drift from the first.
-///
-/// # Prefer the typed forms
-///
-/// Both halves of this signature are the un-migrated string spelling, kept
-/// because it is what the placement path in `lodestone-server` still calls.
-/// New code should take the item as a typed id and use [`block_for_item_id`],
-/// which hands back a [`Block`]; the string here is produced by
-/// [`Block::name`], so the two can never disagree.
-#[must_use]
-pub fn block_for_item(item: &str) -> Option<&'static str> {
-    block_for_item_id(crate::items::item_id(item)?).map(Block::name)
-}
-
-/// The block that `item` places, as a [`Block`] — the typed sibling of
-/// [`block_for_item`].
-#[must_use]
-pub fn block_placed_by(item: &str) -> Option<Block> {
-    block_for_item_id(crate::items::item_id(item)?)
-}
-
-/// The **inverse** of [`block_for_item_id`]: the item that picking `block`
+/// The **inverse** of [`block_placed_by`]: the item that picking `block`
 /// yields — vanilla's own "block as item" accessor, which is what
 /// its own "get clone item stack" default step
 /// bottoms out in, and therefore what pick-block (middle-click) resolves for
@@ -131,7 +90,7 @@ pub fn block_placed_by(item: &str) -> Option<Block> {
 ///
 /// # Scope cut: the block, never a "get clone item stack" override
 ///
-/// Like [`block_for_item`]'s own "block, never state" cut, this answers only
+/// Like [`block_placed_by`]'s own "block, never state" cut, this answers only
 /// the *default* clone-item-stack. Real vanilla overrides it per block for
 /// crops (a wheat *block* clones to `wheat_seeds`, not itself), flower pots
 /// (clones the potted plant), banners (clones the banner entity's pattern

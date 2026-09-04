@@ -19,6 +19,8 @@
 //! - [`identity`] — generational handles, so a plugin holding a `Player`
 //!   reference across ticks gets a reported failure rather than somebody else's
 //!   entity.
+//! - [`callback`] — thread-local callback-depth guards, so a recursive
+//!   Java/Rust cycle fails before it can overflow or wedge.
 //!
 //! ## What is deliberately not here
 //!
@@ -69,9 +71,13 @@
 //!
 //! [`docs/java-plugin-bridge.md`]: https://github.com/matteopolak/lodestone/blob/main/docs/java-plugin-bridge.md
 
+pub mod callback;
 pub mod identity;
 pub mod port;
 
+pub use callback::{
+    CallbackDepthError, CallbackDepthGuard, DEFAULT_CALLBACK_DEPTH_LIMIT,
+};
 pub use identity::{ObjectKind, ObjectRef, ObjectRegistry, ResolveError};
 pub use port::{
     DEFAULT_REQUEST_DEADLINE, PortError, PortServicer, WorldPort, channel, service_with_world,

@@ -373,9 +373,10 @@ actually had, and needs no carve-out in a shared manifest.
   arm uses a scoped attachment and checks the JNI attachment count returns to its pre-call value;
   arbitrary plugin-created async threads and the fate of an outstanding request when one dies
   mid-call remain unproven.
-- **Reentrancy in the other direction** — Rust calling Java calling Rust calling Java. The composed
-  spike now enforces a finite depth budget for this cycle and throws a bounded Java exception when
-  it is exceeded; production host wiring still needs to adopt the same policy.
+- **Reentrancy in the other direction** — Rust calling Java calling Rust calling Java. The bridge
+  now exposes a thread-local `CallbackDepthGuard` with a finite default budget; the composed spike
+  uses it and throws a bounded Java exception when the budget is exceeded. A production host must
+  enter the guard at every native callback boundary.
 - **Ordering guarantees.** Bukkit promises handlers run in listener-priority order on the main
   thread. Servicing a port from the tick thread preserves ordering per handler; concurrent handlers
   on separate threads do not have a defined order between them, and Bukkit's own semantics for that
@@ -618,6 +619,9 @@ counter while unwinding, so the over-limit control cannot poison later callbacks
   `.cache/paper/26.2/paper.jar`, which is outside git.
 - `lodestone_jvm_bridge::port::DEFAULT_REQUEST_DEADLINE` — how long a Java-side call waits for the
   tick thread.
+- `lodestone_jvm_bridge::callback::DEFAULT_CALLBACK_DEPTH_LIMIT` — the maximum nested
+  Java/Rust callback depth before the boundary reports an error; a host may use
+  `CallbackDepthGuard::enter_with_limit` when its policy needs a different bound.
 - `lodestone_jni_invocation_spike::REQUEST_DEADLINE` — the prototype's 150 ms deadline, chosen to
   make the silent servicer control fast while the runner's outer 15-second timeout remains an
   independent hang gate.

@@ -209,7 +209,7 @@ always sees) can never clear the 0.7 immediate-break threshold on its own, so
 refusing an early Stop made every non-instant block unbreakable.
 
 Placement resolves the held item through a real item→block census
-(`block_items::block_for_item`, ~1,537 items) rather than hardcoding
+(`block_items::block_placed_by`, ~1,537 items) rather than hardcoding
 `minecraft:stone` for every placement, which was the original, now-retired
 behaviour — that stone fallback outlived its own justification once an
 inventory model existed, and stayed hidden because the client predicts

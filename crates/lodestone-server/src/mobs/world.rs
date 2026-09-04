@@ -299,12 +299,12 @@ impl PathWorld for ChunkWorld {
     ///
     /// # Two id spaces, and mixing them is silent
     ///
-    /// `block_tag_members` answers in **`minecraft:block` registry ids**, while
+    /// `block_tag_members` stores **`minecraft:block` registry ids**, while
     /// [`state_id`](ChunkWorld::state_id) yields **block-*state*** ids — a
     /// 32,366-entry space against a ~1,100-entry one. Comparing one against the
     /// other compiles, type-checks, and matches whatever unrelated blocks happen
-    /// to share those small integers. `tool::block_registry_id` is the bridge, so
-    /// the lookup is state → block → tag.
+    /// to share those small integers. The lookup validates the state, derives its
+    /// [`Block`](lodestone_data::block::Block), then queries the tag.
     ///
     /// `grass_block` stays block equality, because vanilla's own eat-block goal
     /// tests equality rather than a tag.
@@ -315,10 +315,10 @@ impl PathWorld for ChunkWorld {
         let path = state.split('[').next().unwrap_or(state);
         let edible_for_sheep = self
             .state_id(x, y, z)
-            .and_then(lodestone_data::tool::block_registry_id)
+            .and_then(block_states::StateId::new)
+            .map(block_states::StateId::block)
             .is_some_and(|block| {
-                lodestone_data::tool::block_tag_members("minecraft:edible_for_sheep")
-                    .is_some_and(|members| members.binary_search(&block).is_ok())
+                lodestone_data::tool::block_tag_contains("minecraft:edible_for_sheep", block)
             });
         BlockCues {
             edible_for_sheep,

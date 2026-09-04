@@ -71,6 +71,7 @@ use std::sync::{OnceLock, RwLock};
 
 use lodestone_model::{ItemStack, ToolBlocks, ToolMining, ToolPatch, ToolRule};
 
+use crate::block::Block;
 use crate::block_states::StateId;
 use crate::generated_tools as generated;
 use crate::item::Item;
@@ -113,21 +114,6 @@ pub struct ToolDef {
     pub damage_per_block: u32,
     /// Vanilla's own tool record's can-destroy-blocks-in-creative field.
     pub can_destroy_blocks_in_creative: bool,
-}
-
-/// The `minecraft:block` registry id of block-state `state_id`, or `None` when
-/// the state is unknown to this version.
-///
-/// Block *state* ids and block *registry* ids are different id spaces — 32,366
-/// states over 1,196 blocks — and the wire uses both: chunk palettes and
-/// `block_update` carry state ids, while a `Holder<Block>` (a `block_event`
-/// target, a tool rule's explicit block set) carries a registry id. This is the
-/// bridge between them.
-#[must_use]
-pub fn block_registry_id(state_id: u32) -> Option<u16> {
-    crate::generated_block_registry::STATE_BLOCK
-        .get(state_id as usize)
-        .copied()
 }
 
 /// The process-wide `update_tags` override for [`block_tag_members`].
@@ -177,6 +163,16 @@ pub fn block_tag_members(tag: &str) -> Option<std::borrow::Cow<'static, [u16]>> 
         .map(|index| Cow::Borrowed(generated::BLOCK_TAGS[index].1))
 }
 
+/// Whether the `minecraft:block` tag `tag` contains `block`.
+///
+/// The generated and wire-synced tag tables retain registry ids because that is
+/// the protocol representation. Callers with a validated [`Block`] use this
+/// typed boundary instead of comparing a state id to those registry ids.
+#[must_use]
+pub fn block_tag_contains(tag: &str, block: Block) -> bool {
+    tag_contains(tag, block.registry_id())
+}
+
 /// The built-in `minecraft:tool` prototype of `item` (for example
 /// `minecraft:diamond_pickaxe`), or `None` for an item that has none.
 ///
@@ -207,7 +203,7 @@ pub fn default_tool(item: &str) -> Option<&'static ToolDef> {
 pub fn mining(held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
     let state_id = StateId::new(state_id)?;
     let requires_correct_tool = crate::hardness::hardness(state_id).requires_correct_tool;
-    let block = block_registry_id(state_id.raw())?;
+    let block = state_id.block().registry_id();
 
     // The effective `minecraft:tool`, resolved exactly as vanilla's own
     // component-map accessor for that component does: the patch wins if it
