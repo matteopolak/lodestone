@@ -481,7 +481,7 @@ fn real_vanilla_block_textures_reach_pixels() {
         camera.view_projection().to_cols_array_2d(),
         lodestone_render::fog::FogUniform::disabled(),
     );
-    // The packed path's group-0 binding 1 (issue #76): one origin slot, at zero
+    // The packed path's group-0 binding 1: one origin slot, at zero
     // — this scene's geometry is already section-local to the origin.
     let origin_buf = lodestone_render::section_origin_buffer(device, [0.0, 0.0, 0.0]);
 

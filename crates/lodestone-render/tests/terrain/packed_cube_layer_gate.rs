@@ -3,9 +3,9 @@
 //! # Background: the claim this gate was written to check, and what verifying
 //! it against the tree actually found
 //!
-//! Issue #609 fixed the **model** path (`mesh_models_layers`) to draw
-//! translucent blocks through their own blended pass. Its own text named a
-//! second, narrower gap: `is_packed_cube` (`crates/lodestone-render/src/
+//! The **model** path (`mesh_models_layers`) draws
+//! translucent blocks through their own blended pass. A second, narrower gap
+//! sits next to it: `is_packed_cube` (`crates/lodestone-render/src/
 //! models.rs`) excluded only *tinted* full cubes, so — read naively — an
 //! untinted translucent full cube (stained glass, ice, tinted glass, slime,
 //! honey) looked like it would still take a fast "opaque" path and render
@@ -33,8 +33,8 @@
 //! "our policy" for routing full cubes — exactly the function a future patch
 //! restoring the packed path for live full cubes (a real, measured VRAM win:
 //! 72 vs 152 bytes/quad, see `models.rs`'s D1 section) would reach for. Before
-//! this gate, that function would have silently reproduced the exact bug #609
-//! named, the moment someone wired it up: it took no layer at all, so an
+//! this gate, that function would have silently reproduced the exact bug
+//! described above, the moment someone wired it up: it took no layer at all, so an
 //! untinted translucent full cube passed it unconditionally. `is_packed_cube`
 //! now requires the caller to supply the block's real `RenderLayer` and only
 //! returns `true` for `RenderLayer::Solid` — this gate proves that against
@@ -118,7 +118,7 @@ struct Candidate {
     /// the "sticky edge" look), so they are already excluded by
     /// [`is_full_cube`] before the layer check this gate targets ever runs.
     /// They stay in the corpus (both are still real untinted `Translucent`
-    /// full-*block-space* geometry #609 named) but do not, on their own,
+    /// full-*block-space* geometry) but do not, on their own,
     /// discriminate the layer fix — `white_stained_glass`/`ice`/`tinted_glass`
     /// do that, and `glass` (plain) is the `Cutout` control.
     expect_full_cube: bool,
@@ -146,7 +146,7 @@ fn candidates() -> Vec<Candidate> {
             props: &[],
             expect_full_cube: true,
         },
-        // The five untinted translucent full cubes #609 named.
+        // The five untinted translucent full cubes.
         Candidate {
             block: "minecraft:white_stained_glass",
             props: &[],

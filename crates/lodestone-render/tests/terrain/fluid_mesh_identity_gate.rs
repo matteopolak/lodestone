@@ -11,9 +11,10 @@
 //! value originates outside the code under test in the only sense available for
 //! a refactor: it is the output of the implementation being replaced.
 //!
-//! Issue #542 restructured this path for cost. Fluid rendering also has
-//! deliberate deviations from vanilla in it — #77's boundary side faces landed,
-//! and #82's "five remaining `FluidRenderer` divergences" is still open — so a
+//! This path was restructured for cost. Fluid rendering also has
+//! deliberate deviations from vanilla in it — boundary side faces landed,
+//! and a handful of known divergences from vanilla's fluid renderer are still
+//! open — so a
 //! cost change that *improved* the output would be a defect here, not a bonus.
 //! This gate cannot tell "more correct" from "different"; that is the point.
 //!
@@ -175,12 +176,13 @@ enum Scene {
     /// `water[level]` varying with `x`, air above: sweeps `own_height` across
     /// its whole `1/9..=8/9` range and drives a non-zero flow vector.
     FlowingSlope,
-    /// Water pond walled in real `grass_block`: issue #77's shoreline, where a
+    /// Water pond walled in real `grass_block`: the shoreline case, where a
     /// side face must be culled by a full opaque cube.
     GrassShore,
     /// The same pond walled in `glass`: `overlay_at` is true, so side faces
-    /// take the `water_overlay` sprite and lose their back copy — one of #82's
-    /// divergences, and the only scene that exercises the overlay bits.
+    /// take the `water_overlay` sprite and lose their back copy — one of the
+    /// known divergences from vanilla, and the only scene that exercises the
+    /// overlay bits.
     GlassShore,
     /// The same pond walled in `dirt_path`: a partial, height-reduced occluder,
     /// so `partial_occluder_y_range_at` decides the cull. This is the one probe
@@ -526,8 +528,8 @@ impl FluidSectionView for SceneView<'_> {
 /// its mip depth, which sprites happen to be in it. Any of those legitimately
 /// moving repacks the atlas and rewrites **every** UV in the corpus, which
 /// lands here as "the fluid mesher's output changed" in all eleven water
-/// scenes at once. That happened: adding the atlas gutter (vanilla's
-/// `Stitcher.padding`, `1 << mipLevel`) turned this gate red for a week, and
+/// scenes at once. That happened: adding the atlas gutter (matching vanilla's
+/// own stitcher padding, `1 << mipLevel`) turned this gate red for a week, and
 /// telling it apart from a real mesher regression took reverting the padding
 /// call in `block_models.rs` to see the golden reproduce exactly.
 ///
@@ -901,7 +903,7 @@ fn mesh_fluids_is_byte_identical_to_the_pre_refactor_implementation() {
 # surprising:
 #
 #  4. The block atlas grew its gutter -- `AtlasBuilder::with_padding(1 <<
-#     BLOCK_ATLAS_MIP_LEVELS)`, vanilla's `Stitcher.padding`, so a minified
+#     BLOCK_ATLAS_MIP_LEVELS)`, matching vanilla's own stitcher padding, so a minified
 #     Linear tap at a sprite's own edge stops inside that sprite. That repacked
 #     every sprite and so every baked UV. ALL ELEVEN water scenes moved their
 #     vertex hash and NOTHING else moved: identical vertex counts, identical
@@ -919,7 +921,7 @@ fn mesh_fluids_is_byte_identical_to_the_pre_refactor_implementation() {
 #     new line. Two blind spots closed at once, both of the *world* species:
 #     (a) `SceneView` never overrode `self_occlusion_at`, whose trait default
 #     reports every face un-occluded, so this whole corpus had been meshing with
-#     vanilla's `shouldRenderFace` self test switched OFF; and (b) even with it on,
+#     vanilla's own-block self-occlusion test switched OFF; and (b) even with it on,
 #     the scene named `waterlogged` could not exercise it, because it surrounds
 #     its slabs with water on all six sides and the neighbour rule culls
 #     everything the self test would -- which is why its digest is byte-identical
@@ -929,7 +931,7 @@ fn mesh_fluids_is_byte_identical_to_the_pre_refactor_implementation() {
 #     `down: true, north: true` and the other three sides false, so exactly one of
 #     four sides is covered over the whole square. Turning the self test on moved
 #     nothing precisely because (b) held for every pre-existing scene.
-#  2. `corner_heights` -- vanilla `FluidRenderer.tesselate`'s corner branch, which
+#  2. `corner_heights` -- vanilla's fluid-mesh corner branch, which
 #     forces all four corners to 1.0 when the fluid's own rendered height already
 #     is (the same fluid directly above). `mesh_fluids` was averaging instead, so a
 #     falling column of water rendered 10/12 of a block tall and had a visible gap.

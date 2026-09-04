@@ -1,4 +1,5 @@
-//! Offscreen gate for lava's back faces (issue #18, gap 4: "no back faces").
+//! Offscreen gate for lava's back faces: a back-face-culled mesh needs an
+//! explicit back-copy quad to stay visible from both sides.
 //!
 //! Unlike water, lava is **not** rendered through the no-culling translucent
 //! fluid pipeline — `mesh_snapshot_fluids` merges `FluidMeshes::lava` into the

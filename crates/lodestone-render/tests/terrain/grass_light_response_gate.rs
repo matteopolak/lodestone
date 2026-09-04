@@ -155,8 +155,8 @@ const SKY_NONE: u8 = 0x00;
 const RATIO_LIGHT_APPLIED: f32 = 0.423_07;
 
 /// **The ambient-free prediction**, i.e. vanilla's chain with `AmbientColor`
-/// dropped as a believed no-op — what this gate asserted before
-/// `DimensionTypes`'s own decompiled source was read. `0.363117`. It is only `0.06` from the
+/// dropped as a believed no-op — the wrong answer this gate must rule out.
+/// `0.363117`. It is only `0.06` from the
 /// correct value, which is why [`BAND`] has to be tight.
 const RATIO_AMBIENT_FREE: f32 = 0.363_12;
 
@@ -726,7 +726,7 @@ fn the_grass_block_side_overlay_survives_the_depth_test() {
         "the tinted #overlay must be what a grass block's side shows, but the composite reads \
          G/R {:.3} against the overlay's {:.3} and the bare #side's {:.3}. That is the overlay \
          being rejected by a strict nearer-wins comparison: vanilla's terrain depth comparison \
-         is `GREATER_THAN_OR_EQUAL` (26.2 `DepthStencilState.DEFAULT`), which this reversed-Z \
+         is `GREATER_THAN_OR_EQUAL` (26.2's default depth-stencil state), which this reversed-Z \
          renderer spells `DEPTH_COMPARE_NEARER_OR_EQUAL`, and grass_block.json places both \
          elements at exactly [0,0,0]..[16,16,16], so the second is coplanar with the first and \
          can never pass a strict comparison",
@@ -739,10 +739,10 @@ fn the_grass_block_side_overlay_survives_the_depth_test() {
 /// **The floor at light 0 is vanilla's `0.0935`, on real baked geometry** — not
 /// the retired ramp's `0.2`, and not zero.
 ///
-/// Issue #386 named the `0.2` floor as the mechanism and was right, but the first
-/// fix overshot to pure black: `get_brightness(0)` is `0`, yet `lightmap.fsh`
+/// The `0.2` floor is the right mechanism to target, but a first fix can
+/// overshoot to pure black: `get_brightness(0)` is `0`, yet `lightmap.fsh`
 /// seeds its accumulator with `AmbientColor`, which the overworld sets to
-/// `0x0A0A0A` (`DimensionTypes`'s own decompiled source). After the `notGamma` mix that is
+/// `0x0A0A0A`. After the `notGamma` mix that is
 /// `0.0935`.
 ///
 /// Asserted on the same four populations, because a tinted quad is the

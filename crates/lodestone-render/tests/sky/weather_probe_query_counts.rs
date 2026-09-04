@@ -1,4 +1,6 @@
-//! How many times `extract_columns` interrogates the world, per frame (#521).
+//! How many times `extract_columns` interrogates the world, per frame — each
+//! query is frame-invariant per column, so any count above one per column is
+//! pure waste.
 //!
 //! The shell's `WeatherProbe` impl reaches the client-owned world, and every
 //! `precipitation` call used to cost three lock acquisitions. The frequency half

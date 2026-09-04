@@ -1,7 +1,7 @@
-//! External-anchor gate for the three `Timelines.OVERWORLD_DAY` colour tracks
-//! issue #96 needs — `SUNRISE_SUNSET_COLOR`, `SKY_COLOR` and `FOG_COLOR` —
+//! External-anchor gate for the three overworld-day colour tracks
+//! the sky pass needs — `SUNRISE_SUNSET_COLOR`, `SKY_COLOR` and `FOG_COLOR` —
 //! checked **byte-exactly at every one of the 24000 ticks** against a JVM dump
-//! of 26.2's own `KeyframeTrackSampler` + `AttributeModifier` machinery.
+//! of 26.2's own keyframe-track-sampling machinery.
 //!
 //! # Why this is the gate that matters for these functions
 //!
@@ -15,26 +15,26 @@
 //! plausible, all of which this file would catch and a keyframe-only test would
 //! not:
 //!
-//! * **Wraparound.** `KeyframeTrackSampler.bakeSegments` prepends a segment
+//! * **Wraparound.** Vanilla's segment baking prepends a segment
 //!   running from the *last* keyframe at `last.ticks - 24000` to the first, so
 //!   ticks `0..70` are mid-ramp rather than clamped to the tick-71 keyframe.
-//! * **`floor`, not `round`.** `Mth.lerpInt` is `p0 + floor(alpha * (p1 - p0))`.
+//! * **`floor`, not `round`.** Vanilla's integer lerp is `p0 + floor(alpha * (p1 - p0))`.
 //!   Rounding instead is off by one byte on a large fraction of ticks — visually
 //!   invisible, and caught here immediately.
-//! * **Gamma-space lerp.** `LerpFunction.ofColor()` is `ARGB::srgbLerp`, which
-//!   interpolates raw bytes. `ARGB.linearLerp` exists right next to it in the
+//! * **Gamma-space lerp.** Vanilla's colour lerp interpolates raw sRGB bytes
+//!   directly. A linear-space colour lerp exists right next to it in the
 //!   same file and is *not* what these tracks use.
-//! * **Segment boundary strictness.** `getSegmentAt` uses a strict `<` on
-//!   `toTicks`, so a tick landing exactly on a keyframe resolves through the
-//!   segment ending there.
+//! * **Segment boundary strictness.** Vanilla's segment lookup uses a strict
+//!   `<` on the segment's end tick, so a tick landing exactly on a keyframe
+//!   resolves through the segment ending there.
 //!
 //! # Provenance
 //!
 //! `tests/support/sunrise_sunset_timeline_jvm.txt` was produced by
 //! `../oracle-java/SunriseSunsetTimelineOracle.java` — the sibling of
-//! `SkyLightTimelineOracle.java` (issue #49's gate), same pattern: boot the
-//! real 26.2 registries via `VanillaRegistries.createLookup()` and sample
-//! `Timeline.createTrackSampler` once per tick. Not a hand re-derivation of the
+//! `SkyLightTimelineOracle.java`, same pattern: boot the
+//! real 26.2 registries and sample
+//! the timeline's track sampler once per tick. Not a hand re-derivation of the
 //! interpolation math, and not this crate's own output pasted back.
 //!
 //! Regenerate after a version bump with a JDK 25 on `PATH`, or via Docker as
@@ -108,7 +108,7 @@ fn pack_argb(rgba: [u8; 4]) -> u32 {
 }
 
 /// An opaque RGB multiplier packed the same way (alpha `0xff`, which is what
-/// `AttributeTypes.RGB_COLOR`'s 6-digit codec produces and what the dump shows).
+/// vanilla's 6-digit RGB-colour codec produces and what the dump shows).
 fn pack_opaque(rgb: [u8; 3]) -> u32 {
     0xFF00_0000
         | (u32::from(rgb[0]) << 16)
@@ -116,7 +116,7 @@ fn pack_opaque(rgb: [u8; 3]) -> u32 {
         | u32::from(rgb[2])
 }
 
-/// Vanilla's `ARGB.multiply` (`ARGB`'s own decompiled source) — byte-space, integer-truncating.
+/// Vanilla's opaque-colour multiply — byte-space, integer-truncating.
 /// Reproduced here rather than imported because the crate's own composition
 /// path goes through linear RGB floats (`fog::multiply_gamma`), and this column
 /// exists to check the *shape* of that arithmetic independently of the float
@@ -209,7 +209,7 @@ fn multiplying_a_real_biome_sky_colour_through_the_track_matches_the_jvm() {
 fn the_wrong_samplers_this_gate_exists_to_catch_do_fail_it() {
     let rows = rows();
 
-    // Wrong #1: clamp to the first keyframe instead of wrapping through the
+    // Wrong guess 1: clamp to the first keyframe instead of wrapping through the
     // last one. Only ticks before the first keyframe (71) differ, so a gate
     // that sampled only named times would never see this.
     let clamping_disagreements = rows
@@ -228,7 +228,7 @@ fn the_wrong_samplers_this_gate_exists_to_catch_do_fail_it() {
          segment this gate exists to check is unobservable"
     );
 
-    // Wrong #2: round instead of floor in the channel lerp. Count the ticks
+    // Wrong guess 2: round instead of floor in the channel lerp. Count the ticks
     // where that changes the answer; it must be a substantial fraction, not a
     // handful of edge cases.
     let rounding_disagreements = rows
@@ -238,8 +238,8 @@ fn the_wrong_samplers_this_gate_exists_to_catch_do_fail_it() {
     assert!(
         rounding_disagreements > 1_000,
         "control failed to fail: only {rounding_disagreements} ticks distinguish floor \
-         from round, so this gate would not be evidence that `Mth.lerpInt`'s floor was \
-         ported correctly"
+         from round, so this gate would not be evidence that vanilla's integer-lerp floor \
+         was ported correctly"
     );
 
     eprintln!(

@@ -5,7 +5,7 @@
 //! # What it is
 //!
 //! Vanilla's biome tint is a radius-2 box — 25 `Colormaps::resolve` samples per
-//! tinted quad — and after issue #542's three commits it was still ~63% of
+//! tinted quad — and it is ~63% of
 //! `mesh_fluids`'s per-cell cost (`DESIGN.md` §12.124). Adjacent cells share 20
 //! of their 25 columns, so a sliding per-channel sum costs 5 samples per step
 //! instead of 25. `lodestone_assets::tint::BlendRowCursor` does the arithmetic
@@ -463,7 +463,7 @@ impl ModelSectionView for JunctionView {
 impl FluidSectionView for JunctionView {
     fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell> {
         // Water up to y = 7 inside the section, air above: the `surface` shape
-        // #542 recorded as the one that actually emits quads (an all-water
+        // is the one that actually emits quads (an all-water
         // section culls every face and hashes the empty buffer).
         let inside = (0..16).contains(&x) && (0..16).contains(&z);
         if inside && (0..8).contains(&y) {
@@ -506,8 +506,8 @@ fn the_real_mesher_loops_produce_byte_identical_meshes() {
     let plain_models = mesh_models(&JunctionView::new(TintPath::Plain { shift: 0 }));
 
     // Preconditions, before any comparison: an empty mesh is byte-identical to
-    // another empty mesh, which is the vacuity #542 hit with `water_only` and
-    // `ocean_floor`.
+    // another empty mesh, which is the vacuity a fixture like `water_only` or
+    // `ocean_floor` can hit if it never emits a quad.
     assert!(
         plain_water.water.quad_count() > 0,
         "the fluid fixture meshed no water quads, so its digest is the empty buffer"

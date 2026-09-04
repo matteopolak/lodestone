@@ -1,5 +1,6 @@
 //! How often the FANCY cloud mesh re-enumerates its faces, and that memoising it
-//! changes nothing on screen (#521).
+//! changes nothing on screen — the face set is a pure function of data that only
+//! changes on an event, so recomputing it every frame is pure waste.
 //!
 //! [`CloudFaceCache`] memoises [`extruded_faces`] on its own four arguments, which
 //! were already exactly the cache key. Two things have to hold and they pull in

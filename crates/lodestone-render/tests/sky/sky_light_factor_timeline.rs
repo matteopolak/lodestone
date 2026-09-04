@@ -1,4 +1,4 @@
-//! External-anchor gate for `sky_darken_for_time_of_day` (issue #49): every
+//! External-anchor gate for `sky_darken_for_time_of_day`: every
 //! one of the 24000 ticks in the day, checked against a JVM dump of 26.2's
 //! real `Timelines.OVERWORLD_DAY` / `SKY_LIGHT_FACTOR` timeline track.
 //!
@@ -65,7 +65,7 @@ fn jvm_factor_samples() -> Vec<(i64, f32)> {
 /// not be: `sky_darken_hits_vanillas_noon_and_midnight_anchors` samples noon
 /// and midnight, both deep inside flat plateau segments, so a cosine curve
 /// that matches both plateaus exactly (as the retired port did) passes it
-/// vacuously. The defect issue #49 reports lives entirely in the dusk/dawn
+/// vacuously. A cosine-port defect lives entirely in the dusk/dawn
 /// *ramp* between those plateaus, which only a full-day scan can see.
 #[test]
 fn sky_light_factor_matches_the_jvm_across_the_whole_day() {
@@ -96,9 +96,10 @@ fn sky_light_factor_matches_the_jvm_across_the_whole_day() {
 /// description, so a green scan above is evidence and not a tautology.
 #[test]
 fn the_whole_day_scan_would_have_caught_the_retired_cosine_port() {
-    /// `sky_darken_for_time_of_day`'s implementation before issue #49: a port
-    /// of 1.21's `Level.getSkyDarken` plus `LightTexture`'s `* 0.95 + 0.05`
-    /// lift. Kept here only as the control's fixture, not as production code.
+    /// `sky_darken_for_time_of_day`'s retired implementation: a port
+    /// of 1.21's sky-darken cosine curve plus the light-texture lift's
+    /// `* 0.95 + 0.05` scaling.
+    /// Kept here only as the control's fixture, not as production code.
     fn retired_cosine_port(time_of_day: i64) -> f32 {
         let day = time_of_day.rem_euclid(24_000) as f64 / 24_000.0;
         let frac = (day - 0.25).rem_euclid(1.0);
@@ -133,7 +134,7 @@ fn the_whole_day_scan_would_have_caught_the_retired_cosine_port() {
 }
 
 /// The specific numbers from `docs/time-of-day-lighting.md`'s "known
-/// divergence" note, corrected: the note (and issue #49's own text) claimed
+/// divergence" note, corrected: the note claimed
 /// vanilla was "already at 0.24" at `night` (tick 13000) where the retired
 /// port read `0.300`. The real JVM dump says otherwise — tick 13000 is still
 /// partway down the dusk ramp (`[11270, 13140)`), not yet at the `13140`
