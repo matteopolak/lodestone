@@ -77,6 +77,7 @@ pub mod entity_types;
 pub mod item_types;
 pub mod packets;
 pub mod particle_ids;
+pub mod server_protocol;
 pub mod sound_ids;
 
 /// The `id:meta` (pre-Flattening) → modern block-state table and the bridge
@@ -99,3 +100,4 @@ pub mod sound_ids;
 pub use lodestone_canonical::{canonical, flattening};
 
 pub use adapter::{PROTOCOL, PROTOCOLS, V340Adapter, adapter, adapter_for};
+pub use server_protocol::V340ServerProtocol;

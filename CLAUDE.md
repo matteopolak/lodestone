@@ -17,7 +17,7 @@ Ten client protocol families exist, each a workspace member under `crates/versio
 `lodestone-registry` feature: `v1-7` (1.7.6-1.7.10), `v1-8` (1.8.8-1.8.9), `v1-9` (1.9.4-1.12.2),
 `v1-13` (1.13.2), `v1-14` (1.14.4-1.16.5), `v1-17` (1.17.1-1.18.2), `v1-19` (1.19.4), `v1-20-6`
 (1.20.5-1.20.6), `v1-21-11` (1.21.11), `v26-2` (protocol 776 / MC 26.2). Together they cover every
-Minecraft release from 1.7.10 up, in the joining direction only.
+Minecraft release from 1.7.10 up in the joining direction; hosting is the smaller set below.
 Each folder is named for the *era-start* Minecraft version it covers (e.g. `crates/versions/1.8`), which
 is neither its package/feature suffix (`lodestone-v1-8`, feature `v1-8`) nor a protocol number — ask
 `VersionAdapter::supports`, never the folder or the feature name.
@@ -25,8 +25,10 @@ is neither its package/feature suffix (`lodestone-v1-8`, feature `v1-8`) nor a p
 - **No family is enabled by default** in `lodestone-registry`. The shell's default `live` feature turns
   on `v26-2` and nothing else, so a legacy family is invisible to every command below unless you name
   its feature.
-- **Only `v26-2` implements `ServerProtocol`**, so 26.2 is the only version we can *host*. Joining and
-  hosting are different sets; `lodestone-registry` keeps `Family` and `ServerFamily` as two tables.
+- **Hosted protocols are explicit and narrower than joining support.** `v1-7` hosts protocol 5,
+  `v1-8` hosts 47, `v1-9` hosts only 340, `v1-13` hosts 404, and `v26-2` hosts 776;
+  `lodestone-registry` keeps `Family` and `ServerFamily` as separate tables so other family
+  revisions remain join-only.
 - **A family may speak several protocols**: `v1-9` serves 110/210/316/340 and `v1-14` serves
   498/578/754. No folder, package or feature name is a protocol number.
 

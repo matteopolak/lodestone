@@ -4,8 +4,8 @@
 
 `crates/versions/1.13` (package `lodestone-v1-13`) serves Minecraft 1.13.2 —
 protocol **404** — from one adapter, one generated packet-id table, one
-generated block-state table and two generated entity tables. It is the third
-era crate, after [`the 1.9 era`](./protocol-1-9-era.md) and
+generated block-state table, two generated entity tables and one hosted
+protocol implementation. It is the third era crate, after [`the 1.9 era`](./protocol-1-9-era.md) and
 [`the 1.14 era`](./protocol-1-14-era.md), and the first with exactly one
 member.
 
@@ -149,6 +149,22 @@ arrays, the 256-int biome tail, the straddling long packing and the
 block-state table at once; every one of them going wrong produces a populated
 but wrong world, not an error.
 
+### Hosted path
+
+`V404ServerProtocol` moves directly from login success to Play and uses login
+compression. It sends the era's fixed-shape join and position packets, then a
+full y=0 through y=255 column. Each present chunk section uses the committed
+straddling palette layout followed by block and sky light; the full-column
+biome tail contains 256 big-endian integers.
+
+Outbound state ids are the unique reverse of this family's committed generated
+table, not a generic legacy conversion. A canonical state with no table entry,
+or more than one wire entry, is rejected rather than replaced. The byte-level
+control uses the jar report's dandelion state id (1111), while the in-memory
+client/server control reaches Play, observes that state in a chunk, breaks it,
+and observes the air update. A live protocol-404 client session against this
+host remains the external compatibility check.
+
 ### The negative control, and what it actually measured
 
 The 1.14 era found that **no** misroute between its protocols produces a
@@ -200,11 +216,16 @@ silently weaker control.
   crashes it outright, and a recorder that merely drains the socket is
   disconnected partway through for not answering keep-alives — silently, since
   a closed socket simply stops producing spawn packets.
+- **Hosting** lives in `src/server_protocol.rs`. Its outbound state lookup must
+  remain the reverse of `generated_canonical::STATE_TO_CANONICAL`; preserve the
+  ambiguous-or-absent rejection. Add both a byte-level control in
+  `tests/server_protocol.rs` and a visible client/server assertion in
+  `tests/server_integration.rs` when extending the hosted packet path.
 
 ## Configuration
 
 None new. The era is selected by a `v1-13` feature on `lodestone-registry`;
-the registry reads `PROTOCOLS` from the crate. Oracle ports live in
+the registry selects its adapter and its protocol-404 host. Oracle ports live in
 `scripts/live-oracles/legacy.sh` (game `25590`, RCON `25591`) and are read
 from there by `tests/capture_join.rs` and `tests/entity_types.rs`. That row
 gives 1.13.2 a flat, peaceful, spawn-free world: `level-type=FLAT` is still
@@ -219,7 +240,9 @@ summon with one spawn packet.
 IGNORED}`), `lodestone-macros` (`since`/`until`/`protocols`),
 `lodestone-protocol-common` (the shared packet definitions, four of whose
 ranges this era widened), `lodestone-world`, `lodestone-data` (the canonical
-26.2 block-state registry the generated table targets). Recording needs Apple
+26.2 block-state registry the generated table targets), and `lodestone-server`
+(the version-free host seam). The in-memory hosted control also uses
+`lodestone-client`. Recording needs Apple
 `container` and [`scripts/live-oracles/legacy.sh`](../scripts/live-oracles/legacy.sh);
 regenerating the block-state table additionally needs the jar's own data
 generator under `container`, and the two bridging rules in it need a real 26.2

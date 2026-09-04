@@ -15,9 +15,15 @@ pub(super) fn run_windowed(config: Config) -> anyhow::Result<()> {
 /// composed `App` only changes what `Sim` the constructed `WindowApp` holds, never
 /// how the winit loop drives it.
 pub(super) fn run_windowed_with_app(
-    plugin_app: lodestone_app::App,
+    mut plugin_app: lodestone_app::App,
     config: Config,
 ) -> anyhow::Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::wasm_plugins::install_from_directory(
+        &mut plugin_app,
+        std::path::Path::new(lodestone_wasm_host::DEFAULT_PLUGIN_DIR),
+    )?;
+
     // `EventLoop::<ShellEvent>::with_user_event().build()` rather than
     // `EventLoop::new()`: the two are identical when `ShellEvent = ()`
     // (`EventLoop::new()`'s own doc says it is an alias of

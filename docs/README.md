@@ -366,9 +366,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [The 1.13 era crate: one family, one protocol, two breaks](./protocol-1-13-era.md) —
   `crates/versions/1.13` (package `lodestone-v1-13`) serves Minecraft 1.13.2 —
   protocol **404** — from one adapter, one generated packet-id table, one generated
-  block-state table and two generated entity tables. It is the third era crate, after
-  [`the 1.9 era`](./protocol-1-9-era.md) and [`the 1.14 era`](./protocol-1-14-era.md),
-  and the first with exactly one member.
+  block-state table, two generated entity tables and one hosted protocol
+  implementation. It is the third era crate, after [`the 1.9
+  era`](./protocol-1-9-era.md) and [`the 1.14 era`](./protocol-1-14-era.md), and the
+  first with exactly one member.
 - [The 1.14 era crate: one family, three protocols](./protocol-1-14-era.md) —
   `crates/versions/1.14` (package `lodestone-v1-14`) serves Minecraft 1.14.4, 1.15.2
   and 1.16.5 — protocols 498, 578 and 754 — from a single adapter, three generated
@@ -405,13 +406,15 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   Minecraft **1.21.11** — protocol **774** — with one adapter, one generated
   packet-id table, one generated block-state table, one generated entity registry, and
   this era's own chunk, velocity, chat and tab-list codecs. It is the joining
-  direction only: `ServerProtocol` is implemented by the 26.2 family alone, so 774 is
-  a version we can play on and not one we can host.
+  direction only, so 774 is a version we can play on and not one we can host.
 - [Protocol 5 era (Minecraft 1.7.6-1.7.10)](./protocol-1-7-era.md) —
   `lodestone-v1-7` is the client protocol crate for **protocol 5**, spoken by
   Minecraft 1.7.6 through 1.7.10 — the bottom of the version ladder and the only era
-  that shares almost nothing with its neighbour. It implements the **joining direction
-  only**: there is no `ServerProtocol`, so this version can be joined but not hosted.
+  that shares almost nothing with its neighbour. It provides both the joining adapter
+  and `V5ServerProtocol`; the registry selects the latter only for protocol 5.
+- [Protocol 47 hosting](./protocol-1-8-era.md) — `crates/versions/1.8` can host
+  protocol 47 alongside its existing joining adapter. The registry resolves protocol
+  47 to `V47ServerProtocol`; neighboring protocol numbers remain unhosted.
 - [The 1.9 era crate: one family, four protocols](./protocol-1-9-era.md) —
   `crates/versions/1.9` (package `lodestone-v1-9`) is the first *era* crate in this
   repo: one family serving Minecraft 1.9.4, 1.10.2, 1.11.2 and 1.12.2 — protocols

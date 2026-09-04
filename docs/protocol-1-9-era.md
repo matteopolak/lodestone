@@ -29,6 +29,26 @@ is id **62** at 110/210/316 and **65** at 340. The committed test for that is
 shared 340 table, a protocol-110 adapter handed id 62 emitted `EntityVelocity { entity_id: 65 }`.
 No error, a plausible event, the wrong packet.
 
+### Hosted protocol 340
+
+`V340ServerProtocol` is the server half for protocol 340 only. The registry exposes it through
+`server_protocol_for_protocol(340)` and intentionally rejects the family's older client-only
+protocols. Its legacy login moves directly to Play after login success: this wire revision has no
+configuration acknowledgement packets.
+
+The play baseline emits a join and absolute position packet, then encodes y=0 through y=255 columns as legacy
+`map_chunk` packets. Each canonical block-state id goes through `lodestone_canonical::inverse`,
+which returns an exact `(old_id << 4) | meta` representative or an error. The checked chunk path
+propagates that error to the server rather than silently using air. The direct block-update helper
+uses the same conversion before constructing its packed position and legacy state payload.
+
+The encoder accepts any canonical column spanning y=0 through y=255 and projects precisely that
+window; rows below or above it are not sent. It rejects only a source that does not cover the
+whole legacy window. Its serverbound break decoder accepts the three break statuses and six faces,
+so a player can act on the streamed blocks. The in-memory control joins the registry-selected
+server through the family adapter, observes a known chunk block, and verifies its block update after
+breaking it. A live 1.12.2 client session remains the required real-client validation.
+
 Dispatch is one `lodestone_core::dispatch::Table` per protocol, cached in a four-slot array of
 `OnceLock`s indexed the same way `ids_for` resolves a table. A handler or `IGNORED` entry may
 declare a `ProtocolRange`; `Table::build` skips one whose range excludes the protocol it is
@@ -110,18 +130,23 @@ differential: the byte era must never reproduce 1.5 exactly, the float era must 
 - `minecraft-data` ships 1.10.2's shapes under its `1.10` directory and 1.11.2's under `1.11`;
   `gen-packet-ids` resolves that same-major fallback itself, so pass the real version and
   protocol.
+- The hosted type is deliberately `V340ServerProtocol`, not an era-wide server adapter. Add a
+  separate host implementation and an explicit `ServerFamily` predicate before exposing another
+  protocol: the family adapter's broader `PROTOCOLS` list is not evidence that its server packet
+  layouts match.
 
 ## Configuration
 
 None new. The era is selected by the existing `v1-9` feature on `lodestone-registry`; the
-registry reads `PROTOCOLS` from the crate, so all four protocols became resolvable without a
-registry edit. Oracle ports live in `scripts/live-oracles/legacy.sh` and are read from there by
+client adapter reads `PROTOCOLS` from the crate, while the server registry exposes only protocol
+340. Oracle ports live in `scripts/live-oracles/legacy.sh` and are read from there by
 `tests/capture_join.rs`'s `MEMBERS` table.
 
 ## Dependencies
 
 `lodestone-core` (`Ctx`, `ProtocolRange`, `dispatch::{Table, Handler, IGNORED}`),
 `lodestone-macros` (`since`/`until`/`protocols`), `lodestone-protocol-common` (the shared packet
-definitions whose ranges this work widened), `lodestone-canonical`, `lodestone-world`,
-`lodestone-data`. Recording needs Apple `container` and
+definitions shared by this era), `lodestone-canonical`, `lodestone-world`,
+`lodestone-data`, and `lodestone-server` (the version-free hosting trait and chunk column).
+Recording needs Apple `container` and
 [`scripts/live-oracles/legacy.sh`](../scripts/live-oracles/legacy.sh); replay needs nothing.

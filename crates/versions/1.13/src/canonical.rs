@@ -52,6 +52,9 @@
 //! the failure it guards against is the silent one: answering with some other
 //! protocol's numbering produces a populated, plausible, wrong world.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use crate::generated_canonical;
 
 /// One protocol's `wire state id -> canonical 26.2 state id` mapping.
@@ -116,6 +119,45 @@ static TABLE_404: CanonicalTable = CanonicalTable {
     states: &generated_canonical::STATE_TO_CANONICAL,
     air: generated_canonical::AIR_STATE_ID,
 };
+
+#[derive(Clone, Copy)]
+enum ReverseState {
+    Unique(u32),
+    Ambiguous,
+}
+
+static CANONICAL_TO_WIRE: OnceLock<HashMap<u32, ReverseState>> = OnceLock::new();
+
+fn canonical_to_wire() -> &'static HashMap<u32, ReverseState> {
+    CANONICAL_TO_WIRE.get_or_init(|| {
+        let mut states = HashMap::with_capacity(generated_canonical::STATE_TO_CANONICAL.len());
+        for (wire, &canonical) in generated_canonical::STATE_TO_CANONICAL.iter().enumerate() {
+            let wire = u32::try_from(wire).expect("protocol-404 wire state fits in u32");
+            match states.get(&canonical).copied() {
+                None => {
+                    states.insert(canonical, ReverseState::Unique(wire));
+                }
+                Some(ReverseState::Unique(previous)) if previous != wire => {
+                    states.insert(canonical, ReverseState::Ambiguous);
+                }
+                Some(ReverseState::Unique(_)) | Some(ReverseState::Ambiguous) => {}
+            }
+        }
+        states
+    })
+}
+
+/// Returns the unique protocol-404 state for a canonical state.
+///
+/// The inverse is derived only from this family's committed generated table.
+/// A state absent from that table, or reached by more than one wire state, has
+/// no exact outbound representation and is deliberately rejected by the host.
+pub(crate) fn wire_state_for(canonical: u32) -> Option<u32> {
+    match canonical_to_wire().get(&canonical) {
+        Some(ReverseState::Unique(wire)) => Some(*wire),
+        Some(ReverseState::Ambiguous) | None => None,
+    }
+}
 
 /// Resolves a negotiated protocol to its block-state table.
 ///

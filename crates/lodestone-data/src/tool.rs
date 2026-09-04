@@ -71,6 +71,7 @@ use std::sync::{OnceLock, RwLock};
 
 use lodestone_model::{ItemStack, ToolBlocks, ToolMining, ToolPatch, ToolRule};
 
+use crate::block_states::StateId;
 use crate::generated_tools as generated;
 use crate::item::Item;
 
@@ -204,8 +205,9 @@ pub fn default_tool(item: &str) -> Option<&'static ToolDef> {
 /// block's own "requires correct tool for drops" flag — see [`ToolMining::correct_tool`].
 #[must_use]
 pub fn mining(held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
-    let requires_correct_tool = crate::hardness::hardness(state_id)?.requires_correct_tool;
-    let block = block_registry_id(state_id)?;
+    let state_id = StateId::new(state_id)?;
+    let requires_correct_tool = crate::hardness::hardness(state_id).requires_correct_tool;
+    let block = block_registry_id(state_id.raw())?;
 
     // The effective `minecraft:tool`, resolved exactly as vanilla's own
     // component-map accessor for that component does: the patch wins if it

@@ -109,6 +109,10 @@ pub mod sim;
 pub mod skin_fetch;
 pub mod tablist;
 pub mod worldgen;
+/// Native runtime discovery for capability-gated WASM plugins. Kept out of the
+/// browser graph because the Wasmtime host cannot compile for wasm32.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod wasm_plugins;
 
 pub use config::{CliOutcome, Config, Mode};
 

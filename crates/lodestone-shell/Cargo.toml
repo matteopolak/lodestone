@@ -211,6 +211,10 @@ png = { workspace = true }
 # before us; it is a build-configuration change only and native behaviour is
 # unchanged.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Runtime-loaded component plugins are native-only because Wasmtime cannot run
+# inside the browser build. The shell uses the host's single directory loader;
+# it does not parse manifests or instantiate modules itself.
+lodestone-wasm-host = { path = "../lodestone-wasm-host" }
 # The full workspace feature set, including `net` and `rt-multi-thread`. This is
 # the one dependency that *blocked* the whole wasm build rather than merely
 # panicking at runtime: `net` pulls `mio`, whose `wasm32-unknown-unknown` arm is

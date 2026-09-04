@@ -34,13 +34,17 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.1.0;
+package lodestone:plugin@0.2.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
 /// field-for-field copy of something that already crosses the native plugin
 /// seam as a `Clone` value or a POD struct.
 interface types {
+    /// A guest-local opaque handle returned by the scheduler. The host preserves
+    /// it when a repeating task fires so the callback can cancel itself.
+    type task-id = u64;
+
     /// `lodestone_model::event::ChatKind`.
     enum chat-kind {
         chat,
@@ -137,7 +141,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.1.0"`.
+        /// `"lodestone:plugin@0.2.0"`.
         abi: string,
     }
 
@@ -171,11 +175,27 @@ interface filesystem {
     read-file: func(path: string) -> result<list<u8>, string>;
 }
 
+/// Capability `schedule:tasks` — denied unless the plugin manifest requests it
+/// and host policy grants it. Delays are measured in host ticks; zero and one
+/// both mean the next tick, and a zero repeat period is clamped to one tick.
+interface scheduler {
+    use types.{task-id};
+
+    schedule-once: func(delay-ticks: u32, token: u64) -> task-id;
+    schedule-repeating: func(
+        delay-ticks: u32,
+        period-ticks: u32,
+        token: u64,
+    ) -> task-id;
+    cancel: func(id: task-id);
+}
+
 world plugin {
-    use types.{event, action, plugin-info};
+    use types.{event, action, plugin-info, task-id};
 
     import logging;
     import filesystem;
+    import scheduler;
 
     /// Called once, immediately after instantiation. The returned
     /// [`plugin-info`] is cross-checked against the manifest.
@@ -185,4 +205,8 @@ world plugin {
     /// this tick's actions. Called even when `events` is empty, so a guest can
     /// act on its own clock.
     export on-tick: func(events: list<event>) -> list<action>;
+
+    /// Called when a task scheduled through the `scheduler` import becomes due.
+    /// `token` is guest-defined state that crosses the otherwise stateless ABI.
+    export on-task: func(id: task-id, token: u64) -> list<action>;
 }

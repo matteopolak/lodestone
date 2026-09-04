@@ -24,10 +24,10 @@ is **141/141 decoded, 139/141 emitted, 68/69 encoded, 66/69 serverbound decoded,
 connected**. A decoded packet that is intentionally side-effect-only must be documented as such;
 a decoded packet that produces no action, event, or state change is an island.
 
-The registry has ten families. Nine are joining-only: `v1-7`, `v1-8`, `v1-9`, `v1-13`, `v1-14`,
-`v1-17`, `v1-19`, `v1-20-6`, and `v1-21-11`. Only `v26-2` implements `ServerProtocol`, so it is
-the only hosting family. No family is enabled by default in the registry; the live shell enables
-`v26-2`.
+The registry has ten families. Five are joining-only: `v1-14`, `v1-17`, `v1-19`, `v1-20-6`, and
+`v1-21-11`. Hosted protocols are 5, 47, 340, 404 and 776; `v1-9` hosts 340 only, not every
+revision its joining adapter supports. No family is enabled by default in the registry; the live
+shell enables `v26-2`.
 
 ## Server compatibility roadmap
 

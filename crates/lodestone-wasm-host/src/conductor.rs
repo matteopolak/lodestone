@@ -5,8 +5,8 @@
 //!
 //! A guest cannot *be* a system — it has no Rust type identity with the host, so it
 //! cannot be registered with `add_systems` or ordered against arbitrary sets. So the
-//! host runs **one** system per schedule slot which drives every guest's `on-tick`
-//! in sequence.
+//! host runs **one** system per schedule slot which drives every guest's due
+//! `on-task` callbacks followed by `on-tick`, in sequence.
 //!
 //! That is not a workaround; it is what preserves `docs/plugin-api.md`'s clause 2,
 //! *exactly one system owns each machine*. This system is the single writer of

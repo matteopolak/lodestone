@@ -10,13 +10,12 @@ of the two constraints (both tiers must express the same feature; `EcsHandle` is
 has to satisfy. It ends with a decomposition into sub-issues ordered by what unblocks the most.
 
 The headline: **the client's native tier is at or near parity for every capability family except
-wire-level packet mutation, the client's WASM tier expresses roughly a tenth of what the native tier
-does, and the server has no bevy-shaped plugin surface at all** — its `World` is built and never
-ticked, nothing outside the crate can register a plugin into it, and every server-side capability a
-plugin can reach is a hand-built registry with no event bus, no cancellation and no scheduler behind
-it. Since real Bukkit/Paper plugins are overwhelmingly server plugins, the claim under test is
-answered "yes" for the surface that matters least to a Java plugin author and "not yet" for the one
-that matters most.
+wire-level packet mutation, the client's WASM tier remains substantially narrower, and the server's
+bevy-shaped plugin surface now reaches in-memory and persistent primary worlds, including the
+standalone binary's compile-time application builder**. Native systems run on the real `GameTick`,
+but event adjudication, commands, permissions, scheduling, and runtime plugin discovery remain
+gaps. Since real Bukkit/Paper plugins are overwhelmingly server plugins, the answer for the
+deployment that matters most remains "not yet".
 
 ## How it works
 
@@ -46,10 +45,11 @@ Sources: `docs/plugin-api.md`, `docs/plugin-server-capabilities.md`, `docs/plugi
 substitutes for the other. So for a capability to count as "portable", it has to be expressible on
 the WASM tier as well as the native one — and where the WASM tier structurally cannot host it (a
 resumable off-thread search over an owned snapshot; anything needing a `World` borrow), that has to
-be a stated ceiling rather than an omission. The WASM ABI today (`wit/lodestone-plugin.wit`) is one
-export, `on-tick(list<event>) -> list<action>`, over three event kinds (`chat`, `health-changed`,
-`blocks-changed`) and three actions (`send-chat`, `send-command`, `swing-arm`), plus `log` and
-`fs:read` imports. Every "WASM" cell below is judged against that.
+be a stated ceiling rather than an omission. The WASM ABI today (`wit/lodestone-plugin.wit`) exports
+`on-tick(list<event>) -> list<action>` and `on-task(task-id, token) -> list<action>` over three event
+kinds (`chat`, `health-changed`, `blocks-changed`) and three actions (`send-chat`, `send-command`,
+`swing-arm`), plus `log`, `fs:read`, and capability-gated scheduler imports. Every "WASM" cell below
+is judged against that.
 
 **`EcsHandle` is `Arc<parking_lot::RwLock<World>>` and is not reentrant.** Of the four
 guard-nesting combinations, three deadlock always and the fourth whenever a writer is queued, with
@@ -82,10 +82,10 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | capability | client, native | client, WASM | server |
 |---|---|---|---|
 | observe a typed event | **done** — `GameEvent(ClientEvent)` via `MessageReader`, off by default, installed for every shipped `App` by `ServerBrandChannelPlugin` in `lodestone_app::client_app` | partial — 3 event kinds of ~110 | **gap** — no event bus; `dispatch_play_packet` applies inline |
-| cancel an event (`setCancelled`) | **done** — `ActionVetoes` for all six declared verbs, all asked in production | **gap** — no verdict-shaped export | **gap** — `TickSet::Adjudicate` is declared and empty, and `GameTick` never runs after boot; `CraftingStationHooks` is the one Allow/Deny/Replace hook |
+| cancel an event (`setCancelled`) | **done** — `ActionVetoes` for all six declared verbs, all asked in production | **gap** — no verdict-shaped export | **gap** — `TickSet::Adjudicate` runs but has no proposal or verdict systems; `CraftingStationHooks` is the one Allow/Deny/Replace hook |
 | priority order across plugins | **done** — `EventPriority::{Lowest..Monitor}` chained into all four schedules | partial — manifest `priority` orders guests; nothing else | **gap** |
 | `MONITOR` read-only | **done** — checked against bevy's per-system access set; blind to deferred `Commands` | **gap** | **gap** |
-| sync delayed/repeating tasks | **done** — `TaskScheduler::{schedule_once, schedule_repeating, cancel}` | partial — a guest counts its own `on-tick` calls; no cancellation, no off-tick | **gap** — `run_tick_loop` has no registration point (no `dyn Fn` in it) |
+| sync delayed/repeating tasks | **done** — `TaskScheduler::{schedule_once, schedule_repeating, cancel}` | **done** — `scheduler::{schedule-once, schedule-repeating, cancel}` returns guest-local handles and dispatches `on-task` on host ticks | partial — native systems can run every `GameTick`, but there is no server `TaskScheduler` with delayed/repeating handles and cancellation |
 | async task + main-thread hand-back | **done** — `AsyncTaskPool::{spawn, spawn_with_handback}`; inline on wasm32 | **ceiling** — single-threaded guest by design | **gap** |
 | register a command | **done** — `CommandRegistry`/`PluginCommand`, `PluginCommandsPlugin` in `Sim::client_app`, reached from the wire through the shell's `EcsCommandSink` | partial — `send-command` invokes; nothing registers | partial — `CommandSink` seam exists; the dedicated server installs `CommandDispatch::none()`, so every plugin command is refused there |
 | tab completion / argument types | **done** — `lodestone-command` argument types, `commands::suggest` | **gap** | as above |
@@ -110,13 +110,16 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | the NMS-equivalent escape hatch | **done** — depend on a version crate (`packets`, `adapter` are `pub`), or on `lodestone-shell` for `Sim::ecs()` | **ceiling** — an import not in the WIT world is absent from the linker | **done** — embed `IntegratedServer` and hold the `ChunkSource`, `WorldStateHandle`, `PlayerRegistry`, `MobHandle`, `PluginChannelRegistry` it hands out |
 | hot reload | ceiling (no stable Rust ABI) | **done** — a `.wasm` file on disk, `PluginHost::load_file` | ceiling |
 | panic isolation | ceiling by decision — trusted code, fatal | **done** — trap/fuel/memory limits, three denial gates | ceiling |
-| registered in the shipped binary | **done** — `run_with_app` / `WindowApp::new_with_app` | **gap** — nothing calls `load_directory` (searched `lodestone-shell`, `lodestone-app`) | **gap** — no constructor takes a plugin; `ServerApp::bootstrap()` is called internally with `ServerCorePlugin` only |
+| registered in the shipped binary | **done** — `run_with_app` / `WindowApp::new_with_app` | **done, native windowed client** — `run_windowed_with_app` installs the conductor and calls `load_directory` for cwd-relative `plugins/`; absent and denied-plugin controls reach the real shell `Sim` | **done, compiled-in native** — `dedicated_server_app` feeds the application through `open_persistent_server` and `IntegratedServer::open_persistent_with_mobs_and_commands_and_server_app` into the persistent primary tick task; no runtime discovery |
 
 Read by column: the native client column is done or ceiling in every row but one (durable per-entity
-data). The WASM column is gap in twenty of twenty-eight rows.
+data). The WASM tier now has shipped discovery and scheduling, but remains narrower than native in
+verdicts, intents, commands, world/entity access, drawing, and durable writes.
 The server column has real capability in exactly the rows where a hand-built registry could be
 bolted onto plain function calls — worldgen, entity spawn, crafting hooks, plugin channels, player
-registry — and gap in every row that needs a schedule to hang a system in.
+registry — plus native per-tick systems in explicitly configured in-memory and persistent primary
+worlds. It still lacks the event, cancellation, scheduler, and command surfaces those systems need
+for a broadly portable server plugin.
 
 ### Events and cancellation, the hard half
 
@@ -162,15 +165,13 @@ packet path: `dispatch_play_packet` in `lodestone_server::server` matches `Serve
 The design that answers this — a proposal queue drained into `TickSet::Drain`, vetoed in
 `TickSet::Adjudicate`, applied in `TickSet::Apply`, with server-side clause 4 inverted so the
 plugin outranks the remote client — is fully written (`docs/plans/server-ecs-migration.md`
-Phases 2 and 8, `docs/plugin-server-capabilities.md`'s `ServerProposal`/`ProposalVerdict`) and none
-of it exists in code: `crates/lodestone-server/src/ecs/` holds `mod.rs`, `plugin.rs`,
-`schedules.rs`, `gate.rs` and nothing else; `ServerApp::into_world`'s result is bound as
-`let _server_world = server_world;` inside the tick task in `IntegratedServer` and never passed
-to `run_tick_loop`; a search for `run_schedule` in `lodestone-server/src` outside `ecs/` finds only
-redstone's unrelated `run_scheduled_tick`. `CraftingStationHooks` is the one server hook with a
-verdict, and it runs **inline on the connection task**, so a hook that panics takes that player's
-connection down — a property the panic-isolation decision ("native panics are fatal") does not
-cover, since it is fatal to one connection rather than the process.
+Phases 2 and 8, `docs/plugin-server-capabilities.md`'s `ServerProposal`/`ProposalVerdict`). The
+primary tick task now runs `GameTick`, and an in-memory embedder can register systems into it, but
+the proposal queue, event types, and verdict consumers still do not exist. `CraftingStationHooks`
+is the one server hook with a verdict, and it runs **inline on the connection task**, so a hook
+that panics takes that player's connection down — a property the panic-isolation decision
+("native panics are fatal") does not cover, since it is fatal to one connection rather than the
+process.
 
 Reentrancy on the server is a different lock, not the same one. The design promise is that the
 server `World` has no lock at all, so once systems exist in `Adjudicate` a plugin's `&mut World`
@@ -195,14 +196,18 @@ as its own defect rather than as ordinary contention. A plugin can still defeat 
 `EcsHandle` clone and calling raw `.read()` from the worker — which requires the escape hatch,
 since the sanctioned surface never hands one out. On `wasm32` both functions run inline.
 
-**Client, WASM**: no scheduler import. A guest that wants "in 40 ticks" counts `on-tick` calls;
-that is expressible but has no cancellation handle and no way to run work off the tick. The async
-half is a ceiling for a single-threaded guest, and should be documented as one rather than filed.
+**Client, WASM**: the capability-gated scheduler import creates one-shot and repeating callbacks,
+returns guest-local opaque cancellation handles, and passes a guest-defined token back through
+`on-task`. Delay zero and one both mean the next host tick, repeat period zero is clamped to one, and
+same-tick callbacks run in handle order. The async half remains a ceiling for a single-threaded guest.
 
-**Server**: nothing. `run_tick_loop` and `run_tick_loop_with_weather` are `pub(crate)`, take fixed
-concrete arguments, and register no callbacks. A plugin embedding the server that wants per-tick
-work spawns its own thread and races the tick loop for the mutexes above — which is the shape that
-produces the unguarded deadlocks.
+**Server**: a native embedder can install a system in `GameTick` through
+`ServerApp::bootstrap_with` and pass that application to
+`IntegratedServer::open_in_memory_with_mobs_and_server_app`; the tick task owns the extracted
+`World` and runs the system in deterministic schedule order. Persistent embedders and the
+standalone binary use the corresponding application-injection leaf and the same primary tick path.
+This provides a safe per-tick callback without another thread, but it is not delayed/repeating task
+scheduling: no server resource issues handles, tracks deadlines, or supports cancellation.
 
 ### Commands and permissions
 
@@ -423,11 +428,12 @@ and whether it is honest about its cost.
 ## Configuration
 
 None of its own. The native tier is `App::add_plugins` with no manifest; the WASM tier is
-`PluginHost::new(policy)` with `default_policy()` granting everything except `fs:read`, plus
+`PluginHost::new(policy)` with `default_policy()` withholding `fs:read` and `schedule:tasks`, plus
 `with_fuel`, `with_memory_limit`, `with_filesystem_root`, and a per-plugin `plugin.toml`; the server
 is `LanConfig` (`commands`, `plugin_channels`, `resource_packs`, access lists) and the constructor
 arguments of `IntegratedServer::open_*`. `lodestone-dedicated-server` passes
-`CommandDispatch::none()` and exposes no plugin option.
+`CommandDispatch::none()`. Native server registration is a compile-time builder choice in the
+standalone binary; no property or runtime directory chooses native plugins.
 
 ## Dependencies
 
@@ -476,9 +482,9 @@ plan, not a sprint.
    outcome poll. Client, WASM. Medium.
 9. **WASM: a verdict export**, called synchronously at the six ask sites, with its own fuel budget.
    Client, WASM. Medium; this is what makes a protection plugin expressible on the sandboxed tier.
-10. **WASM: commands, a tick scheduler with cancellation, `fs:write`, `Monitor` enforcement, and
-    registering the host in the shipped shell** (`load_directory` from a plugins directory).
-    Client, WASM. Medium, four small pieces.
+10. **WASM: commands, `fs:write`, and `Monitor` enforcement.** Delayed/repeating scheduling with
+    cancellation and native-windowed shell discovery are shipped. Client, WASM. Medium, three small
+    pieces.
 11. **Both: durable per-entity/per-chunk plugin data**, one opaque blob per namespaced key,
     through the world save on the server and the plugin data directory on the client. Both sides,
     native (WASM follows via `fs:write`). Medium; the server half needs the save path to carry an

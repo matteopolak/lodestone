@@ -13,4 +13,24 @@ public class Level {
     public String getBlockName(int x, int y, int z) {
         return "REAL:" + x + "," + y + "," + z;
     }
+
+    public int nativeBlockStateId(int x, int y, int z) {
+        return x * 10000 + y * 100 + z;
+    }
+
+    public long nativeAcquireBlockHandle(int x, int y, int z) {
+        return -1L;
+    }
+
+    public String nativeReadBlockHandle(long handle) {
+        return "REAL-HANDLE:" + handle;
+    }
+
+    public int nativeReleaseBlockHandle(long handle) {
+        return 0;
+    }
+
+    public static String nativeReentrantDepth(int remaining) {
+        return "REAL-REENTRANT:" + remaining;
+    }
 }

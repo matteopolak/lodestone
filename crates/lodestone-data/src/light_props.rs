@@ -65,32 +65,59 @@
 //! encoder) and any host wiring `lodestone_world::LightProperties`.
 
 use crate::generated_light_props as table;
+use crate::block_states::StateId;
 
 pub use table::STATE_COUNT;
 
-/// The `(dampening, emission)` pair for block-state `id`, or `None` if `id` is
-/// not in `0..`[`STATE_COUNT`].
+/// The `(dampening, emission)` pair for a validated block-state id.
 ///
-/// Zero-heap: reads straight from rodata. O(1) indexing, no search.
+/// `StateId` proves the index is in the complete generated table, so this
+/// lookup is total. Zero-heap: reads straight from rodata. O(1) indexing, no
+/// search.
 #[must_use]
-pub fn light_props(id: u32) -> Option<(u8, u8)> {
-    let &entry = table::STATE_ENTRY.get(id as usize)?;
-    Some(table::ENTRIES[entry as usize])
+pub fn light_props(id: StateId) -> (u8, u8) {
+    let entry = table::STATE_ENTRY[id.raw() as usize];
+    table::ENTRIES[entry as usize]
 }
 
-/// Vanilla's own "get light dampening" accessor for `id` — the **raw** dampening,
-/// `0..=15`, before the engine's `max(1, ·)`. `0` for an id out of range, which
-/// is the transparent (and therefore harmless) default; use
-/// [`light_props`] when the distinction between "transparent" and "unknown id"
-/// matters.
+/// The raw-id boundary for callers that have not validated a block-state id.
+///
+/// New code should construct [`StateId`] at the wire/data boundary and call
+/// [`light_props`] so the complete table's lookup remains total.
+#[must_use]
+fn light_props_raw(id: u32) -> Option<(u8, u8)> {
+    StateId::new(id).map(light_props)
+}
+
+/// Vanilla's own "get light dampening" accessor for a raw state id — the
+/// **raw** dampening, `0..=15`, before the engine's `max(1, ·)`. `0` for an id
+/// out of range, which is the transparent (and therefore harmless) default.
+/// New callers with a validated [`StateId`] should use [`light_props`] directly.
 #[must_use]
 pub fn dampening(id: u32) -> u8 {
-    light_props(id).map_or(0, |(dampening, _)| dampening)
+    light_props_raw(id).map_or(0, |(dampening, _)| dampening)
 }
 
-/// Vanilla's own "get light emission" accessor for `id`, `0..=15`. `0` for an id out
-/// of range — never invent light for an id we cannot resolve.
+/// Vanilla's own "get light emission" accessor for a raw state id, `0..=15`.
+/// `0` for an id out of range — never invent light for an id we cannot resolve.
 #[must_use]
 pub fn emission(id: u32) -> u8 {
-    light_props(id).map_or(0, |(_, emission)| emission)
+    light_props_raw(id).map_or(0, |(_, emission)| emission)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_states::StateId;
+
+    #[test]
+    fn state_id_boundary_rejects_invalid_raw_ids_and_lookup_is_total() {
+        assert!(StateId::new(STATE_COUNT).is_none());
+        assert!(StateId::new(u32::MAX).is_none());
+
+        let valid = StateId::new(0).expect("state zero is in the generated table");
+        let (dampening, emission) = light_props(valid);
+        assert!(dampening <= 15);
+        assert!(emission <= 15);
+    }
 }

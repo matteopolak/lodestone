@@ -2854,10 +2854,13 @@ dependencies = [
 name = "lodestone-dedicated-server"
 version = "0.1.0"
 dependencies = [
+ "bevy_app",
+ "bevy_ecs",
  "lodestone-auth",
  "lodestone-registry",
  "lodestone-server",
  "reqwest",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2917,6 +2920,7 @@ dependencies = [
 name = "lodestone-fuzz"
 version = "0.1.0"
 dependencies = [
+ "lodestone-client",
  "lodestone-core",
  "lodestone-model",
  "lodestone-net",
@@ -2931,6 +2935,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "tokio",
  "uuid",
 ]
 
@@ -3242,6 +3247,7 @@ dependencies = [
  "lodestone-sound",
  "lodestone-testsupport",
  "lodestone-time",
+ "lodestone-wasm-host",
  "lodestone-world",
  "lodestone-worldgen-core",
  "memory-stats",
@@ -3335,12 +3341,15 @@ dependencies = [
 name = "lodestone-v1-13"
 version = "0.1.0"
 dependencies = [
+ "lodestone-client",
  "lodestone-core",
  "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
  "lodestone-protocol-common",
+ "lodestone-registry",
+ "lodestone-server",
  "lodestone-testsupport",
  "lodestone-world",
  "serde_json",
@@ -3445,12 +3454,15 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "lodestone-canonical",
+ "lodestone-client",
  "lodestone-core",
  "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
  "lodestone-protocol-common",
+ "lodestone-registry",
+ "lodestone-server",
  "lodestone-testsupport",
  "lodestone-world",
  "serde_json",
@@ -3464,12 +3476,15 @@ name = "lodestone-v1-8"
 version = "0.1.0"
 dependencies = [
  "lodestone-canonical",
+ "lodestone-client",
  "lodestone-core",
  "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
  "lodestone-protocol-common",
+ "lodestone-registry",
+ "lodestone-server",
  "lodestone-testsupport",
  "lodestone-world",
  "serde_json",
@@ -3483,12 +3498,15 @@ name = "lodestone-v1-9"
 version = "0.1.0"
 dependencies = [
  "lodestone-canonical",
+ "lodestone-client",
  "lodestone-core",
  "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
  "lodestone-protocol-common",
+ "lodestone-registry",
+ "lodestone-server",
  "lodestone-testsupport",
  "lodestone-world",
  "serde_json",

@@ -993,7 +993,9 @@ impl VersionAdapter for V770Adapter {
         // here so a version-free consumer never names v26-2 or the data crate
         // directly. `requires_correct_tool` is the *block's* requirement, not
         // the player's tool match — see `BlockHardness`.
-        lodestone_data::hardness::hardness(state_id).map(|entry| BlockHardness {
+        let state_id = lodestone_data::block_states::StateId::new(state_id)?;
+        let entry = lodestone_data::hardness::hardness(state_id);
+        Some(BlockHardness {
             hardness: entry.hardness,
             requires_correct_tool: entry.requires_correct_tool,
         })

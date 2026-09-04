@@ -85,6 +85,11 @@ v26-2 = ["dep:lodestone-v26-2"]
 rcon-oracle = ["dep:lodestone-testsupport"]
 
 [dev-dependencies]
+# The client-state differential fixture drives the public ClientBuilder through
+# an in-memory transport; these stay test-only so fuzz targets keep their
+# decoder-focused dependency surface.
+lodestone-client = { workspace = true }
+tokio = { workspace = true }
 # Property-based fuzzing. This comment used to justify proptest over
 # `cargo-fuzz` by saying "the toolchain here is 1.95.0 and libFuzzer needs
 # nightly" — that is wrong: `rust-toolchain.toml` pins a nightly channel. The

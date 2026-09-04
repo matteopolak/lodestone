@@ -111,7 +111,9 @@ fn seam_agrees_with_the_version_table_for_every_state() {
     // `impl` would pass the spot checks above but fail here.
     let adapter = seam();
     for id in 0..hardness::STATE_COUNT {
-        let direct = hardness::hardness(id).expect("table resolves");
+        let direct = hardness::hardness(
+            lodestone_data::block_states::StateId::new(id).expect("state id is in range"),
+        );
         let through_seam = adapter.block_hardness(id).expect("seam resolves");
         assert_eq!(
             (through_seam.hardness.to_bits(), through_seam.requires_correct_tool),

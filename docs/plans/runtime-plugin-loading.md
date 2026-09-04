@@ -103,8 +103,9 @@ matters and is argued in the compiled-in section below.
 resource that it populates in `Plugin::build` (root literal, argument tree via the existing
 `lodestone-command` crate, permission node), with chat input routed registry-first before the `#`
 namespace falls through. The portable WASM surface does **not** yet expose command declaration or
-invocation. Its WIT world currently exports only `init` (plugin metadata) and `on-tick` (subscribed
-events in, allowed actions out). Adding portable commands requires a versioned WIT declaration
+invocation. Its WIT world exports `init` (plugin metadata), `on-tick` (subscribed events in, allowed
+actions out), and `on-task` for capability-gated delayed and repeating callbacks. Adding portable
+commands requires a versioned WIT declaration
 shape, a command-invoked event, and host-side routing; movement intents also remain outside the
 shipped action vocabulary. The native autopilot registers directly against `CommandRegistry` today.
 
@@ -178,8 +179,8 @@ Stated plainly, checked against the five clauses, so nobody discovers these at i
 5. **Touch the two privileged internals** — which native plugins cannot touch either, so this row
    costs nothing.
 
-Clause check: the shipped ABI is the current, narrow vocabulary: `init`, `on-tick`, and three
-event variants plus three action variants. It preserves one conductor as the `ActionQueue` writer but does
+Clause check: the shipped ABI is the current, narrow vocabulary: `init`, `on-tick`, `on-task`, and
+three event variants plus three action variants. It preserves one conductor as the `ActionQueue` writer but does
 not yet carry intent installs/removals, outcomes such as `PlaceOutcome`, or component mirroring.
 Those operations require a future, versioned ABI extension with paired install/remove calls,
 outcome delivery, and host-side component mapping. That extension must preserve the existing
@@ -331,14 +332,14 @@ autopilot, built compiled-in and runtime-loaded, as the dual-path proof. Half ri
 | concern | durable decision |
 |---|---|
 | Runtime host | `lodestone-wasm-host` uses Wasmtime 47 and the component model to load a component or encode a core module, then invokes it through a WIT world vendored in-repo. |
-| Capability ABI | The host supplies capability-gated events to each guest's `on-tick` callback and accepts its returned actions through one conductor, preserving `ActionQueue` as the single writer. |
+| Capability ABI | The host supplies capability-gated events to each guest's `on-tick` callback, dispatches capability-gated scheduled work through `on-task`, and accepts both callbacks' returned actions through one conductor, preserving `ActionQueue` as the single writer. |
 | Manifest | TOML expresses capability policy, the targeted WIT world version, and the `EventPriority` tier used by the conductor. |
 | Sandbox and preemption | The `Linker` omits ungranted imports; fuel interrupts an endlessly looping guest and marks it permanently failed. Epoch preemption requires a watchdog and is not enabled. |
 | Native load order | Native plugins retain their existing ordering rules. Runtime plugins load in manifest priority-then-name order; dependency declarations remain a future extension. |
 | Failure isolation | Trusted native-plugin panics remain fatal. The wasm tier traps, unloads, and reports failing guests while keeping the process alive. |
 | Hot reload | Native hot reload is rejected because Rust has no stable ABI and `TypeId` identity breaks across builds. WASM component replacement and state carry-over are not implemented. |
 | ABI versioning | The WIT world version is machine-checked alongside the ordering-anchor enum policy. |
-| Plugin commands | Native plugins use `CommandRegistry`. Portable command declaration and invocation require a future WIT extension and host routing; the current `init`/`on-tick` ABI does not expose them. |
+| Plugin commands | Native plugins use `CommandRegistry`. Portable command declaration and invocation require a future WIT extension and host routing; the current callbacks do not expose them. |
 
 Server-side: the wasm host lands **client-first**. The client `World` has the full surface today
 (bus, intents, outcomes, `ActionQueue`); the server has no plugin registration point at all —
@@ -359,12 +360,13 @@ no plugin loaded through it" is its textbook form.
   renderer-free baseline; `Sim::client_app()` extends it with shell-coupled plugins; `Sim::from_app`
   and `run_with_app` preserve a caller's plugin through real window construction. The headless graph
   remains free of `wgpu` and `winit`; use `scripts/wasm-size.sh` for the current browser-size result.
-- **M1 — runtime host: implemented, with application wiring remaining.** `lodestone-wasm-host` scans
+- **M1 — runtime host and native-windowed application wiring: implemented.** `lodestone-wasm-host` scans
   plugin directories, parses manifests, loads a component or core module, gates capabilities, drives
   `on-tick`, and routes returned actions through the real `ActionQueue`. Its integration tests use
-  the real `lodestone_app::client_app()` and include absent-plugin and denied-capability controls.
-  No shipped client currently calls `load_directory`, so selecting and loading a plugin directory is
-  the remaining on-screen integration step.
+  the real shell `Sim` and include absent-plugin and denied-capability controls. The shipped native
+  windowed runner installs the conductor before `WindowApp` adopts the `App` and scans cwd-relative
+  `plugins/`; the directory is optional, and a caller-supplied `WasmHostPlugin` remains authoritative.
+  Browser loading is excluded because the Wasmtime host cannot compile into a wasm32 client.
 - **M2 — the batched query surface + the cost measurements** (the four measurements above). A
   measurement that materially conflicts with the intended batching model is a design signal, not a
   tuning problem.

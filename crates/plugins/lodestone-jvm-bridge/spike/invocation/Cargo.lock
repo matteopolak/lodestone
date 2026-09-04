@@ -757,6 +757,7 @@ version = "0.1.0"
 dependencies = [
  "lodestone-core",
  "lodestone-world",
+ "smol_str",
  "thiserror",
  "uuid",
 ]

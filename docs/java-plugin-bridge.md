@@ -23,7 +23,7 @@ estimate turns on — the **NMS reference census**, run against a real Paper jar
 
 The bridge itself is not built. What is built is `crates/plugins/lodestone-jvm-bridge` (the
 JVM-independent host machinery), `crates/lodestone-nms-census` (the scanner), an executed
-classload-interception spike, and a separate JNI-invocation spike that drives one native method
+classload-interception spike, and a separate JNI-invocation spike that drives native methods
 through the real `WorldPort`/`PortServicer` pair.
 
 ---
@@ -369,13 +369,13 @@ actually had, and needs no carve-out in a shared manifest.
 - **Async plugin threads.** Bukkit's scheduler has async tasks and JNI requires
   `AttachCurrentThread`. `WorldPort` is `Clone + Send` so each attached thread can hold its own, and
   the port's semantics are already thread-safe. The invocation spike proves that a Rust-created
-  thread can attach, call Java, and receive a Java-to-Rust callback. It uses a permanent attachment;
-  the worker terminates immediately after the call and JNI releases the attachment at thread exit.
-  It does not prove scoped detachment while a worker remains alive. Still unproven is the lifecycle
-  of arbitrary plugin-created async threads, and what happens to an outstanding request when one
-  dies mid-call.
-- **Reentrancy in the other direction** — Rust calling Java calling Rust calling Java. The port
-  bounds Rust-side lock acquisition, but nothing yet bounds *stack depth* across the boundary.
+  thread can attach, call Java, and receive a Java-to-Rust callback. Its composed intercepted-shim
+  arm uses a scoped attachment and checks the JNI attachment count returns to its pre-call value;
+  arbitrary plugin-created async threads and the fate of an outstanding request when one dies
+  mid-call remain unproven.
+- **Reentrancy in the other direction** — Rust calling Java calling Rust calling Java. The composed
+  spike now enforces a finite depth budget for this cycle and throws a bounded Java exception when
+  it is exceeded; production host wiring still needs to adopt the same policy.
 - **Ordering guarantees.** Bukkit promises handlers run in listener-priority order on the main
   thread. Servicing a port from the tick thread preserves ordering per handler; concurrent handlers
   on separate threads do not have a defined order between them, and Bukkit's own semantics for that
@@ -465,6 +465,25 @@ This is a mechanism test using a stand-in plugin class. It does not start Paper,
 `lodestone-server`, exercise global references, prove nested Java/Rust reentrancy bounds, or measure
 production marshalling cost. Its result is narrower: invocation, registration, thread attachment,
 the port hand-off, and loud error translation all work together in one process.
+
+### 4.2 Composed intercepted-shim invocation — hermetic fixture
+
+`spike/invocation/src/bin/intercepted.rs` composes the two mechanisms without importing any third-party
+bytecode. It compiles the existing stand-in class pair and the existing user-supplied-style `Caller`
+once, then loads `Caller` through a platform-parented loader first with the real directory and then with
+the shim directory. The harness invokes `describe` before native registration and requires the independent
+`SHIM:11,1,4` result, so a native callback cannot mask a wrong class selection. The control must answer
+`REAL:11,1,4`; the shim's registered
+`nativeBlockName(int,int,int)` must answer `RUST:345` after its request crosses `WorldPort` to a separate
+servicer thread. The same shim registers `nativeBlockStateId(int,int,int)` with the primitive `(III)I`
+descriptor; the plugin calls it independently and requires `NATIVE-ID:345`, proving multi-method
+registration and integer return marshalling through the same port rather than only string conversion.
+
+The composed runner repeats the dropped-servicer, silent-servicer, unregistered-native, and callback-panic
+arms, each with a 150 ms port deadline and a 15 second process bound. It uses scoped JNI attachment and
+checks the JNI attachment counter returns to its pre-call value, proving detach as well as attach. The
+fixture is exercised by `spike/invocation/run.sh`; `tests/invocation_spike.rs` is an ignored live gate
+because it requires the checksum-pinned container runtime rather than the ordinary Rust test environment.
 
 ---
 
@@ -556,6 +575,20 @@ Three details that are decisions rather than implementation:
 
 Still open: JNI **global refs** for the Java-side objects, and the `DeleteGlobalRef` discipline that
 pairs with `release()`. That needs a JVM to develop against.
+
+The composed fixture now exercises the handle boundary without claiming to close that global-ref
+work. A Java caller obtains an opaque `jlong` for block position `(11,1,4)`, retains it across
+separate `WorldPort` service turns, and reads `BLOCK:11,1,4`. A negative control flips the generation
+bit and must report `STALE-HANDLE:the referenced object no longer exists`; releasing the original
+handle then makes the same read report the same bounded stale result. The registry performs the
+validation and invalidation on the Rust service side, so slot reuse cannot make the old Java-held
+value address a later object. The live runner asserts the complete
+`HANDLE-LIFETIME:live=... forged=... released=1 after=...` line.
+
+The same composed caller exercises recursive Java-to-Rust-to-Java callbacks below and above the
+budget. Depth `2` returns `REENTRANT:OK:3`; depth `4` attempts one more callback and receives
+`RuntimeException:Rust error: reentrant callback depth limit 4 exceeded`. A thread-local guard restores its
+counter while unwinding, so the over-limit control cannot poison later callbacks.
 
 ---
 

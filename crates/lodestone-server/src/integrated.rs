@@ -1494,6 +1494,47 @@ impl IntegratedServer {
             // in-memory-only, same as everything else this constructor opens.
             None,
             CommandDispatch::none(),
+            crate::ecs::ServerApp::bootstrap(),
+        )
+    }
+
+    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs) with a
+    /// caller-configured native server application.
+    ///
+    /// The supplied application's `World` becomes the primary world owned by
+    /// the real tick task. Build it with [`crate::ecs::ServerApp::bootstrap_with`]
+    /// so [`crate::ecs::ServerCorePlugin`] and [`crate::ecs::ServerBoot`] keep
+    /// their normal lifecycle.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_in_memory_with_mobs_and_server_app<P, S>(
+        protocol: P,
+        source: S,
+        mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
+        mob_center: (i32, i32),
+        mob_count: usize,
+        view_radius: i32,
+        server_app: crate::ecs::ServerApp,
+    ) -> (Self, DuplexStream)
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
+        Self::open_in_memory_with_mobs_using(
+            protocol,
+            source,
+            mob_area,
+            mob_center,
+            mob_count,
+            view_radius,
+            BlockEntityHandle::default(),
+            crate::region_source::ScheduledTickHandle::default(),
+            None,
+            crate::portal::PortalIndex::new(),
+            None,
+            CommandDispatch::none(),
+            server_app,
         )
     }
 
@@ -1531,6 +1572,7 @@ impl IntegratedServer {
             crate::portal::PortalIndex::new(),
             None,
             commands,
+            crate::ecs::ServerApp::bootstrap(),
         )
     }
 
@@ -1598,6 +1640,10 @@ impl IntegratedServer {
         // The local singleplayer command host. `open_to_lan` keeps its own
         // configured dispatch policy, so this value never reaches TCP peers.
         commands: CommandDispatch,
+        // Constructed synchronously by the caller. Keeping `App` outside the
+        // spawned task permits native plugin registration while the extracted
+        // `World` remains the only value that crosses the `Send` boundary.
+        server_app: crate::ecs::ServerApp,
     ) -> (Self, DuplexStream)
     where
         P: ServerProtocol + 'static,
@@ -2051,19 +2097,12 @@ impl IntegratedServer {
         });
 
         let clock = Arc::new(TickClock::new());
-        // Build this server's own `bevy_ecs::World` here,
-        // synchronously, before the tick task spawns — the same reason
-        // `mob_handle` above is built here rather than inside the future, and
-        // it is also what makes the startup gate deterministic (no polling: by
-        // the time this constructor returns, `ServerBoot` has already run).
-        //
         // `into_world()` rather than keeping the `App`: `bevy_app::App` is
         // **not** `Send` (its `runner` field is a `Box<dyn FnOnce(App) ->
         // AppExit>` with no `Send` bound), so it cannot cross `spawn`. `World`
         // is, and it carries the `Schedules` resource with it. See
         // `crate::ecs`'s module doc — the primary tick-loop variant owns a
         // `World`, not an `App`.
-        let server_app = crate::ecs::ServerApp::bootstrap();
         let server_tick = server_app.witness();
         let server_world = server_app.into_world();
         // Cloned out here rather than inside the `async move` below: an
@@ -2237,6 +2276,11 @@ impl IntegratedServer {
     /// when they exist, every mutation is retained, and the world is written
     /// back on [`shutdown`](Self::shutdown) and on an autosave timer.
     ///
+    /// `server_app` must come from [`crate::ecs::ServerApp::bootstrap_with`]
+    /// when the host has native plugins. Its extracted `World` becomes the
+    /// persistent primary world's one scheduled application; no second
+    /// application is created beside it.
+    ///
     /// # How it composes
     ///
     /// This wraps `source` in a [`crate::region_source::RegionChunkSource`] and
@@ -2275,7 +2319,7 @@ impl IntegratedServer {
     /// worth playing" argument the entity restore already makes.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::too_many_arguments)]
-    pub fn open_persistent_with_mobs_and_commands<P, S>(
+    pub fn open_persistent_with_mobs_and_commands_and_server_app<P, S>(
         protocol: P,
         world_dir: &std::path::Path,
         source: S,
@@ -2287,6 +2331,7 @@ impl IntegratedServer {
         view_radius: i32,
         autosave: std::time::Duration,
         commands: CommandDispatch,
+        server_app: crate::ecs::ServerApp,
     ) -> Result<
         (
             Self,
@@ -2399,6 +2444,7 @@ impl IntegratedServer {
             // `region/` `persistent` above is already rooted at.
             Some(world_dir.to_path_buf()),
             commands,
+            server_app,
         );
 
         let autosave_handle = save.clone();
@@ -2524,6 +2570,54 @@ impl IntegratedServer {
         // handle.
         server.autosave_task = Some(autosave_task);
         Ok((server, client_end, world))
+    }
+
+    /// Opens a persistent world with a host command dispatcher and the
+    /// default server application.
+    ///
+    /// Native embedders that register server plugins should call
+    /// [`Self::open_persistent_with_mobs_and_commands_and_server_app`]
+    /// so the configured application's `World` reaches the primary tick task.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_persistent_with_mobs_and_commands<P, S>(
+        protocol: P,
+        world_dir: &std::path::Path,
+        source: S,
+        min_y: i32,
+        height: i32,
+        mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
+        mob_center: (i32, i32),
+        mob_count: usize,
+        view_radius: i32,
+        autosave: std::time::Duration,
+        commands: CommandDispatch,
+    ) -> Result<
+        (
+            Self,
+            DuplexStream,
+            crate::region_source::RegionChunkSource<S>,
+        ),
+        crate::region_source::Error,
+    >
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
+        Self::open_persistent_with_mobs_and_commands_and_server_app(
+            protocol,
+            world_dir,
+            source,
+            min_y,
+            height,
+            mob_area,
+            mob_center,
+            mob_count,
+            view_radius,
+            autosave,
+            commands,
+            crate::ecs::ServerApp::bootstrap(),
+        )
     }
 
     /// [`open_persistent_with_mobs_and_commands`](Self::open_persistent_with_mobs_and_commands)

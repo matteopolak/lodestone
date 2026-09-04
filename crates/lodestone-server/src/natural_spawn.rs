@@ -574,7 +574,8 @@ impl PaletteProps {
                 .iter()
                 .map(|name| {
                     block_state_id_or_default(name)
-                        .and_then(lodestone_data::light_props::light_props)
+                        .and_then(lodestone_data::block_states::StateId::new)
+                        .map(lodestone_data::light_props::light_props)
                         // An unresolvable state darkens and occludes, never
                         // brightens — see `light_props`' own module doc.
                         .unwrap_or((15, 0))
@@ -1272,7 +1273,8 @@ fn is_valid_spawn_surface(state: &str) -> bool {
         return false;
     }
     block_state_id_or_default(state)
-        .and_then(lodestone_data::light_props::light_props)
+        .and_then(lodestone_data::block_states::StateId::new)
+        .map(lodestone_data::light_props::light_props)
         .is_none_or(|(_, emission)| emission < 14)
 }
 

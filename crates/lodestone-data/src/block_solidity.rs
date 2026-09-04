@@ -53,28 +53,48 @@
 //! 32366]` would cost 8× that for the same information.
 
 use crate::generated_block_solidity as table;
+use crate::block_states::StateId;
 
 pub use table::STATE_COUNT;
 
-/// Reads bit `id` out of a packed little-endian-within-byte bitset.
-fn bit(bits: &[u8], id: u32) -> Option<bool> {
-    if id >= STATE_COUNT {
-        return None;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_id_boundary_rejects_invalid_raw_ids_and_lookup_is_total() {
+        assert!(StateId::new(STATE_COUNT).is_none());
+        assert!(StateId::new(u32::MAX).is_none());
+
+        let valid = StateId::new(0).expect("state zero is in the generated table");
+        assert!(!legacy_solid(valid));
     }
-    let byte = *bits.get((id / 8) as usize)?;
-    Some(byte & (1u8 << (id % 8)) != 0)
 }
 
-/// Vanilla's own "is solid" accessor — the raw cached "legacy solid" flag — for
-/// block-state `id`, or `None` if `id` is not in `0..`[`STATE_COUNT`].
+/// Reads a validated state bit out of a packed little-endian-within-byte bitset.
+fn bit(bits: &[u8], id: StateId) -> bool {
+    let raw = id.raw();
+    let byte = bits[(raw / 8) as usize];
+    byte & (1u8 << (raw % 8)) != 0
+}
+
+/// The complete-table "is solid" flag for a validated block-state id.
 ///
 /// Prefer [`blocks_motion`] for physics. This is exposed because "is solid" has
 /// several vanilla consumers that are *not* motion blocking (replaceability
 /// checks, a can-be-replaced-by-fluid check), and because it is the value the drift
 /// guard compares a shape-derived answer against.
 #[must_use]
-pub fn legacy_solid(id: u32) -> Option<bool> {
+pub fn legacy_solid(id: StateId) -> bool {
     bit(&table::LEGACY_SOLID, id)
+}
+
+/// Raw-id compatibility boundary for callers that have not validated a
+/// block-state id. New code should construct [`StateId`] and call
+/// [`legacy_solid`] so this complete table is accessed with a total lookup.
+#[must_use]
+pub fn legacy_solid_raw(id: u32) -> Option<bool> {
+    StateId::new(id).map(legacy_solid)
 }
 
 /// Vanilla's own "blocks motion" accessor for block-state `id`, or `None` if `id`
@@ -86,5 +106,5 @@ pub fn legacy_solid(id: u32) -> Option<bool> {
 /// single-state blocks. Do not re-apply the exclusions on top.
 #[must_use]
 pub fn blocks_motion(id: u32) -> Option<bool> {
-    bit(&table::BLOCKS_MOTION, id)
+    StateId::new(id).map(|id| bit(&table::BLOCKS_MOTION, id))
 }

@@ -9,7 +9,7 @@
 //!
 //! | kind | example | enforced by | what a lying manifest gets |
 //! |---|---|---|---|
-//! | **import** | [`Capability::FsRead`] | the wasmtime `Linker` — the interface is simply absent | instantiation fails: *"component imports instance `lodestone:plugin/filesystem@0.1.0`, but a matching implementation was not found in the linker"* |
+//! | **import** | [`Capability::FsRead`] | the wasmtime `Linker` — the interface is simply absent | instantiation fails: *"component imports instance `lodestone:plugin/filesystem@0.2.0`, but a matching implementation was not found in the linker"* |
 //! | **data-flow** | [`Capability::ObserveChat`], [`Capability::ActChat`] | the host's own conductor, in Rust | the events are never lifted, or the actions are counted and dropped |
 //!
 //! An **import** capability is structurally unforgeable: the guest cannot call a
@@ -74,6 +74,11 @@ pub enum Capability {
     /// **Never in [`CapabilitySet::default_policy`].** This is the import-column
     /// capability the denial gate is built around; see this module's table.
     FsRead,
+    /// Schedule delayed or repeating guest callbacks through the host tick.
+    ///
+    /// **Never in [`CapabilitySet::default_policy`].** The scheduler is exposed
+    /// as an import so a guest that does not declare it fails to instantiate.
+    ScheduleTasks,
 }
 
 impl Capability {
@@ -89,6 +94,7 @@ impl Capability {
         Self::ActChat,
         Self::ActInteract,
         Self::FsRead,
+        Self::ScheduleTasks,
     ];
 
     /// The name that appears in a `plugin.toml`.
@@ -102,6 +108,7 @@ impl Capability {
             Self::ActChat => "act:chat",
             Self::ActInteract => "act:interact",
             Self::FsRead => "fs:read",
+            Self::ScheduleTasks => "schedule:tasks",
         }
     }
 
@@ -123,7 +130,7 @@ impl Capability {
     #[must_use]
     pub const fn is_import(self) -> bool {
         match self {
-            Self::Log | Self::FsRead => true,
+            Self::Log | Self::FsRead | Self::ScheduleTasks => true,
             Self::ObserveChat
             | Self::ObserveHealth
             | Self::ObserveBlocks
@@ -154,7 +161,7 @@ impl CapabilitySet {
     }
 
     /// What the host grants unless an operator says otherwise: everything except
-    /// [`Capability::FsRead`].
+    /// [`Capability::FsRead`] and [`Capability::ScheduleTasks`].
     ///
     /// The asymmetry is the whole policy, stated in one place. Observing chat and
     /// pushing a chat action are things a plugin is *for*; reading the user's
@@ -279,9 +286,13 @@ mod tests {
     /// The policy asymmetry, asserted rather than described: the default grants
     /// the observe/act vocabulary and withholds filesystem access.
     #[test]
-    fn the_default_policy_withholds_filesystem_access() {
+    fn the_default_policy_withholds_import_capabilities() {
         let policy = CapabilitySet::default_policy();
         assert!(!policy.contains(Capability::FsRead), "fs:read must not be granted by default");
+        assert!(
+            !policy.contains(Capability::ScheduleTasks),
+            "schedule:tasks must not be granted by default"
+        );
         assert!(policy.contains(Capability::ObserveChat));
         assert!(policy.contains(Capability::ActChat));
         assert!(policy.contains(Capability::Log));
@@ -290,6 +301,7 @@ mod tests {
         // grant it, so "absent" above is a decision and not an artefact of
         // `contains` always answering false.
         assert!(CapabilitySet::permissive().contains(Capability::FsRead));
+        assert!(CapabilitySet::permissive().contains(Capability::ScheduleTasks));
     }
 
     /// `missing_from` reports every shortfall, not just the first.
@@ -309,8 +321,9 @@ mod tests {
     /// The import/data-flow split is a fact about each variant, and the
     /// dangerous one is in the strong column.
     #[test]
-    fn filesystem_access_is_an_import_capability() {
+    fn dangerous_host_services_are_import_capabilities() {
         assert!(Capability::FsRead.is_import());
+        assert!(Capability::ScheduleTasks.is_import());
         assert!(!Capability::ObserveChat.is_import());
         assert!(!Capability::ActChat.is_import());
     }

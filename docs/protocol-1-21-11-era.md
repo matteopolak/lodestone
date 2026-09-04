@@ -6,8 +6,8 @@
 joins Minecraft **1.21.11** — protocol **774** — with one adapter, one
 generated packet-id table, one generated block-state table, one generated
 entity registry, and this era's own chunk, velocity, chat and tab-list codecs.
-It is the joining direction only: `ServerProtocol` is implemented by the 26.2
-family alone, so 774 is a version we can play on and not one we can host.
+It is the joining direction only, so 774 is a version we can play on and not
+one we can host.
 
 The protocol number comes from two independent sources that agree. The jar's
 own `version.json` inside `.cache/mc/1.21.11/server.jar` reports

@@ -22,14 +22,17 @@ use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 
 use lodestone_server::AccessHandle;
+use lodestone_server::ChunkSource;
 use lodestone_server::CommandDispatch;
 use lodestone_server::IntegratedServer;
 use lodestone_server::OnlineModeConfig;
 use lodestone_server::PublishConfig;
 use lodestone_server::RconConfig;
 use lodestone_server::ServerProperties;
+use lodestone_server::ServerProtocol;
 use lodestone_server::WorldType;
 use lodestone_server::dimension::Dimension;
+use lodestone_server::ecs::ServerApp;
 use lodestone_server::{eula, parse_seed};
 
 /// How often the world autosaves while running. Vanilla has no
@@ -50,6 +53,57 @@ const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 /// inputs into `0..=MAX_SIM_RADIUS`: values already in that range are
 /// preserved, and negative values become 0.
 const MAX_SIM_RADIUS: i32 = 2;
+
+/// Builds the application whose `World` the dedicated server's primary tick
+/// task owns. Compiled-in native server plugins are registered here with
+/// [`ServerApp::bootstrap_with`]; the default binary deliberately installs no
+/// optional plugin.
+fn dedicated_server_app() -> ServerApp {
+    ServerApp::bootstrap()
+}
+
+/// Opens the persistent world through the same application-injection leaf an
+/// embedding host uses. Keeping this orchestration in one function makes the
+/// binary's registration point independently testable without binding its TCP
+/// listener or accepting the EULA.
+#[allow(clippy::too_many_arguments)]
+fn open_persistent_server<P, S>(
+    protocol: P,
+    world_dir: &std::path::Path,
+    source: S,
+    mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
+    mob_center: (i32, i32),
+    view_radius: i32,
+    server_app: ServerApp,
+) -> Result<
+    (
+        IntegratedServer,
+        tokio::io::DuplexStream,
+        lodestone_server::region_source::RegionChunkSource<S>,
+    ),
+    lodestone_server::region_source::Error,
+>
+where
+    P: ServerProtocol + 'static,
+    S: ChunkSource + 'static,
+{
+    IntegratedServer::open_persistent_with_mobs_and_commands_and_server_app(
+        protocol,
+        world_dir,
+        source,
+        Dimension::Overworld.min_y(),
+        Dimension::Overworld.height(),
+        mob_area,
+        mob_center,
+        // No demo-mob fixture ring. Real mob spawning is driven by the world
+        // tick independently of this development-only seed count.
+        0,
+        view_radius,
+        AUTOSAVE_INTERVAL,
+        CommandDispatch::none(),
+        server_app,
+    )
+}
 
 #[tokio::main]
 async fn main() {
@@ -152,20 +206,14 @@ async fn main() {
         "hosting protocol {protocol_version} ({:?})",
         lodestone_registry::compiled_server_families()
     );
-    let (mut server, client_end, _world) = match IntegratedServer::open_persistent_with_mobs(
+    let (mut server, client_end, _world) = match open_persistent_server(
         protocol,
         &world_dir,
         source,
-        Dimension::Overworld.min_y(),
-        Dimension::Overworld.height(),
         mob_area,
         mob_center,
-        0, // no demo-mob fixture ring — see `IntegratedServer::demo_mob_count`'s
-        // own doc for why that ring was always a development fixture, never
-        // real spawning; real mob spawning runs from the tick loop
-        // regardless of this argument.
         props.view_distance,
-        AUTOSAVE_INTERVAL,
+        dedicated_server_app(),
     ) {
         Ok(triple) => triple,
         Err(err) => {
@@ -385,7 +433,74 @@ fn sim_radius(simulation_distance: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use bevy_app::{App, Plugin};
+    use bevy_ecs::resource::Resource;
+    use bevy_ecs::schedule::IntoScheduleConfigs;
+    use bevy_ecs::system::Res;
+    use lodestone_server::ecs::{GameTick, ServerApp, TickSet};
+    use lodestone_server::{ChunkColumn, ChunkSource};
+
     use super::*;
+
+    struct AirWorld;
+
+    impl ChunkSource for AirWorld {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 16)
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.column(x.div_euclid(16), z.div_euclid(16))
+                .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+                .to_string()
+        }
+
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            self.column(x.div_euclid(16), z.div_euclid(16))
+                .biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
+                .to_string()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
+    #[derive(Resource, Clone)]
+    struct FixtureTickCount(Arc<AtomicU64>);
+
+    #[derive(Clone)]
+    struct CountingPlugin(Arc<AtomicU64>);
+
+    impl Plugin for CountingPlugin {
+        fn build(&self, app: &mut App) {
+            app.insert_resource(FixtureTickCount(Arc::clone(&self.0)));
+            app.add_systems(
+                GameTick,
+                (|count: Res<FixtureTickCount>| {
+                    count.0.fetch_add(1, Ordering::Relaxed);
+                })
+                .in_set(TickSet::Publish),
+            );
+        }
+    }
+
+    async fn wait_for_completed_ticks(server: &IntegratedServer, expected: u64) {
+        for _ in 0..100 {
+            if server
+                .tick_stats()
+                .is_some_and(|stats| stats.tick_count >= expected)
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!(
+            "persistent tick task did not complete {expected} ticks; completed {}",
+            server.tick_stats().map_or(0, |stats| stats.tick_count)
+        );
+    }
 
     #[test]
     fn level_type_mapping_matches_vanillas_real_identifiers() {
@@ -409,5 +524,83 @@ mod tests {
         assert_eq!(sim_radius(1), 1);
         assert_eq!(sim_radius(-5), 0);
         assert_eq!(sim_radius(1000), MAX_SIM_RADIUS);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dedicated_open_runs_a_native_plugin_on_the_persistent_primary_world() {
+        const TICKS: u64 = 4;
+
+        let temp = tempfile::tempdir().expect("temporary server world must be created");
+        let observed = Arc::new(AtomicU64::new(0));
+        let plugin_observed = Arc::clone(&observed);
+        let server_app = ServerApp::bootstrap_with(|app| {
+            app.add_plugins(CountingPlugin(plugin_observed));
+        });
+        let protocol = lodestone_registry::server_protocol_for_protocol(776)
+            .expect("the dedicated binary's v26-2 feature must provide a server protocol");
+        let (server, client, _world) = open_persistent_server(
+            protocol,
+            temp.path(),
+            AirWorld,
+            (0..=0, 0..=0),
+            (0, 0),
+            1,
+            server_app,
+        )
+        .expect("the persistent fixture world must open");
+        drop(client);
+
+        assert_eq!(observed.load(Ordering::Relaxed), 0);
+        tokio::task::yield_now().await;
+        for _ in 0..TICKS {
+            tokio::time::advance(Duration::from_millis(50)).await;
+        }
+        wait_for_completed_ticks(&server, TICKS).await;
+
+        assert_eq!(
+            observed.load(Ordering::Relaxed),
+            TICKS,
+            "the binary's persistent-world helper must retain the supplied plugin"
+        );
+        server.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dedicated_open_default_app_runs_no_fixture_plugin() {
+        const TICKS: u64 = 4;
+
+        let temp = tempfile::tempdir().expect("temporary server world must be created");
+        let observed = Arc::new(AtomicU64::new(0));
+        let protocol = lodestone_registry::server_protocol_for_protocol(776)
+            .expect("the dedicated binary's v26-2 feature must provide a server protocol");
+        let (server, client, _world) = open_persistent_server(
+            protocol,
+            temp.path(),
+            AirWorld,
+            (0..=0, 0..=0),
+            (0, 0),
+            1,
+            dedicated_server_app(),
+        )
+        .expect("the persistent fixture world must open");
+        drop(client);
+
+        tokio::task::yield_now().await;
+        for _ in 0..TICKS {
+            tokio::time::advance(Duration::from_millis(50)).await;
+        }
+        wait_for_completed_ticks(&server, TICKS).await;
+
+        assert_eq!(
+            observed.load(Ordering::Relaxed),
+            0,
+            "the default binary application must not install the fixture plugin"
+        );
+        assert_eq!(
+            server.server_tick_count(),
+            Some(TICKS + 1),
+            "the zero control must retain one ServerBoot run plus every real GameTick"
+        );
+        server.shutdown().await;
     }
 }

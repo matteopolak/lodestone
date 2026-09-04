@@ -1982,14 +1982,13 @@ mod tests {
     }
 
     /// The trace's depth margin is positive when the picture is **nearer the
-    /// eye**, which in this renderer's forward `[0, 1]` depth means a *smaller*
-    /// depth value — the opposite of the reversed-Z convention every ported
-    /// vanilla depth comparison in this tree has to be flipped out of.
+    /// eye**, which in this renderer's reversed-Z `[0, 1]` depth means a
+    /// *greater* depth value.
     #[test]
     fn the_traced_depth_margin_is_positive_when_the_picture_is_in_front() {
         // Same `w`, so the two depths are the two `z` values directly.
-        let ahead = depth_ulp_margin([0.0, 0.0, 0.90, 1.0], [0.0, 0.0, 0.95, 1.0]);
-        let behind = depth_ulp_margin([0.0, 0.0, 0.95, 1.0], [0.0, 0.0, 0.90, 1.0]);
+        let ahead = depth_ulp_margin([0.0, 0.0, 0.95, 1.0], [0.0, 0.0, 0.90, 1.0]);
+        let behind = depth_ulp_margin([0.0, 0.0, 0.90, 1.0], [0.0, 0.0, 0.95, 1.0]);
         assert!(ahead > 0.0, "a nearer picture must read positive, got {ahead}");
         assert!(behind < 0.0, "a farther picture must read negative, got {behind}");
         assert!(
@@ -2000,7 +1999,7 @@ mod tests {
         // the number comparable against the `-20` polygon-offset constant.
         let one_step = 0.95f32;
         let next = f32::from_bits(one_step.to_bits() + 1);
-        let single = depth_ulp_margin([0.0, 0.0, one_step, 1.0], [0.0, 0.0, next, 1.0]);
+        let single = depth_ulp_margin([0.0, 0.0, next, 1.0], [0.0, 0.0, one_step, 1.0]);
         assert!(
             (single - 1.0).abs() < 1.0e-3,
             "one representable step must read as 1 ULP, got {single}"

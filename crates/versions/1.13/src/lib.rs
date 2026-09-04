@@ -22,10 +22,9 @@
 //! flat state id, a slot leads with a `present` boolean, and mobs and objects
 //! index one unified entity registry instead of two overlapping ones.
 //!
-//! Like every version crate it depends only on `lodestone-core`,
-//! `lodestone-model`, `lodestone-macros`, `lodestone-world` and the
-//! version-free `lodestone-protocol-common`, so the whole era can be removed
-//! by deleting this one folder.
+//! Like every version crate it depends on version-free core, model, macro,
+//! world, common-protocol and server seams, so the whole era can be removed by
+//! deleting this one folder.
 
 #![forbid(unsafe_code)]
 
@@ -75,5 +74,7 @@ pub mod adapter;
 pub mod canonical;
 pub mod entity_types;
 pub mod packets;
+pub mod server_protocol;
 
 pub use adapter::{PROTOCOL, PROTOCOL_1_13_2, PROTOCOLS, V404Adapter, adapter, adapter_for};
+pub use server_protocol::V404ServerProtocol;

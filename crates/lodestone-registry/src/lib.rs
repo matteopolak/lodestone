@@ -336,20 +336,16 @@ pub fn physics_profile_for_protocol(protocol: i32) -> lodestone_physics::Physics
 ///
 /// Separate from [`Family`] rather than a field on it, because the two sets are
 /// not the same: a family can have a `VersionAdapter` (so the client can *join*
-/// that version) and no `ServerProtocol` (so we cannot *host* it). Today only
-/// `v26-2` implements the server side, and a fused table would have had to carry
-/// an `Option` that is `None` for every client family except `v26-2` and mean
-/// "this family cannot be hosted" — a distinction better represented by the
-/// separate table.
+/// that version) and no `ServerProtocol` (so we cannot *host* it). A fused table
+/// would carry an `Option` whose `None` means "this family cannot be hosted".
+/// The independent tables make that join/host distinction explicit.
 #[derive(Clone, Copy)]
 struct ServerFamily {
     /// Human-readable family label, e.g. `"v26-2"`. Same value as the matching
     /// [`Family::label`].
     label: &'static str,
-    /// Whether this family handles a given protocol number. Delegates to the
-    /// family's own `VersionAdapter::supports` rather than restating a protocol
-    /// number, so the two directions can never disagree about which versions a
-    /// family covers.
+    /// Whether this host implements a given protocol number. A family may host
+    /// fewer revisions than its joining adapter supports.
     supports: fn(i32) -> bool,
     /// Constructs a boxed server protocol for this family.
     make: fn() -> Box<dyn lodestone_server::ServerProtocol>,
@@ -370,11 +366,38 @@ impl std::fmt::Debug for ServerFamily {
 /// Gated exactly as [`FAMILIES`] is: deleting a family's folder removes one line
 /// here too.
 const SERVER_FAMILIES: &[ServerFamily] = &[
+    #[cfg(feature = "v1-7")]
+    ServerFamily {
+        label: "v1-7",
+        supports: |protocol| protocol == lodestone_v1_7::PROTOCOL,
+        make: || Box::new(lodestone_v1_7::V5ServerProtocol),
+    },
+    #[cfg(feature = "v1-8")]
+    ServerFamily {
+        label: "v1-8",
+        supports: |protocol| protocol == lodestone_v1_8::PROTOCOL,
+        make: || Box::new(lodestone_v1_8::V47ServerProtocol),
+    },
     #[cfg(feature = "v26-2")]
     ServerFamily {
         label: "v26-2",
         supports: |protocol| lodestone_v26_2::adapter().supports(protocol),
         make: || Box::new(lodestone_v26_2::V770ServerProtocol),
+    },
+    #[cfg(feature = "v1-9")]
+    ServerFamily {
+        label: "v1-9",
+        // This host implements only protocol 340. The family adapter covers
+        // the preceding revisions too, but their server packet layouts have
+        // not been implemented.
+        supports: |protocol| protocol == lodestone_v1_9::PROTOCOL,
+        make: || Box::new(lodestone_v1_9::V340ServerProtocol),
+    },
+    #[cfg(feature = "v1-13")]
+    ServerFamily {
+        label: "v1-13",
+        supports: |protocol| protocol == lodestone_v1_13::PROTOCOL,
+        make: || Box::new(lodestone_v1_13::V404ServerProtocol),
     },
 ];
 
@@ -479,6 +502,24 @@ mod tests {
         assert!(compiled_families().contains(&"v1-8"));
     }
 
+    #[cfg(feature = "v1-7")]
+    #[test]
+    fn resolves_only_protocol_5_for_the_legacy_server_family() {
+        assert!(server_protocol_for_protocol(5).is_some());
+        assert!(compiled_server_families().contains(&"v1-7"));
+        assert!(server_protocol_for_protocol(4).is_none());
+        assert!(server_protocol_for_protocol(6).is_none());
+    }
+
+    #[cfg(feature = "v1-8")]
+    #[test]
+    fn resolves_only_protocol_47_for_the_legacy_server_family() {
+        assert!(server_protocol_for_protocol(47).is_some());
+        assert!(compiled_server_families().contains(&"v1-8"));
+        assert!(server_protocol_for_protocol(46).is_none());
+        assert!(server_protocol_for_protocol(48).is_none());
+    }
+
     /// `v1-8` is 1.8.9, the exact-match family for [`PhysicsProfile`] `mc_1_8`.
     /// `v1-7` also maps there because its pre-1.9 input model is structurally
     /// closer; `v1-21-11` and `v26-2` are exact modern-profile families, while
@@ -535,6 +576,24 @@ mod tests {
         // number no family supports must be `None` even with v26-2 compiled in,
         // or `find` is matching unconditionally.
         assert!(server_protocol_for_protocol(776 + 1).is_none());
+    }
+
+    #[cfg(feature = "v1-9")]
+    #[test]
+    fn resolves_only_protocol_340_for_the_legacy_server_family() {
+        assert!(server_protocol_for_protocol(340).is_some());
+        assert!(compiled_server_families().contains(&"v1-9"));
+        assert!(server_protocol_for_protocol(316).is_none());
+        assert!(server_protocol_for_protocol(341).is_none());
+    }
+
+    #[cfg(feature = "v1-13")]
+    #[test]
+    fn resolves_only_protocol_404_for_the_flattened_server_family() {
+        assert!(server_protocol_for_protocol(404).is_some());
+        assert!(compiled_server_families().contains(&"v1-13"));
+        assert!(server_protocol_for_protocol(403).is_none());
+        assert!(server_protocol_for_protocol(405).is_none());
     }
 
     #[cfg(feature = "v1-14")]

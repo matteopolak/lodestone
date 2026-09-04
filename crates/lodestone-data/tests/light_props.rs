@@ -105,6 +105,10 @@ use std::path::PathBuf;
 use lodestone_data::block_states;
 use lodestone_data::light_props;
 
+fn props(raw: u32) -> Option<(u8, u8)> {
+    block_states::StateId::new(raw).map(light_props::light_props)
+}
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -382,7 +386,7 @@ fn committed_table_matches_the_committed_sources() {
     let mut checked = 0usize;
     for id in 0..block_states::STATE_COUNT {
         let want = resolved(id, &by_name);
-        let got = light_props::light_props(id)
+        let got = props(id)
             .unwrap_or_else(|| panic!("id {id} missing from the committed table"));
         assert_eq!(
             got,
@@ -409,8 +413,8 @@ fn count_matches_block_state_table() {
 
 #[test]
 fn out_of_range_ids_are_none() {
-    assert_eq!(light_props::light_props(light_props::STATE_COUNT), None);
-    assert_eq!(light_props::light_props(u32::MAX), None);
+    assert_eq!(props(light_props::STATE_COUNT), None);
+    assert_eq!(props(u32::MAX), None);
 }
 
 /// The cross-check that anchors source 1 against source 2: the six cases
@@ -430,7 +434,7 @@ fn dampening_matches_vanillas_own_formula_on_the_discriminating_cases() {
         &[("type", "bottom"), ("waterlogged", "false")],
     );
     assert_eq!(
-        light_props::light_props(dry_bottom_slab).unwrap().0,
+        props(dry_bottom_slab).unwrap().0,
         0,
         "dry bottom slab (id {dry_bottom_slab}): no full occlusion shape, shape not full \
          ⇒ skylight propagates"
@@ -453,7 +457,7 @@ fn dampening_matches_vanillas_own_formula_on_the_discriminating_cases() {
         ("minecraft:air", 0, "nothing to dampen"),
     ] {
         let id = first_id_named(name);
-        let (dampening, _) = light_props::light_props(id).expect("resolves");
+        let (dampening, _) = props(id).expect("resolves");
         assert_eq!(dampening, want, "{name} (id {id}): {why}");
     }
 }
@@ -473,7 +477,7 @@ fn emission_matches_vanilla_for_the_sources_worldgen_places() {
         ("minecraft:water", 0),
     ] {
         let id = first_id_named(name);
-        let (_, emission) = light_props::light_props(id).expect("resolves");
+        let (_, emission) = props(id).expect("resolves");
         assert_eq!(emission, want, "{name} (id {id}) emission");
     }
 }
@@ -492,9 +496,9 @@ fn double_slabs_occlude_and_bottom_slabs_do_not() {
         "minecraft:stone_slab",
         &[("type", "double"), ("waterlogged", "false")],
     );
-    assert_eq!(light_props::light_props(bottom).unwrap().0, 0, "bottom slab");
+    assert_eq!(props(bottom).unwrap().0, 0, "bottom slab");
     assert_eq!(
-        light_props::light_props(double).unwrap().0,
+        props(double).unwrap().0,
         15,
         "double slab is a full cube — the per-block source says 0 for it"
     );
@@ -511,9 +515,9 @@ fn waterlogging_costs_one_level() {
         "minecraft:oak_slab",
         &[("type", "bottom"), ("waterlogged", "true")],
     );
-    assert_eq!(light_props::light_props(dry).unwrap().0, 0, "dry slab");
+    assert_eq!(props(dry).unwrap().0, 0, "dry slab");
     assert_eq!(
-        light_props::light_props(wet).unwrap().0,
+        props(wet).unwrap().0,
         1,
         "waterlogged slab: fluid state non-empty ⇒ skylight does not propagate"
     );
@@ -526,9 +530,9 @@ fn waterlogging_costs_one_level() {
 fn unlit_states_emit_nothing() {
     let lit = id_named_with("minecraft:redstone_torch", &[("lit", "true")]);
     let unlit = id_named_with("minecraft:redstone_torch", &[("lit", "false")]);
-    assert_eq!(light_props::light_props(lit).unwrap().1, 7, "lit torch");
+    assert_eq!(props(lit).unwrap().1, 7, "lit torch");
     assert_eq!(
-        light_props::light_props(unlit).unwrap().1,
+        props(unlit).unwrap().1,
         0,
         "unlit torch must not emit — the per-block source says 7 for it"
     );
@@ -543,7 +547,7 @@ fn unlit_states_emit_nothing() {
 fn every_entry_is_in_range_and_every_id_resolves() {
     let mut seen_emitters = 0usize;
     for id in 0..light_props::STATE_COUNT {
-        let (dampening, emission) = light_props::light_props(id)
+        let (dampening, emission) = props(id)
             .unwrap_or_else(|| panic!("id {id} did not resolve"));
         assert!(dampening <= 15, "id {id} dampening {dampening} > 15");
         assert!(emission <= 15, "id {id} emission {emission} > 15");

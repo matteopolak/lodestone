@@ -681,7 +681,7 @@ async fn live_chest_menu_agrees_with_server() {
         seed(&mut rcon, &user, &[(0, diamond, 64)]).await;
         let s0 = poll_seed(&mut session, window, n, &[(0, 64)]).await;
         let mut menu = menu_from_generic(&s0, CHEST_SIZE);
-        Click::shift(0).apply(&mut menu, ctx);
+        Click::shift(0).apply(&mut menu, ctx.clone());
         let s1 = session.click(window, 0, 0, mode::QUICK_MOVE).await;
         assert_match("chest->player", n, &menu, &s1);
     }
@@ -692,7 +692,7 @@ async fn live_chest_menu_agrees_with_server() {
         seed(&mut rcon, &user, &[(54, diamond, 64)]).await; // menu 54 = hotbar native 0
         let s0 = poll_seed(&mut session, window, n, &[(54, 64)]).await;
         let mut menu = menu_from_generic(&s0, CHEST_SIZE);
-        Click::shift(54).apply(&mut menu, ctx);
+        Click::shift(54).apply(&mut menu, ctx.clone());
         let s1 = session.click(window, 54, 0, mode::QUICK_MOVE).await;
         assert_match("player->chest", n, &menu, &s1);
     }
@@ -746,7 +746,7 @@ async fn live_stack_sizes_agree_with_server() {
         seed(&mut rcon, &user, &[(36, "minecraft:ender_pearl", 16)]).await;
         let s0 = poll_seed(&mut session, w0, n, &[(36, 16)]).await;
         let mut menu = menu_from_player(&s0);
-        Click::right(36).apply(&mut menu, ctx);
+        Click::right(36).apply(&mut menu, ctx.clone());
         let s1 = session.click(w0, 36, 1, mode::PICKUP).await;
         assert_match("pearl-pickup-half", n, &menu, &s1);
     }
@@ -768,8 +768,8 @@ async fn live_stack_sizes_agree_with_server() {
         .await;
         let s0 = poll_seed(&mut session, w0, n, &[(36, 16), (9, 14), (10, 14)]).await;
         let mut menu = menu_from_player(&s0);
-        Click::left(36).apply(&mut menu, ctx); // cursor = 16 pearls
-        menu.perform_drag(drag_type::EVEN, &[9, 10], ctx);
+        Click::left(36).apply(&mut menu, ctx.clone()); // cursor = 16 pearls
+        menu.perform_drag(drag_type::EVEN, &[9, 10], ctx.clone());
         session.click(w0, 36, 0, mode::PICKUP).await;
         session
             .click(w0, -999, drag_button(0, drag_type::EVEN), mode::QUICK_CRAFT)
@@ -803,8 +803,8 @@ async fn live_stack_sizes_agree_with_server() {
         .await;
         let s0 = poll_seed(&mut session, w0, n, &[(36, 1), (9, 1), (10, 1)]).await;
         let mut menu = menu_from_player(&s0);
-        Click::left(36).apply(&mut menu, ctx); // cursor = 1 bucket (at its cap)
-        Click::double(36).apply(&mut menu, ctx);
+        Click::left(36).apply(&mut menu, ctx.clone()); // cursor = 1 bucket (at its cap)
+        Click::double(36).apply(&mut menu, ctx.clone());
         session.click(w0, 36, 0, mode::PICKUP).await;
         let s1 = session.click(w0, 36, 0, mode::PICKUP_ALL).await;
         assert_match("bucket-collect-cap1", n, &menu, &s1);
@@ -833,8 +833,8 @@ async fn live_stack_sizes_agree_with_server() {
             "override must make the stacks non-mergeable: {plain:?} vs {overridden:?}"
         );
         let mut menu = menu_from_player(&s0);
-        Click::left(9).apply(&mut menu, ctx); // cursor = plain diamond x10
-        Click::left(10).apply(&mut menu, ctx); // onto overridden -> swap
+        Click::left(9).apply(&mut menu, ctx.clone()); // cursor = plain diamond x10
+        Click::left(10).apply(&mut menu, ctx.clone()); // onto overridden -> swap
         session.click(w0, 9, 0, mode::PICKUP).await;
         let s1 = session.click(w0, 10, 0, mode::PICKUP).await;
         assert_match("override-no-stack-swap", n, &menu, &s1);

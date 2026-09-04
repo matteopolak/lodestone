@@ -255,11 +255,12 @@ pub(crate) fn progress_per_tick(block_state: &str, held: Option<&ItemStack>) -> 
     // `StopDestroy` that an instant block never sends. See
     // `crate::mobs::block_state_id_or_default`.
     let state_id = crate::mobs::block_state_id_or_default(block_state)?;
-    let hardness = lodestone_data::hardness::hardness(state_id)?.hardness;
+    let state_id = lodestone_data::block_states::StateId::new(state_id)?;
+    let hardness = lodestone_data::hardness::hardness(state_id).hardness;
     if hardness < 0.0 {
         return Some(0.0);
     }
-    let mining = lodestone_data::tool::mining(held, state_id)?;
+    let mining = lodestone_data::tool::mining(held, state_id.raw())?;
     let divider = if mining.correct_tool { 30.0 } else { 100.0 };
     // Zero hardness divides to `+inf`, which is the instant-break signal the
     // caller tests with `>= 1.0` — exactly as vanilla's own float division does.

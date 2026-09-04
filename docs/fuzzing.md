@@ -49,7 +49,7 @@ Twelve targets, each a `[[bin]]` in `fuzz/Cargo.toml` under
 |---|---|---|
 | `v26_2_clientbound_decode` | `V770Adapter::handle_packet`, state+id from the input's own first bytes | `lodestone-v26-2` |
 | `v26_2_clientbound_decode_by_id` | as above, but selects a *real* declared packet id by index rather than an arbitrary `i32` — reaches real decode bodies far more often | `lodestone-v26-2` |
-| `v26_2_serverbound_decode` | `V770ServerProtocol::decode` — the attack surface a connecting *client* presents to our integrated server, the only family that hosts | `lodestone-v26-2`, `lodestone-server` |
+| `v26_2_serverbound_decode` | `V770ServerProtocol::decode` — the attack surface a connecting *client* presents to our integrated server | `lodestone-v26-2`, `lodestone-server` |
 | `nbt_decode` | `lodestone_core::read_named_nbt` | `lodestone-core` |
 | `loot_table_json` | `lodestone_server::loot::LootTable::from_json` | `lodestone-server` |
 | `block_state_string` | `lodestone_data::block_states::state_id` (`minecraft:oak_log[axis=y]` grammar) | `lodestone-data` |
@@ -265,6 +265,12 @@ What exists:
   increments a counter and drains exactly the ticks due at that number, so our
   side's tick numbering is exact and the whole tick-alignment error budget
   sits on the RCON side alone.
+- `tests/differential_client_state.rs` also includes a hermetic
+  `IntegratedServer`-backed `WorldOracle`. Its fixed two-tick proof applies
+  edits to the retained `ChunkSource`, reads the same source directly, and
+  waits for `server_tick_count()` before each comparison. A deliberate source
+  read fault is caught at the first differing tick, so the proof exercises the
+  real server tick loop without routing reads through command parsing.
 - `differential::redstone::RedstoneModelOracle` — the **our-side** oracle over
   the redstone model, driving two production entry points rather than one:
   `lodestone_server::react_at_placement_with_entities` for a world edit, and
@@ -273,7 +279,6 @@ What exists:
   redstone signal crosses dust inside the edit and then waits at a repeater,
   re-entering the cascade from a *drained* tick — a comparison driving only
   the edit path cannot see a delay or ordering bug at all.
-
   Its world is a map of whole `ChunkColumn`s, all resident, created on demand
   with a floor. That is load-bearing: the reaction dispatch's reach is decided
   by the `ChunkSource` it is handed, so a single-column rig answers air one
@@ -283,6 +288,19 @@ What exists:
   denied — the single-column reach that existed before the cross-chunk work —
   and exists purely as the control that proves a cross-seam assertion has a
   detector behind it.
+
+- `tests/differential_client_state.rs` — a bounded hermetic client-state
+  comparison. It replays fixed block, entity and inventory packet scripts
+  through the public `ClientBuilder` over `lodestone_net::memory_pair`, with a
+  scripted adapter writing block results through `WorldSink` and entity/menu
+  events through the normal event route. Independent maps are compared with
+  the client-owned `ClientHandle::block_at`, `ClientHandle::entities` and
+  `ClientHandle::player_menu` values after every tick; one-tick state faults
+  prove first-divergence reporting for all three dimensions. The same fixture
+  also runs deterministic generated campaigns: 24 block scripts with 12
+  packets each, 8 entity scripts with 8 packets each, and 8 inventory scripts
+  with 8 packets each. That is 416 packet replays against independent maps,
+  with a first-divergence control for every dimension.
 - `differential::state_matches` — gives the in-process side the vanilla side's
   matching semantics, so `minecraft:water` matches `minecraft:water[level=3]`
   on both and the two sides answer in one alphabet.
@@ -557,25 +575,26 @@ host that bursts through unobserved reference ticks cannot manufacture either
 agreement or disagreement.
 
 ### What Track B still does not do
-- **No client-state comparison.** Comparing what our own *client* believes
-  about blocks/entities/inventory after replaying a packet stream (rather than
-  comparing rendered pixels, which two different renderers will differ on in
-  ways that are not bugs) is entirely unaddressed.
+- **The generated client-state campaign is hermetic and bounded.** It compares
+  generated block, entity and inventory scripts against independent maps, but
+  does not yet replay captured or live packet corpora. It is separate from
+  rendered-frame comparison, where renderer differences are not themselves
+  client-state bugs.
 - **Generated live cases cover fluids and redstone.** Both have bounded
   generated action domains, but no generated piston, falling-block, container
-  or waterlogging action domain exists. Every comparison still covers only
-  block states over a caller-named region; the entity list, player inventory
-  and scheduled-tick queue are unimplemented dimensions.
-- **Our side of the live comparison is the fluid model, not the whole
-  server.** `FluidModelOracle` drives `lodestone_server::fluid`'s production
-  scheduled-tick entry point over a sparse world, not a running
-  `IntegratedServer`. That is enough for a fluid comparison and not enough
-  for redstone or pistons; an `IntegratedServer`-backed `WorldOracle` (via
-  `start_rcon`, following
-  `crates/lodestone-server/tests/rcon_live_oracle.rs`'s pattern) is the next
-  oracle to write. Note our `execute if block` reduces away some properties by
-  design, so such an oracle wants a direct `ChunkSource::block_state` read
-  rather than a command probe.
+  or waterlogging action domain exists. Every generated live comparison still
+  covers only block states over a caller-named region. The client read-model
+  has no scheduled-tick queue to compare: inbound ticking metadata folds into
+  session server information, while world reactions belong to the server-side
+  scheduler rather than the client state exposed by `ClientHandle`.
+- **The live comparison still uses the fluid model for its our-side world.**
+  `FluidModelOracle` drives `lodestone_server::fluid`'s production
+  scheduled-tick entry point over a sparse world. The separate hermetic
+  `IntegratedServer` proof reads a retained `ChunkSource` directly and proves
+  tick alignment, but it does not yet replace the live RCON path or cover the
+  broader redstone, piston, falling-block, waterlogging or container domains.
+  A direct source read also preserves full canonical state properties that an
+  `execute if block` command probe intentionally reduces.
 
 ## How to change it, and the gotchas
 

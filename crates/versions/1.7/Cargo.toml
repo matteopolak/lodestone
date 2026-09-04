@@ -24,6 +24,7 @@ lodestone-model = { workspace = true }
 # Packet definitions measured byte-identical to their counterparts in a later
 # era, with the protocol range declared on the shared definition.
 lodestone-protocol-common = { workspace = true }
+lodestone-server = { path = "../../lodestone-server" }
 lodestone-world = { workspace = true }
 # Chunk payloads in this era are zlib streams inside the packet body. Whole-
 # connection compression does not exist here (the login state has no
@@ -34,7 +35,9 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+lodestone-client = { workspace = true }
 lodestone-net = { workspace = true }
+lodestone-registry = { workspace = true, features = ["v1-7"] }
 lodestone-testsupport = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
