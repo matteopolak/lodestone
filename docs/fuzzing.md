@@ -299,8 +299,9 @@ What exists:
   prove first-divergence reporting for all three dimensions. The same fixture
   also runs deterministic generated campaigns: 24 block scripts with 12
   packets each, 8 entity scripts with 8 packets each, and 8 inventory scripts
-  with 8 packets each. That is 416 packet replays against independent maps,
-  with a first-divergence control for every dimension.
+  with 8 packets each, plus 8 generic-container scripts with 6 packets each.
+  That is 464 packet replays against independent maps, with a
+  first-divergence control for every dimension.
 - `tests/differential_captured_client_state.rs` — a fixed captured-packet
   lane through the real 26.2 adapter and the public client read model. It
   replays server-authored pickaxe and potion slot packets from checked-in
@@ -598,9 +599,9 @@ agreement or disagreement.
   complete spawn/metadata/move/remove sequence, so they cannot independently
   drive `ClientHandle::entity`. A future entity lane needs that paired capture;
   manufacturing an `ADD_ENTITY` prefix would remove the corpus's independent
-  provenance. The generated block/entity/inventory campaign remains hermetic
-  and bounded; it compares client state rather than rendered frames, because
-  renderer differences are not themselves client-state bugs.
+  provenance. The generated block/entity/inventory/container campaign remains
+  hermetic and bounded; it compares client state rather than rendered frames,
+  because renderer differences are not themselves client-state bugs.
 - **Generated live cases cover fluids and redstone.** Both have bounded
   generated action domains. Falling blocks and source-water waterlogging each
   additionally have a bounded hermetic `IntegratedServer` action proof, but no
