@@ -10829,7 +10829,6 @@ mod tests {
     /// exactly that many pixels.
     #[test]
     fn the_scrollbar_and_the_rows_read_the_same_offset() {
-        const V_W: f32 = 854.0;
         const V_H: f32 = 480.0;
         let n = 15;
         let (mut nav, ui, _) = listing("list-scroll-join", n);
