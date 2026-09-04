@@ -298,14 +298,11 @@ pub(crate) fn face_from_normal(normal: [i32; 3]) -> BlockFace {
     }
 }
 
-// `parse_goto_command` lived here — a strict `goto x z` parser for the
-// `#goto` chat command (issue #38, M1). It went with the command: the shell no
-// longer depends on `lodestone-autopilot`, so there is nothing for a parsed
-// coordinate pair to be handed to. See `Sim::send_chat`, which still reserves
-// the `#` namespace so such a line cannot leak to chat, and issue #118, which
-// is where a plugin will eventually register its own commands (and its own
-// argument parsing — `crates/lodestone-command` already exists for that, and
-// re-adding a bespoke parser here would be the wrong direction).
+// The shell reserves the `#` namespace in `Sim::send_chat` so command-like
+// lines cannot leak into chat. `lodestone-command` provides the version-free
+// argument tree and custom argument-type registry, but it has no command
+// dispatcher or plugin registration API. Keeping a parser here would duplicate
+// the input boundary without a consumer.
 
 /// [`BlockFace`] to [`particle_emit::Face`] — the two enumerate the same six
 /// directions under different names because they come from different crates
@@ -322,16 +319,12 @@ pub(crate) fn particle_face(face: BlockFace) -> particle_emit::Face {
     }
 }
 
-/// The block-local hit position `use_item_on` expects — vanilla's
-/// `BlockHitResult` cursor, which is `location - blockPos`
-/// (`writeBlockHitResult`).
+/// The block-local hit position `use_item_on` expects: the ray hit position
+/// relative to the block origin.
 ///
-/// This used to be the centre of the struck *cube* face, because the raycast
-/// reported only a block and a normal. It now reports the exact entry point of
-/// the outline box it hit ([`RayHit::cursor`], issue #375), which is what the
-/// server uses to pick a slab's half, a stair's orientation and which side of a
-/// block a torch attaches to — so the approximation is gone rather than
-/// documented.
+/// [`RayHit::cursor`] returns the exact entry point on the selected outline,
+/// allowing the server to distinguish slab halves, stair orientations, and
+/// attachment sides instead of receiving the centre of a cube face.
 pub(crate) fn hit_cursor(hit: RayHit) -> Vec3f {
     let [x, y, z] = hit.cursor();
     Vec3f::new(x, y, z)
@@ -528,7 +521,7 @@ pub struct Sim {
     last_pack_generation: u64,
     /// The stitched particle sheet, kept alive so `app.rs` can upload the *same*
     /// object to the GPU that the emitter's `(Sheet, frame) -> UV` table was
-    /// built from — see [`Sim::particle_sheet_atlas`] and issue #45. `None` on
+    /// built from — see [`Sim::particle_sheet_atlas`]. `None` on
     /// the demo palette.
     particle_atlas: Option<Arc<lodestone_assets::ParticleAtlas>>,
     /// The vanilla `en_us.json` table for resolving server-authored `translate`
@@ -596,9 +589,9 @@ pub struct Sim {
     won: bool,
     /// Set once `NetUpdate::LanOpened` has arrived this session — the ground
     /// truth `app::session::drive_ui_from_session` pushes into
-    /// `MenuNav::set_lan_published`, which is what makes the pause menu stop
-    /// offering Open to LAN once there is nothing left for it to do (issue
-    /// #535's scope 2). The same plain-field shape as [`Self::won`]: exactly
+    /// `MenuNav::set_lan_published`, which makes the pause menu stop offering
+    /// Open to LAN once there is nothing left for it to do. The same plain-field
+    /// shape as [`Self::won`]: exactly
     /// one consumer, no per-session ECS state to fold it into. Reset by
     /// [`Self::end_session`] so a later session starts unpublished, matching
     /// a fresh integrated-server handle's own unpublished state.
@@ -711,29 +704,26 @@ pub struct Sim {
     /// zoom multiplies it by `0.1`: rounding back to an integer between the option
     /// and the camera would quantise a 3° scoped view to 3.
     fov_y_degrees: f32,
-    /// Vanilla's `invertMouseX`/`invertMouseY` options
-    /// ([`crate::config::Options::invert_mouse_x`]/`invert_mouse_y`, issue
-    /// #203), pushed down the same way as [`Self::view_bobbing`] — see
+    /// The horizontal and vertical look-inversion options
+    /// ([`crate::config::Options::invert_mouse_x`]/`invert_mouse_y`), pushed
+    /// down the same way as [`Self::view_bobbing`] — see
     /// [`Self::set_mouse_invert`]. Read by [`Self::apply_mouse`], which calls
     /// [`lodestone_controller::apply_look_inverted`] instead of the plain
     /// `apply_look` now that there is somewhere to source the two bools from.
     invert_mouse_x: bool,
     invert_mouse_y: bool,
-    /// Vanilla's `sensitivity` option ([`crate::config::Options::sensitivity`],
-    /// issue #443), pushed down the same way as [`Self::invert_mouse_x`] — see
-    /// [`Self::set_sensitivity`].
+    /// The [`crate::config::Options::sensitivity`] option, pushed down the same
+    /// way as [`Self::invert_mouse_x`] — see [`Self::set_sensitivity`].
     ///
-    /// This exists because [`Self::apply_mouse`] previously read
-    /// `self.config.sensitivity`, which is the **argv-derived** [`Config`]
-    /// value and is therefore fixed for the process's lifetime. #443 made the
-    /// option persist, so dragging the slider wrote to disk and changed
-    /// nothing until the next launch. Seeded from `config.sensitivity` at
-    /// construction so a caller that never calls the setter (a headless bot,
-    /// or a test) keeps exactly the old behaviour.
+    /// [`Self::apply_mouse`] reads this field each frame; sourcing it from the
+    /// **argv-derived** [`Config`] value would freeze slider changes until the
+    /// next launch. It is seeded from `config.sensitivity` at construction so
+    /// a caller that never calls the setter (a headless bot or a test) keeps
+    /// the startup setting.
     sensitivity: f32,
-    /// Vanilla's `key.sneak`/`key.sprint` hold-vs-toggle options
-    /// ([`crate::config::Options::toggle_sneak`]/`toggle_sprint`, issue
-    /// #202), pushed down the same way. Applied to the live [`InputState`]
+    /// The sneak and sprint hold-vs-toggle options
+    /// ([`crate::config::Options::toggle_sneak`]/`toggle_sprint`), pushed down
+    /// the same way. Applied to the live [`InputState`]
     /// once per frame at the top of [`Self::step`] (see
     /// [`Self::set_toggle_modes`]) rather than at each key event: the option
     /// cannot change mid-frame, and `InputState::set_toggle_modes` is cheap
@@ -741,23 +731,23 @@ pub struct Sim {
     /// frame runs.
     toggle_sneak: bool,
     toggle_sprint: bool,
-    /// Vanilla's `key.attack`/`key.use` hold-vs-toggle options
-    /// ([`crate::config::Options::toggle_attack`]/`toggle_use`, issue #444),
-    /// pushed down the same way as [`Self::toggle_sneak`]/[`Self::toggle_sprint`]
+    /// The attack and use hold-vs-toggle options
+    /// ([`crate::config::Options::toggle_attack`]/`toggle_use`), pushed down
+    /// the same way as [`Self::toggle_sneak`]/[`Self::toggle_sprint`]
     /// and applied to the live [`InputState`] in the same place. Carried by the
     /// sim even though `interact.rs` has no toggle-mode consumer yet — the
     /// *option* reaches the model end to end, so a future consumer reads it
     /// without touching the plumbing again.
     toggle_attack: bool,
     toggle_use: bool,
-    /// Vanilla's `options.autoJump` ([`crate::config::Options::auto_jump`],
-    /// issue #444), pushed down by [`Self::set_auto_jump`]. Read once per tick
+    /// Whether automatic jumping is enabled ([`crate::config::Options::auto_jump`]),
+    /// pushed down by [`Self::set_auto_jump`]. Read once per tick
     /// in [`Self::step`]'s loop to decide whether to request an auto-jump for
     /// the `GameTick` schedule — see the request firing there.
     auto_jump: bool,
-    /// Vanilla's `options.sprintWindow` ([`crate::config::Options::sprint_window_ticks`],
-    /// issue #444) — the double-tap-forward window in 20 Hz ticks, pushed down
-    /// by [`Self::set_sprint_window_ticks`] and forwarded to the live
+    /// The double-tap-forward window in 20 Hz ticks
+    /// ([`crate::config::Options::sprint_window_ticks`]), pushed down by
+    /// [`Self::set_sprint_window_ticks`] and forwarded to the live
     /// [`InputState`] once per frame at the top of [`Self::step`].
     sprint_window_ticks: u8,
     /// Vanilla's `options.particles`
@@ -831,7 +821,7 @@ pub struct Sim {
     spawner_spins: crate::block_entities::SpawnerSpins,
 
     /// This frame's item pickups (`take_item_entity`), awaiting the fly-to-collector
-    /// animation — issue #365.
+    /// animation.
     ///
     /// A **frame-scoped batch**, not persistent state: [`Self::poll_net`] folds
     /// every `NetUpdate::ItemPickup` into it and drains the whole lot into
@@ -1338,10 +1328,10 @@ impl Sim {
     fn refresh_mesh_policy(&mut self) {
         let sky_default = match &self.net {
             Some(net) => {
-                // Since #288 the server's own dimension **type** decides this;
-                // the level id is only the fallback for a server that sent no
-                // `registry_data`. Both come off one `player()` snapshot so they
-                // cannot describe two different moments.
+                // The server's dimension **type** decides this; the level id is
+                // only the fallback for a server that sent no `registry_data`.
+                // Both come off one `player()` snapshot so they cannot describe
+                // two different moments.
                 let player = net.shared_handle().get().map(|h| h.player());
                 crate::mesher::sky_default_for_dimension(
                     player.as_ref().and_then(|p| p.dimension.as_ref()),
@@ -1403,8 +1393,8 @@ impl Sim {
             sky_default,
             id_spaces_agree,
         };
-        // The live biome registry's ordered entry names (issue #96's
-        // follow-up), refreshed the same way and for the same reason as
+        // The live biome registry's ordered entry names, refreshed the same way
+        // and for the same reason as
         // `sky_default` just above: a mesh worker thread only ever sees the
         // jobs on its channel, never a live `Sim`/`NetClient`, so the current
         // value has to be read here and carried along on the `SectionSnapshot`
@@ -1455,9 +1445,9 @@ impl Sim {
         if !adopt {
             return;
         }
-        // Issue #423: adopt the *write* handle alongside the read one, so the
-        // store `drive_placement` / `Sim::predict_block` edit is the store the
-        // mesher reads — one `Arc`, both resources.
+        // Adopt the *write* handle alongside the read one, so the store edited
+        // by `drive_placement` / `Sim::predict_block` is the store the mesher
+        // reads — one `Arc`, both resources.
         self.write(|w| {
             w.insert_resource(live_write);
             w.insert_resource(live);
@@ -1595,9 +1585,8 @@ impl Sim {
     /// ([`crate::gpu::RenderState::install_particle_sheet_atlas`]) rather than
     /// re-stitching the pack a second time. The CPU-side `(Sheet, frame) -> UV`
     /// table inside [`Particles`] was built from these sprite rects; a second
-    /// `AtlasBuilder` run happens to pack identically today, but issue #45 was
-    /// *exactly* the bug of UVs addressing a different image than the one bound,
-    /// so the identity is made explicit instead of assumed.
+    /// `AtlasBuilder` runs may pack identically, but preserving object identity
+    /// prevents UVs from addressing an image other than the bound atlas.
     #[must_use]
     pub fn particle_sheet_atlas(&self) -> Option<&lodestone_assets::ParticleAtlas> {
         self.particle_atlas.as_deref()
