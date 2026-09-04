@@ -173,9 +173,8 @@ LEGACY-NEW families, UNICODE (#187), RIDING (#11), TEXT-TYPE (#69), CLIENT-REFAC
 - **#43** — one of its two dedup candidates was #67's `data_dir`, now landed; re-scope or close.
 - **#37 (WindowApp.ecs scaffold)** — either delete the inert field (S) or close as superseded by
   the bevy direction; verify which.
-- **#436** is a process ledger, not schedulable work — but it holds an **unticked brokered patch**
-  (`lodestone-render/src/target.rs` `COPY_SRC` + `AcquiredFrame::texture`) that should be applied
-  or struck.
+- **#436** is a process ledger, not schedulable work. Its formerly unticked brokered patch
+  (`lodestone-render/src/target.rs` `COPY_SRC` + `AcquiredFrame::texture`) landed in `224e13b`.
 
 ## Deliberately not classified
 
