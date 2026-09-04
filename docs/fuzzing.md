@@ -20,12 +20,12 @@ The generator's general properties are also proven against fresh in-memory
 oracles. Its own section below says exactly what is and is not there.
 
 This complements, not replaces, `crates/lodestone-fuzz`'s existing
-`proptest`-based harness (`docs/fuzz-harness.md`) — that harness runs under a
-plain `cargo test`, no nightly, no corpus directory; Track A is coverage-guided
+`proptest`-based harness — that harness runs under a
+plain `cargo test`, with no sanitizer setup or corpus directory; Track A is coverage-guided
 and can run far longer and explore far deeper, at the cost of needing the
 nightly toolchain and a corpus/artifact directory. Both check "never panics on
 arbitrary bytes" for overlapping but not identical surfaces; neither replaces
-the other, matching that doc's own note that this is additive.
+the other.
 
 ## How it works
 
@@ -54,7 +54,7 @@ Thirteen targets, each a `[[bin]]` in `fuzz/Cargo.toml` under
 | `nbt_decode` | `lodestone_core::read_named_nbt` | `lodestone-core` |
 | `loot_table_json` | `lodestone_server::loot::LootTable::from_json` | `lodestone-server` |
 | `block_state_string` | `lodestone_data::block_states::state_id` (`minecraft:oak_log[axis=y]` grammar) | `lodestone-data` |
-| `density_function_json` | `lodestone_worldgen_core::density::Builder::build` — **known to panic today**, see that file's own doc | `lodestone-worldgen-core` |
+| `density_function_json` | `lodestone_worldgen_core::density::Builder::build` — malformed JSON shapes must return a typed error | `lodestone-worldgen-core` |
 | `unihex_font` | `lodestone_assets::font::read_hex_entries` (GNU Unifont `.hex` line format, reachable via a pushed resource pack) | `lodestone-assets` |
 | `anvil_region_parse` | `lodestone_anvil::region::RegionFile::parse` + `read_chunk_nbt_bytes` over all 1024 chunk slots, chained into `read_named_nbt` | `lodestone-anvil`, `lodestone-core` |
 | `text_chat_json` | `lodestone_model::text::Text::from_json` (pre-1.20.3 chat/sign/book text) | `lodestone-model` |
@@ -147,8 +147,9 @@ only there is a finding nothing gates on.
 
 `.github/workflows/ci.yml`'s **`fuzz`** job runs `just fuzz-smoke 30` on
 every push to `main` and every pull request: `cargo fuzz build` for all
-thirteen targets, then **30 seconds per gated target** from the committed seeds
-(twelve targets, so roughly six minutes of fuzzing). `timeout-minutes: 90`,
+thirteen targets, then **at most 30 seconds or 10,000 executions per gated
+target**, whichever limit libFuzzer reaches first, from the committed seeds.
+`timeout-minutes: 90`,
 because on a cold cache the ASan release build of the whole crate graph at
 `codegen-units=1` dominates the job.
 
@@ -168,10 +169,15 @@ allocates and then returns `Err` is a correct decoder, not a finding.
 with a reason. Gating is **opt-out**, so a newly added target is covered the
 moment it exists — and a stale exclusion naming a target that no longer
 exists is a hard error, so an exclusion cannot silently keep a live target
-ungated. One entry today: `density_function_json`, whose panic on any
-non-object document is a documented "trusted embedded data" assumption pinned
-by `crates/lodestone-fuzz/tests/density_builder_panics_on_non_object_json.rs`.
-It goes back under the gate once that builder returns a `Result`.
+ungated. An empty target directory or exclusions covering every target also
+fail before building, because neither executes the property being gated.
+
+The runner rejects zero, negative, malformed and overflowing time or execution
+budgets before invoking Cargo: zero disables libFuzzer's time limit. Run
+`python3 fuzz/test_smoke.py` to exercise these controls, verify the ordered
+corpus arguments, and prove target failures propagate while later targets
+still run. This contract test substitutes a recording Cargo executable; it
+checks orchestration and does not claim decoder or sanitizer coverage.
 
 #### Measured runs
 
@@ -701,7 +707,14 @@ agreement or disagreement.
   every `just fuzz-run` invocation on a shared machine; see the Track A section
   above.
 - **`just fuzz-smoke [seconds]`** — seconds per target, default `30`; CI
-  passes `30` explicitly so the workflow states its own budget.
+  passes `30` explicitly so the workflow states its own budget. The argument
+  must be a positive decimal integer no larger than `2147483647`.
+- **`FUZZ_SMOKE_RUNS`** — execution limit per smoke target, default `10000`,
+  passed as libFuzzer's `-runs` alongside the time limit. It has the same
+  positive-integer validation. For a short local run use
+  `CARGO_BUILD_JOBS=2 FUZZ_SMOKE_RUNS=100 just fuzz-smoke 2`.
+  Limits apply to target execution, not compilation; corpus initialization
+  and an in-progress input may finish beyond a time or execution budget.
 - **`LODESTONE_DIFFERENTIAL_RCON`** (`IP:port`) — the live endpoint
   `differential_live_fluid_spread.rs` drives, defaulting to the flat/creative
   oracle's `127.0.0.1:25571`. Any oracle in `scripts/live-oracles/` works: the
@@ -755,9 +768,9 @@ agreement or disagreement.
 - **`lodestone-testsupport`** (optional, `rcon-oracle` feature) — `RconClient`,
   reused rather than re-derived; see `crates/lodestone-testsupport/src/lib.rs`'s
   own doc on the one-`read()`-per-request RCON framing constraint.
-- **`python3`** — `fuzz/seeds/generate-seeds.py` only, and only when
-  regenerating seeds. Nothing in `just health`, `just fuzz-smoke` or CI runs
-  it; the seeds it produces are committed.
+- **`python3`** — the seed generator and `fuzz/test_smoke.py`'s isolated
+  orchestration controls. Nothing in `just health`, `just fuzz-smoke` or CI
+  runs the seed generator; the seeds it produces are committed.
 - **A live vanilla 26.2 oracle under Apple `container`** — Track B's
   `#[ignore]`d live tests only. See `docs/oracles-and-benchmarks.md` and
   `scripts/live-oracles/`.

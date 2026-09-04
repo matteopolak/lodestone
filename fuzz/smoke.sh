@@ -20,16 +20,32 @@
 # Every other target is gated automatically, so adding a fuzz target does not
 # require also remembering to add it here.
 #
-# Usage: fuzz/smoke.sh [seconds-per-target]
+# Usage: FUZZ_SMOKE_RUNS=10000 fuzz/smoke.sh [seconds-per-target]
 #
 # Lives under fuzz/ rather than scripts/ because it is part of the cargo-fuzz
 # workspace it drives: it reads that directory's target list, seed corpus and
 # exclusion file, and has no meaning without them.
 set -euo pipefail
 
-SECONDS_PER_TARGET="${1:-30}"
+SECONDS_PER_TARGET="${1-30}"
+RUNS_PER_TARGET="${FUZZ_SMOKE_RUNS-10000}"
 FUZZ="$(cd "$(dirname "$0")" && pwd)"
 EXCLUSIONS="$FUZZ/smoke-exclusions.txt"
+
+positive_budget() {
+  local name="$1" value="$2"
+  # Validate length before arithmetic so overflow cannot turn a large value
+  # into libFuzzer's zero/unlimited sentinel. Decimal spelling avoids octal.
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ ]] || [ "${#value}" -gt 10 ] ||
+    [ "$value" -gt 2147483647 ]; then
+    echo "$name must be a positive decimal integer at most 2147483647" >&2
+    exit 1
+  fi
+}
+
+[ "$#" -le 1 ] || { echo "usage: fuzz/smoke.sh [seconds-per-target]" >&2; exit 1; }
+positive_budget seconds-per-target "$SECONDS_PER_TARGET"
+positive_budget FUZZ_SMOKE_RUNS "$RUNS_PER_TARGET"
 
 if ! command -v cargo-fuzz >/dev/null 2>&1; then
   echo "cargo-fuzz is not installed: cargo install cargo-fuzz --locked" >&2
@@ -39,6 +55,7 @@ fi
 cd "$FUZZ"
 
 all_targets=()
+shopt -s nullglob
 for path in fuzz_targets/*.rs; do
   all_targets+=("$(basename "$path" .rs)")
 done
@@ -69,6 +86,17 @@ is_excluded() {
   return 1
 }
 
+gated=0
+for target in "${all_targets[@]}"; do
+  if ! is_excluded "$target"; then
+    gated=$((gated + 1))
+  fi
+done
+if [ "$gated" -eq 0 ]; then
+  echo "no gated targets — exclusions cannot turn the smoke gate into a no-op" >&2
+  exit 1
+fi
+
 # Built in one invocation rather than per-target: `cargo fuzz run` would
 # otherwise re-resolve and re-link the shared crate graph for each of them,
 # and a build failure should be reported once, before any fuzzing starts.
@@ -93,9 +121,10 @@ for target in "${all_targets[@]}"; do
   else
     echo "--- $target: no committed seeds (fuzz/seeds/$target absent)"
   fi
-  echo "::group::cargo fuzz run $target (${SECONDS_PER_TARGET}s)"
+  echo "::group::cargo fuzz run $target (${SECONDS_PER_TARGET}s / ${RUNS_PER_TARGET} runs)"
   if cargo fuzz run "$target" "${dirs[@]}" -- \
     "-max_total_time=$SECONDS_PER_TARGET" \
+    "-runs=$RUNS_PER_TARGET" \
     -rss_limit_mb=2048 \
     -timeout=25 \
     -detect_leaks=0 \
@@ -116,4 +145,4 @@ if [ "${#failed[@]}" -gt 0 ]; then
 fi
 
 echo
-echo "fuzz smoke: all gated targets clean at ${SECONDS_PER_TARGET}s each"
+echo "fuzz smoke: $gated gated targets clean; budget ${SECONDS_PER_TARGET}s / ${RUNS_PER_TARGET} runs each"
