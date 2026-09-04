@@ -1,9 +1,10 @@
-//! The toy **subscriber** in issue #107's cross-plugin messaging example.
+//! The toy **subscriber** in the cross-plugin messaging example.
 //!
 //! It reads [`lodestone_shop_api::ShopPurchase`] and has **no compile-time
 //! dependency on the publisher** — `Cargo.toml`'s `[dependencies]` contains
-//! `lodestone-shop-api` and not `lodestone-shop`. That is the Bukkit property
-//! issue #107 asks for, and `tests/dependency_direction.rs` asserts it as a fact
+//! `lodestone-shop-api` and not `lodestone-shop`. That is the same
+//! no-compile-time-coupling property Bukkit's plugin ecosystem relies on for
+//! custom events, and `tests/dependency_direction.rs` asserts it as a fact
 //! about the manifest rather than trusting this paragraph.
 //!
 //! See `docs/cross-plugin-messages.md` for the pattern.

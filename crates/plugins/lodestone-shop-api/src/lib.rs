@@ -1,4 +1,4 @@
-//! The toy `shop` family's **public message crate** (issue #107): the type a
+//! The toy `shop` family's **public message crate**: the type a
 //! third-party plugin depends on in order to hear about shop purchases, and
 //! nothing else.
 //!
@@ -6,8 +6,9 @@
 //!
 //! `lodestone-shop` (the publisher) and `lodestone-shop-stats` (a subscriber)
 //! both depend on this. The subscriber does **not** depend on the publisher —
-//! that is the property issue #107 is about, and it is why the message type
-//! cannot live in the publisher's own crate. A `-api` crate is cheap: one type,
+//! that is the cross-plugin-messaging property this pattern exists to prove,
+//! and it is why the message type cannot live in the publisher's own crate.
+//! A `-api` crate is cheap: one type,
 //! one registration call, no logic, no systems of its own beyond registering the
 //! message.
 //!

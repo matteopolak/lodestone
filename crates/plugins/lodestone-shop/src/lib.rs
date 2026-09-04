@@ -1,8 +1,9 @@
-//! The toy **publisher** in issue #107's cross-plugin messaging example.
+//! The toy **publisher** in the cross-plugin messaging example.
 //!
 //! It writes [`lodestone_shop_api::ShopPurchase`] and knows nothing about who
 //! reads it — this crate has no dependency on any subscriber, which is half of
-//! the property issue #107 is about. See `docs/cross-plugin-messages.md`.
+//! the no-compile-time-coupling property the pattern is about. See
+//! `docs/cross-plugin-messages.md`.
 
 use lodestone_ecs::GameTick;
 use lodestone_ecs::app::{App, Plugin};
