@@ -605,11 +605,11 @@ impl Sim {
         self.read(|w| w.get::<Dead>(self.local).is_some())
     }
 
-    /// The current death's message, for the death screen to draw
-    /// — `None` once the player is alive again, or before any death this
-    /// session. See [`Self::death_message`]'s field doc.
+    /// The current death's message, resolved and interactive, for the death
+    /// screen to draw — `None` once the player is alive again, or before any
+    /// death this session. See [`Self::death_message`]'s field doc.
     #[must_use]
-    pub fn death_message(&self) -> Option<&str> {
+    pub fn death_message(&self) -> Option<&[lodestone_model::text::InteractiveTextSpan]> {
         self.death_message.as_deref()
     }
 

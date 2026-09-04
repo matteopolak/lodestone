@@ -559,7 +559,16 @@ impl Sim {
                     // `NetUpdate::Respawned`, whose arm snaps `prev_position` too.
                     if self.recover_from_death {
                         self.set_dead(true);
-                        self.death_message = Some(message);
+                        // Resolved here, not left for the draw side: this is
+                        // the first point downstream of `net::forward` that
+                        // holds a language table at all (see
+                        // `NetUpdate::Death::message`'s own doc on why the
+                        // message now arrives unflattened). `to_interactive_spans`
+                        // keeps whatever `click`/`hover` a killer's own
+                        // decorated name carries, the same seam chat and the
+                        // tab list already resolve through.
+                        self.death_message =
+                            Some(self.resolve_text(&message).to_interactive_spans());
                         self.status = "you died".into();
                     } else {
                         // Retained only as the live death gate's negative control:

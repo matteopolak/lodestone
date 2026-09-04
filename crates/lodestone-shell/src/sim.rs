@@ -575,15 +575,17 @@ pub struct Sim {
     /// on the death screen forever" bug as the live gate's negative control. Never
     /// flipped in real play.
     pub recover_from_death: bool,
-    /// The most recent death's message (`NetUpdate::Death`'s `message`, already
-    /// flattened to plain text), for the death screen to draw.
+    /// The most recent death's message (`NetUpdate::Death`'s `message`),
+    /// resolved through the language table and flattened to interactive runs
+    /// — see [`Self::poll_net`]'s `NetUpdate::Death` arm — for the death
+    /// screen to draw with its style and `click`/`hover` intact.
     /// `Some` from the moment [`Self::set_dead`] marks the player dead until the
     /// server-confirmed respawn clears it (or [`Self::end_session`] resets it).
     /// Not an ECS component: it is read by exactly one consumer (`app.rs`'s
     /// per-frame UI reconciliation) and does not need to survive a session
     /// teardown/reconnect the way `RespawnCount` and the other session-lifetime
     /// state in `lodestone_ecs::session` do.
-    death_message: Option<String>,
+    death_message: Option<Vec<lodestone_model::text::InteractiveTextSpan>>,
     /// Set once `NetUpdate::WinGame` has arrived — the local
     /// player exited the End through the exit portal after the dragon fight.
     /// Latched rather than transient for the same reason [`Self::death_message`]

@@ -26,6 +26,18 @@ use crate::menu::{Screen, SessionKind, UiState};
 /// Vertex stride in the emitted buffer.
 const STRIDE: usize = FLOATS_PER_VERTEX;
 
+/// A death message with no style, click or hover — for a gate that only
+/// cares about the screen this text lands on, not its interactivity.
+fn plain_death_message(text: &str) -> Vec<lodestone_model::text::InteractiveTextSpan> {
+    vec![lodestone_model::text::InteractiveTextSpan {
+        text: text.to_string(),
+        style: lodestone_model::TextStyle::default(),
+        click: None,
+        hover: None,
+        insertion: None,
+    }]
+}
+
 #[test]
 fn a_server_list_tooltip_snaps_its_box_to_the_same_origin_as_its_text() {
     assert_eq!(
@@ -303,7 +315,7 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
             }
             Screen::Death => {
                 ui.enter_dev_world();
-                ui.die(Some("blew up".to_string()));
+                ui.die(Some(plain_death_message("blew up")));
             }
             Screen::Error => {
                 ui.begin(SessionKind::Multiplayer);
@@ -3905,7 +3917,7 @@ fn death_frame_builds_vanillas_two_widgets_in_order_and_tracks_the_highlight() {
     let mut nav = test_nav("death-frame");
     let mut ui = UiState::new();
     ui.enter_dev_world();
-    ui.die(Some("was slain by a Skeleton".to_string()));
+    ui.die(Some(plain_death_message("was slain by a Skeleton")));
     nav.hover(&ui, 1);
 
     let f = death_frame(&nav, ui.death_message());
@@ -3958,7 +3970,7 @@ fn death_screen_backdrop_is_a_red_gradient_not_a_flat_dim() {
     let mut nav = test_nav("death-gradient");
     let mut ui = UiState::new();
     ui.enter_dev_world();
-    ui.die(Some("was slain by a Skeleton".to_string()));
+    ui.die(Some(plain_death_message("was slain by a Skeleton")));
     nav.hover(&ui, 0);
 
     let f = death_frame(&nav, ui.death_message());
@@ -4116,7 +4128,7 @@ fn every_vanilla_widget_is_on_screen_and_none_overlap() {
     ui.pause();
     let pause = pause_frame(&nav);
     ui.enter_dev_world();
-    ui.die(Some("fell from a high place".to_string()));
+    ui.die(Some(plain_death_message("fell from a high place")));
     let death = death_frame(&nav, ui.death_message());
 
     for (name, frame) in [("title", &title), ("pause", &pause), ("death", &death)] {

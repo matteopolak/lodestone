@@ -513,6 +513,28 @@ impl WindowApp {
         true
     }
 
+    // A death-message hit-test does not live here as a `&self` method: the
+    // one production call site (`app::redraw`'s per-frame draw) already
+    // holds `self.render`/`self.target` as live exclusive borrows for the
+    // rest of that function, the same collision `Self::chat_interaction`'s
+    // own doc names for the chat hover tooltip — a whole-`self` call does
+    // not borrow-check there, so the hit-test is inlined at that call site
+    // off the already-borrowed locals instead, built from
+    // [`crate::menu::render::death_run_at`] plus `self.cursor`, exactly the
+    // physical-to-logical conversion `menu_row_at_in` performs for its own
+    // hit-test.
+    //
+    // Click dispatch is not defined here either. Reaching one needs a caller
+    // in `app/lifecycle.rs`'s `MouseInput` handler, alongside
+    // `dispatch_book_page_click`'s own call — a dispatcher with no such
+    // caller would be unreachable from anywhere `#[cfg(test)]` does not
+    // reach, the exact shape this codebase treats as a defect. Everything a
+    // future caller needs is already on the shelf: `death_run_at`'s
+    // `.span.click`, filtered to
+    // `lodestone_model::text::ClickAction::OpenUrl` (vanilla's own
+    // restriction on this screen), dispatched through
+    // `Self::dispatch_click_action`.
+
     /// The slider track fraction for `row` at physical cursor `(x, y)`.
     ///
     /// Vanilla's own slider-button "set value from mouse" routine, verbatim:

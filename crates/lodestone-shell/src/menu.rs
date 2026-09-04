@@ -601,8 +601,12 @@ pub struct UiState {
     settings_return: Screen,
     /// The current death's message, populated only on [`Screen::Death`] — see
     /// [`Self::die`]. Mirrors how [`Self::error`] carries `Screen::Error`'s
-    /// reason.
-    death_message: Option<String>,
+    /// reason. Interactive runs, not a plain string: a killer's own decorated
+    /// name can carry the same `click`/`hover` a chat line's does, and
+    /// [`crate::sim::Sim::death_message`] already resolves and flattens
+    /// through [`lodestone_model::ResolvedText::to_interactive_spans`] before
+    /// this ever sees it.
+    death_message: Option<Vec<lodestone_model::text::InteractiveTextSpan>>,
     /// Which step of establishing a session [`Screen::Connecting`] is naming —
     /// That fix. Only read on that screen; reset by [`Self::begin`] so a
     /// second session never inherits the previous one's last phase.
@@ -699,7 +703,7 @@ impl UiState {
 
     /// The current death's message, populated only on [`Screen::Death`].
     #[must_use]
-    pub fn death_message(&self) -> Option<&str> {
+    pub fn death_message(&self) -> Option<&[lodestone_model::text::InteractiveTextSpan]> {
         self.death_message.as_deref()
     }
 
@@ -1728,7 +1732,7 @@ impl UiState {
     /// — matching vanilla, which replaces whatever screen is open the instant
     /// the death packet lands (`ClientPacketListener` sets the death screen
     /// unconditionally, not only from `Playing`). `message` is the server's
-    /// death message, already flattened to plain text — see
+    /// death message, resolved and flattened to interactive runs — see
     /// `net::NetUpdate::Death` and `Sim::death_message`.
     ///
     /// Called once per death from `app.rs`'s per-frame reconciliation, guarded
@@ -1737,7 +1741,7 @@ impl UiState {
     /// waits for a click) does not re-latch every frame — harmless here either
     /// way since the guard below is idempotent, but the caller's guard is what
     /// keeps `message` from being overwritten by a later, unrelated call.
-    pub fn die(&mut self, message: Option<String>) {
+    pub fn die(&mut self, message: Option<Vec<lodestone_model::text::InteractiveTextSpan>>) {
         if matches!(
             self.screen,
             Screen::Playing
@@ -1776,6 +1780,28 @@ impl UiState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A single plain (no click/hover, no colour) interactive span holding
+    /// `text` — the shape [`UiState::die`] takes for the many fixtures below
+    /// that only care about the wording, not the interactivity.
+    fn plain_death_message(text: &str) -> Vec<lodestone_model::text::InteractiveTextSpan> {
+        vec![lodestone_model::text::InteractiveTextSpan {
+            text: text.to_string(),
+            style: lodestone_model::TextStyle::default(),
+            click: None,
+            hover: None,
+            insertion: None,
+        }]
+    }
+
+    /// The joined plain wording of a death message, for assertions that only
+    /// care about the text — the interactive-spans sibling of comparing a
+    /// `String` directly, from before [`UiState::die`] carried style and
+    /// interactivity.
+    fn death_message_text(ui: &UiState) -> Option<String> {
+        ui.death_message()
+            .map(|spans| spans.iter().map(|s| s.text.as_str()).collect())
+    }
 
     #[test]
     fn starts_at_the_title_with_cursor_free_and_input_off() {
@@ -2494,15 +2520,15 @@ mod tests {
         ] {
             let mut ui = UiState::new();
             setup(&mut ui);
-            ui.die(Some("hit the ground too hard".to_string()));
+            ui.die(Some(plain_death_message("hit the ground too hard")));
             assert_eq!(ui.screen(), Screen::Death);
-            assert_eq!(ui.death_message(), Some("hit the ground too hard"));
+            assert_eq!(death_message_text(&ui), Some("hit the ground too hard".to_string()));
         }
 
         // A stray call from anywhere it cannot happen from (no live session)
         // must be a no-op — same guard as every other "leave a screen" method.
         let mut ui = UiState::new();
-        ui.die(Some("should not apply".to_string()));
+        ui.die(Some(plain_death_message("should not apply")));
         assert_eq!(ui.screen(), Screen::MainMenu, "no world, so no-op");
         assert!(ui.death_message().is_none());
     }
@@ -2511,7 +2537,7 @@ mod tests {
     fn respawn_confirmed_only_leaves_from_death_and_clears_the_message() {
         let mut ui = UiState::new();
         ui.enter_dev_world();
-        ui.die(Some("burned to death".to_string()));
+        ui.die(Some(plain_death_message("burned to death")));
 
         ui.respawn_confirmed();
         assert_eq!(ui.screen(), Screen::Playing);
@@ -2543,7 +2569,7 @@ mod tests {
     fn quit_to_title_from_the_death_screen_leaves_for_the_main_menu() {
         let mut ui = UiState::new();
         ui.enter_dev_world();
-        ui.die(Some("slain by Zombie".to_string()));
+        ui.die(Some(plain_death_message("slain by Zombie")));
 
         ui.quit_to_title();
         assert_eq!(ui.screen(), Screen::MainMenu);
@@ -2614,7 +2640,7 @@ mod tests {
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);
         ui.session_ready();
-        ui.die(Some("fell out of the world".to_string()));
+        ui.die(Some(plain_death_message("fell out of the world")));
         assert_eq!(ui.screen(), Screen::Death);
 
         ui.session_failed(SessionEnd::disconnected(

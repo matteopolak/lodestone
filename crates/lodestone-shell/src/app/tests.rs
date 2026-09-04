@@ -4112,7 +4112,7 @@ fn immediate_respawn_skips_the_death_screen_entirely() {
          measuring the default and not the rule"
     );
 
-    feed.send(NetUpdate::Death { message: "you died".into() }).unwrap();
+    feed.send(NetUpdate::Death { message: lodestone_model::Text::literal("you died") }).unwrap();
     app.sim.step(1.0 / 20.0);
     assert!(
         app.sim.is_dead(),
@@ -4169,7 +4169,7 @@ fn without_the_rule_the_same_death_still_raises_the_death_screen() {
         });
     assert_eq!(app.sim.game_rules().immediate_respawn(), Some(false));
 
-    feed.send(NetUpdate::Death { message: "you died".into() }).unwrap();
+    feed.send(NetUpdate::Death { message: lodestone_model::Text::literal("you died") }).unwrap();
     app.sim.step(1.0 / 20.0);
     app.drive_ui_from_session();
 
