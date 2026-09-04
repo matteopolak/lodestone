@@ -2,8 +2,7 @@
 # with Rust. See `docs/java-plugin-bridge.md` for the design, the licensing
 # decision and the measured census that sizes the work.
 #
-# **Licence: MIT OR Apache-2.0, deliberately, and this is a decision rather than
-# an inherited default.** Paper is GPL-3.0. Nothing in this crate is derived
+# **Licence: GPL-3.0-or-later.** Paper is GPL-3.0. Nothing in this crate is derived
 # from Paper: it contains no Paper source, no Paper bytecode, and no
 # transcription of either. The copyleft question is about *distribution of a
 # derivative work*, and this crate distributes neither Paper nor anything
@@ -24,7 +23,7 @@
 name = "lodestone-jvm-bridge"
 version.workspace = true
 edition.workspace = true
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [lints]
 workspace = true

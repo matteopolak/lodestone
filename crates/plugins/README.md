@@ -34,16 +34,8 @@ writes components and resources, and reaches the wire by pushing a
 
 ## Licensing
 
-**Each plugin carries its own `LICENSE`**, in its own directory, and may differ
-from the engine's `MIT OR Apache-2.0`. Rust's static linking means "linked into" is
-"the whole binary", so the copyleft boundary is worth being explicit about; keeping
-the file next to the crate is what makes it explicit per plugin rather than a
-repo-wide claim.
-
-| crate | licence | why |
-|---|---|---|
-| `lodestone-nav` | LGPL-3.0-or-later | owner's choice, not a constraint the design imposes — it is clean-room (`docs/baritone-port.md` §1.2) |
-| `lodestone-autopilot` | LGPL-3.0-or-later | same |
+All Lodestone-owned plugins use the repository-wide `GPL-3.0-or-later` license, including
+`lodestone-nav` and `lodestone-autopilot`. See the repository's root `LICENSE` file.
 
 ## Current contents
 
@@ -51,11 +43,11 @@ repo-wide claim.
 |---|---|
 | `lodestone-nav` | version-free autonomous-navigation search core: world view, movement graph, simulation-derived cost model, goals, resumable A\*. No bevy, no ECS, no threads. |
 | `lodestone-autopilot` | the bevy plugin: search driver, per-tick closed-loop executor. **Not a dependency of `lodestone-shell`** — a pre-implemented *external* plugin, for headless bots built on the library. It has no chat commands: `#goto` lived in the shell and was removed with the dependency, and there is no `CommandRegistry` a plugin can add its own command to yet — only the vanilla command surface exists. |
-| `lodestone-event-logger` | a toy `EventPriority::Monitor` reader plugin (the plugin event bus and cross-plugin priority ordering work): observes `lodestone_ecs::GameEvent`, the plugin event bus, and reports through a plain `Arc<Mutex<_>>` outside the ECS rather than a resource. `MIT OR Apache-2.0`, no licensing table row needed. |
-| `lodestone-plugin-support` | shared, non-engine conveniences: a per-plugin data directory and typed config helper (`paths`/`config`), and an in-memory namespaced key-value store attachable to an entity or a chunk (`persistent_data`). `MIT OR Apache-2.0`, no licensing table row needed. |
-| `lodestone-worldedit` | a WorldEdit-class bulk-edit plugin: region fill/replace with a per-session undo/redo stack, built on `lodestone_world::World::fill_region_capturing` and `lodestone_ecs::ChunkWorldWrite`. `MIT OR Apache-2.0`, no licensing table row needed. |
-| `lodestone-key-toggle` | a toy input-interception plugin (the `PluginKeybinds`/`PluginKeyEvent` registration point work): claims one physical key in `Consume` mode and flips a shared flag on every press, reached through a real `TickSet::Input`/`GameTick` schedule rather than called directly. `MIT OR Apache-2.0`, no licensing table row needed. |
-| `lodestone-block-jobs` | a queued `BreakIntent`/`PlaceIntent` producer: the first production consumer of the intent doctrine's write side (both components previously had zero non-test call sites). Runs one submitted `BlockJob` at a time through a real `TickSet::Intent` system, polling `BreakOutcome`/`PlaceOutcome` for completion. `MIT OR Apache-2.0`, no licensing table row needed. |
+| `lodestone-event-logger` | a toy `EventPriority::Monitor` reader plugin (the plugin event bus and cross-plugin priority ordering work): observes `lodestone_ecs::GameEvent`, the plugin event bus, and reports through a plain `Arc<Mutex<_>>` outside the ECS rather than a resource. |
+| `lodestone-plugin-support` | shared, non-engine conveniences: a per-plugin data directory and typed config helper (`paths`/`config`), and an in-memory namespaced key-value store attachable to an entity or a chunk (`persistent_data`). |
+| `lodestone-worldedit` | a WorldEdit-class bulk-edit plugin: region fill/replace with a per-session undo/redo stack, built on `lodestone_world::World::fill_region_capturing` and `lodestone_ecs::ChunkWorldWrite`. |
+| `lodestone-key-toggle` | a toy input-interception plugin (the `PluginKeybinds`/`PluginKeyEvent` registration point work): claims one physical key in `Consume` mode and flips a shared flag on every press, reached through a real `TickSet::Input`/`GameTick` schedule rather than called directly. |
+| `lodestone-block-jobs` | a queued `BreakIntent`/`PlaceIntent` producer: the first production consumer of the intent doctrine's write side (both components previously had zero non-test call sites). Runs one submitted `BlockJob` at a time through a real `TickSet::Intent` system, polling `BreakOutcome`/`PlaceOutcome` for completion. |
 
 `lodestone-nav`/`lodestone-autopilot` are documented in
 [`docs/autonomous-navigation.md`](../../docs/autonomous-navigation.md), against the

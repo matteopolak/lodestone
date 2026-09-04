@@ -21,9 +21,9 @@
 //! It is not `AutopilotPlugin` itself for one deliberate reason:
 //! `crates/lodestone-shell/Cargo.toml` states that `lodestone-autopilot` must not
 //! become a dependency of this crate — "not even `optional = true` behind a
-//! feature" — and a `[dev-dependencies]` entry would put an LGPL-3.0-or-later
-//! crate into the MIT-OR-Apache-2.0 engine's own test graph and version-lock the
-//! plugin's gates to the shell. The autopilot's real goal-arrival behaviour
+//! feature" — and a `[dev-dependencies]` entry would couple the engine's test
+//! graph to that external plugin and version-lock the plugin's gates to the
+//! shell. The autopilot's real goal-arrival behaviour
 //! *through the same seam* is gated one crate down, in
 //! `crates/lodestone-app/tests/headless_consumer_registers_a_plugin.rs`, where
 //! the dependency direction is plugins→engine as `crates/plugins/README.md`

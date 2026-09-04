@@ -4,8 +4,7 @@
 # (the non-persistent half of a persistent data container — see
 # `src/persistent_data.rs` for why the persistent half is out of scope here).
 #
-# `MIT OR Apache-2.0`, the workspace default — no `crates/plugins/README.md`
-# licensing-table row needed, matching `lodestone-event-logger`.
+# `GPL-3.0-or-later`, the workspace default, matching `lodestone-event-logger`.
 [package]
 name = "lodestone-plugin-support"
 version.workspace = true

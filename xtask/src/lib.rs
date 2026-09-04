@@ -21,6 +21,8 @@ pub const DEFAULT_PACKET_IDS_OUT: &str = "crates/versions/26.2/src/generated/pac
 /// Default output for the minecraft-data-sourced protocol 47 (Minecraft 1.8.x).
 pub const DEFAULT_PACKET_IDS_OUT_V47: &str = "crates/versions/1.8/src/generated/packet_ids.rs";
 pub const DEFAULT_CONNECTED_ALLOWLIST: &str = "xtask/check-connected.toml";
+#[cfg(test)]
+const FIRST_PARTY_LICENSE: &str = "GPL-3.0-or-later";
 /// Where `gen-registries` reads/writes the `sound_event`/`particle_type`/`menu`/
 /// `item`/`data_component_type` registry tables by default, and where
 /// `conformance`'s registry step drift-checks them regardless of `--family`.
@@ -404,6 +406,162 @@ fn resolve_canonical_alias<'a>(table: &[(&str, &'a str)], name: &str) -> Option<
         .iter()
         .find(|(from, _)| *from == name)
         .map(|(_, to)| *to)
+}
+
+/// Finds first-party package-license declarations that do not preserve the
+/// workspace's GPL-3.0-or-later policy. The scan deliberately reads only the
+/// `[package]` and root `[workspace.package]` sections, so dependency metadata
+/// and explanatory prose about third-party licenses are outside its scope.
+#[cfg(test)]
+fn first_party_manifest_license_violations(workspace_root: &Path) -> Result<Vec<String>> {
+    let root_manifest = workspace_root.join("Cargo.toml");
+    let mut manifests = vec![root_manifest.clone()];
+    for directory in ["crates", "fuzz", "web", "xtask"] {
+        collect_cargo_manifests(&workspace_root.join(directory), &mut manifests)?;
+    }
+    manifests.sort();
+    manifests.dedup();
+
+    let mut violations = Vec::new();
+    for manifest_path in manifests {
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .with_context(|| format!("read {}", manifest_path.display()))?;
+        let declarations = manifest_license_declarations(&manifest);
+        let package_name = declarations
+            .iter()
+            .find_map(|declaration| match declaration {
+                ManifestDeclaration::PackageName(name) => Some(name.as_str()),
+                ManifestDeclaration::License { .. } => None,
+            });
+        let first_party_package = package_name
+            .is_some_and(|name| name.starts_with("lodestone-") || name == "xtask");
+        let is_root = manifest_path == root_manifest;
+        let has_scoped_license = declarations.iter().any(|declaration| {
+            matches!(
+                declaration,
+                ManifestDeclaration::License {
+                    workspace_package,
+                    ..
+                } if first_party_package || (is_root && *workspace_package)
+            )
+        });
+        if (first_party_package || is_root) && !has_scoped_license {
+            let relative = manifest_path
+                .strip_prefix(workspace_root)
+                .unwrap_or(&manifest_path)
+                .display();
+            violations.push(format!(
+                "{relative}: {FIRST_PARTY_LICENSE} required, found no license declaration"
+            ));
+            continue;
+        }
+
+        for declaration in declarations {
+            let ManifestDeclaration::License {
+                workspace_package,
+                value,
+            } = declaration
+            else {
+                continue;
+            };
+            if !(first_party_package || (is_root && workspace_package)) {
+                continue;
+            }
+            if value == "workspace" || value == FIRST_PARTY_LICENSE {
+                continue;
+            }
+            let relative = manifest_path
+                .strip_prefix(workspace_root)
+                .unwrap_or(&manifest_path)
+                .display();
+            violations.push(format!(
+                "{relative}: {FIRST_PARTY_LICENSE} required, found {value}"
+            ));
+        }
+    }
+    Ok(violations)
+}
+
+#[cfg(test)]
+fn collect_cargo_manifests(directory: &Path, manifests: &mut Vec<PathBuf>) -> Result<()> {
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(directory)
+        .with_context(|| format!("read {}", directory.display()))?
+    {
+        let entry = entry.with_context(|| format!("read entry under {}", directory.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_cargo_manifests(&path, manifests)?;
+        } else if path.file_name().is_some_and(|name| name == "Cargo.toml") {
+            manifests.push(path);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+enum ManifestDeclaration {
+    PackageName(String),
+    License {
+        workspace_package: bool,
+        value: String,
+    },
+}
+
+#[cfg(test)]
+fn manifest_license_declarations(manifest: &str) -> Vec<ManifestDeclaration> {
+    #[derive(Clone, Copy)]
+    enum Section {
+        Other,
+        Package,
+        WorkspacePackage,
+    }
+
+    let mut section = Section::Other;
+    let mut declarations = Vec::new();
+    for line in manifest.lines() {
+        let line = line.trim();
+        section = match line {
+            "[package]" => Section::Package,
+            "[workspace.package]" => Section::WorkspacePackage,
+            line if line.starts_with('[') && line.ends_with(']') => Section::Other,
+            _ => section,
+        };
+        if line.starts_with('#') {
+            continue;
+        }
+        match section {
+            Section::Package if line.starts_with("name =") => {
+                if let Some(name) = manifest_string_value(line) {
+                    declarations.push(ManifestDeclaration::PackageName(name.to_owned()));
+                }
+            }
+            Section::Package | Section::WorkspacePackage if line.starts_with("license =") => {
+                if let Some(license) = manifest_string_value(line) {
+                    declarations.push(ManifestDeclaration::License {
+                        workspace_package: matches!(section, Section::WorkspacePackage),
+                        value: license.to_owned(),
+                    });
+                }
+            }
+            Section::Package if line == "license.workspace = true" => {
+                declarations.push(ManifestDeclaration::License {
+                    workspace_package: false,
+                    value: "workspace".to_owned(),
+                });
+            }
+            _ => {}
+        }
+    }
+    declarations
+}
+
+#[cfg(test)]
+fn manifest_string_value(line: &str) -> Option<&str> {
+    let (_, value) = line.split_once('=')?;
+    value.trim().strip_prefix('"')?.strip_suffix('"')
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -14571,7 +14729,7 @@ members = ["crates/versions/*", "crates/lodestone-registry"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 lodestone-v1 = { path = "crates/versions/v1" }
@@ -14663,6 +14821,61 @@ v1 = ["dep:lodestone-v1"]
   }}
 }}"#
         )
+    }
+
+    #[test]
+    fn first_party_manifest_license_control_rejects_non_gpl_declarations() -> Result<()> {
+        let workspace = fresh_test_workspace("first-party-license")?;
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            r#"[workspace.package]
+license = "GPL-3.0-or-later"
+"#,
+        )?;
+        let crate_dir = workspace.join("crates/lodestone-control");
+        std::fs::create_dir_all(&crate_dir)?;
+        std::fs::write(
+            crate_dir.join("Cargo.toml"),
+            r#"# Third-party prose may say license = "MIT OR Apache-2.0".
+[package]
+name = "lodestone-control"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+license = { package = "third-party", version = "1" }
+"#,
+        )?;
+        let missing_dir = workspace.join("crates/lodestone-missing-license");
+        std::fs::create_dir_all(&missing_dir)?;
+        std::fs::write(
+            missing_dir.join("Cargo.toml"),
+            r#"[package]
+name = "lodestone-missing-license"
+"#,
+        )?;
+
+        let violations = first_party_manifest_license_violations(workspace.deref())?;
+        assert_eq!(
+            violations,
+            vec![
+                "crates/lodestone-control/Cargo.toml: GPL-3.0-or-later required, found MIT OR Apache-2.0",
+                "crates/lodestone-missing-license/Cargo.toml: GPL-3.0-or-later required, found no license declaration",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn first_party_manifest_licenses_match_the_workspace_license() -> Result<()> {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize()
+            .context("canonicalize workspace root")?;
+        assert!(
+            first_party_manifest_license_violations(&workspace_root)?.is_empty(),
+            "first-party Cargo.toml license declarations must be GPL-3.0-or-later"
+        );
+        Ok(())
     }
 
     #[test]

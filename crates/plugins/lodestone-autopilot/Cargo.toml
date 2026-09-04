@@ -3,13 +3,13 @@
 # executor that turns a `lodestone-nav` `Plan` into `MovementIntent`/`LookIntent`,
 # and (future milestones) chat commands and a debug overlay.
 #
-# **Licence.** LGPL-3.0-or-later, its own `LICENSE` file, matching `lodestone-nav`
+# **Licence.** GPL-3.0-or-later, matching `lodestone-nav`
 # per `docs/baritone-port.md` §1.2 point 2 and `crates/plugins/README.md`.
 [package]
 name = "lodestone-autopilot"
 version.workspace = true
 edition.workspace = true
-license = "LGPL-3.0-or-later"
+license = "GPL-3.0-or-later"
 
 [lints]
 workspace = true
@@ -61,4 +61,3 @@ bevy_app = { workspace = true }
 # warns about: it cannot exercise the geometry the search and physics code
 # exist to handle, because the input never contains a non-cube shape.
 lodestone-data = { workspace = true }
-

@@ -204,9 +204,8 @@ sees it, written down so counsel has something concrete to react to.
 - **Vanilla Minecraft is proprietary** and neither we nor Paper may redistribute it — which is
   exactly why Paper ships a *patch* plus a launcher that downloads Mojang's jar at first run, rather
   than shipping the server (§1.5's trap 1 is that mechanism observed from outside).
-- **This repository is `MIT OR Apache-2.0`**, and `crates/plugins/*` carry per-crate licences
-  precisely because the copyleft boundary is per-plugin. `lodestone-nav` is the precedent: LGPL-3.0
-  in its own crate, a clean-room design, with the reasoning recorded in `docs/baritone-port.md` §1.
+- **Lodestone-owned code is `GPL-3.0-or-later`**, including the bridge and the crates under
+  `crates/plugins/*`.
 
 ### 2.2 What we ship, and what we do not
 
@@ -216,7 +215,7 @@ The design's licensing property is that **we distribute no Paper bytecode, modif
 |---|---|---|
 | the Paper jar | **the user**, obtained from PaperMC themselves | we never distribute it |
 | shim classes with NMS names/signatures | us | see §2.3 |
-| the Rust bridge crate | us | MIT OR Apache-2.0 |
+| the Rust bridge crate | us | GPL-3.0-or-later |
 | the classloader that redirects vanilla's own internal classes | us | our own code |
 | the Paper jar used for the census | downloaded locally, **never committed** | a measurement input |
 
@@ -226,7 +225,8 @@ classes at load time with **no modification to Paper at all**.
 
 ### 2.3 The engineering conclusion
 
-**The bridge crate is `MIT OR Apache-2.0`**, and this is a decision rather than an inherited default:
+**The bridge crate is `GPL-3.0-or-later`.** That project-wide license choice does not change the
+bridge's clean-room and distribution boundaries:
 
 1. **No derivation.** The crate contains no Paper source, no Paper bytecode, and no transcription of
    either. Its NMS-facing surface is derived from **Mojang's** de-obfuscated names — the same source
@@ -234,9 +234,6 @@ classes at load time with **no modification to Paper at all**.
 2. **No distribution of a derivative work.** GPL-3.0's copyleft obligations attach to *conveying* a
    work based on the Program. We convey no part of Paper. The user assembles the combination on
    their own machine, at their own runtime, from parts they obtained separately.
-3. **The precedent is already in the tree.** `crates/plugins/*` exist as separately-licensed crates
-   for exactly this reason, and `lodestone-nav` already carries a different licence from the
-   workspace for a copyleft-boundary reason.
 
 **What may not be shipped, under any framing:**
 

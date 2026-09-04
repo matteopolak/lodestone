@@ -70,8 +70,8 @@ pub const NOTICE: &str =
      software; this project is not affiliated with, endorsed by, or associated with Mojang or \
      Microsoft (see docs/legal-notices.md). Operating a Minecraft-compatible server is \
      nonetheless governed by Mojang's own End User License Agreement: \
-     https://aka.ms/MinecraftEULA. Lodestone itself is provided under its own open-source \
-     license (see LICENSE-MIT / LICENSE-APACHE).";
+     https://aka.ms/MinecraftEULA. Lodestone itself is provided under GPL-3.0-or-later \
+     (see LICENSE).";
 
 /// Whether `eula.txt` at `path` says `eula=true`.
 ///

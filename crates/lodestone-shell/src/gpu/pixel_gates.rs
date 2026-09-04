@@ -457,12 +457,11 @@ fn no_plugin_billboards_source_installed_draws_nothing() {
 /// `PluginBillboard`s spread along a route — `extract_plan_billboards`
 /// (`crates/plugins/lodestone-autopilot/src/lib.rs`) pushes one per
 /// remaining edge, not the single billboard the precedent gate above uses.
-/// `lodestone-shell` must not depend on `lodestone-autopilot` (an
-/// LGPL-3.0-or-later external plugin — see that crate's `Cargo.toml`
-/// comment), so this gate cannot drive the real plugin through a real
-/// `Sim`; it instead feeds the render pipeline the same *shape* that
-/// producer emits — several distinct world-space markers along a line —
-/// and checks each one reaches its own region of the frame.
+/// `lodestone-shell` must not depend on `lodestone-autopilot` (an external
+/// plugin rather than part of the shipped client), so this gate cannot drive
+/// the real plugin through a real `Sim`; it instead feeds the render pipeline
+/// the same *shape* that producer emits — several distinct world-space markers
+/// along a line — and checks each one reaches its own region of the frame.
 ///
 /// This is the `CLAUDE.md` "measure by location, never by frame average"
 /// case directly: an aggregate diff count (the precedent gate's own

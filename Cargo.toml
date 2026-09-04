@@ -41,7 +41,7 @@ default-members = ["crates/lodestone-shell"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/matthew/lodestone"
 
 [workspace.dependencies]
@@ -105,9 +105,7 @@ lodestone-ecs  = { path = "crates/lodestone-ecs" }
 # registration point the shell and an external consumer both use.
 lodestone-app  = { path = "crates/lodestone-app" }
 # Plugins (`crates/plugins/`, `docs/autonomous-navigation.md`). Listed here so a
-# plugin that depends on another plugin does not spell a relative path, and so the
-# licence boundary is visible in one place: both are LGPL-3.0-or-later, unlike the
-# MIT-OR-Apache-2.0 engine.
+# plugin that depends on another plugin does not spell a relative path.
 lodestone-nav = { path = "crates/plugins/lodestone-nav" }
 lodestone-autopilot = { path = "crates/plugins/lodestone-autopilot" }
 

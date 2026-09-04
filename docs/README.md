@@ -216,11 +216,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   connection. This keeps the controller's per-tick `ClientAction::Move` producer
   independent from each protocol's wire cadence.
 - [Legal notices and attribution](./legal-notices.md) — The record behind this
-  repository's `README.md` disclaimer, `NOTICE`, `LICENSE-MIT`, and `LICENSE-APACHE`
-  files: what an IP/attribution audit found, on what evidence, and which questions are
-  for counsel rather than for an agent working in this repo. This doc is the "why" for
-  those files; it is not itself a legal opinion, and nothing in it should be read as
-  one.
+  repository's `README.md` disclaimer, `NOTICE`, and `LICENSE` file: what an
+  IP/attribution audit found, on what evidence, and which questions are for counsel
+  rather than for an agent working in this repo. This doc is the "why" for those
+  files; it is not itself a legal opinion, and nothing in it should be read as one.
 - [Lighting and sky](./lighting-and-sky.md) — The client's whole lighting and
   atmosphere model: per-corner smooth lighting and ambient occlusion on baked block
   models, the vanilla lightmap curve that turns a light byte plus time-of-day into a
