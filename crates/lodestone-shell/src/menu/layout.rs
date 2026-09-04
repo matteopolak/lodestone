@@ -854,11 +854,6 @@ impl FrameLayout {
         self.min_height = ipx(min_height);
     }
 
-    /// `defaultChildLayoutSetting()` — the live baseline, centred by default.
-    pub fn default_child_layout_setting(&mut self) -> &mut LayoutSettings {
-        &mut self.default_child_settings
-    }
-
     /// `newChildLayoutSettings()` — a copy of it.
     #[must_use]
     pub fn new_child_layout_settings(&self) -> LayoutSettings {
