@@ -2,7 +2,9 @@
 xtask = "run --quiet --package xtask --"
 
 [build]
-rustc-wrapper = "/opt/homebrew/bin/sccache"
+# Local builds invoke rustc directly. CI opts into sccache through its own
+# RUSTC_WRAPPER environment setting, so a checkout never depends on a
+# machine-specific wrapper path or a locally useful compiler-cache hit rate.
 # Parallel front-end (`-Z threads=N`), nightly-only. Measured 2026-08-15 in two isolated,
 # contention-free `CARGO_TARGET_DIR` builds of lodestone-ecs (bevy_ecs's derive-macro-heavy
 # dependency chain): threads=1 real 50.84s / user 43.73s, threads=8 real 43.27s / user 45.80s --

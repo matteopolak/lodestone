@@ -153,18 +153,13 @@ unbounded network wait into a fast, honest failure instead of eating the job's w
 
 ### sccache in CI, and what it is actually worth
 
-The repo-wide, unconditional `build.rustc-wrapper` line in `.cargo/config.toml` means every
-job here needs a real `sccache` binary on `PATH` before its first `cargo` invocation, or the
-very first compile hard-errors rather than falling back — so every job (including
-`xtask-structural-checks`, which skips the `alsa-sys` apt step) runs
-`mozilla-actions/sccache-action@v0.0.11` right after `Swatinem/rust-cache`, with
-`SCCACHE_GHA_ENABLED`/`RUSTC_WRAPPER` set at the workflow's top-level `env:` (both required by
-the action's own README; it installs the binary and a cache server but sets neither variable
-itself). Setting `RUSTC_WRAPPER` as a workflow env var also sidesteps a portability question:
-an environment variable always wins over a config-file value in Cargo's precedence, so this
-resolves through `PATH` to whatever the action just installed regardless of the absolute,
-dev-machine-specific path `.cargo/config.toml` hardcodes. The documented escape hatch for a job
-or runner that genuinely cannot run the action is overriding `RUSTC_WRAPPER: ""` for that job.
+CI opts into `sccache` explicitly. Jobs that can use it run
+`mozilla-actions/sccache-action@v0.0.11` after `Swatinem/rust-cache`, and the workflow supplies
+`SCCACHE_GHA_ENABLED`/`RUSTC_WRAPPER` in its environment. The action installs the binary and its
+cache service but does not set those variables itself. Local Cargo configuration has no wrapper,
+so this workflow setting is the entire CI opt-in rather than an override of a machine-specific
+path. A job or runner that cannot use the action sets `RUSTC_WRAPPER: ""` and invokes `rustc`
+directly.
 
 **Windows is that case, and it is a measured limitation rather than a preference.** The
 `lodestone-shell` `rustc` invocation on that leg carries several hundred `-L
@@ -176,19 +171,11 @@ cargo alone can spawn the same command. `check-default`'s matrix therefore sets
 GitHub expression, so that ternary's `||` fires anyway and every leg would get `sccache`
 regardless of the condition.
 
-**Measured on both sides, and the two numbers disagree sharply on purpose.** In CI, `sccache`
-is genuinely earning its place: the `wasm` job's own `Post Run` step on a recent run reported
-**86% — 102 hits, 14 misses**, and every job's summary shows real nonzero compile requests
-with a meaningful hit rate. Measured on the shared dev machine, across a five-agent day, the
-contribution is close to zero: 5,635 compile requests, 1 cache hit — a **0.16%** hit rate — and
-sccache refuses incremental compilation outright rather than falling through. Disabling
-incremental compilation does not close that gap: two isolated builds of `lodestone-time` with
-`CARGO_INCREMENTAL=0` into two empty target directories — identical inputs, so the second
-should hit if the cache functions at all — produced 8 requests, 2 cacheable, 5 non-cacheable,
-and **zero** hits. `docs/repo-tooling.md` carries the full local-side measurement and the
-untested suspects for why it misses; the point worth keeping here is that "sccache works" and
-"sccache is worth it locally" are different claims, verified independently, and only the first
-one is true on the dev machine today.
+CI cache summaries, not local intuition, justify this opt-in: the `wasm` job's `Post Run` step
+has reported **86% — 102 hits, 14 misses**. Local builds invoke `rustc` directly because local
+measurements have not established useful `sccache` reuse. Keep the two policies separate: a CI
+cache can be worthwhile without making an absolute wrapper path or a local cache daemon a
+checkout requirement.
 
 ### The `bench-gate` job
 

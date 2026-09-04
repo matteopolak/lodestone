@@ -86,16 +86,12 @@ env:
   # optimization level or debug_assertions (semantics are unchanged).
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  # The dev machine's `.cargo/config.toml` is gaining a repo-wide, unconditional
-  # `build.rustc-wrapper = "…/sccache"` line, so every job here MUST make a real
-  # `sccache` binary available before its first `cargo` invocation (mozilla-actions
-  # /sccache-action below) — a config-level wrapper pointing at a missing binary is
-  # a hard error, not a slow fallback. Setting RUSTC_WRAPPER here is also what makes
-  # this repeatable regardless of what path `.cargo/config.toml` hardcodes: cargo's
-  # config precedence has an environment variable win over a config-file value, so
-  # this always resolves through PATH to whatever the action just installed. See
-  # docs/ci.md's "sccache in CI, and what it is actually worth" for the escape
-  # hatch (RUSTC_WRAPPER: "") if a future job or runner genuinely can't run the action.
+  # CI opts into sccache explicitly; the repository's Cargo configuration has no
+  # local rustc wrapper. Jobs using this setting must run sccache-action before
+  # their first cargo invocation, because a wrapper named on RUSTC_WRAPPER is a
+  # hard requirement rather than a slow fallback. Resolving the wrapper by PATH
+  # binds it to the binary the action installed. See docs/ci.md's "sccache in CI,
+  # and what it is actually worth" for the RUSTC_WRAPPER: "" escape hatch.
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
 
@@ -163,11 +159,9 @@ jobs:
           # `sccache: error: failed to spawn Command {…}` / `os error 206`
           # (ERROR_FILENAME_EXCED_RANGE, "The filename or extension is too long")
           # while every other leg passed. Cargo can spawn that command; sccache
-          # in front of it cannot. `RUSTC_WRAPPER: ""` is the escape hatch
-          # docs/ci.md already documents for exactly this case, and an env var
-          # beats the committed `.cargo/config.toml` `build.rustc-wrapper` line in
-          # cargo's config precedence — which matters here, because that line
-          # hardcodes a Homebrew path that does not exist on any runner.
+          # in front of it cannot. `RUSTC_WRAPPER: ""` is the documented escape
+          # hatch: it overrides the workflow-level opt-in for this matrix leg,
+          # while the repository's Cargo configuration still invokes rustc directly.
           - os: windows-latest
             rustc_wrapper: ""
     env:

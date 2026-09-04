@@ -5,7 +5,7 @@
 The tools that keep this workspace buildable and testable at scale: the `just` task runner
 that gives every health check a short canonical name, the GitHub Actions CI workflow that
 verifies pushes without contending for the shared dev machine, the `sccache`/private-target-dir
-build-caching design that lets many agents build concurrently in one checkout, and the
+build policy that lets many agents build concurrently in one checkout, and the
 `cargo xtask` static scanners (`islands`, `world-coverage`, and their siblings `connectedness`,
 `check-ptr-const`, `wasm-check`) that catch classes of defect no compiler check can see.
 
@@ -26,9 +26,8 @@ which is how to verify a recipe stays byte-for-byte faithful to the raw command 
 Every cargo-invoking recipe passes `--target-dir {{tdir}}` and `-j {{jobs}}`, both sourced from
 `LODESTONE_TARGET_DIR`/`LODESTONE_JOBS` environment variables that `just` interpolates into the
 command line **before** cargo runs — so cargo only ever sees the flag form, never the
-environment variable. This is load-bearing, not stylistic: the flag form measures 78–94%
-`sccache` hits where the equivalent `CARGO_TARGET_DIR` environment variable measures near 0%,
-because `sccache` hashes `CARGO_*` env vars into its own cache keys. `LODESTONE_JOBS` defaults
+environment variable. The flag form keeps Cargo's private-target choice visible in each expanded
+recipe without placing a `CARGO_*` variable in the process environment. `LODESTONE_JOBS` defaults
 to empty (cargo's own default), never a hardcoded number, so a recipe never silently throttles a
 CI runner or an otherwise-idle machine. `just run` (native) and `just run-wasm` (the browser
 target, driven by `trunk` against `web/`'s own separate Cargo workspace) are deliberately
@@ -77,12 +76,9 @@ test). None of these show up in `cargo check` or a wasm hazard census.
 CI installs `libasound2-dev`/`pkg-config` on Linux before the toolchain step, since `cpal`'s
 Linux audio backend needs them at build time and every other backend needs no system package at
 all — the step is `if: runner.os == 'Linux'` because `apt-get` does not exist on the other two
-runners. A repo-wide, unconditional `sccache` wrapper in `.cargo/config.toml` means every job,
-including CI's, needs the `sccache` binary on `PATH` or the very first compile hard-errors; CI
-satisfies this with `mozilla-actions/sccache-action`, setting `RUSTC_WRAPPER`/
-`SCCACHE_GHA_ENABLED` as workflow environment variables (an environment variable always beats a
-config-file value in Cargo's precedence, so this correctly overrides whatever absolute,
-dev-machine-specific path the committed config file names).
+runners. CI opts into `sccache` explicitly with `mozilla-actions/sccache-action` and its
+`RUSTC_WRAPPER`/`SCCACHE_GHA_ENABLED` workflow environment variables; local Cargo configuration
+does not select a wrapper or require the binary.
 
 **A subtle, load-bearing gotcha**: every job passes a `toolchain:` input to the toolchain-install
 action, and that value is **not** the compiler any job actually uses — `rust-toolchain.toml`'s
@@ -93,43 +89,29 @@ and any doc or comment claiming the two are "kept in sync" is describing somethi
 config-precedence rules make impossible to verify by inspection — read the actual `rustc
 --version` a job reports, never a `toolchain:` value in the YAML.
 
-### Build caching (`sccache`, private target dirs, trimmed dev profiles)
+### Private target directories, CI caching, and trimmed dev profiles
 
 Up to a dozen agents build concurrently in one shared checkout on one machine. Before this
 design, every agent shared one `target/`, and cargo serializes concurrent builds on an exclusive
 build-directory lock — a `cargo test` has been measured at 42+ minutes elapsed and 0% CPU, pure
-lock-wait. **Private per-agent target directories dodge the lock; a shared `sccache` compiler
-cache is what makes that affordable**, since the dependency graph then comes from cache instead
-of being recompiled once per agent. The measured warm hit rate on a full workspace check is
-above 90%; the flag-vs-env-var distinction above is what makes that possible. Trimmed dev
-profiles (`debug = "line-tables-only"` for the workspace, `opt-level = 1` for third-party
-dependencies) cut both wall time and per-agent `target/` size substantially, at the cost of a
-slower incremental edit loop for the one or two crates where `opt-level = 1` bites hardest —
-override it locally for just that package if it does (`--config
-'profile.dev.package.<crate>.opt-level=0'`).
+lock-wait. **Private per-agent target directories dodge that lock**, but they do not share local
+compiled dependencies: each has its own build outputs. The root Cargo configuration deliberately
+does not enable `sccache` for local builds. A controlled pair of fresh, non-incremental target
+directories must establish a useful local hit rate before that policy changes; otherwise the
+wrapper adds a dependency and startup work without demonstrated reuse. CI is separate: its
+workflow explicitly opts into an Actions-backed `sccache` service and keeps the wrapper scoped to
+jobs where it works.
 
-**This measurement is scoped to `rustc` invocations only, and that scope has a real blind
-spot.** `sccache` is installed as `[build] rustc-wrapper`, which says nothing about what a build
-script does with a C toolchain — a heavy vendored-C `-sys` crate is rebuilt from scratch in
-*every* per-agent target directory, with no cache to offset it, which is a straight multiplier on
-disk and time for exactly that class of dependency. The two practical mitigations: delete a
-per-agent target directory as soon as a task finishes (nothing does this automatically), and
-prefer removing a heavy `-sys` dependency outright over trying to cache it (see
-`docs/accounts-and-join.md`'s TLS crypto provider section for one such removal). The binding
-constraint this design does not touch at all is test-runtime memory — a single test binary has
-been observed using several gigabytes of RSS, which is unrelated to anything caching or profile
-tuning can fix.
-
-**`sccache`'s measured contribution is approximately nothing, and the blind spot above understates
-it.** Sampled during a five-agent day: 5,635 compile requests, **1 cache hit**, 628 misses, and
-4,984 calls classified non-cacheable — a 0.16% hit rate. It also refuses incremental compilation
-outright rather than falling through (`incremental compilation is prohibited`). The intuitive
-remedy does not work: two builds of the same crate with `CARGO_INCREMENTAL=0` into two *empty*
-target directories — identical inputs, so the second must hit if the cache functions — produced
-zero hits and two further misses. Why it misses is **not** established; the untested suspects are
-the nightly `-Z threads=8` in `build.rustflags` and the Cranelift `codegen-backend` in
-`profile.dev`, both the kind of flag sccache declines to cache, and both carrying their own
-measured wins. Treat any claim that a dependency is "served from sccache" as unverified.
+Trimmed dev profiles (`debug = "line-tables-only"` for the workspace, `opt-level = 1` for
+third-party dependencies) cut both wall time and per-agent `target/` size substantially, at the
+cost of a slower incremental edit loop for the one or two crates where `opt-level = 1` bites
+hardest — override it locally for just that package if it does (`--config
+'profile.dev.package.<crate>.opt-level=0'`). A heavy vendored-C `-sys` crate is rebuilt in every
+private target directory because a Rust compiler wrapper cannot cache its C toolchain work. Delete
+a task's private target directory as soon as it finishes, and prefer removing a heavy `-sys`
+dependency outright over trying to cache it. The binding constraint this design does not touch at
+all is test-runtime memory — a single test binary has been observed using several gigabytes of
+RSS, which is unrelated to target-directory policy or profile tuning.
 
 **`just reclaim` is the safe disk reclaim**, and disk is a live constraint rather than a
 theoretical one: free space on this volume has fallen to 4.1 GiB, below which every shell call in
@@ -181,8 +163,8 @@ cannot: `connectedness` only ever asks "does this clientbound packet reach anyth
 ## How to change it, and the gotchas
 
 - **Never reintroduce a `CARGO_*`-prefixed variable, a hardcoded shared target dir, or a fixed
-  `-j`, anywhere in the Justfile.** Each defeats a specific measured property (cache hits,
-  per-agent isolation, no throttling of idle/CI machines) invisibly — a recipe that "still
+  `-j`, anywhere in the Justfile.** Each defeats a specific property (per-agent isolation or no
+  throttling of idle/CI machines) invisibly — a recipe that "still
   works" gives no signal that one of these regressed.
 - **Do not add a job to CI that runs the `#[ignore]`d live/GPU gates.** There is no jar, GPU, or
   oracle server on a hosted runner; such a job would either fail every run or need its
@@ -221,17 +203,17 @@ cannot: `connectedness` only ever asks "does this clientbound packet reach anyth
   write, used throughout the regeneration recipes and the `docs-index` generator.
 - `cargo xtask islands [--crate <name>]`, `cargo xtask world-coverage` — no environment
   variables of their own; both scan the whole workspace from the current directory unless scoped.
-- `.cargo/config.toml`'s `[build] rustc-wrapper` — the repo-wide `sccache` pin; an environment
-  variable (`RUSTC_WRAPPER=""`) is the sanctioned escape hatch for an environment without the
-  binary, including one CI leg that cannot practically wrap `rustc` at all.
+- `.cargo/config.toml` — local Cargo configuration deliberately has no `rustc-wrapper`. CI's
+  workflow supplies `RUSTC_WRAPPER=sccache` only on supported jobs; a job without that setting
+  invokes `rustc` directly.
 
 ## Dependencies
 
 - `casey/just` for the task runner; `cargo`, `xtask`, and `scripts/*` for everything it names.
 - `dtolnay/rust-toolchain`, `Swatinem/rust-cache`, `mozilla-actions/sccache-action`,
   `extractions/setup-just` in CI.
-- `sccache` (native, native profile) as the compiler-cache wrapper; `syn`/`proc-macro2` (with
-  the `visit` feature) for both AST-walking `xtask` scanners; `lodestone-data`/`lodestone-assets`
+- `sccache` in CI as the compiler-cache wrapper; `syn`/`proc-macro2` (with the `visit` feature)
+  for both AST-walking `xtask` scanners; `lodestone-data`/`lodestone-assets`
   as plain, version-free dependencies of `world-coverage` for the real registry populations and
   rig corpus, and the pinned 26.2 decompile under `.cache/` as `world-coverage`'s optional
   vanilla-oracle cross-check.
