@@ -243,7 +243,7 @@ fn tab_row_band(row_count: usize, h: u32) -> (u32, u32) {
     // `max_name_width`/`widest_banner` size the plates horizontally only; the y
     // ladder is a pure function of the line counts, so a nominal width is
     // sound here for exactly the reason the in-crate layout gate gives.
-    let panel = TabPanel::new(canvas_w, row_count.max(1), false, 40.0, 0, 0, 0.0);
+    let panel = TabPanel::new(canvas_w, row_count.max(1), false, 40.0, 0, 0.0);
     // One line of headroom above and below, so a row's ink cannot fall outside
     // the band through rounding.
     let top = (panel.rows_top - 1.0).max(0.0);

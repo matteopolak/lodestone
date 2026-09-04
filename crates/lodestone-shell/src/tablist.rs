@@ -670,8 +670,8 @@ mod tests {
         // and the banner width are only needed for *horizontal* geometry, which
         // this gate does not measure, so the bands below are unaffected by passing
         // a nominal width — the y ladder is a pure function of the line counts.
-        let panel_b = TabPanel::new(cw, banner.len(), false, 40.0, 3, 3, 40.0);
-        let panel_n = TabPanel::new(cw, bare.len(), false, 40.0, 0, 0, 0.0);
+        let panel_b = TabPanel::new(cw, banner.len(), false, 40.0, 3, 40.0);
+        let panel_n = TabPanel::new(cw, bare.len(), false, 40.0, 0, 0.0);
 
         // Count text-bright pixels in a logical scanline band, across the whole
         // width. The overlay's own backdrop is the 0x80 black plate over the grey
