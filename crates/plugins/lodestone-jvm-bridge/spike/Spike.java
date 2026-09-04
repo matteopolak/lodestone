@@ -7,14 +7,14 @@ import java.net.URLClassLoader;
  * The classload-interception spike.
  *
  * <p><b>The claim under test.</b> The Java-plugin bridge's whole design rests on
- * one mechanism: that {@code net.minecraft.*} can be redirected to
+ * one mechanism: that a target package can be redirected to
  * signature-identical shim classes <em>at classload time</em>, so that Paper's
  * already-compiled bytecode calls into us with no bytecode modification and no
  * redistribution of Paper. Everything else in the design is downstream of that
  * working. It had never been executed here, so it was an assumption.
  *
  * <p><b>The A/B.</b> {@code org.example.Caller} is compiled <em>once</em>,
- * against the real {@code Level}, and never recompiled. It is then loaded twice
+ * against the real {@code World}, and never recompiled. It is then loaded twice
  * through two loaders that differ in exactly one element of their search path:
  *
  * <ul>
@@ -27,10 +27,10 @@ import java.net.URLClassLoader;
  * <p>Both loaders take the <b>platform</b> class loader as parent, not the
  * system one. That is load-bearing and is the detail most likely to be got
  * wrong: with the system loader as parent, ordinary parent-first delegation
- * would find whichever {@code Level} is on the application classpath and the
+ * would find whichever {@code World} is on the application classpath and the
  * test arm would silently answer {@code REAL} — an interception that appears to
  * fail for a reason that has nothing to do with interception. The platform
- * loader sees JDK modules only, so {@code net.minecraft} genuinely cannot
+ * loader sees JDK modules only, so the target package genuinely cannot
  * resolve above us.
  *
  * <p><b>The native seam.</b> The shim additionally declares a {@code native}

@@ -1,11 +1,10 @@
 package org.example;
 
-import net.minecraft.world.level.Level;
+import org.example.target.World;
 
 /**
- * Stands in for Paper's {@code org.bukkit.craftbukkit.CraftWorld}: a class
- * outside {@code net.minecraft} that is compiled once against the real NMS
- * signature and then never touched again.
+ * Stands in for a Paper wrapper class: a class outside the target package that
+ * is compiled once against the real signature and then never touched again.
  *
  * <p>The spike compiles this against {@code spike/real} and runs it in two
  * arms without recompiling. If the answer changes between the arms, classload
@@ -15,9 +14,9 @@ import net.minecraft.world.level.Level;
 public final class Caller {
     private Caller() {}
 
-    /** Called reflectively by the harness so the harness itself is not bound to {@link Level}. */
+    /** Called reflectively by the harness so it is not bound to {@link World}. */
     public static String describe() {
-        return new Level().getBlockName(11, 1, 4);
+        return new World().getBlockName(11, 1, 4);
     }
 
     /**
@@ -27,8 +26,8 @@ public final class Caller {
     public static String describeNative() {
         try {
             java.lang.reflect.Method m =
-                    Level.class.getMethod("nativeBlockName", int.class, int.class, int.class);
-            return String.valueOf(m.invoke(new Level(), 11, 1, 4));
+                    World.class.getMethod("nativeBlockName", int.class, int.class, int.class);
+            return String.valueOf(m.invoke(new World(), 11, 1, 4));
         } catch (NoSuchMethodException e) {
             return "NO-SUCH-METHOD (this class has no native seam)";
         } catch (java.lang.reflect.InvocationTargetException e) {
@@ -51,8 +50,8 @@ public final class Caller {
     private static String describeNativeMessageAt(int x) {
         try {
             java.lang.reflect.Method m =
-                    Level.class.getMethod("nativeBlockName", int.class, int.class, int.class);
-            return String.valueOf(m.invoke(new Level(), x, 1, 4));
+                    World.class.getMethod("nativeBlockName", int.class, int.class, int.class);
+            return String.valueOf(m.invoke(new World(), x, 1, 4));
         } catch (NoSuchMethodException e) {
             return "NO-SUCH-METHOD:" + e.getMessage();
         } catch (java.lang.reflect.InvocationTargetException e) {
@@ -67,8 +66,8 @@ public final class Caller {
     public static String describeNativeId() {
         try {
             java.lang.reflect.Method m =
-                    Level.class.getMethod("nativeBlockStateId", int.class, int.class, int.class);
-            return "NATIVE-ID:" + m.invoke(new Level(), 11, 1, 4);
+                    World.class.getMethod("nativeBlockStateId", int.class, int.class, int.class);
+            return "NATIVE-ID:" + m.invoke(new World(), 11, 1, 4);
         } catch (NoSuchMethodException e) {
             return "NO-SUCH-METHOD:" + e.getMessage();
         } catch (java.lang.reflect.InvocationTargetException e) {
@@ -82,13 +81,13 @@ public final class Caller {
     /** Keep an opaque handle across callbacks, then report forged and released failures. */
     public static String describeHandleLifetime() {
         try {
-            java.lang.reflect.Method acquire = Level.class.getMethod(
+            java.lang.reflect.Method acquire = World.class.getMethod(
                     "nativeAcquireBlockHandle", int.class, int.class, int.class);
-            java.lang.reflect.Method read = Level.class.getMethod(
+            java.lang.reflect.Method read = World.class.getMethod(
                     "nativeReadBlockHandle", long.class);
-            java.lang.reflect.Method release = Level.class.getMethod(
+            java.lang.reflect.Method release = World.class.getMethod(
                     "nativeReleaseBlockHandle", long.class);
-            Level level = new Level();
+            World level = new World();
             long handle = ((Long) acquire.invoke(level, 11, 1, 4)).longValue();
             String live = (String) read.invoke(level, handle);
             String forged = (String) read.invoke(level, handle ^ 1L);
@@ -111,9 +110,9 @@ public final class Caller {
     /** Exercise the bounded Rust-to-Java-to-Rust callback recursion control. */
     public static String describeReentrantDepth(int remaining) {
         try {
-            java.lang.reflect.Method m = Level.class.getMethod(
+            java.lang.reflect.Method m = World.class.getMethod(
                     "nativeReentrantDepth", int.class);
-            return (String) m.invoke(new Level(), remaining);
+            return (String) m.invoke(new World(), remaining);
         } catch (NoSuchMethodException e) {
             return "NO-SUCH-METHOD:" + e.getMessage();
         } catch (java.lang.reflect.InvocationTargetException e) {

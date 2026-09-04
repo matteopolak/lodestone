@@ -9,9 +9,10 @@ use jni::objects::{JClass, JObject, JString};
 use jni::sys::{jint, jlong, jobject};
 use jni::vm::{InitArgsBuilder, JavaVM};
 use jni::{Env, EnvUnowned, JNIVersion, JValue, NativeMethod, jni_sig, jni_str};
+use lodestone_ecs::{EcsHandle, hold_write, new_handle};
 use lodestone_jvm_bridge::{
     CallbackDepthGuard, ObjectKind, ObjectRef, ObjectRegistry, PortServicer, ResolveError,
-    WorldPort, channel,
+    WorldPort, channel, service_with_world,
 };
 
 const REQUEST_DEADLINE: Duration = Duration::from_millis(150);
@@ -235,7 +236,11 @@ extern "system" fn native_release_block_handle<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
-fn service_request(state: &mut ServiceState, request: Request) -> Response {
+fn service_request(
+    state: &mut ServiceState,
+    world_present: bool,
+    request: Request,
+) -> Response {
     let service_thread = thread::current().id();
     let mut response = Response {
         value: 0,
@@ -246,7 +251,8 @@ fn service_request(state: &mut ServiceState, request: Request) -> Response {
     };
     match request.kind {
         RequestKind::BlockName | RequestKind::BlockStateId => {
-            response.value = predicted_value(request.x, request.y, request.z);
+            response.value =
+                predicted_value(request.x, request.y, request.z) + i32::from(world_present);
         }
         RequestKind::AcquireBlockHandle => {
             let position = (request.x, request.y, request.z);
@@ -279,16 +285,24 @@ fn service_request(state: &mut ServiceState, request: Request) -> Response {
 fn spawn_active_servicer(
     servicer: PortServicer<Request, Response>,
     done: Arc<AtomicBool>,
-) -> Result<JoinHandle<()>, String> {
+    world: EcsHandle,
+) -> Result<JoinHandle<bool>, String> {
+    let seed = hold_write(&world, |world| world.spawn_empty().id());
     let mut state = ServiceState::default();
     thread::Builder::new()
         .name("world-port-servicer".to_owned())
         .spawn(move || {
+            let mut world_present = false;
             while !done.load(Ordering::Acquire) {
-                if !servicer.service_pending(|request| service_request(&mut state, request)) {
+                let served = service_with_world(&servicer, &world, 1, |world, request| {
+                    world_present = world.get_entity(seed).is_ok();
+                    service_request(&mut state, world_present, request)
+                });
+                if served == 0 {
                     thread::yield_now();
                 }
             }
+            world_present
         })
         .map_err(|error| format!("could not start service thread: {error}"))
 }
@@ -296,7 +310,7 @@ fn spawn_active_servicer(
 fn spawn_silent_servicer(
     servicer: PortServicer<Request, Response>,
     done: Arc<AtomicBool>,
-) -> Result<JoinHandle<()>, String> {
+) -> Result<JoinHandle<bool>, String> {
     thread::Builder::new()
         .name("silent-world-port-servicer".to_owned())
         .spawn(move || {
@@ -304,6 +318,7 @@ fn spawn_silent_servicer(
                 thread::sleep(Duration::from_millis(1));
             }
             drop(servicer);
+            false
         })
         .map_err(|error| format!("could not start silent service thread: {error}"))
 }
@@ -491,18 +506,20 @@ fn validate_output(
     state_id: &str,
     handle_lifetime: &str,
     reentrant_control: &str,
+    world_probe: &str,
     scenario: &str,
 ) -> bool {
     control == "REAL:11,1,4"
         && shim == "SHIM:11,1,4"
         && match scenario {
             "success" => {
-                test == "RUST:345"
-                    && state_id == "NATIVE-ID:345"
+                test == "RUST:346"
+                    && state_id == "NATIVE-ID:346"
                     && handle_lifetime
                         == "HANDLE-LIFETIME:live=BLOCK:11,1,4 forged=STALE-HANDLE:the referenced object no longer exists released=1 after=STALE-HANDLE:the referenced object no longer exists"
                     && reentrant_control
                         == "REENTRANT-CONTROL:below=REENTRANT:OK:3 over=RuntimeException:Rust error: reentrant callback depth limit 4 exceeded"
+                    && world_probe == "WORLD:present"
             }
             "unregistered" => {
                 state_id.is_empty()
@@ -549,9 +566,10 @@ fn run() -> Result<(), String> {
 
     let (port, servicer) = channel::<Request, Response>(REQUEST_DEADLINE);
     let done = Arc::new(AtomicBool::new(false));
+    let world = new_handle();
     let service = match scenario {
         Scenario::Success | Scenario::Panicked => {
-            Some(spawn_active_servicer(servicer, Arc::clone(&done))?)
+            Some(spawn_active_servicer(servicer, Arc::clone(&done), world.clone())?)
         }
         Scenario::TimedOut => Some(spawn_silent_servicer(servicer, Arc::clone(&done))?),
         Scenario::Dropped | Scenario::Unregistered => {
@@ -580,11 +598,14 @@ fn run() -> Result<(), String> {
         return Err(format!("scoped attachment leaked: {attached_before} -> {attached_after}"));
     }
     done.store(true, Ordering::Release);
-    if let Some(service) = service {
+    let world_probe = if let Some(service) = service {
         service
             .join()
-            .map_err(|_| "service thread panicked".to_owned())?;
-    }
+            .map_err(|_| "service thread panicked".to_owned())?
+    } else {
+        false
+    };
+    hold_write(&world, |_world| {});
     let (control, shim, test, state_id, handle_lifetime, reentrant_control) = result;
     if !validate_output(
         &control,
@@ -593,6 +614,7 @@ fn run() -> Result<(), String> {
         &state_id,
         &handle_lifetime,
         &reentrant_control,
+        &format!("WORLD:{}", if world_probe { "present" } else { "missing" }),
         &scenario_name,
     ) {
         return Err(format!(
@@ -600,7 +622,8 @@ fn run() -> Result<(), String> {
         ));
     }
     println!(
-        "control={control} shim={shim} test={test} state_id={state_id} handle_lifetime={handle_lifetime} reentrant_control={reentrant_control} attachment={attached_before}->{attached_after} detached=PASS"
+        "control={control} shim={shim} test={test} state_id={state_id} handle_lifetime={handle_lifetime} reentrant_control={reentrant_control} world=WORLD:{} attachment={attached_before}->{attached_after} detached=PASS",
+        if world_probe { "present" } else { "missing" }
     );
     Ok(())
 }
@@ -621,28 +644,31 @@ mod tests {
         assert!(validate_output(
             "REAL:11,1,4",
             "SHIM:11,1,4",
-            "RUST:345",
-            "NATIVE-ID:345",
+            "RUST:346",
+            "NATIVE-ID:346",
             "HANDLE-LIFETIME:live=BLOCK:11,1,4 forged=STALE-HANDLE:the referenced object no longer exists released=1 after=STALE-HANDLE:the referenced object no longer exists",
             "REENTRANT-CONTROL:below=REENTRANT:OK:3 over=RuntimeException:Rust error: reentrant callback depth limit 4 exceeded",
+            "WORLD:present",
             "success"
         ));
         assert!(!validate_output(
             "REAL:11,1,4",
             "REAL:11,1,4",
-            "RUST:345",
-            "NATIVE-ID:345",
+            "RUST:346",
+            "NATIVE-ID:346",
             "HANDLE-LIFETIME:live=BLOCK:11,1,4 forged=STALE-HANDLE:the referenced object no longer exists released=1 after=STALE-HANDLE:the referenced object no longer exists",
             "REENTRANT-CONTROL:below=REENTRANT:OK:3 over=RuntimeException:Rust error: reentrant callback depth limit 4 exceeded",
+            "WORLD:missing",
             "success"
         ));
         assert!(!validate_output(
             "REAL:11,1,4",
             "SHIM:11,1,4",
-            "RUST:345",
-            "NATIVE-ID:346",
+            "RUST:346",
+            "NATIVE-ID:347",
             "HANDLE-LIFETIME:live=BLOCK:11,1,4 forged=STALE-HANDLE:the referenced object no longer exists released=1 after=STALE-HANDLE:the referenced object no longer exists",
             "REENTRANT-CONTROL:below=REENTRANT:OK:3 over=RuntimeException:Rust error: reentrant callback depth limit 4 exceeded",
+            "WORLD:present",
             "success"
         ));
     }

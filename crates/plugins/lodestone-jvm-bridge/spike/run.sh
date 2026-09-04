@@ -12,7 +12,7 @@
 #
 # WHAT IT PROVES
 #   See Spike.java's class documentation. In one sentence: `org.example.Caller`
-#   is compiled ONCE against the real NMS signature and then loaded through two
+#   is compiled ONCE against the real target signature and then loaded through two
 #   loaders differing in one path element; if the answer changes, classload
 #   interception works on already-compiled third-party bytecode, which is the
 #   single mechanism the bridge design rests on. The control arm — which must
@@ -42,7 +42,7 @@ container run --rm \
     set -e
     mkdir -p /work/real /work/shim /work/app /work/harness
 
-    # `Caller` is compiled against the REAL Level, exactly once. Nothing
+    # `Caller` is compiled against the REAL World, exactly once. Nothing
     # recompiles it for the shim arm -- if it had to be recompiled, the design
     # would be jar patching rather than classload interception.
     javac -d /work/real $(find /spike/real -name "*.java")
