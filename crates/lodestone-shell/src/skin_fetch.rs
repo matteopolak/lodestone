@@ -22,7 +22,7 @@
 //! menu::accounts worker  (device-code and loopback, both)
 //!   -> lodestone_auth::login::finish_interactive          -- Session { profile.skin }
 //!   -> fetch_own_skin(&client, &profile)
-//!        -> lodestone_auth::texture::fetch_texture        -- TextureUrlChecker, then GET
+//!        -> lodestone_auth::texture::fetch_texture        -- host allow list, then GET
 //!        -> Image::decode_png
 //!        -> write skin.png + skin.model + skin.uuid       -- later launches
 //!        -> publish(profile.id, model, image)             -- this session
@@ -39,8 +39,8 @@
 //!
 //! **The host allow list is not optional and does not belong here.** The URL
 //! arrives over the network, so it goes through
-//! [`lodestone_auth::texture::fetch_texture`], which applies authlib's own
-//! `TextureUrlChecker` *before* opening a socket. Do not add a "just fetch it"
+//! [`lodestone_auth::texture::fetch_texture`], which applies the texture-host
+//! allow list *before* opening a socket. Do not add a "just fetch it"
 //! path here for a URL from a `PlayerInfo` entry either — that one is strictly
 //! less trustworthy than our own profile's.
 //!
