@@ -15,7 +15,7 @@ frame-time win sitting in plain sight: `render_inner` rewrote every loaded secti
 camera uniform every frame — ~4000 `queue.write_buffer` calls per frame, each allocating
 and destroying a Metal staging buffer. Median frame time 17.05 ms → 8.19 ms; the main
 thread went from 94% of a core to 56%. See issue #75 and
-[`../section-camera-uniform.md`](../terrain-rendering.md).
+[`../terrain-rendering.md`](../terrain-rendering.md).
 
 **Nothing would have caught that, and nothing would catch it coming back.** No benchmark
 suite existed; the only reason #75 was found at all was a `samply` session run because a
@@ -38,7 +38,7 @@ completeness for its own sake:
 | **Physics** | Movement integration and collision sweeps run every tick for every entity against a real, non-trivial per-block-state shape census (32,366 states) — a plausible place for narrow-phase cost to hide. |
 | **Render submit** | Draw-call and bind-group counts as a *measured* per-frame quantity, not an assumption — directly because #75 shows how badly an assumption can drift, and #76 shows the same shape already re-exists elsewhere in the tree. |
 | **Protocol** | Packet decode/encode throughput for the highest-volume packet (chunk-with-light), NBT, registries — one-time or per-chunk cost that scales with render distance. |
-| **Memory** | Resident-set growth over a session (observed climbing to ~600 MB in play), per-chunk/per-section footprint (already measured in `lodestone-world/tests/memory.rs`, just not tracked), and arena/atlas occupancy against the fixed ceilings `docs/section-camera-uniform.md` documents. |
+| **Memory** | Resident-set growth over a session (observed climbing to ~600 MB in play), per-chunk/per-section footprint (already measured in `lodestone-world/tests/memory.rs`, just not tracked), and arena/atlas occupancy against the fixed ceilings `docs/terrain-rendering.md` documents. |
 
 The full per-item breakdown, with the specific file each benchmark extends or the specific
 gap it closes, lives in the sub-issues of [#78](https://github.com/matteopolak/lodestone/issues/78)
@@ -113,7 +113,7 @@ and retrofitting these, not starting from zero.
 `lodestone-worldgen` (`benches/generation.rs`, closing #84/#85) and `lodestone-v26-2`
 (`benches/{chunk_light_decode,nbt_decode,registry_decode}.rs`, closing the protocol
 decode benches under #137/#142/#146). See
-[`../benchmark-harness.md`](../render-benchmarks.md) for how it actually works, how to
+[`../render-benchmarks.md`](../render-benchmarks.md) for how it actually works, how to
 extend it, and why the `support.rs` recording helper is duplicated per-crate rather than
 promoted to a shared crate. `lodestone-allocbench`, `bench_worldgen.rs`,
 `world_mesher_bench.rs`/`scene_bench.rs` and `lodestone-world/tests/memory.rs` above are
@@ -134,7 +134,7 @@ harness-shape decision when that sub-issue is picked up, not automatically inher
   `default-features = false, features = ["cargo_bench_support"]` dev-dependency, which
   excludes `plotters`/`rayon`/`itertools`/`regex`/`walkdir` entirely — dev-only, so it
   does not touch either crate's wasm-facing lib build. See
-  [`../benchmark-harness.md`](../benchmark-harness.md#configuration).
+  [`../render-benchmarks.md`](../render-benchmarks.md).
 - **The existing hand-rolled `tests/*_bench.rs` shape** stays for anything that needs a
   GPU device, a multi-crate integration path, or `/usr/bin/time -l`-style RSS — none of
   which criterion measures.
@@ -150,7 +150,7 @@ harness-shape decision when that sub-issue is picked up, not automatically inher
   travel with every number, per the evidence standard below — a number without them is
   not comparable across runs or across machines. **Implemented** as
   `benches/support.rs`'s `record()` in both `lodestone-worldgen` and `lodestone-v26-2`;
-  see [`../benchmark-harness.md`](../render-benchmarks.md) for the exact shape and why
+  see [`../render-benchmarks.md`](../render-benchmarks.md) for the exact shape and why
   the file is duplicated rather than shared.
 - **Profiling**: the `samply` + `debug = 2` + `threadCPUDelta`-weighting workflow that
   found #75, packaged as a repeatable script (issue #83) rather than tribal knowledge in
@@ -183,14 +183,21 @@ The policy, applied to every benchmark under this epic:
 - **Where no natural pairing exists**, compare against a *stored baseline* from a previous
   run on the *same machine*, with a documented tolerance band (e.g. ±25%) — never a bare
   cross-machine absolute number.
-- **Nothing under this epic fails a PR by default.** These are local/manual/scheduled
+- **Deterministic COUNTS now fail a PR; durations still never do.** That split is what
+  makes a blocking gate safe. A count of things the program did is a pure function of
+  committed code and a committed fixture, so it reads identically on a loaded CI runner
+  and on a laptop; a duration does not, and a committed duration baseline is a wall-clock
+  ceiling by another name. `scripts/bench-gate.py` compares the count half against
+  committed baselines in `bench-baselines/` and runs in CI's `bench-gate` job; see
+  [`../benchmark-regression-gate.md`](../benchmark-regression-gate.md). The
+  paragraph below describes the durations, which are unchanged.
+- **Nothing *timing-shaped* under this epic fails a PR.** Those stay local/manual/scheduled
   checks a developer runs before or after a perf-sensitive change, reported as a diff
   against the stored baseline. The *sanity*-ceiling tests that already exist (anti-vacuity
   assertions like `quads > 0`, generous absolute ceilings like `mean_ms < 50.0`) stay in
   the normal `cargo test --workspace --all-targets` suite unchanged; only the *regression*
-  numbers get baseline-diff treatment, and that treatment is explicitly not wired into a
-  blocking CI gate as part of this epic — whether it ever should be is a decision for a
-  later issue, once there is a body of tracked baselines worth gating on.
+  numbers get baseline-diff treatment, and only their deterministic-count half is wired
+  into a blocking CI gate.
 - **State what would represent the thing actually worth catching**, for every ratio gate
   — "superlinear in column count" for light, "bind-group count independent of section
   count" for render submit — mirroring the fix already made to
@@ -222,11 +229,15 @@ a git-sha prefix, for an explicit before/after comparison across a change:
 the band (default 25, i.e. ±25%, matching the literal in `support.rs`).
 
 It prints a ratio and a verdict and exits non-zero when the ratio falls outside the
-tolerance band — useful to a human, or to some future opt-in script — but nothing here
-runs it: **issue #82 decides explicitly not to wire this into CI**, per the "nothing
-fails a PR by default" policy above. A nightly or manually-triggered workflow that
-shells out to it once a body of tracked baselines exists is a reasonable next step, not
-attempted here.
+tolerance band. Nothing runs it automatically, and that stays true: it compares two
+entries of a *per-machine* log, which is the right instrument for "is this run different
+from my last one" and the wrong one for CI, where no previous run exists.
+
+The CI-facing counterpart is `scripts/bench-gate.py`, which compares a fresh run against
+a *committed* baseline and so needs no local history — see
+[`../benchmark-regression-gate.md`](../benchmark-regression-gate.md). The two are
+complementary rather than alternatives: `bench-compare` handles durations on one machine,
+`bench-gate` handles machine-independent counts everywhere.
 
 The tool deliberately does not label a result "regression" or "improvement" — a metric
 recorded in `bench-results/*.jsonl` carries no annotation of which direction is better
@@ -394,7 +405,7 @@ build with `debug = 2` (no codegen change), on a live session (~94 s of play), w
 samples by `samples.threadCPUDelta` rather than sample count — sample-count weighting
 reads blocked time (e.g. `acquire()` stalling on an occluded `CAMetalLayer`, a real,
 separately-documented trap in `docs/frame-pacing.md`) as work, which would have produced
-a wrong attribution here. Full detail in `docs/section-camera-uniform.md`.
+a wrong attribution here. Full detail in `docs/terrain-rendering.md`.
 
 The number this epic should be able to reproduce on demand, going forward, is not "8.19 ms"
 in isolation — it is the *shape*: bind-group and write-buffer counts staying flat as
@@ -412,6 +423,16 @@ resident section count grows, which is exactly what the render-submit sub-issues
   is missing is the *consumer*: `lodestone-autopilot`, the plugin shell that would wire
   search results into gameplay, tracked separately as issue #38 and a confirmed island.
   The search algorithm's cost does not need to wait on that wiring to be benchmarked.
-- **No benchmark in this repo runs a regression check that would fail a loaded CI runner
-  by default.** That is deliberate for now (see "How a regression is caught" above); it
-  is recorded here so it reads as a decision rather than an omission if revisited later.
+- **No *duration* in this repo fails a build.** That remains deliberate, and is the
+  reason the CI gate is restricted to deterministic counts — see
+  [`../benchmark-regression-gate.md`](../benchmark-regression-gate.md) for the split and
+  for what a count gate cannot catch (a regression that keeps every count identical while
+  making each call more expensive).
+- **The per-phase server tick split is not reachable from outside `lodestone-server`.**
+  `TickClock::phase_stats` already computes p50/p95/p99/max and an over-budget count per
+  phase; `IntegratedServer` exposes `tick_stats()` but not the clock, so
+  `benches/server_tick.rs` records whole-tick figures only. One forwarding accessor would
+  turn "which third of a tick dominates" into a tracked metric.
+- **`benches/support.rs` exists in eight byte-identical copies.** `lodestone-testsupport`
+  is already a dev-dependency of most of the crates involved and is the natural home; the
+  move is a cross-crate change of its own.

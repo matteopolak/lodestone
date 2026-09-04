@@ -3,7 +3,7 @@
 # that doc carries the count and a warning that it is stale), and how to
 # reproduce any of these jobs locally.
 #
-# Seven jobs, nine legs: `check-default` is a 3-OS matrix (Linux / macOS /
+# Eight jobs, ten legs: `check-default` is a 3-OS matrix (Linux / macOS /
 # Windows) and every other job is Linux-only on purpose — see that job's comment
 # for which axis each one varies and why re-running it per OS would measure the
 # same thing three times. GitHub bills macOS runner minutes at 10x and Windows at
@@ -30,6 +30,20 @@
 #
 #   just wasm-check   # cargo xtask wasm-check
 #   just fuzz-smoke   # ./fuzz/smoke.sh 30
+#
+# and one that answers "what runs the benchmarks":
+#
+#   just bench-record && just bench-gate
+#
+# The benchmark suite was a set of 29 criterion files that NOTHING invoked
+# automatically, with every recorded number living in a gitignored local log
+# no other machine could read. `bench-gate` runs the subset whose metrics are
+# deterministic COUNTS -- per-frame API calls, drawn sections, quads, atlas
+# pixels, structural heap bytes -- and compares them to the committed
+# bench-baselines/. Deliberately no wall-clock number is gated: a duration
+# baseline is a wall-clock ceiling, which is the shape that failed this repo
+# once already on perfectly healthy code under load. See
+# docs/benchmark-regression-gate.md.
 #
 # `just` is the canonical *command* layer (docs/task-runner.md) — calling the
 # recipe instead of retyping the raw invocation makes command drift between
@@ -458,6 +472,84 @@ jobs:
           name: fuzz-artifacts
           path: fuzz/artifacts/
           if-no-files-found: ignore
+
+  # The benchmark tripwire, and it exists for the same reason the wasm and
+  # fuzz jobs above do: 29 criterion bench files existed, all real, and
+  # nothing ran any of them on any schedule. Worse than an unrun test, a
+  # benchmark whose only record is a gitignored per-machine log cannot be
+  # compared by anyone who did not personally take the previous measurement.
+  #
+  # What this gates, and what it deliberately does not:
+  #
+  #   * GATED -- deterministic counts, compared against committed baselines in
+  #     bench-baselines/ with a per-entry tolerance band, failing in EITHER
+  #     direction. Per-frame draw/API-call counts, drawn and drawable section
+  #     counts, emitted quads, atlas occupancy in pixels, and the structural
+  #     heap footprint of a fixed column. Every one of those is a pure
+  #     function of committed code plus a committed fixture, so it reads the
+  #     same on this runner as on a developer's laptop.
+  #   * NOT GATED -- every duration. Those keep the treatment they already
+  #     have: recorded to bench-results/*.jsonl and compared by
+  #     `cargo xtask bench-compare` against the same machine's own history.
+  #     A committed duration baseline is a wall-clock ceiling on a shared
+  #     runner, and this repo has already had one go red on healthy code.
+  #
+  # The count set is the one that matters most: the single real performance
+  # regression this repo has found and fixed -- a render path rewriting one
+  # camera uniform per resident section per frame -- was count-shaped, and
+  # would have shown here as per-frame API calls tracking section count.
+  #
+  # `--min-compared` inside the recipe is load-bearing: without it, a bench
+  # that silently stopped writing its log would leave the gate comparing
+  # nothing and reporting green.
+  bench-gate:
+    name: "bench: just bench-record + bench-gate (committed count baselines)"
+    runs-on: ubuntu-latest
+    # Bounded because this is a from-scratch `bench`-profile build of
+    # lodestone-render, lodestone-world and their graph (wgpu, naga) on a cold
+    # cache. The benches themselves run in criterion's --test mode -- one
+    # iteration each -- and take seconds; the build dominates.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # No apt step: neither lodestone-render nor lodestone-world reaches
+      # cpal/alsa-sys, which enters the graph through lodestone-audio and
+      # lodestone-shell -- and neither of those is in this job's package set.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Own key: the `bench` profile builds a different target/ from every
+          # other job here, and sharing a key would thrash it.
+          shared-key: bench-gate
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+      # The gate's own control suite, before the gate: 25 checks including a
+      # planted regression the gate must catch and a healthy fixture it must
+      # pass. A regression detector that cannot itself be observed failing is
+      # a description of a gate, not a gate -- and this is the cheap half,
+      # seconds of pure python, so it runs first and fails fast.
+      - name: just test-bench-gate (control suite for the gate itself)
+        run: just test-bench-gate
+      - name: just bench-record
+        run: just bench-record
+      - name: just bench-gate
+        run: just bench-gate
+      # The measurement log is the evidence behind whatever verdict the step
+      # above printed, and it is gitignored, so it vanishes with the runner.
+      # Uploaded on success as well as failure: a green run's numbers are how
+      # anyone reconstructs what the baseline drifted from later.
+      - name: Upload recorded measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench-results/
+          if-no-files-found: warn
 
   test:
     name: "test: just test"

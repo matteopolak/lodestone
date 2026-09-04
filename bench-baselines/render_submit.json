@@ -1,0 +1,392 @@
+{
+  "bench": "render_submit",
+  "note": "Committed baseline for deterministic bench metrics: counts, byte totals and fractions of a fixed capacity. NEVER a duration -- scripts/bench-gate.py refuses to write one, because a committed duration is a wall-clock ceiling on whatever machine recorded it. Move a value with `just bench-baseline-update` and commit the diff alongside the change that moved it; the band is two-way, so an unexplained improvement is red too. First recorded on macbook.local (aarch64, macOS, `bench` profile); cross-machine agreement is verified by CI's own first run of the bench-gate job, and a disagreement there is evidence that the metric is not machine-independent rather than evidence of a regression.",
+  "entries": [
+    {
+      "metric": "arena_bytes_per_section",
+      "scene": "fixture=synthetic_overworld_column rd=3 resident=218",
+      "unit": "bytes",
+      "value": 3605.064220183486,
+      "tolerance_pct": 0,
+      "required": false,
+      "recorded_sha": "a0e24e675441",
+      "optional_because": "the mesh arena needs a real GPU adapter; absent on a CI runner"
+    },
+    {
+      "metric": "arena_bytes_per_section",
+      "scene": "fixture=synthetic_overworld_column rd=6 resident=578",
+      "unit": "bytes",
+      "value": 4189.868512110726,
+      "tolerance_pct": 0,
+      "required": false,
+      "recorded_sha": "a0e24e675441",
+      "optional_because": "the mesh arena needs a real GPU adapter; absent on a CI runner"
+    },
+    {
+      "metric": "arena_index_used_bytes",
+      "scene": "fixture=synthetic_overworld_column rd=3 resident=218",
+      "unit": "bytes",
+      "value": 392952.0,
+      "tolerance_pct": 0,
+      "required": false,
+      "recorded_sha": "a0e24e675441",
+      "optional_because": "the mesh arena needs a real GPU adapter; absent on a CI runner"
+    },
+    {
+      "metric": "arena_index_used_bytes",
+      "scene": "fixture=synthetic_overworld_column rd=6 resident=578",
+      "unit": "bytes",
+      "value": 1210872.0,
+      "tolerance_pct": 0,
+      "required": false,
+      "recorded_sha": "a0e24e675441",
+      "optional_because": "the mesh arena needs a real GPU adapter; absent on a CI runner"
+    },
+    {
+      "metric": "arena_resident_sections",
+      "scene": "fixture=synthetic_overworld_column rd=3 resident=218",
+      "unit": "sections",
+      "value": 218.0,
+      "tolerance_pct": 0,
+      "required": false,
+      "recorded_sha": "a0e24e675441",
+      "optional_because": "the mesh arena needs a real GPU adapter; absent on a CI runner"
+    },
+    {
+      "metric": "arena_resident_sections",
+      "scene": "fixture=synthetic_overworld_column rd=6 resident=578",
+      "unit": "sections",
+      "value": 578.0,
+      "tolerance_pct": 0,
+      "required": false,
+      "recorded_sha": "a0e24e675441",
+      "optional_because": "the mesh arena needs a real GPU adapter; absent on a CI runner"
+    },
+    {
+      "metric": "arena_vertex_used_bytes",
+      "scene": "fixture=synthetic_overworld_column rd=3 resident=218",
+      "unit": "bytes",
+      "value": 785904.0,
+      "tolerance_pct": 0,
+      "required": false,
+      "recorded_sha": "a0e24e675441",
+      "optional_because": "the mesh arena needs a real GPU adapter; absent on a CI runner"
+    },
+    {
+      "metric": "arena_vertex_used_bytes",
+      "scene": "fixture=synthetic_overworld_column rd=6 resident=578",
+      "unit": "bytes",
+      "value": 2421744.0,
+      "tolerance_pct": 0,
+      "required": false,
+      "recorded_sha": "a0e24e675441",
+      "optional_because": "the mesh arena needs a real GPU adapter; absent on a CI runner"
+    },
+    {
+      "metric": "atlas_occupancy_fraction",
+      "scene": "synthetic n=1024 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "fraction",
+      "value": 0.517578125,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_occupancy_fraction",
+      "scene": "synthetic n=16 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "fraction",
+      "value": 0.53125,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_occupancy_fraction",
+      "scene": "synthetic n=256 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "fraction",
+      "value": 0.517578125,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_occupancy_fraction",
+      "scene": "synthetic n=64 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "fraction",
+      "value": 0.5234375,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_sprite_count",
+      "scene": "synthetic n=1024 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "sprites",
+      "value": 1024.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_sprite_count",
+      "scene": "synthetic n=16 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "sprites",
+      "value": 16.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_sprite_count",
+      "scene": "synthetic n=256 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "sprites",
+      "value": 256.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_sprite_count",
+      "scene": "synthetic n=64 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "sprites",
+      "value": 64.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_total_pixels",
+      "scene": "synthetic n=1024 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "px",
+      "value": 524288.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_total_pixels",
+      "scene": "synthetic n=16 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "px",
+      "value": 8192.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_total_pixels",
+      "scene": "synthetic n=256 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "px",
+      "value": 131072.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_total_pixels",
+      "scene": "synthetic n=64 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "px",
+      "value": 32768.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_used_pixels",
+      "scene": "synthetic n=1024 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "px",
+      "value": 271360.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_used_pixels",
+      "scene": "synthetic n=16 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "px",
+      "value": 4352.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_used_pixels",
+      "scene": "synthetic n=256 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "px",
+      "value": 67840.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "atlas_used_pixels",
+      "scene": "synthetic n=64 (~93% 16x16, ~3% 32x16 strips)",
+      "unit": "px",
+      "value": 17152.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "entity_plan_batches",
+      "scene": "crowd n=10 models=3",
+      "unit": "batches",
+      "value": 3.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "entity_plan_batches",
+      "scene": "crowd n=100 models=3",
+      "unit": "batches",
+      "value": 3.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "entity_plan_batches",
+      "scene": "crowd n=1000 models=3",
+      "unit": "batches",
+      "value": 3.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "entity_plan_batches",
+      "scene": "crowd n=5000 models=3",
+      "unit": "batches",
+      "value": 3.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "entity_upload_buffers",
+      "scene": "crowd n=100 models=3",
+      "unit": "buffers",
+      "value": 3.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "entity_upload_buffers",
+      "scene": "crowd n=5000 models=3",
+      "unit": "buffers",
+      "value": 3.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_drawable_sections",
+      "scene": "flat_world rd=12 sections=1875",
+      "unit": "sections",
+      "value": 1250.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_drawable_sections",
+      "scene": "flat_world rd=16 sections=3267",
+      "unit": "sections",
+      "value": 2178.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_drawable_sections",
+      "scene": "flat_world rd=8 sections=867",
+      "unit": "sections",
+      "value": 578.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_drawn_sections",
+      "scene": "flat_world rd=12 sections=1875",
+      "unit": "sections",
+      "value": 205.0,
+      "tolerance_pct": 2,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_drawn_sections",
+      "scene": "flat_world rd=16 sections=3267",
+      "unit": "sections",
+      "value": 347.0,
+      "tolerance_pct": 2,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_drawn_sections",
+      "scene": "flat_world rd=8 sections=867",
+      "unit": "sections",
+      "value": 101.0,
+      "tolerance_pct": 2,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_mdi_draw_slots",
+      "scene": "flat_world rd=12 sections=1875",
+      "unit": "slots",
+      "value": 1250.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_mdi_draw_slots",
+      "scene": "flat_world rd=16 sections=3267",
+      "unit": "slots",
+      "value": 2178.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_mdi_draw_slots",
+      "scene": "flat_world rd=8 sections=867",
+      "unit": "slots",
+      "value": 578.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_per_draw_api_calls",
+      "scene": "flat_world rd=12 sections=1875",
+      "unit": "calls",
+      "value": 205.0,
+      "tolerance_pct": 2,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_per_draw_api_calls",
+      "scene": "flat_world rd=16 sections=3267",
+      "unit": "calls",
+      "value": 347.0,
+      "tolerance_pct": 2,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "terrain_per_draw_api_calls",
+      "scene": "flat_world rd=8 sections=867",
+      "unit": "calls",
+      "value": 101.0,
+      "tolerance_pct": 2,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    }
+  ]
+}
