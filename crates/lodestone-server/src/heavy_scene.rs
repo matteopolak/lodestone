@@ -1,0 +1,1259 @@
+//! Deterministic integrated-server scenes for heavyweight profiling.
+//!
+//! The scene plan is the single source of truth for server-side setup actions,
+//! ordered command phases, and the witness columns consumed by profiling tools.
+//! It is intentionally serializable so a release-built server can hand the
+//! exact same plan to a separate client-side runner.
+
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use lodestone_core::{Reader, Writer};
+use lodestone_net::Connection;
+use tokio::io::DuplexStream;
+use lodestone_model::BlockPos;
+
+use crate::{BlockEntity, ChunkColumn, ChunkSource, IntegratedServer, NoEntities, ServerProtocol};
+use crate::block_entities::SignData;
+
+/// A bounded workload family exposed by the heavyweight profiling contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HeavyScenario {
+    Palette,
+    Transparency,
+    Light,
+    Liquid,
+    Sign,
+    BlockEntity,
+    Entity,
+    Scheduled,
+    Mixed,
+}
+
+impl HeavyScenario {
+    pub const ALL: [Self; 9] = [
+        Self::Palette,
+        Self::Transparency,
+        Self::Light,
+        Self::Liquid,
+        Self::Sign,
+        Self::BlockEntity,
+        Self::Entity,
+        Self::Scheduled,
+        Self::Mixed,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Palette => "palette",
+            Self::Transparency => "transparency",
+            Self::Light => "light",
+            Self::Liquid => "liquid",
+            Self::Sign => "sign",
+            Self::BlockEntity => "block-entity",
+            Self::Entity => "entity",
+            Self::Scheduled => "scheduled",
+            Self::Mixed => "mixed",
+        }
+    }
+
+    #[must_use]
+    pub fn parse_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "palette" => Self::Palette,
+            "transparency" => Self::Transparency,
+            "light" => Self::Light,
+            "liquid" => Self::Liquid,
+            "sign" => Self::Sign,
+            "block-entity" => Self::BlockEntity,
+            "entity" => Self::Entity,
+            "scheduled" => Self::Scheduled,
+            "mixed" => Self::Mixed,
+            _ => return None,
+        })
+    }
+}
+
+/// The three ordered phases of a scene plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneCommandPhase {
+    Setup,
+    AfterJoin,
+    Mutation,
+}
+
+impl SceneCommandPhase {
+    pub const ALL: [Self; 3] = [Self::Setup, Self::AfterJoin, Self::Mutation];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Setup => "setup",
+            Self::AfterJoin => "after_join",
+            Self::Mutation => "mutation",
+        }
+    }
+}
+
+/// Errors raised before a scene can produce actions or runtime output.
+#[derive(Debug, thiserror::Error)]
+pub enum HeavyError {
+    #[error("invalid heavy-scene argument: {0}")]
+    Argument(String),
+    #[error("heavy-scene I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("heavy-scene JSON failed: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("heavy-scene peer failed: {0}")]
+    Peer(String),
+    #[error("heavy-scene deadline expired after {elapsed:?} in phase {phase} at action {action}")]
+    Deadline {
+        elapsed: std::time::Duration,
+        phase: String,
+        action: usize,
+    },
+    #[error("heavy-scene witness failed: {0}")]
+    Witness(String),
+    #[error("heavy-scene runtime scenario is not supported yet: {0}")]
+    Unsupported(String),
+}
+
+/// Runtime phase selected by the release example.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerPhase {
+    Ready,
+    Steady,
+    Mutate,
+}
+
+impl ServerPhase {
+    fn parse(value: &str) -> Result<Self, HeavyError> {
+        match value {
+            "ready" => Ok(Self::Ready),
+            "steady" => Ok(Self::Steady),
+            "mutate" => Ok(Self::Mutate),
+            _ => Err(HeavyError::Argument(format!("invalid phase {value:?}"))),
+        }
+    }
+}
+
+/// Camera arrangement recorded in runtime metadata for the client handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CameraPlan {
+    Stationary,
+    Orbit,
+}
+
+impl CameraPlan {
+    fn parse(value: &str) -> Result<Self, HeavyError> {
+        match value {
+            "stationary" => Ok(Self::Stationary),
+            "orbit" => Ok(Self::Orbit),
+            _ => Err(HeavyError::Argument(format!("invalid camera plan {value:?}"))),
+        }
+    }
+}
+
+/// Arguments shared by the release executable and parser controls.
+#[derive(Debug, Clone)]
+pub struct HeavyServerArgs {
+    pub emit_scene: Option<PathBuf>,
+    pub spec: HeavySceneSpec,
+    pub phase: ServerPhase,
+    pub ticks: u64,
+    pub output: PathBuf,
+    pub wall_deadline: std::time::Duration,
+    pub camera_plan: CameraPlan,
+    pub smoke: bool,
+}
+
+impl HeavyServerArgs {
+    pub fn parse_from<I, S>(arguments: I) -> Result<Self, HeavyError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut args = arguments.into_iter().map(Into::into);
+        let _program = args.next();
+        let mut emit_scene = None;
+        let mut scenario = None;
+        let mut seed: u64 = 1;
+        let mut scale: u32 = 1;
+        let mut phase = ServerPhase::Ready;
+        let mut ticks: u64 = 0;
+        let mut output = PathBuf::from("bench-results/heavy-server.jsonl");
+        let mut wall_deadline_secs = 180u64;
+        let mut camera_plan = CameraPlan::Stationary;
+        let mut smoke = false;
+        let mut saw_seed = false;
+        let mut saw_scale = false;
+        while let Some(flag) = args.next() {
+            match flag.as_str() {
+                "--emit-scene" => {
+                    emit_scene = Some(PathBuf::from(required_arg(&mut args, &flag)?));
+                }
+                "--scenario" => {
+                    let name = required_arg(&mut args, &flag)?;
+                    scenario = Some(HeavyScenario::parse_name(&name).ok_or_else(|| {
+                        HeavyError::Argument(format!("invalid scenario {name:?}"))
+                    })?);
+                }
+                "--seed" => {
+                    let raw = required_arg(&mut args, &flag)?;
+                    seed = raw
+                        .parse()
+                        .map_err(|_| HeavyError::Argument(format!("invalid seed {raw:?}")))?;
+                    saw_seed = true;
+                }
+                "--scale" => {
+                    let raw = required_arg(&mut args, &flag)?;
+                    scale = raw
+                        .parse()
+                        .map_err(|_| HeavyError::Argument(format!("invalid scale {raw:?}")))?;
+                    saw_scale = true;
+                }
+                "--phase" => phase = ServerPhase::parse(&required_arg(&mut args, &flag)?)?,
+                "--ticks" => {
+                    let raw = required_arg(&mut args, &flag)?;
+                    ticks = raw
+                        .parse()
+                        .map_err(|_| HeavyError::Argument(format!("invalid ticks {raw:?}")))?;
+                }
+                "--output" => output = PathBuf::from(required_arg(&mut args, &flag)?),
+                "--wall-deadline-secs" => {
+                    let raw = required_arg(&mut args, &flag)?;
+                    wall_deadline_secs = raw.parse().map_err(|_| {
+                        HeavyError::Argument(format!("invalid wall deadline {raw:?}"))
+                    })?;
+                }
+                "--camera-plan" => camera_plan = CameraPlan::parse(&required_arg(&mut args, &flag)?)?,
+                "--smoke" => smoke = true,
+                _ => return Err(HeavyError::Argument(format!("unknown argument {flag}"))),
+            }
+        }
+        let scenario = scenario.ok_or_else(|| HeavyError::Argument("--scenario is required".to_string()))?;
+        let spec = HeavySceneSpec::new(scenario, seed, scale)?;
+        if !saw_seed && emit_scene.is_some() {
+            return Err(HeavyError::Argument("--seed is required with --emit-scene".to_string()));
+        }
+        if !saw_scale && emit_scene.is_some() {
+            return Err(HeavyError::Argument("--scale is required with --emit-scene".to_string()));
+        }
+        if wall_deadline_secs == 0 {
+            return Err(HeavyError::Argument("wall deadline must be positive".to_string()));
+        }
+        if matches!(phase, ServerPhase::Mutate)
+            && matches!(scenario, HeavyScenario::Scheduled | HeavyScenario::Liquid)
+            && ticks == 0
+        {
+            return Err(HeavyError::Argument(
+                "scheduled and liquid mutation require positive --ticks".to_string(),
+            ));
+        }
+        Ok(Self {
+            emit_scene,
+            spec,
+            phase,
+            ticks,
+            output,
+            wall_deadline: std::time::Duration::from_secs(wall_deadline_secs),
+            camera_plan,
+            smoke,
+        })
+    }
+
+    pub fn parse_env() -> Result<Self, HeavyError> {
+        Self::parse_from(std::env::args())
+    }
+
+    #[must_use]
+    pub fn for_test(scenario: HeavyScenario) -> Self {
+        Self {
+            emit_scene: None,
+            spec: HeavySceneSpec::new(scenario, 1, 1).expect("test scale is valid"),
+            phase: ServerPhase::Ready,
+            ticks: 0,
+            output: PathBuf::from("/tmp/lodestone-heavy-server-test.jsonl"),
+            wall_deadline: std::time::Duration::from_secs(30),
+            camera_plan: CameraPlan::Stationary,
+            smoke: true,
+        }
+    }
+}
+
+/// Immutable inputs for one deterministic scene.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeavySceneSpec {
+    pub scenario: HeavyScenario,
+    pub seed: u64,
+    pub scale: u32,
+}
+
+/// A single client-side readiness requirement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WitnessRequirement {
+    pub segment: String,
+    pub column: String,
+    pub minimum: u64,
+}
+
+/// Commands grouped in their execution order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderedSceneCommands {
+    pub setup: Vec<String>,
+    pub after_join: Vec<String>,
+    pub mutation: Vec<String>,
+}
+
+/// Versioned, hashed handoff artifact consumed by the client profiler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeavyScenePlan {
+    pub schema: u32,
+    pub spec: HeavySceneSpec,
+    pub commands: OrderedSceneCommands,
+    pub witnesses: Vec<WitnessRequirement>,
+    pub scene_hash: String,
+}
+
+/// Deterministic counters written by a heavyweight server run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeavyCounts {
+    pub join_columns: u64,
+    pub chunk_batches: u64,
+    pub chunk_payload_bytes: u64,
+    pub sections: u64,
+    pub distinct_states: u64,
+    pub opaque_cells: u64,
+    pub cutout_cells: u64,
+    pub translucent_cells: u64,
+    pub liquid_cells: u64,
+    pub light_emitters: u64,
+    pub light_cells_changed: u64,
+    pub scheduled_enqueued: u64,
+    pub scheduled_executed: u64,
+    pub scheduled_remaining: u64,
+    pub signs: u64,
+    pub sign_vertices: u64,
+    pub block_entity_records: u64,
+    pub block_entity_draws: u64,
+    pub entities_spawned: u64,
+    pub entities_extracted: u64,
+    pub entities_drawn: u64,
+    pub liquid_meshes: u64,
+    pub relight_remeshes: u64,
+    pub server_ticks: u64,
+}
+
+pub type RequestedCounts = HeavyCounts;
+pub type InstalledCounts = HeavyCounts;
+pub type ConsumedCounts = HeavyCounts;
+
+/// Versioned JSONL record for one finite server profiling run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeavyRunRecord {
+    pub schema: u32,
+    pub run_id: String,
+    pub executable_kind: String,
+    pub git_sha: String,
+    pub platform: String,
+    pub arch: String,
+    pub pid: u32,
+    pub scenario_hash: String,
+    pub scenario: HeavyScenario,
+    pub seed: u64,
+    pub scale: u32,
+    pub phase: ServerPhase,
+    pub requested: RequestedCounts,
+    pub installed: InstalledCounts,
+    pub consumed: ConsumedCounts,
+    pub setup_ms: u128,
+    pub warmup_ms: u128,
+    pub status: String,
+    pub failure: Option<String>,
+}
+
+impl HeavyRunRecord {
+    pub fn validate_ready(&self) -> Result<(), HeavyError> {
+        let requirements = requirements_for_scenario(self.scenario);
+        let mut missing = Vec::new();
+        for requirement in &requirements {
+            let observed = witness_value(&self.consumed, &requirement.column);
+            if observed < requirement.minimum {
+                missing.push(format!(
+                    "{} {} observed {} minimum {}",
+                    requirement.segment, requirement.column, observed, requirement.minimum
+                ));
+            }
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(HeavyError::Witness(missing.join("; ")))
+        }
+    }
+}
+
+fn requirements_for_scenario(scenario: HeavyScenario) -> Vec<WitnessRequirement> {
+    if scenario == HeavyScenario::Mixed {
+        return HeavyScenario::ALL
+            .into_iter()
+            .filter(|candidate| *candidate != HeavyScenario::Mixed)
+            .flat_map(requirements_for_scenario)
+            .collect();
+    }
+    let indexes: &[usize] = match scenario {
+        HeavyScenario::Palette => &[0],
+        HeavyScenario::Transparency => &[1],
+        HeavyScenario::Light => &[7, 8],
+        HeavyScenario::Liquid => &[2],
+        HeavyScenario::Sign => &[3],
+        HeavyScenario::BlockEntity => &[4],
+        HeavyScenario::Entity => &[5],
+        HeavyScenario::Scheduled => &[6],
+        HeavyScenario::Mixed => unreachable!("mixed is handled above"),
+    };
+    indexes
+        .iter()
+        .map(|index| {
+            let (segment, column, minimum) = STATIC_WITNESSES[*index];
+            witness(segment, column, minimum)
+        })
+        .collect()
+}
+
+fn witness_value(counts: &HeavyCounts, column: &str) -> u64 {
+    match column {
+        "world.opaque_sections_drawn" => counts.opaque_cells,
+        "world.water_sections_drawn" => counts.liquid_cells,
+        "world.translucent_sections_drawn" => counts.translucent_cells,
+        "world.entities_drawn" => counts.entities_drawn,
+        "world.block_entities_drawn" => counts.block_entity_draws,
+        "world.sign_text_vertices" => counts.sign_vertices,
+        "world.particles_drawn" => counts.scheduled_executed,
+        "light.relight_cells_changed" => counts.light_cells_changed,
+        "light.remesh_sections_submitted" => counts.relight_remeshes,
+        _ => 0,
+    }
+}
+
+#[derive(Serialize)]
+struct CanonicalPlan<'a> {
+    scenario: &'a str,
+    seed: u64,
+    scale: u32,
+    setup: &'a [String],
+    after_join: &'a [String],
+    mutation: &'a [String],
+    witnesses: &'a [WitnessRequirement],
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn required_arg<I>(args: &mut I, flag: &str) -> Result<String, HeavyError>
+where
+    I: Iterator<Item = String>,
+{
+    args.next()
+        .ok_or_else(|| HeavyError::Argument(format!("missing value for {flag}")))
+}
+
+const PALETTE_STATES: [&str; 12] = [
+    "minecraft:stone",
+    "minecraft:granite",
+    "minecraft:diorite",
+    "minecraft:andesite",
+    "minecraft:deepslate",
+    "minecraft:tuff",
+    "minecraft:calcite",
+    "minecraft:dripstone_block",
+    "minecraft:oak_planks",
+    "minecraft:spruce_planks",
+    "minecraft:birch_planks",
+    "minecraft:bricks",
+];
+
+const STATIC_WITNESSES: &[(&str, &str, u64)] = &[
+    ("heavyweight.stationary", "world.opaque_sections_drawn", 1),
+    ("heavyweight.stationary", "world.translucent_sections_drawn", 1),
+    ("heavyweight.stationary", "world.water_sections_drawn", 1),
+    ("heavyweight.stationary", "world.sign_text_vertices", 6),
+    ("heavyweight.stationary", "world.block_entities_drawn", 1),
+    ("heavyweight.stationary", "world.entities_drawn", 1),
+    ("heavyweight.stationary", "world.particles_drawn", 1),
+    ("heavyweight.mutation", "light.relight_cells_changed", 1),
+    ("heavyweight.mutation", "light.remesh_sections_submitted", 1),
+];
+
+#[derive(Default)]
+struct BuildOutput {
+    setup: Vec<String>,
+    after_join: Vec<String>,
+    mutation: Vec<String>,
+    witnesses: Vec<WitnessRequirement>,
+}
+
+fn subject_origin(index: u32) -> (i32, i32, i32) {
+    let x = i32::try_from(index % 4).expect("bounded subject index") * 24 - 48;
+    let z = i32::try_from(index / 4).expect("bounded subject index") * 24 - 48;
+    (x, 64, z)
+}
+
+fn witness(segment: &str, column: &str, minimum: u64) -> WitnessRequirement {
+    WitnessRequirement {
+        segment: segment.to_string(),
+        column: column.to_string(),
+        minimum,
+    }
+}
+
+fn add_witnesses(out: &mut BuildOutput, names: &[(&str, &str, u64)]) {
+    out.witnesses
+        .extend(names.iter().map(|(segment, column, minimum)| witness(segment, column, *minimum)));
+}
+
+fn build_palette(scale: u32, seed: u64) -> BuildOutput {
+    let mut out = BuildOutput::default();
+    out.setup.push("kill @e[tag=lodestone_heavy_scene]".to_string());
+    let count = 64u32.saturating_mul(scale);
+    for index in 0..count {
+        let (x, y, z) = subject_origin(index % 16);
+        let material = PALETTE_STATES[((index as u64 + seed) % PALETTE_STATES.len() as u64) as usize];
+        out.setup.push(format!("setblock {} {} {} {}", x + (index % 8) as i32, y + (index / 8) as i32, z, material));
+    }
+    add_witnesses(&mut out, &[STATIC_WITNESSES[0]]);
+    out
+}
+
+fn build_transparency(scale: u32) -> BuildOutput {
+    let mut out = BuildOutput::default();
+    let count = 48u32.saturating_mul(scale);
+    for index in 0..count {
+        let (x, y, z) = subject_origin(16 + index % 8);
+        let block = if index % 2 == 0 { "minecraft:white_stained_glass" } else { "minecraft:glass_pane" };
+        out.setup.push(format!("setblock {} {} {} {}", x + (index % 6) as i32, y + (index / 6) as i32, z, block));
+    }
+    add_witnesses(&mut out, &[STATIC_WITNESSES[1]]);
+    out
+}
+
+fn build_light(scale: u32) -> BuildOutput {
+    let mut out = BuildOutput::default();
+    for index in 0..16u32.saturating_mul(scale) {
+        let (x, y, z) = subject_origin(24 + index % 8);
+        out.setup.push(format!("setblock {} {} {} minecraft:sea_lantern", x + (index % 4) as i32, y, z + (index / 4) as i32));
+    }
+    out.mutation.push("setblock -48 65 8 minecraft:sea_lantern".to_string());
+    add_witnesses(&mut out, &[STATIC_WITNESSES[7], STATIC_WITNESSES[8]]);
+    out
+}
+
+fn build_liquid(scale: u32) -> BuildOutput {
+    let mut out = BuildOutput::default();
+    for index in 0..32u32.saturating_mul(scale) {
+        let (x, y, z) = subject_origin(32 + index % 8);
+        out.setup.push(format!("setblock {} {} {} minecraft:water", x + (index % 8) as i32, y, z + (index / 8) as i32));
+    }
+    out.mutation.push("setblock -24 65 8 minecraft:water".to_string());
+    add_witnesses(&mut out, &[STATIC_WITNESSES[2]]);
+    out
+}
+
+fn sign_commands(scale: u32) -> Vec<String> {
+    (0..24u32.saturating_mul(scale))
+        .map(|index| {
+            format!(
+                "setblock {} 65 24 minecraft:oak_wall_sign[facing=north]{{front_text:{{has_glowing_text:1b,color:\"yellow\",messages:[{{text:\"HEAVY-{index:03}\"}},{{text:\"sign\"}},{{text:\"text\"}},{{text:\"witness\"}}]}}}}",
+                -48 + i32::try_from(index * 2).expect("bounded sign index")
+            )
+        })
+        .collect()
+}
+
+fn build_sign(scale: u32) -> BuildOutput {
+    let mut out = BuildOutput::default();
+    out.setup.extend(sign_commands(scale));
+    add_witnesses(&mut out, &[STATIC_WITNESSES[3]]);
+    out
+}
+
+fn block_entity_commands(scale: u32) -> Vec<String> {
+    (0..4u32.saturating_mul(scale))
+        .flat_map(|index| {
+            let x = 8 + i32::try_from(index * 2).expect("bounded block entity index");
+            [
+                format!("setblock {x} 65 24 minecraft:chest[facing=north]"),
+                format!("setblock {x} 66 24 minecraft:purple_shulker_box[facing=up]"),
+                format!("setblock {x} 67 24 minecraft:white_banner[rotation=0]"),
+                format!("setblock {x} 68 24 minecraft:conduit[waterlogged=false]"),
+            ]
+        })
+        .collect()
+}
+
+fn build_block_entities(scale: u32) -> BuildOutput {
+    let mut out = BuildOutput::default();
+    out.setup.extend(block_entity_commands(scale));
+    add_witnesses(&mut out, &[STATIC_WITNESSES[4]]);
+    out
+}
+
+fn build_entities(scale: u32, seed: u64) -> BuildOutput {
+    let mut out = BuildOutput::default();
+    let count = 1024u32.saturating_mul(scale);
+    for index in 0..count {
+        let row = index / 32;
+        let column = index % 32;
+        let x = -48 + column as i32;
+        let z = -48 + row as i32;
+        let kind = match ((index as u64 + seed) % 4) as u8 {
+            0 => "minecraft:pig",
+            1 => "minecraft:cow",
+            2 => "minecraft:sheep",
+            _ => "minecraft:chicken",
+        };
+        out.setup.push(format!(
+            "summon {kind} {x} 65 {z} {{NoAI:1b,NoGravity:1b,PersistenceRequired:1b,Tags:[\"lodestone_heavy_scene\",\"heavy_entity\"]}}"
+        ));
+    }
+    add_witnesses(&mut out, &[STATIC_WITNESSES[5]]);
+    out
+}
+
+fn build_scheduled(scale: u32) -> BuildOutput {
+    let mut out = BuildOutput::default();
+    for index in 0..8u32.saturating_mul(scale) {
+        let x = -8 + (index % 4) as i32 * 2;
+        let z = 40 + (index / 4) as i32 * 2;
+        out.setup.push(format!(
+            "setblock {x} 65 {z} minecraft:repeating_command_block[facing=up]{{auto:1b,Command:\"particle minecraft:flame ~ ~1 ~ 0 0 0 0 1\"}}"
+        ));
+    }
+    out.mutation.push("setblock -8 65 40 minecraft:repeating_command_block[facing=up]".to_string());
+    add_witnesses(&mut out, &[STATIC_WITNESSES[6]]);
+    out
+}
+
+fn build_for_scenario(spec: &HeavySceneSpec) -> BuildOutput {
+    if spec.scenario == HeavyScenario::Mixed {
+        let mut mixed = BuildOutput::default();
+        for scenario in HeavyScenario::ALL.into_iter().filter(|scenario| *scenario != HeavyScenario::Mixed) {
+            let part = build_for_scenario(&HeavySceneSpec { scenario, ..spec.clone() });
+            mixed.setup.extend(part.setup);
+            mixed.after_join.extend(part.after_join);
+            mixed.mutation.extend(part.mutation);
+            mixed.witnesses.extend(part.witnesses);
+        }
+        return mixed;
+    }
+    match spec.scenario {
+        HeavyScenario::Palette => build_palette(spec.scale, spec.seed),
+        HeavyScenario::Transparency => build_transparency(spec.scale),
+        HeavyScenario::Light => build_light(spec.scale),
+        HeavyScenario::Liquid => build_liquid(spec.scale),
+        HeavyScenario::Sign => build_sign(spec.scale),
+        HeavyScenario::BlockEntity => build_block_entities(spec.scale),
+        HeavyScenario::Entity => build_entities(spec.scale, spec.seed),
+        HeavyScenario::Scheduled => build_scheduled(spec.scale),
+        HeavyScenario::Mixed => unreachable!("mixed is handled before the scenario match"),
+    }
+}
+
+impl HeavySceneSpec {
+    pub const MAX_COMMAND_BYTES: usize = 32_000;
+    pub const MAX_SCALE: u32 = 16;
+
+    pub fn new(scenario: HeavyScenario, seed: u64, scale: u32) -> Result<Self, HeavyError> {
+        if scale == 0 {
+            return Err(HeavyError::Argument("scale must be positive".to_string()));
+        }
+        if scale > Self::MAX_SCALE {
+            return Err(HeavyError::Argument(format!(
+                "scale must not exceed {}",
+                Self::MAX_SCALE
+            )));
+        }
+        Ok(Self { scenario, seed, scale })
+    }
+
+    #[must_use]
+    pub fn view_radius(&self) -> i32 {
+        if self.scale == 1 { 1 } else { 2 }
+    }
+
+    #[must_use]
+    pub fn expected_join_columns(&self) -> u64 {
+        let radius = self.view_radius();
+        u64::try_from((radius * 2 + 1).pow(2)).expect("positive view radius")
+    }
+
+    pub fn build_plan(&self) -> Result<HeavyScenePlan, HeavyError> {
+        let built = build_for_scenario(self);
+        let commands = OrderedSceneCommands {
+            setup: built.setup,
+            after_join: built.after_join,
+            mutation: built.mutation,
+        };
+        let witnesses = built.witnesses;
+        let canonical = CanonicalPlan {
+            scenario: self.scenario.as_str(),
+            seed: self.seed,
+            scale: self.scale,
+            setup: &commands.setup,
+            after_join: &commands.after_join,
+            mutation: &commands.mutation,
+            witnesses: &witnesses,
+        };
+        let bytes = serde_json::to_vec(&canonical)?;
+        Ok(HeavyScenePlan {
+            schema: 1,
+            spec: self.clone(),
+            commands,
+            witnesses,
+            scene_hash: sha256_hex(&bytes),
+        })
+    }
+}
+
+impl HeavyScenePlan {
+    pub fn json_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("scene plan is serializable")
+    }
+
+    pub fn json_string(&self) -> String {
+        serde_json::to_string(self).expect("scene plan is serializable")
+    }
+}
+
+/// Writes one immutable scene plan, or emits it as the sole stdout object when
+/// `destination` is `-`.
+pub fn emit_scene(plan: &HeavyScenePlan, destination: &std::path::Path) -> Result<(), HeavyError> {
+    let json = plan.json_string();
+    if destination == std::path::Path::new("-") {
+        println!("{json}");
+    } else {
+        std::fs::write(destination, format!("{json}\n"))?;
+    }
+    Ok(())
+}
+
+/// Counters owned by the deterministic source and observed by the harness.
+#[derive(Debug, Default)]
+struct HeavySourceStats {
+    opaque_cells: std::sync::atomic::AtomicU64,
+    liquid_cells: std::sync::atomic::AtomicU64,
+    light_emitters: std::sync::atomic::AtomicU64,
+    state_names: Mutex<HashSet<String>>,
+    by_column: Mutex<HashMap<(i32, i32), SourceColumnMetrics>>,
+}
+
+#[derive(Debug, Default)]
+struct SourceColumnMetrics {
+    opaque_cells: u64,
+    liquid_cells: u64,
+    light_emitters: u64,
+    state_names: HashSet<String>,
+}
+
+/// A bounded, retained source used by the profiling harness. It is deliberately
+/// a real [`ChunkSource`]: the integrated server owns chunk retention and the
+/// version protocol owns encoding, while this source only supplies deterministic
+/// terrain and records the work that crossed that boundary.
+#[derive(Clone)]
+pub struct HeavyChunkSource {
+    columns: Arc<Mutex<HashMap<(i32, i32), ChunkColumn>>>,
+    stats: Arc<HeavySourceStats>,
+}
+
+impl HeavyChunkSource {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            columns: Arc::new(Mutex::new(HashMap::new())),
+            stats: Arc::new(HeavySourceStats::default()),
+        }
+    }
+
+    fn fresh_column(cx: i32, cz: i32) -> ChunkColumn {
+        let mut column = ChunkColumn::new(-64, 384);
+        for y in 0..64 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    column.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        // Keep each column distinguishable without introducing a dependency on
+        // the scenario command interpreter.
+        let marker = if (cx + cz).rem_euclid(3) == 0 {
+            "minecraft:glass"
+        } else {
+            "minecraft:oak_planks"
+        };
+        column.set_block(cx.rem_euclid(16), 64, cz.rem_euclid(16), marker);
+        column.set_block(0, 65, 0, "minecraft:chest");
+        column.set_block(1, 65, 0, "minecraft:oak_sign");
+        column.set_block_entities(vec![
+            (
+                BlockPos::new(cx * 16, 65, cz * 16),
+                BlockEntity::Container {
+                    id: "minecraft:chest".to_string(),
+                    slots: vec![None; 27],
+                },
+            ),
+            (
+                BlockPos::new(cx * 16 + 1, 65, cz * 16),
+                BlockEntity::Sign(SignData::default()),
+            ),
+        ]);
+        column
+    }
+
+    fn column_for(&self, cx: i32, cz: i32) -> ChunkColumn {
+        let mut columns = self.columns.lock().expect("heavy source lock");
+        if let Some(column) = columns.get(&(cx, cz)) {
+            return column.clone();
+        }
+        let column = Self::fresh_column(cx, cz);
+        columns.insert((cx, cz), column.clone());
+        column
+    }
+
+    fn stats(&self) -> SourceMetrics {
+        let columns = self.columns.lock().expect("heavy source columns lock");
+        SourceMetrics {
+            retained_columns: columns.len() as u64,
+            sections: columns.values().map(|column| column.section_count() as u64).sum(),
+            opaque_cells: self.stats.opaque_cells.load(std::sync::atomic::Ordering::Relaxed),
+            liquid_cells: self.stats.liquid_cells.load(std::sync::atomic::Ordering::Relaxed),
+            light_emitters: self.stats.light_emitters.load(std::sync::atomic::Ordering::Relaxed),
+            distinct_states: self.stats.state_names.lock().expect("heavy source state lock").len() as u64,
+        }
+    }
+
+    fn metrics_for_coordinates(&self, coordinates: &HashSet<(i32, i32)>) -> SourceMetrics {
+        let columns = self.columns.lock().expect("heavy source columns lock");
+        let by_column = self.stats.by_column.lock().expect("heavy source metric lock");
+        let mut metrics = SourceMetrics::default();
+        let mut states = HashSet::new();
+        for coordinate in coordinates {
+            if let Some(column) = columns.get(coordinate) {
+                metrics.retained_columns += 1;
+                metrics.sections += column.section_count() as u64;
+            }
+            if let Some(column_metrics) = by_column.get(coordinate) {
+                metrics.opaque_cells += column_metrics.opaque_cells;
+                metrics.liquid_cells += column_metrics.liquid_cells;
+                metrics.light_emitters += column_metrics.light_emitters;
+                states.extend(column_metrics.state_names.iter().cloned());
+            }
+        }
+        metrics.distinct_states = states.len() as u64;
+        metrics
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourceMetrics {
+    retained_columns: u64,
+    sections: u64,
+    opaque_cells: u64,
+    liquid_cells: u64,
+    light_emitters: u64,
+    distinct_states: u64,
+}
+
+impl Default for SourceMetrics {
+    fn default() -> Self {
+        Self {
+            retained_columns: 0,
+            sections: 0,
+            opaque_cells: 0,
+            liquid_cells: 0,
+            light_emitters: 0,
+            distinct_states: 0,
+        }
+    }
+}
+
+impl ChunkSource for HeavyChunkSource {
+    fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        self.column_for(cx, cz)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let column = self.column_for(x.div_euclid(16), z.div_euclid(16));
+        column
+            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+            .to_string()
+    }
+
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_string()
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let mut columns = self.columns.lock().expect("heavy source lock");
+        let column = columns
+            .entry((cx, cz))
+            .or_insert_with(|| Self::fresh_column(cx, cz));
+        column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+        self.stats
+            .state_names
+            .lock()
+            .expect("heavy source state lock")
+            .insert(name.to_string());
+        let mut by_column = self.stats.by_column.lock().expect("heavy source metric lock");
+        let column_metrics = by_column.entry((cx, cz)).or_default();
+        column_metrics.state_names.insert(name.to_string());
+        if name == "minecraft:water" {
+            self.stats
+                .liquid_cells
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            column_metrics.liquid_cells += 1;
+        } else if name == "minecraft:sea_lantern" {
+            self.stats
+                .light_emitters
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            column_metrics.light_emitters += 1;
+        } else if name != "minecraft:air" {
+            self.stats
+                .opaque_cells
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            column_metrics.opaque_cells += 1;
+        }
+    }
+}
+
+/// Drives one finite join against the production integrated server and records
+/// the wire-level work needed by the heavyweight profiler.
+pub struct HeavyServerHarness;
+
+impl HeavyServerHarness {
+    /// Runs the harness with a concrete protocol supplied by the release
+    /// example or an integration test. Keeping the protocol generic avoids a
+    /// version dependency cycle in the version-free server crate.
+    pub async fn run<P>(
+        args: HeavyServerArgs,
+        plan: HeavyScenePlan,
+        protocol: P,
+    ) -> Result<HeavyRunRecord, HeavyError>
+    where
+        P: ServerProtocol + 'static,
+    {
+        let output = args.output.clone();
+        let phase = args.phase;
+        let scenario = args.spec.clone();
+        let scenario_hash = plan.scene_hash.clone();
+        if args.spec.scenario != HeavyScenario::Palette {
+            let error = HeavyError::Unsupported(format!(
+                "{} requires an integrated entity/tick producer that is not wired in this slice",
+                args.spec.scenario.as_str()
+            ));
+            let _ = write_runtime_record(&output, &failed_record(&scenario, &scenario_hash, phase, &error));
+            return Err(error);
+        }
+        if args.phase != ServerPhase::Ready {
+            let error = HeavyError::Unsupported(
+                "only --phase ready is supported until the integrated tick/command path is wired".to_string(),
+            );
+            let _ = write_runtime_record(&output, &failed_record(&scenario, &scenario_hash, phase, &error));
+            return Err(error);
+        }
+        let started = Instant::now();
+        let deadline = args.wall_deadline;
+        match tokio::time::timeout(deadline, Self::run_inner(args, plan, protocol)).await {
+            Ok(Ok(record)) => Ok(record),
+            Ok(Err(error)) => {
+                let _ = write_runtime_record(
+                    &output,
+                    &failed_record(&scenario, &scenario_hash, phase, &error),
+                );
+                Err(error)
+            }
+            Err(_) => {
+                let error = HeavyError::Deadline {
+                    elapsed: started.elapsed(),
+                    phase: "join".to_string(),
+                    action: 0,
+                };
+                let _ = write_runtime_record(
+                    &output,
+                    &failed_record(&scenario, &scenario_hash, phase, &error),
+                );
+                Err(error)
+            }
+        }
+    }
+
+    async fn run_inner<P>(
+        args: HeavyServerArgs,
+        plan: HeavyScenePlan,
+        protocol: P,
+    ) -> Result<HeavyRunRecord, HeavyError>
+    where
+        P: ServerProtocol + 'static,
+    {
+        let source = HeavyChunkSource::new();
+        let stats_source = source.clone();
+        apply_setblock_commands(&source, &plan.commands.setup);
+        let (server, io) = IntegratedServer::open_in_memory_with_entities(
+            protocol,
+            source,
+            NoEntities,
+            plan.spec.view_radius(),
+        );
+        let mut peer = Connection::new(io);
+        let started = Instant::now();
+        let join = drive_v770_join(
+            &mut peer,
+            plan.spec.expected_join_columns(),
+        )
+        .await;
+        let join = join;
+        drop(peer);
+        server.shutdown().await;
+        let (join_columns, batches, payload_bytes, sent_coordinates) = join?;
+        let metrics = stats_source.stats();
+        let consumed_metrics = stats_source.metrics_for_coordinates(&sent_coordinates);
+        let (requested, installed, consumed) = counts_for(
+            &plan,
+            join_columns,
+            batches,
+            payload_bytes,
+            metrics,
+            consumed_metrics,
+            0,
+        );
+        let record = HeavyRunRecord {
+            schema: 1,
+            run_id: format!("heavy-{}-{}", plan.spec.as_str(), std::process::id()),
+            executable_kind: "heavy-scene-server".to_string(),
+            git_sha: option_env!("GIT_SHA").unwrap_or("unknown").to_string(),
+            platform: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            pid: std::process::id(),
+            scenario_hash: plan.scene_hash.clone(),
+            scenario: plan.spec.scenario,
+            seed: plan.spec.seed,
+            scale: plan.spec.scale,
+            phase: args.phase,
+            requested,
+            installed,
+            consumed,
+            setup_ms: started.elapsed().as_millis(),
+            warmup_ms: 0,
+            status: "complete".to_string(),
+            failure: None,
+        };
+        if let Err(error) = record.validate_ready() {
+            return Err(HeavyError::Witness(format!(
+                "{error}; installed opaque_cells={}; consumed opaque_cells={}; chunk_payload_bytes={}",
+                record.installed.opaque_cells,
+                record.consumed.opaque_cells,
+                record.consumed.chunk_payload_bytes
+            )));
+        }
+        write_runtime_record(&args.output, &record)?;
+        Ok(record)
+    }
+}
+
+fn write_runtime_record(destination: &std::path::Path, record: &HeavyRunRecord) -> Result<(), HeavyError> {
+    if let Some(parent) = destination.parent().filter(|path| !path.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let line = serde_json::to_string(record)?;
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(destination)?;
+    writeln!(file, "{line}")?;
+    file.flush().map_err(HeavyError::Io)
+}
+
+fn failed_record(
+    spec: &HeavySceneSpec,
+    scenario_hash: &str,
+    phase: ServerPhase,
+    error: &HeavyError,
+) -> HeavyRunRecord {
+    HeavyRunRecord {
+        schema: 1,
+        run_id: format!("heavy-{}-{}", spec.as_str(), std::process::id()),
+        executable_kind: "heavy-scene-server".to_string(),
+        git_sha: option_env!("GIT_SHA").unwrap_or("unknown").to_string(),
+        platform: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        pid: std::process::id(),
+        scenario_hash: scenario_hash.to_string(),
+        scenario: spec.scenario,
+        seed: spec.seed,
+        scale: spec.scale,
+        phase,
+        requested: HeavyCounts::default(),
+        installed: HeavyCounts::default(),
+        consumed: HeavyCounts::default(),
+        setup_ms: 0,
+        warmup_ms: 0,
+        status: "failed".to_string(),
+        failure: Some(error.to_string()),
+    }
+}
+
+fn counts_for(
+    plan: &HeavyScenePlan,
+    join_columns: u64,
+    batches: u64,
+    payload_bytes: u64,
+    metrics: SourceMetrics,
+    consumed_metrics: SourceMetrics,
+    server_ticks: u64,
+) -> (HeavyCounts, HeavyCounts, HeavyCounts) {
+    let requested = HeavyCounts {
+        join_columns: plan.spec.expected_join_columns(),
+        opaque_cells: plan.commands.setup.iter().filter(|command| command.starts_with("setblock ")).count() as u64,
+        ..HeavyCounts::default()
+    };
+    let installed = HeavyCounts {
+        join_columns: metrics.retained_columns,
+        sections: metrics.sections,
+        distinct_states: metrics.distinct_states,
+        opaque_cells: metrics.opaque_cells,
+        liquid_cells: metrics.liquid_cells,
+        light_emitters: metrics.light_emitters,
+        ..HeavyCounts::default()
+    };
+    let consumed = HeavyCounts {
+        join_columns,
+        chunk_batches: batches,
+        chunk_payload_bytes: payload_bytes,
+        sections: consumed_metrics.sections,
+        distinct_states: consumed_metrics.distinct_states,
+        opaque_cells: consumed_metrics.opaque_cells,
+        liquid_cells: consumed_metrics.liquid_cells,
+        light_emitters: consumed_metrics.light_emitters,
+        server_ticks,
+        ..HeavyCounts::default()
+    };
+    (requested, installed, consumed)
+}
+
+fn apply_setblock_commands(source: &HeavyChunkSource, commands: &[String]) {
+    for command in commands {
+        let mut fields = command.split_whitespace();
+        if fields.next() != Some("setblock") {
+            continue;
+        }
+        let (Some(raw_x), Some(raw_y), Some(raw_z), Some(raw_name)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (Ok(x), Ok(y), Ok(z)) = (raw_x.parse(), raw_y.parse(), raw_z.parse()) else {
+            continue;
+        };
+        let name = raw_name.split(['[', '{']).next().unwrap_or(raw_name);
+        source.set_block(x, y, z, name);
+    }
+}
+
+async fn drive_v770_join(
+    peer: &mut Connection<DuplexStream>,
+    expected_columns: u64,
+) -> Result<(u64, u64, u64, HashSet<(i32, i32)>), HeavyError> {
+    const HANDSHAKE: i32 = 0;
+    const LOGIN_HELLO: i32 = 0;
+    const LOGIN_COMPRESSION: i32 = 3;
+    const LOGIN_FINISHED: i32 = 2;
+    const LOGIN_ACKNOWLEDGED: i32 = 3;
+    const CONFIG_FINISH: i32 = 3;
+    const PLAY_CHUNK_BATCH_FINISHED: i32 = 11;
+    const PLAY_CHUNK_BATCH_START: i32 = 12;
+    const PLAY_CHUNK: i32 = 45;
+    const PLAY_CHUNK_BATCH_RECEIVED: i32 = 11;
+
+    let mut handshake = Writer::default();
+    handshake.var_i32(776);
+    handshake.string("localhost");
+    handshake.u16(25565);
+    handshake.var_i32(2);
+    peer.write_packet(HANDSHAKE, handshake.as_slice()).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
+    let mut hello = Writer::default();
+    hello.string("HeavyScene");
+    hello.uuid(uuid::Uuid::from_u128(0x553));
+    peer.write_packet(LOGIN_HELLO, hello.as_slice()).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
+    loop {
+        let (id, payload) = next_packet(peer).await?;
+        if id == LOGIN_COMPRESSION {
+            let threshold = Reader::new(&payload).var_i32().map_err(|error| HeavyError::Peer(error.to_string()))?;
+            peer.set_compression(threshold);
+        } else if id == LOGIN_FINISHED {
+            break;
+        }
+    }
+    peer.write_packet(LOGIN_ACKNOWLEDGED, &[]).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
+    loop {
+        let (id, _payload) = next_packet(peer).await?;
+        if id == CONFIG_FINISH {
+            break;
+        }
+    }
+    peer.write_packet(CONFIG_FINISH, &[]).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
+    let mut columns = 0;
+    let mut batches = 0;
+    let mut payload_bytes = 0;
+    let mut in_batch = false;
+    let mut sent_coordinates = HashSet::new();
+    while columns < expected_columns || in_batch {
+        let (id, payload) = next_packet(peer).await?;
+        match id {
+            PLAY_CHUNK_BATCH_START => in_batch = true,
+            PLAY_CHUNK => {
+                columns += 1;
+                payload_bytes += payload.len() as u64;
+                let mut chunk = Reader::new(&payload);
+                let cx = chunk.i32().map_err(|error| HeavyError::Peer(error.to_string()))?;
+                let cz = chunk.i32().map_err(|error| HeavyError::Peer(error.to_string()))?;
+                sent_coordinates.insert((cx, cz));
+            }
+            PLAY_CHUNK_BATCH_FINISHED => {
+                batches += 1;
+                in_batch = false;
+                let _reported = Reader::new(&payload).var_i32().map_err(|error| HeavyError::Peer(error.to_string()))?;
+                peer.write_packet(PLAY_CHUNK_BATCH_RECEIVED, &[0]).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
+            }
+            _ => {}
+        }
+        if columns >= expected_columns && !in_batch {
+            break;
+        }
+    }
+    Ok((columns, batches, payload_bytes, sent_coordinates))
+}
+
+async fn next_packet(peer: &mut Connection<DuplexStream>) -> Result<(i32, Vec<u8>), HeavyError> {
+    peer.read_packet()
+        .await
+        .map_err(|error| HeavyError::Peer(error.to_string()))?
+        .ok_or_else(|| HeavyError::Peer("peer closed before the join completed".to_string()))
+}
+
+impl HeavySceneSpec {
+    fn as_str(&self) -> &'static str {
+        self.scenario.as_str()
+    }
+}

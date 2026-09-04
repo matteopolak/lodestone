@@ -340,6 +340,23 @@ wasm-size:
 test-profile-table:
     python3 scripts/test-profile-cost-table.py
 
+# Server-only heavyweight scene handoff and finite runtime capture. The scene
+# file is the immutable client-runner input; the runtime record stays in the
+# caller-selected local output path.
+heavy-server-emit scenario="mixed" seed="1" scale="1":
+    cargo build --release -p lodestone-server --example heavy-scene-server
+    target/release/examples/heavy-scene-server --emit-scene /tmp/lodestone-heavy-scene.json --scenario {{scenario}} --seed {{seed}} --scale {{scale}}
+
+samply-heavy-server scenario="palette" seed="1" scale="1":
+    cargo build --release -p lodestone-server --example heavy-scene-server
+    samply record --save-only --unstable-presymbolicate -o bench-results/heavy-server.json.gz -- target/release/examples/heavy-scene-server --scenario {{scenario}} --seed {{seed}} --scale {{scale}} --phase ready --ticks 0 --camera-plan stationary --wall-deadline-secs 180 --output bench-results/heavy-server.jsonl
+    test -s bench-results/heavy-server.json.gz
+    test -s bench-results/heavy-server.json.syms.json
+    test -s bench-results/heavy-server.jsonl
+
+profile-heavy-server capture:
+    python3 scripts/profile-cost-table.py {{capture}}
+
 # --- Benchmark baselines and regression detection -------------------------
 #
 # Three recipes, in the order you use them. `bench-record` runs the subset of
