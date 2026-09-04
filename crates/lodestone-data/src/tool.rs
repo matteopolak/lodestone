@@ -72,6 +72,7 @@ use std::sync::{OnceLock, RwLock};
 use lodestone_model::{ItemStack, ToolBlocks, ToolMining, ToolPatch, ToolRule};
 
 use crate::generated_tools as generated;
+use crate::item::Item;
 
 pub use generated::{BLOCK_TAG_COUNT, ITEM_TOOL_COUNT};
 
@@ -179,11 +180,15 @@ pub fn block_tag_members(tag: &str) -> Option<std::borrow::Cow<'static, [u16]>> 
 /// `minecraft:diamond_pickaxe`), or `None` for an item that has none.
 ///
 /// This is what a stack's component patch is a delta *against*; see the module
-/// docs for why the wire alone is not enough.
+/// docs for why the wire alone is not enough. The lookup accepts canonical
+/// built-in names only; unlike [`Item::from_name`], it deliberately rejects a
+/// bare path because this boundary receives component keys, not user input.
 #[must_use]
 pub fn default_tool(item: &str) -> Option<&'static ToolDef> {
+    let resolved = Item::from_name(item)?;
+    (resolved.name() == item).then_some(())?;
     generated::ITEM_TOOLS
-        .binary_search_by_key(&item, |&(name, _)| name)
+        .binary_search_by_key(&resolved.registry_id(), |&(id, _)| id)
         .ok()
         .map(|index| &generated::ITEM_TOOLS[index].1)
 }

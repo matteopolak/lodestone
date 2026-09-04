@@ -74,7 +74,6 @@ const ALLOWED: &[(&str, &str, Kind, &str)] = &[
     ("potions.rs", "POTION_NAMES", CanonicalNames, "the minecraft:potion registry"),
     ("sound_events.rs", "SOUND_EVENT_NAMES", CanonicalNames, "the minecraft:sound_event registry"),
     ("tools.rs", "BLOCK_TAGS", CanonicalNames, "the block-tag registry; its members are already typed u16 block ids"),
-    ("tools.rs", "ITEM_TOOLS", CrossReference, "keyed by item name; should key on a minecraft:item registry id once Item is generated"),
 ];
 
 fn generated_dir() -> PathBuf {
@@ -196,7 +195,7 @@ fn every_generated_string_column_is_classified() {
     }
     assert_eq!(
         debt.len(),
-        3,
+        2,
         "the count of untyped registry columns changed; if it went down, update this number \
          and delete the ALLOWED row — it is meant to reach zero"
     );

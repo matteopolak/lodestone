@@ -30,6 +30,15 @@ reports rather than merely trusted. A wire-supplied `minecraft:tool`
 `evaluate` function, so the two sources cannot diverge in how a rule list is
 walked.
 
+`ITEM_TOOLS` is a sparse table of `(u16, ToolDef)` pairs, sorted by
+`minecraft:item` registry id. `default_tool` first resolves its canonical item
+name through [`Item`](../crates/lodestone-data/src/item.rs), then binary-searches
+that id; it deliberately rejects a bare item path even though `Item::from_name`
+accepts one. This keeps the tool census from duplicating 38 canonical item
+strings while preserving the component-key boundary. Block-tag names remain
+strings because they are keys in the tag namespace, rather than item-registry
+references.
+
 `evaluate` replays vanilla exactly: walk rules in order, first match wins
 **independently** for speed and for correct-for-drops (a rule denying drops
 does not stop the speed search), falling back to vanilla's own default mining speed

@@ -6,9 +6,9 @@
 //! Generated `minecraft:tool` census for protocol 776 (Minecraft 26.2): block
 //! tag membership, and the built-in tool component of every item that has one.
 //!
-//! Raw rodata arrays consumed by [`crate::tool`] — every string is a
-//! `&'static str` and every id a `u16`, so the whole census lives in rodata with
-//! zero heap. Both tables are sorted by their key for binary search.
+//! Raw rodata arrays consumed by [`crate::tool`] — tag names are
+//! `&'static str` and registry ids are `u16`, so the whole census lives in rodata
+//! with zero heap. Both tables are sorted by their key for binary search.
 
 use crate::tool::{ToolBlocksDef, ToolDef, ToolRuleDef};
 
@@ -289,12 +289,182 @@ pub static BLOCK_TAGS: [(&str, &[u16]); BLOCK_TAG_COUNT] = [
 ];
 
 /// Items whose *prototype* component map carries `minecraft:tool`, sorted by
-/// item name. This is what a clientbound component patch is a delta
-/// against: a plain vanilla pickaxe sends an empty patch, so without this table
+/// `minecraft:item` registry id. A clientbound component patch is a delta
+/// against it: a plain vanilla pickaxe sends an empty patch, so without this table
 /// it would mine at bare-hand speed.
-pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
+pub static ITEM_TOOLS: [(u16, ToolDef); ITEM_TOOL_COUNT] = [
     (
-        "minecraft:copper_axe",
+        939,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Blocks(&[129]),
+                    speed: Some(15.0),
+                    correct_for_drops: Some(true),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:sword_instantly_mines"),
+                    speed: Some(3.4028235e38),
+                    correct_for_drops: None,
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:sword_efficient"),
+                    speed: Some(1.5),
+                    correct_for_drops: None,
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 2,
+            can_destroy_blocks_in_creative: false,
+        },
+    ),
+    (
+        940,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_wooden_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/shovel"),
+                    speed: Some(2.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        941,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_wooden_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
+                    speed: Some(2.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        942,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_wooden_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
+                    speed: Some(2.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        943,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_wooden_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
+                    speed: Some(2.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        944,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Blocks(&[129]),
+                    speed: Some(15.0),
+                    correct_for_drops: Some(true),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:sword_instantly_mines"),
+                    speed: Some(3.4028235e38),
+                    correct_for_drops: None,
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:sword_efficient"),
+                    speed: Some(1.5),
+                    correct_for_drops: None,
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 2,
+            can_destroy_blocks_in_creative: false,
+        },
+    ),
+    (
+        945,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_copper_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/shovel"),
+                    speed: Some(5.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        946,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_copper_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
+                    speed: Some(5.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        947,
         ToolDef {
             rules: &[
                 ToolRuleDef {
@@ -314,7 +484,7 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:copper_hoe",
+        948,
         ToolDef {
             rules: &[
                 ToolRuleDef {
@@ -334,47 +504,7 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:copper_pickaxe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_copper_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
-                    speed: Some(5.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:copper_shovel",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_copper_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/shovel"),
-                    speed: Some(5.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:copper_sword",
+        949,
         ToolDef {
             rules: &[
                 ToolRuleDef {
@@ -399,77 +529,17 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:diamond_axe",
+        950,
         ToolDef {
             rules: &[
                 ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_diamond_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
-                    speed: Some(8.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:diamond_hoe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_diamond_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
-                    speed: Some(8.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:diamond_pickaxe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_diamond_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
-                    speed: Some(8.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:diamond_shovel",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_diamond_tool"),
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_stone_tool"),
                     speed: None,
                     correct_for_drops: Some(false),
                 },
                 ToolRuleDef {
                     blocks: ToolBlocksDef::Tag("minecraft:mineable/shovel"),
-                    speed: Some(8.0),
+                    speed: Some(4.0),
                     correct_for_drops: Some(true),
                 },
             ],
@@ -479,7 +549,67 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:diamond_sword",
+        951,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_stone_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
+                    speed: Some(4.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        952,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_stone_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
+                    speed: Some(4.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        953,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_stone_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
+                    speed: Some(4.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        954,
         ToolDef {
             rules: &[
                 ToolRuleDef {
@@ -504,67 +634,7 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:golden_axe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_gold_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
-                    speed: Some(12.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:golden_hoe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_gold_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
-                    speed: Some(12.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:golden_pickaxe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_gold_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
-                    speed: Some(12.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:golden_shovel",
+        955,
         ToolDef {
             rules: &[
                 ToolRuleDef {
@@ -584,7 +654,67 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:golden_sword",
+        956,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_gold_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
+                    speed: Some(12.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        957,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_gold_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
+                    speed: Some(12.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        958,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_gold_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
+                    speed: Some(12.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        959,
         ToolDef {
             rules: &[
                 ToolRuleDef {
@@ -609,67 +739,7 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:iron_axe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_iron_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
-                    speed: Some(6.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:iron_hoe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_iron_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
-                    speed: Some(6.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:iron_pickaxe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_iron_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
-                    speed: Some(6.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:iron_shovel",
+        960,
         ToolDef {
             rules: &[
                 ToolRuleDef {
@@ -689,7 +759,67 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:iron_sword",
+        961,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_iron_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
+                    speed: Some(6.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        962,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_iron_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
+                    speed: Some(6.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        963,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_iron_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
+                    speed: Some(6.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        964,
         ToolDef {
             rules: &[
                 ToolRuleDef {
@@ -714,76 +844,112 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:mace",
+        965,
         ToolDef {
-            rules: &[],
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_diamond_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/shovel"),
+                    speed: Some(8.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        966,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_diamond_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
+                    speed: Some(8.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        967,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_diamond_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
+                    speed: Some(8.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        968,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_diamond_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
+                    speed: Some(8.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        969,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Blocks(&[129]),
+                    speed: Some(15.0),
+                    correct_for_drops: Some(true),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:sword_instantly_mines"),
+                    speed: Some(3.4028235e38),
+                    correct_for_drops: None,
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:sword_efficient"),
+                    speed: Some(1.5),
+                    correct_for_drops: None,
+                },
+            ],
             default_mining_speed: 1.0,
             damage_per_block: 2,
             can_destroy_blocks_in_creative: false,
         },
     ),
     (
-        "minecraft:netherite_axe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_netherite_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
-                    speed: Some(9.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:netherite_hoe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_netherite_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
-                    speed: Some(9.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:netherite_pickaxe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_netherite_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
-                    speed: Some(9.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:netherite_shovel",
+        970,
         ToolDef {
             rules: &[
                 ToolRuleDef {
@@ -803,32 +969,67 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:netherite_sword",
+        971,
         ToolDef {
             rules: &[
                 ToolRuleDef {
-                    blocks: ToolBlocksDef::Blocks(&[129]),
-                    speed: Some(15.0),
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_netherite_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
+                    speed: Some(9.0),
                     correct_for_drops: Some(true),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:sword_instantly_mines"),
-                    speed: Some(3.4028235e38),
-                    correct_for_drops: None,
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:sword_efficient"),
-                    speed: Some(1.5),
-                    correct_for_drops: None,
                 },
             ],
             default_mining_speed: 1.0,
-            damage_per_block: 2,
-            can_destroy_blocks_in_creative: false,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
         },
     ),
     (
-        "minecraft:shears",
+        972,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_netherite_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
+                    speed: Some(9.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        973,
+        ToolDef {
+            rules: &[
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_netherite_tool"),
+                    speed: None,
+                    correct_for_drops: Some(false),
+                },
+                ToolRuleDef {
+                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
+                    speed: Some(9.0),
+                    correct_for_drops: Some(true),
+                },
+            ],
+            default_mining_speed: 1.0,
+            damage_per_block: 1,
+            can_destroy_blocks_in_creative: true,
+        },
+    ),
+    (
+        1134,
         ToolDef {
             rules: &[
                 ToolRuleDef {
@@ -858,112 +1059,7 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:stone_axe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_stone_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
-                    speed: Some(4.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:stone_hoe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_stone_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
-                    speed: Some(4.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:stone_pickaxe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_stone_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
-                    speed: Some(4.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:stone_shovel",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_stone_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/shovel"),
-                    speed: Some(4.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:stone_sword",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Blocks(&[129]),
-                    speed: Some(15.0),
-                    correct_for_drops: Some(true),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:sword_instantly_mines"),
-                    speed: Some(3.4028235e38),
-                    correct_for_drops: None,
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:sword_efficient"),
-                    speed: Some(1.5),
-                    correct_for_drops: None,
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 2,
-            can_destroy_blocks_in_creative: false,
-        },
-    ),
-    (
-        "minecraft:trident",
+        1253,
         ToolDef {
             rules: &[],
             default_mining_speed: 1.0,
@@ -972,105 +1068,9 @@ pub static ITEM_TOOLS: [(&str, ToolDef); ITEM_TOOL_COUNT] = [
         },
     ),
     (
-        "minecraft:wooden_axe",
+        1362,
         ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_wooden_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/axe"),
-                    speed: Some(2.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:wooden_hoe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_wooden_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/hoe"),
-                    speed: Some(2.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:wooden_pickaxe",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_wooden_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/pickaxe"),
-                    speed: Some(2.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:wooden_shovel",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:incorrect_for_wooden_tool"),
-                    speed: None,
-                    correct_for_drops: Some(false),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:mineable/shovel"),
-                    speed: Some(2.0),
-                    correct_for_drops: Some(true),
-                },
-            ],
-            default_mining_speed: 1.0,
-            damage_per_block: 1,
-            can_destroy_blocks_in_creative: true,
-        },
-    ),
-    (
-        "minecraft:wooden_sword",
-        ToolDef {
-            rules: &[
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Blocks(&[129]),
-                    speed: Some(15.0),
-                    correct_for_drops: Some(true),
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:sword_instantly_mines"),
-                    speed: Some(3.4028235e38),
-                    correct_for_drops: None,
-                },
-                ToolRuleDef {
-                    blocks: ToolBlocksDef::Tag("minecraft:sword_efficient"),
-                    speed: Some(1.5),
-                    correct_for_drops: None,
-                },
-            ],
+            rules: &[],
             default_mining_speed: 1.0,
             damage_per_block: 2,
             can_destroy_blocks_in_creative: false,
