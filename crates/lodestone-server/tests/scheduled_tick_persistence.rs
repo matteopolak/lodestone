@@ -1,9 +1,8 @@
-//! Pending block and fluid ticks survive a world being closed and reopened
-//! (issue [#468](https://github.com/matteopolak/lodestone/issues/468)).
+//! Pending block and fluid ticks survive a world being closed and reopened.
 //!
 //! # What this gates that a round trip cannot
 //!
-//! Two fields of vanilla's `SavedTick` are shaped so that a writer and a reader
+//! Two fields of the persisted tick record are shaped so that a writer and a reader
 //! sharing one misunderstanding agree perfectly:
 //!
 //! * **`p` is the priority *value* in `-3..3`, not the ordinal.** Our
@@ -15,12 +14,12 @@
 //!   check of either priority alone, and fails both here.
 //! * **`t` is a signed delay** relative to game time at save. A tick already
 //!   overdue writes a negative one, which is 1,584 of the 133,051 entries in
-//!   the real vanilla worlds `chunk_extras_vanilla_oracle.rs` reads.
+//!   the real-world save fixtures read by `chunk_extras_vanilla_oracle.rs`.
 //!
-//! Both expected values come from vanilla's own `TickPriority` and
-//! `SavedTick` types respectively, not from this crate.
+//! Both expected values come from the persisted format's independent reference
+//! data, not from this crate.
 //!
-//! The complementary direction — that *Mojang's* bytes decode correctly — is
+//! The complementary direction — decoding externally produced bytes — is
 //! `tests/chunk_extras_vanilla_oracle.rs`. Neither file is sufficient alone.
 
 use std::path::{Path, PathBuf};
@@ -77,8 +76,7 @@ impl ChunkSource for Flat {
     }
 
     // No storage: this fixture serves fresh columns and edits are discarded by
-    // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // design. Tests that need edits to survive use a source with retention.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -268,7 +266,7 @@ fn pending_ticks_survive_a_close_and_reopen_with_the_right_delay_and_priority() 
 
     let _ = world.column(0, 0);
 
-    // Rebased onto LOAD_TICK, not restored to their old absolute triggers.
+    // Rebased onto LOAD_TICK, not restored to their previous absolute triggers.
     let expected_block = LOAD_TICK as i64 + i64::from(expected_block_delay);
     let expected_fluid = LOAD_TICK as i64 + i64::from(expected_fluid_delay);
     let (block, fluid) = scheduled.with(|queues| {
@@ -378,9 +376,8 @@ fn an_overdue_tick_whose_delay_predates_the_clock_becomes_due_immediately() {
 /// The reason this needs its own test: the schema and the save path can both be
 /// correct while `tick::run_tick_loop` keeps its own private queues, in which
 /// case ticks fire correctly, save nothing, and no assertion above notices.
-/// That is exactly the state this crate was in before this change — and it is
-/// still the state until the tick loop takes the handle, which is why this
-/// asserts the *seam* rather than the wiring.
+/// A world clone must expose the same queues that the tick loop drains, so
+/// this asserts the *seam* directly rather than only observing persistence.
 #[test]
 fn the_world_hands_out_one_shared_scheduled_tick_queue() {
     let dir = tempdir("one-queue");

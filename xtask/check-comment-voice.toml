@@ -26,26 +26,6 @@ owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
 
 [[allow]]
-file = "crates/lodestone-server/tests/poi_persistence_round_trip.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
-file = "crates/lodestone-server/tests/random_tick_section_counters.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
-file = "crates/lodestone-server/tests/scheduled_tick_persistence.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
-file = "crates/lodestone-server/tests/serve_play.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
 file = "crates/lodestone-shell/src/container/background.rs"
 owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
