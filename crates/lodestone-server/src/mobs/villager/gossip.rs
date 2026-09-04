@@ -69,27 +69,6 @@ pub enum GossipType {
 }
 
 impl GossipType {
-    /// Every variant, in `GossipType.values()`'s own declaration order.
-    pub const ALL: [GossipType; 5] = [
-        GossipType::MajorNegative,
-        GossipType::MinorNegative,
-        GossipType::MinorPositive,
-        GossipType::MajorPositive,
-        GossipType::Trading,
-    ];
-
-    /// `GossipType.id` — the registry-style serialized name.
-    #[must_use]
-    pub fn path(self) -> &'static str {
-        match self {
-            Self::MajorNegative => "major_negative",
-            Self::MinorNegative => "minor_negative",
-            Self::MinorPositive => "minor_positive",
-            Self::MajorPositive => "major_positive",
-            Self::Trading => "trading",
-        }
-    }
-
     /// `GossipType.weight` — signed; every negative variant carries a
     /// negative weight, so a stored count multiplied by this is already the
     /// reputation contribution, not merely a magnitude.
