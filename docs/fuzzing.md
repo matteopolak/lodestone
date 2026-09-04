@@ -14,9 +14,9 @@ bug Track A structurally cannot see — wrong behaviour that never panics (the
 motivating example: breaking a waterlogged block used to destroy the water
 too, which is not the real mechanic). Track B is a narrow slice rather than a
 finished fuzzer: fixed scripts run end to end against a live vanilla server,
-while bounded generated scripts and semantic shrinking are proven only against
-fresh in-memory oracles. Generated live runs remain deliberately unwired until
-their reset and tick-boundary semantics can be made trustworthy. Its own
+and bounded generated fluid scripts now run against that oracle with per-case
+reset, timing-boundary checks, semantic shrinking, and replay. The generator's
+general properties are also proven against fresh in-memory oracles. Its own
 section below says exactly what is and is not there.
 
 This complements, not replaces, `crates/lodestone-fuzz`'s existing
@@ -362,6 +362,17 @@ What exists:
   The ignored live test runs a deliberately faulty read wrapper first and
   requires generation to find, shrink, serialize and replay its divergence.
   That is the negative control for an accidentally always-agreeing generator.
+  `historical_reversion_is_found_shrunk_and_replayed_against_live_vanilla` is
+  the production-regression control: it is ignored in the normal tree and is
+  run only by `just fuzz-historical-fluid-reversion`, which checks out a
+  detached worktree and applies the reviewed delay-one fluid-seed mutation
+  there. Before that mutation, the wrapper runs the matching fixed-tree
+  control over the exact same bounded stream and requires `NoDivergence`.
+  The control requires the real first-tick downstream mismatch, requires the
+  semantic shrinker to preserve its complete divergence signature, and then
+  replays the serialized minimal case from a fresh live lane. The wrapper
+  removes the worktree on every exit path, so it neither edits nor relies on
+  uncommitted changes in the shared checkout.
   A real divergence is likewise replayed immediately after decoding its JSON
   before the test reports the artifact. Set `LODESTONE_DIFFERENTIAL_REPLAY` to
   that JSON file on a later run to bypass generation and execute the explicit
@@ -371,7 +382,8 @@ What exists:
   positions and states from the generator's domain, and a recorded divergence
   inside the probe alphabet and execution horizon. A replay cannot use the
   general `RunCommand` action to escape the reset lane.
-- **Three live runs, against a real vanilla 26.2 server**, all `#[ignore]`d.
+- **Three live integration targets, plus two historical controls, against a
+  real vanilla 26.2 server**, all `#[ignore]`d.
   `crates/lodestone-fuzz/tests/differential_live_fluid_spread.rs` pairs
   `FluidModelOracle` with `RconOracle` over a water front spreading down a
   closed stone channel and requires agreement throughout the complete spread.
@@ -528,11 +540,6 @@ host that bursts through unobserved reference ticks cannot manufacture either
 agreement or disagreement.
 
 ### What Track B still does not do
-- **No validation against a reverted historical fix** — revert a committed fix
-  in a scratch worktree and require the harness to rediscover it (flowing
-  water waterlogging a slab, a door dropping nothing, …). Generated live fluid
-  scripts now have a reset and replay path, but the deliberately faulty read
-  control is not a historical production regression.
 - **No client-state comparison.** Comparing what our own *client* believes
   about blocks/entities/inventory after replaying a packet stream (rather than
   comparing rendered pixels, which two different renderers will differ on in
@@ -614,6 +621,17 @@ agreement or disagreement.
   `ReplayCase::replay_generated_with`, which validates the scenario, probe
   lane, action kind, positions and state alphabet before invoking the same
   resettable evaluator used by generated and shrink candidates.
+- **Run the historical fluid-reversion control** with a separately started
+  `./scripts/live-oracles/creative.sh`, then `just
+  fuzz-historical-fluid-reversion`. The wrapper starts from committed `HEAD`
+  in a uniquely named detached worktree, applies the exact former delay-one
+  seven-cell seeding behavior from commit `40d39c13` without committing it,
+  confirms the old seed is present, and executes the fixed-tree and historical
+  ignored generated-live tests in that order. It exits successfully only after
+  the fixed tree has no divergence and the mutated tree's historical test
+  finds the expected live disagreement, shrinks it, and replays it; it
+  removes that worktree even when the test fails. Do not run `git revert` in
+  the shared checkout: its uncommitted edits belong to other work.
 
 ## Configuration
 

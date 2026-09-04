@@ -31,8 +31,8 @@ use differential_generation::{
 use lodestone_fuzz::differential::fluid::FluidModelOracle;
 use lodestone_fuzz::differential::rcon::RconOracle;
 use lodestone_fuzz::differential::{
-    Action, DifferentialOutcome, OracleFailure, OracleFailureKind, Script, Side, TICK_MILLIS,
-    WorldOracle, run_differential,
+    Action, DifferentialOutcome, Divergence, OracleFailure, OracleFailureKind, Script, Side,
+    TICK_MILLIS, WorldOracle, run_differential,
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:25571";
@@ -595,4 +595,80 @@ fn generated_fluid_candidates_are_isolated_shrunk_and_replayable() {
             panic!("invalid generated-live configuration: {message}")
         }
     }
+}
+
+/// The fixed-tree half of the historical-reversion control. It runs the same
+/// bounded generated stream as the mutation half, but requires every candidate
+/// to agree with the live oracle before the wrapper applies any mutation.
+#[test]
+#[ignore = "needs a live vanilla 26.2 RCON oracle"]
+fn fixed_generated_fluid_stream_has_no_live_divergence() {
+    let outcome = search_and_shrink_with(
+        &domain(),
+        budget(),
+        &region(),
+        SETTLE_TICKS,
+        |script, region, settle_ticks| evaluate_stable(script, region, settle_ticks, false),
+    );
+    match outcome {
+        SearchOutcome::NoDivergence { cases_run } => assert_eq!(cases_run, budget().cases),
+        other => panic!("the fixed generated-fluid stream must agree with live vanilla: {other:?}"),
+    }
+}
+
+/// A historical-reversion control for the generated live search. The wrapper
+/// in `scripts/historical-fluid-reversion.sh` runs this only after restoring
+/// the former seven-cell delay-one seed in a detached worktree. It must then
+/// find the first downstream cell one elapsed tick ahead of the live oracle,
+/// shrink the generated script without changing that first disagreement, and
+/// replay the serialized result from a fresh lane.
+#[test]
+#[ignore = "requires the historical fluid seed reversion in a detached worktree and a live vanilla 26.2 RCON oracle"]
+fn historical_reversion_is_found_shrunk_and_replayed_against_live_vanilla() {
+    let outcome = search_and_shrink_with(
+        &domain(),
+        budget(),
+        &region(),
+        SETTLE_TICKS,
+        |script, region, settle_ticks| evaluate_stable(script, region, settle_ticks, false),
+    );
+    let SearchOutcome::Found(found) = outcome else {
+        panic!(
+            "the restored delay-one seven-cell seed must diverge from the live oracle: {outcome:?}"
+        );
+    };
+
+    let expected = Divergence {
+        tick: 0,
+        pos: (1, 0, 0),
+        left: Some("minecraft:water".to_owned()),
+        right: Some(AIR.to_owned()),
+    };
+    assert_eq!(
+        found.original_divergence, expected,
+        "the historical seed reaches the first downstream cell after one elapsed tick"
+    );
+    assert_eq!(
+        found.minimal_divergence, expected,
+        "shrinking must preserve the recorded gameplay divergence, not merely find another one"
+    );
+    assert!(
+        found.shrink_attempts > 0,
+        "the bounded search must exercise at least one semantic shrink candidate"
+    );
+    assert_ne!(
+        found.minimal_script.steps, found.original_script.steps,
+        "the recorded minimal script must be an accepted semantic shrink, not the original candidate"
+    );
+
+    let replay = ReplayCase::from_found(
+        "generated-live-fluid-historical-reversion",
+        budget().seed,
+        SETTLE_TICKS,
+        region(),
+        &found,
+    );
+    let json = replay.to_json_pretty().expect("encode historical replay JSON");
+    let replay = ReplayCase::from_json(&json).expect("decode historical replay JSON");
+    assert_replay(&replay, "generated-live-fluid-historical-reversion", false);
 }

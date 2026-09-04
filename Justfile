@@ -615,6 +615,14 @@ fuzz-smoke seconds="30":
 fuzz-seeds-regen:
     python3 fuzz/seeds/generate-seeds.py
 
+# Restore one historical fluid scheduling defect in a disposable detached
+# worktree, then require the generated live differential search to find,
+# shrink and replay the resulting divergence. The local vanilla oracle must
+# already be running; see docs/fuzzing.md for the command and cleanup scope.
+[doc("verify the generated live fluid search rediscovers its historical delay-one seed defect")]
+fuzz-historical-fluid-reversion:
+    ./scripts/historical-fluid-reversion.sh
+
 # Reclaim disk from `target/` without disturbing a build in progress.
 #
 # Two independently safe reclaims, in increasing order of cost to redo:
