@@ -74,6 +74,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "v26_2_serverbound_decode_by_id"
+path = "fuzz_targets/v26_2_serverbound_decode_by_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "nbt_decode"
 path = "fuzz_targets/nbt_decode.rs"
 test = false

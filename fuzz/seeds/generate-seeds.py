@@ -63,6 +63,7 @@ FIXTURE_PACKETS = [
     (re.compile(r"^registry_data_"), "configuration", "minecraft:registry_data"),
     (re.compile(r"^update_tags_configuration$"), "configuration", "minecraft:update_tags"),
     (re.compile(r"^item_entity_metadata_"), "play", "minecraft:set_entity_data"),
+    (re.compile(r"^potion_contents_complete$"), "play", "minecraft:container_set_slot"),
     (re.compile(r"^tool_component_"), "play", "minecraft:container_set_slot"),
     (re.compile(r"^command_suggestions_"), "play", "minecraft:command_suggestions"),
     (re.compile(r"^command_tree_"), "play", "minecraft:commands"),
@@ -122,23 +123,23 @@ def load_packet_report() -> dict:
     return ids
 
 
-def load_entry_indices() -> dict[tuple[str, str], int]:
-    """Position of each packet name in our per-state clientbound id table.
+def load_entry_indices(bound: str) -> dict[tuple[str, str], int]:
+    """Position of each packet name in a per-state id table.
 
-    `v26_2_clientbound_decode_by_id` spends one input byte on an index into
-    that table rather than on a raw id, so a seed for it has to know the
-    ordering. Only the *index* comes from here; the payload bytes and the
-    packet's identity still come from the capture and the vanilla report.
+    The real-id targets spend one input byte on an index into the selected
+    table rather than on a raw id, so a seed for either direction has to know
+    the ordering. Only the index comes from here; packet payload bytes still
+    come from captured traffic.
     """
     text = require(PACKET_IDS_RS).read_text()
     indices: dict[tuple[str, str], int] = {}
     for state in STATE_SELECTOR:
         module = "handshaking" if state == "handshake" else state
         body = module_body(text, module, PACKET_IDS_RS)
-        clientbound = module_body(body, "clientbound", PACKET_IDS_RS)
-        entries = re.search(r"static ENTRIES: &\[\(&str, i32\)\] = &\[(.*?)\];", clientbound, re.S)
+        table = module_body(body, bound, PACKET_IDS_RS)
+        entries = re.search(r"static ENTRIES: &\[\(&str, i32\)\] = &\[(.*?)\];", table, re.S)
         if not entries:
-            raise Fatal(f"no ENTRIES table under `{module}::clientbound` in {PACKET_IDS_RS}")
+            raise Fatal(f"no ENTRIES table under `{module}::{bound}` in {PACKET_IDS_RS}")
         for i, name in enumerate(re.findall(r'\("([^"]+)"', entries.group(1))):
             indices[(state, name)] = i
     return indices
@@ -169,7 +170,8 @@ def module_body(text: str, module: str, source: Path) -> str:
 
 def seed_packet_decoders() -> list[str]:
     ids = load_packet_report()
-    indices = load_entry_indices()
+    indices = load_entry_indices("clientbound")
+    serverbound_indices = load_entry_indices("serverbound")
     notes = []
     fixtures = sorted(require(V26_2_FIXTURES).glob("*.hex"))
     if not fixtures:
@@ -214,8 +216,19 @@ def seed_packet_decoders() -> list[str]:
             f"{stem}.bin",
             selector + bytes([indices[(state, name)]]) + payload,
         )
+        serverbound_count = sum(1 for entry_state, _ in serverbound_indices if entry_state == state)
+        if not serverbound_count:
+            raise Fatal(f"our {state} serverbound ENTRIES table is empty")
+        # The payload remains a real server capture; the selected id is a
+        # valid serverbound arm, even when its schema differs from the
+        # captured clientbound payload.
+        write_seed(
+            "v26_2_serverbound_decode_by_id",
+            f"{stem}.bin",
+            selector + bytes([matched % serverbound_count]) + payload,
+        )
         matched += 1
-    notes.append(f"{matched} captured 26.2 packet payloads -> 3 decode targets")
+    notes.append(f"{matched} captured 26.2 packet payloads -> 4 decode targets")
     return notes
 
 
