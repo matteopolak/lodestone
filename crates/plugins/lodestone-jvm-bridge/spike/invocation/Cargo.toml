@@ -2,6 +2,7 @@
 name = "lodestone-jni-invocation-spike"
 version = "0.0.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
 publish = false
 
 [dependencies]
@@ -10,4 +11,3 @@ lodestone-jvm-bridge = { path = "../.." }
 
 # This is an executable experiment, not another production workspace member.
 [workspace]
-

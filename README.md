@@ -96,6 +96,11 @@ just run-wasm     # the browser build, on :8080 (release is mandatory there)
 
 The binary is `lodestone`, not `lodestone-shell`.
 
+## License
+
+Lodestone-owned code is licensed under the
+[GNU General Public License, version 3 or later](./LICENSE) (`GPL-3.0-or-later`).
+
 ## Reading further
 
 - [`CLAUDE.md`](./CLAUDE.md) — the working rules, and the hazards behind each one

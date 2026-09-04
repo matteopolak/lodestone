@@ -50,9 +50,8 @@ bevy_ecs = { workspace = true }
 # all. `tests/headless_consumer_registers_a_plugin.rs` drives its real
 # goal-arrival behaviour through a `client_app()`-composed `App`.
 #
-# **Dev-only, deliberately.** `lodestone-autopilot` is LGPL-3.0-or-later while
-# this crate is MIT-OR-Apache-2.0 (`crates/plugins/README.md` §Licensing); a
-# normal dependency here would put the copyleft boundary inside an engine crate.
+# **Dev-only, deliberately.** A normal dependency here would make the
+# conformance plugin part of every application build.
 lodestone-autopilot = { workspace = true }
 # The fixture collision world and version adapter the conformance test walks on,
 # reusing the plugin's own gate rather than a weaker hand-rolled one.

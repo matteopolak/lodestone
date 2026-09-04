@@ -2,8 +2,8 @@
 
 ## What it is
 
-The record behind this repository's `README.md` disclaimer, `NOTICE`, `LICENSE-MIT`, and
-`LICENSE-APACHE` files: what an IP/attribution audit found, on what evidence, and which
+The record behind this repository's `README.md` disclaimer, `NOTICE`, and `LICENSE` file:
+what an IP/attribution audit found, on what evidence, and which
 questions are for counsel rather than for an agent working in this repo. This doc is the
 "why" for those files; it is not itself a legal opinion, and nothing in it should be read as
 one.
@@ -87,16 +87,13 @@ sentence is cheap and is exactly what a future audit will grep for first.
 
 ## Configuration
 
-None — this is a documentation and licensing artifact, not code. The license each crate
-declares lives in `Cargo.toml`'s `license.workspace = true` (root `Cargo.toml`'s
-`[workspace.package]` sets `license = "MIT OR Apache-2.0"`); `web/Cargo.toml`,
-`web/server/Cargo.toml`, and `xtask/Cargo.toml` do not currently set a `license` field and
-were flagged in the filed issue rather than edited here, since editing source-tree
-`Cargo.toml` files was out of scope for this pass.
+None — this is a documentation and licensing artifact, not code. Lodestone-owned code uses
+`GPL-3.0-or-later`; workspace crates inherit that SPDX expression through
+`Cargo.toml`'s `license.workspace = true`.
 
 ## Dependencies
 
-`NOTICE`, `LICENSE-MIT`, `LICENSE-APACHE`, and this doc are read by anyone auditing the
+`NOTICE`, `LICENSE`, and this doc are read by anyone auditing the
 repository's IP posture; keep them consistent with each other rather than duplicating facts
 that could drift. `cargo xtask docs-index` regenerates `docs/README.md`'s table of contents
 from this file's H1 and this section; re-run it after any structural edit here.

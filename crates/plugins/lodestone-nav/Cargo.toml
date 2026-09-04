@@ -4,7 +4,7 @@
 # precisely so it can be gated headlessly against captured chunk regions and a
 # live server without a schedule between the oracle and the code it validates.
 #
-# **Licence.** LGPL-3.0-or-later, its own `LICENSE` file, per
+# **Licence.** GPL-3.0-or-later, per
 # `docs/baritone-port.md` §1.2 point 2. The design is clean-room (§1.2 point 1):
 # it carries no structure, no type names and no constants from any existing
 # navigation implementation. Every movement number comes from
@@ -13,7 +13,7 @@
 name = "lodestone-nav"
 version.workspace = true
 edition.workspace = true
-license = "LGPL-3.0-or-later"
+license = "GPL-3.0-or-later"
 
 [lints]
 workspace = true
