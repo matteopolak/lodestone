@@ -342,3 +342,40 @@ fn custom_argument_type_registers_and_parses_and_suggests() {
     assert_eq!(tree.suggest("b"), vec!["BETA".to_string()]);
     assert!(registry.get("nonexistent").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Redirect-walk depth: a redirect hop consumes at least one character, which
+// keeps a redirect cycle merely deep rather than infinite, but a command
+// still arrives with up to the protocol's 32767-character cap — plenty of
+// room for a redirect chain deep enough to overflow a recursive walk's call
+// stack before the input itself runs out.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn control_self_redirecting_literal_survives_a_deep_redirect_chain() {
+    // A literal that redirects straight back to the root, fed a chain long
+    // enough to drive the redirect walk far deeper than an ordinary command
+    // ever goes. Every hop consumes its literal token plus one separator, so
+    // this cannot be mistaken for the (node, cursor) redirect-cycle case
+    // covered above — each hop's key is distinct.
+    //
+    // Before the redirect walk was made iterative, this many hops overflowed
+    // the call stack and aborted the process well short of completing (the
+    // crate doc's `docs/server-commands.md` entry measured 1024 hops
+    // surviving and fewer than 2048 overflowing, on a 2 MiB stack). This test
+    // is the control: it must run to completion rather than crash, and it is
+    // the regression test for the iterative rewrite that removed the bound
+    // on stack depth rather than merely raising it.
+    const HOPS: usize = 20_000;
+
+    let mut tree = CommandTree::new();
+    let root = tree.root();
+    let a = tree.add_literal(root, "a");
+    tree.set_executable(a, true);
+    tree.set_redirect(a, root);
+
+    let input = vec!["a"; HOPS].join(" ");
+    let parsed = tree.parse(&input).expect("a long non-cyclic redirect chain must parse rather than abort");
+    assert_eq!(parsed.nodes.len(), HOPS);
+    assert!(parsed.nodes.iter().all(|&id| id == a));
+}

@@ -99,6 +99,22 @@ impl CommandTree {
         }
     }
 
+    /// Walk from `node_id` to wherever the input stops matching, following
+    /// redirects along the way. Iterative rather than recursive: a redirect
+    /// hop used to cost one Rust call-stack frame per hop (this function and
+    /// [`CommandTree::step_match`] called each other, and the redirect branch
+    /// does work *after* its nested call returns, so the compiler cannot turn
+    /// it into a loop on its own). A command carries the protocol's default
+    /// 32767-character cap, and a redirect hop only has to consume a single
+    /// separator character, so a self-redirecting node drove that recursion
+    /// deep enough to overflow the stack — `tests/brigadier_spec.rs`'s
+    /// `control_self_redirecting_literal_survives_a_deep_redirect_chain`
+    /// aborts the process against the old recursive version. `redirect_stack`
+    /// is this function's own heap-allocated stack standing in for the call
+    /// stack the old version spent: it grows with the number of redirect
+    /// hops instead, which a `Vec` absorbs the same way the neighbor-update
+    /// propagator's own explicit work stack does for its chained
+    /// notifications.
     fn parse_nodes(
         &self,
         node_id: NodeId,
@@ -108,8 +124,91 @@ impl CommandTree {
         arguments: &mut Vec<(String, ParsedValue)>,
         filter: &dyn PermissionFilter,
     ) -> Result<(), ParseError> {
+        let mut redirect_stack: Vec<RedirectFrame> = Vec::new();
+        let mut current = node_id;
+
+        loop {
+            match self.step_match(current, reader, nodes, arguments, filter) {
+                Step::Continue { next } => current = next,
+                Step::Redirect { via, target } => {
+                    let key = (target, reader.cursor());
+                    // A redirect that lands on a `(node, cursor)` pair already
+                    // on this path consumed nothing on the way back to it,
+                    // and would do so again forever — this is the guard
+                    // `tests/brigadier_spec.rs` exercises directly; real
+                    // Brigadier has no equivalent and would recurse until the
+                    // stack overflows.
+                    if visited_redirects.contains(&key) {
+                        return Err(ParseError::new(reader.cursor(), ParseErrorKind::RedirectCycle));
+                    }
+                    visited_redirects.push(key);
+                    redirect_stack.push(RedirectFrame {
+                        via,
+                        cursor: reader.cursor(),
+                        nodes_len: nodes.len(),
+                        arguments_len: arguments.len(),
+                    });
+                    current = target;
+                }
+                Step::Done => match self.resolve_redirect_fallback(reader, nodes, arguments, &mut redirect_stack) {
+                    Some(next) => current = next,
+                    None => return Ok(()),
+                },
+                Step::Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// A completed hop (`Step::Done`, or a matched leaf — the two collapse
+    /// into the same "nothing more to try here" outcome) bubbles through
+    /// `redirect_stack` exactly as the old recursive version's post-return
+    /// check did at every enclosing call: each pending redirect either
+    /// resolves quietly (the walk it enclosed consumed something, or its own
+    /// node has no children to fall back into) or converts into fresh work —
+    /// trying that node's own children instead of the redirect target that
+    /// turned out to match nothing. Returns the node to resume at, or `None`
+    /// once the whole stack (and thus the whole walk) is resolved.
+    fn resolve_redirect_fallback(
+        &self,
+        reader: &StringReader,
+        nodes: &mut Vec<NodeId>,
+        arguments: &mut Vec<(String, ParsedValue)>,
+        redirect_stack: &mut Vec<RedirectFrame>,
+    ) -> Option<NodeId> {
+        loop {
+            let frame = redirect_stack.pop()?;
+            // `/execute ... run` redirects into the ordinary root so built-in
+            // commands retain their normal grammar. Its own greedy fallback
+            // is deliberately considered only when that root consumed
+            // *nothing*: a known built-in root with bad arguments must remain
+            // a built-in parse error, while an unknown terminal root may be
+            // handed to the host dispatcher with the already-rewritten
+            // source.
+            if reader.cursor() != frame.cursor || self.node(frame.via).children().is_empty() {
+                continue;
+            }
+            nodes.truncate(frame.nodes_len);
+            arguments.truncate(frame.arguments_len);
+            return Some(frame.via);
+        }
+    }
+
+    /// Try to match one token against `node_id`'s children, then (on a
+    /// match) enforce the argument-separator boundary — together, one hop of
+    /// what used to be `parse_nodes` calling `after_match`. Reports what the
+    /// walk should do next rather than recursing itself, so the driver loop
+    /// in [`CommandTree::parse_nodes`] can turn a chain of hops into
+    /// iteration instead of call-stack depth.
+    fn step_match(
+        &self,
+        node_id: NodeId,
+        reader: &mut StringReader,
+        nodes: &mut Vec<NodeId>,
+        arguments: &mut Vec<(String, ParsedValue)>,
+        filter: &dyn PermissionFilter,
+    ) -> Step {
         if !reader.can_read() {
-            return Ok(());
+            return Step::Done;
         }
 
         let node = self.node(node_id);
@@ -126,21 +225,18 @@ impl CommandTree {
         // `remaining().startsWith(literal)` + trailing-separator check,
         // restated as "the token up to the next space equals the literal".
         let token = reader.peek_token();
-        if let Some(&literal_child) = node.literal_children.get(token.as_str()) {
+        let matched = if let Some(&literal_child) = node.literal_children.get(token.as_str()) {
             if self.node_allowed(literal_child, filter) {
                 reader.advance(token.chars().count());
                 nodes.push(literal_child);
-                return self.after_match(
-                    literal_child,
-                    reader,
-                    visited_redirects,
-                    nodes,
-                    arguments,
-                    filter,
-                );
+                Some(literal_child)
+            } else {
+                denied = self.node(literal_child).permission.clone();
+                None
             }
-            denied = self.node(literal_child).permission.clone();
-        }
+        } else {
+            None
+        };
 
         // No literal matched: try argument children in insertion order.
         // The upstream command-parser library reports the *specific* argument
@@ -149,78 +245,68 @@ impl CommandTree {
         // attempted and failed with exactly one recorded error — we
         // approximate that by remembering the last failure and surfacing it
         // if no child in this position succeeded.
-        let mut last_error: Option<ParseError> = None;
-        for &child_id in &node.argument_children {
-            let checkpoint = reader.cursor();
-            let argument_type = self.node(child_id).argument_type().expect("argument_children only holds Argument nodes");
-            match argument_type.parse(reader) {
-                Ok(value) => {
-                    // The permission check happens *after* a successful parse
-                    // rather than before it, so a denied argument node does
-                    // not shadow a later sibling that would have accepted the
-                    // same token. Restoring the cursor is required: the
-                    // argument type moved it.
-                    if !self.node_allowed(child_id, filter) {
-                        reader.set_cursor(checkpoint);
-                        if denied.is_none() {
-                            denied = self.node(child_id).permission.clone();
+        let matched = match matched {
+            Some(child_id) => Some(child_id),
+            None => {
+                let mut last_error: Option<ParseError> = None;
+                let mut result = None;
+                for &child_id in &node.argument_children {
+                    let checkpoint = reader.cursor();
+                    let argument_type = self.node(child_id).argument_type().expect("argument_children only holds Argument nodes");
+                    match argument_type.parse(reader) {
+                        Ok(value) => {
+                            // The permission check happens *after* a
+                            // successful parse rather than before it, so a
+                            // denied argument node does not shadow a later
+                            // sibling that would have accepted the same
+                            // token. Restoring the cursor is required: the
+                            // argument type moved it.
+                            if !self.node_allowed(child_id, filter) {
+                                reader.set_cursor(checkpoint);
+                                if denied.is_none() {
+                                    denied = self.node(child_id).permission.clone();
+                                }
+                                continue;
+                            }
+                            let name = self.node(child_id).name().expect("Argument nodes always have a name").to_string();
+                            arguments.push((name, value));
+                            nodes.push(child_id);
+                            result = Some(child_id);
+                            break;
                         }
-                        continue;
+                        Err(e) => {
+                            reader.set_cursor(checkpoint);
+                            last_error = Some(e);
+                        }
                     }
-                    let name = self.node(child_id).name().expect("Argument nodes always have a name").to_string();
-                    arguments.push((name, value));
-                    nodes.push(child_id);
-                    return self.after_match(
-                        child_id,
-                        reader,
-                        visited_redirects,
-                        nodes,
-                        arguments,
-                        filter,
-                    );
                 }
-                Err(e) => {
-                    reader.set_cursor(checkpoint);
-                    last_error = Some(e);
+
+                if result.is_none() {
+                    // A denied match outranks a failed parse: the player's
+                    // problem is the permission, and reporting "invalid
+                    // integer" for a branch they cannot use would be
+                    // actively misleading.
+                    if let Some(permission) = denied {
+                        return Step::Err(ParseError::new(reader.cursor(), ParseErrorKind::NoPermission { permission }));
+                    }
+                    if let Some(e) = last_error {
+                        return Step::Err(e);
+                    }
+                    // Truly nothing here could take this token — leave the
+                    // reader where it is; the top-level caller turns
+                    // "there's still input left" into
+                    // UnknownCommand/UnknownArgument depending on whether
+                    // anything matched earlier in the path.
+                    return Step::Done;
                 }
+                result
             }
-        }
+        };
 
-        // A denied match outranks a failed parse: the player's problem is the
-        // permission, and reporting "invalid integer" for a branch they cannot
-        // use would be actively misleading.
-        if let Some(permission) = denied {
-            return Err(ParseError::new(
-                reader.cursor(),
-                ParseErrorKind::NoPermission { permission },
-            ));
-        }
+        let child_id = matched.expect("a token was matched by this point, or this function already returned");
 
-        if let Some(e) = last_error {
-            return Err(e);
-        }
-
-        // Truly nothing here could take this token — leave the reader where
-        // it is; the top-level caller turns "there's still input left" into
-        // UnknownCommand/UnknownArgument depending on whether anything
-        // matched earlier in the path.
-        Ok(())
-    }
-
-    /// After a child successfully consumed a token: enforce the
-    /// argument-separator boundary, then either follow a redirect, recurse
-    /// into the child's own children, or stop (a leaf).
-    fn after_match(
-        &self,
-        child_id: NodeId,
-        reader: &mut StringReader,
-        visited_redirects: &mut Vec<(NodeId, usize)>,
-        nodes: &mut Vec<NodeId>,
-        arguments: &mut Vec<(String, ParsedValue)>,
-        filter: &dyn PermissionFilter,
-    ) -> Result<(), ParseError> {
         // `CommandDispatcher::parseNodes` only bothers skipping the separator
-        // and recursing (into a redirect target, or into the child's own
+        // and continuing (into a redirect target, or into the child's own
         // children) when there is *strictly more* input left to justify it —
         // `reader.canRead(child.getRedirect() == null ? 2 : 1)`, collapsed
         // here to a single `can_read()` check (a documented simplification:
@@ -230,54 +316,54 @@ impl CommandTree {
         // Getting this gate right is exactly what makes a redirect back to an
         // ancestor merely *deep* rather than *infinite*: every redirect hop
         // requires and then consumes at least this one separator character,
-        // so recursion depth is always bounded by the input's length. A first
-        // pass at this function skipped the separator and followed the
-        // redirect unconditionally, which broke exactly this guarantee for a
-        // trailing zero-width match at true end-of-input — caught by
+        // so the walk is always bounded by the input's length. A first pass
+        // at this function skipped the separator and followed the redirect
+        // unconditionally, which broke exactly this guarantee for a trailing
+        // zero-width match at true end-of-input — caught by
         // `tests/brigadier_spec.rs`'s non-cyclic redirect control failing
         // before this comment existed.
         if !reader.can_read() {
-            return Ok(());
+            return Step::Done;
         }
         if reader.peek() != Some(' ') {
-            return Err(ParseError::new(reader.cursor(), ParseErrorKind::ExpectedArgumentSeparator));
+            return Step::Err(ParseError::new(reader.cursor(), ParseErrorKind::ExpectedArgumentSeparator));
         }
         reader.skip();
 
         if let Some(target) = self.node(child_id).redirect() {
-            let key = (target, reader.cursor());
-            // A redirect that lands on a `(node, cursor)` pair already on
-            // this path consumed nothing on the way back to it, and would do
-            // so again forever — this is the guard `tests/brigadier_spec.rs`
-            // exercises directly; real Brigadier has no equivalent and would
-            // recurse until the stack overflows.
-            if visited_redirects.contains(&key) {
-                return Err(ParseError::new(reader.cursor(), ParseErrorKind::RedirectCycle));
-            }
-            visited_redirects.push(key);
-            let cursor = reader.cursor();
-            let nodes_len = nodes.len();
-            let arguments_len = arguments.len();
-            self.parse_nodes(target, reader, visited_redirects, nodes, arguments, filter)?;
-
-            // `/execute ... run` redirects into the ordinary root so built-in
-            // commands retain their normal grammar.  Its own greedy fallback
-            // is deliberately considered only when that root consumed
-            // *nothing*: a known built-in root with bad arguments must remain
-            // a built-in parse error, while an unknown terminal root may be
-            // handed to the host dispatcher with the already-rewritten source.
-            if reader.cursor() != cursor || self.node(child_id).children().is_empty() {
-                return Ok(());
-            }
-            nodes.truncate(nodes_len);
-            arguments.truncate(arguments_len);
-            return self.parse_nodes(child_id, reader, visited_redirects, nodes, arguments, filter);
+            return Step::Redirect { via: child_id, target };
         }
 
         if !self.node(child_id).children().is_empty() {
-            return self.parse_nodes(child_id, reader, visited_redirects, nodes, arguments, filter);
+            return Step::Continue { next: child_id };
         }
 
-        Ok(())
+        Step::Done
     }
+}
+
+/// One pending redirect hop on [`CommandTree::parse_nodes`]'s explicit
+/// stack: `via` is the node whose redirect is being tried, and `cursor`/
+/// `nodes_len`/`arguments_len` are the state to fall back to — trying `via`'s
+/// own children instead — if the redirect target turns out to match nothing.
+struct RedirectFrame {
+    via: NodeId,
+    cursor: usize,
+    nodes_len: usize,
+    arguments_len: usize,
+}
+
+/// What [`CommandTree::step_match`] found, for its caller to act on without
+/// either function recursing.
+enum Step {
+    /// A redirect was followed to `target`; `via` is the node whose own
+    /// children are the fallback if `target` matches nothing at all.
+    Redirect { via: NodeId, target: NodeId },
+    /// Continue matching directly against `next`'s own children (no
+    /// redirect involved).
+    Continue { next: NodeId },
+    /// Nothing more to try from here: either nothing matched, or a match was
+    /// a leaf with no redirect and no children of its own.
+    Done,
+    Err(ParseError),
 }
