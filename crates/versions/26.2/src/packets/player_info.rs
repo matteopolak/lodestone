@@ -7,9 +7,9 @@
 //! macros, so the decoder is hand-written against the wire format of
 //! `ClientboundPlayerInfoUpdatePacket` (behavioural reference only).
 //!
-//! The `EnumSet` is serialised as a fixed bit set of `ceil(N/8)` bytes
-//! (`vanilla's own friendly byte buf's own write fixed bit set`); with the eight actions below that is a
-//! single byte, bit `i` (LSB-first) selecting action ordinal `i`.
+//! The `EnumSet` is serialised as a fixed bit set of `ceil(N/8)` bytes; with
+//! the eight actions below that is a single byte, bit `i` (LSB-first)
+//! selecting action ordinal `i`.
 //!
 //! `UPDATE_LIST_ORDER` and `UPDATE_HAT` are now kept, not discarded: they
 //! carry into `lodestone_model::event::PlayerListEntry::list_order`/
@@ -37,12 +37,12 @@ mod action {
     pub const UPDATE_HAT: u8 = 7;
 }
 
-/// Maximum lengths from the vanilla stream codecs, used to bound string reads.
+/// Maximum lengths from the protocol stream codecs, used to bound string reads.
 const MAX_NAME: usize = 16;
 const MAX_PROP_NAME: usize = 64;
 const MAX_PROP_VALUE: usize = 32_767;
 const MAX_PROP_SIGNATURE: usize = 1_024;
-/// `vanilla's own byte buf codecs's own game profile properties` caps the property count at 16.
+/// The wire format caps the profile-property count at 16.
 const MAX_PROPERTIES: i32 = 16;
 
 /// One decoded tab-list entry. Each optional field is `Some` exactly when its
@@ -79,12 +79,9 @@ pub struct PlayerInfoEntry {
     /// This player's announced chat-signing session, from `INITIALIZE_CHAT`.
     /// `Some(None)` would be indistinguishable from "action absent" here, so
     /// (matching every other action in this struct) `None` means the
-    /// `INITIALIZE_CHAT` bit was not set in this particular update; vanilla's
-    /// own field is `Optional<vanilla's own remote chat session's own data>` because a player can
-    /// announce "no session" explicitly (the nullability boolean on the wire
-    /// reads `false`) — that inner case is folded into this same `None` since
-    /// no caller here needs to tell "never announced" from "announced empty"
-    /// apart.
+    /// `INITIALIZE_CHAT` bit was not set in this particular update. An explicit
+    /// empty wire session also becomes `None`, because no caller needs to tell
+    /// "never announced" from "announced empty" apart.
     pub chat_session: Option<RemoteChatSessionData>,
     /// Tab-list sort key, from `UPDATE_LIST_ORDER`. Higher orders sort first
     /// (`lodestone_game::tablist::TabList::ordered_by`).
@@ -95,7 +92,7 @@ pub struct PlayerInfoEntry {
 }
 
 /// One profile property from `ADD_PLAYER`: a name, a value, and an optional
-/// Mojang signature over the value (present only in online mode).
+/// Account-service signature over the value (present only in online mode).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileProperty {
     /// Property name, e.g. `textures`.
@@ -106,33 +103,29 @@ pub struct ProfileProperty {
     pub signature: Option<String>,
 }
 
-/// A player's announced chat-signing session (`vanilla's own remote chat session's own data`):
-/// their session UUID and Mojang-issued public key, as broadcast by
-/// `INITIALIZE_CHAT`.
+/// A player's announced chat-signing session: their session UUID and public
+/// key, as broadcast by `INITIALIZE_CHAT`.
 ///
 /// This is the *receiving* half of secure chat — the public key needed to
 /// verify messages from this player (`lodestone_auth::verify_signature`).
 ///
-/// **Now retained past this decode** (issue #283): the adapter carries this
-/// into `lodestone_model::event::PlayerListEntry::chat_session` (see
+/// The adapter retains this past decode in
+/// `lodestone_model::event::PlayerListEntry::chat_session` (see
 /// `adapter::player`'s `PLAYER_INFO_UPDATE` arm), and `lodestone_client`'s
 /// driver looks it up there to verify a signed `PLAYER_CHAT` message's
-/// signature. What is still missing is the fuller per-sender chain validator
-/// vanilla's own `RemoteChatSession`/`vanilla's own signed message chain's own decoder` runs —
-/// link-index ordering and expiry are not enforced here, only the RSA check
-/// itself.
+/// signature. Per-sender chain validation remains outside this dataflow:
+/// link-index ordering and expiry are not enforced here, only the individual
+/// RSA signature check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteChatSessionData {
     /// This player's chat-session UUID.
     pub session_id: Uuid,
-    /// Public-key expiry, epoch milliseconds (`vanilla's own profile public key's own data's own expires at`,
-    /// `readInstant` = epoch millis).
+    /// Public-key expiry in epoch milliseconds, not seconds.
     pub expires_at: i64,
     /// DER-encoded (X.509 `SubjectPublicKeyInfo`) RSA public key, verbatim.
     pub public_key: Vec<u8>,
-    /// Mojang's signature over `public_key` (`signature_v2` on the wire —
-    /// `vanilla's own profile public key's own data`'s codec field name — not independently verified
-    /// by this client; only the server checks it against Mojang's own key).
+    /// Issuer signature over `public_key` (`signature_v2` on the wire). This
+    /// client retains it but does not independently verify it.
     pub key_signature: Vec<u8>,
 }
 
@@ -152,15 +145,12 @@ fn read_byte_array(r: &mut Reader<'_>) -> Result<Vec<u8>> {
     Ok(r.bytes(len as usize)?.to_vec())
 }
 
-/// Reads an optional `vanilla's own remote chat session's own data` (`INITIALIZE_CHAT`): a
-/// nullability boolean, then, when present, the session UUID and a
-/// `vanilla's own profile public key's own data` (an instant, the public key, and its signature).
+/// Reads an optional chat-signing session (`INITIALIZE_CHAT`): a nullability
+/// boolean followed, when present, by the session UUID and signed public-key
+/// record (expiry, public key, and signature).
 ///
-/// **Used to discard every field here** (`skip_byte_array`/`skip_chat_session`,
-/// before this fix) — the session UUID, expiry and public key were read off
-/// the wire purely to stay aligned and then thrown away, so no chat message
-/// from any other player could ever be verified client-side. The bytes were
-/// always correct; nothing carried them past this function.
+/// The returned value retains every field needed by downstream signed-message
+/// verification.
 fn read_chat_session(r: &mut Reader<'_>) -> Result<Option<RemoteChatSessionData>> {
     if !r.bool()? {
         return Ok(None);

@@ -527,10 +527,9 @@ impl<T: Transport> Driver<T> {
                                     // wake world-query waiters even if the
                                     // adapter emits no notification directive.
                                     self.read_model.wake();
-                                    // Issue #299: hold anything decoded inside a
-                                    // bundle back from `execute` until the
-                                    // closing delimiter, so the shell only ever
-                                    // sees a bundle applied whole.
+                                    // Keep directives decoded inside a bundle out
+                                    // of `execute` until its closing delimiter
+                                    // makes the complete batch available.
                                     let ready = self.absorb_bundle(directives);
                                     if let Step::Stop(outcome) = self.execute(ready).await {
                                         return *outcome;
@@ -831,10 +830,9 @@ impl<T: Transport> Driver<T> {
                 // `Directive` is `#[non_exhaustive]` (crosses the
                 // `lodestone-model` crate boundary), so a wildcard is required
                 // even though every variant that exists today is named above.
-                // This is exactly the arm that used to silently swallow
-                // `BeginEncryption` before this change — now it can only ever
-                // catch a variant added to `lodestone-model` after this crate
-                // was last updated, which is worth a loud warning.
+                // This arm can therefore only catch a variant added to
+                // `lodestone-model` after this crate was last updated; warn
+                // loudly rather than silently dropping that new directive.
                 other => {
                     tracing::warn!(?other, "ignoring unknown directive variant");
                 }
@@ -1694,14 +1692,10 @@ mod tests {
         (lodestone_auth::ChatSession::new(sender, key_pair), public_key_der)
     }
 
-    /// The half of the discriminating pair this issue's verification section
-    /// asks for that is new code: signed-in signs, against the **real**
-    /// last-seen chain rather than an empty or cached one. The other half —
-    /// signed-out sends unsigned — is [`Driver::maybe_sign_chat`]'s one-line
-    /// early return when `chat_session` is `None`, which is exactly the path
-    /// every pre-existing `SendChat` test in `tests/driver.rs` already takes
-    /// (none of them ever populate an online intent or `chat_session`) and which
-    /// stayed green across this change, so it is not re-asserted here.
+    /// Signs an outgoing chat action against the complete pending last-seen
+    /// chain. A missing `chat_session` follows
+    /// [`Driver::maybe_sign_chat`]'s unsigned path; this test instead proves
+    /// that an authenticated session includes an existing pending signature.
     #[test]
     fn sign_chat_action_signs_over_the_real_last_seen_chain_with_correct_units() {
         let (mut chat_session, public_key_der) = test_chat_session();
@@ -1860,11 +1854,10 @@ mod tests {
         );
     }
 
-    /// Issue #283's discriminating pair for the *receiving* half: a message
-    /// whose signature is valid, and the same message with one byte of the
-    /// signature flipped — same sender, same session, same chain, same
-    /// content. A `verify_chat_message` that always returned `true` would
-    /// pass the first assertion and fail only the second; both must hold.
+    /// Checks the receiving path with a valid message and the same message
+    /// with one signature byte flipped. Keeping the sender, session, chain,
+    /// and content fixed makes acceptance and rejection distinguish a real
+    /// signature verification from an unconditional result.
     #[test]
     fn verify_chat_message_accepts_valid_and_rejects_tampered() {
         let (mut chat_session, public_key_der) = test_chat_session();

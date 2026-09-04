@@ -11,11 +11,10 @@ impl V770Adapter {
             let mut reader = Reader::new(payload);
             let global_index = reader.var_i32().map_err(dec_err)?;
             let sender = reader.uuid().map_err(dec_err)?;
-            // The signed-message-link index — this message's position in the
-            // sender's signing chain. Used to be discarded (`let _index`);
-            // now carried through `ChatAckInfo::message_index` so the client
-            // driver can reconstruct the exact link a signature verification
-            // has to hash (issue #283).
+            // The signed-message-link index identifies this message's position
+            // in the sender's signing chain. `ChatAckInfo::message_index`
+            // preserves it for the client driver, which needs the exact link
+            // when it reconstructs the signed-message payload for verification.
             let message_index = reader.var_i32().map_err(dec_err)?;
             let signature = if reader.bool().map_err(dec_err)? {
                 reader.bytes(256).map_err(dec_err)?.to_vec()
@@ -625,4 +624,3 @@ fn decode_command_suggestions(payload: &[u8]) -> Result<CommandSuggestionsRespon
         suggestions,
     })
 }
-

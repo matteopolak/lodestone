@@ -2405,19 +2405,11 @@ mod tests {
         );
     }
 
-    /// The three-way fork over one fixture byte, so no one path's result is a
-    /// lone assertion about a shape that might differ between the others.
-    /// Mirrors `the_living_guard_is_the_only_difference_between_the_two_decodes`.
-    ///
-    /// This is also the control that proves `decodes_armor_stand_flags_…` above
-    /// is not vacuous: before `armor_stand_flags` existed, this same test
-    /// (`the_mob_guard_is_the_only_difference_between_the_two_decodes`) asserted
-    /// `as_stand.is_empty()` — using the armour-stand-shaped byte's *absence*
-    /// from the decoded update as its own negative control. That premise is
-    /// exactly what this change invalidates (CLAUDE.md: "a gate that uses an
-    /// unimplemented thing as its negative stand-in goes vacuous the moment
-    /// someone implements it"), so the assertion is now the opposite: an
-    /// armour stand's decode is **not** empty either.
+    /// The shared index-15 byte has three current classifications: a mob
+    /// reports `mob_flags`, an armour stand reports `armor_stand_flags`, and an
+    /// unresolved living non-mob reports neither. Each arm controls the other
+    /// two, so a decoder that treats the index as universally either field
+    /// cannot satisfy this fixture.
     #[test]
     fn the_class_guard_disambiguates_index_15_between_mob_and_armor_stand() {
         let mut bytes = Vec::new();
