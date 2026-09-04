@@ -4,12 +4,13 @@
 //! `minecraft:flat` world — and a flat world is a *vacuous world* for light: no
 //! overhangs, no caves, no trees, so sky light never spreads sideways and
 //! horizontal decay (the attenuation path most likely to be wrong, and the one
-//! `impl-world` pinned with a unit test) is never exercised. A "0 differ" there
+//! covered separately by a unit test) is never exercised. A "0 differ" there
 //! is real for the vertical/opacity paths but silent about horizontal decay,
 //! section seams from stacked terrain, and the block-state ids that only appear
 //! on real terrain.
 //!
-//! This gate closes that gap. It joins a **normal-generation** 26.2 server
+//! This gate exercises those missing terrain cases. It joins a
+//! **normal-generation** 26.2 server
 //! (hills, caves, overhangs, trees), takes the light the server itself baked into
 //! every `level_chunk_with_light`, recomputes our engine's light over the same
 //! blocks **with neighbours loaded** (`compute_column_light_with_neighbours`, so
@@ -19,8 +20,8 @@
 //! Reported as a **count**, per the project's evidence standard, with anti-vacuity
 //! guards so a pass can never be trivially true:
 //!   1. `light_exercises_propagation` must hold on the server's own light for the
-//!      judged chunks — the impl-world guard that fails closed if we accidentally
-//!      run on superflat again.
+//!      judged chunks — the terrain guard that fails closed if the oracle returns
+//!      superflat data.
 //!   2. an explicit **horizontal** sky-gradient cell count (cells whose sky level
 //!      differs from a same-`y` neighbour), counted only over the props-clean
 //!      volume actually judged, must clear a floor — direct proof the
@@ -29,19 +30,19 @@
 //!   3. the hard correctness claim: **zero interior cells where our light is
 //!      *brighter* than the server's**. With a full 3×3 neighbourhood the centre
 //!      compute is exact, so an interior over-production is a real engine defect —
-//!      an over-propagation or a horizontal-decay-too-slow bug (impl-world's #1
-//!      suspect) surfaces here as a too-bright cell. This is the one direction a
+//!      an over-propagation or a horizontal-decay-too-slow bug surfaces here as a
+//!      too-bright cell. This is the one direction a
 //!      props gap *cannot* fake (see below), so it is a sound engine claim.
 //!
 //! ## Why the claim is "never brighter", not "never differs"
 //!
-//! Light props come from `vendor/minecraft-data 1.21.11` (the committable source
-//! impl-world advised, **not** the decompiled tree) while the server is 26.2. That
-//! data is *incomplete* for 26.2 in two measured ways, both of which can only make
+//! Light props come from vendored `minecraft-data 1.21.11` while the server is
+//! 26.2. That data is *incomplete* for 26.2 in two measured ways, both of which
+//! can only make
 //! our computed light **darker** than the server, never brighter:
 //!   - **Opacity**: 26.2 generation places blocks 1.21.11 never had (`sulfur`,
 //!     `cinnabar`, … — new ores) that key by name to nothing and default to
-//!     opaque, casting shadow vanilla does not. These are found per-chunk and
+//!     opaque, casting shadows that the server does not. These are found per-chunk and
 //!     their whole block-light/sky-shadow bleed volume is *excluded* from the
 //!     judged sections (below).
 //!   - **Emission**: minecraft-data records `glow_lichen`/`cave_vines` as
@@ -127,7 +128,7 @@ const PROPS_BLEED_MARGIN_SECTIONS: i32 = 3;
 // --- Light properties keyed by 776 block-state id, from vendored mc-data. ------
 
 /// A protocol-776 [`LightProperties`] built from `vendor/minecraft-data`
-/// (`filterLight`/`emitLight` == vanilla dampening/emission), keyed by block
+/// (`filterLight`/`emitLight` == server light dampening/emission), keyed by block
 /// *name* and resolved to a 776 state id through this crate's authoritative
 /// [`block_states`] table — never trusting mc-data's own state numbering.
 ///

@@ -1,8 +1,8 @@
-//! End-to-end acceptance gate for issue #48's remainder — both hops named in
-//! `crate::command_block`'s own module doc, over the **real** wire and a
-//! **real** running tick loop: a real `lodestone-client` opens a command
-//! block, sends the same `SET_COMMAND_BLOCK` packet the vanilla GUI's "Done"
-//! button sends, and the server's own world must show the command's effect —
+//! End-to-end acceptance gate for command-block execution across both required
+//! hops, over the **real** wire and a **real** running tick loop: a real
+//! `lodestone-client` opens a command block, sends the `SET_COMMAND_BLOCK`
+//! packet used by the in-game "Done" action, and the server's own world must
+//! show the command's effect —
 //! not merely that the packet decoded, and not merely that the block entity
 //! ticked.
 //!
@@ -15,8 +15,8 @@
 //! `open_in_memory_with_mobs` is the one public constructor that also spawns
 //! the real background tick loop (`crates/lodestone-server/src/tick.rs`'s
 //! `run_tick_loop_with_weather`, `pub(crate)` and unreachable from this crate
-//! directly), so this is the strongest evidence available from outside
-//! `lodestone-server`: the identical machinery a real join runs.
+//! directly), so this test exercises the complete connection-to-tick path used
+//! by an ordinary client session.
 //!
 //! # The discriminating pair
 //!
@@ -26,13 +26,11 @@
 //!
 //! - **positive** — a repeating command block set "Always Active"
 //!   (`automatic: true`, unconditional) must actually place the block. This
-//!   is the control that proves the negative cases below are discriminating
-//!   rather than vacuous: without it, "nothing ran" could just as easily mean
-//!   the harness never gave anything a chance to run.
-//! - **unpowered** — the identical command on an ordinary impulse command
-//!   block, `automatic: false`, with nothing wired to power it (this pass
-//!   does not wire a live redstone signal — see `crate::command_block`'s own
-//!   module doc for exactly why), must never place the block.
+//!   establishes that the harness provides a working command execution path,
+//!   so a negative result in the other cases is meaningful.
+//! - **unpowered** — the same command on an ordinary impulse command
+//!   block, `automatic: false`, with no redstone power, must never place the
+//!   block.
 //! - **conditional, unmet** — a repeating command block set "Always Active"
 //!   *and* conditional, with nothing behind it, must never place the block:
 //!   `mark_condition_met`'s "no predecessor reads as unmet" branch.
@@ -40,9 +38,8 @@
 //! # Computed *and* delivered
 //!
 //! Each case asserts the server's own [`ChunkSource`] (the ground truth a
-//! `SetBlock` effect is applied against, held through a second `Arc` handle
-//! this test keeps — the same shape `server_redstone_placement.rs` already
-//! established) **and** the real client's own decoded view
+//! `SetBlock` effect is applied against, held through a second `Arc` handle)
+//! **and** the real client's own decoded view
 //! (`handle.block_at`, which can only change because a real `block_update`
 //! packet arrived). The target cell sits inside the loaded view for exactly
 //! that reason.
@@ -57,9 +54,8 @@ use lodestone_model::{BlockFace, ClientAction, CommandBlockMode, GameMode, ItemS
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v26_2::{V770ServerProtocol, adapter};
 
-/// An all-air, edit-retaining column — the same shape
-/// `server_block_placement.rs`'s `SharedAirSource` establishes, cloned here
-/// rather than imported (that one is private to its own file).
+/// An all-air, edit-retaining column whose shared state lets the assertions
+/// inspect changes made by the server's command execution.
 #[derive(Clone, Default)]
 struct SharedAirSource {
     edits: Arc<Mutex<HashMap<(i32, i32, i32), String>>>,
@@ -143,10 +139,10 @@ async fn place_command_block(
         .expect("command block placement never confirmed");
 }
 
-/// The positive control: "Always Active" (unconditional) must run.
+/// The positive case: "Always Active" (unconditional) must run.
 ///
-/// Without this passing, the two negative cases below would be unfalsifiable
-/// — see this file's own module doc.
+/// This establishes a working command execution path before the negative cases
+/// check that their respective prerequisites prevent execution.
 #[tokio::test]
 async fn an_always_active_command_block_runs_its_command() {
     let view_radius = 0;
@@ -189,7 +185,7 @@ async fn an_always_active_command_block_runs_its_command() {
     }
     assert_eq!(source.block_state(target.x, target.y, target.z), "minecraft:diamond_block");
 
-    // The delivered half: the real client's own decoded world, reachable
+    // The client-visible half: the real client's own decoded world, reachable
     // only through a real `block_update` the tick loop's effect must have
     // published.
     let diamond_id = (0..lodestone_data::block_states::STATE_COUNT)
@@ -205,12 +201,9 @@ async fn an_always_active_command_block_runs_its_command() {
     server.shutdown().await;
 }
 
-/// Negative control #1: an ordinary impulse command block (`Redstone` mode,
+/// First negative case: an ordinary impulse command block (`Redstone` mode,
 /// `automatic: false`) with a real command set and nothing wired to power it
-/// must never run. This pass does not wire a live redstone signal to
-/// `crate::command_block::on_power_changed` — see that module's own doc —
-/// so this also documents the current boundary rather than merely asserting
-/// an accident.
+/// must never run. With no redstone power source, the command remains pending.
 #[tokio::test]
 async fn an_unpowered_impulse_command_block_never_runs() {
     let view_radius = 0;
@@ -259,10 +252,8 @@ async fn an_unpowered_impulse_command_block_never_runs() {
     server.shutdown().await;
 }
 
-/// Negative control #2: "Always Active" *and* conditional, with no command
-/// block behind it — `mark_condition_met`'s "no predecessor reads as unmet"
-/// branch — must never run, even though the same "Always Active" toggle
-/// alone is exactly what the positive control proves is sufficient.
+/// Second negative case: "Always Active" *and* conditional, with no command
+/// block behind it, must never run because the predecessor condition is unmet.
 #[tokio::test]
 async fn a_conditional_always_active_command_block_with_no_predecessor_never_runs() {
     let view_radius = 0;
