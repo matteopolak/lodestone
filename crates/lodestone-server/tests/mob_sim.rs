@@ -98,9 +98,9 @@ fn goal_driven_mob_walks_to_its_target_over_real_worldgen_terrain() {
 }
 
 /// Builds a floor plus a two-tall solid wall from `x=-4..=4` at `z=3`, with open
-/// ground on either end. A mob cannot jump two full blocks (vanilla jump ≈1.25),
-/// so it must walk around a wall end to cross — the same detour invariant a live
-/// zombie shows against a fence, here over the server's own block terrain.
+/// ground on either end. A mob cannot jump two full blocks (the jump height is
+/// about 1.25), so it must walk around a wall end to cross — the detour
+/// invariant is exercised here over the server's own block terrain.
 fn walled_world() -> ChunkWorld {
     let mut world = ChunkWorld::new(-4, 24);
     for x in -8..=8 {
@@ -274,13 +274,10 @@ impl EntitySource for SimSource<'_> {
     }
 }
 
-/// Closes the "a real ticking mob is actually visible" gap: a real `MobSim`
-/// behind the `Arc<Mutex<…>>` the integrated server uses, viewed as an
-/// `EntitySource`, yields snapshots that track the mob's real movement across
-/// ticks — spawn appears, then position advances toward the target. bulk-encoders
-/// proved the transport/client half with a stand-in source; this proves the
-/// other half of the same seam with a *real* sim (no stand-in), so the two meet
-/// in the middle.
+/// A real `MobSim` behind the `Arc<Mutex<…>>` used by the integrated server,
+/// viewed as an `EntitySource`, yields snapshots that track movement across
+/// ticks: the spawn appears and its position advances toward the target. The
+/// test covers the simulation half of the source seam without a stand-in.
 #[test]
 fn real_mobsim_behind_arc_mutex_is_an_entity_source_that_tracks_movement() {
     let source = WorldgenChunkSource::new(floor_density(), -64, 128);
@@ -358,8 +355,8 @@ fn tunnel_world() -> ChunkWorld {
 /// A minimal [`VersionAdapter`] answering `entity_dimensions` from a fixed table
 /// (real census numbers) and panicking on everything else — the census consumer
 /// only ever calls `entity_dimensions`, so a real registry adapter slots in
-/// unchanged. This proves the seam end-to-end (census → fold → shape → path)
-/// without naming a version crate.
+/// unchanged. The resulting values exercise the complete census → fold → shape
+/// → path seam without naming a version crate.
 #[derive(Debug)]
 struct CensusStub(std::collections::HashMap<i32, EntityBaseDimensions>);
 
@@ -492,13 +489,11 @@ fn census_height_decides_whether_a_mob_fits_a_two_high_tunnel() {
     );
 }
 
-/// Closes the `damage.rs` island: before this, `MeleeAttackGoal` calling
-/// `mob.attack(target)` only pushed to a `Vec` for test assertions — no health
-/// value anywhere ever changed. A freshly spawned mob's stats must now be the
-/// *real* per-type attributes (`Zombie.createAttributes()`: `max_health` 20,
-/// `attack_damage` 3, `armor` 2 — `lodestone_entity::attribute`'s own
-/// hand-verified template, not a number invented for this test), proving the
-/// wiring reads real data rather than a hardcoded placeholder.
+/// The combat gate checks that `MeleeAttackGoal` calling `mob.attack(target)`
+/// updates health through the real per-type attributes. A freshly spawned mob
+/// has `max_health` 20, `attack_damage` 3, and `armor` 2 from
+/// `lodestone_entity::attribute`'s hand-verified template, rather than a
+/// hardcoded test placeholder.
 #[test]
 fn spawned_mob_combat_stats_are_the_real_zombie_attributes() {
     let world = ChunkWorld::new(-4, 24);
@@ -627,13 +622,9 @@ fn two_attackers_hitting_the_same_tick_only_land_one_full_hit() {
     );
 }
 
-/// Closes the `explosion.rs` island: before this, `seen_percent` /
-/// `entity_damage` had no consumer anywhere in the tree — only their own
-/// hermetic unit tests exercised them (against `OpenAir` or a hand-rolled
-/// blocked stub, never a real terrain query). [`MobSim::explode`] is the real
-/// consumer: it samples exposure against the sim's own [`ChunkWorld`] and
-/// lands the result through the same [`SimMob::apply_damage`] pipeline a
-/// melee hit uses.
+/// The explosion gate samples `seen_percent` / `entity_damage` against the
+/// simulation's own [`ChunkWorld`] and lands the result through the same
+/// [`SimMob::apply_damage`] pipeline a melee hit uses.
 ///
 /// A point-blank mob (staged at low health) must die, and a mob roughly twice
 /// as far — but still within the blast's `2 * radius` — must take strictly
@@ -734,16 +725,13 @@ fn explosion_exposure_is_ray_sampled_a_wall_fully_shields_a_mob() {
     );
 }
 
-// -- `MobSim::spawn_species`: the #205 driver --------------------------
+// -- `MobSim::spawn_species`: the per-species production path -------------
 //
-// Before this, `SimMob::entity_type` defaulted to `minecraft:zombie`
-// unconditionally and `MobSim::spawn`'s `GoalSelector` started empty, so
-// every spawned mob — whatever species a caller thought it was placing —
-// was behaviourally and nominally identical. These gates drive
-// `spawn_species` (never hand-building a `SimMob` with a manually forced
-// entity_type/goal set) and assert real, jar-verified per-species numbers
-// (`lodestone_entity::attribute`'s own hand-verified `type_spec` table),
-// not invented test constants.
+// `spawn_species` supplies the requested entity type, dimensions, attributes,
+// and goal roster. These gates use that production entry point rather than
+// hand-building a `SimMob` with a manually forced type or goal set, and assert
+// per-species values from `lodestone_entity::attribute`'s hand-verified
+// `type_spec` table rather than invented test constants.
 
 fn rk(name: &str) -> ResourceKey {
     ResourceKey::from_str(name).expect("valid resource key")
@@ -785,8 +773,8 @@ fn spawn_species_resolves_real_per_species_shape_speed_and_combat_stats() {
     assert_ne!(zombie_height, pig_height);
 }
 
-/// The behavioural half of #205's own worked example: "a `minecraft:pig`
-/// never acquires a melee target, a `minecraft:zombie` does." A pig's
+/// Species-specific melee behavior: a `minecraft:pig` never acquires a melee
+/// hit while a `minecraft:zombie` does. A pig's
 /// `spawn_species` goal set has no `MeleeAttackGoal` at all, so setting an
 /// attack target on it (exactly as the zombie below is given one) can never
 /// produce a connecting hit — structurally, not by chance/timing. The zombie
@@ -859,24 +847,16 @@ fn spawn_species_only_the_hostile_species_can_ever_land_a_melee_hit() {
     assert!(sim.get(zombie_id).is_some(), "the zombie is untouched");
 }
 
-// -- Creeper swell/detonate: the "creepers never prime" fix -------------
+// -- Creeper swell/detonate: the complete production trigger path ----------
 //
-// Before this, `MobSim::explode` had correct exposure/damage maths (issue
-// #213) and exactly two callers anywhere in the tree — both direct calls from
-// this file's own explosion tests above. Nothing ever *decided* an explosion
-// should happen: `SwellGoal` did not exist, no species got it, and
-// `NavigatingMob` had no fuse state at all. These gates drive the whole
-// chain through `MobSim::tick` — the same production entry point
-// `run_mob_tick_loop` calls every server tick — with no test-only shortcut
-// to the detonation trigger.
+// `MobSim::tick` drives the complete trigger chain: a species with `SwellGoal`
+// updates its fuse state and reaches `MobSim::explode` without a test-only
+// shortcut. The server tick loop uses this same entry point.
 
-/// The `ignite()` path: vanilla's `readAdditionalSaveData` calls this when a
-/// summoned creeper carries NBT `ignited:1b`
-/// (vanilla's own `Creeper` entity),
-/// and its own aiStep then forces `swellDir = 1` every tick regardless
-/// of proximity. Predicts the exact tick-29 value (not merely "increased" —
-/// see CLAUDE.md's *magnitude* vacuous-test species) and the exact tick the
-/// blast reaches a mob standing one block away.
+/// The `ignite()` path forces `swell_dir = 1` on every tick regardless of
+/// proximity. The test predicts the exact tick-29 value and the exact tick the
+/// blast reaches a mob standing one block away, rather than merely asserting
+/// that the fuse increased.
 #[test]
 fn ignited_creeper_climbs_by_exactly_one_per_tick_and_detonates_at_tick_30() {
     let world = ChunkWorld::new(-4, 24);
@@ -922,7 +902,7 @@ fn ignited_creeper_climbs_by_exactly_one_per_tick_and_detonates_at_tick_30() {
 }
 
 /// A creeper given a stationary attack target within `SwellGoal`'s 3-block
-/// start range (vanilla's own `SwellGoal`) must prime from proximity alone, with no
+/// start range must prime from proximity alone, with no
 /// `ignite()` call — the actual bug report ("creepers never prime near a
 /// player"). Same exact-tick prediction as the ignited case.
 #[test]
@@ -978,12 +958,11 @@ fn creeper_with_no_target_and_never_ignited_never_primes_or_detonates() {
 }
 
 // =====================================================================
-// Issue #441 — perception starvation, and the breeding feed that closes
-// #234/#237's landed island.
+// Perception feed: breeding, parenting, and retaliation.
 //
-// `NavigatingMob`'s `impl MobController` left eight perception methods at
-// their trait defaults, so six goals had a constant-false `can_use` in
-// production and two more read fields `MobSim::tick` never populated. Every
+// `NavigatingMob`'s `impl MobController` has eight perception methods whose
+// values must be populated by `MobSim::tick`; otherwise six goals have a
+// constant-false `can_use` in production and two more read empty fields. Every
 // affected goal nonetheless had a *green* unit test, because those drive
 // `ScriptMob`, a fake that overrides all eight — CLAUDE.md's `world` species
 // of vacuous test, where the defect is in which controller the test was
@@ -1007,32 +986,25 @@ fn breeding_pen() -> ChunkWorld {
     world
 }
 
-/// Vanilla's own `Animal.PARENT_AGE_AFTER_BREEDING`.
+/// The post-breeding parent cooldown, in ticks.
 const PARENT_AGE_AFTER_BREEDING: i32 = 6000;
 
 #[test]
 fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
-    // `BreedGoal` was one of the two goals that *were* overridden on
-    // `NavigatingMob` but never fed: `MobSim::tick` populated no
-    // partner candidate and never drained `take_bred()`, so breeding could not
-    // happen in the running game no matter how many cows were in love.
-    //
-    // Predict the *population*, not the flag. The seam's `take_bred()` already
-    // returned `true` before this fix without any child existing, so asserting
-    // on it is exactly the vacuous shape to avoid.
+    // The test drives the partner feed and consumes the birth result through
+    // the simulation, then predicts the population rather than a transient
+    // flag. A birth is meaningful only when a third mob exists.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
 
-    // Two blocks apart: inside `BreedGoal`'s 8.0 partner search
-    // (vanilla's own `BreedGoal`) *and* inside the 9.0 squared distance at
+    // Two blocks apart: inside `BreedGoal`'s 8.0 partner search and inside the
+    // 9.0 squared distance at
     // which the child actually spawns (`:57`).
     let a = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
     let b = sim.spawn_species(rk("minecraft:cow"), Vec3::new(2.0, 0.0, 0.0)).id();
 
-    // Vanilla `BreedGoal` is not installed by the current roster, so install it
-    // at vanilla's own cow priority 2 (its own cow goal registration).
-    // Installing the goal is the roster's job (plan unit B2); what this gate
-    // proves is that once installed it can *act*, which is A1/A2's job.
+    // Install the goal explicitly so this gate isolates its behavior; roster
+    // installation is covered by the separate species-roster tests.
     for id in [a, b] {
         sim.get_mut(id)
             .expect("just spawned")
@@ -1042,8 +1014,8 @@ fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
 
     assert_eq!(sim.len(), 2, "precondition: exactly the two parents");
 
-    // `BreedGoal` needs 60 ticks of proximity (vanilla's own `BreedGoal`,
-    // `loveTime >= adjustedTickDelay(60)`); 200 is generous headroom without
+    // `BreedGoal` needs 60 ticks of proximity (`loveTime >= 60`); 200 is
+    // generous headroom without
     // outliving `LOVE_TICKS` (600).
     let mut ticks = 0;
     while sim.len() < 3 && ticks < 200 {
@@ -1076,8 +1048,8 @@ fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
          would be a fresh island"
     );
 
-    // Both parents take the cooldown and leave love mode
-    // (vanilla's own `Animal`). The age counts *down* one per tick from
+    // Both parents take the cooldown and leave love mode. The age counts *down*
+    // one per tick from
     // 6000, so allow for the ticks elapsed since the birth rather than
     // asserting an exact 6000 the timer has already moved off.
     for id in [a, b] {
@@ -1097,10 +1069,9 @@ fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
 
 #[test]
 fn cows_beyond_breed_range_never_produce_a_child() {
-    // The negative control the population assertion above needs: identical
-    // setup, identical goal, identical tick budget — only the *distance*
-    // changed, to just outside `BreedGoal`'s 8.0 partner search
-    // (vanilla's own `BreedGoal`). The population must not grow.
+    // Negative control: identical setup, goal, and tick budget, with only the
+    // distance moved just outside `BreedGoal`'s 8.0 partner search. The
+    // population must not grow.
     //
     // Without this, "a third mob appeared" is satisfied by any code path that
     // spawns something per tick.
@@ -1136,11 +1107,9 @@ fn cows_beyond_breed_range_never_produce_a_child() {
 
 #[test]
 fn a_baby_cow_is_fed_its_parent_and_an_orphan_is_not() {
-    // `FollowParentGoal` was the other overridden-but-never-fed goal:
-    // `parent_candidate` had no writer anywhere in the crate.
-    //
-    // Vanilla searches `getBoundingBox().inflate(8.0, 4.0, 8.0)` for a
-    // same-class animal with `getAge() >= 0` (vanilla's own `FollowParentGoal`).
+    // `FollowParentGoal` consumes `parent_candidate`, which the simulation
+    // populates from nearby adults of the same species. Its search envelope is
+    // 8.0 horizontally and 4.0 vertically, and adults have `age() >= 0`.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
 
@@ -1159,8 +1128,7 @@ fn a_baby_cow_is_fed_its_parent_and_an_orphan_is_not() {
         "a baby must be fed the nearest adult of its own species"
     );
 
-    // Control 1: the adult is not a baby, so it must be fed no parent at all —
-    // vanilla returns early on `getAge() >= 0` (vanilla's own `FollowParentGoal`).
+    // Control 1: the adult is not a baby, so it must be fed no parent at all.
     assert_eq!(
         sim.get(adult).expect("alive").parent_candidate(),
         None,
@@ -1186,15 +1154,10 @@ fn a_baby_cow_is_fed_its_parent_and_an_orphan_is_not() {
 
 #[test]
 fn a_player_attack_makes_a_mob_retaliate_through_the_production_path() {
-    // The strongest end-to-end claim available in this commit, because it
-    // needs **no new producer**: `MobSim::attack` already took `attacker_pos`
-    // (for knockback direction) and its only production caller is
-    // `crate::server::apply_attack`, reached from the real `ATTACK` packet.
-    // So this is the actual path a player's swing travels.
-    //
-    // Before #441 the hit landed, damage applied, and the mob had no idea who
-    // hit it: `last_hurt_by()` was the trait default `None`, so
-    // `HurtByTargetGoal::can_use` was false forever.
+    // `MobSim::attack` receives `attacker_pos` for knockback direction and is
+    // reached by `crate::server::apply_attack` from the `ATTACK` packet. The
+    // test therefore covers the same path as a player's swing and checks that
+    // the hit records an attacker for `HurtByTargetGoal`.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
     let zombie = sim.spawn_species(rk("minecraft:zombie"), Vec3::new(0.0, 0.0, 0.0)).id();
@@ -1305,12 +1268,10 @@ fn a_mob_standing_in_water_is_driven_to_jump_and_one_on_dry_land_is_not() {
 
 #[test]
 fn no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record() {
-    // The seventh case, and the only one whose default was wrong in the
-    // *permissive* direction: `SimMob` has always incremented `no_action_time`,
-    // but only on its own record — it never crossed the `MobController` seam,
-    // so `RandomStrollGoal`'s idle suppression
-    // (vanilla's own `RandomStrollGoal`, `>= 100`) read the trait default `0`
-    // and never fired. No dead-code warning could ever have shown this.
+    // `SimMob` increments `no_action_time`, and the controller exposes that
+    // value to `RandomStrollGoal` through the `MobController` seam. The goal's
+    // idle suppression begins at `>= 100`; checking both views prevents a
+    // disconnected record from silently passing.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
     let id = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
@@ -1334,7 +1295,7 @@ fn no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record() {
 }
 
 // =====================================================================
-// Issue #441, second half: the player feed, and the last two of the eight.
+// Player perception feed: looking and item-driven movement.
 //
 // `nearest_player` and `temptation` were the only two perception methods with
 // no possible source — `MobSim` knew nothing about players. The producer is now
@@ -1364,10 +1325,8 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
     let id = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
-    // Vanilla's cow registers `LookAtPlayerGoal(Player, 6.0F)` at priority 6
-    // (its own cow goal registration). Probability 1.0 rather than
-    // vanilla's 0.02F default (its own `LookAtPlayerGoal`) so the
-    // pre-roll cannot make this flaky — the roll is not what is under test.
+    // Use priority 6 and probability 1.0 so the pre-roll cannot make this
+    // gate flaky; the roll is not what is under test.
     sim.get_mut(id).expect("just spawned").add_goal(
         6,
         Box::new(lodestone_entity::ai::goals::LookAtPlayerGoal::new(6.0, 1.0)),
@@ -1378,16 +1337,10 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
     // Control first: no players fed at all. `LookAtPlayerGoal` must never pick a
     // target, so the mob must never be pointed at where the player *will* be.
     //
-    // This control used to assert `facing() == None`, and that premise stopped
-    // being true when the per-species roster landed: a cow now gets vanilla's
-    // real goal set, including `RandomLookAroundGoal` at priority 7
-    // (vanilla's own cow goal registration), which idly writes a look *direction*
-    // through `look_toward`. A blanket `None` therefore fails on a cow that is
-    // behaving correctly — the classic false-premise control, where the thing
-    // painting into the observable is not the thing under test. Asserting the
-    // absence of the *player position* specifically keeps the control
-    // discriminating: nothing but `LookAtPlayerGoal` can produce it, and the
-    // positive assertion below is the same equality.
+    // The control checks for absence of the *player position*, not absence of
+    // all facing data: an idle look direction may be written by another goal.
+    // This keeps the assertion specific to `LookAtPlayerGoal`, which is the
+    // only goal in this setup that can produce the fed player's position.
     for _ in 0..20 {
         sim.tick();
         assert_ne!(
@@ -1428,10 +1381,8 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
     far_sim.set_players(vec![empty_handed(far_player)]);
     for _ in 0..20 {
         far_sim.tick();
-        // Same false-premise repair as the first control above: a cow's own
-        // `RandomLookAroundGoal` writes an idle look direction, so `None` is the
-        // wrong absence to assert. The discriminating absence is the *player's
-        // position*, which only `LookAtPlayerGoal` can produce.
+        // As above, an idle look direction is not the discriminating absence.
+        // Only `LookAtPlayerGoal` can produce the fed player's position.
         assert_ne!(
             far_sim.get(far_id).expect("alive").facing(),
             Some(far_player),
@@ -1454,8 +1405,8 @@ fn a_pig_follows_a_player_holding_a_potato_and_ignores_an_empty_hand() {
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
     let id = sim.spawn_species(rk("minecraft:pig"), Vec3::new(0.0, 0.0, 0.0)).id();
-    // Vanilla pig: `TemptGoal(1.2, PIG_FOOD)` at priority 4
-    // (vanilla's own pig goal registration).
+    // Priority 4 and speed 1.2 make the item-driven movement deterministic for
+    // this focused goal test.
     sim.get_mut(id)
         .expect("just spawned")
         .add_goal(4, Box::new(lodestone_entity::ai::goals::TemptGoal::new(1.2)));

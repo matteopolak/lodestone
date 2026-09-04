@@ -1,30 +1,25 @@
-//! Issue #273's remaining half, closed: `LanConfig::online_mode` actually
-//! reaches an accepted connection through `IntegratedServer::open_to_lan`,
-//! not just through `serve_connection_with_online_mode` called directly (that
-//! function-level proof is `tests/online_mode.rs`; this file proves the
-//! *wiring* one layer up, over a real TCP loopback socket — the same
-//! entry point `net.rs`'s "Open to LAN" caller and any future dedicated-server
-//! binary would use).
+//! `LanConfig::online_mode` reaches an accepted connection through
+//! `IntegratedServer::open_to_lan`, not only through a direct call to
+//! `serve_connection_with_online_mode`. The tests exercise that wiring one
+//! layer up over a real TCP loopback socket, matching the entry point used by
+//! the server's Open to LAN path.
 //!
-//! Two gates, matching `docs/server-online-mode.md`'s own framing of what a
-//! wiring change must show:
+//! Two gates cover the observable behavior of the wiring:
 //!
 //! - [`default_lan_config_stays_offline_no_network_call`]: `LanConfig::default()`
-//!   (what `bind` and every pre-existing caller still build) completes a join
+//!   (what `bind` and its callers build) completes a join
 //!   with **no** `EncryptionRequest` ever sent — the discriminating half this
-//!   file exists for, since a test that only exercises the online path cannot
-//!   show the default singleplayer/LAN behaviour survived.
+//!   file exists for, since an online-only test cannot show that the default
+//!   singleplayer/LAN behavior remains plaintext.
 //! - [`lan_config_online_mode_demands_encryption_and_substitutes_identity`]:
 //!   setting `LanConfig::online_mode` to `Some` makes the exact same listener
 //!   demand the real RSA/AES-128-CFB8 handshake and hand back the session
 //!   server's identity, not the client's self-reported one.
 //!
-//! No real network call anywhere in this file: [`OnlineModeConfig::for_test`]
-//! substitutes a fixture for the session-server `hasJoined` check, the same
-//! seam `tests/online_mode.rs` uses and for the same reason `CLAUDE.md`
-//! records (a pre-existing test reaching a real external service the moment
-//! online-mode auth is wired into a code path tests already call). This file
-//! adds no new seam; it exercises the existing one one layer further out.
+//! No external network call occurs in this file: [`OnlineModeConfig::for_test`]
+//! substitutes a fixture for the session-server `hasJoined` check. The fixture
+//! keeps the accepted-connection test deterministic while the loopback socket
+//! still exercises the real listener and login wiring.
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_net::{Connection, Transport, generate_shared_secret, rsa_encrypt};
@@ -38,9 +33,8 @@ use uuid::Uuid;
 
 const CTX: Ctx = Ctx { version: 776 };
 
-/// Never actually queried: both gates below stop reading once `LOGIN_FINISHED`
-/// arrives, before chunk streaming starts — same as `tests/online_mode.rs`'s
-/// own `UnusedSource`.
+/// Never queried: both gates below stop reading once `LOGIN_FINISHED` arrives,
+/// before chunk streaming starts.
 #[derive(Clone, Default)]
 struct UnusedSource;
 impl ChunkSource for UnusedSource {
@@ -79,12 +73,10 @@ async fn write_login_start<T: Transport>(client: &mut Connection<T>, username: &
     client.write_packet(login::serverbound::HELLO, w.as_slice()).await.unwrap();
 }
 
-/// `LanConfig::default()` (`online_mode: None`) reproduces exactly the
-/// pre-#273-wiring behaviour: `LOGIN_FINISHED` arrives straight off
-/// `LoginHello`, over a plaintext connection, with the client's own claimed
-/// name and uuid echoed back unchanged. Every pre-existing `bind`/`open_to_lan`
-/// caller builds `LanConfig` this way (see `docs/open-to-lan.md`), so this is
-/// the gate proving they are all still untouched by this change.
+/// `LanConfig::default()` (`online_mode: None`) completes a plaintext login:
+/// `LOGIN_FINISHED` follows `LoginHello`, and the client's claimed name and
+/// uuid are echoed unchanged. This is the default behavior for callers that do
+/// not opt into online-mode authentication.
 #[tokio::test]
 async fn default_lan_config_stays_offline_no_network_call() {
     let server = IntegratedServer::open_to_lan(
@@ -104,7 +96,7 @@ async fn default_lan_config_stays_offline_no_network_call() {
     write_login_start(&mut client, username, uuid).await;
 
     // Offline: the very next packet is LOGIN_COMPRESSION (compression is
-    // unconditional, `docs/server-login-compression.md`), never
+    // unconditional), never
     // `login::clientbound::HELLO` (the EncryptionRequest) — no RSA keypair
     // was generated, no session-server call was ever possible, because
     // `online_mode` was never `Some` anywhere on this path.
@@ -141,9 +133,8 @@ async fn lan_config_online_mode_demands_encryption_and_substitutes_identity() {
     let real_uuid = Uuid::from_u128(0x3333_3333_3333_3333_3333_3333_3333_3333);
 
     let online_mode = OnlineModeConfig::for_test(move |username, _hash| {
-        // Deliberately differs from what the client claims (per this repo's
-        // evidence standard: a value equal to the neighbour cannot show a
-        // substitution happened at all), and the fixture's own `username`
+        // Deliberately differs from what the client claims: a value equal to the
+        // input cannot demonstrate substitution. The fixture's own `username`
         // argument is asserted to be the client's claimed one — the same
         // input `has_joined` would really be called with.
         assert_eq!(username, claimed_username);
@@ -188,12 +179,10 @@ async fn lan_config_online_mode_demands_encryption_and_substitutes_identity() {
     client.write_packet(login::serverbound::KEY, w.as_slice()).await.unwrap();
     client.enable_encryption(&secret).unwrap();
 
-    // LOGIN_COMPRESSION, then LOGIN_FINISHED, both now enciphered — the same
-    // ordering `docs/server-login-compression.md`/`docs/server-online-mode.md`
-    // document. `Connection::read_packet` decrypts transparently once
-    // `enable_encryption` above has run, but this end must also activate the
-    // same compression threshold before decoding `LOGIN_FINISHED` (sent
-    // compressed), exactly as `tests/online_mode.rs`'s own gate does.
+    // LOGIN_COMPRESSION, then LOGIN_FINISHED, both enciphered. The client side
+    // decrypts transparently once `enable_encryption` above has run, but it must
+    // also activate the compression threshold before decoding LOGIN_FINISHED,
+    // which is sent compressed.
     let (id, payload) = client.read_packet().await.unwrap().expect("server closed early");
     assert_eq!(id, login::clientbound::LOGIN_COMPRESSION);
     let threshold = Reader::new(&payload).var_i32().unwrap();
