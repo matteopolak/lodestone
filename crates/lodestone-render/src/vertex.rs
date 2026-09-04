@@ -197,14 +197,6 @@ pub const fn vram_bytes(quad_count: usize) -> usize {
     vertices + indices
 }
 
-/// The same projection using the 48-byte naive vertex, for comparison.
-#[must_use]
-pub const fn naive_vram_bytes(quad_count: usize) -> usize {
-    let vertices = quad_count * 4 * 48;
-    let indices = quad_count * 6 * BYTES_PER_INDEX;
-    vertices + indices
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
