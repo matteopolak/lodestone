@@ -33,13 +33,14 @@ fn lang(key: &str) -> Option<String> {
 
 #[test]
 fn a_translate_menu_title_renders_words_not_the_raw_key() {
-    // Issue #52, exactly as the server sends it: `ClientboundOpenScreen`
-    // carries `translate("container.crafting")`, never the word "Crafting".
+    // The server sends a translation component carrying
+    // `translate("container.crafting")`, never the word "Crafting".
     let title = lodestone_model::Text::translate("container.crafting", vec![]);
     assert_eq!(menu_title(&title, &lang), "Crafting");
 
     // -- negative control -------------------------------------------------
-    // The call this replaced. If this ever stops producing the raw key, the
+    // A direct key lookup would be the wrong behavior. If this ever produces
+    // the raw key, the
     // assertion above has stopped proving anything — either the model grew a
     // `container.*` entry into its stub table, or something upstream is
     // resolving the component before we see it.
@@ -295,14 +296,14 @@ fn a_loaded_cursor_sends_the_click_on_release_not_on_press() {
 
 #[test]
 fn painting_slots_emits_the_full_quick_craft_sequence() {
-    // Two things changed here with issue #378 part 1, both because `dragged`
-    // now reads the menu instead of recording blindly:
+    // The fixture encodes two preconditions because `dragged` reads the menu
+    // instead of recording blindly:
     //
-    // * the cursor really has to hold something. This used to run against a
-    //   menu whose cursor was empty while `loaded()` claimed otherwise — the
+    // * the cursor really has to hold something. The menu cursor must agree
+    //   with `loaded()` — the
     //   two were free to disagree because nothing consulted the menu.
     // * the **menu** has to be one where cells 1/2/4/5 are all paintable.
-    //   On `Menu::player()` (the old `blank_menu()`) slot 5 is an *armour*
+    //   On `Menu::player()` slot 5 is an *armour*
     //   slot, whose `may_place` needs a `minecraft:equippable` component, so
     //   a plank genuinely cannot be painted there and vanilla would not
     //   paint it either. A crafting table's 1..=9 are all grid cells.
@@ -623,14 +624,12 @@ fn shift_double_click_gathers_only_matching_slots_in_the_same_backing_container(
     );
 }
 
-/// Control for the test above: `last_quick_moved` is captured off the
-/// double-clicked slot's *own* contents at press time
-///, so shift+double-clicking an
-/// **empty** slot records vanilla's `ItemStack.EMPTY` — and
-/// `!this.lastQuickMoved.isEmpty()` then suppresses the gather entirely,
-/// sending nothing. This proves the emitted clicks in the test above come
-/// from a real match against a captured stack, not from the double-click
-/// alone.
+/// Control for the test above: `last_quick_moved` is captured from the
+/// double-clicked slot's *own* contents at press time. An **empty** slot
+/// therefore records an empty stack, and the non-empty guard suppresses the
+/// gather entirely, sending nothing. This proves the emitted clicks in the
+/// test above come from a real match against a captured stack, not from the
+/// double-click alone.
 #[test]
 fn shift_double_click_on_an_empty_slot_sends_nothing() {
     let menu = Menu::generic(9); // slot 0 starts empty
@@ -647,17 +646,13 @@ fn shift_double_click_on_an_empty_slot_sends_nothing() {
 }
 
 // ---------------------------------------------------------------------
-// Issue #378 part 1: taking from a crafting result onto a matching cursor.
+// Taking from a crafting result onto a matching cursor.
 //
-// The machine's arm for this (`click.rs::do_pickup`'s "slot rejects
-// placement but same item" branch,
-// vanilla's own abstract container-menu base) was present, correct and tested.
-// What was broken is *which packet the release sends*: an unfiltered paint
-// set turned a click-with-a-jiggle on the result slot into a
-// `QUICK_CRAFT` sequence the machine then dropped on the floor. These tests
-// are at the shell layer for that reason — the click audit in
-// `docs/container-clicks.md` covers `doClick` and structurally could not
-// see this.
+// The menu already accepts a matching cursor stack from a result slot. The
+// shell-specific risk is packet selection: an unfiltered paint set can turn a
+// click-with-a-jiggle on the result slot into a `QUICK_CRAFT` sequence that
+// the menu drops on the floor. These tests therefore exercise the shell
+// release path; the click audit covers the lower-level menu operation.
 // ---------------------------------------------------------------------
 
 /// A crafting table whose result slot holds `result_count` sticks and whose
@@ -810,7 +805,7 @@ fn the_paint_gate_also_honours_item_identity_and_the_cursor_count() {
 }
 
 // ---------------------------------------------------------------------
-// Issue #378 part 2: the live drag preview.
+// The live drag preview.
 //
 // The arithmetic itself is proved in `lodestone-game`'s
 // `tests/drag_preview_agreement.rs`, which compares the plan against the
@@ -890,7 +885,7 @@ fn the_screens_paint_set_and_the_machines_stay_identical() {
 }
 
 /// The preview must reach the *geometry*, not merely be computable — the
-/// island defect this project has hit repeatedly. A frame with a drag armed
+/// incomplete integration. A frame with a drag armed
 /// has to emit more colour vertices than the identical frame without one
 /// (the 50%-white wash plus the provisional stacks' counts), and the pixel
 /// gate in `tests/container_drag_preview_pixels.rs` then proves *where*.
@@ -971,8 +966,8 @@ fn a_one_cell_paint_blanks_that_cell_rather_than_previewing_it() {
 }
 
 // ---------------------------------------------------------------------
-// Container background art and the hotbar dim (issue #61's
-// leftover). GPU-free: `ContainerBackground` is deliberately a pure
+// Container background art and the hotbar dim. GPU-free:
+// `ContainerBackground` is deliberately a pure
 // producer/consumer split (see its own doc comment) so this needs no
 // device. The GPU pixel proof lives in
 // `tests/container_background_pixels.rs`.
@@ -1003,8 +998,8 @@ fn background_kind_mirrors_slot_layouts_own_dispatch() {
     );
 }
 
-/// The four `special_layout` menus (#253-#255) get their own real
-/// background, not the plain generic-chest fallback a same-sized
+/// Each `special_layout` menu gets its own real background, not the plain
+/// generic-chest fallback a same-sized
 /// container without one draws — the control at the end proves it is the
 /// `special_layout`, not the size, that changed the result.
 #[test]
@@ -1035,9 +1030,9 @@ fn background_kind_recognises_the_four_special_layout_menus() {
     );
 }
 
-/// The six more `special_layout` menus issue #28 added — same proof as
-/// [`background_kind_recognises_the_four_special_layout_menus`], plus a
-/// control that the two size-9 special layouts (dispenser/dropper vs. a
+/// Each remaining `special_layout` menu uses its dedicated background — the
+/// same proof as [`background_kind_recognises_the_four_special_layout_menus`],
+/// plus a control that the two size-9 special layouts (dispenser/dropper vs. a
 /// plain 9-slot chest) are told apart by `special_layout`, not size.
 #[test]
 fn background_kind_recognises_the_six_menus_issue_28_added() {
@@ -1188,7 +1183,7 @@ fn generic_container_inventory_row_matches_chest_menus_real_offset() {
             "row {rows}: the first main-storage slot (menu index \
              {container_size}) must sit at ChestMenu's real inventoryTop"
         );
-        // The wrong hypothesis this rules out: the old `+ 14` constant,
+        // The wrong hypothesis this rules out: the fixed `+ 14` constant,
         // one pixel lower, at every row count.
         assert_ne!(
             at(&layout, container_size),
@@ -1437,11 +1432,9 @@ fn the_other_three_special_layouts_match_their_menu_constructors() {
     assert_eq!(at(&enchanting, 1), Some((35.0, 47.0)));
 }
 
-/// The six menus issue #28 added, checked against the same vanilla slot
-/// constructor arguments cited in `special_layout_positions`'s own doc
-/// table (vanilla's own abstract furnace menu, vanilla's own brewing-stand menu,
-/// vanilla's own loom menu, vanilla's own stonecutter menu,
-/// vanilla's own cartography-table menu, vanilla's own dispenser menu).
+/// Each specialised menu is checked against the slot coordinates recorded in
+/// `special_layout_positions`'s own table (furnace, brewing stand, loom,
+/// stonecutter, cartography table and dispenser).
 ///
 /// The wrong hypothesis this rules out: before `special_layout_positions`
 /// grew these arms, every one of them fell through to `generic_layout`'s
@@ -1450,7 +1443,7 @@ fn the_other_three_special_layouts_match_their_menu_constructors() {
 /// 18)`) instead of `(56.0, 53.0)`, and the panel would size itself to
 /// `114 + 1*18 = 132` tall instead of the real `166`. Both wrong values
 /// are far enough from the real ones that a transposed-but-plausible
-/// layout (the exact trap issue #28 itself warns about) cannot pass this
+/// layout cannot pass this
 /// by accident.
 #[test]
 fn the_six_menus_issue_28_added_match_their_menu_constructors() {
@@ -1542,7 +1535,7 @@ fn hit_test_agrees_with_the_anvil_layout_it_was_never_told_about() {
 }
 
 /// Same proof as [`hit_test_agrees_with_the_anvil_layout_it_was_never_told_about`],
-/// for the dispenser/dropper's 3×3 grid — the one issue #28 shape most
+/// for the dispenser/dropper's 3×3 grid — the specialised layout most
 /// likely to desync, because it is the only new layout that reorders
 /// slots into a **square** rather than merely repositioning a handful of
 /// them. Slot 4 is the grid's centre cell (row 1, col 1): a click there
@@ -1572,8 +1565,8 @@ fn synthetic_background() -> ContainerBackground {
 }
 
 /// [`synthetic_background`], with the Advancements `window.png` stand-in at
-/// `(window_w, window_h)` instead of vanilla's real `256x256` — issue #565's
-/// first defect, a 2x-resolution pack cropping the window's own bottom and
+/// `(window_w, window_h)` instead of the baseline `256x256` — a 2x-resolution
+/// pack would otherwise crop the window's own bottom and
 /// right edges off. `advancements_window_quad`/`advancements_tile_quad`
 /// scale their sample by the sprite's *real* placed size against the
 /// declared vanilla one, so this is the one knob a test needs to turn to
@@ -1708,10 +1701,9 @@ fn synthetic_background_with_window_size(window_w: u32, window_h: u32) -> Contai
     ContainerBackground::build(&manager).expect("synthetic background builds")
 }
 
-/// Issue #565's first defect: a higher-resolution `window.png` must still
-/// sample its **whole** `252x140` sub-rect, not a fixed 252x140 *real
-/// pixels* starting at the sprite's atlas origin (which, for a 2x sheet, is
-/// only the top-left quarter — the "missing bottom and right edges" report).
+/// A higher-resolution `window.png` must still sample its **whole** `252x140`
+/// sub-rect, not a fixed 252x140 *real pixels* starting at the sprite's atlas
+/// origin (which, for a 2x sheet, is only the top-left quarter).
 ///
 /// The expected value is derived from the sprite's own real placed size via
 /// `ContainerBackground::atlas()`, not hand-computed, so this measures the
@@ -1759,7 +1751,8 @@ fn advancements_window_quad_scales_its_sample_with_a_higher_resolution_sheet() {
         (native_h - WINDOW_H).abs() < 0.01,
         "a native 256x256 sheet must sample exactly {WINDOW_H} real px, got {native_h}"
     );
-    // The control: the pre-#565 formula would report the *same* 252x140 real
+    // The control: a formula that ignores the sprite's declared size would
+    // report the *same* 252x140 real
     // pixels here too — a fixed span regardless of resolution — so this is
     // the assertion that actually distinguishes the fix from the bug.
     assert!(
@@ -1919,14 +1912,11 @@ fn the_menu_type_anchor_reaches_build_inner_and_moves_the_title() {
 }
 
 // ---------------------------------------------------------------------
-// Issue #376: the hover highlight and the empty-slot placeholders.
+// The hover highlight and the empty-slot placeholders.
 //
-// Both were reported from play ("hovering draws no highlight", "the armour
-// and off-hand slots show no icons"). Neither was a missing verb and neither
-// was an asset gap — `tests/container_slot_sprites.rs` had already measured
-// the sprites present in the GUI atlas, and `lodestone-game` already
-// declared `Slot::no_item_icon` per slot. The gap was that nothing in this
-// module ever asked for a quad.
+// The sprites are present in the GUI atlas and each slot declares its empty
+// icon. The missing link was that this module did not request quads for the
+// hover marker or the empty-slot placeholders.
 // ---------------------------------------------------------------------
 
 /// Decode the background stream back into pixel-space `dst` rects, one per
@@ -2180,8 +2170,8 @@ fn nothing_hovered_blits_no_highlight_at_all() {
     }
 }
 
-/// Issue #398's proof requirement: "a base class with one subclass is not a
-/// base class." The two tests above only ever exercised `Menu::player()`;
+/// A base class with one subclass is not enough coverage. The two tests above
+/// only exercise `Menu::player()`;
 /// this is the identical order proof on a **second** real screen — a chest —
 /// through the same `build_inner` path. There is no per-screen branch that
 /// could have gotten the ordering right on one screen and wrong on the

@@ -867,8 +867,7 @@ pub struct EntityDraw {
     /// entity with no visible custom name.
     pub name_tag: Option<NameTag>,
     /// Whether the hurt/death **red overlay** applies to this entity's model
-    /// this frame — vanilla's `state.hasRedOverlay = entity.hurtTime > 0 ||
-    /// entity.deathTime > 0`, issue #98.
+    /// this frame. The overlay is active while either countdown is positive.
     ///
     /// Boolean, not a fade: vanilla does not interpolate by how much of
     /// `hurtTime` remains, so neither does this (see
@@ -878,11 +877,9 @@ pub struct EntityDraw {
     /// [`extract_entity_draws`], **not** folded through [`EntityFacts`] —
     /// exactly like [`Self::anim`]'s `attack_anim`, and for the same reason:
     /// the component lives on the *ingest* entity rather than the render one.
-    /// `docs/combat.md`'s original patch spec called for an
-    /// `EntitySnapshot::hurt` field (`EntitySnapshot` was the boundary type
-    /// issue #36 deleted); that would have added a third hop and rippled
-    /// through ~15 struct literals for a value the extract system can already
-    /// reach directly.
+    /// Keeping this value on the render-side draw record avoids introducing a
+    /// second snapshot boundary for data the extract system can already reach
+    /// directly.
     ///
     /// Both halves of the disjunction are live: [`Self::death_time`] carries
     /// `deathTime`, so the overlay now persists through the fall-over instead of
@@ -1014,8 +1011,8 @@ pub struct EntityDraw {
     /// `shouldRenderLayers` running unconditionally regardless of body
     /// visibility. The nametag pass reads this same `entities` slice too and
     /// is equally untouched by the body-batch skip — an invisible, named
-    /// entity still shows its tag, which is the "server hologram" case issue
-    /// #643 reports (an invisible, custom-named armour stand).
+    /// entity still shows its tag, which covers the server-hologram case of an
+    /// invisible, custom-named armour stand.
     ///
     /// **Not implemented, on purpose, rather than half-built:**
     /// `state.isInvisibleToPlayer` — vanilla still shows an invisible entity,
@@ -1835,8 +1832,8 @@ fn pickup_progress(life: f32, partial_tick: f32) -> f32 {
 /// Returns `false` — and starts nothing — when the item was not tracked on the
 /// render side, either because its stack was never reported or because the track
 /// has already been pruned. Drawing a flight from a made-up start point would be
-/// worse than drawing none, and "no animation" is exactly the pre-#365
-/// behaviour rather than a new failure.
+/// worse than drawing none, and "no animation" is the established behavior
+/// for an untracked or stackless item.
 ///
 /// **Must be called before the frame's `fold_entities`.** `Sim::poll_net` runs
 /// ahead of `Sim::fold_entities`, so the track the server has stopped reporting
@@ -2183,40 +2180,33 @@ fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
 /// The animation drive for this frame.
 ///
 /// `partial_tick` is the fraction through the current 50 ms tick, used for the
-/// walk cycle exactly as vanilla's `WalkAnimationState` interpolation. The head
-/// yaw is clamped to the body (`Mob.clampHeadRotationToBody`) and then expressed
-/// *relative* to it, because that is what `LivingEntityRenderer` feeds
-/// `setupAnim` — passing the absolute value would spin every mob's head with its
-/// body.
+/// walk cycle. The head yaw is clamped to the body and then expressed
+/// *relative* to it; passing the absolute value would spin every mob's head
+/// with its body.
 ///
 /// `swing_progress` is the entity's interpolated `attack_anim` for this frame —
 /// `0.0` for an entity that has never swung, otherwise
 /// [`lodestone_ecs::entity::AttackSwing::attack_anim_lerp`] resolved by the
-/// caller through [`EntityIndex`] (see [`extract_entity_draws`]). This used to
-/// be a hardcoded `0.0`: `ClientboundAnimatePacket` was decoded and folded
-/// nowhere, so every other player and mob mined, hit and placed with a rigid
-/// arm (issue #10 / `docs/arm-swing-animation.md`). The local player's own
-/// swing is *not* this path — it is not a tracked network entity, and it goes
-/// through `Sim::body_pose`/`Sim::hand_swing_progress` instead.
-/// `aggressive` is vanilla's own is-aggressive check — bit `0x04` of the mob-flags byte, folded
-/// into [`MobState`] by `ingest::apply_entity_metadata` and resolved by the caller
-/// through [`EntityIndex`] the same way `swing_progress` is. It was a
-/// hardcoded `false` here, which made the zombie arm lift in
-/// `Skeleton::animate_zombie_arms` unreachable.
+/// caller through [`EntityIndex`] (see [`extract_entity_draws`]). The local
+/// player's swing is *not* this path: it is not a tracked network entity and
+/// goes through `Sim::body_pose`/`Sim::hand_swing_progress` instead.
+/// `aggressive` is bit `0x04` of the mob-flags byte, folded into [`MobState`]
+/// by `ingest::apply_entity_metadata` and resolved by the caller through
+/// [`EntityIndex`] the same way `swing_progress` is. It selects the raised-arm
+/// pose for mobs whose renderer supports that stance.
 ///
-/// `crouching` is vanilla's own is-crouching check — the [`Pose`] component at metadata
-/// index 6, **not** the shift-key bit of the shared-flags byte; see the `poses`
-/// query in [`extract_entity_draws`] for why the two are not interchangeable.
-/// It drives `Skeleton::pose`'s humanoid crouch branch, so a sneaking remote
-/// player hunches exactly as the local self-avatar does.
+/// `crouching` is the [`Pose`] component at metadata index 6, **not** the
+/// shift-key bit of the shared-flags byte; see the `poses` query in
+/// [`extract_entity_draws`] for why the two are not interchangeable. It drives
+/// the humanoid crouch branch, so a sneaking remote player hunches exactly as
+/// the local self-avatar does.
 ///
-/// `swim_amount` is vanilla's own swim-amount accessor, interpolated for this
-/// frame — the same [`SwimRamp`]-integrated value [`extract_entity_draws`]
+/// `swim_amount` is the interpolated swim amount for this frame — the same
+/// [`SwimRamp`]-integrated value [`extract_entity_draws`]
 /// already computes and carries on [`EntityDraw::swim_amount`] for the
 /// whole-body prone rotation. This is the second, independent consumer: it
-/// drives `Skeleton::pose`'s humanoid swim branch — the arm-over-arm stroke
-/// and leg kick — which reads it off `AnimInput` rather than `EntityDraw`,
-/// since that is the field `Skeleton::pose` actually takes.
+/// drives the humanoid swim branch — the arm-over-arm stroke and leg kick —
+/// which reads it from `AnimInput` rather than `EntityDraw`.
 fn render_anim(
     from: &InterpFrom,
     to: &InterpTo,
@@ -2304,21 +2294,15 @@ struct ArmPoseChoice {
 ///   fraction from the tick counter.
 /// # The mob trigger is a *different flag*, and it is checked first
 ///
-/// Vanilla selects an arm pose per **renderer**, and
-/// its own abstract-skeleton arm-pose selection overrides the base one:
-/// `isAggressive() && mainHandItem.is(BOW)` ⇒ `BOW_AND_ARROW`, else the base
-/// case. That
-/// branch is what makes a skeleton shooting at you actually draw. It is **not**
-/// the using-item bit: a skeleton's ranged attack goal calls
-/// its own ranged-attack routine and never enters the item-use state, so `item_use` is
-/// forever `using: false` for it and #57's mechanism — correct for players and
-/// remote players — reaches zero mobs.
+/// Arm poses are selected per renderer, and a renderer-specific aggressive-bow
+/// override takes precedence over the generic item-use path. A ranged mob does
+/// not enter the item-use state, so relying on `item_use` alone would leave its
+/// bow pose unreachable.
 ///
 /// The override is keyed on the entity type by
 /// [`mob_draws_bow_when_aggressive`], because it is genuinely per-renderer: an
-/// aggressive *zombie* holding a bow gets no such pose in vanilla, and an
-/// aggressive pillager's poses come from a different enum on a different model
-/// class entirely.
+/// aggressive *zombie* holding a bow gets no such pose, and an aggressive
+/// pillager's poses come from a different model family entirely.
 ///
 /// * **Crossbow hold** — **not** an in-use pose at all. Vanilla checks
 ///   `!swinging && is(CROSSBOW) &&` its own is-charged check, where
@@ -2579,28 +2563,21 @@ pub fn extract_entity_draws(
     // so it is bridged the same way `AttackSwing` is rather than folded through
     // `EntityFacts` — see `EntityDraw::hurt`.
     hurts: Query<&HurtTime>,
-    // `DeathTime` lives on the ingest entity too (`apply_entity_status` resolves
-    // `EntityStatus`'s byte 3 through the same `EntityIndex`), bridged the same way
-    // `HurtTime` is — and read beside it, because vanilla's red overlay is the
-    // disjunction of the two. It is what turns a death packet into a mob toppling
-    // onto its side; see `EntityDraw::death_time`.
+    // `DeathTime` lives on the ingest entity too and is bridged through the same
+    // `EntityIndex` as `HurtTime`. Reading both values keeps the red overlay and
+    // the death animation driven by their respective countdowns.
     deaths: Query<&DeathTime>,
-    // `ItemUse` lives on the ingest entity too (`apply_entity_item_use` resolves
-    // the living-flags byte through the same `EntityIndex`), bridged the same way
-    // `AttackSwing` and `HurtTime` are. It is what turns a metadata bit into a bow
-    // draw — see `arm_pose_for` and issue #57.
+    // `ItemUse` lives on the ingest entity too and is bridged through the same
+    // `EntityIndex` as `AttackSwing` and `HurtTime`. It turns the metadata bit
+    // into the item-use arm pose in `arm_pose_for`.
     item_uses: Query<&ItemUse>,
-    // `EntityFlags` lives on the ingest entity too
-    // (`apply_entity_metadata` inserts it from the *shared*-flags byte —
-    // index 0, not the living-flags byte `MobState`/`ItemUse` read — through
-    // the same `EntityIndex`), bridged the same way. It is what turns bit
-    // `0x01` into the mob-fire billboard — see `EntityDraw::on_fire` and
-    // issue #434.
+    // `EntityFlags` lives on the ingest entity too and is bridged through the
+    // same `EntityIndex`. Bit `0x01` drives the mob-fire billboard in
+    // `EntityDraw::on_fire`.
     flags: Query<&EntityFlags>,
-    // `MobState` lives on the ingest entity too (`apply_entity_metadata` folds the
-    // *mob* flags byte into it), bridged the same way. It is what turns
-    // `Mob.isAggressive()` into a drawn bow and into a zombie's raised arms — see
-    // `arm_pose_for` and issue #379.
+    // `MobState` lives on the ingest entity too and is bridged through the same
+    // `EntityIndex`. Its aggressive bit selects a drawn bow and raised arms in
+    // `arm_pose_for`.
     mob_states: Query<&MobState>,
     // `Pose` lives on the ingest entity too (`apply_entity_metadata` inserts it
     // from the pose accessor at index 6 — a *separate* field from the shared-flags
@@ -2638,11 +2615,9 @@ pub fn extract_entity_draws(
     // resolved to a texture sheet by `lodestone_render::entity_variant_sheet_for`.
     // See `EntityDraw::variant_sheet`.
     variants: Query<&lodestone_ecs::entity::Variant>,
-    // `Tamed` lives on the ingest entity too (`lodestone_ecs::ingest::
-    // apply_entity_metadata` folds `EntityMetadataUpdate::tamed` into it),
-    // bridged the same way `variants` is. It is the last hop of issue #235's
-    // chain: without it `variant_sheet` below has no source for the tame bit
-    // and a tamed wolf draws the wild sheet forever.
+    // `Tamed` lives on the ingest entity too and is bridged through the same
+    // `EntityIndex` as `variants`. It supplies the tame bit that
+    // `variant_sheet` uses to select the tamed texture.
     //
     // Paired with `vehicles` in one tuple parameter rather than two separate
     // ones: `bevy_ecs`'s `SystemParam` tuple impl tops out at 16 top-level
@@ -4337,19 +4312,14 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
 /// Registers the render-side entity systems into the schedules `lodestone-ecs`
 /// owns, plus the resources they read.
 ///
-/// Still separate from `lodestone_ecs::ingest::IngestPlugin`, but no longer
-/// because of a `World` boundary — §4.1(c) removed that, and the shell's one
-/// `App` now installs both. It stays separate because the *entities* are still
-/// separate: `IngestPlugin` folds the server's report onto one entity per mob and
-/// this plugin's [`fold_entities`] spawns a second, render-side entity per mob
-/// keyed by [`TrackIndex`], reading [`resolve_entity_facts`] as the bridge
-/// between them (issue #36 deleted the `EntitySnapshot` type that used to
-/// carry that bridge across a `Vec`).
+/// Still separate from `lodestone_ecs::ingest::IngestPlugin`: ingest folds the
+/// server's report onto one entity per mob, while this plugin's
+/// [`fold_entities`] spawns a second, render-side entity per mob keyed by
+/// [`TrackIndex`] and reads [`resolve_entity_facts`] as the bridge between them.
 ///
-/// Collapsing the two entities into one remains a separate, larger change —
-/// ingest runs in `NetIngest`, which the plan orders *before* `GameTick`,
-/// while this module's order is clocks → ticks → fold and every numeric
-/// expectation in the ~25 tests below is written against it.
+/// The separation is also a scheduling boundary: ingest runs in `NetIngest`
+/// before `GameTick`, while this module runs clocks → ticks → fold. The numeric
+/// expectations in the tests below are written against that order.
 #[derive(Debug, Default)]
 pub struct EntityInterpPlugin;
 
@@ -4360,8 +4330,8 @@ impl Plugin for EntityInterpPlugin {
         app.init_resource::<EntityMapIds>();
         app.init_resource::<TrackIndex>();
         app.init_resource::<ExtractedDraws>();
-        // Issue #365. Written by `begin_item_pickup` from `Sim::poll_net`, aged by
-        // `tick_pickup_animations`, drawn by `extract_pickup_draws`.
+        // Written by `begin_item_pickup`, aged by `tick_pickup_animations`,
+        // and drawn by `extract_pickup_draws`.
         app.init_resource::<PickupAnimations>();
         // `extract_entity_draws` reads `AttackSwing` through this — normally
         // `lodestone_ecs::ingest::IngestPlugin` owns it, but this plugin is
@@ -4692,8 +4662,7 @@ impl EntityInterpolator {
     /// range) — a caller drives this by adding/removing ingest entities and
     /// their `EntityIndex` mapping on [`Self::world_mut`] before calling this,
     /// the same way [`crate::sim::Sim::fold_entities`] does against the live
-    /// `World` (issue #36 deleted the `&[EntitySnapshot]` parameter this used
-    /// to take; see [`fold_entities`]'s own doc for why).
+    /// `World`.
     ///
     /// `collision`/`profile` feed only [`tick_item_physics`] (every other
     /// entity is a pure position ease and never touches either); they are
@@ -4796,8 +4765,8 @@ mod tests {
         Velocity,
     };
 
-    /// Test-only ingest builder replacing the deleted `EntitySnapshot` (issue
-    /// #36): same field shape, but [`Self::apply`] spawns (or upserts) the
+    /// Test-only ingest builder with the same field shape as a network
+    /// snapshot. [`Self::apply`] spawns (or upserts) the
     /// real [`lodestone_ecs::entity`] components and registers the mapping in
     /// [`EntityIndex`], the same pattern
     /// `a_swinging_attack_swing_reaches_the_extracted_anim` already uses for a
@@ -5455,20 +5424,19 @@ mod tests {
         );
     }
 
-    /// Issue #100's two nametag rules, each pinned directly against
-    /// [`resolve_entity_facts`]'s real boundary rather than against the
+    /// The two nametag rules are pinned directly against
+    /// [`resolve_entity_facts`]'s boundary rather than against the
     /// render path — the render-level pixel gate (`tests/nametag_pixels.rs`)
     /// proves the wiring end to end, this proves the *resolution logic* in
-    /// isolation. Moved from `net.rs`'s now-deleted `entity_snapshot` tests
-    ///: the boundary these pin is ingest components ->
-    /// `EntityFacts`, not `EntityView` -> `EntitySnapshot`.
+    /// isolation. The boundary these pin is ingest components ->
+    /// `EntityFacts`, not a render-only projection.
     mod name_tag {
         use uuid::Uuid;
 
         use super::*;
 
-        /// Vanilla's own living-entity should-show-name check honours the target team's
-        /// `NEVER` rule even when the entity itself is otherwise visible. A
+        /// The name-tag visibility rule honours the target team's `NEVER`
+        /// setting even when the entity itself is otherwise visible. A
         /// player-type NPC helper can use that protocol state to suppress its
         /// profile name without relying on a plugin-specific name prefix.
         #[test]
@@ -5482,9 +5450,8 @@ mod tests {
             );
         }
 
-        /// Vanilla's `myTeam == null` arms retain the normal invisibility
-        /// gate; they do not make a hidden target visible merely because the
-        /// viewer belongs to no team.
+        /// A viewer with no team retains the normal invisibility gate; being
+        /// outside a team does not make a hidden target visible.
         #[test]
         fn a_hidden_other_team_member_stays_hidden_when_the_viewer_has_no_team() {
             let mut team = lodestone_game::scoreboard::Team::new("npc-helper");
@@ -6132,8 +6099,8 @@ mod tests {
         // this used to hardcode a right-handed answer for.
         assert!(arm_pose_for("skeleton", &bow_in_main_hand(), None, true, true).left_hand);
 
-        // Not aggressive — the flag is the trigger, and this is the case every
-        // skeleton in the world was stuck in before #379.
+        // Not aggressive — the flag is the trigger, and this is the case where
+        // a skeleton's arms must remain at rest.
         assert_eq!(
             arm_pose_for("skeleton", &bow_in_main_hand(), None, false, false).pose,
             ArmPose::Empty
@@ -6185,8 +6152,8 @@ mod tests {
         );
     }
 
-    /// The aggressive override must not eat the using-item path #57 built: a
-    /// *player* drawing a bow has no mob-flags byte at all, and still poses.
+    /// The aggressive override must not eat the using-item path: a *player*
+    /// drawing a bow has no mob-flags byte at all, and still poses.
     #[test]
     fn the_using_item_path_still_works_for_a_non_aggressive_entity() {
         let drawing = ItemUse {
@@ -6643,7 +6610,7 @@ mod tests {
         );
     }
 
-    /// Issue #98's render-side half, the same shape as the swing test above:
+    /// Render-side coverage, in the same shape as the swing test above:
     /// [`extract_entity_draws`] must read [`HurtTime`] through [`EntityIndex`]
     /// and land it on [`EntityDraw::hurt`].
     ///
@@ -6692,7 +6659,7 @@ mod tests {
         );
     }
 
-    /// Issue #434's render-side half, the same shape as the hurt-time test
+    /// Render-side coverage, in the same shape as the hurt-time test
     /// above: [`extract_entity_draws`] must read [`EntityFlags`] through
     /// [`EntityIndex`] and land bit `0x01` on [`EntityDraw::on_fire`] —
     /// player report "mobs dont show flames yet".
@@ -6842,7 +6809,7 @@ mod tests {
         );
     }
 
-    /// Issue #573's producer-side wiring, traced end to end: [`Pose`] on the
+    /// Producer-side wiring, traced end to end: [`Pose`] on the
     /// ingest entity (what `apply_entity_metadata` inserts from the pose
     /// accessor at index 6) → [`SwimRamp`]/[`tick_swim_ramp`] →
     /// [`EntityDraw::swim_amount`]. The rotation math this value feeds is a
@@ -7208,13 +7175,10 @@ mod tests {
         (snap(2, Vec3::X, 0.0)).apply(interp.world_mut());
         interp.update(0.016);
         assert_eq!(interp.len(), 2);
-        // Entity 2 vanishes from the report. Since #36 deleted the
-        // `&[EntitySnapshot]` parameter, re-applying only entity 1 no longer
-        // *implies* 2 is gone — absence from a slice was the old signal, and
-        // there is no slice. `forget` is the stand-in the migration added for
-        // exactly this, and production's equivalent is `ingest.rs`'s
-        // `ClientEvent::EntityRemoved` arm, which despawns and drops the
-        // `EntityIndex` mapping the same way.
+        // Entity 2 vanishes from the report. Re-applying only entity 1 does
+        // not imply that 2 is gone, so `forget` explicitly removes its track;
+        // production performs the equivalent operation when it receives an
+        // entity-removal event and drops the `EntityIndex` mapping.
         forget(interp.world_mut(), 2);
         (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
         interp.update(0.016);
@@ -8345,8 +8309,8 @@ mod tests {
         assert!((pickup_progress(4.0, 0.0) - 1.0).abs() < 1e-6);
     }
 
-    /// **The end-to-end gate for #365, and the one that would have caught the
-    /// island.** `begin_item_pickup` → `tick_pickup_animations` → the `Extract`
+    /// **The end-to-end gate for item pickup.** `begin_item_pickup` →
+    /// `tick_pickup_animations` → the `Extract`
     /// schedule → an `EntityDraw` in the list `RenderState::prepare_item_geometry`
     /// consumes, at the position vanilla's own constants predict.
     ///
@@ -8381,9 +8345,9 @@ mod tests {
         );
 
         // One tick, with the item gone from the server's report. `forget` is
-        // what makes it gone: since #36 there is no snapshot slice to omit it
-        // from, so without this the item entity stays tracked and draws
-        // *alongside* its own flight animation — two item draws, not one.
+        // what makes it gone: without this explicit removal, the item entity
+        // stays tracked and draws *alongside* its own flight animation — two
+        // item draws, not one.
         forget(interp.world_mut(), ITEM);
         (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
         interp.update(TICK);
@@ -8574,9 +8538,9 @@ mod tests {
         (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
         interp.update(0.0);
         // Collected, so the server stops reporting it — but *no* pickup event is
-        // raised, which is the whole point of this control. `forget` is what
-        // "stops reporting" means since #36; without it this asserts against an
-        // unpruned track and fails for the very reason the doc above warns about.
+        // raised, which is the whole point of this control. `forget` models
+        // the report no longer containing the collected item; without it this
+        // asserts against an unpruned track.
         forget(interp.world_mut(), ITEM);
         (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
         interp.update(TICK);
@@ -8605,10 +8569,10 @@ mod tests {
         interp.update(0.0);
         assert!(begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR));
 
-        // The server stops reporting the item the moment it is collected. Since
-        // #36 that has to be said explicitly — otherwise the item track survives
-        // every tick and this measures an unpruned track rather than the
-        // animation's own three-tick life, reading `[2, 2, 1, 1, 1]`.
+        // The server stops reporting the item the moment it is collected. That
+        // absence must be represented explicitly; otherwise the item track
+        // survives every tick and this measures an unpruned track rather than
+        // the animation's own three-tick life, reading `[2, 2, 1, 1, 1]`.
         forget(interp.world_mut(), ITEM);
 
         let mut drawn = Vec::new();

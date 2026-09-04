@@ -183,32 +183,25 @@ pub(super) enum BackgroundKind {
 }
 
 /// Mirrors [`slot_layout`]'s own dispatch, **including** its
-/// [`Menu::special_layout`] check (issues #253-#255, extended by #28 to the
-/// furnace family, brewing stand, loom, stonecutter, cartography table and
-/// dispenser/dropper): each of these gets its own real `container/*.png`
-/// sheet, checked *before* the plain `MenuKind` dispatch for the same reason
-/// `slot_layout` checks it before `craft_layout` — a menu with a
-/// `special_layout` is mechanically a [`MenuKind::Generic`] and would
+/// [`Menu::special_layout`] check: each specialised menu gets its own real
+/// `container/*.png` sheet, checked *before* the plain [`MenuKind`] dispatch
+/// for the same reason `slot_layout` checks it before `craft_layout` — a menu
+/// with a `special_layout` is mechanically a [`MenuKind::Generic`] and would
 /// otherwise fall into the plain chest case. Everything else without one:
 /// [`Menu::craft_layout`] draws the crafting table's background regardless of
 /// container size (today always the 3×3 table), everything else generic draws
 /// the chest sheet at its own row count, and [`MenuKind::Player`] draws the
 /// player inventory sheet.
 ///
-/// Every `special_layout` sheet but one is a single whole-panel `176×166`
-/// blit at the sheet's origin, exactly like
+/// Most `special_layout` sheets are a single whole-panel `176×166`
+/// panel draw at the sheet's origin, exactly like
 /// [`BackgroundKind::Inventory`]/[`BackgroundKind::Crafting`]
-/// (screens adjacent to vanilla's own anvil-screen blit calls; every one of these screens'
-/// `blit(texture, x, y, 0, 0, imageWidth, imageHeight)` uses the vanilla
-/// `176×166` default, none override `imageWidth`/`imageHeight` — re-verified
-/// against vanilla's own container-screen base's own default constructor for
-/// the six added by #28, not merely assumed to match the first four). Three
-/// exceptions pass a non-default size to their own `super(...)` constructor
-/// and [`ContainerBackground::quads`] special-cases each rather than reusing
+/// (the remaining specialised screens use the `176×166` default panel dimensions).
+/// Three exceptions use a non-default size and
+/// [`ContainerBackground::quads`] special-cases each rather than reusing
 /// the `whole_panel` closure's hardcoded size: [`BackgroundKind::Hopper`]
-/// (`176, 133`, vanilla's own hopper-screen constructor), [`BackgroundKind::Merchant`] (`276,
-/// 166`, vanilla's own merchant-screen constructor) and [`BackgroundKind::Beacon`] (`230, 219`,
-/// vanilla's own beacon-screen constructor).
+/// (`176, 133`), [`BackgroundKind::Merchant`] (`276, 166`) and
+/// [`BackgroundKind::Beacon`] (`230, 219`).
 pub(super) fn background_kind(menu: &Menu) -> BackgroundKind {
     match menu.special_layout() {
         Some(SpecialLayout::Anvil) => return BackgroundKind::Anvil,
@@ -249,7 +242,7 @@ impl ContainerBackground {
             .expect("hardcoded location is always valid");
         let inventory = ResourceLocation::new("minecraft", "gui/container/inventory")
             .expect("hardcoded location is always valid");
-        // The four item-combiner-shaped screens (#253-#255): each is its own
+        // The item-combiner-shaped screens: each is its own
         // whole-panel sheet, same family as the three above.
         let anvil = ResourceLocation::new("minecraft", "gui/container/anvil")
             .expect("hardcoded location is always valid");
@@ -259,7 +252,8 @@ impl ContainerBackground {
             .expect("hardcoded location is always valid");
         let enchantment = ResourceLocation::new("minecraft", "gui/container/enchanting_table")
             .expect("hardcoded location is always valid");
-        // The six more added by issue #28: same family, one whole-panel sheet
+        // The remaining specialised screens use the same family of
+        // whole-panel sheets.
         // each. `dispenser` is loaded once and shared by the dropper too —
         // see `SpecialLayout::Dispenser`'s doc comment for why there is no
         // separate `dropper` sheet to load.
@@ -280,8 +274,7 @@ impl ContainerBackground {
                 .expect("hardcoded location is always valid");
         let dispenser = ResourceLocation::new("minecraft", "gui/container/dispenser")
             .expect("hardcoded location is always valid");
-        // Not one of #28's own named containers — found while writing this
-        // list's doc comment (see `SpecialLayout::Hopper`).
+        // The hopper is another specialised container with its own sheet.
         let hopper = ResourceLocation::new("minecraft", "gui/container/hopper")
             .expect("hardcoded location is always valid");
         // The merchant/trading screen (UI half): a `512×256`
@@ -443,9 +436,8 @@ impl ContainerBackground {
         })
     }
 
-    /// `AdvancementsScreen.BACKGROUND_TEXTURE_WIDTH`/`_HEIGHT` (`:34-35`) — the
-    /// declared sheet size [`Self::advancements_window_quad`] scales its
-    /// `252 x 140` sample against.
+    /// The declared sheet size against which
+    /// [`Self::advancements_window_quad`] scales its `252 x 140` sample.
     const BACKGROUND_TEXTURE_SIZE: f32 = 256.0;
 
     /// The declared (16x-baseline) size of every whole-panel `gui/container/**`
@@ -454,36 +446,31 @@ impl ContainerBackground {
     ///
     /// None of these sheets carries a `.mcmeta`, so a resource pack has no
     /// declared metadata to read for them the way a `gui/sprites/**` entry's
-    /// nine-slice does — vanilla itself never scales its `blit` source rects
-    /// by anything but this literal ratio against the sprite's real placed
+    /// nine-slice does — these panel samples use this literal ratio against
+    /// the sprite's real placed
     /// size (see [`Self::advancements_window_quad`]'s doc for the worked
     /// case), so every sub-rect sampled against one of these sheets is
     /// rescaled by `sprite.width/height` over this pair before it is added to
-    /// the sprite's atlas offset — issue #582.
+    /// the sprite's atlas offset.
     const SHEET_DECLARED: (f32, f32) = (256.0, 256.0);
     /// [`Self::merchant`]'s own declared sheet size — see that field's doc
     /// comment for why it is genuinely `512×256` rather than `256×256` like
     /// every other sheet [`Self::SHEET_DECLARED`] covers.
     const MERCHANT_DECLARED: (f32, f32) = (512.0, 256.0);
 
-    /// The Advancements screen's window blit —
-    /// `graphics.blit(..., WINDOW_LOCATION, leftPos, topPos, 0, 0, 252, 140, 256,
-    /// 256)`.
+    /// The advancements window's `252 x 140` panel sample.
     ///
     /// The `252 x 140` sample is scaled by the sprite's **real placed size**
-    /// against vanilla's declared `256 x 256` sheet
-    /// (its own background-texture-width/height constants, in its own
-    /// advancements-screen rendering) —
-    /// first defect ("the bottom and right side don't have UI on
-    /// the edges"). `window.png` has no sibling `.mcmeta` (see this struct's
+    /// against the declared `256 x 256` sheet. `window.png` has no sibling
+    /// `.mcmeta` (see this struct's
     /// own doc), so a higher-resolution pack is the only way this sheet's real
     /// size can differ from 256x256, and nothing else here would notice: the
     /// unscaled version always sampled a fixed 252x140 **real pixels**
     /// starting at the sprite's atlas origin, so a 2x pack (a `512x512`
-    /// sheet) sampled only its top-left quarter — cropping the window's own
-    /// bottom and right edges clean off, exactly the reported symptom. The
-    /// same fraction-of-declared-size fix as the nine-slice arm,
-    /// applied to this hand-rolled sub-rect blit instead, since `window.png`
+    /// sheet) samples only its top-left quarter, cropping the window's bottom
+    /// and right edges. The same fraction-of-declared-size conversion used by
+    /// the nine-slice path is applied to this hand-rolled sub-rect because
+    /// `window.png`
     /// is loose `textures/gui/container/**` art and never reaches
     /// [`lodestone_render::GuiAtlas`]'s `GuiScaling` system at all.
     #[must_use]
@@ -569,9 +556,9 @@ impl ContainerBackground {
     ///
     /// Rescales the `195x136` sample by the sprite's real placed size against
     /// [`Self::SHEET_DECLARED`], the same fix
-    /// [`Self::advancements_window_quad`] applies to its own sheet — issue
-    /// #582: these three sheets carry no `.mcmeta` either, so nothing short
-    /// of this ratio notices a resource pack whose real pixels exceed the
+    /// [`Self::advancements_window_quad`] applies to its own sheet. These
+    /// three sheets carry no `.mcmeta` either, so nothing short of this ratio
+    /// notices a resource pack whose real pixels exceed the
     /// `256x256` baseline `CREATIVE_PANEL_W`/`CREATIVE_PANEL_H` are declared
     /// against.
     #[must_use]
@@ -738,20 +725,17 @@ impl ContainerBackground {
     /// [`sprite_quad`](Self::sprite_quad) always samples the *whole* sprite,
     /// which is right for the highlight pair and the empty-slot placeholders
     /// but wrong for the furnace family's lit/burn bars and the brewing
-    /// stand's fuel/brew/bubble bars: vanilla grows every one of
-    /// those from a partial `blitSprite` sub-rectangle of a larger sprite —
-    /// e.g. vanilla's own abstract furnace-screen's lit flame samples a `14×n`
-    /// window of a `14×14` sprite, offset from the *bottom*, via
-    /// `blitSprite(pipeline, sprite, 14, 14, 0, 14 - h, x, y, 14, h)`. That
+    /// stand's fuel/brew/bubble bars. Each bar uses a partial `14×n`
+    /// sub-rectangle of a `14×14` sprite, offset from the *bottom*. That
     /// `14, 14` pair is `declared`, not a real pixel measurement, exactly
     /// like [`GuiScaling::geometry`](lodestone_assets::gui::GuiScaling::geometry)'s
     /// nine-slice case and
     /// [`GuiAtlas::subregion_quad_declared`](lodestone_render::GuiAtlas::subregion_quad_declared) —
     /// on a resource pack whose real pixels exceed `declared`, `local` is
     /// rescaled by `sprite.width/height` over `declared` before it is added
-    /// to the sprite's atlas offset (issue #582: the un-rescaled version
-    /// sampled only the top-left quadrant of a 32x sprite and drew it 2x too
-    /// big). Mirrors the `uv` closure [`quads`](Self::quads) uses for the
+    /// to the sprite's atlas offset. Without that conversion, a 32x sprite
+    /// would sample only its top-left quadrant and draw the region at twice
+    /// the intended size. Mirrors the `uv` closure [`quads`](Self::quads) uses for the
     /// whole-panel sheets, generalised to any sprite in the atlas rather than
     /// the panel sheets specifically.
     #[must_use]
@@ -791,8 +775,8 @@ impl ContainerBackground {
         // `Self::SHEET_DECLARED` for every sheet but the merchant's (see
         // `Self::MERCHANT_DECLARED`). `local` is rescaled by the sprite's
         // real placed size over `declared` before being added to the
-        // sprite's atlas offset — issue #582; none of these sheets carries a
-        // `.mcmeta`, so a resource pack has nowhere else to declare a higher
+        // sprite's atlas offset; none of these sheets carries a `.mcmeta`, so
+        // a resource pack has nowhere else to declare a higher
         // resolution and nothing upstream would otherwise notice one.
         let uv = |loc: &ResourceLocation,
                   declared: (f32, f32),
@@ -951,10 +935,9 @@ mod tests {
     }
 
     /// A [`ContainerBackground`] fixture where every sheet and sprite is real
-    /// at `scale`× its declared vanilla size. `scale == 1` is the
-    /// 16x-equivalent input (declared == real) every other gate in this
-    /// module used before issue #582 — the one input where the bug is
-    /// invisible. `scale == 2` is a genuinely different ("32x") resolution:
+    /// at `scale`× its declared size. `scale == 1` is the 16x-equivalent input
+    /// (declared == real), where the declared-size and real-pixel calculations
+    /// coincide. `scale == 2` is a genuinely different ("32x") resolution:
     /// the discriminating input needed to tell a fraction-of-declared
     /// computation apart from a raw real-pixel one.
     fn synthetic_background_scaled(scale: u32) -> ContainerBackground {
@@ -1029,9 +1012,10 @@ mod tests {
         ]
     }
 
-    /// Issue #582, reproduced against every one of `sprite_subregion_quad`'s
-    /// five real call sites (`crate::container::geometry`): the furnace
-    /// family's lit/burn bars and the brewing stand's fuel/brew/bubble bars.
+    /// Resolution-invariance coverage for every one of
+    /// `sprite_subregion_quad`'s five real call sites
+    /// (`crate::container::geometry`): the furnace family's lit/burn bars and
+    /// the brewing stand's fuel/brew/bubble bars.
     /// Each is built at a 16x-equivalent (`scale = 1`) and a 32x
     /// (`scale = 2`) resolution, and the resolved UV span — as a fraction of
     /// the sprite's own real placed rect — must be identical at both: the
