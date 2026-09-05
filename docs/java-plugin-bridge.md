@@ -849,6 +849,15 @@ is not visible yet. A stale, forged, wrong-kind, or off-worker handle raises a
 named error before the map lookup; no ECS value, connection, world, or guard
 crosses JNI.
 
+`playerHandleIsRetained(long)` is the paired soft stale-generation control. It
+returns `true` while a player handle still resolves in the worker registry,
+including callback-only players that are deliberately not active in the
+reconciled roster; it returns `false` after a disconnect, lifecycle release,
+or slot reuse invalidates that generation. It is not a current-roster query:
+callers that need that distinction use `playerHandleIsActive(long)`. Forged,
+out-of-range, wrong-kind, and off-worker handles remain named errors so a bad
+`long` cannot be mistaken for expected lifecycle cleanup.
+
 To extend this event subset, update the source-of-truth declarations and validation in
 `native_surface`, the JNI registration and worker dispatch in `adapter`, and the lifecycle cleanup
 calls in `paper`. Keep the listener list ordered and bounded; do not turn it into a general event
@@ -1096,6 +1105,12 @@ worker snapshot: an active lifecycle handle reports `true`, a live
 callback-only handle reports `false`, and a released handle fails its
 generation check before the snapshot is read. The isolated shim fixture pins
 its `(J)Z` declaration and registration after every declaration validation.
+
+`playerHandleIsRetained(long)` has parallel controls for the generation seam:
+a live lifecycle handle remains retained, a disconnected handle reports
+`false`, and a replacement in the same slot cannot revive the departed
+generation. The fixture pins the separate `(J)Z` declaration and registration;
+strict profile and activity accessors continue to reject stale handles.
 
 `playerHandleForUuid(String)` has a matching `(Ljava/lang/String;)J` declaration and registration
 fixture. Its controls cover malformed input before map lookup, an unknown UUID after disconnect,
