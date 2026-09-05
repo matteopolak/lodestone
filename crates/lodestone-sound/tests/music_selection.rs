@@ -26,8 +26,8 @@ use std::borrow::Cow;
 use lodestone_audio::JavaRandom;
 use lodestone_sound::biome_music::{biome_music, biome_music_volume, overworld_music_for};
 use lodestone_sound::music::{
-    BackgroundMusic, Music, MusicFrequency, MusicManager, MusicSink, MusicSituation, MusicStart,
-    STARTING_DELAY, musics, next_int,
+    BackgroundMusic, Music, MusicDelay, MusicFrequency, MusicManager, MusicSink, MusicSituation,
+    MusicStart, STARTING_DELAY, musics, next_int,
 };
 
 // ---------------------------------------------------------------------------
@@ -135,8 +135,8 @@ fn the_musics_table_matches_the_jar() {
     ];
     for (music, sound, min, max, replace) in expected {
         assert_eq!(music.sound(), sound);
-        assert_eq!(music.min_delay, min, "{sound} min_delay");
-        assert_eq!(music.max_delay, max, "{sound} max_delay");
+        assert_eq!(music.min_delay.ticks(), min, "{sound} min_delay");
+        assert_eq!(music.max_delay.ticks(), max, "{sound} max_delay");
         assert_eq!(
             music.replace_current_music, replace,
             "{sound} replace_current_music"
@@ -149,7 +149,18 @@ fn the_musics_table_matches_the_jar() {
     // END's min is vanilla's own five-minute constant, not the game tracks' ten-minute one.
     assert_eq!(musics::END_BOSS.sound(), "music.dragon");
     assert_ne!(musics::END.min_delay, musics::GAME.min_delay);
-    assert_eq!(musics::END.min_delay, 6_000);
+    assert_eq!(musics::END.min_delay.ticks(), 6_000);
+}
+
+/// Track timing has a distinct type so a frequency option measured in minutes
+/// cannot silently become a tick window. Zero is valid for immediate tracks;
+/// a negative delay has no scheduling meaning and must fail validation.
+#[test]
+fn track_delays_are_non_negative_tick_values() {
+    assert_eq!(MusicDelay::from_ticks(0).ticks(), 0);
+    assert_eq!(MusicDelay::from_ticks(12_000).ticks(), 12_000);
+
+    assert_eq!(MusicDelay::try_from_ticks(-1), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -499,8 +510,8 @@ fn a_fresh_manager_waits_exactly_starting_delay_ticks_before_the_first_track() {
     // naive `assert_eq!(delay, i32::MAX)` here fails against real vanilla
     // behaviour — which is how this expectation was caught and corrected.
     mgr.tick(&situation, &mut rng, &mut sink);
-    assert_eq!(mgr.next_song_delay(), musics::GAME.max_delay);
-    assert_eq!(musics::GAME.max_delay, 24_000);
+    assert_eq!(mgr.next_song_delay(), musics::GAME.max_delay.ticks());
+    assert_eq!(musics::GAME.max_delay.ticks(), 24_000);
 
     for _ in 0..1_000 {
         mgr.tick(&situation, &mut rng, &mut sink);
@@ -508,7 +519,7 @@ fn a_fresh_manager_waits_exactly_starting_delay_ticks_before_the_first_track() {
     assert_eq!(sink.started.len(), 1, "a playing track must not be restarted");
     assert_eq!(
         mgr.next_song_delay(),
-        musics::GAME.max_delay,
+        musics::GAME.max_delay.ticks(),
         "the countdown must hold, not drain, while a track plays"
     );
 }
@@ -575,7 +586,7 @@ fn a_replacing_selection_takes_the_min_of_two_draws() {
     // random-int draw over `[0, END_BOSS.min_delay / 2]`
     // = nextInt(0, 0) = 0, and its min>=max early return consumes no draw for a
     // zero-width range.
-    let first = next_int(&mut oracle, 0, musics::END_BOSS.min_delay / 2);
+    let first = next_int(&mut oracle, 0, musics::END_BOSS.min_delay.ticks() / 2);
     // The same tick's `!isActive` branch — min with the next-song-delay computation(END_BOSS): range
     // min(0,24000)..=min(0,24000) = 0..=0, again no draw.
     let second = MusicFrequency::Default.next_song_delay(Some(&musics::END_BOSS), &mut oracle);
@@ -723,7 +734,7 @@ fn a_missing_track_is_silence_with_a_full_interval_retry() {
     // ...and the retry cadence is a full interval, not a busy loop. The floor is
     // one attempt per min_delay ticks, so over 120000 ticks at 12000..=24000 the
     // count cannot exceed 10 + the initial one. A busy loop would be ~120000.
-    let ceiling = TICKS / musics::GAME.min_delay + 1;
+    let ceiling = TICKS / musics::GAME.min_delay.ticks() + 1;
     assert!(
         sink.started.len() as i32 <= ceiling,
         "retried {} times in {TICKS} ticks (ceiling {ceiling}) — that is a busy loop, \
@@ -783,7 +794,7 @@ fn a_silent_start_rearms_the_countdown_within_two_ticks() {
     mgr.tick(&situation, &mut rng, &mut sink);
     let delay = mgr.next_song_delay();
     assert!(
-        (musics::GAME.min_delay - 1..=musics::GAME.max_delay).contains(&delay),
+        (musics::GAME.min_delay.ticks() - 1..=musics::GAME.max_delay.ticks()).contains(&delay),
         "after a silent start the countdown is {delay}, not a 12000..=24000 interval"
     );
     assert_ne!(delay, i32::MAX, "the countdown must not stay parked");
@@ -935,7 +946,12 @@ fn the_creative_flag_is_instabuild_and_mayfly() {
 #[test]
 fn both_static_and_owned_track_names_work() {
     assert!(matches!(musics::GAME.sound, Cow::Borrowed(_)));
-    let owned = Music::owned(String::from("music.overworld.jungle"), 12_000, 24_000, false);
+    let owned = Music::owned(
+        String::from("music.overworld.jungle"),
+        MusicDelay::from_ticks(12_000),
+        MusicDelay::from_ticks(24_000),
+        false,
+    );
     assert!(matches!(owned.sound, Cow::Owned(_)));
     assert_eq!(owned, *biome_music("jungle").unwrap().default.as_ref().unwrap());
 }
