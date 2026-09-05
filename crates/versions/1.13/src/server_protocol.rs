@@ -26,6 +26,7 @@ use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
 use crate::packets::settings::Settings;
+use crate::packets::window::ServerboundHeldItemSlot;
 
 const CTX: Ctx = Ctx { version: PROTOCOL };
 const COMPRESSION_THRESHOLD: i32 = 256;
@@ -354,6 +355,15 @@ impl ServerProtocol for V404ServerProtocol {
                     }
                     _ => ServerBound::Ignored,
                 }
+            }
+            State::Play if packet_id == play::serverbound::HELD_ITEM_SLOT => {
+                let Some(slot) = decode_full::<ServerboundHeldItemSlot>(payload)
+                    .and_then(|packet| u8::try_from(packet.slot).ok())
+                    .filter(|&slot| slot < 9)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::CarriedItemChanged { slot }
             }
             State::Play if packet_id == play::serverbound::TELEPORT_CONFIRM => {
                 decode_full::<TeleportConfirm>(payload).map_or(ServerBound::Ignored, |confirm| {

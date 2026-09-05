@@ -72,6 +72,7 @@ Protocols 756 and 758 accept the signed 16-bit held-item selection packet only f
 0 through 8. The selected slot enters the shared `CarriedItemChanged` inventory consumer; malformed,
 out-of-range, trailing, and pre-Play inputs are ignored without mutating player state.
 Protocols 498, 578, and 754 enforce the same boundary through their own packet-id tables.
+Protocol 404 applies that boundary at the same shared consumer after its own registry selection.
 
 ## Client compatibility roadmap
 
