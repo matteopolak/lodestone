@@ -164,7 +164,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 21] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 24] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -200,6 +200,18 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 21] = [
     NativeMethodSpec {
         name: "blockHandlePosition",
         descriptor: "(J)Ljava/lang/String;",
+    },
+    NativeMethodSpec {
+        name: "blockHandleX",
+        descriptor: "(J)I",
+    },
+    NativeMethodSpec {
+        name: "blockHandleY",
+        descriptor: "(J)I",
+    },
+    NativeMethodSpec {
+        name: "blockHandleZ",
+        descriptor: "(J)I",
     },
     NativeMethodSpec {
         name: "blockHandleStateId",
@@ -767,6 +779,15 @@ fn method_id(
             jni_str!("blockHandlePosition"),
             jni_sig!("(J)Ljava/lang/String;"),
         ),
+        ("blockHandleX", "(J)I") => {
+            env.get_static_method_id(class, jni_str!("blockHandleX"), jni_sig!("(J)I"))
+        }
+        ("blockHandleY", "(J)I") => {
+            env.get_static_method_id(class, jni_str!("blockHandleY"), jni_sig!("(J)I"))
+        }
+        ("blockHandleZ", "(J)I") => {
+            env.get_static_method_id(class, jni_str!("blockHandleZ"), jni_sig!("(J)I"))
+        }
         ("blockHandleStateId", "(J)I") => {
             env.get_static_method_id(class, jni_str!("blockHandleStateId"), jni_sig!("(J)I"))
         }
@@ -882,6 +903,24 @@ fn register_method(
                 method.descriptor,
             )
         }
+        ("blockHandleX", "(J)I") => adapter::register_block_handle_x_query(
+            env,
+            class,
+            method.name,
+            method.descriptor,
+        ),
+        ("blockHandleY", "(J)I") => adapter::register_block_handle_y_query(
+            env,
+            class,
+            method.name,
+            method.descriptor,
+        ),
+        ("blockHandleZ", "(J)I") => adapter::register_block_handle_z_query(
+            env,
+            class,
+            method.name,
+            method.descriptor,
+        ),
         ("blockHandleStateId", "(J)I") => adapter::register_block_handle_state_id_query(
             env,
             class,
@@ -1131,6 +1170,9 @@ mod tests {
                     name: "blockHandlePosition",
                     descriptor: "(J)Ljava/lang/String;",
                 },
+                NativeMethodSpec { name: "blockHandleX", descriptor: "(J)I" },
+                NativeMethodSpec { name: "blockHandleY", descriptor: "(J)I" },
+                NativeMethodSpec { name: "blockHandleZ", descriptor: "(J)I" },
                 NativeMethodSpec { name: "blockHandleStateId", descriptor: "(J)I" },
                 NativeMethodSpec {
                     name: "currentPlayerHandle",
@@ -1348,6 +1390,9 @@ mod tests {
              public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
              public static native long currentBlockHandle(); \
              public static native String blockHandlePosition(long handle); \
+             public static native int blockHandleX(long handle); \
+             public static native int blockHandleY(long handle); \
+             public static native int blockHandleZ(long handle); \
              public static native int blockHandleStateId(long handle); \
              public static native long currentPlayerHandle(); \
              public static native String playerHandleName(long handle); \
@@ -1438,6 +1483,9 @@ mod tests {
              public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
              public static native long currentBlockHandle(); \
              public static native String blockHandlePosition(long handle); \
+             public static native int blockHandleX(long handle); \
+             public static native int blockHandleY(long handle); \
+             public static native int blockHandleZ(long handle); \
              public static native int blockHandleStateId(long handle); \
              public static native long currentPlayerHandle(); \
              public static native String playerHandleName(long handle); \

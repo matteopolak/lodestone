@@ -766,6 +766,12 @@ one-slot worker command queue, and any world read or write from a listener must 
 `WorldPort` request/response seam rather than reaching an ECS guard. The
 `IsolatedPaperShim.blockHandlePosition(long)` resolver returns a copied coordinate string while the
 handle is live; stale, forged, out-of-range, and worker-off-thread calls fail as named Java errors.
+The typed `blockHandleX(long)`, `blockHandleY(long)`, and `blockHandleZ(long)` accessors return the
+same copied coordinates as `(J)I` values. They resolve the handle and its generation first, then
+read only the worker-owned payload: they deliberately make no host query, so they cannot turn a
+coordinate lookup into chunk generation or a server-world read. Hermetic controls use coordinates
+whose components differ and then release the handle to prove both the selected component and the
+stale-generation failure path.
 `blockHandleStateId(long)` first generation-checks that same handle, then asks the host's bounded
 resident-block query port for the state at its copied coordinate. This preserves the distinction
 between air and an unavailable column, and a stale handle fails before a host query is sent.

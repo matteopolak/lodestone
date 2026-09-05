@@ -775,12 +775,13 @@ fn release_active_player_handle(
 
 fn resolve_resident_block_handle(
     bits: i64,
+    operation: &str,
 ) -> Result<(i32, i32, i32), AdapterError> {
     let handle = ObjectRef::from_bits(bits, ObjectKind::Block);
     RESIDENT_OBJECT_HANDLES.with(|slot| {
         let handles = slot.borrow();
         let handles = handles.as_ref().ok_or_else(|| {
-            AdapterError::new("blockHandlePosition requires the adapter worker thread")
+            AdapterError::new(format!("{operation} requires the adapter worker thread"))
         })?;
         handles
             .resolve(handle, ObjectKind::Block)
@@ -791,8 +792,24 @@ fn resolve_resident_block_handle(
                     actual: ObjectKind::Player,
                 }),
             })
-            .map_err(|error| AdapterError::new(format!("blockHandlePosition: {error}")))
+            .map_err(|error| AdapterError::new(format!("{operation}: {error}")))
     })
+}
+
+/// Returns one copied coordinate from a generation-checked block handle.
+///
+/// The adapter mints a handle only while delivering a host-confirmed resident
+/// block-state change. Its position remains a worker-owned value, so these
+/// accessors need neither a world-port request nor an ECS pointer. Each named
+/// accessor resolves the generation before returning a coordinate, making a
+/// released or wrong-kind `long` fail loudly instead of reading a replacement.
+fn resident_block_handle_coordinate(
+    bits: i64,
+    coordinate: usize,
+    operation: &str,
+) -> Result<jint, AdapterError> {
+    let position = resolve_resident_block_handle(bits, operation)?;
+    Ok([position.0, position.1, position.2][coordinate])
 }
 
 /// Resolves a block handle before requesting its current state from the host.
@@ -803,9 +820,7 @@ fn resolve_resident_block_handle(
 /// host still owns the distinction between a resident air block and an absent
 /// column.
 pub(crate) fn resident_block_handle_state_id(bits: i64) -> Result<jint, AdapterError> {
-    let (x, y, z) = resolve_resident_block_handle(bits).map_err(|error| {
-        AdapterError::new(error.to_string().replace("blockHandlePosition", "blockHandleStateId"))
-    })?;
+    let (x, y, z) = resolve_resident_block_handle(bits, "blockHandleStateId")?;
     let port = CALLBACK_PORT.with(|slot| slot.borrow().clone())
         .ok_or_else(|| AdapterError::new("blockHandleStateId requires the adapter worker thread"))?;
     let state = port.request(BlockStateQuery { x, y, z })
@@ -1731,6 +1746,73 @@ pub(crate) fn register_block_handle_position_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_block_handle_x_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    register_block_handle_coordinate_query(
+        env,
+        class,
+        method_name,
+        descriptor,
+        native_block_handle_x,
+    )
+}
+
+#[allow(unsafe_code)]
+pub(crate) fn register_block_handle_y_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    register_block_handle_coordinate_query(
+        env,
+        class,
+        method_name,
+        descriptor,
+        native_block_handle_y,
+    )
+}
+
+#[allow(unsafe_code)]
+pub(crate) fn register_block_handle_z_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    register_block_handle_coordinate_query(
+        env,
+        class,
+        method_name,
+        descriptor,
+        native_block_handle_z,
+    )
+}
+
+#[allow(unsafe_code)]
+fn register_block_handle_coordinate_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+    function: extern "system" fn(EnvUnowned<'_>, JClass<'_>, jlong) -> jint,
+) -> jni::errors::Result<()> {
+    // SAFETY: each validated static native accepts one opaque jlong and
+    // returns a copied coordinate from the worker-local value registry. It
+    // never requests or publishes a server-owned pointer.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(&name, &signature, function as *mut c_void);
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_block_handle_state_id_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -2108,10 +2190,49 @@ extern "system" fn native_block_handle_position<'local>(
     env.with_env(|env| {
         let _depth = CallbackDepthGuard::enter()
             .map_err(|error| AdapterError::new(error.to_string()))?;
-        let position = resolve_resident_block_handle(bits)?;
+        let position = resolve_resident_block_handle(bits, "blockHandlePosition")?;
         env.new_string(format!("{},{},{}", position.0, position.1, position.2))
             .map(|value| value.into_raw())
             .map_err(|error| AdapterError::new(format!("blockHandlePosition: {error}")))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_block_handle_x<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resident_block_handle_coordinate(bits, 0, "blockHandleX")
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_block_handle_y<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resident_block_handle_coordinate(bits, 1, "blockHandleY")
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_block_handle_z<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resident_block_handle_coordinate(bits, 2, "blockHandleZ")
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -3462,16 +3583,37 @@ mod tests {
             )),
         );
         assert_eq!(
-            resolve_resident_block_handle(first.to_bits()).expect("live handle position"),
+            resolve_resident_block_handle(first.to_bits(), "blockHandlePosition")
+                .expect("live handle position"),
             (11, 1, 4),
+        );
+        assert_eq!(
+            resident_block_handle_coordinate(first.to_bits(), 0, "blockHandleX"),
+            Ok(11),
+        );
+        assert_eq!(
+            resident_block_handle_coordinate(first.to_bits(), 1, "blockHandleY"),
+            Ok(1),
+        );
+        assert_eq!(
+            resident_block_handle_coordinate(first.to_bits(), 2, "blockHandleZ"),
+            Ok(4),
+            "coordinates are copied from the worker registry without a world request",
         );
 
         assert_eq!(release_resident_handles(&identity), 1);
         assert_eq!(
-            resolve_resident_block_handle(first.to_bits()),
+            resolve_resident_block_handle(first.to_bits(), "blockHandlePosition"),
             Err(AdapterError::new(
                 "blockHandlePosition: the referenced object no longer exists",
             )),
+        );
+        assert_eq!(
+            resident_block_handle_coordinate(first.to_bits(), 0, "blockHandleX"),
+            Err(AdapterError::new(
+                "blockHandleX: the referenced object no longer exists",
+            )),
+            "released bits must not resolve through a recycled block slot",
         );
         assert_eq!(
             RESIDENT_OBJECT_HANDLES.with(|slot| {
