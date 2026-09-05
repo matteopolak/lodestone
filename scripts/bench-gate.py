@@ -156,6 +156,39 @@ def load_baseline(path: Path) -> dict:
     return doc
 
 
+def validate_entries(path: Path, entries: list[object]) -> None:
+    """Reject malformed or duplicate baseline keys before counting results.
+
+    A duplicate `(scene, metric)` is not two observations: `load_results`
+    deliberately collapses that key to its newest recorded value. Accepting
+    duplicate baseline entries would therefore let one observed metric satisfy
+    `--min-compared` more than once and make the coverage count dishonest.
+    """
+    seen: dict[tuple[str, str], int] = {}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise GateError(f"{path}: baseline entry #{index} must be an object")
+        for field in ("metric", "scene", "unit", "value"):
+            if field not in entry:
+                raise GateError(
+                    f"{path}: an entry is missing required field {field!r}"
+                )
+        metric = entry["metric"]
+        scene = entry["scene"]
+        if not isinstance(metric, str) or not isinstance(scene, str):
+            raise GateError(
+                f"{path}: baseline entry #{index} requires string 'metric' and 'scene'"
+            )
+        key = (scene, metric)
+        previous = seen.get(key)
+        if previous is not None:
+            raise GateError(
+                f"{path}: duplicate baseline key (scene={scene!r}, metric={metric!r}) "
+                f"in entries #{previous} and #{index}; each metric must be listed once"
+            )
+        seen[key] = index
+
+
 def check_unit(entry: dict, where: str) -> None:
     unit = entry.get("unit")
     if unit in ALLOWED_UNITS:
@@ -272,6 +305,7 @@ def run_gate(
 
     for path in baselines:
         doc = load_baseline(path)
+        validate_entries(path, doc["entries"])
         bench = doc.get("bench", path.stem)
         observed = load_results(results_dir / f"{bench}.jsonl")
         lines.append(f"--- {bench} ({len(doc['entries'])} baselined) ---")
@@ -289,11 +323,6 @@ def run_gate(
             )
             continue
         for entry in doc["entries"]:
-            for field in ("metric", "scene", "unit", "value"):
-                if field not in entry:
-                    raise GateError(
-                        f"{path}: an entry is missing required field {field!r}"
-                    )
             check_unit(entry, str(path))
             status, line = compare_one(
                 entry, observed.get((entry["scene"], entry["metric"]))
@@ -370,6 +399,7 @@ def run_update(
     touched = 0
     for path in baselines:
         doc = load_baseline(path)
+        validate_entries(path, doc["entries"])
         bench = doc.get("bench", path.stem)
         observed = load_results(results_dir / f"{bench}.jsonl")
         changed = False

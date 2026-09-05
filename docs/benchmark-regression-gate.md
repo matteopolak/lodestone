@@ -91,6 +91,8 @@ what a count gate can do.
   commit, via `just bench-baseline-update` (`scripts/bench-gate.py --update`). The
   update rewrites values only — tolerances and flags survive, so re-baselining can
   never quietly widen a band, and the control suite has a mutation proving that.
+  Each `(scene, metric)` key must appear once per baseline; a duplicate is rejected
+  before it can inflate the coverage count.
 - **What happens on a legitimate improvement**: exactly the same thing. The band is
   **two-way**: an unexplained improvement fails too. That is deliberate. A one-way
   ratchet turns a baseline into noise, because the most common cause of a number
@@ -107,7 +109,7 @@ what a count gate can do.
 
 ## How the gate cannot pass vacuously
 
-Three separate guards, each with a check in the control suite and a mutation proving the
+Four separate guards, each with a check in the control suite and a mutation proving the
 check would notice its removal:
 
 1. **`--min-compared N`** — fewer than `N` metrics actually compared exits **2**, not 0.
@@ -118,6 +120,10 @@ check would notice its removal:
    regression in every metric it owns.
 3. **A required metric that stopped being recorded fails**, rather than silently
    dropping out of the comparison.
+4. **A duplicate `(scene, metric)` baseline key exits 2**, before it can make one
+   observed record count more than once toward `--min-compared`. A duplicate or
+   structurally malformed baseline entry is a gate-input failure, not evidence that
+   the benchmark passed.
 
 Exit status is `0` inside band, `1` drift or a required metric absent, `2` the gate did
 not really run. Read it directly. `cargo test --workspace | grep … | tail` once reported
@@ -127,7 +133,7 @@ success in this repo while cargo returned 101.
 
 `python3 scripts/test-bench-gate.py` — stdlib only, no pytest, the same shape as
 `scripts/test-profile-cost-table.py` and for the same reason (these are Python scripts
-and no crate owns them). 25 checks over synthetic fixtures in a temporary directory;
+and no crate owns them). 28 checks over synthetic fixtures in a temporary directory;
 nothing is written inside the checkout.
 
 The centre of it is a planted regression in the exact shape of the real one: a fixture
@@ -137,7 +143,7 @@ that moved, and must not implicate the one that did not. Its control is the iden
 fixture unplanted, which must exit 0 — without that pairing, a gate that always failed
 would satisfy every red-expecting check in the file.
 
-Every guard is then mutation-tested. Seven broken copies of `bench-gate.py` (via
+Every guard is then mutation-tested. Eight broken copies of `bench-gate.py` (via
 `BENCH_GATE_PATH`, which points the suite at a copy so nothing in the shared checkout is
 edited) each turn the suite red:
 
@@ -150,6 +156,7 @@ edited) each turn the suite red:
 | unrun bench treated as green | a missing log is "did not run" even with the count guard off |
 | ignore unit mismatch | a unit change is a failure, not a silent comparison |
 | `--update` widens the tolerance | `--update` preserves the tolerance |
+| accept duplicate baseline keys | one observed record cannot satisfy coverage twice |
 
 Two of these were written *after* a mutation survived, which is the whole point of
 running the mutations rather than reasoning about them: the "unrun bench" check was
