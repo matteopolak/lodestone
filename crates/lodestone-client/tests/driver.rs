@@ -787,16 +787,10 @@ async fn ping_answered_regardless_of_keep_alive_policy() {
 /// A server-pushed resource pack is answered automatically, from the driver
 /// rather than from anything shell-side.
 ///
-/// `route(&ClientEvent::ResourcePackPushed)` is `Route::NOWHERE` in
-/// `lodestone-model` — deliberately, per `docs/event-routing.md` and the doc
-/// on `Driver::emit`'s own `ResourcePackPushed` arm: the shell's event loop
-/// does not start until after login, so a shell-side producer would be
-/// correct-looking and permanently too late for a pack pushed during
-/// Configuration. A prior audit flagged `ClientAction::ResourcePackResponse`
-/// as an island on the strength of that `NOWHERE` routing alone — the same
-/// false-negative shape `docs/event-routing.md` already documents for `Ping`
-/// (also `Route::NOWHERE`, also answered here, also currently mis-flagged as
-/// unconsumed by that same doc's prose). This is the regression gate the
+/// `route(&ClientEvent::ResourcePackPushed)` is `Route::client` in
+/// `lodestone-model`: the shell's event loop does not start until after login,
+/// so a shell-side producer would be correct-looking and permanently too late
+/// for a pack pushed during Configuration. This is the regression gate the
 /// existing wiring never had: the v26-2 round-trip test in
 /// `resource_pack_push.rs` sends the reply by calling `send_action` by hand,
 /// so it cannot tell an automatic answer from a manual one. This test never

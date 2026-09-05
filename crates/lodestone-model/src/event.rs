@@ -4220,6 +4220,9 @@ pub fn route(event: &ClientEvent) -> Route {
         // router. It is therefore consumed by the client even though no action
         // is emitted for the store operation itself.
         ClientEvent::CookieStored { .. } => CLIENT,
+        // `Driver::emit` immediately answers the pushed pack before surfacing
+        // the event, so configuration cannot stall waiting for the shell.
+        ClientEvent::ResourcePackPushed { .. } => CLIENT,
         // `Driver::emit` records the existing `SessionOutcome::Transferred`
         // result before surfacing this event, so a caller can reconnect with
         // the target and the driver's preserved cookie store.
@@ -4440,7 +4443,7 @@ mod block_state_ref_tests {
 
 #[cfg(test)]
 mod route_tests {
-    use super::{ClientEvent, Difficulty, LevelEventData, Route, route};
+    use super::{ClientEvent, Difficulty, LevelEventData, Route, Uuid, route};
     use crate::{ids::Identifier, math::BlockPos};
 
     /// **The guard that protects the guard.**
@@ -4555,6 +4558,24 @@ mod route_tests {
         let r = route(&event);
         assert!(!r.ingest && !r.session && !r.shell);
         assert!(r.client, "the driver stores cookies automatically");
+        assert!(!r.is_island());
+    }
+
+    /// `Driver::emit` answers a pushed resource pack before the event reaches
+    /// any router. The route must record that client-internal response so the
+    /// automatically answered event is not counted as an island.
+    #[test]
+    fn resource_pack_push_reaches_the_client_driver() {
+        let event = ClientEvent::ResourcePackPushed {
+            id: Uuid::nil(),
+            url: "https://example.invalid/pack.zip".into(),
+            hash: String::new(),
+            required: false,
+            prompt: None,
+        };
+        let r = route(&event);
+        assert!(!r.ingest && !r.session && !r.shell);
+        assert!(r.client, "the driver answers resource-pack pushes automatically");
         assert!(!r.is_island());
     }
 
