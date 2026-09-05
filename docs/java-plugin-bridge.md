@@ -805,6 +805,10 @@ bounded host port. The dedicated host matches the UUID against its live player s
 world servicing has returned; disconnect, stale-generation, and non-finite-coordinate cases fail
 by name rather than becoming an origin position. Each component is a fresh live read, so callers
 that require an atomic pose snapshot need a later object-shaped API.
+The player-handle entity-ID method uses that same live snapshot and returns the server's current
+network entity ID. The ID deliberately is not stored in the long-lived handle: reconnect and
+roster reconciliation remain authoritative, and an unavailable player is an error rather than a
+plausible sentinel.
 The generic registry separately reports wrong-kind use. A live player handle may
 also resolve through `playerHandleName(long)` and `playerHandleUuid(long)`. The
 latter returns a canonical lowercase UUID string from the fixed sixteen profile
