@@ -85,7 +85,7 @@ registry, and mob simulation. It is a thread-local diagnostic rather than a runt
 so release builds add no lock-tracking contention. A new callback-held handle must be placed in
 that order before it can be acquired from scheduled work.
 
-### Block-entity ticking is gated by residency, not by distance
+### Block-entity ticking is chunk-owned, serial, and gated by residency
 
 Block entities (hoppers foremost, since only that kind actually probes world state each tick) used
 to be ticked from one flat, ever-growing registry scanned unconditionally at full rate regardless of
@@ -105,6 +105,15 @@ to a currently loaded chunk. The registry itself still has **no eviction of its 
 block entity's simulated state must be able to keep advancing the moment its chunk becomes resident
 again, exactly as if it had never left, which is a different property from whether it gets ticked on
 any given pass.
+
+`BlockEntityRegistry::tick_plan` then snapshots the registry into one owner per chunk and runs those
+owners serially in `(chunk x, chunk z, local y, local z, local x)` order. This replaces a storage-map
+iteration order with an explicit simulation order without adding workers or changing which entities
+tick. A furnace lit transition is carried out as `BlockEntityTickEffect`, recording its chunk owner,
+and only then handed to the world writer that mutates the visible block state and publishes the update.
+That owner-to-writer hand-off is intentionally explicit: a later region executor must preserve it (or
+replace it with a validated cross-owner message), rather than letting a chunk-local tick mutate shared
+world state through an untracked borrow.
 
 ### Profiling the tick loop and world generation
 
@@ -162,6 +171,10 @@ cold-region number is the more dramatic-looking figure.
   eviction is not the same event as "this world state no longer exists," and conflating them would
   silently stop a block entity's simulated state from resuming correctly once its chunk becomes
   resident again.
+- **Changing block-entity execution ownership**: preserve `BlockEntityRegistry::tick_plan`'s serial
+  order and route `BlockEntityTickEffect` through an explicit owner-to-world-writer hand-off. Hopper
+  neighbours are vertical and remain inside one chunk today; any future lateral container interaction
+  needs a separate cross-chunk message rather than borrowing a neighbour owner's state directly.
 - **Adding a new tick-loop phase or worldgen stage to the profiler**: keep the boundary at a clean
   section transition outside any held lock, and keep the instrument's own zero-cost idle-world
   control passing — a boundary that accidentally spans part of the wait between ticks, or leaks a

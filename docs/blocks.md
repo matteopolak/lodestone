@@ -265,7 +265,10 @@ value type with one `tick(&mut self) -> â€¦Tick` method reporting what changed â
 no `ChunkSource`, no connection, no async. `BlockEntityRegistry` is the shared
 `HashMap<BlockPos, BlockEntity>` (an enum over the four types, plus a
 27-slot `Container` variant for chests/trapped chests/barrels), advanced by
-the unified 20 Hz tick loop alongside the mob simulation. Placement honours
+the unified 20 Hz tick loop alongside the mob simulation. Each pass first
+snapshots a deterministic chunk-owner plan, then advances those owners serially;
+furnace lit flips carry the producing owner back to the shared world writer as
+an explicit hand-off. Placement honours
 the held item for these blocks specifically (via `block_entity_for_item`);
 right-clicking an already-registered furnace or hopper opens its real screen
 (`OPEN_SCREEN`/`CONTAINER_SET_CONTENT`/`CONTAINER_SET_SLOT`/

@@ -2170,7 +2170,17 @@ async fn run_tick_loop_with_weather_impl<W>(
         // streamed — the same shape as the target-block write just above, and
         // the one production caller that module's own doc names as holding
         // both a `ChunkSource` and the registry.
-        for (pos, lit) in furnace_lit_changes {
+        for effect in furnace_lit_changes {
+            let pos = effect.pos;
+            let lit = effect.lit;
+            debug_assert_eq!(
+                effect.owner,
+                crate::block_entities::BlockEntityTickOwner::Chunk {
+                    cx: pos.x.div_euclid(16),
+                    cz: pos.z.div_euclid(16),
+                },
+                "a block-entity effect must be handed to the writer by its position's owner"
+            );
             let state = world.block_state(pos.x, pos.y, pos.z);
             let new_state =
                 crate::redstone::with_property(&state, "lit", if lit { "true" } else { "false" });

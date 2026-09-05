@@ -28,9 +28,13 @@ provides the input contract a future partitioner must preserve.
 `TickRegionPlan::owner_workloads` reports the current real ownership (one
 single-chunk workload per selected column). `FollowArea::spawnable_chunks`
 consumes that report on the live tick path, so the count cannot become an
-unobserved parallel data structure. The scheduled queues, block entities,
-entities, natural-spawn planning, world border, game rules, time, weather and
-other cross-column work remain global. For a named populated scene,
+unobserved parallel data structure. Scheduled queues and block entities now
+have their own chunk-local ownership seams: `ChunkScheduledTickQueue` keeps
+pending ticks at their target chunk and merges due heads into one serial order,
+while `BlockEntityRegistry::tick_plan` assigns its tick-start snapshot to
+chunk owners and hands visible furnace writes back to the global world writer
+as `BlockEntityTickEffect`. Entities, natural-spawn planning, world border,
+game rules, time, weather and other cross-column work remain global. For a named populated scene,
 `FollowArea::candidate_region_workload` groups the same selected chunks into an
 observer-supplied spatial edge using Euclidean division. Its sorted cell counts,
 total, and largest-cell count establish whether that scene is spatially spread

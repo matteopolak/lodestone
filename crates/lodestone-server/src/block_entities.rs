@@ -45,7 +45,7 @@
 //!   does not write anything back — this module's job is *simulating*, not
 //!   *rendering*.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use lodestone_core::Nbt;
@@ -876,6 +876,77 @@ fn placed_block_entity_for_item(item: &str) -> Option<(&'static str, PlacedBlock
     Some(placed)
 }
 
+/// The region-local owner of one block entity during a serial tick pass.
+///
+/// The current executor still advances every owner on one thread. This type
+/// makes the owner that produces an outbound block-state write visible before
+/// a future region executor changes where that write is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockEntityTickOwner {
+    /// The chunk column containing the entity at `(cx, cz)`.
+    Chunk { cx: i32, cz: i32 },
+}
+
+/// One block entity assigned to its chunk-local [`BlockEntityTickOwner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockEntityTickAssignment {
+    /// The owner that advances `pos` during this pass.
+    pub owner: BlockEntityTickOwner,
+    /// The entity position.
+    pub pos: BlockPos,
+}
+
+/// A deterministic, chunk-owned view of the entities present at tick start.
+///
+/// Chunks are visited in `(cx, cz)` order, then their entities in `(y, z, x)`
+/// order. The plan is a snapshot: insertions made after it is built wait for
+/// the next tick, exactly as they did when the registry snapshotted its keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockEntityTickPlan {
+    assignments: Vec<BlockEntityTickAssignment>,
+}
+
+impl BlockEntityTickPlan {
+    fn from_positions(positions: impl IntoIterator<Item = BlockPos>) -> Self {
+        let mut by_chunk: BTreeMap<(i32, i32), Vec<BlockPos>> = BTreeMap::new();
+        for pos in positions {
+            by_chunk
+                .entry((pos.x.div_euclid(16), pos.z.div_euclid(16)))
+                .or_default()
+                .push(pos);
+        }
+        let assignments = by_chunk
+            .into_iter()
+            .flat_map(|((cx, cz), mut positions)| {
+                positions.sort_unstable_by_key(|pos| (pos.y, pos.z, pos.x));
+                positions.into_iter().map(move |pos| BlockEntityTickAssignment {
+                    owner: BlockEntityTickOwner::Chunk { cx, cz },
+                    pos,
+                })
+            })
+            .collect();
+        Self { assignments }
+    }
+
+    /// Every entity assignment in this tick's deterministic serial order.
+    #[must_use]
+    pub fn assignments(&self) -> &[BlockEntityTickAssignment] {
+        &self.assignments
+    }
+}
+
+/// A block-state write handed from a chunk-owned entity tick to the world
+/// writer that owns visible state and client publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockEntityTickEffect {
+    /// The chunk owner that produced this effect.
+    pub owner: BlockEntityTickOwner,
+    /// The block-state position the global writer must update.
+    pub pos: BlockPos,
+    /// The furnace's new `lit` value.
+    pub lit: bool,
+}
+
 /// A [`BlockPos`]-keyed map of live [`BlockEntity`] values — the world's own
 /// set of ticking furnaces/composters/hoppers/brewing stands. See the module
 /// doc comment for what this closes and what it still does not.
@@ -939,18 +1010,28 @@ impl BlockEntityRegistry {
         self.entities.get_mut(&pos)
     }
 
+    /// Snapshots the current registry into deterministic chunk-local owners.
+    ///
+    /// This does not tick anything. It is public so a future owner-specific
+    /// executor can consume the same assignment contract without reaching
+    /// into the registry's storage map.
+    #[must_use]
+    pub fn tick_plan(&self) -> BlockEntityTickPlan {
+        BlockEntityTickPlan::from_positions(self.entities.keys().copied())
+    }
+
     /// Advances every registered entity by exactly one tick.
     ///
-    /// Positions are snapshotted up front (`Vec<BlockPos>`, not a live
+    /// Positions are snapshotted up front (`BlockEntityTickPlan`, not a live
     /// iterator over `self.entities`) because [`tick_hopper`](Self::tick_hopper)
     /// needs to mutate the map (remove-then-reinsert three entries) while a
     /// plain `HashMap` iterator would forbid mutating the map it is walking.
     /// The snapshot cannot observe an entity a tick *added* mid-pass (nothing
     /// here adds one — only placement does, and placement never runs
     /// concurrently with a tick since both hold the same registry lock, see
-    /// [`BlockEntityHandle`]), so this is a complete, order-independent pass
+    /// [`BlockEntityHandle`]), so this is a complete, deterministic serial pass
     /// over exactly what existed when the tick started.
-    pub fn tick_all(&mut self) -> Vec<(BlockPos, bool)> {
+    pub fn tick_all(&mut self) -> Vec<BlockEntityTickEffect> {
         self.tick_all_with_hopper_lock(&|_| true, &|_| true)
     }
 
@@ -991,18 +1072,20 @@ impl BlockEntityRegistry {
     /// this registry, and a hopper ticked through the shorthand can never be
     /// locked or bounded.
     ///
-    /// Returns every furnace-kind position whose `lit` flipped this tick
-    /// (`(pos, now_lit)`), for that same caller to write through
-    /// `ChunkSource::set_block` — see [`BlockEntity::tick_non_hopper`]'s own
-    /// doc for why this registry cannot write it itself.
+    /// Returns every furnace-kind `BlockEntityTickEffect` whose `lit` flipped
+    /// this tick. The effect is an explicit hand-off from the chunk owner to
+    /// the world writer, which calls `ChunkSource::set_block` and publishes the
+    /// visible change — see [`BlockEntity::tick_non_hopper`]'s own doc for why
+    /// this registry cannot write it itself.
     pub fn tick_all_with_hopper_lock(
         &mut self,
         is_loaded: &dyn Fn(BlockPos) -> bool,
         enabled: &dyn Fn(BlockPos) -> bool,
-    ) -> Vec<(BlockPos, bool)> {
-        let positions: Vec<BlockPos> = self.entities.keys().copied().collect();
+    ) -> Vec<BlockEntityTickEffect> {
+        let plan = self.tick_plan();
         let mut lit_changes = Vec::new();
-        for pos in positions {
+        for assignment in plan.assignments() {
+            let pos = assignment.pos;
             if !is_loaded(pos) {
                 continue;
             }
@@ -1012,7 +1095,11 @@ impl BlockEntityRegistry {
             } else if let Some(entity) = self.entities.get_mut(&pos)
                 && let Some(now_lit) = entity.tick_non_hopper()
             {
-                lit_changes.push((pos, now_lit));
+                lit_changes.push(BlockEntityTickEffect {
+                    owner: assignment.owner,
+                    pos,
+                    lit: now_lit,
+                });
             }
         }
         lit_changes
@@ -1492,6 +1579,79 @@ mod tests {
         assert!(reg.is_empty());
     }
 
+    /// The ownership plan must be independent of `HashMap` bucket layout: a
+    /// later executor may split at these assignments, while today's executor
+    /// consumes the same sequence serially. Negative coordinates are the
+    /// control for truncation-toward-zero accidentally assigning `x = -1` to
+    /// the origin chunk.
+    #[test]
+    fn tick_plan_groups_entities_by_chunk_in_canonical_serial_order() {
+        let mut reg = BlockEntityRegistry::new();
+        let positions = [
+            BlockPos::new(16, 70, 0),
+            BlockPos::new(-1, 72, 0),
+            BlockPos::new(1, 80, 1),
+            BlockPos::new(1, 64, 1),
+        ];
+        for pos in positions {
+            reg.insert(pos, BlockEntity::Composter(Composter::new()));
+        }
+
+        assert_eq!(
+            reg.tick_plan().assignments(),
+            [
+                BlockEntityTickAssignment {
+                    owner: BlockEntityTickOwner::Chunk { cx: -1, cz: 0 },
+                    pos: BlockPos::new(-1, 72, 0),
+                },
+                BlockEntityTickAssignment {
+                    owner: BlockEntityTickOwner::Chunk { cx: 0, cz: 0 },
+                    pos: BlockPos::new(1, 64, 1),
+                },
+                BlockEntityTickAssignment {
+                    owner: BlockEntityTickOwner::Chunk { cx: 0, cz: 0 },
+                    pos: BlockPos::new(1, 80, 1),
+                },
+                BlockEntityTickAssignment {
+                    owner: BlockEntityTickOwner::Chunk { cx: 1, cz: 0 },
+                    pos: BlockPos::new(16, 70, 0),
+                },
+            ],
+            "chunk order, then local position order, is the serial execution contract"
+        );
+    }
+
+    /// Two chunk owners handing lit flips to the global world writer must
+    /// retain the plan's order. The same insertion sequence is intentionally
+    /// scrambled, so this is not a test of insertion order or hash layout.
+    #[test]
+    fn tick_effects_preserve_chunk_owner_handoff_order() {
+        let mut reg = BlockEntityRegistry::new();
+        for pos in [BlockPos::new(16, 70, 0), BlockPos::new(-1, 70, 0)] {
+            let mut furnace = Furnace::new(FurnaceKind::Furnace);
+            furnace.set_fuel(Some(stack("minecraft:coal", 1)));
+            furnace.set_input(Some(stack("minecraft:iron_ore", 1)));
+            reg.insert(pos, BlockEntity::Furnace(furnace));
+        }
+
+        assert_eq!(
+            reg.tick_all(),
+            [
+                BlockEntityTickEffect {
+                    owner: BlockEntityTickOwner::Chunk { cx: -1, cz: 0 },
+                    pos: BlockPos::new(-1, 70, 0),
+                    lit: true,
+                },
+                BlockEntityTickEffect {
+                    owner: BlockEntityTickOwner::Chunk { cx: 1, cz: 0 },
+                    pos: BlockPos::new(16, 70, 0),
+                    lit: true,
+                },
+            ],
+            "the global world writer must receive effects in the serial owner order"
+        );
+    }
+
     /// A furnace ticked through the registry behaves exactly like one ticked
     /// directly — the registry is a location, not a reimplementation. Loaded
     /// with fuel and ore, it lights on the first `tick_all` and reports the
@@ -1530,7 +1690,14 @@ mod tests {
         furnace.set_input(Some(stack("minecraft:iron_ore", 1)));
         reg.insert(pos, BlockEntity::Furnace(furnace));
 
-        assert_eq!(reg.tick_all(), vec![(pos, true)]);
+        assert_eq!(
+            reg.tick_all(),
+            vec![BlockEntityTickEffect {
+                owner: BlockEntityTickOwner::Chunk { cx: 0, cz: 0 },
+                pos,
+                lit: true,
+            }]
+        );
         assert_eq!(
             reg.tick_all(),
             Vec::new(),
@@ -1800,7 +1967,15 @@ mod tests {
         furnace.set_input(Some(stack("minecraft:iron_ore", 1)));
         reg.insert(pos, BlockEntity::Furnace(furnace));
 
-        assert_eq!(reg.tick_all(), vec![(pos, true)], "must light on the first tick");
+        assert_eq!(
+            reg.tick_all(),
+            vec![BlockEntityTickEffect {
+                owner: BlockEntityTickOwner::Chunk { cx: 0, cz: 0 },
+                pos,
+                lit: true,
+            }],
+            "must light on the first tick"
+        );
         for _ in 1..200 {
             reg.tick_all();
         }
