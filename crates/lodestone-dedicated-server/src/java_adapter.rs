@@ -5,7 +5,8 @@ use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Duration;
 
 use lodestone_jvm_bridge::adapter::{
-    AdapterEvent, AdapterHost, BlockStateWrite, PlayerGameMode, PlayerIdentity, PlayerSnapshot,
+    AdapterEvent, AdapterHost, BlockStateWrite, PlayerGameMode, PlayerIdentity,
+    PlayerInventorySlot, PlayerSnapshot,
 };
 use lodestone_jvm_bridge::native_surface::OperatorBlockStateMember;
 use lodestone_jvm_bridge::paper::{
@@ -393,6 +394,27 @@ impl JavaAdapter {
                     experience_points: player.xp_points,
                 })
                 .ok_or_else(|| format!("player {uuid} is not connected"))
+        });
+        self.host.service_pending_player_inventory_slots(64, |query| {
+            let native_slot = usize::try_from(query.native_slot).map_err(|_| {
+                format!("native inventory slot {} is negative", query.native_slot)
+            })?;
+            let uuid = uuid::Uuid::from_bytes(query.uuid);
+            let inventory = server
+                .players()
+                .and_then(|registry| registry.inventory(uuid))
+                .ok_or_else(|| format!("player {uuid} is not connected"))?;
+            if native_slot >= lodestone_server::PLAYER_NATIVE_SIZE {
+                return Err(format!(
+                    "native inventory slot {native_slot} is outside 0..{}",
+                    lodestone_server::PLAYER_NATIVE_SIZE,
+                ));
+            }
+            Ok(inventory.native(native_slot).map(|stack| PlayerInventorySlot {
+                item_key: stack.item.to_string(),
+                count: stack.count,
+                unmodeled: stack.components.has_unmodeled,
+            }))
         });
         // Read a value-only roster after all world-port servicing has returned.
         // Dispatch below is the only point that can invoke Java, and it runs

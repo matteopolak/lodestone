@@ -927,6 +927,11 @@ value-only player roster into generation-checked handles: `playerHandleName(long
 `activePlayerHandleAt(int)`, `activePlayerCount()`, and
 `playerHandleIsActive(long)` read that worker snapshot only. The dedicated host
 never hands a server object, connection, ECS entity, or world guard to Java.
+`playerHandleNativeItemKey(long, int)` follows the same boundary for a copied
+native inventory slot: it returns the item key, or `null` for an empty slot.
+The host rejects a stack with unmodeled components before returning a partial
+projection, and the surface deliberately has no Java item-object or mutation
+operation until their serialization and connection-task handoff are modeled.
 `AdapterHost::start_with_setup` mints the corresponding capability token only
 from its worker's request ports; consuming it keeps that token with the retained loader state, and the
 dedicated `JavaAdapter::poll` call is the matching live producer through

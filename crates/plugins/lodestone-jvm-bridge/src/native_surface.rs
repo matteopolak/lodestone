@@ -218,7 +218,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 41] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 42] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -356,6 +356,10 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 41] = [
         name: "setBlockStateIdsWithFlags",
         descriptor: "([II)I",
     },
+    NativeMethodSpec {
+        name: "playerHandleNativeItemKey",
+        descriptor: "(JI)Ljava/lang/String;",
+    },
 ];
 
 const ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS: [IsolatedDescriptorMemberSpec; 4] = [
@@ -430,6 +434,34 @@ const PAPER_WORLD_SURFACE_CENSUS: [PaperWorldMemberSpec; 14] = [
     PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[40], capability: PaperWorldCapability::ResidentStateWrite },
 ];
 
+/// The Rust producer category for one implemented inventory shim member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperInventoryCapability {
+    /// A bounded UUID-and-native-slot read against the copied authoritative
+    /// inventory snapshot. It is a key projection, not a stack serializer.
+    NativeItemKeyRead,
+}
+
+/// One generated inventory shim declaration and its Rust capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaperInventoryMemberSpec {
+    /// Exact declared static-native method.
+    pub method: NativeMethodSpec,
+    /// The finite Rust capability servicing that declaration.
+    pub capability: PaperInventoryCapability,
+}
+
+/// The complete current inventory/item shim census.
+///
+/// A missing member is unsupported and must fail at the declaration or call
+/// boundary; it must not be inferred from the adjacent key projection.
+const PAPER_INVENTORY_SURFACE_CENSUS: [PaperInventoryMemberSpec; 1] = [
+    PaperInventoryMemberSpec {
+        method: ISOLATED_SHIM_METHODS[41],
+        capability: PaperInventoryCapability::NativeItemKeyRead,
+    },
+];
+
 /// One non-interchangeable phase of native registration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeRegistrationStep {
@@ -490,6 +522,7 @@ const ISOLATED_SHIM_REGISTRATION: &[NativeRegistrationStep] = registration_steps
     ISOLATED_SHIM_METHODS[38],
     ISOLATED_SHIM_METHODS[39],
     ISOLATED_SHIM_METHODS[40],
+    ISOLATED_SHIM_METHODS[41],
 );
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -507,6 +540,11 @@ pub const fn isolated_shim_methods() -> &'static [NativeMethodSpec] {
 /// callers must not infer a capability from an adjacent shim declaration.
 pub const fn paper_world_surface_census() -> &'static [PaperWorldMemberSpec] {
     &PAPER_WORLD_SURFACE_CENSUS
+}
+
+/// Generated census of every implemented inventory/item shim member.
+pub const fn paper_inventory_surface_census() -> &'static [PaperInventoryMemberSpec] {
+    &PAPER_INVENTORY_SURFACE_CENSUS
 }
 
 /// Generated validation and registration sequence for the isolated shim.
@@ -1162,6 +1200,11 @@ fn method_id(
         ("playerHandleExperienceLevel", "(J)I") | ("playerHandleExperiencePoints", "(J)I") => {
             env.get_static_method_id(class, JNIString::new(method.name), jni_sig!("(J)I"))
         }
+        ("playerHandleNativeItemKey", "(JI)Ljava/lang/String;") => env.get_static_method_id(
+            class,
+            jni_str!("playerHandleNativeItemKey"),
+            jni_sig!("(JI)Ljava/lang/String;"),
+        ),
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -1387,6 +1430,14 @@ fn register_method(
         }
         ("playerHandleExperienceLevel", "(J)I") | ("playerHandleExperiencePoints", "(J)I") => {
             adapter::register_player_handle_position_query(env, class, method.name, method.descriptor)
+        }
+        ("playerHandleNativeItemKey", "(JI)Ljava/lang/String;") => {
+            adapter::register_player_handle_native_item_key_query(
+                env,
+                class,
+                method.name,
+                method.descriptor,
+            )
         }
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
@@ -1626,6 +1677,10 @@ mod tests {
                 NativeMethodSpec { name: "blockStateIds", descriptor: "([I)[I" },
                 NativeMethodSpec { name: "setBlockStateIds", descriptor: "([I)I" },
                 NativeMethodSpec { name: "setBlockStateIdsWithFlags", descriptor: "([II)I" },
+                NativeMethodSpec {
+                    name: "playerHandleNativeItemKey",
+                    descriptor: "(JI)Ljava/lang/String;",
+                },
             ],
         );
         let methods = isolated_shim_methods();
@@ -1682,6 +1737,21 @@ mod tests {
                 descriptor: "(IIII)V",
             }],
             "the listener is one typed callback, not a general event hierarchy",
+        );
+    }
+
+    #[test]
+    fn inventory_surface_census_has_only_the_lossless_key_projection() {
+        assert_eq!(
+            paper_inventory_surface_census(),
+            &[PaperInventoryMemberSpec {
+                method: NativeMethodSpec {
+                    name: "playerHandleNativeItemKey",
+                    descriptor: "(JI)Ljava/lang/String;",
+                },
+                capability: PaperInventoryCapability::NativeItemKeyRead,
+            }],
+            "the inventory census must name each implemented method and must not imply item serialization or mutation",
         );
     }
 
@@ -1833,7 +1903,8 @@ mod tests {
              public static native int playerHandleEntityId(long handle); \
              public static native int playerHandleGameMode(long handle); \
              public static native int playerHandleExperienceLevel(long handle); \
-             public static native int playerHandleExperiencePoints(long handle); }",
+             public static native int playerHandleExperiencePoints(long handle); \
+             public static native String playerHandleNativeItemKey(long handle, int nativeSlot); }",
         )
         .expect("shim source");
         let descriptor_source = source_root.join("IsolatedPluginDescriptor.java");
@@ -1943,7 +2014,8 @@ mod tests {
              public static native int playerHandleEntityId(long handle); \
              public static native int playerHandleGameMode(long handle); \
              public static native int playerHandleExperienceLevel(long handle); \
-             public static native int playerHandleExperiencePoints(long handle); }",
+             public static native int playerHandleExperiencePoints(long handle); \
+             public static native String playerHandleNativeItemKey(long handle, int nativeSlot); }",
         )
         .expect("shim source");
         let descriptor_source = shim_source_root.join("IsolatedPluginDescriptor.java");
