@@ -351,6 +351,54 @@ impl Menus {
                     title: title.clone(),
                 });
             }
+            ClientEvent::MountScreenOpened {
+                container_id,
+                inventory_columns,
+                ..
+            } => {
+                // This packet is the mount-menu equivalent of `ScreenOpened`
+                // plus its size: it does not send a menu type or wait for a
+                // content packet to tell us how many mount slots exist. Open
+                // the model now so the shell has a real screen to draw, then
+                // let the ordinary content/slot packets reconcile into it.
+                // A mount inventory is its two equipment slots plus three rows
+                // of the announced carrying columns.
+                let Ok(columns) = usize::try_from(*inventory_columns) else {
+                    return true;
+                };
+                let Some(container_size) = columns
+                    .checked_mul(3)
+                    .and_then(|n| n.checked_add(2))
+                else {
+                    return true;
+                };
+                // The protocol field is an unbounded VarInt, but real mount
+                // inventories are bounded by their screen. Refuse a hostile
+                // allocation rather than letting an announcement exhaust the
+                // client before a later server correction can arrive.
+                if columns > 15 {
+                    return true;
+                }
+                self.reclaim_inventory();
+                self.pending = None;
+                self.opened = Some(OpenMenu {
+                    window_id: *container_id,
+                    menu_type: Some(
+                        "minecraft:horse"
+                            .parse()
+                            .expect("hardcoded mount menu key is valid"),
+                    ),
+                    // The packet names an entity, not a title. The entity-name
+                    // projection is not available at this version-free menu
+                    // boundary, so leave the normal title slot empty instead
+                    // of inventing a horse name.
+                    title: Some(Text::literal("")),
+                    menu: ClientMenu::new(Menu::generic(container_size)),
+                    data: Vec::new(),
+                    local: false,
+                });
+                self.hand_inventory_to_opened();
+            }
             ClientEvent::ScreenClosed { window_id } => {
                 if self
                     .opened
@@ -956,6 +1004,66 @@ mod tests {
         assert_eq!(
             menus.opened_menu_type(),
             Some(&key("minecraft:generic_9x3"))
+        );
+    }
+
+    #[test]
+    fn mount_screen_opens_its_announced_inventory_before_content_arrives() {
+        let mut menus = Menus::new();
+        assert!(menus.apply(&ClientEvent::MountScreenOpened {
+            container_id: 12,
+            inventory_columns: 5,
+            entity_id: 77,
+        }));
+
+        let opened = menus
+            .opened()
+            .expect("mount packet opens a menu immediately");
+        // Two equipment cells plus three rows of five carrying cells, then
+        // the normal 27+9 player inventory.
+        assert_eq!(opened.slot_count(), 2 + 3 * 5 + 36);
+        assert_eq!(menus.opened_window_id(), Some(12));
+        assert_eq!(menus.opened_menu_type(), Some(&key("minecraft:horse")));
+
+        let mut items = vec![None; 2 + 3 * 5 + 36];
+        items[16] = Some(stack("minecraft:gold_ingot", 5));
+        assert!(menus.apply(&ClientEvent::ContainerContent {
+            window_id: 12,
+            state_id: 4,
+            items,
+            carried_item: None,
+        }));
+        assert_eq!(
+            menus.opened().unwrap().slot_item(16),
+            Some(&game_stack("minecraft:gold_ingot", 5)),
+            "the regular content fold must reconcile into the mount menu the announcement opened"
+        );
+    }
+
+    #[test]
+    fn invalid_mount_column_count_does_not_replace_the_visible_menu() {
+        let mut menus = Menus::new();
+        assert!(menus.apply(&ClientEvent::ScreenOpened {
+            window_id: 5,
+            menu_type: key("minecraft:generic_9x1"),
+            title: Text::literal("Chest"),
+        }));
+        assert!(menus.apply(&ClientEvent::ContainerContent {
+            window_id: 5,
+            state_id: 1,
+            items: vec![None; 45],
+            carried_item: None,
+        }));
+
+        assert!(menus.apply(&ClientEvent::MountScreenOpened {
+            container_id: 12,
+            inventory_columns: -1,
+            entity_id: 77,
+        }));
+        assert_eq!(
+            menus.opened_window_id(),
+            Some(5),
+            "a malformed announcement must not discard a real currently open menu"
         );
     }
 

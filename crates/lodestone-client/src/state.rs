@@ -1707,6 +1707,32 @@ mod tests {
         );
     }
 
+    /// The driver calls `SharedState::apply` for the adapter's mount-open
+    /// event. Unlike ordinary containers, this packet supplies the menu size
+    /// itself and has no preceding `ScreenOpened`, so a visible open-menu
+    /// snapshot here proves the route and session fold together.
+    #[test]
+    fn apply_routes_mount_screen_into_the_open_menu_snapshot() {
+        let state = SharedState::default();
+        state.apply(&ClientEvent::MountScreenOpened {
+            container_id: 12,
+            inventory_columns: 5,
+            entity_id: 77,
+        });
+        let open = state
+            .open_menu()
+            .expect("mount screen must reach the shell-facing snapshot");
+        assert_eq!(open.window_id, 12);
+        assert_eq!(open.menu.slot_count(), 2 + 3 * 5 + 36);
+
+        state.apply(&ClientEvent::PlayerCombatEntered);
+        assert_eq!(
+            state.open_menu().map(|menu| menu.window_id),
+            Some(12),
+            "control: a terminal combat event must not replace the announced mount screen"
+        );
+    }
+
     #[test]
     fn name_only_player_identity_reaches_and_leaves_the_public_read_model() {
         let state = SharedState::default();

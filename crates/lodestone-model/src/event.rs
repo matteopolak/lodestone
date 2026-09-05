@@ -4389,9 +4389,8 @@ pub fn route(event: &ClientEvent) -> Route {
         // shell route because it sizes the loading-grid consumer.
         ClientEvent::SimulationDistanceChanged { .. } => SESSION,
         ClientEvent::ServerDataReceived { .. } => SESSION,
-        ClientEvent::PlayerCombatEntered
-        | ClientEvent::PlayerCombatEnded { .. }
-        | ClientEvent::MountScreenOpened { .. } => Route::NOWHERE,
+        ClientEvent::MountScreenOpened { .. } => SESSION,
+        ClientEvent::PlayerCombatEntered | ClientEvent::PlayerCombatEnded { .. } => Route::NOWHERE,
         // A stop packet names a sound/category filter, while the mixer owns
         // live voices by opaque handles. `net::forward` carries the filters to
         // `ShellAudio`, which keeps the packet-created name/category-to-handle
@@ -4796,13 +4795,29 @@ mod route_tests {
         assert!(!r.is_island());
 
         assert!(
-            route(&ClientEvent::MountScreenOpened {
-                container_id: 1,
-                inventory_columns: 3,
-                entity_id: 7,
-            })
-            .is_island(),
-            "control: mount-screen opening still has no menu consumer"
+            route(&ClientEvent::PlayerCombatEntered).is_island(),
+            "control: combat enter still has no session menu consumer"
+        );
+    }
+
+    /// The mount-open packet has no companion `ScreenOpened`: it supplies both
+    /// a window id and the inventory's column count itself. The menu session
+    /// consumes that directly so the shell's existing open-menu screen can draw
+    /// before ordinary container content arrives.
+    #[test]
+    fn mount_screen_open_reaches_the_session_menu_consumer() {
+        let r = route(&ClientEvent::MountScreenOpened {
+            container_id: 1,
+            inventory_columns: 3,
+            entity_id: 7,
+        });
+        assert!(r.session, "the menu session builds the announced mount screen");
+        assert!(!r.ingest && !r.shell && !r.client);
+        assert!(!r.is_island());
+
+        assert!(
+            route(&ClientEvent::PlayerCombatEntered).is_island(),
+            "control: combat enter must not accidentally create a mount menu"
         );
     }
 
