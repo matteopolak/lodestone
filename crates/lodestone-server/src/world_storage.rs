@@ -204,6 +204,20 @@ pub struct NativeChunkRecord {
     pub fluid_scheduled_ticks: Vec<crate::scheduled_tick::PersistedScheduledTick>,
 }
 
+/// One complete native terrain record together with its recovered coordinate.
+///
+/// The coordinate comes from the committed native-key index and the record is
+/// decoded while that same backend lock is held. This makes the value suitable
+/// for a typed export selection without making its caller rediscover and
+/// reopen one column at a time.
+#[derive(Debug)]
+pub struct NativeChunkSnapshot {
+    /// The horizontal coordinate selected from the recovered native index.
+    pub coordinate: NativeChunkCoordinate,
+    /// The complete typed terrain record at [`Self::coordinate`].
+    pub record: NativeChunkRecord,
+}
+
 impl NativeChunkRecord {
     /// Stages this record's pending ticks into the live scheduler.
     ///
@@ -963,6 +977,45 @@ impl WorldStorage {
             .committed_chunk_coordinates())
     }
 
+    /// Snapshots every committed complete native terrain record in coordinate order.
+    ///
+    /// `min_y` and `height` remain explicit because version 1 keys and chunk
+    /// records do not define a dimension height. The native backend lock stays
+    /// held from copying the recovered index through decoding every envelope,
+    /// so a concurrent writer cannot replace a discovered column before this
+    /// snapshot has decoded it. A malformed, terrain-only, or unsupported
+    /// record rejects the entire selection rather than becoming a partial
+    /// export candidate. Anvil rejects this native-only request without
+    /// scanning compatibility files.
+    pub fn native_chunk_records(
+        &self,
+        min_y: i32,
+        height: i32,
+    ) -> Result<Vec<NativeChunkSnapshot>, Error> {
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        validate_extent(min_y, height)?;
+        let mut native = native.lock().expect("world storage lock poisoned");
+        native
+            .committed_chunk_coordinates()
+            .into_iter()
+            .map(|coordinate| {
+                let record = native
+                    .get(RecordKey::chunk(coordinate.column_x, coordinate.column_z))?
+                    .expect("a coordinate copied from the native index must remain readable while locked");
+                let record = decode_native_chunk(
+                    coordinate.column_x,
+                    coordinate.column_z,
+                    min_y,
+                    height,
+                    record,
+                )?;
+                Ok(NativeChunkSnapshot { coordinate, record })
+            })
+            .collect()
+    }
+
     /// Snapshots every committed supported native general record in key order.
     ///
     /// The store keeps its lock while it copies the recovered key index and
@@ -1349,16 +1402,28 @@ impl WorldStorage {
         let Some(record) = record else {
             return Ok(None);
         };
-        let (column, (block_scheduled_ticks, fluid_scheduled_ticks), light) =
-            decode_chunk(column_x, column_z, min_y, height, record)?;
-        let light = light.ok_or(ChunkRecordError::MissingStoredLight)?;
-        Ok(Some(NativeChunkRecord {
-            column,
-            light,
-            block_scheduled_ticks,
-            fluid_scheduled_ticks,
-        }))
+        Ok(Some(decode_native_chunk(
+            column_x, column_z, min_y, height, record,
+        )?))
     }
+}
+
+fn decode_native_chunk(
+    column_x: i32,
+    column_z: i32,
+    min_y: i32,
+    height: i32,
+    record: StorageRecord,
+) -> Result<NativeChunkRecord, ChunkRecordError> {
+    let (column, (block_scheduled_ticks, fluid_scheduled_ticks), light) =
+        decode_chunk(column_x, column_z, min_y, height, record)?;
+    let light = light.ok_or(ChunkRecordError::MissingStoredLight)?;
+    Ok(NativeChunkRecord {
+        column,
+        light,
+        block_scheduled_ticks,
+        fluid_scheduled_ticks,
+    })
 }
 
 fn encode_chunk(
@@ -2559,6 +2624,10 @@ mod tests {
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
         assert!(matches!(
+            storage.native_chunk_records(0, 16),
+            Err(Error::AnvilDoesNotAcceptTypedRecords)
+        ));
+        assert!(matches!(
             storage.native_general_records(),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
@@ -3005,6 +3074,118 @@ mod tests {
                 actual: rejected,
                 ..
             })) if rejected == actual
+        ));
+        drop(storage);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_chunk_snapshot_decodes_complete_records_in_coordinate_order() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-chunk-snapshot-{}-{unique}",
+            std::process::id()
+        ));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        let mut later = crate::chunk::ChunkColumn::new(0, 16);
+        later.set_block(3, 4, 5, "minecraft:stone");
+        let later_light = lodestone_world::ColumnLight::new(later.section_count());
+        let mut earlier = crate::chunk::ChunkColumn::new(0, 16);
+        earlier.set_block(7, 8, 9, "minecraft:oak_log[axis=z]");
+        let mut earlier_light = lodestone_world::ColumnLight::new(earlier.section_count());
+        *earlier_light.sky_mut(1) = lodestone_world::LightData::Uniform(13);
+        let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
+
+        assert_eq!(
+            storage
+                .write_dirty_chunks([
+                    NativeDirtyChunkRecord::new(7, -4, &later, &later_light, &scheduled),
+                    NativeDirtyChunkRecord::new(-2, 8, &earlier, &earlier_light, &scheduled),
+                ])
+                .expect("write complete terrain batch"),
+            2
+        );
+
+        let snapshot = storage
+            .native_chunk_records(0, 16)
+            .expect("decode complete terrain snapshot");
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|chunk| chunk.coordinate)
+                .collect::<Vec<_>>(),
+            [
+                NativeChunkCoordinate {
+                    column_x: -2,
+                    column_z: 8,
+                },
+                NativeChunkCoordinate {
+                    column_x: 7,
+                    column_z: -4,
+                },
+            ],
+            "the recovered index order must define export order"
+        );
+        assert_eq!(
+            snapshot[0].record.column.block_state(7, 8, 9),
+            "minecraft:oak_log[axis=z]"
+        );
+        assert_eq!(
+            snapshot[0].record.light.sky(1),
+            &lodestone_world::LightData::Uniform(13),
+            "a snapshot returns the complete canonical-light record, not terrain alone"
+        );
+        assert_eq!(
+            snapshot[1].record.column.block_state(3, 4, 5),
+            "minecraft:stone"
+        );
+        drop(storage);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_chunk_snapshot_refuses_a_terrain_only_record_before_export() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-chunk-snapshot-incomplete-{}-{unique}",
+            std::process::id()
+        ));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        let complete = crate::chunk::ChunkColumn::new(0, 16);
+        let complete_light = lodestone_world::ColumnLight::new(complete.section_count());
+        let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
+        storage
+            .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                -1,
+                0,
+                &complete,
+                &complete_light,
+                &scheduled,
+            ))
+            .expect("write complete first coordinate");
+        let incomplete = crate::chunk::ChunkColumn::new(0, 16);
+        storage
+            .write_dirty([RecordWrite::new(
+                RecordKey::chunk(1, 0),
+                encode_chunk(1, 0, &incomplete, None).expect("encode terrain-only record"),
+            )])
+            .expect("storage accepts a legacy terrain-only envelope");
+
+        assert!(matches!(
+            storage.native_chunk_records(0, 16),
+            Err(Error::Chunk(ChunkRecordError::MissingStoredLight))
         ));
         drop(storage);
         std::fs::remove_dir_all(directory).expect("remove native test segment");
