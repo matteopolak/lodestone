@@ -102,6 +102,11 @@ fn encode_open_screen_round_trips_through_the_real_adapter() {
     else {
         panic!("expected a Send directive");
     };
+    assert_eq!(
+        payload[..2],
+        [0x03, 0x0e],
+        "the furnace menu registry id is the independently pinned VarInt 14"
+    );
 
     let events = decode_events(packet_id, &payload);
     assert_eq!(events.len(), 1);
