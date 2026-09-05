@@ -44,6 +44,12 @@ pub struct ChunkRecord {
     /// retained answer; a present map must have exactly 256 unsigned 16-bit values.
     #[prost(uint32, repeated, tag = "7")]
     pub motion_blocking_heights: ::prost::alloc::vec::Vec<u32>,
+    /// Complete named-NBT roots for the resident block entities. Position and type
+    /// stay inside the NBT tree so opaque entries retain every field this build
+    /// does not simulate; readers must reject malformed roots or roots outside
+    /// this column rather than silently dropping them.
+    #[prost(bytes = "vec", repeated, tag = "8")]
+    pub block_entity_nbt: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
     #[prost(message, repeated, tag = "10")]
     pub extensions: ::prost::alloc::vec::Vec<ExtensionValue>,
 }

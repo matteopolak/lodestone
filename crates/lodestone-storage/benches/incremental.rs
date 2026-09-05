@@ -52,6 +52,7 @@ fn chunk(column: i32, seed: u8) -> StorageRecord {
             biome_sections: vec![],
             surface_biome_ids: vec![],
             motion_blocking_heights: vec![],
+            block_entity_nbt: vec![],
             extensions: vec![],
         })),
     }

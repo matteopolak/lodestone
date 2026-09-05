@@ -31,6 +31,11 @@ message ChunkRecord {
   // indexed by `local_x + local_z * 16`. An absent map means the source had no
   // retained answer; a present map must have exactly 256 unsigned 16-bit values.
   repeated uint32 motion_blocking_heights = 7 [packed = true];
+  // Complete named-NBT roots for the resident block entities. Position and type
+  // stay inside the NBT tree so opaque entries retain every field this build
+  // does not simulate; readers must reject malformed roots or roots outside
+  // this column rather than silently dropping them.
+  repeated bytes block_entity_nbt = 8;
   repeated ExtensionValue extensions = 10;
 }
 
