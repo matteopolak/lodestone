@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent, Rotation, Vec3};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_9::adapter_for;
 
@@ -119,6 +119,37 @@ async fn assert_registry_selected_server_reaches_play_and_confirms_a_block_break
     server.shutdown().await;
 }
 
+async fn assert_teleport_confirmation_unblocks_movement(protocol_version: i32) {
+    let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .expect("hosted legacy protocol must resolve");
+    let source = Arc::new(LegacyFixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, _events) = ClientBuilder::new(
+        address(),
+        profile(),
+        Box::new(adapter_for(protocol_version)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(client_io);
+    handle.wait_for_spawn(Duration::from_secs(10)).await.expect("must join Play");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
+        .await
+        .expect("initial column must arrive");
+    handle.send_action(ClientAction::Move {
+        pos: Vec3::new(24.0, 100.0, 8.0),
+        rotation: Rotation { yaw: 0.0, pitch: 0.0 },
+        on_ground: true,
+        horizontal_collision: false,
+    }).expect("joined client accepts movement");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
+        .await
+        .expect("confirmed teleport must unblock movement and recenter the view");
+    handle.shutdown();
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn registry_selected_protocol_340_reaches_play_and_confirms_a_block_break() {
     assert_registry_selected_server_reaches_play_and_confirms_a_block_break(340).await;
@@ -137,6 +168,26 @@ async fn registry_selected_protocol_110_reaches_play_and_confirms_a_block_break(
 #[tokio::test]
 async fn registry_selected_protocol_316_reaches_play_and_confirms_a_block_break() {
     assert_registry_selected_server_reaches_play_and_confirms_a_block_break(316).await;
+}
+
+#[tokio::test]
+async fn teleport_confirmation_unblocks_protocol_340_movement() {
+    assert_teleport_confirmation_unblocks_movement(340).await;
+}
+
+#[tokio::test]
+async fn teleport_confirmation_unblocks_protocol_316_movement() {
+    assert_teleport_confirmation_unblocks_movement(316).await;
+}
+
+#[tokio::test]
+async fn teleport_confirmation_unblocks_protocol_210_movement() {
+    assert_teleport_confirmation_unblocks_movement(210).await;
+}
+
+#[tokio::test]
+async fn teleport_confirmation_unblocks_protocol_110_movement() {
+    assert_teleport_confirmation_unblocks_movement(110).await;
 }
 
 #[test]

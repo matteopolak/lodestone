@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
 use lodestone_server::{
     ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -22,7 +22,10 @@ use crate::packet_ids::{handshaking, login, play};
 use crate::packets::common::{
     KeepAliveRequest, KeepAliveRequestVarInt, KeepAliveResponse, KeepAliveResponseVarInt,
 };
-use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGame};
+use crate::packets::game::{
+    BlockDig, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
+    ServerboundPosition, ServerboundPositionLook, TeleportConfirm,
+};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
@@ -69,6 +72,11 @@ struct ServerPacketIds {
     compression: i32,
     login_success: i32,
     block_dig: i32,
+    teleport_confirm: i32,
+    flying: i32,
+    position_serverbound: i32,
+    position_look: i32,
+    look: i32,
     settings: i32,
     keep_alive_clientbound: i32,
     keep_alive_serverbound: i32,
@@ -84,6 +92,11 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     compression: login::clientbound::COMPRESS,
     login_success: login::clientbound::SUCCESS,
     block_dig: play::serverbound::BLOCK_DIG,
+    teleport_confirm: play::serverbound::TELEPORT_CONFIRM,
+    flying: play::serverbound::FLYING,
+    position_serverbound: play::serverbound::POSITION,
+    position_look: play::serverbound::POSITION_LOOK,
+    look: play::serverbound::LOOK,
     settings: play::serverbound::SETTINGS,
     keep_alive_clientbound: play::clientbound::KEEP_ALIVE,
     keep_alive_serverbound: play::serverbound::KEEP_ALIVE,
@@ -99,6 +112,11 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_316::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_316::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_316::play::serverbound::BLOCK_DIG,
+    teleport_confirm: crate::packet_ids_316::play::serverbound::TELEPORT_CONFIRM,
+    flying: crate::packet_ids_316::play::serverbound::FLYING,
+    position_serverbound: crate::packet_ids_316::play::serverbound::POSITION,
+    position_look: crate::packet_ids_316::play::serverbound::POSITION_LOOK,
+    look: crate::packet_ids_316::play::serverbound::LOOK,
     settings: crate::packet_ids_316::play::serverbound::SETTINGS,
     keep_alive_clientbound: crate::packet_ids_316::play::clientbound::KEEP_ALIVE,
     keep_alive_serverbound: crate::packet_ids_316::play::serverbound::KEEP_ALIVE,
@@ -114,6 +132,11 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_210::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_210::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_210::play::serverbound::BLOCK_DIG,
+    teleport_confirm: crate::packet_ids_210::play::serverbound::TELEPORT_CONFIRM,
+    flying: crate::packet_ids_210::play::serverbound::FLYING,
+    position_serverbound: crate::packet_ids_210::play::serverbound::POSITION,
+    position_look: crate::packet_ids_210::play::serverbound::POSITION_LOOK,
+    look: crate::packet_ids_210::play::serverbound::LOOK,
     settings: crate::packet_ids_210::play::serverbound::SETTINGS,
     keep_alive_clientbound: crate::packet_ids_210::play::clientbound::KEEP_ALIVE,
     keep_alive_serverbound: crate::packet_ids_210::play::serverbound::KEEP_ALIVE,
@@ -129,6 +152,11 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_110::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_110::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_110::play::serverbound::BLOCK_DIG,
+    teleport_confirm: crate::packet_ids_110::play::serverbound::TELEPORT_CONFIRM,
+    flying: crate::packet_ids_110::play::serverbound::FLYING,
+    position_serverbound: crate::packet_ids_110::play::serverbound::POSITION,
+    position_look: crate::packet_ids_110::play::serverbound::POSITION_LOOK,
+    look: crate::packet_ids_110::play::serverbound::LOOK,
     settings: crate::packet_ids_110::play::serverbound::SETTINGS,
     keep_alive_clientbound: crate::packet_ids_110::play::clientbound::KEEP_ALIVE,
     keep_alive_serverbound: crate::packet_ids_110::play::serverbound::KEEP_ALIVE,
@@ -472,6 +500,47 @@ fn decode_packet(
                     sequence: 0,
                 }
             }
+            State::Play if packet_id == ids.teleport_confirm => {
+                decode_full::<TeleportConfirm>(payload, ctx).map_or(ServerBound::Ignored, |confirm| {
+                    ServerBound::TeleportationAccepted { id: confirm.teleport_id }
+                })
+            }
+            State::Play if packet_id == ids.position_serverbound => {
+                decode_full::<ServerboundPosition>(payload, ctx).map_or(ServerBound::Ignored, |move_| {
+                    ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: None,
+                        on_ground: move_.on_ground,
+                    }
+                })
+            }
+            State::Play if packet_id == ids.position_look => {
+                decode_full::<ServerboundPositionLook>(payload, ctx).map_or(ServerBound::Ignored, |move_| {
+                    ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: Some(Rotation { yaw: move_.yaw, pitch: move_.pitch }),
+                        on_ground: move_.on_ground,
+                    }
+                })
+            }
+            State::Play if packet_id == ids.look => {
+                decode_full::<ServerboundLook>(payload, ctx).map_or(ServerBound::Ignored, |look| {
+                    ServerBound::PlayerRotated {
+                        yaw: look.yaw,
+                        pitch: look.pitch,
+                        on_ground: look.on_ground,
+                    }
+                })
+            }
+            State::Play if packet_id == ids.flying => {
+                decode_full::<ServerboundFlying>(payload, ctx).map_or(ServerBound::Ignored, |flying| {
+                    ServerBound::PlayerStatusOnly { on_ground: flying.on_ground }
+                })
+            }
             State::Play if packet_id == ids.settings => {
                 decode_full::<Settings>(payload, ctx).map_or(ServerBound::Ignored, |settings| {
                     ServerBound::ClientInformationChanged {
@@ -618,6 +687,10 @@ macro_rules! impl_server_protocol {
 
             fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
                 begin_play($ids, $ctx, $protocol)
+            }
+
+            fn uses_teleport_acknowledgements(&self) -> bool {
+                true
             }
 
             fn begin_chunk_batch(&self) -> ServerDirective {

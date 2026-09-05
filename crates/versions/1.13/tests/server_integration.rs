@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, Rotation, Vec3};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_13::adapter;
 
@@ -100,6 +100,36 @@ async fn registry_selected_404_server_reaches_play_and_confirms_a_block_break() 
         .await
         .expect("the server block update must replace the known block with air");
 
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn teleport_confirmation_unblocks_hosted_protocol_404_movement() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
+        .expect("protocol 404 must resolve to a hosted family");
+    let source = Arc::new(FlatFixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, _events) = ClientBuilder::new(address(), profile(), Box::new(adapter()))
+        .player_loaded_policy(PlayerLoadedPolicy::Manual)
+        .connect_with(client_io);
+    handle.wait_for_spawn(Duration::from_secs(10)).await.expect("must join Play");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
+        .await
+        .expect("initial column must arrive");
+    // The adapter's teleport-confirm reply is queued while it applies the
+    // initial position; this move reaches the server only after that reply.
+    handle.send_action(ClientAction::Move {
+        pos: Vec3::new(24.0, 100.0, 8.0),
+        rotation: Rotation { yaw: 0.0, pitch: 0.0 },
+        on_ground: true,
+        horizontal_collision: false,
+    }).expect("joined client accepts movement");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
+        .await
+        .expect("confirmed teleport must unblock movement and recenter the view");
     handle.shutdown();
     server.shutdown().await;
 }
