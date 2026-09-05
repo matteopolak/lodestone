@@ -107,6 +107,34 @@ fn join_position_chunk_and_block_update_match_protocol_404_fixtures() {
 }
 
 #[test]
+fn keep_alive_uses_the_protocol_404_i64_body_in_both_directions() {
+    let protocol = V404ServerProtocol;
+    // An independently specified big-endian i64 body: no packet-codec
+    // round-trip can make a wrong field width pass this control.
+    let body = [1, 2, 3, 4, 5, 6, 7, 8];
+    assert_eq!(
+        protocol.decode(State::Play, lodestone_v1_13::packet_ids::play::serverbound::KEEP_ALIVE, &body),
+        ServerBound::KeepAlive {
+            id: 0x0102_0304_0506_0708,
+        }
+    );
+    assert!(matches!(
+        protocol.encode_keep_alive(0x0102_0304_0506_0708),
+        ServerDirective::Send { packet_id, payload }
+            if packet_id == lodestone_v1_13::packet_ids::play::clientbound::KEEP_ALIVE && payload == body
+    ));
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            lodestone_v1_13::packet_ids::play::serverbound::KEEP_ALIVE,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 0],
+        ),
+        ServerBound::Ignored,
+        "a keep-alive body with a trailing byte must not acknowledge the challenge"
+    );
+}
+
+#[test]
 fn states_missing_from_the_404_table_are_errors_not_air_substitutions() {
     let protocol = V404ServerProtocol;
     assert!(protocol

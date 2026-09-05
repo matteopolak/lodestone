@@ -19,6 +19,9 @@ use uuid::Uuid;
 use crate::PROTOCOL;
 use crate::adapter::{PROTOCOL_1_9_4, PROTOCOL_1_10_2, PROTOCOL_1_11_2};
 use crate::packet_ids::{handshaking, login, play};
+use crate::packets::common::{
+    KeepAliveRequest, KeepAliveRequestVarInt, KeepAliveResponse, KeepAliveResponseVarInt,
+};
 use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGame};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -65,6 +68,8 @@ struct ServerPacketIds {
     compression: i32,
     login_success: i32,
     block_dig: i32,
+    keep_alive_clientbound: i32,
+    keep_alive_serverbound: i32,
     join: i32,
     position: i32,
     map_chunk: i32,
@@ -77,6 +82,8 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     compression: login::clientbound::COMPRESS,
     login_success: login::clientbound::SUCCESS,
     block_dig: play::serverbound::BLOCK_DIG,
+    keep_alive_clientbound: play::clientbound::KEEP_ALIVE,
+    keep_alive_serverbound: play::serverbound::KEEP_ALIVE,
     join: play::clientbound::LOGIN,
     position: play::clientbound::POSITION,
     map_chunk: play::clientbound::MAP_CHUNK,
@@ -89,6 +96,8 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_316::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_316::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_316::play::serverbound::BLOCK_DIG,
+    keep_alive_clientbound: crate::packet_ids_316::play::clientbound::KEEP_ALIVE,
+    keep_alive_serverbound: crate::packet_ids_316::play::serverbound::KEEP_ALIVE,
     join: crate::packet_ids_316::play::clientbound::LOGIN,
     position: crate::packet_ids_316::play::clientbound::POSITION,
     map_chunk: crate::packet_ids_316::play::clientbound::MAP_CHUNK,
@@ -101,6 +110,8 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_210::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_210::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_210::play::serverbound::BLOCK_DIG,
+    keep_alive_clientbound: crate::packet_ids_210::play::clientbound::KEEP_ALIVE,
+    keep_alive_serverbound: crate::packet_ids_210::play::serverbound::KEEP_ALIVE,
     join: crate::packet_ids_210::play::clientbound::LOGIN,
     position: crate::packet_ids_210::play::clientbound::POSITION,
     map_chunk: crate::packet_ids_210::play::clientbound::MAP_CHUNK,
@@ -113,6 +124,8 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_110::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_110::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_110::play::serverbound::BLOCK_DIG,
+    keep_alive_clientbound: crate::packet_ids_110::play::clientbound::KEEP_ALIVE,
+    keep_alive_serverbound: crate::packet_ids_110::play::serverbound::KEEP_ALIVE,
     join: crate::packet_ids_110::play::clientbound::LOGIN,
     position: crate::packet_ids_110::play::clientbound::POSITION,
     map_chunk: crate::packet_ids_110::play::clientbound::MAP_CHUNK,
@@ -153,6 +166,13 @@ fn block_face(face: i8) -> Option<BlockFace> {
         5 => Some(BlockFace::East),
         _ => None,
     }
+}
+
+fn uses_varint_keep_alive(protocol: i32) -> bool {
+    matches!(
+        protocol,
+        PROTOCOL_1_9_4 | PROTOCOL_1_10_2 | PROTOCOL_1_11_2
+    )
 }
 
 fn bits_for_palette(len: usize) -> u8 {
@@ -446,6 +466,20 @@ fn decode_packet(
                     sequence: 0,
                 }
             }
+            State::Play if packet_id == ids.keep_alive_serverbound => {
+                let id = if uses_varint_keep_alive(protocol) {
+                    let Some(response) = decode_full::<KeepAliveResponseVarInt>(payload, ctx) else {
+                        return ServerBound::Ignored;
+                    };
+                    i64::from(response.id)
+                } else {
+                    let Some(response) = decode_full::<KeepAliveResponse>(payload, ctx) else {
+                        return ServerBound::Ignored;
+                    };
+                    response.id
+                };
+                ServerBound::KeepAlive { id }
+            }
             _ => ServerBound::Ignored,
         }
 }
@@ -525,6 +559,31 @@ fn try_encode_chunk(
     })
 }
 
+fn encode_keep_alive(
+    protocol: i32,
+    ids: ServerPacketIds,
+    ctx: Ctx,
+    id: i64,
+) -> ServerDirective {
+    if uses_varint_keep_alive(protocol) {
+        let id = i32::try_from(id)
+            .expect("protocol-110/210/316 keep-alive id must fit its signed VarInt wire field");
+        send(
+            ids.keep_alive_clientbound,
+            &KeepAliveRequestVarInt { id },
+            ctx,
+            protocol,
+        )
+    } else {
+        send(
+            ids.keep_alive_clientbound,
+            &KeepAliveRequest { id },
+            ctx,
+            protocol,
+        )
+    }
+}
+
 macro_rules! impl_server_protocol {
     ($type:ty, $protocol:expr, $ids:expr, $ctx:expr) => {
         impl ServerProtocol for $type {
@@ -577,6 +636,10 @@ macro_rules! impl_server_protocol {
 
             fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
                 ServerDirective::None
+            }
+
+            fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+                encode_keep_alive($protocol, $ids, $ctx, id)
             }
 
             fn encode_block_update(

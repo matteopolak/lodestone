@@ -129,6 +129,28 @@ fn projects_the_legacy_window_and_decodes_break_actions() {
 }
 
 #[test]
+fn keep_alive_uses_the_protocol_5_i32_body_in_both_directions() {
+    let protocol = V5ServerProtocol;
+    // This is an independently chosen big-endian i32 body, not a value
+    // round-tripped through the packet codec under test.
+    let body = [0x01, 0x02, 0x03, 0x04];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::KEEP_ALIVE, &body),
+        ServerBound::KeepAlive { id: 0x0102_0304 }
+    );
+    assert!(matches!(
+        protocol.encode_keep_alive(0x0102_0304),
+        ServerDirective::Send { packet_id, payload }
+            if packet_id == play::clientbound::KEEP_ALIVE && payload == body
+    ));
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::KEEP_ALIVE, &[0x01, 0x02, 0x03, 0x04, 0]),
+        ServerBound::Ignored,
+        "a keep-alive body with a trailing byte must not acknowledge the challenge"
+    );
+}
+
+#[test]
 fn unsupported_states_are_errors_not_air_substitutions() {
     let protocol = V5ServerProtocol;
     assert!(protocol

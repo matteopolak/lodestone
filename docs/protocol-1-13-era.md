@@ -165,6 +165,12 @@ client/server control reaches Play, observes that state in a chunk, breaks it,
 and observes the air update. A live protocol-404 client session against this
 host remains the external compatibility check.
 
+The hosted protocol also supplies the server's connection watchdog: it sends a clientbound
+keep-alive and lifts only an exact serverbound echo to `ServerBound::KeepAlive`. Protocol 404 uses
+a fixed signed `i64` id in both directions. Its server-protocol control pins an eight-byte body and
+proves a trailing byte is not accepted as an acknowledgement; it is not an external-client
+validation.
+
 ### The negative control, and what it actually measured
 
 The 1.14 era found that **no** misroute between its protocols produces a

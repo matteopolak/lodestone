@@ -17,7 +17,9 @@ use uuid::Uuid;
 
 use crate::PROTOCOL;
 use crate::packet_ids::{handshaking, login, play};
-use crate::packets::game::{ClientboundPositionLook, JoinGame};
+use crate::packets::game::{
+    ClientboundPositionLook, JoinGame, KeepAliveRequest, KeepAliveResponse,
+};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess};
 use crate::packets::world::{BlockChange, BlockDig};
@@ -289,6 +291,13 @@ impl ServerProtocol for V5ServerProtocol {
                     sequence: 0,
                 }
             }
+            State::Play if packet_id == play::serverbound::KEEP_ALIVE => {
+                decode_full::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {
+                    ServerBound::KeepAlive {
+                        id: i64::from(response.keep_alive_id),
+                    }
+                })
+            }
             _ => ServerBound::Ignored,
         }
     }
@@ -361,6 +370,15 @@ impl ServerProtocol for V5ServerProtocol {
 
     fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
         ServerDirective::None
+    }
+
+    fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+        let keep_alive_id = i32::try_from(id)
+            .expect("protocol-5 keep-alive id must fit its signed i32 wire field");
+        send(
+            play::clientbound::KEEP_ALIVE,
+            &KeepAliveRequest { keep_alive_id },
+        )
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {

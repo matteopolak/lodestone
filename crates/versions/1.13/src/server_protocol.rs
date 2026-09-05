@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::PROTOCOL;
 use crate::canonical::wire_state_for;
 use crate::packet_ids::{handshaking, login, play};
+use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGame};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -253,6 +254,11 @@ impl ServerProtocol for V404ServerProtocol {
                     sequence: 0,
                 }
             }
+            State::Play if packet_id == play::serverbound::KEEP_ALIVE => {
+                decode_full::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {
+                    ServerBound::KeepAlive { id: response.id }
+                })
+            }
             _ => ServerBound::Ignored,
         }
     }
@@ -336,6 +342,10 @@ impl ServerProtocol for V404ServerProtocol {
 
     fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
         ServerDirective::None
+    }
+
+    fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+        send(play::clientbound::KEEP_ALIVE, &KeepAliveRequest { id })
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
