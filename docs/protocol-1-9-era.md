@@ -70,6 +70,15 @@ in all four tables, and the body is the same through 110, 210, 316, and 340: loc
 VarInt chat mode, colours, skin parts, and VarInt main hand. Literal-body controls check every
 table and reject trailing bytes.
 
+The serverbound `held_item_slot` packet closes the selected-hotbar seam. The shell
+emits it whenever a player or plugin changes the active hotbar position; the family adapter writes
+one signed big-endian `i16`, and each hosted table decodes only slots `0..=8` into
+`ServerBound::CarriedItemChanged`. The shared inventory consumer then selects the same stack that
+block use, placement, and combat read. Negative slots, slot 9 and above, malformed bodies, and
+valid prefixes with trailing bytes are ignored, so an untrusted slot cannot select a different
+stack. The controls use literal final-slot/out-of-range bodies for every hosted table, while the
+protocol-340 registry control passes the real adapter action through the selected hosted protocol.
+
 All four hosted tables also carry ordinary legacy chat. Their serverbound id is 2 and its body is
 one bounded, unsigned string; the decoder supplies explicit zero timestamp/salt and no signature
 to the shared chat consumer, which is the only honest representation of a pre-signed-chat wire.
