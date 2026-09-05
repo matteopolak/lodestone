@@ -126,6 +126,17 @@ gap is narrower: the human path can be *vetoed* but not *observed* through `Brea
 polling `BreakOutcome`/`PlaceOutcome` for completion before starting the next. It is the first
 production call site for either component — see that crate's own doc for the state machine.
 
+Hotbar choice has its own deliberately smaller intent: `SelectSlotIntent(0..=8)` is one-shot.
+A plugin inserts it in `TickSet::Intent`; the shell's later selection consumer validates it,
+updates `SelectedSlot`, queues `SetCarriedItem` only when the value changed, and removes the
+intent whatever the result. There is no outcome component because selection has no world legality
+question: a valid slot always succeeds, while a repeated or out-of-range request is consumed as a
+no-op. `crates/plugins/lodestone-hotbar-lock` is the native reference consumer. Its claimed key
+continuously reissues the existing one-shot intent only while enabled; its second press releases
+the lock, after which a human selection remains untouched. The integration gate composes the real
+`Sim` route and checks the no-press baseline, the carried-item echo, and that release restores
+human selection rather than only seeing a component in an isolated world.
+
 ### What stays privileged
 
 Two things are off-limits by construction, not by a permission check a plugin could route around:
