@@ -351,6 +351,14 @@ What exists:
   that deliberately drops an `extra` child must disagree, proving the detector
   observes the folded output instead of accepting every generated input.
 
+- `tests/legacy_text_model.rs` — a bounded fixed-ChaCha-seed model check for
+  the `§`-formatted text parser used by the 1.8 and 1.9 adapter display-name,
+  prefix and suffix paths. An independent token grammar and state machine
+  produce styled spans across named colours, format flags, unknown codes and a
+  dangling prefix. A literal reset witness makes a model that retains the
+  preceding colour fail, proving the comparison observes the reset style that
+  reaches shared renderers.
+
 - `tests/resource_key_model.rs` — a bounded fixed-ChaCha-seed grammar check
   over `lodestone_model::ResourceKey`, the shared identifier parser packet
   adapters use before retaining registry, sound, channel, and command-parser
