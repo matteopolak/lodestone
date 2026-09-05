@@ -4204,6 +4204,15 @@ impl IntegratedServer {
         self.block_ticks.as_ref()
     }
 
+    /// This server's live block-entity registry, if its unified tick loop owns
+    /// one. Profile fixtures use this same handle so their entities exercise
+    /// the central owner-batch hand-off instead of a disconnected registry.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn block_entities(&self) -> Option<&BlockEntityHandle> {
+        self.host.as_ref().map(|host| &host.block_entities)
+    }
+
     /// How many times a system registered on this server's own
     /// `bevy_ecs::World` has run, or `None` for a handle
     /// with no world-tick task — the same `Some` iff `tick_task` rule

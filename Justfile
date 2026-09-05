@@ -358,6 +358,15 @@ samply-heavy-server-smoke:
 profile-heavy-server capture:
     python3 scripts/profile-cost-table.py {{capture}}
 
+# A finite Samply input for the chunk-owner hand-off architecture. The example
+# drives a paused 128-tick scene and exits; it is an investigation, never CI.
+bench-chunk-owner-tick:
+    cargo bench {{jflag}} -p lodestone-server --features profile-harness --bench chunk_owner_tick -- --quick
+
+samply-chunk-owner-tick capture:
+    cargo build --release {{jflag}} -p lodestone-server --features profile-harness --example chunk-owner-tick-profile
+    samply record --save-only --unstable-presymbolicate -o {{capture}} -- target/release/examples/chunk-owner-tick-profile 128
+
 # --- Benchmark baselines and regression detection -------------------------
 #
 # Three recipes, in the order you use them. `bench-record` runs the subset of

@@ -37,6 +37,10 @@ redstone-counters = []
 # unaffected; a future non-v770 hosting family, or a build that wants to
 # drop the bundle's size, is the one that turns it off.
 bundled-worldgen-v26_2 = []
+# Enables Tokio's paused clock for the deterministic criterion/Samply fixture.
+# Kept off normal builds because the test-time clock API is not part of the
+# server's ordinary runtime surface.
+profile-harness = ["tokio/test-util"]
 
 [dependencies]
 # The portable clock. Not a direct `web-time` dependency any more:
@@ -255,4 +259,8 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # waiting is virtual and the work is real.
 [[bench]]
 name = "server_tick"
+harness = false
+
+[[bench]]
+name = "chunk_owner_tick"
 harness = false

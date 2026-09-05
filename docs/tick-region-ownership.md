@@ -66,6 +66,16 @@ out or concentrated before any worker or lock is introduced. Candidate cells
 are measurements only; they do not alter the chunk-owner assignment or
 simulation order.
 
+`chunk_owner_profile::SCENE_NAME` is the separate deterministic populated
+workload for this ownership seam. Its eight resident chunk owners each receive
+a furnace, one due block tick and one due fluid tick; 64 cows are distributed
+across those owners so periodic ambient effects return through entity-owner
+batches. The `profile-harness` feature gives the standard run a paused runtime
+that advances exactly 128 tick periods. `TickStats::owner_work` accumulates due
+block/fluid entries and the block-entity/entity batch and effect counts at the
+live central hand-offs, so the profile proves its work crossed those boundaries
+rather than merely being seeded in a fixture.
+
 ## How to change it
 
 Do not add region workers or coalesce these chunk owners into a larger region
@@ -107,12 +117,27 @@ scenes. This is spatial workload evidence, not an MSPT measurement: use it to
 decide whether a later profile deserves a regionisation experiment, never as a
 claim that a particular edge is the right size for coalescing chunk owners.
 
+For the owner-boundary workload, run `just bench-chunk-owner-tick` first. It
+constructs the live scene and rejects a missing phase sample, scheduled drain,
+block-entity owner batch, or ambient entity owner batch before Criterion takes
+its short sample. For a local call tree, build an explicit capture path and run
+`just samply-chunk-owner-tick <capture>`. Inspect the scheduled-and-physics
+phase beside `owner_work.scheduled_block_ticks` and
+`owner_work.scheduled_fluid_ticks`; inspect mobs-and-items beside
+`owner_work.block_entity_batches`, `entity_effect_batches`, and
+`entity_effects`. A high phase cost with a missing or unexpectedly small count
+is a fixture/wiring failure, not evidence for parallelization.
+
 ## Configuration
 
 None. Chunk ownership has no tunable size. Lifecycle batches are bounded by the
 existing cache selection rather than a new queue capacity. A candidate edge
 remains an explicit measurement argument, while any useful multi-chunk worker
 size depends on profiling a populated, named workload and has not been selected.
+The profile entry point accepts an optional tick count; its normal 128-tick run
+is fixed so counter comparisons name the same workload. The `profile-harness`
+feature is required for the fast paused-clock path and is selected by both
+`just` recipes; without it the finite example uses normal server sleeps.
 
 ## Dependencies
 
@@ -122,3 +147,7 @@ consumes its ownership sequence for random ticks and thunder decisions. The
 load/unload boundary, including the stores owned by `IntegratedServer`.
 regionised ticking design document records the prerequisites for changing this
 serial ownership seam into concurrent execution.
+
+The profile scene uses `IntegratedServer`, `BlockEntityRegistry`, scheduled
+tick queues and `MobSim`; it intentionally drives their ordinary production
+tick path instead of a parallel test-only executor.
