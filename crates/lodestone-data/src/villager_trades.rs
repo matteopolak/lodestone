@@ -92,6 +92,42 @@ pub struct TradeRecord {
     pub price_multiplier: f32,
 }
 
+/// A villager's trade tier.
+///
+/// The trade registry has exactly five tiers. Keeping the range here means a
+/// table lookup cannot accidentally accept a zero-based UI index, an xp value,
+/// or an unvalidated value restored from another boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VillagerLevel(u8);
+
+impl VillagerLevel {
+    /// The first trade tier, called `novice` by the game.
+    pub const NOVICE: Self = Self(1);
+    /// The final trade tier, called `master` by the game.
+    pub const MASTER: Self = Self(5);
+
+    /// Validates a raw villager trade tier.
+    #[must_use]
+    pub const fn new(raw: i32) -> Option<Self> {
+        if raw >= Self::NOVICE.0 as i32 && raw <= Self::MASTER.0 as i32 {
+            Some(Self(raw as u8))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the one-based number used by the save and protocol surfaces.
+    #[must_use]
+    pub const fn number(self) -> i32 {
+        self.0 as i32
+    }
+
+    /// Iterates every tier unlocked by this one, including novice and `self`.
+    pub fn unlocked_tiers(self) -> impl Iterator<Item = Self> {
+        (Self::NOVICE.0..=self.0).map(Self)
+    }
+}
+
 /// `tags/villager_trade/armorer/level_1.json` resolves to: `smith/1/coal_emerald`, `armorer/1/emerald_iron_leggings`, `armorer/1/emerald_iron_boots`, `armorer/1/emerald_iron_helmet`, `armorer/1/emerald_iron_chestplate`.
 /// `trade_set/armorer/level_1.json`'s `amount` is `2`.
 const ARMORER_LEVEL_1: &[TradeRecord] = &[
@@ -3241,16 +3277,16 @@ const WEAPONSMITH_LEVEL_4: &[TradeRecord] = &[
 // weaponsmith level 5: no portable trades in the resolved tag (all 1 record(s) use given_item_modifiers: ['weaponsmith/5/emerald_enchanted_diamond_sword']).
 /// The pool a profession/level's own trade set draws from, plus the tag's
 /// declared `amount` — `None` for a `(profession, level)` with no portable
-/// pool: an unrecognised profession path, `level` outside `1..=5`, or a
-/// level whose entire resolved tag is `given_item_modifiers`-only (see this
+/// pool: an unrecognised profession path, or a level whose entire resolved
+/// tag is `given_item_modifiers`-only (see this
 /// module's own doc for the exact list). `profession` is the bare registry
 /// path (e.g. `"farmer"`, `"librarian"`) — the same string
 /// `lodestone_server::mobs::villager::Profession::path` already returns, so
 /// a caller there needs no enum translation to use this table.
 #[must_use]
-pub fn pool_for(profession: &str, level: i32) -> Option<(&'static [TradeRecord], usize)> {
+pub fn pool_for(profession: &str, level: VillagerLevel) -> Option<(&'static [TradeRecord], usize)> {
     #[allow(clippy::match_same_arms)]
-    match (profession, level) {
+    match (profession, level.number()) {
         ("armorer", 1) => Some((ARMORER_LEVEL_1, 2)),
         ("armorer", 2) => Some((ARMORER_LEVEL_2, 2)),
         ("armorer", 3) => Some((ARMORER_LEVEL_3, 2)),
@@ -3320,13 +3356,17 @@ pub fn pool_for(profession: &str, level: i32) -> Option<(&'static [TradeRecord],
 mod tests {
     use super::*;
 
+    fn level(number: i32) -> VillagerLevel {
+        VillagerLevel::new(number).expect("test level is in the five-tier trade domain")
+    }
+
     /// The discriminating assertion this table exists for: a **specific**
     /// generated record, checked against the real jar file, not "some
     /// trades were generated". Pairwise-distinct counts (20/1/16) so a
     /// transposition of wants/gives/max_uses cannot survive unnoticed.
     #[test]
     fn farmer_level_1_wheat_for_emerald_matches_the_jar_record_exactly() {
-        let (pool, amount) = pool_for("farmer", 1).expect("farmer level 1 is ported");
+        let (pool, amount) = pool_for("farmer", level(1)).expect("farmer level 1 is ported");
         assert_eq!(amount, 2, "trade_set/farmer/level_1.json's amount is 2");
         assert_eq!(
             pool[0],
@@ -3348,7 +3388,7 @@ mod tests {
     /// is 1, not the plausible-but-wrong 0.
     #[test]
     fn a_record_missing_its_xp_field_resolves_the_codecs_default_of_one() {
-        let (pool, _) = pool_for("armorer", 1).unwrap();
+        let (pool, _) = pool_for("armorer", level(1)).unwrap();
         let leggings = pool
             .iter()
             .find(|t| t.gives_item == "minecraft:iron_leggings")
@@ -3361,7 +3401,7 @@ mod tests {
     /// a real second cost (`additional_wants`), not a modelled-away one.
     #[test]
     fn a_two_cost_trade_carries_its_second_cost_item() {
-        let (pool, _) = pool_for("fisherman", 1).unwrap();
+        let (pool, _) = pool_for("fisherman", level(1)).unwrap();
         let cod = pool
             .iter()
             .find(|t| t.gives_item == "minecraft:cooked_cod")
@@ -3377,7 +3417,7 @@ mod tests {
     /// own four armor-piece trades.
     #[test]
     fn armorer_pool_includes_the_shared_smith_trade() {
-        let (pool, _) = pool_for("armorer", 1).unwrap();
+        let (pool, _) = pool_for("armorer", level(1)).unwrap();
         assert!(
             pool.iter().any(|t| t.wants_item == "minecraft:coal" && t.gives_item == "minecraft:emerald"),
             "armorer/1 should include the common_smith coal_emerald trade"
@@ -3390,19 +3430,21 @@ mod tests {
     /// empty-but-present one, and not invented numbers.
     #[test]
     fn a_fully_unportable_level_returns_none() {
-        assert_eq!(pool_for("armorer", 4), None);
-        assert_eq!(pool_for("armorer", 5), None);
-        assert_eq!(pool_for("toolsmith", 5), None);
-        assert_eq!(pool_for("weaponsmith", 5), None);
+        assert_eq!(pool_for("armorer", level(4)), None);
+        assert_eq!(pool_for("armorer", level(5)), None);
+        assert_eq!(pool_for("toolsmith", level(5)), None);
+        assert_eq!(pool_for("weaponsmith", level(5)), None);
     }
 
     #[test]
-    fn an_unrecognised_profession_or_level_returns_none() {
-        assert_eq!(pool_for("nitwit", 1), None);
-        assert_eq!(pool_for("none", 1), None);
-        assert_eq!(pool_for("farmer", 0), None);
-        assert_eq!(pool_for("farmer", 6), None);
-        assert_eq!(pool_for("not_a_profession", 1), None);
+    fn level_validation_stops_invalid_numbers_before_table_lookup() {
+        const _: fn(&str, VillagerLevel) -> Option<(&'static [TradeRecord], usize)> = pool_for;
+
+        assert_eq!(VillagerLevel::new(0), None);
+        assert_eq!(VillagerLevel::new(6), None);
+        assert_eq!(pool_for("nitwit", level(1)), None);
+        assert_eq!(pool_for("none", level(1)), None);
+        assert_eq!(pool_for("not_a_profession", level(1)), None);
     }
 
     /// Librarian level 5 is the one profession/level whose `trade_set`
@@ -3410,7 +3452,7 @@ mod tests {
     /// likely default every level to the common value.
     #[test]
     fn librarian_level_5_amount_is_three_not_the_common_two() {
-        let (_, amount) = pool_for("librarian", 5).unwrap();
+        let (_, amount) = pool_for("librarian", level(5)).unwrap();
         assert_eq!(amount, 3);
     }
 
@@ -3428,7 +3470,7 @@ mod tests {
         ];
         let mut missing = Vec::new();
         for profession in professions {
-            if (1..=5).all(|level| pool_for(profession, level).is_none()) {
+            if (1..=5).all(|number| pool_for(profession, level(number)).is_none()) {
                 missing.push(profession);
             }
         }
@@ -3452,11 +3494,11 @@ mod tests {
         ];
         let mut mismatches = Vec::new();
         for profession in professions {
-            for level in 1..=5 {
-                let is_none = pool_for(profession, level).is_none();
-                let should_be_none = expected_none.contains(&(profession, level));
+            for number in 1..=5 {
+                let is_none = pool_for(profession, level(number)).is_none();
+                let should_be_none = expected_none.contains(&(profession, number));
                 if is_none != should_be_none {
-                    mismatches.push((profession, level, is_none));
+                    mismatches.push((profession, number, is_none));
                 }
             }
         }

@@ -54,7 +54,9 @@ real `open_screen` + `merchant_offers`.
 26.2 jar's `data/minecraft/{villager_trade,trade_set,tags/villager_trade}`. `pool_for(profession_path,
 level)` resolves a pool (including nested tags — `armorer`/`toolsmith`/`weaponsmith` pull in
 `#minecraft:common_smith/level_N`) keyed by the bare registry path string, since this crate sits
-below `lodestone-server` and cannot name its `Profession` type. Records that compute part of
+below `lodestone-server` and cannot name its `Profession` type. Its `VillagerLevel` newtype
+accepts only the one-based `1..=5` trade-tier domain; the live mob validates its stored numeric
+level once before it reaches the lookup or offer-building loops. Records that compute part of
 their result at runtime (enchanted books, cartographer maps, enchanted-weapon/tipped-arrow
 trades) are excluded rather than given invented numbers; a handful of profession/level
 combinations resolve to nothing portable at all. `crate::mobs::villager::trades` (what

@@ -2784,10 +2784,12 @@ impl<'w> SimMob<'w> {
             Some((p, l, _)) if *p == self.profession && *l == self.villager_level
         );
         if fresh {
+            let trade_level = lodestone_data::villager_trades::VillagerLevel::new(self.villager_level)
+                .expect("a simulated villager always keeps a level in 1..=5");
             self.trades = Some((
                 self.profession,
                 self.villager_level,
-                crate::villager_trade::VillagerTrades::for_profession(self.profession, self.villager_level),
+                crate::villager_trade::VillagerTrades::for_profession(self.profession, trade_level),
             ));
         }
         self.trades.as_mut().map(|(_, _, trades)| trades)
@@ -6785,7 +6787,9 @@ impl<'w> MobSim<'w> {
         if species == "villager" {
             let profession = mob.profession;
             let level = mob.villager_level;
-            let has_offers = !villager::trades::offers_up_to(profession, level).is_empty();
+            let trade_level = lodestone_data::villager_trades::VillagerLevel::new(level)
+                .expect("a simulated villager always keeps a level in 1..=5");
+            let has_offers = !villager::trades::offers_up_to(profession, trade_level).is_empty();
             let outcome = if matches!(
                 profession,
                 villager::Profession::None | villager::Profession::Nitwit
