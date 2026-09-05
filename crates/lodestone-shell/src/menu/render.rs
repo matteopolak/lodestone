@@ -80,8 +80,8 @@ use crate::menu::widget::{self, LayoutElement, Widget};
 // something else -- `command_block`, `edit_box` and `layout` are already in the
 // block above and need no restating.
 use super::{
-    Screen, UiState, accounts, confirm, create_world, key_binds, language, nav, options, packs,
-    social, stats, status, telemetry, world_select,
+    Screen, UiState, accounts, confirm, create_world, friends, key_binds, language, nav, options,
+    packs, social, stats, status, telemetry, world_select,
 };
 
 mod account_screen;
