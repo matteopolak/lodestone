@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -75,6 +76,31 @@ class SamplyHeavyServerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "sidecar"):
                 MODULE.require_nonempty(paths.symbols, "sidecar")
 
+    def test_macos_signature_control_requires_samply_debugger_entitlement(self):
+        unsigned = subprocess.CompletedProcess(
+            ["codesign"], 0, "", "Executable=/tmp/samply\n"
+        )
+        signed = subprocess.CompletedProcess(
+            ["codesign"], 0, "", "com.apple.security.cs.debugger\n"
+        )
+        with mock.patch.object(MODULE.sys, "platform", "darwin"), \
+             mock.patch.object(MODULE.subprocess, "run", return_value=unsigned):
+            with self.assertRaisesRegex(RuntimeError, "samply setup"):
+                MODULE.require_macos_samply_setup("/tmp/samply")
+        with mock.patch.object(MODULE.sys, "platform", "darwin"), \
+             mock.patch.object(MODULE.subprocess, "run", return_value=signed) as run:
+            MODULE.require_macos_samply_setup("/tmp/samply")
+        self.assertEqual(
+            run.call_args.args[0],
+            ["codesign", "-d", "--entitlements", ":-", "/tmp/samply"],
+        )
+
+    def test_non_macos_does_not_require_codesign(self):
+        with mock.patch.object(MODULE.sys, "platform", "linux"), \
+             mock.patch.object(MODULE.subprocess, "run") as run:
+            MODULE.require_macos_samply_setup("/tmp/samply")
+        run.assert_not_called()
+
     def test_capture_commands_profile_entity_ready_phase_with_two_deadlines(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -99,11 +125,13 @@ class SamplyHeavyServerTests(unittest.TestCase):
                     paths.runtime.write_text(json.dumps(record) + "\n")
 
             with mock.patch.object(MODULE.shutil, "which", return_value="/usr/bin/samply"), \
+                 mock.patch.object(MODULE, "require_macos_samply_setup") as readiness, \
                  mock.patch.object(MODULE, "emit_scene", return_value=scene), \
                  mock.patch.object(MODULE, "run_bounded", side_effect=fake_run) as run:
                 actual_paths, actual_record = MODULE.capture(args)
             self.assertEqual(actual_paths, paths)
             self.assertEqual(actual_record, record)
+            readiness.assert_called_once_with("/usr/bin/samply")
             samply_call = run.call_args.args[0]
             self.assertEqual(samply_call[:5], ["samply", "record", "--save-only", "--unstable-presymbolicate", "-o"])
             self.assertIn("--phase", samply_call)

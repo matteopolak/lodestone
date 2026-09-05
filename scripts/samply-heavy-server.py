@@ -38,6 +38,7 @@ MAX_ENTITY_SCALE = 2
 MAX_WALL_DEADLINE_SECS = 60
 SMOKE_WALL_DEADLINE_SECS = 15
 PROFILER_GRACE_SECS = 15
+MACOS_DEBUGGER_ENTITLEMENT = "com.apple.security.cs.debugger"
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,33 @@ def paths_for(output_dir: Path, run_id: str) -> CapturePaths:
 def require_nonempty(path: Path, label: str) -> None:
     if not path.is_file() or path.stat().st_size == 0:
         raise RuntimeError(f"Samply did not produce a nonempty {label}: {path}")
+
+
+def require_macos_samply_setup(samply: str) -> None:
+    """Reject an unsigned Samply before it can fail after the scene handoff."""
+    if sys.platform != "darwin":
+        return
+    try:
+        signature = subprocess.run(
+            ["codesign", "-d", "--entitlements", ":-", samply],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as error:
+        raise RuntimeError(
+            "cannot inspect Samply's macOS code signature; install the Xcode command-line tools "
+            "and run `samply setup`"
+        ) from error
+    entitlements = signature.stdout + signature.stderr
+    if signature.returncode or MACOS_DEBUGGER_ENTITLEMENT not in entitlements:
+        raise RuntimeError(
+            "Samply is not enabled for macOS process attachment: its code signature lacks "
+            f"{MACOS_DEBUGGER_ENTITLEMENT}. Run `samply setup` interactively once (and again "
+            "after updating Samply), then re-run this command. It self-signs only the Samply "
+            "executable; do not use sudo."
+        )
 
 
 def run_bounded(command: list[str], timeout_secs: int) -> subprocess.CompletedProcess[str]:
@@ -182,8 +210,10 @@ def capture(args: argparse.Namespace) -> tuple[CapturePaths, dict]:
             f"release heavy-scene server is missing: {args.server}; run "
             "cargo build --release -p lodestone-server --example heavy-scene-server"
         )
-    if shutil.which("samply") is None:
+    samply = shutil.which("samply")
+    if samply is None:
         raise RuntimeError("samply is not on PATH; install Samply before capturing")
+    require_macos_samply_setup(samply)
     run_id = args.run_id or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     paths = paths_for(args.output_dir, run_id)
     args.output_dir.mkdir(parents=True, exist_ok=True)

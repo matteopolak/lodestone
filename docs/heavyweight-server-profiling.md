@@ -95,6 +95,16 @@ complete runtime JSONL record are non-empty and agree on scene identity and
 population. Use `just samply-heavy-server-smoke` for the 12-second local smoke
 capture; it is the appropriate verification run, not a long campaign.
 
+On macOS, Samply must be self-signed for process attachment. The runner inspects
+Samply's code signature before it emits the scene or creates any output
+directory. If it reports a missing `com.apple.security.cs.debugger` entitlement,
+run `samply setup` interactively once, and repeat it after every Samply update.
+That operation changes only the local Samply executable; it does not require
+`sudo`, nor any change to system security settings. The release
+`heavy-scene-server` binary is locally compiled and is therefore a supported
+target. Do not use a system-signed executable such as `/usr/bin/true` as a
+Samply control: macOS blocks Samply's launch mechanism for those targets.
+
 Each successful run prints its unique paths below `bench-results/profiles/`.
 Open the interactive flamegraph with the printed command, for example:
 
