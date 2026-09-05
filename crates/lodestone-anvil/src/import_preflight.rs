@@ -81,6 +81,22 @@ pub enum NativeField {
     SpawnPosition,
     /// Native world spawn dimension.
     SpawnDimension,
+    /// Native chunk column coordinates supplied to the record key and body.
+    ChunkCoordinates,
+    /// Native chunk data-version census.
+    ChunkDataVersion,
+    /// Native section Y coordinate.
+    ChunkSectionY,
+    /// Native per-section block-state palettes and indices.
+    ChunkBlockStates,
+    /// Native per-section three-dimensional biome cells and surface answer.
+    ChunkBiomes,
+    /// Native `MOTION_BLOCKING` heightmap.
+    ChunkMotionBlocking,
+    /// Native per-section sky-light arrays or uniform values.
+    ChunkSkyLight,
+    /// Native per-section block-light arrays or uniform values.
+    ChunkBlockLight,
 }
 
 /// A source value with a typed destination in the initial native vocabulary.
@@ -324,6 +340,220 @@ impl PreflightBuilder {
                     path: "$".to_string(),
                 },
                 BlockerReason::MissingOrMalformedValue,
+            );
+        }
+    }
+
+    /// Inspects the subset of one chunk that the version-1 native record can
+    /// consume.
+    ///
+    /// This is intentionally separate from [`Self::inspect_chunk`], which is
+    /// the conservative report used by a future whole-world walker while no
+    /// chunk consumer has been selected. The bounded consumer calls this
+    /// method and receives field-level loss entries for block entities, ticks,
+    /// structures, and other source payloads it will drop.
+    pub fn inspect_native_chunk(
+        &mut self,
+        dimension: impl Into<String>,
+        x: i32,
+        z: i32,
+        chunk: &Nbt,
+    ) {
+        let source = ImportSource::Chunk {
+            dimension: dimension.into(),
+            x,
+            z,
+        };
+        let location = |path: String| SourceLocation {
+            source: source.clone(),
+            path,
+        };
+        let Nbt::Compound(fields) = chunk else {
+            self.block(location("$".to_owned()), BlockerReason::MissingOrMalformedValue);
+            return;
+        };
+
+        let mut data_version = false;
+        let mut x_pos = false;
+        let mut z_pos = false;
+        let mut sections = false;
+        for (name, value) in fields {
+            match name.as_str() {
+                "DataVersion" => {
+                    data_version = true;
+                    if matches!(value, Nbt::Int(level_dat::DATA_VERSION_26_2)) {
+                        self.support(location(name.clone()), NativeField::ChunkDataVersion);
+                    } else {
+                        self.block(location(name.clone()), BlockerReason::UnsupportedDataVersion);
+                    }
+                }
+                "xPos" => {
+                    x_pos = true;
+                    if matches!(value, Nbt::Int(value) if *value == x) {
+                        self.support(location(name.clone()), NativeField::ChunkCoordinates);
+                    } else {
+                        self.block(location(name.clone()), BlockerReason::MissingOrMalformedValue);
+                    }
+                }
+                "zPos" => {
+                    z_pos = true;
+                    if matches!(value, Nbt::Int(value) if *value == z) {
+                        self.support(location(name.clone()), NativeField::ChunkCoordinates);
+                    } else {
+                        self.block(location(name.clone()), BlockerReason::MissingOrMalformedValue);
+                    }
+                }
+                "sections" => {
+                    sections = true;
+                    self.inspect_native_chunk_sections(&source, value);
+                }
+                "Heightmaps" => self.inspect_native_heightmaps(&source, value),
+                "Status"
+                | "yPos"
+                | "LastUpdate"
+                | "InhabitedTime"
+                | "isLightOn"
+                | "block_entities"
+                | "block_ticks"
+                | "fluid_ticks"
+                | "structures"
+                | "entities"
+                | "PostProcessing" => {
+                    self.loss(location(name.clone()), LossReason::NoNativeDestination);
+                }
+                _ => self.loss(location(name.clone()), LossReason::NoNativeDestination),
+            }
+        }
+        if !data_version {
+            self.block(
+                location("DataVersion".to_owned()),
+                BlockerReason::MissingOrMalformedValue,
+            );
+        }
+        if !x_pos {
+            self.block(location("xPos".to_owned()), BlockerReason::MissingOrMalformedValue);
+        }
+        if !z_pos {
+            self.block(location("zPos".to_owned()), BlockerReason::MissingOrMalformedValue);
+        }
+        if !sections {
+            self.block(
+                location("sections".to_owned()),
+                BlockerReason::MissingOrMalformedValue,
+            );
+        }
+    }
+
+    fn inspect_native_chunk_sections(&mut self, source: &ImportSource, value: &Nbt) {
+        let location = |path: String| SourceLocation {
+            source: source.clone(),
+            path,
+        };
+        let Nbt::List { elements, .. } = value else {
+            self.block(
+                location("sections".to_owned()),
+                BlockerReason::MissingOrMalformedValue,
+            );
+            return;
+        };
+        for (index, section) in elements.iter().enumerate() {
+            let path = format!("sections[{index}]");
+            let Nbt::Compound(fields) = section else {
+                self.block(location(path), BlockerReason::MissingOrMalformedValue);
+                continue;
+            };
+            let mut found_y = false;
+            for (name, value) in fields {
+                let field_path = format!("sections[{index}].{name}");
+                match name.as_str() {
+                    "Y" => {
+                        found_y = true;
+                        if matches!(value, Nbt::Byte(_)) {
+                            self.support(location(field_path), NativeField::ChunkSectionY);
+                        } else {
+                            self.block(
+                                location(field_path),
+                                BlockerReason::MissingOrMalformedValue,
+                            );
+                        }
+                    }
+                    "block_states" => {
+                        if matches!(value, Nbt::Compound(_)) {
+                            self.support(location(field_path), NativeField::ChunkBlockStates);
+                        } else {
+                            self.block(
+                                location(field_path),
+                                BlockerReason::MissingOrMalformedValue,
+                            );
+                        }
+                    }
+                    "biomes" => {
+                        if matches!(value, Nbt::Compound(_)) {
+                            self.support(location(field_path), NativeField::ChunkBiomes);
+                        } else {
+                            self.block(
+                                location(field_path),
+                                BlockerReason::MissingOrMalformedValue,
+                            );
+                        }
+                    }
+                    "SkyLight" | "BlockLight" => {
+                        if matches!(value, Nbt::ByteArray(bytes) if bytes.len() == 2048) {
+                            let destination = if name == "SkyLight" {
+                                NativeField::ChunkSkyLight
+                            } else {
+                                NativeField::ChunkBlockLight
+                            };
+                            self.support(location(field_path), destination);
+                        } else {
+                            self.block(
+                                location(field_path),
+                                BlockerReason::MissingOrMalformedValue,
+                            );
+                        }
+                    }
+                    _ => self.loss(location(field_path), LossReason::NoNativeDestination),
+                }
+            }
+            if !found_y {
+                self.block(
+                    location(format!("sections[{index}].Y")),
+                    BlockerReason::MissingOrMalformedValue,
+                );
+            }
+        }
+    }
+
+    fn inspect_native_heightmaps(&mut self, source: &ImportSource, value: &Nbt) {
+        let location = |path: String| SourceLocation {
+            source: source.clone(),
+            path,
+        };
+        let Nbt::Compound(fields) = value else {
+            self.block(
+                location("Heightmaps".to_owned()),
+                BlockerReason::MissingOrMalformedValue,
+            );
+            return;
+        };
+        let mut found_motion_blocking = false;
+        for (name, value) in fields {
+            let path = format!("Heightmaps.{name}");
+            if name == "MOTION_BLOCKING" {
+                found_motion_blocking = true;
+                if matches!(value, Nbt::LongArray(values) if !values.is_empty()) {
+                    self.support(location(path), NativeField::ChunkMotionBlocking);
+                } else {
+                    self.block(location(path), BlockerReason::MissingOrMalformedValue);
+                }
+            } else {
+                self.loss(location(path), LossReason::NoNativeDestination);
+            }
+        }
+        if !found_motion_blocking {
+            self.loss(
+                location("Heightmaps.MOTION_BLOCKING".to_owned()),
+                LossReason::NoNativeDestination,
             );
         }
     }
