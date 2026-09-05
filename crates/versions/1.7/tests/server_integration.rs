@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, Rotation, Vec3};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent, Rotation, Vec3,
+};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_7::adapter;
 
@@ -128,6 +130,46 @@ async fn position_look_recenters_the_hosted_protocol_5_view() {
         .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
         .await
         .expect("position/look must recenter the hosted view");
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_5_echoes_legacy_chat_to_the_client_event_stream() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
+        .expect("protocol 5 must resolve to a hosted family");
+    let source = Arc::new(LegacyFixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, mut events) = ClientBuilder::new(address(), profile(), Box::new(adapter()))
+        .player_loaded_policy(PlayerLoadedPolicy::Manual)
+        .connect_with(client_io);
+
+    handle
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("legacy login must reach Play");
+    handle
+        .send_action(ClientAction::SendChat {
+            text: "legacy chat \"escapes\"".to_owned(),
+        })
+        .expect("joined legacy client accepts chat");
+
+    let (text, kind) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::Chat { text, kind, .. }) = events.recv().await {
+                return (text.to_plain_string(), kind);
+            }
+        }
+    })
+    .await
+    .expect("the hosted server must echo legacy chat through the real adapter");
+    assert_eq!(text, "<LegacyFixture> legacy chat \"escapes\"");
+    assert_eq!(
+        kind,
+        ChatKind::Chat,
+        "protocol 5 has no chat-position byte to distinguish system output"
+    );
+
     handle.shutdown();
     server.shutdown().await;
 }
