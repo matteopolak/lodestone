@@ -1,5 +1,5 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Vec3f};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_20_6::{V766ServerProtocol, packet_ids};
 use lodestone_v1_20_6::packets::chunk::{ChunkShape, MapChunk};
@@ -128,6 +128,66 @@ fn block_action_and_initial_chunk_batch_use_the_hosted_wire_shapes() {
     });
     assert_eq!(protocol.decode(State::Play, 0x08, &[0x40, 0x60, 0x00, 0x00]),
         ServerBound::ChunkBatchAcknowledged { desired_chunks_per_tick: 3.5 });
+}
+
+#[test]
+fn block_place_literal_reaches_the_server_use_on_consumer_shape() {
+    let protocol = V766ServerProtocol;
+    // This is a protocol-766 `use_item_on` body assembled from the wire fields,
+    // not this crate's BlockPlace encoder: off hand, (5, -10, -7), south face,
+    // cursor (0.25, 1.0, 0.75), inside-block true, prediction sequence 17.
+    let packed = ((5_i64 & 0x3ff_ffff) << 38)
+        | ((-7_i64 & 0x3ff_ffff) << 12)
+        | (-10_i64 & 0xfff);
+    let body = [
+        vec![0x01],
+        packed.to_be_bytes().to_vec(),
+        vec![0x03],
+        0.25_f32.to_be_bytes().to_vec(),
+        1.0_f32.to_be_bytes().to_vec(),
+        0.75_f32.to_be_bytes().to_vec(),
+        vec![0x01, 0x11],
+    ]
+    .concat();
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            packet_ids::play::serverbound::BLOCK_PLACE,
+            &body,
+        ),
+        ServerBound::UseItemOn {
+            pos: BlockPos::new(5, -10, -7),
+            face: BlockFace::South,
+            cursor: Vec3f {
+                x: 0.25,
+                y: 1.0,
+                z: 0.75,
+            },
+            sequence: 17,
+            hand: 1,
+        }
+    );
+
+    let mut invalid_face = body.clone();
+    invalid_face[9] = 0x06;
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            packet_ids::play::serverbound::BLOCK_PLACE,
+            &invalid_face,
+        ),
+        ServerBound::Ignored,
+        "a non-face direction must not reach placement"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Configuration,
+            packet_ids::play::serverbound::BLOCK_PLACE,
+            &body,
+        ),
+        ServerBound::Ignored,
+        "configuration packets must not leak into Play consumers"
+    );
 }
 
 #[test]

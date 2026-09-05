@@ -249,8 +249,12 @@ The same feature registers `V766ServerProtocol` for hosting protocol 766.
 ## Hosting
 
 `server_protocol::V766ServerProtocol` implements offline login, configuration,
-the Overworld join and teleport, chunk batches, player movement, and block
-breaking updates. All four Play movement shapes preserve the position,
+the Overworld join and teleport, chunk batches, player movement, block
+breaking updates, and block-use placement. Its 766 `block_place` decoder lifts
+the hand, signed packed position, face, block-local cursor, and prediction
+sequence into `ServerBound::UseItemOn`, the existing integrated-server placement
+consumer; it rejects invalid hand or face values and never accepts those bytes
+before Play. All four Play movement shapes preserve the position,
 optional rotation, and grounded status the shared server uses to recenter the
 view and check interactions.
 The configuration fixture in `src/generated/hosting-configuration.txt` contains
