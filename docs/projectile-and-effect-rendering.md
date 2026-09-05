@@ -108,6 +108,13 @@ Renderer-facing methods intentionally still lower it to `i32`, because the item-
 use that raw representation. Keep validation at the map-store ingress instead of letting those later
 consumers turn a malformed id into cache identity.
 
+`lodestone_render::PackedMapColour` owns the renderer boundary for each packed palette byte. Its high six
+bits must name one of the 62 populated base-colour entries and its low two bits select brightness; ids 62
+and 63 are rejected before indexing the table. `map_texture_rgba` validates each wire-fed grid byte once,
+then carries the typed value through `map_color_rgba`; an invalid byte falls back to the transparent entry,
+so malformed map data cannot panic or draw an arbitrary palette row. The positive controls are the final
+base-colour entry at highest brightness and the transparent base entry at all four brightness values.
+
 ### Display entities (`text_display` / `item_display` / `block_display`)
 
 All three share one placement:
