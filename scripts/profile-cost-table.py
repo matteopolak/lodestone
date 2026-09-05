@@ -497,6 +497,36 @@ def compute_cost_tables(tables: Tables, thread: dict) -> tuple[dict, dict, float
     cpu_delta = samples.get("threadCPUDelta")
     weight_array = samples.get("weight")
 
+    # An absent CPU array means this platform did not record CPU deltas and is
+    # the one case where sample-count fallback is honest. A present array is
+    # part of the sample-row alignment contract, even when every value is
+    # null; accepting a different length shifts attribution or hides a broken
+    # capture behind the fallback warning.
+    if cpu_delta is not None:
+        if not isinstance(cpu_delta, list):
+            raise SystemExit(
+                "selected thread has a non-list threadCPUDelta value; refusing "
+                "to attribute a malformed profile."
+            )
+        if len(cpu_delta) != len(stacks):
+            raise SystemExit(
+                "selected thread has threadCPUDelta entries for "
+                f"{len(cpu_delta)} samples but {len(stacks)} stack entries; refusing "
+                "a misaligned CPU-time table."
+            )
+    if weight_array is not None:
+        if not isinstance(weight_array, list):
+            raise SystemExit(
+                "selected thread has a non-list sample weight value; refusing "
+                "to attribute a malformed profile."
+            )
+        if len(weight_array) != len(stacks):
+            raise SystemExit(
+                "selected thread has sample weights for "
+                f"{len(weight_array)} samples but {len(stacks)} stack entries; refusing "
+                "a misaligned sample-weight table."
+            )
+
     if cpu_delta is not None and any(d is not None for d in cpu_delta):
         weight_kind = "threadCPUDelta"
 
