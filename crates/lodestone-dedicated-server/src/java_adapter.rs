@@ -80,25 +80,30 @@ impl JavaAdapter {
     ) -> Result<Self, String> {
         let (host, paper_construction_receiver) = if let Some(plan) = paper_plan.clone() {
             let (construction_sender, construction_receiver) = sync_channel(1);
-            AdapterHost::start_with_setup(config, class, deadline, move |runtime, env| {
-                let lifecycle = plan.load_lifecycle_entries_in_runtime(runtime, env).map_err(|error| {
-                    format!("could not load configured Paper lifecycle entries: {error}")
-                })?;
-                let facade_input = if plan.requires_isolated_native_shim() {
-                    PaperServerFacadeInput::native_block_state_read()
-                } else {
-                    PaperServerFacadeInput::Unavailable
-                };
-                let construction = lifecycle.into_construction_plan(facade_input).map_err(|error| {
-                    format!("could not retain configured Paper construction state: {error}")
-                })?;
-                construction_sender
-                    .send(construction.readiness().clone())
-                    .map_err(|error| {
+            AdapterHost::start_with_setup(
+                config,
+                class,
+                deadline,
+                move |runtime, env, native_surface| {
+                    let lifecycle = plan.load_lifecycle_entries_in_runtime(runtime, env).map_err(|error| {
+                        format!("could not load configured Paper lifecycle entries: {error}")
+                    })?;
+                    let facade_input = if plan.requires_isolated_native_shim() {
+                        PaperServerFacadeInput::native_block_state_read(native_surface)
+                    } else {
+                        PaperServerFacadeInput::Unavailable
+                    };
+                    let construction = lifecycle.into_construction_plan(facade_input).map_err(|error| {
                         format!("could not retain configured Paper construction state: {error}")
                     })?;
-                Ok(construction)
-            })
+                    construction_sender
+                        .send(construction.readiness().clone())
+                        .map_err(|error| {
+                            format!("could not retain configured Paper construction state: {error}")
+                        })?;
+                    Ok(construction)
+                },
+            )
             .map(|host| (host, Some(construction_receiver)))
         } else {
             AdapterHost::start(config, class, deadline).map(|host| (host, None))

@@ -3,10 +3,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::sync_channel;
+use std::time::{Duration, Instant};
 
+use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost};
 use lodestone_jvm_bridge::paper::{
     PaperBootstrapConfig, PaperServerFacadeInput, PaperServerFacadeState,
 };
+use lodestone_jvm_bridge::runtime::JvmConfig;
 
 /// This deliberately uses stand-in archives. It proves only the production
 /// loader's non-initializing lifecycle boundary, not Paper startup or plugin
@@ -22,6 +26,8 @@ fn lifecycle_entries_load_without_initialization() {
     let plugin_classes = fixture.path().join("plugin-classes");
     let shim_sources = fixture.path().join("shim-sources");
     let shim_classes = fixture.path().join("shim-classes");
+    let adapter_sources = fixture.path().join("adapter-sources");
+    let adapter_classes = fixture.path().join("adapter-classes");
     for path in [
         &paper_sources,
         &paper_classes,
@@ -29,6 +35,8 @@ fn lifecycle_entries_load_without_initialization() {
         &plugin_classes,
         &shim_sources,
         &shim_classes,
+        &adapter_sources,
+        &adapter_classes,
     ] {
         fs::create_dir_all(path).expect("fixture directory");
     }
@@ -54,9 +62,20 @@ fn lifecycle_entries_load_without_initialization() {
          public static native int blockStateId(int x, int y, int z); }",
     )
     .expect("shim source");
+    let adapter_package = adapter_sources.join("fixture/adapter");
+    fs::create_dir_all(&adapter_package).expect("adapter package directory");
+    let adapter_source = adapter_package.join("LifecycleAdapter.java");
+    fs::write(
+        &adapter_source,
+        "package fixture.adapter; public final class LifecycleAdapter { \
+         private static native int blockStateId(int x, int y, int z); \
+         public static void onTick(long tick) {} }",
+    )
+    .expect("adapter source");
     compile(&jdk, &paper_classes, &bootstrap_source);
     compile(&jdk, &plugin_classes, &plugin_source);
     compile(&jdk, &shim_classes, &shim_source);
+    compile(&jdk, &adapter_classes, &adapter_source);
     fs::write(
         plugin_classes.join("plugin.yml"),
         "name: Fixture\nversion: one\nmain: fixture.plugin.Main\n",
@@ -81,30 +100,48 @@ fn lifecycle_entries_load_without_initialization() {
         .with_isolated_native_shim()
         .discover()
         .expect("discover stand-in lifecycle inputs");
-    let runtime = plan.start_runtime().expect("start JVM");
-    runtime.with_attached_thread(|env| {
-        let lifecycle = plan.load_lifecycle_entries_in_runtime(&runtime, env)
-            .expect("load classes without running static initializers");
-        assert_eq!(lifecycle.loader_count(), 2, "retain bootstrap and plugin loaders");
-        assert!(lifecycle.retains_bootstrap_loader());
-        assert_eq!(lifecycle.loaded_plugins()[0].descriptor().name(), "Fixture");
-        assert!(lifecycle.loaded_plugins()[0].retains_entry_association());
-        let construction = lifecycle
-            .into_construction_plan(PaperServerFacadeInput::native_block_state_read())
-            .expect("retain native facade construction state");
-        assert_eq!(construction.loader_count(), 2, "keep the loaders beside construction state");
-        assert_eq!(construction.readiness().plugins()[0].descriptor().name(), "Fixture");
-        assert_eq!(
-            construction.readiness().facade(),
-            PaperServerFacadeState::NativeBlockStateRead,
-        );
-        assert_eq!(
-            construction.readiness().plugins()[0].blocker().to_string(),
-            "the installed server capability cannot supply plugin construction semantics",
-        );
-        Ok(())
-    })
-    .expect("attach fixture JVM thread");
+    let (construction_sender, construction_receiver) = sync_channel(1);
+    let mut host = AdapterHost::start_with_setup(
+        JvmConfig::new().with_classpath(&adapter_classes),
+        "fixture.adapter.LifecycleAdapter",
+        Duration::from_secs(5),
+        move |runtime, env, native_surface| {
+            let lifecycle = plan.load_lifecycle_entries_in_runtime(runtime, env)
+                .expect("load classes without running static initializers");
+            assert_eq!(lifecycle.loader_count(), 2, "retain bootstrap and plugin loaders");
+            assert!(lifecycle.retains_bootstrap_loader());
+            assert_eq!(lifecycle.loaded_plugins()[0].descriptor().name(), "Fixture");
+            assert!(lifecycle.loaded_plugins()[0].retains_entry_association());
+            let construction = lifecycle
+                .into_construction_plan(PaperServerFacadeInput::native_block_state_read(
+                    native_surface,
+                ))
+                .expect("retain worker-owned native facade state");
+            construction_sender
+                .send(construction.readiness().clone())
+                .map_err(|error| format!("send construction readiness: {error}"))?;
+            Ok(construction)
+        },
+    )
+    .expect("start lifecycle adapter worker");
+    let limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        match host.poll().expect("lifecycle adapter readiness") {
+            Some(AdapterEvent::Ready) => break,
+            Some(AdapterEvent::TickCompleted(tick)) => panic!("unexpected adapter tick {tick}"),
+            None => assert!(Instant::now() < limit, "lifecycle adapter did not become ready"),
+        }
+        std::thread::yield_now();
+    }
+    let readiness = construction_receiver
+        .try_recv()
+        .expect("worker must publish construction state before readiness");
+    assert_eq!(readiness.facade(), PaperServerFacadeState::NativeBlockStateRead);
+    assert_eq!(readiness.plugins()[0].descriptor().name(), "Fixture");
+    assert_eq!(
+        readiness.plugins()[0].blocker().to_string(),
+        "the installed server capability cannot supply plugin construction semantics",
+    );
 }
 
 struct FixtureDirectory(PathBuf);

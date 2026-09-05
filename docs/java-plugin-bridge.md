@@ -688,10 +688,13 @@ worker-lifetime lifecycle state and snapshots each descriptor's Load status befo
 plugin loader sees shim paths, the server jar, and only its own jar. The worker also snapshots each
 descriptor's construction prerequisite. Without `LODESTONE_PAPER_SHIM_PATH`, no facade is available.
 With it, the dedicated host supplies exactly one Java-facing, loader-local capability: the registered
-native block-state read. That capability is served from `IntegratedServer::resident_block_state_id`
-and is installed into each private loader before its entry class loads. It is not a Bukkit `Server`,
-a plugin loader, or a construction permit: loaded entries remain blocked from construction with a
-named insufficient-facade result. These are non-initializing class loads: the host does **not**
+native block-state read. `AdapterHost::start_with_setup` mints the corresponding capability token only
+from its worker's request port; consuming it keeps that token with the retained loader state, and the
+dedicated `JavaAdapter::poll` call is the matching live producer through
+`IntegratedServer::resident_block_state_id`. A lifecycle caller cannot claim that seam with an enum
+value while no request producer exists. It is not a Bukkit `Server`, a plugin loader, or a construction
+permit: loaded entries remain blocked from construction with a named insufficient-facade result. These
+are non-initializing class loads: the host does **not**
 initialize Paper, construct or enable plugins, dispatch Paper events, or promise plugin
 compatibility. Successfully loaded entries are retained but blocked from construction rather than
 receiving a fake partial API. A failed plugin entry is logged with its descriptor and stays disabled;

@@ -57,7 +57,7 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
         JvmConfig::new().with_classpath(&adapter_jar),
         "lodestone.fixture.BridgeAdapter",
         Duration::from_secs(5),
-        move |_, env| {
+        move |_, env, _surface| {
             env.find_class(jni_str!("java/lang/Object")).map_err(|error| error.to_string())?;
             setup_observed.store(true, Ordering::SeqCst);
             Ok(SetupState(setup_drop_observed))
