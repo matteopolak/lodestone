@@ -14,6 +14,7 @@ use lodestone_anvil::{
 };
 use lodestone_server::{
     anvil_entity_export::export_entities,
+    anvil_metadata_export::export_metadata,
     anvil_player_export::export_all_players,
     anvil_native_entity_import::{
         EntityChunkSelection, EntityLossDecision, SelectedEntityChunk, discover_entity_chunks,
@@ -58,6 +59,9 @@ const USAGE: &str = concat!(
     "  lodestone-server anvil-convert export-entities --source <native-store> ",
     "--destination <anvil-world> --native-path <native-store> ",
     "--dimension <minecraft:overworld|minecraft:the_nether|minecraft:the_end> --apply\n\n",
+    "  lodestone-server anvil-convert export-metadata --source <native-store> ",
+    "--destination <anvil-world> --native-path <native-store> --template <anvil-world> ",
+    "--world-name <name> --timestamp <seconds> --apply\n\n",
     "Without --apply this command only reports its payload-free preflight and refuses mutation. ",
     "A lossy --apply requires the exact review token printed by that preflight.",
 );
@@ -71,6 +75,7 @@ enum Direction {
     ImportEntities,
     ExportPlayers,
     ExportEntities,
+    ExportMetadata,
 }
 
 impl Direction {
@@ -83,6 +88,7 @@ impl Direction {
             Self::ImportEntities => "import-entities",
             Self::ExportPlayers => "export-players",
             Self::ExportEntities => "export-entities",
+            Self::ExportMetadata => "export-metadata",
         }
     }
 }
@@ -105,6 +111,8 @@ struct ConversionLaunch {
     all_players: bool,
     entity_chunks: Vec<SelectedEntityChunk>,
     all_entities: bool,
+    template: Option<PathBuf>,
+    world_name: Option<String>,
     apply: bool,
     acknowledgement: Option<String>,
 }
@@ -129,10 +137,11 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
         Some("import-entities") => Direction::ImportEntities,
         Some("export-players") => Direction::ExportPlayers,
         Some("export-entities") => Direction::ExportEntities,
+        Some("export-metadata") => Direction::ExportMetadata,
         Some("--help") | Some("-h") | None => return Err(USAGE.to_owned()),
         Some(other) => {
             return Err(format!(
-                "anvil-convert expects import, export, import-metadata, import-players, import-entities, export-players, or export-entities, got {other:?}\n{USAGE}"
+                "anvil-convert expects import, export, import-metadata, import-players, import-entities, export-players, export-entities, or export-metadata, got {other:?}\n{USAGE}"
             ));
         }
     };
@@ -151,6 +160,8 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
     let mut all_players = false;
     let mut entity_chunks = Vec::new();
     let mut all_entities = false;
+    let mut template = None;
+    let mut world_name = None;
     let mut apply = false;
     let mut acknowledgement = None;
 
@@ -195,6 +206,8 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
                 });
             }
             "--all-entities" => all_entities = true,
+            "--template" => template = Some(PathBuf::from(next_arg("--template", &mut args)?)),
+            "--world-name" => world_name = Some(next_arg("--world-name", &mut args)?),
             "--apply" => apply = true,
             "--acknowledge" => acknowledgement = Some(next_arg("--acknowledge", &mut args)?),
             "--help" | "-h" => return Err(USAGE.to_owned()),
@@ -219,6 +232,8 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
         all_players,
         entity_chunks,
         all_entities,
+        template,
+        world_name,
         apply,
         acknowledgement,
     };
@@ -237,7 +252,10 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
         | Direction::ImportEntities => {
             &launch.destination
         }
-        Direction::ExportTerrain | Direction::ExportPlayers | Direction::ExportEntities => {
+        Direction::ExportTerrain
+        | Direction::ExportPlayers
+        | Direction::ExportEntities
+        | Direction::ExportMetadata => {
             &launch.source
         }
     };
@@ -257,6 +275,11 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
             },
             launch.direction.name(),
         ));
+    }
+    if launch.direction != Direction::ExportMetadata
+        && (launch.template.is_some() || launch.world_name.is_some())
+    {
+        return Err("--template and --world-name are export-metadata-only".to_owned());
     }
     match launch.direction {
         Direction::ImportTerrain => {
@@ -424,6 +447,35 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
                 );
             }
         }
+        Direction::ExportMetadata => {
+            if launch.min_y.is_some()
+                || launch.height.is_some()
+                || launch.dimension.is_some()
+                || !launch.chunks.is_empty()
+                || launch.all_terrain
+                || launch.game_time.is_some()
+                || launch.compression.is_some()
+                || !launch.players.is_empty()
+                || launch.all_players
+                || !launch.entity_chunks.is_empty()
+                || launch.all_entities
+                || launch.acknowledgement.is_some()
+            {
+                return Err("export-metadata accepts only --source, --destination, --native-path, --template, --world-name, --timestamp, and --apply".to_owned());
+            }
+            if launch.template.is_none()
+                || launch.world_name.as_deref().is_none_or(str::is_empty)
+                || launch.timestamp.is_none()
+            {
+                return Err(
+                    "export-metadata requires --template, a non-empty --world-name, and --timestamp"
+                        .to_owned(),
+                );
+            }
+            if !launch.apply {
+                return Err("export-metadata requires --apply; it mutates the Anvil destination".to_owned());
+            }
+        }
     }
     Ok(())
 }
@@ -460,6 +512,29 @@ fn execute(launch: &ConversionLaunch) -> Result<String, String> {
             Ok(format!(
                 "Converted {} typed native entities into {}.\n",
                 result.entities_exported,
+                launch.destination.display()
+            ))
+        }
+        Direction::ExportMetadata => {
+            let storage = open_native_backend(launch)?;
+            let timestamp_millis =
+                i64::from(launch.timestamp.expect("validated metadata export timestamp")) * 1_000;
+            let result = export_metadata(
+                &storage,
+                launch
+                    .template
+                    .as_deref()
+                    .expect("validated metadata template"),
+                &launch.destination,
+                launch
+                    .world_name
+                    .as_deref()
+                    .expect("validated metadata world name"),
+                timestamp_millis,
+            ).map_err(|error| format!("metadata export failed: {error}"))?;
+            Ok(format!(
+                "Converted typed native metadata at game data version {} into {}.\n",
+                result.game_data_version,
                 launch.destination.display()
             ))
         }
@@ -851,6 +926,8 @@ fn parse_builtin_dimension(
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    use lodestone_storage_schema::{BuiltinDimension, GameMode, WorldProperties};
 
     use lodestone_server::{
         ChunkColumn, ScheduledTickHandle, TickPriority,
@@ -1440,5 +1517,64 @@ mod tests {
         assert_eq!(exported.len(), 1);
         assert_eq!(exported[0].uuid, uuid);
         assert_eq!(exported[0].id.to_string(), "minecraft:pig");
+    }
+
+    #[test]
+    fn metadata_export_command_publishes_typed_values_from_a_complete_template() {
+        let scratch = tempfile::tempdir().expect("create isolated metadata-export CLI scratch");
+        let native = scratch.path().join("native");
+        let template = scratch.path().join("template");
+        let destination = scratch.path().join("anvil");
+        std::fs::create_dir_all(template.join("data/minecraft")).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(template.join("level.dat"), LEVEL_DAT_FIXTURE).unwrap();
+        std::fs::write(
+            template.join("data/minecraft/world_gen_settings.dat"),
+            WORLD_GEN_FIXTURE,
+        ).unwrap();
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: native.clone(),
+        }).unwrap();
+        storage
+            .write_dirty_world_properties(WorldProperties {
+                game_data_version: level_dat::DATA_VERSION_26_2 as u32,
+                seed: 42_424_242,
+                spawn_dimension: BuiltinDimension::End as i32,
+                spawn_x: 1,
+                spawn_y: 64,
+                spawn_z: -2,
+                day_time: 0,
+                default_game_mode: GameMode::Creative as i32,
+            })
+            .unwrap();
+        drop(storage);
+
+        let output = run([
+            "export-metadata",
+            "--source",
+            native.to_str().unwrap(),
+            "--destination",
+            destination.to_str().unwrap(),
+            "--native-path",
+            native.to_str().unwrap(),
+            "--template",
+            template.to_str().unwrap(),
+            "--world-name",
+            "Converted world",
+            "--timestamp",
+            "1789000123",
+            "--apply",
+        ])
+        .unwrap();
+        assert!(output.contains("Converted typed native metadata"));
+        let level = level_dat::read_from_file(&level_dat::path_in(&destination)).unwrap();
+        assert_eq!(level.level_name(), Some("Converted world"));
+        assert_eq!(level.game_type(), Some(1));
+        assert_eq!(level.spawn().unwrap().dimension, "minecraft:the_end");
+        let settings = world_gen_settings::read_from_file(
+            &world_gen_settings::path_in(&destination),
+        ).unwrap();
+        assert_eq!(settings.seed().unwrap(), 42_424_242);
+        assert!(settings.has_dimensions());
     }
 }

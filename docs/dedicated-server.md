@@ -52,6 +52,18 @@ a same-filesystem rename. Existing sidecars are refused rather than merged. The 
 position, and rotation are retained; entity fields absent from the native schema use empty/default
 Anvil values.
 
+### Native metadata export
+
+`lodestone-server anvil-convert export-metadata --source <native-store> --destination
+<anvil-world> --native-path <native-store> --template <anvil-world> --world-name <name>
+--timestamp <seconds> --apply` publishes typed seed, spawn, default game mode, data version, name,
+and last-played time. The template must be from the same game data version and supplies the complete
+world-generation dimensions tree; export changes its seed without rebuilding or discarding that
+version-specific structure. Existing destination metadata is refused. The settings file publishes
+first and `level.dat` last, so an interrupted export does not leave a recognizable partial world.
+A nonzero native day clock is refused because 26.2 stores it in a separate per-dimension clock file
+that the current native schema does not model losslessly.
+
 ### The tick loop
 
 A real 20Hz clock, independent of client traffic, driving the mob simulation and every registered
