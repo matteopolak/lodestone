@@ -44,6 +44,14 @@ destination, writes below a same-filesystem staging root, and publishes the comp
 directory with one rename. It refuses to merge with or replace existing player data. Typed locator
 and game-mode values are retained; fields absent from the native schema use new-player defaults.
 
+`lodestone-server anvil-convert export-entities --source <native-store> --destination <anvil-world>
+--native-path <native-store> --dimension <id> --apply` performs the matching export for one built-in
+dimension's complete typed resident-entity population. It validates the complete native general
+snapshot first, stages real entity-sidecar region files, and publishes one `entities` directory with
+a same-filesystem rename. Existing sidecars are refused rather than merged. The native type, UUID,
+position, and rotation are retained; entity fields absent from the native schema use empty/default
+Anvil values.
+
 ### The tick loop
 
 A real 20Hz clock, independent of client traffic, driving the mob simulation and every registered

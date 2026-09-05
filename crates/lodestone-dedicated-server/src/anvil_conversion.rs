@@ -13,6 +13,7 @@ use lodestone_anvil::{
     level_dat, world_gen_settings,
 };
 use lodestone_server::{
+    anvil_entity_export::export_entities,
     anvil_player_export::export_all_players,
     anvil_native_entity_import::{
         EntityChunkSelection, EntityLossDecision, SelectedEntityChunk, discover_entity_chunks,
@@ -54,6 +55,9 @@ const USAGE: &str = concat!(
     "[--apply --acknowledge <review-token>]\n\n",
     "  lodestone-server anvil-convert export-players --source <native-store> ",
     "--destination <anvil-world> --native-path <native-store> --apply\n\n",
+    "  lodestone-server anvil-convert export-entities --source <native-store> ",
+    "--destination <anvil-world> --native-path <native-store> ",
+    "--dimension <minecraft:overworld|minecraft:the_nether|minecraft:the_end> --apply\n\n",
     "Without --apply this command only reports its payload-free preflight and refuses mutation. ",
     "A lossy --apply requires the exact review token printed by that preflight.",
 );
@@ -66,6 +70,7 @@ enum Direction {
     ImportPlayers,
     ImportEntities,
     ExportPlayers,
+    ExportEntities,
 }
 
 impl Direction {
@@ -77,6 +82,7 @@ impl Direction {
             Self::ImportPlayers => "import-players",
             Self::ImportEntities => "import-entities",
             Self::ExportPlayers => "export-players",
+            Self::ExportEntities => "export-entities",
         }
     }
 }
@@ -122,10 +128,11 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
         Some("import-players") => Direction::ImportPlayers,
         Some("import-entities") => Direction::ImportEntities,
         Some("export-players") => Direction::ExportPlayers,
+        Some("export-entities") => Direction::ExportEntities,
         Some("--help") | Some("-h") | None => return Err(USAGE.to_owned()),
         Some(other) => {
             return Err(format!(
-                "anvil-convert expects import, export, import-metadata, import-players, import-entities, or export-players, got {other:?}\n{USAGE}"
+                "anvil-convert expects import, export, import-metadata, import-players, import-entities, export-players, or export-entities, got {other:?}\n{USAGE}"
             ));
         }
     };
@@ -230,7 +237,9 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
         | Direction::ImportEntities => {
             &launch.destination
         }
-        Direction::ExportTerrain | Direction::ExportPlayers => &launch.source,
+        Direction::ExportTerrain | Direction::ExportPlayers | Direction::ExportEntities => {
+            &launch.source
+        }
     };
     if native_endpoint != &launch.native_path {
         return Err(format!(
@@ -383,6 +392,38 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
                 );
             }
         }
+        Direction::ExportEntities => {
+            if launch.min_y.is_some()
+                || launch.height.is_some()
+                || !launch.chunks.is_empty()
+                || launch.all_terrain
+                || launch.game_time.is_some()
+                || launch.timestamp.is_some()
+                || launch.compression.is_some()
+                || !launch.players.is_empty()
+                || launch.all_players
+                || !launch.entity_chunks.is_empty()
+                || launch.all_entities
+                || launch.acknowledgement.is_some()
+            {
+                return Err(
+                    "export-entities accepts only --source, --destination, --native-path, --dimension, and --apply"
+                        .to_owned(),
+                );
+            }
+            parse_builtin_dimension(
+                launch
+                    .dimension
+                    .as_deref()
+                    .ok_or_else(|| "export-entities requires --dimension".to_owned())?,
+            )?;
+            if !launch.apply {
+                return Err(
+                    "export-entities requires --apply; it is lossless but mutates the Anvil destination"
+                        .to_owned(),
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -403,6 +444,22 @@ fn execute(launch: &ConversionLaunch) -> Result<String, String> {
             Ok(format!(
                 "Converted {} typed native players into {}.\n",
                 result.players_exported,
+                launch.destination.display()
+            ))
+        }
+        Direction::ExportEntities => {
+            let storage = open_native_backend(launch)?;
+            let dimension = parse_builtin_dimension(
+                launch
+                    .dimension
+                    .as_deref()
+                    .expect("validated entity export dimension"),
+            )?;
+            let result = export_entities(&storage, &launch.destination, dimension)
+                .map_err(|error| format!("entity export failed: {error}"))?;
+            Ok(format!(
+                "Converted {} typed native entities into {}.\n",
+                result.entities_exported,
                 launch.destination.display()
             ))
         }
@@ -778,6 +835,19 @@ fn parse_compression(value: &str) -> Result<CompressionScheme, String> {
     }
 }
 
+fn parse_builtin_dimension(
+    value: &str,
+) -> Result<lodestone_server::dimension::Dimension, String> {
+    match value {
+        "minecraft:overworld" => Ok(lodestone_server::dimension::Dimension::Overworld),
+        "minecraft:the_nether" => Ok(lodestone_server::dimension::Dimension::Nether),
+        "minecraft:the_end" => Ok(lodestone_server::dimension::Dimension::End),
+        _ => Err(format!(
+            "--dimension must be minecraft:overworld, minecraft:the_nether, or minecraft:the_end; got {value:?}"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -785,8 +855,8 @@ mod tests {
     use lodestone_server::{
         ChunkColumn, ScheduledTickHandle, TickPriority,
         world_storage::{
-            NativeDirtyChunkRecord, NativePlayerData, NativePlayerRecord, WorldStorage,
-            WorldStorageBackend,
+            NativeDirtyChunkRecord, NativeEntityRecord, NativePlayerData, NativePlayerRecord,
+            WorldStorage, WorldStorageBackend,
         },
     };
 
@@ -1317,5 +1387,58 @@ mod tests {
         assert_eq!(exported.dimension, "minecraft:the_end");
         assert_eq!(exported.pos, lodestone_model::Vec3::new(-1.25, 80.0, 2.5));
         assert_eq!(exported.game_mode, Some(lodestone_model::GameMode::Spectator));
+    }
+
+    #[test]
+    fn entity_export_command_publishes_the_selected_dimension() {
+        let scratch = tempfile::tempdir().expect("create isolated entity-export CLI scratch");
+        let native = scratch.path().join("native");
+        let destination = scratch.path().join("anvil");
+        std::fs::create_dir(&destination).expect("create existing Anvil destination");
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: native.clone(),
+        })
+        .expect("open native entity source");
+        let uuid = uuid::Uuid::from_bytes([0x72; 16]);
+        storage
+            .write_dirty_entities(
+                0,
+                0,
+                0,
+                128,
+                [NativeEntityRecord {
+                    uuid: *uuid.as_bytes(),
+                    entity_type: "minecraft:pig".parse().expect("canonical entity type"),
+                    dimension: lodestone_storage_schema::BuiltinDimension::Nether,
+                    position: lodestone_model::Vec3::new(3.5, 70.0, 4.5),
+                    rotation: lodestone_model::Rotation::new(25.0, -10.0),
+                }],
+            )
+            .expect("seed typed native entity");
+        drop(storage);
+
+        let output = run([
+            "export-entities",
+            "--source",
+            native.to_str().expect("UTF-8 native source"),
+            "--destination",
+            destination.to_str().expect("UTF-8 Anvil destination"),
+            "--native-path",
+            native.to_str().expect("UTF-8 native path"),
+            "--dimension",
+            "minecraft:the_nether",
+            "--apply",
+        ])
+        .expect("run native entity export command");
+        assert!(output.contains("Converted 1 typed native entities"));
+        let exported = lodestone_server::entity_storage::EntityStorage::open_readonly_for_dimension(
+            &destination,
+            lodestone_server::dimension::Dimension::Nether,
+        )
+        .load_chunk(0, 0)
+        .expect("decode exported entity chunk");
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].uuid, uuid);
+        assert_eq!(exported[0].id.to_string(), "minecraft:pig");
     }
 }
