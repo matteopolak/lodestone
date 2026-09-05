@@ -155,10 +155,26 @@ fn validate_builtin_biomes(ids: &[i32]) -> Result<(), ValidationError> {
 }
 
 fn validate_general(general: &GeneralRecord) -> Result<(), ValidationError> {
-    if general.record.is_none() {
-        return Err(ValidationError::MissingGeneralRecord);
+    match &general.record {
+        Some(generated::general_record::Record::Player(player)) => validate_player(player)?,
+        Some(_) => {}
+        None => return Err(ValidationError::MissingGeneralRecord),
     }
     validate_extension_values(&general.extensions)
+}
+
+fn validate_player(player: &PlayerRecord) -> Result<(), ValidationError> {
+    if player.player_uuid.len() != 16 {
+        return Err(ValidationError::InvalidPlayerUuidLength(
+            player.player_uuid.len(),
+        ));
+    }
+    if BuiltinDimension::try_from(player.dimension).is_err()
+        || player.dimension == BuiltinDimension::Unspecified as i32
+    {
+        return Err(ValidationError::UnknownBuiltinDimension(player.dimension));
+    }
+    Ok(())
 }
 
 fn validate_extension_values(values: &[ExtensionValue]) -> Result<(), ValidationError> {
@@ -187,6 +203,8 @@ pub enum ValidationError {
     UnknownBuiltinBiome(i32),
     InvalidMotionBlockingHeightCount(usize),
     MotionBlockingHeightOutOfRange(u32),
+    InvalidPlayerUuidLength(usize),
+    UnknownBuiltinDimension(i32),
     ZeroExtensionId,
     DuplicateExtensionId(u32),
     UnregisteredExtensionId(u32),
@@ -229,6 +247,12 @@ impl std::fmt::Display for ValidationError {
             }
             Self::MotionBlockingHeightOutOfRange(height) => {
                 write!(formatter, "motion-blocking height {height} exceeds u16")
+            }
+            Self::InvalidPlayerUuidLength(actual) => {
+                write!(formatter, "expected a 16-byte player UUID, found {actual} bytes")
+            }
+            Self::UnknownBuiltinDimension(id) => {
+                write!(formatter, "unknown built-in dimension {id}")
             }
             Self::ZeroExtensionId => formatter.write_str("extension local ID zero is reserved"),
             Self::DuplicateExtensionId(id) => write!(formatter, "duplicate extension local ID {id}"),

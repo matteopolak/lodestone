@@ -78,6 +78,21 @@ impl RecordKey {
         }
     }
 
+    /// A key for one independently replaceable typed general record.
+    ///
+    /// General-record producers define their own collision-checked coordinate
+    /// and local-ID convention. The key deliberately contains no names: the
+    /// protobuf body supplies the typed record discriminator and identity.
+    #[must_use]
+    pub const fn general(column_x: i32, column_z: i32, local_id: u32) -> Self {
+        Self {
+            column_x,
+            column_z,
+            local_id,
+            kind: RecordKind::General,
+        }
+    }
+
     /// The 13-byte little-endian persistent key representation.
     pub fn to_bytes(self) -> [u8; 13] {
         let mut bytes = [0; 13];

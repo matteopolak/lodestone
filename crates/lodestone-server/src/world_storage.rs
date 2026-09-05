@@ -16,13 +16,37 @@ use lodestone_storage::{
     ExtensionRegistration, NativeStore, RecordKey, RecordWrite, StoreError,
 };
 use lodestone_storage_schema::{
-    BiomeSection, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1, RegisteredExtension,
-    StorageRecord,
-    generated::storage_record,
+    BiomeSection, BuiltinDimension, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1,
+    GeneralRecord, PlayerRecord, RegisteredExtension, StorageRecord,
+    generated::{general_record, storage_record},
 };
 
 const GAME_DATA_VERSION: u32 = 46_002;
 const SECTION_CELLS: usize = 16 * 16 * 16;
+
+/// One native player record's deliberately bounded, typed locator state.
+///
+/// This is not an Anvil player-data replacement: inventory, health, velocity,
+/// and fields this build does not model stay on the established Anvil path.
+/// Position values are the schema's producer-owned signed fixed-point integers;
+/// the adapter retains them exactly and deliberately performs no float rounding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativePlayerRecord {
+    /// The complete 16-byte player identity.
+    pub uuid: [u8; 16],
+    /// The built-in dimension containing the stored position.
+    pub dimension: BuiltinDimension,
+    /// Producer-defined signed fixed-point feet position, retained verbatim.
+    pub x_fixed: i32,
+    /// Producer-defined signed fixed-point feet position, retained verbatim.
+    pub y_fixed: i32,
+    /// Producer-defined signed fixed-point feet position, retained verbatim.
+    pub z_fixed: i32,
+    /// Yaw in millidegrees.
+    pub yaw_millidegrees: i32,
+    /// Pitch in millidegrees.
+    pub pitch_millidegrees: i32,
+}
 
 /// The explicit persistent-record backend selected by a host.
 ///
@@ -50,6 +74,8 @@ pub enum Error {
     Native(StoreError),
     /// A native chunk record cannot be represented by this server build.
     Chunk(ChunkRecordError),
+    /// A native player locator record is malformed, unsupported, or ambiguous.
+    Player(PlayerRecordError),
 }
 
 impl fmt::Display for Error {
@@ -60,6 +86,7 @@ impl fmt::Display for Error {
             }
             Self::Native(error) => write!(formatter, "native world storage failed: {error}"),
             Self::Chunk(error) => write!(formatter, "native chunk record failed: {error}"),
+            Self::Player(error) => write!(formatter, "native player record failed: {error}"),
         }
     }
 }
@@ -75,6 +102,12 @@ impl From<StoreError> for Error {
 impl From<ChunkRecordError> for Error {
     fn from(error: ChunkRecordError) -> Self {
         Self::Chunk(error)
+    }
+}
+
+impl From<PlayerRecordError> for Error {
+    fn from(error: PlayerRecordError) -> Self {
+        Self::Player(error)
     }
 }
 
@@ -279,6 +312,59 @@ impl fmt::Display for ChunkRecordError {
 
 impl std::error::Error for ChunkRecordError {}
 
+/// A malformed, unsupported, or ambiguous native player locator record.
+#[derive(Debug, Eq, PartialEq)]
+pub enum PlayerRecordError {
+    /// The envelope has a format version this reader does not understand.
+    UnsupportedFormatVersion(u32),
+    /// The envelope did not contain a typed general body.
+    MissingGeneralBody,
+    /// The general body was not a player locator record.
+    MissingPlayerBody,
+    /// The stored player UUID did not have its required 16 bytes.
+    InvalidUuidLength { actual: usize },
+    /// The typed record names an unknown or custom dimension.
+    UnsupportedDimension(i32),
+    /// This bounded reader cannot preserve opaque player extensions.
+    UnsupportedExtensions,
+    /// The key's 96-bit UUID prefix resolves to a different complete UUID.
+    KeyCollision {
+        requested: [u8; 16],
+        stored: [u8; 16],
+    },
+}
+
+impl fmt::Display for PlayerRecordError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedFormatVersion(version) => {
+                write!(formatter, "unsupported player record format version {version}")
+            }
+            Self::MissingGeneralBody => {
+                formatter.write_str("record does not contain a general body")
+            }
+            Self::MissingPlayerBody => {
+                formatter.write_str("general record does not contain a player body")
+            }
+            Self::InvalidUuidLength { actual } => {
+                write!(formatter, "expected a 16-byte player UUID, found {actual} bytes")
+            }
+            Self::UnsupportedDimension(dimension) => {
+                write!(formatter, "unsupported built-in player dimension {dimension}")
+            }
+            Self::UnsupportedExtensions => {
+                formatter.write_str("player record carries unsupported extension payloads")
+            }
+            Self::KeyCollision { requested, stored } => write!(
+                formatter,
+                "player key collision: requested UUID {requested:02x?} conflicts with stored UUID {stored:02x?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PlayerRecordError {}
+
 trait DirtyRecordStore: Send {
     fn write_transaction(&mut self, writes: Vec<RecordWrite>) -> Result<(), StoreError>;
     fn get(&mut self, key: RecordKey) -> Result<Option<StorageRecord>, StoreError>;
@@ -400,6 +486,46 @@ impl WorldStorage {
             .lock()
             .expect("world storage lock poisoned")
             .register_extensions(&registrations)
+            .map_err(Into::into)
+    }
+
+    /// Saves one independently dirty bounded player locator record.
+    ///
+    /// This path intentionally retains only the fields represented by
+    /// [`NativePlayerRecord`]. It does not inspect or replace the live player
+    /// tick state, and it must not be substituted for the Anvil player-data
+    /// writer. A UUID's first 96 bits form the compact native key; the complete
+    /// UUID remains in the body and is checked before any replacement, so the
+    /// unkeyed final 32 bits can never cause a silent overwrite.
+    pub fn write_dirty_player(&self, player: NativePlayerRecord) -> Result<(), Error> {
+        let key = player_key(player.uuid);
+        let record = encode_player(player)?;
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        let mut native = native.lock().expect("world storage lock poisoned");
+        if let Some(existing) = native.get(key)? {
+            decode_player(player.uuid, existing)?;
+        }
+        native.write_transaction(vec![RecordWrite::new(key, record)])?;
+        Ok(())
+    }
+
+    /// Loads one bounded native player locator record by its complete UUID.
+    ///
+    /// Missing records return `None`. A record whose compact key maps to a
+    /// different UUID is an explicit collision error, and extensions or custom
+    /// dimensions are refused rather than being silently discarded.
+    pub fn load_player(&self, uuid: [u8; 16]) -> Result<Option<NativePlayerRecord>, Error> {
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        native
+            .lock()
+            .expect("world storage lock poisoned")
+            .get(player_key(uuid))?
+            .map(|record| decode_player(uuid, record))
+            .transpose()
             .map_err(Into::into)
     }
 
@@ -747,6 +873,89 @@ fn decode_chunk(
     Ok(column)
 }
 
+fn player_key(uuid: [u8; 16]) -> RecordKey {
+    // The compact key has exactly 96 identity bits. The complete UUID remains
+    // in `PlayerRecord`, and `write_dirty_player`/`load_player` compare it
+    // before replacing or returning a record so the remaining 32 bits cannot
+    // turn a collision into a different player's save.
+    RecordKey::general(
+        i32::from_le_bytes(uuid[..4].try_into().expect("four UUID bytes")),
+        i32::from_le_bytes(uuid[4..8].try_into().expect("four UUID bytes")),
+        u32::from_le_bytes(uuid[8..12].try_into().expect("four UUID bytes")),
+    )
+}
+
+fn encode_player(player: NativePlayerRecord) -> Result<StorageRecord, PlayerRecordError> {
+    let dimension = player.dimension as i32;
+    validate_player_dimension(dimension)?;
+    Ok(StorageRecord {
+        format_version: FORMAT_VERSION_V1,
+        record: Some(storage_record::Record::General(GeneralRecord {
+            record: Some(general_record::Record::Player(PlayerRecord {
+                player_uuid: player.uuid.to_vec(),
+                dimension,
+                x_fixed: player.x_fixed,
+                y_fixed: player.y_fixed,
+                z_fixed: player.z_fixed,
+                yaw_millidegrees: player.yaw_millidegrees,
+                pitch_millidegrees: player.pitch_millidegrees,
+            })),
+            extensions: Vec::new(),
+        })),
+    })
+}
+
+fn decode_player(
+    requested_uuid: [u8; 16],
+    record: StorageRecord,
+) -> Result<NativePlayerRecord, PlayerRecordError> {
+    if record.format_version != FORMAT_VERSION_V1 {
+        return Err(PlayerRecordError::UnsupportedFormatVersion(record.format_version));
+    }
+    let Some(storage_record::Record::General(general)) = record.record else {
+        return Err(PlayerRecordError::MissingGeneralBody);
+    };
+    if !general.extensions.is_empty() {
+        return Err(PlayerRecordError::UnsupportedExtensions);
+    }
+    let Some(general_record::Record::Player(player)) = general.record else {
+        return Err(PlayerRecordError::MissingPlayerBody);
+    };
+    let actual = player.player_uuid.len();
+    let uuid: [u8; 16] = player
+        .player_uuid
+        .try_into()
+        .map_err(|_| PlayerRecordError::InvalidUuidLength { actual })?;
+    if uuid != requested_uuid {
+        return Err(PlayerRecordError::KeyCollision {
+            requested: requested_uuid,
+            stored: uuid,
+        });
+    }
+    validate_player_dimension(player.dimension)?;
+    Ok(NativePlayerRecord {
+        uuid,
+        dimension: BuiltinDimension::try_from(player.dimension)
+            .expect("validated built-in player dimension"),
+        x_fixed: player.x_fixed,
+        y_fixed: player.y_fixed,
+        z_fixed: player.z_fixed,
+        yaw_millidegrees: player.yaw_millidegrees,
+        pitch_millidegrees: player.pitch_millidegrees,
+    })
+}
+
+fn validate_player_dimension(dimension: i32) -> Result<(), PlayerRecordError> {
+    match BuiltinDimension::try_from(dimension) {
+        Ok(BuiltinDimension::Overworld | BuiltinDimension::Nether | BuiltinDimension::End) => {
+            Ok(())
+        }
+        Ok(BuiltinDimension::Unspecified) | Err(_) => {
+            Err(PlayerRecordError::UnsupportedDimension(dimension))
+        }
+    }
+}
+
 fn validate_block_entity_position(
     index: usize,
     pos: lodestone_model::BlockPos,
@@ -991,6 +1200,129 @@ mod tests {
             storage.write_dirty([chunk(2, 3, 9)]),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
+        assert!(matches!(
+            storage.write_dirty_player(NativePlayerRecord {
+                uuid: [1; 16],
+                dimension: BuiltinDimension::Overworld,
+                x_fixed: 0,
+                y_fixed: 0,
+                z_fixed: 0,
+                yaw_millidegrees: 0,
+                pitch_millidegrees: 0,
+            }),
+            Err(Error::AnvilDoesNotAcceptTypedRecords)
+        ));
+    }
+
+    #[test]
+    fn native_player_locator_reopens_without_touching_anvil_player_data() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-player-record-{}-{unique}",
+            std::process::id()
+        ));
+        let player = NativePlayerRecord {
+            uuid: [
+                0x3c, 0x16, 0x72, 0x95, 0x2b, 0xd0, 0x41, 0x5a, 0x87, 0xef, 0x91, 0x44, 0xee,
+                0x77, 0x31, 0x09,
+            ],
+            dimension: BuiltinDimension::Nether,
+            x_fixed: -12_345,
+            y_fixed: 2_048,
+            z_fixed: 98_765,
+            yaw_millidegrees: -179_999,
+            pitch_millidegrees: 89_999,
+        };
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        storage
+            .write_dirty_player(player)
+            .expect("write bounded player locator");
+        drop(storage);
+
+        let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("reopen native store");
+        assert_eq!(
+            reopened.load_player(player.uuid).unwrap(),
+            Some(player),
+            "the persisted body retains every typed locator field"
+        );
+        let absent = [0x7f; 16];
+        assert!(
+            reopened.load_player(absent).unwrap().is_none(),
+            "a different UUID prefix is the independent absence control"
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_player_locator_refuses_the_same_compact_key_for_another_uuid() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-player-collision-{}-{unique}",
+            std::process::id()
+        ));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        let first = NativePlayerRecord {
+            uuid: [0x55; 16],
+            dimension: BuiltinDimension::End,
+            x_fixed: 1,
+            y_fixed: 2,
+            z_fixed: 3,
+            yaw_millidegrees: 4,
+            pitch_millidegrees: 5,
+        };
+        let mut collision = first;
+        collision.uuid[15] = 0x99;
+        storage.write_dirty_player(first).unwrap();
+        assert!(matches!(
+            storage.write_dirty_player(collision),
+            Err(Error::Player(PlayerRecordError::KeyCollision { .. }))
+        ));
+        drop(storage);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_player_locator_refuses_an_extension_before_it_can_be_dropped() {
+        let player = NativePlayerRecord {
+            uuid: [0x21; 16],
+            dimension: BuiltinDimension::Overworld,
+            x_fixed: -1,
+            y_fixed: 2,
+            z_fixed: -3,
+            yaw_millidegrees: 4,
+            pitch_millidegrees: -5,
+        };
+        let mut record = encode_player(player).expect("built-in player encodes");
+        let Some(storage_record::Record::General(general)) = &mut record.record else {
+            panic!("player encoder must produce a general record");
+        };
+        general
+            .extensions
+            .push(lodestone_storage_schema::ExtensionValue {
+                local_id: 1,
+                payload: vec![0xde, 0xad],
+            });
+
+        assert_eq!(
+            decode_player(player.uuid, record),
+            Err(PlayerRecordError::UnsupportedExtensions)
+        );
     }
 
     #[test]

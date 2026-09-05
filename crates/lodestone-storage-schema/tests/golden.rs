@@ -1,8 +1,8 @@
 use lodestone_storage_schema::generated::{general_record, storage_record};
 use lodestone_storage_schema::{
     validate_extension_table, validate_record, validate_record_with_extensions, BiomeSection,
-    BuiltinBiome, BuiltinDimension, ExtensionTable, FORMAT_VERSION_V1, GameMode, StorageRecord,
-    ValidationError,
+    BuiltinBiome, BuiltinDimension, ExtensionTable, FORMAT_VERSION_V1, GameMode, GeneralRecord,
+    PlayerRecord, StorageRecord, ValidationError,
 };
 use prost::Message;
 
@@ -91,6 +91,53 @@ fn extension_values_must_name_a_registered_nonzero_id() {
         validate_record_with_extensions(&record, &table),
         Err(ValidationError::UnregisteredExtensionId(8))
     );
+}
+
+#[test]
+fn player_locator_requires_a_complete_uuid_and_a_builtin_dimension() {
+    let mut record = StorageRecord {
+        format_version: FORMAT_VERSION_V1,
+        record: Some(storage_record::Record::General(GeneralRecord {
+            record: Some(general_record::Record::Player(PlayerRecord {
+                player_uuid: vec![0x42; 16],
+                dimension: BuiltinDimension::Nether as i32,
+                x_fixed: -16_385,
+                y_fixed: 256,
+                z_fixed: 65_535,
+                yaw_millidegrees: -90_001,
+                pitch_millidegrees: 45_002,
+            })),
+            extensions: Vec::new(),
+        })),
+    };
+    validate_record(&record).unwrap();
+
+    set_player_uuid_and_dimension(
+        &mut record,
+        vec![0x42; 15],
+        BuiltinDimension::Nether as i32,
+    );
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::InvalidPlayerUuidLength(15))
+    );
+
+    set_player_uuid_and_dimension(&mut record, vec![0x42; 16], 77);
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::UnknownBuiltinDimension(77))
+    );
+}
+
+fn set_player_uuid_and_dimension(record: &mut StorageRecord, uuid: Vec<u8>, dimension: i32) {
+    let Some(storage_record::Record::General(general)) = &mut record.record else {
+        unreachable!();
+    };
+    let Some(general_record::Record::Player(player)) = &mut general.record else {
+        unreachable!();
+    };
+    player.player_uuid = uuid;
+    player.dimension = dimension;
 }
 
 #[test]
