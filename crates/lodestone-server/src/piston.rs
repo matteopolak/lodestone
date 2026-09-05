@@ -334,6 +334,7 @@ pub fn is_pushable(
 /// would silently freeze contraptions after a version bump.
 fn has_block_entity(state: &str) -> bool {
     crate::mobs::block_state_id_or_default(state)
+        .and_then(lodestone_data::block_states::StateId::new)
         .and_then(lodestone_data::block_entity_types::block_entity_type)
         .is_some()
 }

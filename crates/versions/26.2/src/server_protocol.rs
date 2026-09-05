@@ -2809,7 +2809,9 @@ fn encode_column_body(
 /// map would cost more to build than the scans it saves.
 fn resolve_block_entity_type_id(name: &str) -> Option<u32> {
     (0..lodestone_data::block_entity_types::TYPE_COUNT)
-        .find(|&id| lodestone_data::block_entity_types::block_entity_type_name(id) == Some(name))
+        .filter_map(lodestone_data::block_entity_types::BlockEntityType::new)
+        .find(|&kind| lodestone_data::block_entity_types::block_entity_type_name(kind) == name)
+        .map(lodestone_data::block_entity_types::BlockEntityType::raw)
 }
 
 /// Writes the chunk packet's block-entity array: a VarInt count
@@ -7161,8 +7163,11 @@ mod block_edit_tests {
         assert_eq!(unpack_block_pos(packed), pos);
         let type_id = r.var_i32().expect("type id") as u32;
         assert_eq!(
-            lodestone_data::block_entity_types::block_entity_type_name(type_id),
-            Some("minecraft:piston"),
+            lodestone_data::block_entity_types::block_entity_type_name(
+                lodestone_data::block_entity_types::BlockEntityType::new(type_id)
+                    .expect("wire type validates"),
+            ),
+            "minecraft:piston",
             "the block's key is `moving_piston` and its entity's key is `piston`; \
              sending the block's would resolve to some other entity"
         );

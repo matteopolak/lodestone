@@ -453,7 +453,9 @@ fn a_block_update_creates_and_then_removes_a_chests_block_entity() {
     let mut world = world_with_chunk(pos);
     let chest = first_state_named("minecraft:chest");
     let air = first_state_named("minecraft:air");
-    let chest_type = lodestone_data::block_entity_types::block_entity_type(chest)
+    let chest_type = lodestone_data::block_states::StateId::new(chest)
+        .and_then(lodestone_data::block_entity_types::block_entity_type)
+        .map(|kind| kind.raw())
         .expect("a chest state owns a block entity");
 
     assert!(
@@ -551,7 +553,9 @@ fn a_section_blocks_update_creates_and_removes_per_cell() {
     let mut world = world_with_chunk(pos);
     let chest = first_state_named("minecraft:chest");
     let air = first_state_named("minecraft:air");
-    let chest_type = lodestone_data::block_entity_types::block_entity_type(chest).expect("type");
+    let chest_type = lodestone_data::block_states::StateId::new(chest)
+        .and_then(lodestone_data::block_entity_types::block_entity_type)
+        .map(|kind| kind.raw()).expect("type");
 
     // Seed a record that the packet's air cell must remove.
     world.sync_block_entity(-16, 64, 34, Some(chest_type));
@@ -596,7 +600,9 @@ fn a_section_blocks_update_reconstructs_negative_coordinates() {
     let pos = ChunkPos::new(-1, -1);
     let mut world = world_with_chunk(pos);
     let chest = first_state_named("minecraft:chest");
-    let chest_type = lodestone_data::block_entity_types::block_entity_type(chest).expect("type");
+    let chest_type = lodestone_data::block_states::StateId::new(chest)
+        .and_then(lodestone_data::block_entity_types::block_entity_type)
+        .map(|kind| kind.raw()).expect("type");
 
     // Section (-1, -1, -1) covers blocks x/y/z -16..0.
     let mut payload = pack_section_pos(-1, -1, -1).to_be_bytes().to_vec();
@@ -650,7 +656,9 @@ fn a_repeated_block_update_keeps_the_nbt_block_entity_data_delivered() {
 
     // The server's payload for that chest.
     let mut data = pack_block_pos(3, 64, 9).to_be_bytes().to_vec();
-    let chest_type = lodestone_data::block_entity_types::block_entity_type(chest).expect("type");
+    let chest_type = lodestone_data::block_states::StateId::new(chest)
+        .and_then(lodestone_data::block_entity_types::block_entity_type)
+        .map(|kind| kind.raw()).expect("type");
     data.extend_from_slice(&var_i32(chest_type as i32));
     data.extend_from_slice(&empty_compound());
     adapter

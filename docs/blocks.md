@@ -243,6 +243,15 @@ needs to call it per block.
 
 ### Block entities: composter, furnace, hopper, brewing stand
 
+The data census accepts a validated `block_states::StateId` and returns
+`Option<block_entity_types::BlockEntityType>`: `None` means a valid block state
+owns no record. A block-entity type is a separate registry domain, not a state
+ID; its checked constructor rejects out-of-range wire/import values, and its
+name lookup is total. Version adapters validate raw state IDs before lookup and
+convert the resulting type with `raw()` only when writing version-free world
+records. Extend the generated census and its committed-dump tests together;
+these lookups introduce no configuration or runtime dependencies.
+
 Four independent, pure, tick-driven state machines
 (`crates/lodestone-server/src/{composter,furnace,hopper,brewing}.rs`), each a
 value type with one `tick(&mut self) -> …Tick` method reporting what changed —

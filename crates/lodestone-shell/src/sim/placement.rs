@@ -230,7 +230,10 @@ const INTERACTABLE_FRAGMENTS: &[&str] = &[
 
 /// Whether right-clicking this block state actuates it instead of placing.
 pub(crate) fn is_interactable_state(state: u32) -> bool {
-    if lodestone_data::block_entity_types::block_entity_type(state).is_some() {
+    if lodestone_data::block_states::StateId::new(state)
+        .and_then(lodestone_data::block_entity_types::block_entity_type)
+        .is_some()
+    {
         return true;
     }
     let Some(name) = lodestone_data::block_states::block_name(state) else {
@@ -684,6 +687,8 @@ pub fn write_predicted_block(
         block[0],
         block[1],
         block[2],
-        lodestone_data::block_entity_types::block_entity_type(state),
+        lodestone_data::block_states::StateId::new(state)
+            .and_then(lodestone_data::block_entity_types::block_entity_type)
+            .map(|kind| kind.raw()),
     )
 }

@@ -53,7 +53,7 @@
 //! "does a record belong here, and is the existing one still the right kind".
 //! That is exactly how `lodestone-shell`'s `block_entities` module uses it.
 
-use crate::generated_block_entity_types as table;
+use crate::{block_states::StateId, generated_block_entity_types as table};
 
 pub use table::{STATE_COUNT, TYPE_COUNT};
 
@@ -63,30 +63,50 @@ pub use table::{STATE_COUNT, TYPE_COUNT};
 /// entry, so a zero sentinel would give every non-block-entity block a furnace.
 pub const NO_BLOCK_ENTITY: u16 = u16::MAX;
 
+/// A validated entry in the block-entity-type registry, distinct from a block state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockEntityType(u32);
+
+impl BlockEntityType {
+    /// Validates a raw registry id at a wire or import boundary.
+    #[must_use]
+    pub const fn new(raw: u32) -> Option<Self> {
+        if raw < TYPE_COUNT {
+            Some(Self(raw))
+        } else {
+            None
+        }
+    }
+
+    /// The registry id for version-free world records and wire encoding.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
 /// The `minecraft:block_entity_type` registry id owned by block-state `id`, or
 /// `None` when the state owns no block entity — vanilla's own
 /// "has block entity" check plus *which* type.
 ///
-/// Also `None` for an `id` outside `0..`[`STATE_COUNT`], so an unknown state id
-/// behaves like plain terrain rather than panicking: a hostile or
-/// newer-than-expected state id must not be able to crash the client.
+/// The input is validated at the caller's state boundary. `None` means only
+/// that a valid state owns no block entity.
 ///
 /// Zero-heap: reads straight from rodata. O(1) indexing, no search.
 #[must_use]
-pub fn block_entity_type(id: u32) -> Option<u32> {
-    let &entry = table::STATE_TYPE.get(id as usize)?;
+pub fn block_entity_type(id: StateId) -> Option<BlockEntityType> {
+    let entry = table::STATE_TYPE[id.raw() as usize];
     if entry == NO_BLOCK_ENTITY {
         return None;
     }
-    Some(u32::from(entry))
+    Some(BlockEntityType(u32::from(entry)))
 }
 
-/// The registry key of block-entity type `id` (e.g. `"minecraft:chest"`), or
-/// `None` if `id` is not in `0..`[`TYPE_COUNT`].
+/// The registry key of a validated block-entity type (e.g. `"minecraft:chest"`).
 ///
-/// Diagnostics and tests only — nothing in the render or world path needs the
-/// name, and matching on it would be a slower spelling of comparing ids.
+/// Server record construction and diagnostics use names; world records and
+/// rendering retain numeric registry ids.
 #[must_use]
-pub fn block_entity_type_name(id: u32) -> Option<&'static str> {
-    table::TYPE_NAMES.get(id as usize).copied()
+pub fn block_entity_type_name(id: BlockEntityType) -> &'static str {
+    table::TYPE_NAMES[id.raw() as usize]
 }

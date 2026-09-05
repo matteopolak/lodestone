@@ -393,7 +393,10 @@ fn block_entity_from_state(rel_x: u8, rel_z: u8, y: i16, state: u32, nbt: Nbt) -
         rel_x,
         rel_z,
         y,
-        type_id: block_entity_type(state).unwrap_or(0),
+        type_id: lodestone_data::block_states::StateId::new(state)
+            .and_then(block_entity_type)
+            .map(|kind| kind.raw())
+            .unwrap_or(0),
         nbt,
     }
 }

@@ -1577,7 +1577,14 @@ impl V762Adapter {
         // Writing a state is what creates/removes a block entity in vanilla
         // (done inside the chunk's own block-state setter, no packet
         // involved).
-        world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
+        world.sync_block_entity(
+            pos.x,
+            pos.y,
+            pos.z,
+            lodestone_data::block_states::StateId::new(state)
+                .and_then(block_entity_type)
+                .map(|kind| kind.raw()),
+        );
         Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
             section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),
             blocks: vec![[

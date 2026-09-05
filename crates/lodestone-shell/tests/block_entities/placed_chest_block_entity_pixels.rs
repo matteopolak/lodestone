@@ -319,7 +319,9 @@ fn write_block(world: &mut World, block: [i32; 3], state: u32, sync: bool) -> Op
             block[0],
             block[1],
             block[2],
-            lodestone_data::block_entity_types::block_entity_type(state),
+            lodestone_data::block_states::StateId::new(state)
+                .and_then(lodestone_data::block_entity_types::block_entity_type)
+                .map(|kind| kind.raw()),
         )
     })
 }
@@ -795,7 +797,9 @@ fn a_refused_placement_loses_the_predicted_block_entity() {
     // assertion names it so a census change that started handing back `Some` here
     // fails loudly instead of silently keeping the chest.
     assert_eq!(
-        lodestone_data::block_entity_types::block_entity_type(air_state),
+        lodestone_data::block_states::StateId::new(air_state)
+            .and_then(lodestone_data::block_entity_types::block_entity_type)
+            .map(|kind| kind.raw()),
         None,
         "air must own no block entity"
     );

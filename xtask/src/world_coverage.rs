@@ -1410,29 +1410,31 @@ fn particle_population(index: &SourceIndex) -> Result<PopulationReport> {
 /// `ends_with("_sign")` and shelves by `ends_with("_shelf")`, so a scan that
 /// collected only whole literals would report both families as unreached.
 fn block_entity_population(index: &SourceIndex, oracle: &VanillaOracle) -> Result<PopulationReport> {
-    use lodestone_data::block_entity_types::{TYPE_COUNT, block_entity_type, block_entity_type_name};
-    use lodestone_data::block_states::{STATE_COUNT, block_name};
+    use lodestone_data::block_entity_types::{
+        BlockEntityType, TYPE_COUNT, block_entity_type, block_entity_type_name,
+    };
+    use lodestone_data::block_states::{STATE_COUNT, StateId, block_name};
 
     let expected = TYPE_COUNT as usize;
     let mut ids = Vec::with_capacity(expected);
     for id in 0..TYPE_COUNT {
-        let name = block_entity_type_name(id).with_context(|| {
-            format!("world-coverage: block-entity registry id {id} has no name — table truncated")
-        })?;
+        let kind = BlockEntityType::new(id).context("census block-entity type validates")?;
+        let name = block_entity_type_name(kind);
         ids.push(name.strip_prefix("minecraft:").unwrap_or(name).to_owned());
     }
 
     // Invert the per-block-state table: which block names own each type.
     let mut blocks_for_type: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
     for state in 0..STATE_COUNT {
-        let Some(type_id) = block_entity_type(state) else {
+        let state_id = StateId::new(state).context("census block state validates")?;
+        let Some(type_id) = block_entity_type(state_id) else {
             continue;
         };
         let Some(name) = block_name(state) else {
             continue;
         };
         blocks_for_type
-            .entry(type_id)
+            .entry(type_id.raw())
             .or_default()
             .insert(name.strip_prefix("minecraft:").unwrap_or(name).to_owned());
     }

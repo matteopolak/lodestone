@@ -545,7 +545,10 @@ fn block_entity_from_embedded_nbt(nbt: Nbt, column: &ChunkColumn) -> Option<Bloc
 /// since, and reshaping those without an outside oracle for the target shape
 /// would be an invented mapping.
 fn block_entity_from_state(rel_x: u8, rel_z: u8, y: i32, state: u32, nbt: Nbt) -> BlockEntity {
-    let type_id = block_entity_type(state).unwrap_or(0);
+    let type_id = lodestone_data::block_states::StateId::new(state)
+        .and_then(block_entity_type)
+        .map(|kind| kind.raw())
+        .unwrap_or(0);
     let nbt = if is_sign_state(state) {
         legacy_sign_nbt(&nbt)
     } else {

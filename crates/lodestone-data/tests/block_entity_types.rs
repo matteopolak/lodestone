@@ -232,6 +232,10 @@ fn first_id_named(name: &str) -> Option<u32> {
     (0..block_states::STATE_COUNT).find(|&id| block_states::block_name(id) == Some(name))
 }
 
+fn validated(id: u32) -> block_states::StateId {
+    block_states::StateId::new(id).expect("known census state")
+}
+
 #[test]
 fn committed_table_matches_the_committed_dump_row_for_row() {
     let rows = parse_dump(DUMP);
@@ -242,20 +246,22 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
     );
     let mut with_block_entity = 0usize;
     for row in &rows {
-        let actual = block_entity_types::block_entity_type(row.id as u32);
+        let actual = block_entity_types::block_entity_type(validated(row.id as u32));
         match &row.block_entity {
             Some((type_id, type_name)) => {
                 with_block_entity += 1;
                 assert_eq!(
-                    actual,
+                    actual.map(|kind| kind.raw()),
                     Some(*type_id),
                     "{} (state {}) should own block entity type {type_id} ({type_name})",
                     row.name,
                     row.id
                 );
                 assert_eq!(
-                    block_entity_types::block_entity_type_name(*type_id),
-                    Some(type_name.as_str()),
+                    block_entity_types::block_entity_type_name(
+                        block_entity_types::BlockEntityType::new(*type_id).expect("dump type validates"),
+                    ),
+                    type_name.as_str(),
                     "type {type_id}'s name disagrees with the dump"
                 );
             }
@@ -289,14 +295,33 @@ fn count_matches_block_state_table() {
 }
 
 #[test]
+fn validated_state_and_block_entity_type_are_distinct_domains() {
+    use block_entity_types::BlockEntityType;
+
+    let lookup: fn(block_states::StateId) -> Option<BlockEntityType> =
+        block_entity_types::block_entity_type;
+    let name: fn(BlockEntityType) -> &'static str = block_entity_types::block_entity_type_name;
+    let furnace = BlockEntityType::new(0).expect("furnace type exists");
+    assert_eq!(name(furnace), "minecraft:furnace");
+    assert_eq!(furnace.raw(), 0);
+    let chest = block_states::StateId::new(first_id_named("minecraft:chest").expect("chest exists"))
+        .expect("chest state validates");
+    let kind = lookup(chest).expect("chest owns a block entity");
+    assert_eq!(kind.raw(), 1);
+    assert_eq!(name(kind), "minecraft:chest");
+    assert!(BlockEntityType::new(block_entity_types::TYPE_COUNT).is_none());
+    assert!(BlockEntityType::new(u32::MAX).is_none());
+}
+
+#[test]
 fn out_of_range_ids_are_none_rather_than_a_panic() {
     assert_eq!(
-        block_entity_types::block_entity_type(block_entity_types::STATE_COUNT),
+        block_states::StateId::new(block_entity_types::STATE_COUNT),
         None
     );
-    assert_eq!(block_entity_types::block_entity_type(u32::MAX), None);
+    assert_eq!(block_states::StateId::new(u32::MAX), None);
     assert_eq!(
-        block_entity_types::block_entity_type_name(block_entity_types::TYPE_COUNT),
+        block_entity_types::BlockEntityType::new(block_entity_types::TYPE_COUNT),
         None
     );
 }
@@ -316,7 +341,7 @@ fn plain_terrain_owns_no_block_entity() {
     ] {
         let id = first_id_named(name).unwrap_or_else(|| panic!("{name} is in the 26.2 table"));
         assert_eq!(
-            block_entity_types::block_entity_type(id),
+            block_entity_types::block_entity_type(validated(id)),
             None,
             "{name} (state {id}) must own no block entity"
         );
@@ -333,12 +358,12 @@ fn plain_terrain_owns_no_block_entity() {
 fn the_chest_family_maps_the_way_the_renderer_assumes() {
     let expect = |block: &str, type_name: &str| {
         let id = first_id_named(block).unwrap_or_else(|| panic!("{block} is in the 26.2 table"));
-        let type_id = block_entity_types::block_entity_type(id)
+        let type_id = block_entity_types::block_entity_type(validated(id))
             .unwrap_or_else(|| panic!("{block} (state {id}) must own a block entity"));
         assert_eq!(
             block_entity_types::block_entity_type_name(type_id),
-            Some(type_name),
-            "{block} (state {id}) resolved to type {type_id}"
+            type_name,
+            "{block} (state {id}) resolved to type {type_id:?}"
         );
         type_id
     };
@@ -373,12 +398,12 @@ fn the_chest_family_maps_the_way_the_renderer_assumes() {
 /// depending on it.
 #[test]
 fn the_type_is_constant_across_a_blocks_states() {
-    let mut seen: BTreeMap<&'static str, Option<u32>> = BTreeMap::new();
+    let mut seen: BTreeMap<&'static str, Option<block_entity_types::BlockEntityType>> = BTreeMap::new();
     for id in 0..block_entity_types::STATE_COUNT {
         let Some(name) = block_states::block_name(id) else {
             continue;
         };
-        let type_id = block_entity_types::block_entity_type(id);
+        let type_id = block_entity_types::block_entity_type(validated(id));
         match seen.get(name) {
             Some(existing) => assert_eq!(
                 *existing, type_id,
@@ -402,12 +427,12 @@ fn the_type_is_constant_across_a_blocks_states() {
 fn every_type_is_named_and_every_name_is_reachable() {
     let mut reached = vec![false; block_entity_types::TYPE_COUNT as usize];
     for id in 0..block_entity_types::STATE_COUNT {
-        if let Some(type_id) = block_entity_types::block_entity_type(id) {
+        if let Some(type_id) = block_entity_types::block_entity_type(validated(id)) {
             assert!(
-                block_entity_types::block_entity_type_name(type_id).is_some(),
-                "state {id} names type {type_id}, which has no registry key"
+                !block_entity_types::block_entity_type_name(type_id).is_empty(),
+                "state {id} names type {type_id:?}, which has no registry key"
             );
-            reached[type_id as usize] = true;
+            reached[type_id.raw() as usize] = true;
         }
     }
     let unreachable: Vec<&str> = reached
@@ -415,7 +440,9 @@ fn every_type_is_named_and_every_name_is_reachable() {
         .enumerate()
         .filter(|&(_, &hit)| !hit)
         .map(|(index, _)| {
-            block_entity_types::block_entity_type_name(index as u32).expect("named")
+            block_entity_types::block_entity_type_name(
+                block_entity_types::BlockEntityType::new(index as u32).expect("type validates"),
+            )
         })
         .collect();
     assert!(
@@ -473,8 +500,10 @@ fn type_ids_match_mojangs_registry_report() {
     for (name, value) in entries {
         let id = value["protocol_id"].as_u64().expect("protocol_id") as u32;
         assert_eq!(
-            block_entity_types::block_entity_type_name(id),
-            Some(name.as_str()),
+            block_entity_types::block_entity_type_name(
+                block_entity_types::BlockEntityType::new(id).expect("report type validates"),
+            ),
+            name.as_str(),
             "registries.json numbers {name} as {id}; our table disagrees"
         );
     }
