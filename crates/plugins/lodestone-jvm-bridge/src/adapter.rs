@@ -1,10 +1,11 @@
 //! Explicit experimental adapter loading and tick dispatch on a dedicated JVM thread.
 //!
 //! This is a bootstrap contract for developing the Paper host, not a Java plugin
-//! discovery mechanism. The supplied class declares `static void onTick(long)`
-//! and `static native int blockStateId(int, int, int)`. Native requests cross the
-//! world port; the worker never receives world state. A host must service the
-//! port and poll completion, and must not dispatch another tick until idle.
+//! discovery mechanism. The supplied class declares `static void onTick(long)`,
+//! `static void onBlockStateChanged(int, int, int, int)`, and `static native
+//! int blockStateId(int, int, int)`. Native requests cross the world port; the
+//! worker never receives world state. A host must service the port and poll
+//! completion, and must not dispatch another callback until idle.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -88,18 +89,31 @@ thread_local! {
     static SERVER_TICK_PORT: RefCell<Option<TickPort>> = const { RefCell::new(None) };
 }
 
-/// A completed worker transition. Ticks carry the caller's original sequence.
+/// One host-to-JVM callback waiting on the dedicated adapter worker.
+///
+/// The single command channel and [`State::Running`] permit only one of these
+/// at a time. A block-change callback therefore cannot be dispatched while a
+/// native read or write callback is waiting for the host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdapterCommand {
+    Tick(u64),
+    BlockStateChanged(BlockStateWrite),
+}
+
+/// A completed worker transition. Payload-bearing events preserve the host's
+/// original callback values so callers can match completion without guessing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdapterEvent {
     Ready,
     TickCompleted(u64),
+    BlockStateChangedCompleted(BlockStateWrite),
 }
 
 #[derive(Debug)]
 enum State {
     Loading(Instant),
     Idle,
-    Running { tick: u64, started: Instant },
+    Running { command: AdapterCommand, started: Instant },
     Failed(AdapterError),
 }
 
@@ -111,7 +125,7 @@ enum State {
 /// JNI permits only one JVM startup per process, including after a failed load.
 #[derive(Debug)]
 pub struct AdapterHost {
-    commands: SyncSender<u64>,
+    commands: SyncSender<AdapterCommand>,
     events: Receiver<Result<AdapterEvent, AdapterError>>,
     servicer: PortServicer<BlockStateQuery, BlockStateAnswer>,
     block_write_servicer: PortServicer<BlockStateWrite, BlockStateWriteAnswer>,
@@ -177,7 +191,9 @@ impl AdapterHost {
 
     fn spawn(
         deadline: Duration,
-        run: impl FnOnce(Receiver<u64>, Events, BlockPort, BlockWritePort, TickPort) + Send + 'static,
+        run: impl FnOnce(Receiver<AdapterCommand>, Events, BlockPort, BlockWritePort, TickPort)
+            + Send
+            + 'static,
     ) -> Result<Self, AdapterError> {
         let (commands, receiver) = sync_channel(1);
         let (sender, events) = sync_channel(1);
@@ -210,12 +226,44 @@ impl AdapterHost {
         if tick > i64::MAX as u64 {
             return Err(AdapterError::new("adapter tick exceeds Java long range"));
         }
+        self.dispatch_command(AdapterCommand::Tick(tick), "tick")
+    }
+
+    /// Queues one host-confirmed block-state change for the adapter worker.
+    ///
+    /// Call this only after the host has applied a successful resident-block
+    /// mutation. The callback runs on the dedicated JVM worker, never on the
+    /// tick thread, and has no direct route to an ECS handle. A busy worker is
+    /// rejected rather than accumulating events or calling Java while a
+    /// native world request is unresolved.
+    ///
+    /// This is a narrow bridge callback, not a Bukkit or Paper event. It calls
+    /// the explicit adapter method `onBlockStateChanged(int, int, int, int)`;
+    /// no listener registry, cancellation, plugin instance, or Paper event
+    /// type exists yet.
+    pub fn dispatch_block_state_changed(
+        &mut self,
+        change: BlockStateWrite,
+    ) -> Result<(), AdapterError> {
+        if i32::try_from(change.state_id).is_err() {
+            return Err(AdapterError::new(
+                "block-state callback state id exceeds Java int range",
+            ));
+        }
+        self.dispatch_command(AdapterCommand::BlockStateChanged(change), "block-state callback")
+    }
+
+    fn dispatch_command(
+        &mut self,
+        command: AdapterCommand,
+        operation: &str,
+    ) -> Result<(), AdapterError> {
         if !self.is_idle() {
             return Err(AdapterError::new("adapter is not idle; poll its pending operation"));
         }
-        self.commands.try_send(tick)
-            .map_err(|error| AdapterError::new(format!("adapter tick dispatch: {error}")))?;
-        self.state = State::Running { tick, started: Instant::now() };
+        self.commands.try_send(command)
+            .map_err(|error| AdapterError::new(format!("adapter {operation} dispatch: {error}")))?;
+        self.state = State::Running { command, started: Instant::now() };
         Ok(())
     }
 
@@ -284,7 +332,19 @@ impl AdapterHost {
         let result = match self.events.try_recv() {
             Ok(Ok(event)) => match (&self.state, event) {
                 (State::Loading(_), AdapterEvent::Ready) => Ok(Some(event)),
-                (State::Running { tick, .. }, AdapterEvent::TickCompleted(done)) if *tick == done => {
+                (
+                    State::Running { command: AdapterCommand::Tick(tick), .. },
+                    AdapterEvent::TickCompleted(done),
+                ) if *tick == done => {
+                    Ok(Some(event))
+                }
+                (
+                    State::Running {
+                        command: AdapterCommand::BlockStateChanged(expected),
+                        ..
+                    },
+                    AdapterEvent::BlockStateChangedCompleted(done),
+                ) if *expected == done => {
                     Ok(Some(event))
                 }
                 _ => Err(AdapterError::new("adapter worker returned an unexpected completion")),
@@ -336,7 +396,7 @@ fn validate_class(class: &str) -> Result<(), AdapterError> {
 fn run_java<S>(
     config: JvmConfig,
     class_name: &str,
-    commands: Receiver<u64>,
+    commands: Receiver<AdapterCommand>,
     events: &Events,
     port: BlockPort,
     block_write_port: BlockWritePort,
@@ -368,17 +428,57 @@ fn run_java<S>(
                 .map_err(|error| java_error(env, &format!("{class_name}.blockStateId(III)I"), error))?;
             env.get_static_method_id(&class, jni_str!("onTick"), jni_sig!("(J)V"))
                 .map_err(|error| java_error(env, &format!("{class_name}.onTick(J)V"), error))?;
+            env.get_static_method_id(&class, jni_str!("onBlockStateChanged"), jni_sig!("(IIII)V"))
+                .map_err(|error| java_error(
+                    env,
+                    &format!("{class_name}.onBlockStateChanged(IIII)V"),
+                    error,
+                ))?;
             if events.send(Ok(AdapterEvent::Ready)).is_err() {
                 return Ok(());
             }
-            while let Ok(tick) = commands.recv() {
-                env.with_local_frame(16, |env| {
-                    env.call_static_method(&class, jni_str!("onTick"), jni_sig!("(J)V"),
-                        &[JValue::Long(tick as i64)])
-                        .map(|_| ())
-                        .map_err(|error| java_error(env, &format!("{class_name}.onTick(J)V"), error))
-                })?;
-                if events.send(Ok(AdapterEvent::TickCompleted(tick))).is_err() {
+            while let Ok(command) = commands.recv() {
+                let completion = match command {
+                    AdapterCommand::Tick(tick) => {
+                        env.with_local_frame(16, |env| {
+                            env.call_static_method(&class, jni_str!("onTick"), jni_sig!("(J)V"),
+                                &[JValue::Long(tick as i64)])
+                                .map(|_| ())
+                                .map_err(|error| java_error(
+                                    env,
+                                    &format!("{class_name}.onTick(J)V"),
+                                    error,
+                                ))
+                        })?;
+                        AdapterEvent::TickCompleted(tick)
+                    }
+                    AdapterCommand::BlockStateChanged(change) => {
+                        let state_id = i32::try_from(change.state_id).map_err(|_| {
+                            AdapterError::new("block-state callback state id exceeds Java int range")
+                        })?;
+                        env.with_local_frame(16, |env| {
+                            env.call_static_method(
+                                &class,
+                                jni_str!("onBlockStateChanged"),
+                                jni_sig!("(IIII)V"),
+                                &[
+                                    JValue::Int(change.x),
+                                    JValue::Int(change.y),
+                                    JValue::Int(change.z),
+                                    JValue::Int(state_id),
+                                ],
+                            )
+                            .map(|_| ())
+                            .map_err(|error| java_error(
+                                env,
+                                &format!("{class_name}.onBlockStateChanged(IIII)V"),
+                                error,
+                            ))
+                        })?;
+                        AdapterEvent::BlockStateChangedCompleted(change)
+                    }
+                };
+                if events.send(Ok(completion)).is_err() {
                     break;
                 }
             }
@@ -549,7 +649,10 @@ mod tests {
         let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, port, _, _| {
             assert_ne!(std::thread::current().id(), host_thread);
             events.send(Ok(AdapterEvent::Ready)).unwrap();
-            for tick in commands {
+            for command in commands {
+                let AdapterCommand::Tick(tick) = command else {
+                    panic!("fixture expected only a tick callback");
+                };
                 let result = port.request(BlockStateQuery { x: 11, y: 7, z: -3 }).unwrap();
                 assert_eq!(result, Ok(422));
                 events.send(Ok(AdapterEvent::TickCompleted(tick))).unwrap();
@@ -571,6 +674,37 @@ mod tests {
         }
         assert_eq!(await_event(&mut host), AdapterEvent::TickCompleted(37));
         assert!(host.is_idle());
+    }
+
+    #[test]
+    fn block_change_callbacks_are_bounded_and_preserve_the_applied_value() {
+        let host_thread = std::thread::current().id();
+        let expected = BlockStateWrite {
+            x: -17,
+            y: 64,
+            z: 33,
+            state_id: 1234,
+        };
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, _, _, _| {
+            assert_ne!(std::thread::current().id(), host_thread);
+            events.send(Ok(AdapterEvent::Ready)).unwrap();
+            let command = commands.recv().expect("one host callback");
+            assert_eq!(command, AdapterCommand::BlockStateChanged(expected));
+            events.send(Ok(AdapterEvent::BlockStateChangedCompleted(expected))).unwrap();
+        }).unwrap();
+        assert_eq!(await_event(&mut host), AdapterEvent::Ready);
+        host.dispatch_block_state_changed(expected).unwrap();
+        assert!(host.dispatch_tick(37).is_err(), "no callback backlog is permitted");
+        assert_eq!(
+            await_event(&mut host),
+            AdapterEvent::BlockStateChangedCompleted(expected),
+        );
+        assert!(host.is_idle());
+        let oversized = BlockStateWrite { state_id: i32::MAX as u32 + 1, ..expected };
+        let error = host
+            .dispatch_block_state_changed(oversized)
+            .expect_err("the Java callback cannot represent this native state id");
+        assert!(error.to_string().contains("Java int range"), "{error}");
     }
 
     #[test]

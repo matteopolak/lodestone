@@ -1,9 +1,10 @@
 //! Operator-configured experimental Java adapter over the public server read API.
 
+use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Duration;
 
-use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost};
+use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost, BlockStateWrite};
 use lodestone_jvm_bridge::paper::{
     PaperBootstrapConfig, PaperBootstrapPlan, PaperPluginConstructionBlocker,
     PaperPluginConstructionReadiness, PaperServerFacadeInput,
@@ -11,12 +12,15 @@ use lodestone_jvm_bridge::paper::{
 use lodestone_jvm_bridge::runtime::JvmConfig;
 use lodestone_server::IntegratedServer;
 
+const MAX_PENDING_BLOCK_CHANGE_EVENTS: usize = 64;
+
 #[derive(Debug)]
 pub(crate) struct JavaAdapter {
     host: AdapterHost,
     paper_plan: Option<PaperBootstrapPlan>,
     paper_construction: Option<PaperPluginConstructionReadiness>,
     paper_construction_receiver: Option<Receiver<PaperPluginConstructionReadiness>>,
+    pending_block_change_events: VecDeque<BlockStateWrite>,
     last_dispatched: Option<u64>,
 }
 
@@ -123,6 +127,7 @@ impl JavaAdapter {
             paper_plan,
             paper_construction: None,
             paper_construction_receiver,
+            pending_block_change_events: VecDeque::new(),
             last_dispatched: None,
         })
     }
@@ -197,6 +202,9 @@ impl JavaAdapter {
                 }
             }
             Some(AdapterEvent::TickCompleted(tick)) => tracing::debug!(tick, "Java adapter callback completed"),
+            Some(AdapterEvent::BlockStateChangedCompleted(change)) => {
+                tracing::debug!(?change, "Java adapter block-change callback completed");
+            }
             None => {}
         }
         self.host.service_pending(64, |query| {
@@ -204,17 +212,23 @@ impl JavaAdapter {
                 .map(|state| state.raw())
                 .ok_or_else(|| format!("primary-world block unavailable at {},{},{}", query.x, query.y, query.z))
         });
-        self.host.service_pending_block_writes(64, |write| {
+        let available_block_change_events = MAX_PENDING_BLOCK_CHANGE_EVENTS
+            .saturating_sub(self.pending_block_change_events.len());
+        self.host.service_pending_block_writes(available_block_change_events, |write| {
             let state = lodestone_data::block_states::StateId::new(write.state_id)
                 .ok_or_else(|| format!("block state id {} is outside this server's state table", write.state_id))?;
-            server.set_resident_block_state_id(write.x, write.y, write.z, state)
+            server.set_resident_block_state_id(write.x, write.y, write.z, state)?;
+            self.pending_block_change_events.push_back(write);
+            Ok(())
         });
         self.host.service_pending_server_tick(64, || {
             server.server_tick_count()
                 .ok_or_else(|| "primary-world server tick is unavailable".to_owned())
         });
         if self.host.is_idle() {
-            if let Some(tick) = server.server_tick_count() {
+            if let Some(change) = self.pending_block_change_events.pop_front() {
+                self.host.dispatch_block_state_changed(change).map_err(|error| error.to_string())?;
+            } else if let Some(tick) = server.server_tick_count() {
                 if self.last_dispatched != Some(tick) {
                     self.host.dispatch_tick(tick).map_err(|error| error.to_string())?;
                     self.last_dispatched = Some(tick);

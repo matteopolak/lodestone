@@ -14,4 +14,9 @@ public final class WorldAdapter {
             throw new AssertionError("unavailable world query returned normally");
         }
     }
+
+    public static void onBlockStateChanged(int x, int y, int z, int stateId) {
+        // This world-read fixture does not request a mutation. The required
+        // host callback remains a no-op so the adapter contract is complete.
+    }
 }

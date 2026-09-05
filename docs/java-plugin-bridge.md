@@ -605,7 +605,7 @@ adapter class. It is not Paper plugin discovery or a Fabric mod loader. The host
 `JvmConfig`, a dotted Java class name, and a positive operation deadline. Startup happens on one
 dedicated worker; `poll` reports `Ready` only after class loading, static-method validation, and
 native registration succeed. The worker keeps its class reference inside one scoped attachment,
-and each tick uses a local JNI frame so repeated callbacks do not accumulate temporary references.
+and each callback uses a local JNI frame so repeated dispatches do not accumulate temporary references.
 
 The adapter bootstrap contract is deliberately small:
 
@@ -617,12 +617,20 @@ public final class Adapter {
         int state = blockStateId(11, 7, -3);
         System.out.println("tick=" + tick + " blockState=" + state);
     }
+    public static void onBlockStateChanged(int x, int y, int z, int stateId) {
+        System.out.println("changed=" + x + "," + y + "," + z + ":" + stateId);
+    }
 }
 ```
 
 The host calls `dispatch_tick` only while `is_idle` is true, drains `service_pending` through its
-public block-state accessor, and polls `TickCompleted` before dispatching again. There is at most
-one outstanding tick, so a slow callback cannot silently build a backlog. `BlockStateQuery` uses
+public block-state accessor, and polls `TickCompleted` before dispatching again. After it has
+successfully applied a resident block-state replacement, it may call
+`dispatch_block_state_changed`; completion retains the exact `BlockStateWrite` payload as
+`BlockStateChangedCompleted`. There is one shared command slot for both callback shapes, so a slow
+callback cannot silently build a backlog or overlap another callback. In particular, the host must
+not send a block-change callback while a native world request is unresolved: it waits for the
+native write response, then queues the separate host-to-JVM callback. `BlockStateQuery` uses
 absolute primary-world block coordinates. The host returns either a real `u32` state ID or a named
 error; an unavailable chunk must not be reported as air. Values outside Java's nonnegative `int`
 range fail explicitly. The isolated shim additionally exposes `setBlockStateId(x, y, z, stateId)`:
@@ -724,14 +732,21 @@ wrappers forward this capability. A source with no retained read capability retu
 converts this into a named Java error. Extreme and out-of-height Y coordinates are also unavailable.
 The Rust API returns validated `StateId`; conversion to a raw integer happens only at the Java wire
 boundary. Writes validate that raw value back into `StateId`, render its canonical state string, and
-write through the same live source only after its resident-column preflight succeeds. Tick queries use
+write through the same live source only after its resident-column preflight succeeds. Each successful
+write enters a dedicated-host FIFO of at most 64 `BlockStateWrite` callbacks. The host does not apply
+more writes when that FIFO is full, so it never acknowledges a native write then silently loses its
+matching callback. When the adapter worker becomes idle, it receives the oldest callback through the
+same one-slot worker command queue before the next tick is dispatched. A failed write emits no
+block-change callback. Tick queries use
 `IntegratedServer::server_tick_count`; an inactive server is likewise a
 named error rather than a fabricated zero, because zero may be a valid future tick count.
 
 The adapter observes the latest completed server tick whenever it becomes idle. Intervening server
 ticks are **coalesced**, not replayed with historical state; the same tick is never dispatched twice.
-This is a narrow native state contract, not Paper's per-tick event semantics. Readiness
-and failures are logged; an asynchronous failure disables the adapter while the server continues.
+This is a narrow native state contract. Its host-confirmed block-change callback is an adapter
+method, not a Bukkit/Paper event: it has no listener registry, priority ordering, cancellation,
+plugin instance, or event object. Readiness and failures are logged; an asynchronous failure
+disables the adapter while the server continues.
 Shutdown drops the adapter before saving. Closed stdin suspends only the console-input future, so
 adapter polling and termination signals continue under a supervisor.
 
