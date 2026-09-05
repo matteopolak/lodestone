@@ -263,6 +263,16 @@ whole selected stack or one item, `5` releases an in-progress held-item use,
 and `6` swaps the selected main-hand slot with the off hand. Their target,
 face, and prediction fields are padding rather than an interaction target; an
 unknown status or any such packet before Play is ignored.
+
+The initial view is a typed `ChunkBatchStart`, its columns, then a typed
+`ChunkBatchFinished`; the serverbound `ChunkBatchReceived` decoder becomes
+`ServerBound::ChunkBatchAcknowledged`. The shared server consumes that event
+with connection-local `awaiting_chunk_batch_ack` and
+`pending_chunk_batches` state: it writes at most one queued batch until the
+client replies, then releases the next batch. `chunks_per_tick` remains the
+client's request rather than a server-side within-batch rate, so changing
+batch sizing belongs in the shared consumer rather than either protocol codec.
+
 The configuration fixture in `src/generated/hosting-configuration.txt` contains
 all eight synchronized registries, plus features and tags, recorded directly
 from the headless 1.20.6 server. Every registry entry has its NBT payload, so no

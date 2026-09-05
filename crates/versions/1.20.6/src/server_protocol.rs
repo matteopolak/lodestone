@@ -16,8 +16,8 @@ use crate::PROTOCOL_1_20_6;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::configuration::RegistryData;
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientboundPositionLook, JoinGame, ServerboundFlying,
-    ServerboundLook, ServerboundPosition, ServerboundPositionLook, SpawnInfo,
+    BlockDig, BlockPlace, ChunkBatchFinished, ChunkBatchStart, ClientboundPositionLook, JoinGame,
+    ServerboundFlying, ServerboundLook, ServerboundPosition, ServerboundPositionLook, SpawnInfo,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -536,10 +536,7 @@ impl ServerProtocol for V766ServerProtocol {
     }
 
     fn begin_chunk_batch(&self) -> ServerDirective {
-        ServerDirective::Send {
-            packet_id: play::clientbound::CHUNK_BATCH_START,
-            payload: Vec::new(),
-        }
+        send(play::clientbound::CHUNK_BATCH_START, &ChunkBatchStart)
     }
 
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective {
@@ -574,12 +571,7 @@ impl ServerProtocol for V766ServerProtocol {
     }
 
     fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
-        let mut payload = Writer::default();
-        payload.var_i32(batch_size);
-        ServerDirective::Send {
-            packet_id: play::clientbound::CHUNK_BATCH_FINISHED,
-            payload: payload.into_vec(),
-        }
+        send(play::clientbound::CHUNK_BATCH_FINISHED, &ChunkBatchFinished { batch_size })
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
