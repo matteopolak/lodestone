@@ -518,7 +518,7 @@ fn the_three_eras_disagree_about_what_a_state_id_means() {
             let id = canonical::table_for(protocol)
                 .resolve(PROBE)
                 .expect("probe is inside every era's palette");
-            block_states::block_name(id).expect("canonical id is a real 26.2 state")
+            id.name()
         })
         .collect();
     assert_eq!(
@@ -555,8 +555,9 @@ fn committed_tables_are_internally_consistent() {
         for wire in 0..table.state_count() {
             let id = table.resolve(wire).expect("wire < state_count resolves");
             assert!(
-                id < block_states::STATE_COUNT,
-                "protocol {}: canonical id {id} is not a valid 26.2 state (STATE_COUNT = {})",
+                id.raw() < block_states::STATE_COUNT,
+                "protocol {}: canonical id {} is not a valid 26.2 state (STATE_COUNT = {})",
+                id.raw(),
                 source.protocol,
                 block_states::STATE_COUNT
             );
@@ -564,8 +565,8 @@ fn committed_tables_are_internally_consistent() {
         assert_eq!(table.resolve(table.state_count()), None);
 
         let air = table.air_state_id();
-        assert_eq!(block_states::block_name(air), Some("minecraft:air"));
-        assert_eq!(block_states::properties(air), Some(&[][..]));
+        assert_eq!(block_states::block_name(air.raw()), Some("minecraft:air"));
+        assert_eq!(block_states::properties(air.raw()), Some(&[][..]));
     }
 }
 
@@ -606,9 +607,11 @@ fn discriminating_states_resolve_to_their_26_2_ids_not_their_wire_ids() {
     for &(label, wire_id, expected_26_2_id, wrong_name) in cases {
         let resolved = table.resolve_or_air(wire_id, &mut tally);
         assert_eq!(
-            resolved, expected_26_2_id,
+            block_states::StateId::new(expected_26_2_id).expect("oracle id is canonical"),
+            resolved,
             "{label}: 1.16.5 state {wire_id} should canonicalise to 26.2 state \
-             {expected_26_2_id}, got {resolved}"
+             {expected_26_2_id}, got {}",
+            resolved.raw()
         );
 
         // Negative control: the *unfixed* path (this crate before this

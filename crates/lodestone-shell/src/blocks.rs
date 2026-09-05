@@ -43,6 +43,52 @@ pub mod id {
     pub const GRAVEL: u32 = 9;
 }
 
+/// A validated state in the shell's offline demo palette.
+///
+/// This is deliberately separate from [`StateId`]: the demo palette's numbers
+/// are local fixture indexes and must never be interpreted as canonical states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DemoStateId(u32);
+
+impl DemoStateId {
+    /// Validates one of the demo palette's ten state slots.
+    #[must_use]
+    pub const fn new(raw: u32) -> Option<Self> {
+        if raw <= id::GRAVEL {
+            Some(Self(raw))
+        } else {
+            None
+        }
+    }
+
+    /// The local demo-palette index.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// A block state in the ID space selected for one shell session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellStateId {
+    /// The offline demo palette's local ID space.
+    Demo(DemoStateId),
+    /// The canonical built-in block-state table used by live sessions.
+    Vanilla(StateId),
+}
+
+impl From<DemoStateId> for ShellStateId {
+    fn from(state_id: DemoStateId) -> Self {
+        Self::Demo(state_id)
+    }
+}
+
+impl From<StateId> for ShellStateId {
+    fn from(state_id: StateId) -> Self {
+        Self::Vanilla(state_id)
+    }
+}
+
 /// Light opacity/emission for the demo palette, keyed by the [`id`] constants.
 ///
 /// This feeds [`lodestone_world::compute_column_light`] at generation time so the
@@ -269,8 +315,7 @@ impl BlockClassifier for ShellClassifier {
 /// session: [`crate::resources::BlockResources::try_vanilla`] always attaches them
 /// before the atlas escapes).
 #[must_use]
-pub fn vanilla_fluid(atlas: &BlockAtlas, state_id: u32) -> Option<FluidKind> {
-    let state_id = StateId::new(state_id)?;
+pub fn vanilla_fluid(atlas: &BlockAtlas, state_id: StateId) -> Option<FluidKind> {
     atlas.models()?.fluid(state_id).map(|cell| cell.kind)
 }
 
@@ -282,8 +327,8 @@ pub fn vanilla_fluid(atlas: &BlockAtlas, state_id: u32) -> Option<FluidKind> {
 /// to share, only this fixture's own fact, and it belongs next to the [`id`]
 /// constants it reads.
 #[must_use]
-pub fn demo_fluid(state_id: u32) -> Option<FluidKind> {
-    (state_id == id::WATER).then_some(FluidKind::Water)
+pub fn demo_fluid(state_id: DemoStateId) -> Option<FluidKind> {
+    (state_id.raw() == id::WATER).then_some(FluidKind::Water)
 }
 
 impl ShellClassifier {
@@ -292,10 +337,13 @@ impl ShellClassifier {
     /// Dispatches to [`vanilla_fluid`] or [`demo_fluid`]; see [`vanilla_fluid`]
     /// for why this is the only place the question is answered.
     #[must_use]
-    pub fn fluid(&self, state_id: u32) -> Option<FluidKind> {
-        match self {
-            ShellClassifier::Demo(_) => demo_fluid(state_id),
-            ShellClassifier::Vanilla(a) => vanilla_fluid(a, state_id),
+    pub fn fluid(&self, state_id: impl Into<ShellStateId>) -> Option<FluidKind> {
+        match (self, state_id.into()) {
+            (ShellClassifier::Demo(_), ShellStateId::Demo(state_id)) => demo_fluid(state_id),
+            (ShellClassifier::Vanilla(atlas), ShellStateId::Vanilla(state_id)) => {
+                vanilla_fluid(atlas, state_id)
+            }
+            _ => None,
         }
     }
 }

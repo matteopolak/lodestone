@@ -22,7 +22,6 @@
 //! around the container, which is the version-specific part.
 
 use lodestone_core::{Nbt, Reader, Writer, write_named_nbt};
-use lodestone_data::block_states;
 use lodestone_v1_14::canonical;
 use lodestone_v1_14::packets::chunk::{ChunkShape, MapChunk, UpdateLight};
 use lodestone_world::{LongArrayFraming, PaletteKind, PalettedContainer, SignText};
@@ -145,7 +144,7 @@ fn find_wire_sign_id(table: &canonical::CanonicalTable) -> u32 {
         .find(|&wire| {
             table
                 .resolve(wire)
-                .and_then(block_states::block_name)
+                .map(|state_id| state_id.name())
                 .is_some_and(|name| name.ends_with("_sign"))
         })
         .expect("1.16.5's table has at least one wire state that canonicalises to a sign")

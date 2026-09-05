@@ -132,7 +132,7 @@ impl ChunkShape {
             block_kind: PaletteKind::block_states(),
             biome_kind: PaletteKind::biomes(),
             canonical,
-            air_id: canonical.air_state_id(),
+            air_id: canonical.air_state_id().raw(),
             biome_id: 0,
         }
     }
@@ -439,7 +439,7 @@ fn decode_section_blocks(
     // encoding translate each raw value instead, below.
     let translated_palette: Vec<u32> = palette
         .iter()
-        .map(|&raw| shape.canonical.resolve_or_air(raw, fallback))
+        .map(|&raw| shape.canonical.resolve_or_air(raw, fallback).raw())
         .collect();
 
     let declared =
@@ -460,7 +460,7 @@ fn decode_section_blocks(
     let mut values = vec![0u32; BLOCK_ENTRIES];
     for (out, &raw) in values.iter_mut().zip(indices.iter()) {
         *out = if translated_palette.is_empty() {
-            shape.canonical.resolve_or_air(raw, fallback)
+            shape.canonical.resolve_or_air(raw, fallback).raw()
         } else {
             *translated_palette.get(raw as usize).ok_or_else(|| {
                 lodestone_world::WorldError::from(lodestone_core::Error::Custom(format!(

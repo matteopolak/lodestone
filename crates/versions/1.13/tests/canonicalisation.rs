@@ -460,17 +460,17 @@ fn committed_tables_are_internally_consistent() {
         for wire in 0..table.state_count() {
             let id = table.resolve(wire).expect("wire < state_count resolves");
             assert!(
-                id < block_states::STATE_COUNT,
-                "protocol {}: canonical id {id} is not a valid 26.2 state (STATE_COUNT = {})",
+                id.raw() < block_states::STATE_COUNT,
+                "protocol {}: canonical id {} is not a valid 26.2 state (STATE_COUNT = {})",
                 source.protocol,
+                id.raw(),
                 block_states::STATE_COUNT
             );
         }
         assert_eq!(table.resolve(table.state_count()), None);
 
         let air = table.air_state_id();
-        assert_eq!(block_states::block_name(air), Some("minecraft:air"));
-        assert_eq!(block_states::properties(air), Some(&[][..]));
+        assert_eq!(block_states::block_name(air.raw()), Some("minecraft:air"));
+        assert_eq!(air.properties(), &[][..]);
     }
 }
-

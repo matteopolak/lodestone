@@ -214,7 +214,7 @@ impl ChunkShape {
             block_kind: PaletteKind::block_states(),
             biome_kind: PaletteKind::biomes(),
             canonical,
-            air_id: canonical.air_state_id(),
+            air_id: canonical.air_state_id().raw(),
             biome_id: 0,
         }
     }
@@ -425,7 +425,7 @@ fn read_translated_blocks(
 ) -> Result<PalettedContainer> {
     let raw = PalettedContainer::decode(shape.block_kind, blob)?;
     let translated: Vec<u32> = (0..BLOCK_ENTRIES)
-        .map(|i| shape.canonical.resolve_or_air(raw.get(i), fallback))
+        .map(|i| shape.canonical.resolve_or_air(raw.get(i), fallback).raw())
         .collect();
     Ok(PalettedContainer::from_values(shape.block_kind, &translated))
 }

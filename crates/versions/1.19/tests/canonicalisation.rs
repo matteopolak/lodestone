@@ -443,7 +443,7 @@ fn discriminating_states_resolve_to_their_26_2_ids_not_their_wire_ids() {
             .unwrap_or_else(|| panic!("{probe} is absent from the 26.2 registry"));
         assert_eq!(
             table.resolve(state.id),
-            Some(expected),
+            Some(block_states::StateId::new(expected).expect("oracle id is canonical")),
             "{probe}: wire state {} must map to 26.2 state {expected}",
             state.id
         );
