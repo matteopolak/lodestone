@@ -20,7 +20,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use lodestone_data::attribute_types::{self, ATTRIBUTE_COUNT};
+use lodestone_data::attribute_types::{self, AttributeId, ATTRIBUTE_COUNT};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -124,34 +124,38 @@ fn generate(doc: &serde_json::Value) -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ids_are_contiguous_and_out_of_range_is_none() {
+fn attribute_id_validates_the_table_domain() {
     for id in 0..ATTRIBUTE_COUNT as i32 {
+        let id = AttributeId::new(id).expect("table id validates");
         assert!(
-            attribute_types::attribute_name(id).is_some(),
-            "id {id} in 0..{ATTRIBUTE_COUNT} did not resolve to a name"
+            !attribute_types::attribute_name(id).is_empty(),
+            "id {id:?} in 0..{ATTRIBUTE_COUNT} did not resolve to a name"
         );
     }
-    assert_eq!(attribute_types::attribute_name(-1), None);
-    assert_eq!(
-        attribute_types::attribute_name(ATTRIBUTE_COUNT as i32),
-        None
-    );
-    assert_eq!(attribute_types::attribute_name(i32::MAX), None);
+    assert_eq!(AttributeId::new(-1), None);
+    assert_eq!(AttributeId::new(ATTRIBUTE_COUNT as i32), None);
+    assert_eq!(AttributeId::new(i32::MAX), None);
+
+    let lookup: fn(AttributeId) -> &'static str = attribute_types::attribute_name;
+    let reverse: fn(&str) -> Option<AttributeId> = attribute_types::attribute_id;
+    let speed = AttributeId::new(26).expect("known id validates");
+    assert_eq!(reverse(lookup(speed)), Some(speed));
 }
 
 #[test]
 fn known_ids_resolve_to_their_identifiers() {
     // Spot an id the live seam relies on; a transposed table fails instantly.
     assert_eq!(
-        attribute_types::attribute_name(26),
-        Some("minecraft:movement_speed")
+        attribute_types::attribute_name(AttributeId::new(26).expect("known id validates")),
+        "minecraft:movement_speed"
     );
     // Every name is a well-formed namespaced identifier.
     for id in 0..ATTRIBUTE_COUNT as i32 {
-        let name = attribute_types::attribute_name(id).unwrap();
+        let id = AttributeId::new(id).expect("table id validates");
+        let name = attribute_types::attribute_name(id);
         assert!(
             name.starts_with("minecraft:") && name.len() > "minecraft:".len(),
-            "id {id} has a malformed name {name:?}"
+            "id {id:?} has a malformed name {name:?}"
         );
     }
 }
@@ -190,7 +194,8 @@ fn committed_table_matches_report() {
     );
     let mut mismatches = 0usize;
     for (id, name) in names.iter().enumerate() {
-        if attribute_types::attribute_name(id as i32) != Some(name.as_str()) {
+        let id = AttributeId::new(id as i32).expect("report id validates");
+        if attribute_types::attribute_name(id) != name {
             mismatches += 1;
         }
     }

@@ -12,16 +12,37 @@
 pub use crate::generated_attribute_types::ATTRIBUTE_COUNT;
 use crate::generated_attribute_types::ATTRIBUTE_NAMES;
 
-/// Resolves a network attribute id to its canonical `minecraft:*` identifier.
+/// A validated entry in the 26.2 attribute registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AttributeId(i32);
+
+impl AttributeId {
+    /// Validates a raw network registry id at a wire or import boundary.
+    #[must_use]
+    pub const fn new(raw: i32) -> Option<Self> {
+        if raw >= 0 && raw < ATTRIBUTE_COUNT as i32 {
+            Some(Self(raw))
+        } else {
+            None
+        }
+    }
+
+    /// The registry id used by the version-specific wire codec.
+    #[must_use]
+    pub const fn raw(self) -> i32 {
+        self.0
+    }
+}
+
+/// Resolves a validated network attribute id to its canonical `minecraft:*`
+/// identifier.
 ///
-/// Returns `None` for ids outside `0..ATTRIBUTE_COUNT`, so a malformed or
-/// future-version id surfaces as an explicit miss rather than a panic or a
-/// silently wrong attribute.
+/// Raw values are validated by [`AttributeId::new`] before they enter this
+/// total lookup, so a malformed or future-version id remains an explicit miss
+/// at the boundary rather than a silently wrong attribute.
 #[must_use]
-pub fn attribute_name(id: i32) -> Option<&'static str> {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| ATTRIBUTE_NAMES.get(index).copied())
+pub fn attribute_name(id: AttributeId) -> &'static str {
+    ATTRIBUTE_NAMES[id.raw() as usize]
 }
 
 /// Resolves a canonical `minecraft:*` identifier to its network attribute id
@@ -34,9 +55,10 @@ pub fn attribute_name(id: i32) -> Option<&'static str> {
 /// over `ATTRIBUTE_COUNT` (40) entries rather than a generated reverse table:
 /// this is called once per attribute per packet, not per tick.
 #[must_use]
-pub fn attribute_id(name: &str) -> Option<i32> {
+pub fn attribute_id(name: &str) -> Option<AttributeId> {
     ATTRIBUTE_NAMES
         .iter()
         .position(|&candidate| candidate == name)
         .and_then(|index| i32::try_from(index).ok())
+        .and_then(AttributeId::new)
 }

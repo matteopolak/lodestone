@@ -78,7 +78,7 @@ use lodestone_model::{
     EntityVariant, Identifier, ItemStack, Quat, Reported, Text, Vec3f,
 };
 
-use lodestone_data::attribute_types::{attribute_id, attribute_name};
+use lodestone_data::attribute_types::{AttributeId, attribute_id, attribute_name};
 use crate::entity_variants;
 
 /// Sentinel index terminating a metadata list.
@@ -1415,7 +1415,9 @@ pub fn read_update_attributes(
     let count = checked_count(reader.var_i32()?, MAX_ATTRIBUTES, "attribute count")?;
     let mut attributes = Vec::with_capacity(count);
     for _ in 0..count {
-        let attribute_id = reader.var_i32()?;
+        let raw_attribute_id = reader.var_i32()?;
+        let attribute_id = AttributeId::new(raw_attribute_id)
+            .ok_or_else(|| Error::Custom(format!("unknown attribute id {raw_attribute_id}")))?;
         let base = reader.f64()?;
         let modifier_count =
             checked_count(reader.var_i32()?, usize::MAX, "attribute modifier count")?;
@@ -1433,8 +1435,7 @@ pub fn read_update_attributes(
                 operation,
             });
         }
-        let name = attribute_name(attribute_id)
-            .ok_or_else(|| Error::Custom(format!("unknown attribute id {attribute_id}")))?;
+        let name = attribute_name(attribute_id);
         attributes.push(EntityAttributeSnapshot {
             attribute: parse_identifier(name)?,
             base,
@@ -1462,14 +1463,14 @@ pub fn read_update_attributes(
 /// is a no-op over a bare base value with no modifiers, so it lands on the
 /// same number the server already computed.
 pub fn write_update_attributes(w: &mut Writer, entity_id: i32, attributes: &[EntityAttributeSnapshot]) {
-    let resolved: Vec<(i32, &EntityAttributeSnapshot)> = attributes
+    let resolved: Vec<(AttributeId, &EntityAttributeSnapshot)> = attributes
         .iter()
         .filter_map(|snapshot| attribute_id(&snapshot.attribute.to_string()).map(|id| (id, snapshot)))
         .collect();
     w.var_i32(entity_id);
     w.var_i32(resolved.len() as i32);
     for (attribute_network_id, snapshot) in resolved {
-        w.var_i32(attribute_network_id);
+        w.var_i32(attribute_network_id.raw());
         w.f64(snapshot.base);
         w.var_i32(snapshot.modifiers.len() as i32);
         for modifier in &snapshot.modifiers {
