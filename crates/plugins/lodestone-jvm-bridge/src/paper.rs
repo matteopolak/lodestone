@@ -28,7 +28,7 @@ use crate::runtime::{JvmConfig, JvmRuntime};
 #[cfg(feature = "jvm")]
 use crate::native_surface;
 #[cfg(feature = "jvm")]
-use crate::native_surface::OperatorValueMember;
+use crate::native_surface::{OperatorBlockStateMember, OperatorValueMember};
 #[cfg(feature = "jvm")]
 use crate::adapter::NativeServerSurface;
 
@@ -54,6 +54,8 @@ pub struct PaperBootstrapConfig {
     native_shim: bool,
     #[cfg(feature = "jvm")]
     operator_value_member: Option<OperatorValueMember>,
+    #[cfg(feature = "jvm")]
+    operator_block_state_member: Option<OperatorBlockStateMember>,
     max_plugins: usize,
 }
 
@@ -68,6 +70,8 @@ impl PaperBootstrapConfig {
             native_shim: false,
             #[cfg(feature = "jvm")]
             operator_value_member: None,
+            #[cfg(feature = "jvm")]
+            operator_block_state_member: None,
             max_plugins: DEFAULT_MAX_PLUGINS,
         }
     }
@@ -108,6 +112,19 @@ impl PaperBootstrapConfig {
         self
     }
 
+    /// Registers one operator-selected block-handle state-read member in the
+    /// retained bootstrap loader.
+    ///
+    /// The selected static `(long): int` method resolves its supplied opaque
+    /// block handle on the adapter worker before using the bounded host query.
+    /// It does not provide a world object or an alternate plugin API.
+    #[cfg(feature = "jvm")]
+    #[must_use]
+    pub fn with_operator_block_state_member(mut self, member: OperatorBlockStateMember) -> Self {
+        self.operator_block_state_member = Some(member);
+        self
+    }
+
     /// Limits discovered plugin jars before opening any descriptor.
     #[must_use]
     pub fn with_max_plugins(mut self, max_plugins: usize) -> Self {
@@ -124,7 +141,7 @@ impl PaperBootstrapConfig {
             || {
                 #[cfg(feature = "jvm")]
                 {
-                    self.operator_value_member.is_some()
+                    self.operator_value_member.is_some() || self.operator_block_state_member.is_some()
                 }
                 #[cfg(not(feature = "jvm"))]
                 {
@@ -162,6 +179,8 @@ impl PaperBootstrapConfig {
             native_shim: self.native_shim,
             #[cfg(feature = "jvm")]
             operator_value_member: self.operator_value_member,
+            #[cfg(feature = "jvm")]
+            operator_block_state_member: self.operator_block_state_member,
             plugins,
         })
     }
@@ -175,6 +194,8 @@ pub struct PaperBootstrapPlan {
     native_shim: bool,
     #[cfg(feature = "jvm")]
     operator_value_member: Option<OperatorValueMember>,
+    #[cfg(feature = "jvm")]
+    operator_block_state_member: Option<OperatorBlockStateMember>,
     plugins: Vec<PaperPluginDescriptor>,
 }
 
@@ -1415,6 +1436,7 @@ impl PaperBootstrapPlan {
             None,
             self.native_shim,
             self.operator_value_member.as_ref(),
+            self.operator_block_state_member.as_ref(),
         )
             .map_err(|error| PaperBootstrapError::lifecycle(
                 format!("could not load Paper bootstrap class {BOOTSTRAP_CLASS}"),
@@ -1431,6 +1453,7 @@ impl PaperBootstrapPlan {
                 plugin.main_class(),
                 Some(bootstrap_loader.as_obj()),
                 false,
+                None,
                 None,
             ) {
                 Ok((loader, entry_class)) => {
@@ -1467,6 +1490,7 @@ impl PaperBootstrapPlan {
         parent: Option<&JObject<'local>>,
         install_native_shim: bool,
         operator_value_member: Option<&OperatorValueMember>,
+        operator_block_state_member: Option<&OperatorBlockStateMember>,
     ) -> Result<(Global<JObject<'static>>, Global<JClass<'static>>), PaperBootstrapError> {
         let config = paths.iter().fold(JvmConfig::new(), |config, path| {
             config.with_classpath(path)
@@ -1481,6 +1505,7 @@ impl PaperBootstrapPlan {
                     binary_name,
                     install_native_shim,
                     operator_value_member,
+                    operator_block_state_member,
                     &native_error,
                 )
             })
@@ -1493,6 +1518,7 @@ impl PaperBootstrapPlan {
                     binary_name,
                     install_native_shim,
                     operator_value_member,
+                    operator_block_state_member,
                     &native_error,
                 )
             })
@@ -1511,6 +1537,7 @@ impl PaperBootstrapPlan {
         binary_name: &str,
         install_native_shim: bool,
         operator_value_member: Option<&OperatorValueMember>,
+        operator_block_state_member: Option<&OperatorBlockStateMember>,
         native_error: &std::cell::RefCell<Option<crate::native_surface::NativeSurfaceError>>,
     ) -> Result<(Global<JObject<'static>>, Global<JClass<'static>>), crate::runtime::JvmError> {
         if install_native_shim {
@@ -1521,6 +1548,17 @@ impl PaperBootstrapPlan {
         }
         if let Some(member) = operator_value_member {
             if let Err(error) = native_surface::install_operator_value_member_in_loader(
+                runtime,
+                &mut *env,
+                loader,
+                member,
+            ) {
+                *native_error.borrow_mut() = Some(error.clone());
+                return Err(crate::runtime::JvmError::new(error.to_string()));
+            }
+        }
+        if let Some(member) = operator_block_state_member {
+            if let Err(error) = native_surface::install_operator_block_state_member_in_loader(
                 runtime,
                 &mut *env,
                 loader,

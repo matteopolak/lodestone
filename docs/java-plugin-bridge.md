@@ -572,6 +572,15 @@ lifecycle fixture checks that a real retained plugin entry receives the expected
 this path. This is a narrow class-loader/native-registration control, not a parallel Bukkit facade
 or a claim of broad internal-surface coverage.
 
+A second, independently selected control accepts one static `(long): int` block-state member.
+The `long` is an opaque resident block handle, not a server object: the worker generation-checks it,
+copies its coordinates, and only then sends the already-bounded state query to the host. The ignored
+JDK fixture packages the caller solely in a plugin child archive while the selected declaration
+lives only in the bootstrap paths; its successful read therefore proves the production parent/child
+loader route as well as the handle-to-host-query sequence. A stale or wrong-kind handle fails before
+the host receives a query. This is deliberately one operator-provided value shape, not a class of
+world wrappers.
+
 Field access is deliberately not part of this surface. Reading a static field would initialize its
 declaring shim class, contradicting the non-initializing load contract; instance fields would need a
 separate object-lifetime design. The field-operation risk in §1.2 therefore remains open rather than

@@ -96,6 +96,49 @@ impl OperatorValueMember {
     }
 }
 
+/// An operator-selected resident block-state read member to intercept.
+///
+/// The fixed `(J)I` shape accepts one opaque block handle and returns the
+/// current state identifier. Resolving the handle before the read makes this
+/// a value operation, not an exposed world object or a parallel API layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperatorBlockStateMember {
+    class: String,
+    method: String,
+}
+
+impl OperatorBlockStateMember {
+    /// Creates an operator-selected block-handle state-read contract.
+    pub fn new(
+        class: impl Into<String>,
+        method: impl Into<String>,
+    ) -> Result<Self, NativeSurfaceError> {
+        let class = class.into();
+        let method = method.into();
+        if !valid_binary_name(&class) {
+            return Err(NativeSurfaceError::InvalidOperatorMember {
+                detail: format!("invalid operator class {class:?}"),
+            });
+        }
+        if !valid_member_name(&method) {
+            return Err(NativeSurfaceError::InvalidOperatorMember {
+                detail: format!("invalid operator method {method:?}"),
+            });
+        }
+        Ok(Self { class, method })
+    }
+
+    /// The operator-selected binary class name.
+    pub fn class(&self) -> &str {
+        &self.class
+    }
+
+    /// The operator-selected static method name.
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+}
+
 thread_local! {
     /// One selected operation per resident adapter worker. A Java-created
     /// thread never receives this value and therefore fails loudly instead of
@@ -288,6 +331,27 @@ pub enum NativeSurfaceError {
         /// JNI registration error detail.
         detail: String,
     },
+    /// The selected block-state class did not resolve from the bootstrap loader.
+    OperatorBlockStateMemberClassLoad {
+        /// Operator-provided binary class name.
+        class: String,
+        /// JVM loader error detail.
+        detail: String,
+    },
+    /// The selected block-state member was absent or had a different static `(J)I` shape.
+    OperatorBlockStateMemberMissing {
+        /// The supplied member contract.
+        member: OperatorBlockStateMember,
+        /// JVM lookup error detail.
+        detail: String,
+    },
+    /// JNI rejected the selected block-state member after shape validation.
+    OperatorBlockStateMemberRegistration {
+        /// The supplied member contract.
+        member: OperatorBlockStateMember,
+        /// JNI registration error detail.
+        detail: String,
+    },
     /// The shim did not declare the exact static native method the bridge owns.
     MissingMethod {
         class: &'static str,
@@ -356,6 +420,21 @@ impl fmt::Display for NativeSurfaceError {
             Self::OperatorMemberRegistration { member, detail } => write!(
                 formatter,
                 "could not register operator value member {}.{}()I: {detail}",
+                member.class,
+                member.method,
+            ),
+            Self::OperatorBlockStateMemberClassLoad { class, detail } => {
+                write!(formatter, "could not load operator block-state class {class}: {detail}")
+            }
+            Self::OperatorBlockStateMemberMissing { member, detail } => write!(
+                formatter,
+                "operator block-state member {}.{}(J)I must be static native: {detail}",
+                member.class,
+                member.method,
+            ),
+            Self::OperatorBlockStateMemberRegistration { member, detail } => write!(
+                formatter,
+                "could not register operator block-state member {}.{}(J)I: {detail}",
                 member.class,
                 member.method,
             ),
@@ -464,6 +543,73 @@ extern "system" fn native_operator_value_member<'local>(
                 )
             })
         })
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Installs one operator-selected resident block-state member in the bootstrap
+/// loader before any plugin child loader is created.
+///
+/// The selected member takes only opaque handle bits. Its implementation
+/// generation-checks those bits on the resident worker, then performs the
+/// existing bounded state query; neither an ECS pointer nor a world guard can
+/// cross the Java boundary.
+pub(crate) fn install_operator_block_state_member_in_loader<'local>(
+    runtime: &JvmRuntime,
+    env: &mut Env<'local>,
+    loader: &JObject<'local>,
+    member: &OperatorBlockStateMember,
+) -> Result<(), NativeSurfaceError> {
+    let class = runtime
+        .load_class_from_loader(env, loader, member.class())
+        .map_err(|error| NativeSurfaceError::OperatorBlockStateMemberClassLoad {
+            class: member.class.clone(),
+            detail: error.to_string(),
+        })?;
+    let name = JNIString::new(member.method());
+    env.get_static_method_id(&class, &name, jni_sig!("(J)I"))
+        .map_err(|error| NativeSurfaceError::OperatorBlockStateMemberMissing {
+            member: member.clone(),
+            detail: error.to_string(),
+        })?;
+    register_operator_block_state_member(env, &class, member).map_err(|error| {
+        NativeSurfaceError::OperatorBlockStateMemberRegistration {
+            member: member.clone(),
+            detail: error.to_string(),
+        }
+    })
+}
+
+#[allow(unsafe_code)]
+fn register_operator_block_state_member(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    member: &OperatorBlockStateMember,
+) -> jni::errors::Result<()> {
+    // SAFETY: validation above proves the supported ABI is static native
+    // `(J)I`, matching `native_operator_block_state_member` exactly. The
+    // callback receives opaque bits and returns a copied integer value.
+    unsafe {
+        let name = JNIString::new(member.method());
+        let signature = JNIString::new("(J)I");
+        let method = jni::NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_operator_block_state_member as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+extern "system" fn native_operator_block_state_member<'local>(
+    mut env: jni::EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jni::sys::jlong,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| adapter::AdapterError::new(error.to_string()))?;
+        adapter::resident_block_handle_state_id(bits)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -930,6 +1076,22 @@ mod tests {
             ("operator.fixture.Value", "read-value"),
         ] {
             let error = OperatorValueMember::new(class, method, 0)
+                .expect_err("malformed operator input must fail before loading");
+            assert!(error.to_string().contains("invalid operator value-member"));
+        }
+    }
+
+    #[test]
+    fn operator_block_state_member_requires_one_checked_handle_shape() {
+        let member = OperatorBlockStateMember::new("operator.fixture.BlockValue", "state")
+            .expect("valid operator block-state member");
+        assert_eq!(member.class(), "operator.fixture.BlockValue");
+        assert_eq!(member.method(), "state");
+        for (class, method) in [
+            ("operator..BlockValue", "state"),
+            ("operator.fixture.BlockValue", "read-state"),
+        ] {
+            let error = OperatorBlockStateMember::new(class, method)
                 .expect_err("malformed operator input must fail before loading");
             assert!(error.to_string().contains("invalid operator value-member"));
         }

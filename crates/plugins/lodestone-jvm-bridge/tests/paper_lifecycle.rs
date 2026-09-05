@@ -6,8 +6,8 @@ use std::process::Command;
 use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
-use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost};
-use lodestone_jvm_bridge::native_surface::OperatorValueMember;
+use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost, BlockStateWrite};
+use lodestone_jvm_bridge::native_surface::{OperatorBlockStateMember, OperatorValueMember};
 use lodestone_jvm_bridge::paper::{
     PaperBootstrapConfig, PaperPluginLifecyclePhase, PaperPluginLifecycleStep,
     PaperServerFacadeInput,
@@ -244,6 +244,210 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
             "Alpha-disable:Alpha:one:fixture.alpha.Main\n",
         ),
     );
+}
+
+/// This uses one plugin-child class that can reach an operator-selected
+/// bootstrap definition only through its retained parent loader. The native
+/// member receives opaque block-handle bits, so a stale or wrong-kind value is
+/// rejected by the worker registry before the one bounded host read.
+#[test]
+#[ignore = "requires JAVA_HOME pointing to a JDK with javac and libjvm"]
+fn plugin_child_reads_resident_block_state_through_operator_member() {
+    let jdk = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"));
+    let fixture = FixtureDirectory::new();
+    let paper_sources = fixture.path().join("paper-sources");
+    let paper_classes = fixture.path().join("paper-classes");
+    let shim_sources = fixture.path().join("shim-sources");
+    let shim_classes = fixture.path().join("shim-classes");
+    let adapter_sources = fixture.path().join("adapter-sources");
+    let adapter_classes = fixture.path().join("adapter-classes");
+    for path in [
+        &paper_sources,
+        &paper_classes,
+        &shim_sources,
+        &shim_classes,
+        &adapter_sources,
+        &adapter_classes,
+    ] {
+        fs::create_dir_all(path).expect("fixture directory");
+    }
+    let bootstrap_source = paper_sources.join("PaperBootstrap.java");
+    fs::write(
+        &bootstrap_source,
+        "package io.papermc.paper; public final class PaperBootstrap { static { if (System.nanoTime() != Long.MIN_VALUE) throw new AssertionError(\"bootstrap initialized\"); } }",
+    )
+    .expect("bootstrap source");
+    let shim_package = shim_sources.join("lodestone/bridge");
+    fs::create_dir_all(&shim_package).expect("shim package directory");
+    let shim_source = shim_package.join("IsolatedPaperShim.java");
+    fs::write(
+        &shim_source,
+        "package lodestone.bridge; public final class IsolatedPaperShim { \
+         public static native int blockStateId(int x, int y, int z); \
+         public static native long serverTickCount(); \
+         public static native int setBlockStateId(int x, int y, int z, int stateId); \
+         public static native String currentPluginName(); \
+         public static native String currentPluginVersion(); \
+         public static native IsolatedPluginDescriptor currentPluginDescriptor(); \
+         public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
+         public static native long currentBlockHandle(); \
+         public static native String blockHandlePosition(long handle); \
+         public static native int blockHandleStateId(long handle); \
+         public static native long currentPlayerHandle(); \
+         public static native String playerHandleName(long handle); }",
+    )
+    .expect("shim source");
+    let descriptor_source = shim_package.join("IsolatedPluginDescriptor.java");
+    fs::write(
+        &descriptor_source,
+        "package lodestone.bridge; public final class IsolatedPluginDescriptor { \
+         private final String name; private final String version; private final String mainClass; \
+         public IsolatedPluginDescriptor(String name, String version, String mainClass) { \
+         this.name = name; this.version = version; this.mainClass = mainClass; } \
+         public String name() { return name; } public String version() { return version; } \
+         public String mainClass() { return mainClass; } }",
+    )
+    .expect("descriptor source");
+    let listener_source = shim_package.join("ResidentBlockChangeListener.java");
+    fs::write(
+        &listener_source,
+        "package lodestone.bridge; public interface ResidentBlockChangeListener { \
+         void onResidentBlockStateChanged(int x, int y, int z, int stateId); }",
+    )
+    .expect("listener source");
+    let member_package = shim_sources.join("fixture/intercepted");
+    fs::create_dir_all(&member_package).expect("operator member package directory");
+    let member_source = member_package.join("BlockValue.java");
+    fs::write(
+        &member_source,
+        "package fixture.intercepted; public final class BlockValue { \
+         public static native int state(long handle); }",
+    )
+    .expect("operator member source");
+    let adapter_package = adapter_sources.join("fixture/adapter");
+    fs::create_dir_all(&adapter_package).expect("adapter package directory");
+    let adapter_source = adapter_package.join("LifecycleAdapter.java");
+    fs::write(
+        &adapter_source,
+        "package fixture.adapter; public final class LifecycleAdapter { \
+         private static native int blockStateId(int x, int y, int z); \
+         public static void onTick(long tick) {} \
+         public static void onBlockStateChanged(int x, int y, int z, int stateId) {} \
+         public static void onPlayerJoined(long handle) {} \
+         public static void onPlayerDisconnected(long handle) {} }",
+    )
+    .expect("adapter source");
+    compile(&jdk, &paper_classes, &bootstrap_source);
+    compile(&jdk, &shim_classes, &descriptor_source);
+    compile(&jdk, &shim_classes, &listener_source);
+    compile_with_classpath(&jdk, &shim_classes, &shim_source, &shim_classes);
+    compile(&jdk, &shim_classes, &member_source);
+    compile(&jdk, &adapter_classes, &adapter_source);
+    let manifest = fixture.path().join("MANIFEST.MF");
+    fs::write(&manifest, "Manifest-Version: 1.0\nImplementation-Title: Paper\n")
+        .expect("Paper manifest");
+    let paper_jar = archive(
+        &jdk,
+        fixture.path(),
+        "paper.jar",
+        &paper_classes,
+        Some(&manifest),
+    );
+    let plugins = fixture.path().join("plugins");
+    fs::create_dir(&plugins).expect("plugins directory");
+    let plugin_sources = fixture.path().join("plugin-sources");
+    let plugin_classes = fixture.path().join("plugin-classes");
+    fs::create_dir_all(&plugin_sources).expect("plugin source directory");
+    fs::create_dir_all(&plugin_classes).expect("plugin classes directory");
+    let plugin_source = plugin_sources.join("Main.java");
+    fs::write(
+        &plugin_source,
+        "package fixture.plugin; public final class Main { \
+         private static void log(String event) { try { java.nio.file.Files.writeString( \
+         java.nio.file.Path.of(System.getProperty(\"fixture.block-state.log\")), event + \"\\n\", \
+         java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND); \
+         } catch (java.io.IOException error) { throw new RuntimeException(error); } } \
+         public Main() {} public void onEnable() { \
+         lodestone.bridge.IsolatedPaperShim.subscribeResidentBlockStateChanges( \
+         new lodestone.bridge.ResidentBlockChangeListener() { \
+         public void onResidentBlockStateChanged(int x, int y, int z, int stateId) { \
+         long handle = lodestone.bridge.IsolatedPaperShim.currentBlockHandle(); \
+         log(\"state=\" + fixture.intercepted.BlockValue.state(handle)); } }); } \
+         public void onDisable() {} }",
+    )
+    .expect("plugin source");
+    compile_with_classpath(&jdk, &plugin_classes, &plugin_source, &shim_classes);
+    fs::write(
+        plugin_classes.join("plugin.yml"),
+        "name: BlockReader\nversion: one\nmain: fixture.plugin.Main\n",
+    )
+    .expect("plugin descriptor");
+    archive(&jdk, &plugins, "block-reader.jar", &plugin_classes, None);
+
+    let plan = PaperBootstrapConfig::new(&paper_jar, &plugins)
+        .with_shim_path(&shim_classes)
+        .with_isolated_native_shim()
+        .with_operator_block_state_member(
+            OperatorBlockStateMember::new("fixture.intercepted.BlockValue", "state")
+                .expect("operator block-state member"),
+        )
+        .discover()
+        .expect("discover stand-in lifecycle inputs");
+    let callback_log = fixture.path().join("block-state.log");
+    let mut host = AdapterHost::start_with_setup(
+        JvmConfig::new()
+            .with_classpath(&adapter_classes)
+            .with_option(format!("-Dfixture.block-state.log={}", callback_log.display())),
+        "fixture.adapter.LifecycleAdapter",
+        Duration::from_secs(5),
+        move |runtime, env, native_surface| {
+            let lifecycle = plan.load_lifecycle_entries_in_runtime(runtime, env)
+                .map_err(|error| error.to_string())?;
+            let construction = lifecycle
+                .into_construction_plan(
+                    env,
+                    PaperServerFacadeInput::native_server_surface(native_surface),
+                )
+                .map_err(|error| error.to_string())?
+                .construct_entries(env);
+            Ok(construction.enable_entries(env))
+        },
+    )
+    .expect("start lifecycle adapter worker");
+    let ready_limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        match host.poll().expect("lifecycle adapter readiness") {
+            Some(AdapterEvent::Ready) => break,
+            Some(event) => panic!("unexpected event before readiness: {event:?}"),
+            None => assert!(Instant::now() < ready_limit, "lifecycle adapter did not become ready"),
+        }
+        std::thread::yield_now();
+    }
+    let change = BlockStateWrite { x: -17, y: 64, z: 33, state_id: 422 };
+    host.dispatch_block_state_changed(change)
+        .expect("dispatch resident block change");
+    let completion_limit = Instant::now() + Duration::from_secs(5);
+    loop {
+        host.service_pending(1, |query| {
+            assert_eq!((query.x, query.y, query.z), (-17, 64, 33));
+            Ok(422)
+        });
+        match host.poll().expect("resident block completion") {
+            Some(AdapterEvent::BlockStateChangedCompleted {
+                change: completed,
+                listener_failures,
+                ..
+            }) => {
+                assert_eq!(completed, change);
+                assert!(listener_failures.is_empty(), "operator member failure: {listener_failures:?}");
+                break;
+            }
+            Some(event) => panic!("unexpected event after block dispatch: {event:?}"),
+            None => assert!(Instant::now() < completion_limit, "block-state member did not complete"),
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(fs::read_to_string(callback_log).expect("block-state callback log"), "state=422\n");
 }
 
 fn callback_plugin_source(
