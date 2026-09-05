@@ -615,7 +615,9 @@ fn decode_server_links(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
             let component = read_network_nbt(&mut reader).map_err(dec_err)?;
             ServerLinkKind::Custom(Text::from_nbt(&component))
         };
-        let url = reader.string(32767).map_err(dec_err)?;
+        let raw_url = reader.string(32767).map_err(dec_err)?;
+        let url = lodestone_model::event::ServerLinkUrl::parse(&raw_url)
+            .map_err(|error| AdapterError::Decode(format!("invalid server link URL: {error}")))?;
         links.push(ServerLink { kind, url });
     }
     reader.ensure_empty().map_err(dec_err)?;
@@ -748,4 +750,3 @@ mod tests {
         );
     }
 }
-

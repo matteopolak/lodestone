@@ -994,8 +994,9 @@ impl WindowApp {
                 crate::menu::accounts::copy_to_clipboard(&click.value);
             }
             ClickAction::OpenUrl => {
-                self.nav.server_links_mut().confirm_chat_url(click.value.clone());
-                self.ui.open_server_links_from_chat();
+                if self.nav.server_links_mut().confirm_chat_url(&click.value) {
+                    self.ui.open_server_links_from_chat();
+                }
             }
             ClickAction::OpenFile => {
                 self.sim.push_local_chat(format!(

@@ -351,11 +351,17 @@ fn custom_report_details_is_capped_at_thirty_two_entries() {
 #[test]
 fn server_links_reads_true_as_the_known_id_arm() {
     let mut bytes = vec![2u8];
-    // entry 1: true (Left = known), id 3, url "u"
-    bytes.extend_from_slice(&[0x01, 0x03, 0x01, b'u']);
-    // entry 2: false (Right = custom component), a TAG_String NBT component, url "v"
+    // entry 1: true (Left = known), id 3, then a valid URL
+    bytes.extend_from_slice(&[0x01, 0x03]);
+    let known_url = b"https://known.invalid/";
+    bytes.push(known_url.len() as u8);
+    bytes.extend_from_slice(known_url);
+    // entry 2: false (Right = custom component), a TAG_String NBT component, then a valid URL
     // Network NBT for a bare string: tag id 8, then a UTF length-prefixed body.
-    bytes.extend_from_slice(&[0x00, 0x08, 0x00, 0x02, b'h', b'i', 0x01, b'v']);
+    bytes.extend_from_slice(&[0x00, 0x08, 0x00, 0x02, b'h', b'i']);
+    let custom_url = b"https://custom.invalid/";
+    bytes.push(custom_url.len() as u8);
+    bytes.extend_from_slice(custom_url);
 
     let ClientEvent::ServerLinksReceived { links } = one(play::clientbound::SERVER_LINKS, &bytes)
     else {
@@ -367,12 +373,29 @@ fn server_links_reads_true_as_the_known_id_arm() {
         ServerLinkKind::Known(3),
         "true must select the known-id arm"
     );
-    assert_eq!(links[0].url, "u");
+    assert_eq!(links[0].url.as_str(), "https://known.invalid/");
     assert!(
         matches!(links[1].kind, ServerLinkKind::Custom(_)),
         "false must select the custom-component arm"
     );
-    assert_eq!(links[1].url, "v");
+    assert_eq!(links[1].url.as_str(), "https://custom.invalid/");
+}
+
+#[test]
+fn server_links_rejects_a_malformed_url_at_ingress() {
+    let bytes = [0x01, 0x01, 0x03, 0x09, b'n', b'o', b't', b' ', b'a', b' ', b'U', b'R', b'L'];
+    let adapter = lodestone_v26_2::adapter();
+    let mut sink = NullSink;
+    assert!(
+        adapter
+            .handle_packet(
+                &mut sink,
+                ConnectionState::Play,
+                play::clientbound::SERVER_LINKS,
+                &bytes,
+            )
+            .is_err()
+    );
 }
 
 #[test]

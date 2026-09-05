@@ -84,7 +84,7 @@
 //! [`super::accounts::open_in_browser`] for the one side effect this screen
 //! can cause.
 
-use lodestone_model::event::{ServerLink, ServerLinkKind};
+use lodestone_model::event::{ServerLink, ServerLinkKind, ServerLinkUrl};
 
 use super::options::{self, Placement};
 use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
@@ -194,7 +194,7 @@ pub enum ServerLinksOutcome {
     /// [`super::accounts::open_in_browser`] and then also returns to
     /// [`super::Screen::Paused`] (vanilla's `ConfirmLinkScreen` always closes
     /// back to the screen it was opened over, whichever button was pressed).
-    OpenUrl(String),
+    OpenUrl(ServerLinkUrl),
 }
 
 /// This screen's own state: the server's links (pushed in every frame by
@@ -220,13 +220,17 @@ impl ServerLinksNav {
     }
 
     /// Opens vanilla's untrusted-link confirmation directly for a chat URL.
-    pub fn confirm_chat_url(&mut self, url: String) {
+    pub fn confirm_chat_url(&mut self, url: &str) -> bool {
+        let Ok(url) = ServerLinkUrl::parse(url) else {
+            return false;
+        };
         self.view = LinksView::Confirm(ServerLink {
             kind: ServerLinkKind::Custom(lodestone_model::Text::literal("Open link")),
             url,
         });
         self.hovered = None;
         self.chat_link = true;
+        true
     }
 
     #[must_use]
@@ -477,7 +481,7 @@ fn confirm_frame(nav: &ServerLinksNav, link: &ServerLink) -> MenuFrame<'static> 
         vanilla: true,
         labels: vec![
             line(CONFIRM_TITLE.to_string(), TITLE_Y, widget::ACTIVE_LABEL),
-            line(link.url.clone(), TITLE_Y + 16.0, widget::ACTIVE_LABEL),
+            line(link.url.to_string(), TITLE_Y + 16.0, widget::ACTIVE_LABEL),
             line(CONFIRM_WARNING.to_string(), TITLE_Y + 32.0, WARNING_COLOUR),
         ],
         ..Default::default()
@@ -489,13 +493,16 @@ mod tests {
     use super::*;
 
     fn link(id: i32, url: &str) -> ServerLink {
-        ServerLink { kind: ServerLinkKind::Known(id), url: url.to_string() }
+        ServerLink {
+            kind: ServerLinkKind::Known(id),
+            url: ServerLinkUrl::parse(url).expect("valid test URL"),
+        }
     }
 
     fn custom_link(label: &str, url: &str) -> ServerLink {
         ServerLink {
             kind: ServerLinkKind::Custom(lodestone_model::Text::literal(label)),
-            url: url.to_string(),
+            url: ServerLinkUrl::parse(url).expect("valid test URL"),
         }
     }
 
@@ -560,23 +567,33 @@ mod tests {
     #[test]
     fn a_chat_url_enters_confirmation_and_no_or_escape_close_it() {
         let mut nav = ServerLinksNav::default();
-        nav.confirm_chat_url("https://example.invalid/chat".to_string());
+        assert!(nav.confirm_chat_url("https://example.invalid/chat"));
         assert!(nav.returns_to_chat());
-        assert!(matches!(nav.view(), LinksView::Confirm(link) if link.url == "https://example.invalid/chat"));
+        assert!(matches!(nav.view(), LinksView::Confirm(link) if link.url.as_str() == "https://example.invalid/chat"));
         assert_eq!(nav.click_row(NO_ROW), ServerLinksOutcome::Close);
 
-        nav.confirm_chat_url("https://example.invalid/escape".to_string());
+        assert!(nav.confirm_chat_url("https://example.invalid/escape"));
         assert_eq!(nav.escape(), ServerLinksOutcome::Close);
     }
 
     #[test]
     fn confirming_a_chat_url_yields_only_that_url() {
         let mut nav = ServerLinksNav::default();
-        nav.confirm_chat_url("https://example.invalid/confirmed".to_string());
+        assert!(nav.confirm_chat_url("https://example.invalid/confirmed"));
         assert_eq!(
             nav.click_row(YES_ROW),
-            ServerLinksOutcome::OpenUrl("https://example.invalid/confirmed".to_string())
+            ServerLinksOutcome::OpenUrl(
+                ServerLinkUrl::parse("https://example.invalid/confirmed").expect("valid test URL")
+            )
         );
+    }
+
+    #[test]
+    fn malformed_chat_urls_do_not_enter_confirmation() {
+        let mut nav = ServerLinksNav::default();
+        assert!(!nav.confirm_chat_url("not a URL"));
+        assert_eq!(nav.view(), &LinksView::List);
+        assert!(!nav.returns_to_chat());
     }
 
     #[test]
@@ -608,7 +625,9 @@ mod tests {
         nav.click_row(0);
         assert_eq!(
             nav.click_row(YES_ROW),
-            ServerLinksOutcome::OpenUrl("https://example.invalid/eleven".to_string())
+            ServerLinksOutcome::OpenUrl(
+                ServerLinkUrl::parse("https://example.invalid/eleven").expect("valid test URL")
+            )
         );
     }
 

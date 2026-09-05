@@ -12,4 +12,5 @@ lodestone-core.workspace = true
 lodestone-world.workspace = true
 smol_str.workspace = true
 thiserror.workspace = true
+url = "2.5"
 uuid.workspace = true

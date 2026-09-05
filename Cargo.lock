@@ -3050,6 +3050,7 @@ dependencies = [
  "lodestone-world",
  "smol_str",
  "thiserror 2.0.19",
+ "url",
  "uuid",
 ]
 

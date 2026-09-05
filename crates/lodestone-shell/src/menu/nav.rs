@@ -6078,7 +6078,7 @@ impl MenuNav {
             // `clickUrlAction` — so opening the link also closes this screen,
             // not just the confirmation sub-view.
             ServerLinksOutcome::OpenUrl(url) => {
-                crate::menu::accounts::open_in_browser(&url);
+                crate::menu::accounts::open_in_browser(url.as_str());
                 let returns_to_chat = self.server_links.returns_to_chat();
                 self.server_links.reset();
                 if returns_to_chat {
