@@ -270,6 +270,115 @@ impl PaperPluginLifecycleStatusSet {
     }
 }
 
+/// The server-owned API prerequisite for constructing a loaded plugin entry.
+///
+/// Loading a class proves only that its private loader can resolve it. Before
+/// construction, the entry also needs a server facade which can truthfully
+/// answer the API calls its constructor may make. The bridge has not installed
+/// one, so `Unavailable` is a deliberate product state rather than permission
+/// to guess at a broad compatibility surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperServerFacadeState {
+    /// No compatible server facade has been supplied to the retained loader.
+    Unavailable,
+}
+
+impl fmt::Display for PaperServerFacadeState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => formatter.write_str("no compatible server facade is installed"),
+        }
+    }
+}
+
+/// Why one descriptor may not yet be constructed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperPluginConstructionBlocker {
+    /// The entry loaded, but its loader has no compatible server facade.
+    ServerFacadeUnavailable,
+    /// The isolated entry load failed, so there is no retained class to construct.
+    EntryLoadFailed,
+}
+
+impl fmt::Display for PaperPluginConstructionBlocker {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ServerFacadeUnavailable => {
+                formatter.write_str("no compatible server facade is installed")
+            }
+            Self::EntryLoadFailed => formatter.write_str("the isolated plugin entry did not load"),
+        }
+    }
+}
+
+/// Descriptor-backed construction state for one plugin entry.
+///
+/// The descriptor supplies the future plugin identity and description. It is
+/// kept separate from a Java object because calling a constructor would run
+/// operator code before the prerequisite state is real.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaperPluginConstructionStatus {
+    descriptor: PaperPluginDescriptor,
+    blocker: PaperPluginConstructionBlocker,
+}
+
+impl PaperPluginConstructionStatus {
+    /// The validated identity and description for this future construction.
+    pub fn descriptor(&self) -> &PaperPluginDescriptor {
+        &self.descriptor
+    }
+
+    /// The explicit reason no constructor may run yet.
+    pub fn blocker(&self) -> PaperPluginConstructionBlocker {
+        self.blocker
+    }
+}
+
+/// The construction precondition snapshot paired with retained lifecycle loaders.
+///
+/// This records every descriptor, including failed loads, so an operator can
+/// distinguish a bad entry jar from the universal missing-facade gate. No
+/// variant currently permits construction: adding one requires a real,
+/// server-owned facade attached to the same retained loader as its entry class.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaperPluginConstructionReadiness {
+    facade: PaperServerFacadeState,
+    lifecycle: PaperPluginLifecycleStatusSet,
+    plugins: Vec<PaperPluginConstructionStatus>,
+}
+
+impl PaperPluginConstructionReadiness {
+    fn from_lifecycle(status: &PaperPluginLifecycleStatusSet) -> Self {
+        Self {
+            facade: PaperServerFacadeState::Unavailable,
+            lifecycle: status.clone(),
+            plugins: status.plugins().iter().map(|plugin| PaperPluginConstructionStatus {
+                descriptor: plugin.descriptor().clone(),
+                blocker: if plugin.phase() == PaperPluginLifecyclePhase::Loaded {
+                    PaperPluginConstructionBlocker::ServerFacadeUnavailable
+                } else {
+                    PaperPluginConstructionBlocker::EntryLoadFailed
+                },
+            }).collect(),
+        }
+    }
+
+    /// The server facade state applied to every retained entry loader.
+    pub fn facade(&self) -> PaperServerFacadeState {
+        self.facade
+    }
+
+    /// The original per-descriptor Load result and diagnostic.
+    pub fn lifecycle(&self) -> &PaperPluginLifecycleStatusSet {
+        &self.lifecycle
+    }
+
+    /// Construction state in deterministic descriptor discovery order.
+    pub fn plugins(&self) -> &[PaperPluginConstructionStatus] {
+        &self.plugins
+    }
+}
+
 /// Loader state retained after non-initializing lifecycle entry loading.
 ///
 /// Each global reference owns one fresh isolated loader. Keeping those loaders
@@ -282,6 +391,18 @@ pub struct PaperLifecycleLoad {
     bootstrap_loader: Global<JObject<'static>>,
     plugins: Vec<PaperLoadedPlugin>,
     status: PaperPluginLifecycleStatusSet,
+}
+
+/// Retained lifecycle classes plus the construction prerequisites that govern them.
+///
+/// Owning the lifecycle load here keeps the non-initialized class and its fresh
+/// loader alive for the same worker lifetime as the construction snapshot.
+/// The snapshot currently blocks every constructor explicitly because the
+/// compatible server facade is unavailable.
+#[cfg(feature = "jvm")]
+pub struct PaperPluginConstructionPlan {
+    lifecycle: PaperLifecycleLoad,
+    readiness: PaperPluginConstructionReadiness,
 }
 
 /// One successfully loaded plugin entry, kept with its identity and loader.
@@ -319,6 +440,17 @@ impl fmt::Debug for PaperLifecycleLoad {
 }
 
 #[cfg(feature = "jvm")]
+impl fmt::Debug for PaperPluginConstructionPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PaperPluginConstructionPlan")
+            .field("loader_count", &self.lifecycle.loader_count())
+            .field("readiness", &self.readiness)
+            .finish()
+    }
+}
+
+#[cfg(feature = "jvm")]
 impl PaperLifecycleLoad {
     /// Number of isolated loaders retained by this successful lifecycle load.
     pub fn loader_count(&self) -> usize {
@@ -339,6 +471,29 @@ impl PaperLifecycleLoad {
     /// Successfully loaded entries, each retained beside its private loader.
     pub fn loaded_plugins(&self) -> &[PaperLoadedPlugin] {
         &self.plugins
+    }
+
+    /// Retains this lifecycle load with the current explicit construction gate.
+    ///
+    /// This consumes the raw lifecycle owner so later code cannot separate a
+    /// construction description from the loader and class it describes. It
+    /// does not invoke any Java constructor or callback.
+    pub fn into_construction_plan(self) -> PaperPluginConstructionPlan {
+        let readiness = PaperPluginConstructionReadiness::from_lifecycle(&self.status);
+        PaperPluginConstructionPlan { lifecycle: self, readiness }
+    }
+}
+
+#[cfg(feature = "jvm")]
+impl PaperPluginConstructionPlan {
+    /// The observable prerequisite state for these retained entry classes.
+    pub fn readiness(&self) -> &PaperPluginConstructionReadiness {
+        &self.readiness
+    }
+
+    /// Number of loaders kept alive beside the blocked construction entries.
+    pub fn loader_count(&self) -> usize {
+        self.lifecycle.loader_count()
     }
 }
 
@@ -1223,6 +1378,41 @@ mod tests {
         assert!(PaperPluginLifecyclePhase::Enabled.accepts(PaperPluginLifecycleStep::Disable));
         assert!(!PaperPluginLifecyclePhase::Disabled.accepts(PaperPluginLifecycleStep::Load));
         assert!(!PaperPluginLifecyclePhase::Failed.accepts(PaperPluginLifecycleStep::Enable));
+    }
+
+    #[test]
+    fn construction_readiness_preserves_descriptions_and_blocks_every_constructor() {
+        let fixture = Fixture::new();
+        fixture.paper_jar();
+        fixture.plugin_jar("ready.jar", PAPER_DESCRIPTOR, valid_descriptor("Ready", "a.Main"));
+        fixture.plugin_jar("failed.jar", BUKKIT_DESCRIPTOR, valid_descriptor("Failed", "b.Main"));
+        let plan = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
+            .discover()
+            .expect("discover construction fixture");
+        let status = plan.load_lifecycle_entries(|_, class| {
+            if class == "b.Main" { Err("fixture entry failure") } else { Ok(()) }
+        })
+        .expect("the bootstrap and first entry load");
+
+        let readiness = PaperPluginConstructionReadiness::from_lifecycle(&status);
+        assert_eq!(readiness.facade(), PaperServerFacadeState::Unavailable);
+        assert_eq!(readiness.plugins().len(), 2);
+        assert_eq!(readiness.plugins()[0].descriptor().name(), "Failed");
+        assert_eq!(readiness.plugins()[0].descriptor().version(), "one");
+        assert_eq!(readiness.plugins()[0].descriptor().main_class(), "b.Main");
+        assert_eq!(
+            readiness.plugins()[0].blocker(),
+            PaperPluginConstructionBlocker::EntryLoadFailed,
+        );
+        assert_eq!(readiness.plugins()[1].descriptor().name(), "Ready");
+        assert_eq!(
+            readiness.plugins()[1].blocker(),
+            PaperPluginConstructionBlocker::ServerFacadeUnavailable,
+        );
+        assert_eq!(
+            PaperPluginConstructionBlocker::ServerFacadeUnavailable.to_string(),
+            "no compatible server facade is installed",
+        );
     }
 
     #[test]
