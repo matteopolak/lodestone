@@ -1617,17 +1617,15 @@ mod tests {
         // family directly -- that is the version seam `just check-seam`
         // guards.
         const CONTAINER_SET_SLOT: i32 = 20;
-        // `minecraft:written_book_content`'s data-component-type id,
-        // resolved by searching the committed generated table through its own
-        // public accessor rather than written as a literal, so a registry
-        // reorder fails here instead of silently decoding as a neighbouring
-        // component. The bound is generous -- the table is far shorter.
-        let component_id = (0..1024)
-            .find(|id| {
-                lodestone_data::data_component_types::component_type_name(*id)
-                    == Some("minecraft:written_book_content")
-            })
-            .expect("written_book_content is a real data component type");
+        // `minecraft:written_book_content`'s data-component-type id, resolved
+        // through the generated table's validated reverse lookup rather than
+        // written as a literal. A registry reorder then fails here rather than
+        // silently decoding as a neighbouring component.
+        let component_id = lodestone_data::data_component_types::component_type_id(
+            "minecraft:written_book_content",
+        )
+        .expect("written_book_content is a real data component type")
+        .raw();
 
         let mut payload = Vec::new();
         varint(0, &mut payload); // container id 0 -- the player inventory

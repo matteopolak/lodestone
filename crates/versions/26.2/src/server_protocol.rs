@@ -2183,16 +2183,6 @@ fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) {
     }
 }
 
-/// Reverse of [`lodestone_data::data_component_types::component_type_name`]:
-/// finds the numeric `minecraft:data_component_type` registry id for a name
-/// by linear scan over the same table, the identical "no reverse export,
-/// search the forward one" shape [`villager_registry_wire_id`] above already
-/// uses and for the same reason.
-fn component_type_id(name: &str) -> Option<i32> {
-    (0..lodestone_data::data_component_types::DATA_COMPONENT_TYPE_COUNT as i32)
-        .find(|&id| lodestone_data::data_component_types::component_type_name(id) == Some(name))
-}
-
 /// Writes an item stack's outbound component patch for
 /// `container_set_slot`/`container_set_content`/`merchant_offers`: a VarInt
 /// added-component count, a VarInt removed-component count, then the added
@@ -2226,7 +2216,11 @@ fn write_item_component_patch(w: &mut Writer, components: &ItemComponents) {
     w.var_i32(count);
     w.var_i32(0); // removed components: this crate never sends a removal.
     if let Some(bytes) = custom_data {
-        w.var_i32(0); // minecraft:custom_data is the first component registry entry.
+        let component = lodestone_data::data_component_types::component_type_id(
+            "minecraft:custom_data",
+        )
+        .expect("generated data-component-type table has custom_data");
+        w.var_i32(component.raw());
         w.bytes(bytes);
     }
     if let Some(pages) = &components.writable_book_content {
@@ -2253,7 +2247,11 @@ fn valid_custom_data(bytes: &[u8]) -> bool {
 /// same call the decode-side reader in `adapter/inventory.rs` makes for the
 /// reverse direction).
 fn write_writable_book_content_entry(w: &mut Writer, pages: &[String]) {
-    w.var_i32(component_type_id("minecraft:writable_book_content").unwrap_or(0));
+    let component = lodestone_data::data_component_types::component_type_id(
+        "minecraft:writable_book_content",
+    )
+    .expect("generated data-component-type table has writable_book_content");
+    w.var_i32(component.raw());
     w.var_i32(i32::try_from(pages.len()).unwrap_or(i32::MAX));
     for page in pages {
         w.string(page);
@@ -2268,7 +2266,11 @@ fn write_writable_book_content_entry(w: &mut Writer, pages: &[String]) {
 /// [`written_book_page_nbt`] then a `false` filtered-alternate flag), then
 /// the `resolved` bool.
 fn write_written_book_content_entry(w: &mut Writer, content: &WrittenBookContent) {
-    w.var_i32(component_type_id("minecraft:written_book_content").unwrap_or(0));
+    let component = lodestone_data::data_component_types::component_type_id(
+        "minecraft:written_book_content",
+    )
+    .expect("generated data-component-type table has written_book_content");
+    w.var_i32(component.raw());
     w.string(&content.title);
     w.bool(false); // no filtered alternate
     w.string(&content.author);

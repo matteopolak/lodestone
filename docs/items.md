@@ -71,12 +71,25 @@ right elsewhere. Test gotcha: never use a component about to be modelled as a
 test's "unmodelled" stand-in, and a single-item fixture cannot see a list
 caller that ignores the decode verdict.
 
+The generated `minecraft:data_component_type` census has its own narrow
+built-in boundary: `lodestone_data::data_component_types::DataComponentTypeId`.
+The packet reader validates its raw VarInt once, then resolves the typed id
+through the total `component_type_name` lookup. An id outside the built-in
+census stays an unknown/custom component: since its added-component payload is
+unframed, the patch becomes partial exactly like a known-but-unmodelled type;
+it is never coerced to a nearby built-in name. Removed ids carry no payload, so
+unknown/custom removals remain safely skippable. Outbound writers resolve their
+known built-in names with `component_type_id` and write `DataComponentTypeId::raw`
+only at the codec boundary. Literal controls pin `custom_data = 0`, `tool = 28`,
+and `shulker/color = 110` independently of table-wide round trips.
+
 The clientbound container encoders preserve the top-level `minecraft:custom_data`
 component when its model bytes are one complete compound-root network-NBT value.
-They emit it as component id `0`, before book entries, byte-for-byte; malformed,
-non-compound, or trailing-byte values are omitted so they cannot consume a
-neighboring component's payload. Other modeled component fields remain absent
-from outbound patches until their complete stream-codec writers are available.
+They resolve its typed built-in id before writing it, before book entries,
+byte-for-byte; malformed, non-compound, or trailing-byte values are omitted so
+they cannot consume a neighboring component's payload. Other modeled component
+fields remain absent from outbound patches until their complete stream-codec
+writers are available.
 
 ### Item nesting is sender-chosen, so the decoders bound it
 

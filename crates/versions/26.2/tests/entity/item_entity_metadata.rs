@@ -23,7 +23,7 @@
 //!    resuming into it, because resuming would produce plausible garbage.
 
 use lodestone_core::{Reader, Writer};
-use lodestone_data::data_component_types::component_type_name;
+use lodestone_data::data_component_types::component_type_id;
 use lodestone_model::{
     ClientEvent, ConnectionState, Directive, EntityMetadataUpdate, ItemStack, Reported,
     VersionAdapter,
@@ -67,9 +67,7 @@ const CAPTURED_COMPONENT: &str = "minecraft:repair_cost";
 const UNMODELED_COMPONENT: &str = "minecraft:can_place_on";
 
 fn component_id(name: &str) -> i32 {
-    (0..)
-        .find(|&id| component_type_name(id) == Some(name))
-        .expect("known component type")
+    component_type_id(name).expect("known component type").raw()
 }
 
 /// Rewrites the capture's single component-type id to one this build does not
