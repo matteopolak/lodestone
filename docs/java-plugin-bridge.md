@@ -610,6 +610,10 @@ lifecycle, or mutating method on it. Each query reads a worker-local stack, not 
 field, world port, or server object; outside one of those calls it fails with a Java error. This
 gives a retained entry truthful identity metadata without implying a Bukkit/Paper metadata or
 server facade.
+`currentPluginLifecyclePhase()` is the paired worker-local scope marker. It returns one of
+`construct`, `enable`, `disable`, or `resident-block-change` while that bounded callback is active,
+and otherwise fails with the same named scope error. It is an observation of this bridge's own
+retained-entry experiment, not an upstream lifecycle state or permission to access server state.
 `construct_entries` attempts eligible entries in discovery order; a constructor exception changes only
 that entry to `Failed` with a `Construct` diagnostic and later eligible entries still run. The status
 sequence can continue through the equally narrow retained-object callbacks: `enable_entries` calls

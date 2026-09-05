@@ -143,7 +143,7 @@ thread_local! {
     static ACTIVE_PLAYER_HANDLES: RefCell<Option<HashMap<PlayerIdentity, ObjectRef>>> = const {
         RefCell::new(None)
     };
-    static LIFECYCLE_IDENTITY: RefCell<Vec<LifecycleIdentity>> = const {
+    static LIFECYCLE_IDENTITY: RefCell<Vec<LifecycleContext>> = const {
         RefCell::new(Vec::new())
     };
     static RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS: RefCell<Option<ResidentBlockChangeSubscriptions<Global<JObject<'static>>>>> = const {
@@ -161,6 +161,36 @@ struct LifecycleIdentity {
     name: String,
     version: String,
     main_class: String,
+}
+
+/// The callback scope that owns the worker-local descriptor identity.
+///
+/// The values describe the bridge's retained-entry experiment, not an
+/// upstream lifecycle. They let a shim distinguish its callback context
+/// without obtaining a server object or a capability to mutate host state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LifecycleScope {
+    Construct,
+    Enable,
+    Disable,
+    ResidentBlockChange,
+}
+
+impl LifecycleScope {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Construct => "construct",
+            Self::Enable => "enable",
+            Self::Disable => "disable",
+            Self::ResidentBlockChange => "resident-block-change",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LifecycleContext {
+    identity: LifecycleIdentity,
+    scope: LifecycleScope,
 }
 
 /// One listener failure reported after a resident block-state callback.
@@ -984,12 +1014,16 @@ pub(crate) fn with_lifecycle_identity<T>(
     name: &str,
     version: &str,
     main_class: &str,
+    scope: LifecycleScope,
     operation: impl FnOnce() -> T,
 ) -> T {
     LIFECYCLE_IDENTITY.with(|identities| {
         identities
             .borrow_mut()
-            .push(lifecycle_identity(name, version, main_class));
+            .push(LifecycleContext {
+                identity: lifecycle_identity(name, version, main_class),
+                scope,
+            });
     });
     let _identity = LifecycleIdentityGuard;
     operation()
@@ -1751,6 +1785,27 @@ pub(crate) fn register_lifecycle_plugin_descriptor_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_lifecycle_plugin_phase_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native takes no arguments and returns a
+    // Java string copied from the worker-local lifecycle scope.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_lifecycle_plugin_phase as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_resident_block_change_subscription(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -2283,6 +2338,14 @@ extern "system" fn native_lifecycle_plugin_descriptor<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+extern "system" fn native_lifecycle_plugin_phase<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jstring {
+    env.with_env(|env| lifecycle_scope_string(env))
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 extern "system" fn native_subscribe_resident_block_changes<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -2617,7 +2680,12 @@ fn subscribe_resident_block_changes(
 }
 
 fn active_subscription_identity() -> Result<LifecycleIdentity, AdapterError> {
-    LIFECYCLE_IDENTITY.with(|identities| identities.borrow().last().cloned())
+    LIFECYCLE_IDENTITY.with(|identities| {
+        identities
+            .borrow()
+            .last()
+            .map(|context| context.identity.clone())
+    })
         .ok_or_else(|| AdapterError::new(
             "subscribeResidentBlockStateChanges requires an active retained-entry lifecycle call",
         ))
@@ -2730,6 +2798,7 @@ fn dispatch_resident_block_change(
                 &identity.name,
                 &identity.version,
                 &identity.main_class,
+                LifecycleScope::ResidentBlockChange,
                 || {
                     let _block_handle = ResidentBlockHandleGuard::enter(*handle);
                     let _player_handle = ResidentPlayerHandleGuard::enter(*player_handle);
@@ -2798,6 +2867,15 @@ fn lifecycle_identity_value(field: LifecycleIdentityField) -> Result<String, Ada
     })
 }
 
+fn lifecycle_scope_string(env: &mut Env<'_>) -> Result<jstring, AdapterError> {
+    let _depth = CallbackDepthGuard::enter()
+        .map_err(|error| AdapterError::new(error.to_string()))?;
+    let scope = active_lifecycle_scope()?.as_str();
+    env.new_string(scope)
+        .map(|value| value.into_raw())
+        .map_err(|error| AdapterError::new(format!("plugin lifecycle phase query: {error}")))
+}
+
 fn lifecycle_plugin_descriptor(
     env: &mut Env<'_>,
     shim_class: &JClass<'_>,
@@ -2850,9 +2928,21 @@ fn lifecycle_plugin_descriptor(
 }
 
 fn active_lifecycle_identity() -> Result<LifecycleIdentity, AdapterError> {
-    LIFECYCLE_IDENTITY.with(|identities| identities.borrow().last().cloned())
+    LIFECYCLE_IDENTITY.with(|identities| {
+        identities
+            .borrow()
+            .last()
+            .map(|context| context.identity.clone())
+    })
         .ok_or_else(|| AdapterError::new(
             "plugin descriptor queries require an active retained-entry lifecycle call",
+        ))
+}
+
+fn active_lifecycle_scope() -> Result<LifecycleScope, AdapterError> {
+    LIFECYCLE_IDENTITY.with(|identities| identities.borrow().last().map(|context| context.scope))
+        .ok_or_else(|| AdapterError::new(
+            "plugin lifecycle phase queries require an active retained-entry lifecycle call",
         ))
 }
 
@@ -2861,50 +2951,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lifecycle_descriptor_identity_is_worker_scoped_and_restored() {
+    fn lifecycle_context_is_worker_scoped_and_restored() {
         assert_eq!(
             active_lifecycle_identity()
                 .expect_err("out-of-scope descriptor query must fail")
                 .to_string(),
             "plugin descriptor queries require an active retained-entry lifecycle call",
         );
-        with_lifecycle_identity("outer", "one", "outer.Main", || {
-            assert_eq!(
-                lifecycle_identity_value(LifecycleIdentityField::MainClass),
-                Ok("outer.Main".to_owned()),
-                "the direct lifecycle query returns the validated main-class name",
-            );
-            let outer = active_lifecycle_identity().expect("outer identity");
-            assert_eq!(outer.name, "outer");
-            assert_eq!(outer.version, "one");
-            assert_eq!(outer.main_class, "outer.Main");
-            with_lifecycle_identity("inner", "two", "inner.Main", || {
+        assert_eq!(
+            active_lifecycle_scope()
+                .expect_err("out-of-scope lifecycle phase query must fail")
+                .to_string(),
+            "plugin lifecycle phase queries require an active retained-entry lifecycle call",
+        );
+        assert_eq!(LifecycleScope::Construct.as_str(), "construct");
+        assert_eq!(LifecycleScope::Enable.as_str(), "enable");
+        assert_eq!(LifecycleScope::Disable.as_str(), "disable");
+        assert_eq!(
+            LifecycleScope::ResidentBlockChange.as_str(),
+            "resident-block-change",
+        );
+        with_lifecycle_identity(
+            "outer",
+            "one",
+            "outer.Main",
+            LifecycleScope::Construct,
+            || {
                 assert_eq!(
                     lifecycle_identity_value(LifecycleIdentityField::MainClass),
-                    Ok("inner.Main".to_owned()),
-                    "nested lifecycle identity must take precedence",
+                    Ok("outer.Main".to_owned()),
+                    "the direct lifecycle query returns the validated main-class name",
                 );
-                let inner = active_lifecycle_identity().expect("inner identity");
-                assert_eq!(inner.name, "inner");
-                assert_eq!(inner.version, "two");
-                assert_eq!(inner.main_class, "inner.Main");
-            });
-            assert_eq!(
-                active_lifecycle_identity().expect("restored outer identity").name,
-                "outer",
-            );
-            assert_eq!(
-                active_lifecycle_identity()
-                    .expect("restored outer identity")
-                    .main_class,
-                "outer.Main",
-            );
-            assert_eq!(
-                lifecycle_identity_value(LifecycleIdentityField::MainClass),
-                Ok("outer.Main".to_owned()),
-                "dropping the nested identity restores the direct query",
-            );
-        });
+                assert_eq!(active_lifecycle_scope(), Ok(LifecycleScope::Construct));
+                let outer = active_lifecycle_identity().expect("outer identity");
+                assert_eq!(outer.name, "outer");
+                assert_eq!(outer.version, "one");
+                assert_eq!(outer.main_class, "outer.Main");
+                with_lifecycle_identity(
+                    "inner",
+                    "two",
+                    "inner.Main",
+                    LifecycleScope::Disable,
+                    || {
+                        assert_eq!(
+                            lifecycle_identity_value(LifecycleIdentityField::MainClass),
+                            Ok("inner.Main".to_owned()),
+                            "nested lifecycle identity must take precedence",
+                        );
+                        assert_eq!(active_lifecycle_scope(), Ok(LifecycleScope::Disable));
+                        let inner = active_lifecycle_identity().expect("inner identity");
+                        assert_eq!(inner.name, "inner");
+                        assert_eq!(inner.version, "two");
+                        assert_eq!(inner.main_class, "inner.Main");
+                    },
+                );
+                assert_eq!(active_lifecycle_scope(), Ok(LifecycleScope::Construct));
+                assert_eq!(
+                    active_lifecycle_identity().expect("restored outer identity").name,
+                    "outer",
+                );
+                assert_eq!(
+                    active_lifecycle_identity()
+                        .expect("restored outer identity")
+                        .main_class,
+                    "outer.Main",
+                );
+                assert_eq!(
+                    lifecycle_identity_value(LifecycleIdentityField::MainClass),
+                    Ok("outer.Main".to_owned()),
+                    "dropping the nested identity restores the direct query",
+                );
+            },
+        );
         assert_eq!(
             lifecycle_identity_value(LifecycleIdentityField::MainClass)
                 .expect_err("direct query must fail outside the lifecycle scope")
@@ -2916,6 +3034,12 @@ mod tests {
                 .expect_err("descriptor context must be removed after callback")
                 .to_string(),
             "plugin descriptor queries require an active retained-entry lifecycle call",
+        );
+        assert_eq!(
+            active_lifecycle_scope()
+                .expect_err("lifecycle phase context must be removed after callback")
+                .to_string(),
+            "plugin lifecycle phase queries require an active retained-entry lifecycle call",
         );
     }
 
