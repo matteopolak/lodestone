@@ -399,6 +399,12 @@ pub(crate) struct CommandSession {
     pub(crate) builtins: crate::commands::ServerCommands,
     pub(crate) dispatch: CommandDispatch,
     pub(crate) caller: CommandCaller,
+    /// The native access handle retained solely for the host-plugin fallback.
+    /// Its provider callback is invoked on a direct plugin command, not on
+    /// every packet or tick; `AccessHandle` releases both locks before the
+    /// callback runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) plugin_access: crate::access::AccessHandle,
     /// This caller's permission level, 0–4, resolved once at the Play handoff
     /// from [`crate::AccessLists::permission_level`].
     ///
@@ -407,6 +413,31 @@ pub(crate) struct CommandSession {
     /// describes, for the same reason: nothing in the command text may influence
     /// which player's permissions are consulted.
     pub(crate) permission_level: u8,
+}
+
+impl CommandSession {
+    /// The authenticated caller for one direct host-plugin command.
+    ///
+    /// Built-in command gates, administrative packets, and the command tree
+    /// deliberately retain [`Self::permission_level`] from Play handoff. This
+    /// narrow re-resolution lets native permission plugins revoke or grant a
+    /// node-gated host command without turning ordinary packet processing into
+    /// a provider poll.
+    #[must_use]
+    pub(crate) fn plugin_caller(&self) -> CommandCaller {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            return CommandCaller::with_permission_level(
+                self.caller.uuid,
+                self.caller.username.clone(),
+                self.plugin_access.command_permission_level(self.caller.uuid),
+            );
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.caller.clone()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -422,6 +453,34 @@ mod tests {
         assert_eq!(caller().permission_level, 0);
         assert_eq!(CommandCaller::with_permission_level(Uuid::nil(), "op", 3).permission_level, 3);
         assert_eq!(CommandCaller::with_permission_level(Uuid::nil(), "invalid", 5).permission_level, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn direct_plugin_caller_refreshes_a_replaced_native_provider() {
+        let access = crate::access::AccessHandle::default();
+        access.set_permission_provider(Some(Arc::new(|_| Some(0))));
+        let session = CommandSession {
+            builtins: crate::commands::ServerCommands::new(),
+            dispatch: CommandDispatch::none(),
+            caller: CommandCaller::with_permission_level(Uuid::from_u128(7), "tester", 0),
+            plugin_access: access,
+            permission_level: 0,
+        };
+
+        assert_eq!(
+            session.plugin_caller().permission_level,
+            0,
+            "the first provider begins as a denial"
+        );
+        session
+            .plugin_access
+            .set_permission_provider(Some(Arc::new(|_| Some(3))));
+        assert_eq!(
+            session.plugin_caller().permission_level,
+            3,
+            "the next plugin command sees the replacement"
+        );
     }
 
     /// The security property this module exists to hold, at its own layer.
