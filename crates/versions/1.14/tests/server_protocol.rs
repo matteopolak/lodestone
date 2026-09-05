@@ -1,6 +1,6 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body, read_named_nbt};
 use lodestone_data::block_states;
-use lodestone_model::Rotation;
+use lodestone_model::{BlockFace, BlockPos, Rotation, Vec3f};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_14::{V498ServerProtocol, V578ServerProtocol, V754ServerProtocol};
 use lodestone_v1_14::packet_ids;
@@ -116,6 +116,56 @@ fn protocol_754_lifts_literal_movement_bodies() {
         serverbound::LOOK,
         serverbound::FLYING,
     );
+}
+
+/// Independent 1.14+ `block_place` body: off hand, packed `(5, -10, -7)`,
+/// south face, three IEEE-754 cursor coordinates and `inside_block`.  There is
+/// no prediction sequence in this era; an accidental modern decoder would
+/// leave a byte unread and be rejected by `decode_full`.
+const BLOCK_USE_BODY: [u8; 23] = [
+    0x01, // off hand
+    0x00, 0x00, 0x01, 0x7f, 0xff, 0xff, 0x9f, 0xf6, // 5, -10, -7
+    0x03, // south
+    0x3e, 0x80, 0x00, 0x00, // 0.25
+    0x3f, 0x80, 0x00, 0x00, // 1.0
+    0x3f, 0x40, 0x00, 0x00, // 0.75
+    0x01, // inside block
+];
+
+fn assert_block_use_lift<P: ServerProtocol>(protocol: &P, packet_id: i32) {
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &BLOCK_USE_BODY),
+        ServerBound::UseItemOn {
+            pos: BlockPos::new(5, -10, -7),
+            face: BlockFace::South,
+            cursor: Vec3f::new(0.25, 1.0, 0.75),
+            sequence: 0,
+            hand: 1,
+        }
+    );
+
+    let mut invalid_face = BLOCK_USE_BODY;
+    invalid_face[9] = 0x06;
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &invalid_face),
+        ServerBound::Ignored,
+        "a malformed face must not reach placement through a plausible packet body"
+    );
+}
+
+#[test]
+fn protocol_498_lifts_its_literal_block_use_body() {
+    assert_block_use_lift(&V498ServerProtocol, packet_ids_498::play::serverbound::BLOCK_PLACE);
+}
+
+#[test]
+fn protocol_578_lifts_its_literal_block_use_body() {
+    assert_block_use_lift(&V578ServerProtocol, play::serverbound::BLOCK_PLACE);
+}
+
+#[test]
+fn protocol_754_lifts_its_literal_block_use_body() {
+    assert_block_use_lift(&V754ServerProtocol, packet_ids::play::serverbound::BLOCK_PLACE);
 }
 
 #[test]
