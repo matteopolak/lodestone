@@ -26,34 +26,20 @@ fn surface_heightmap_uses_first_free_y_and_non_straddling_nine_bit_longs() {
     assert_eq!(longs[11] as u64, 166_u64 << 54);
 }
 
-fn captured_configuration() -> Vec<(i32, Vec<u8>)> {
-    include_str!("captures/join_1_21_11.txt").lines().filter_map(|line| {
-        let mut fields = line.split_whitespace();
-        if fields.next()? != "configuration" { return None; }
-        let id: i32 = fields.next()?.parse().ok()?;
-        if ![7, 12, 13].contains(&id) { return None; }
-        let hex = fields.next()?;
-        Some((id, (0..hex.len()).step_by(2).map(|index|
-            u8::from_str_radix(&hex[index..index + 2], 16).unwrap()).collect()))
-    }).collect()
-}
 
 #[test]
-fn hosted_configuration_is_the_external_capture_with_full_registry_payloads() {
+fn hosted_configuration_matches_the_full_oracle_registry_manifest() {
     let protocol = V774ServerProtocol;
-    let expected = captured_configuration();
     let actual = protocol.encode_registry_data();
-    assert_eq!(actual.len(), expected.len());
-    let mut registry_count = 0;
+    let mut registries = std::collections::BTreeMap::new();
     let mut dimension = None;
-    for (directive, (id, body)) in actual.iter().zip(&expected) {
+    for directive in &actual {
         let ServerDirective::Send { packet_id, payload } = directive else { panic!("expected packet"); };
-        assert_eq!((*packet_id, payload), (*id, body));
-        if *id == 7 {
-            registry_count += 1;
+        if *packet_id == 7 {
             let mut reader = Reader::new(payload);
             let registry = RegistryData::decode(&mut reader, CTX).unwrap();
             reader.ensure_empty().unwrap();
+            assert!(registries.insert(registry.registry.clone(), registry.entries.len()).is_none());
             assert!(registry.entries.iter().all(|entry| entry.data.is_some()),
                 "registry {} must not require known-pack negotiation", registry.registry);
             if registry.registry == "minecraft:dimension_type" {
@@ -61,7 +47,32 @@ fn hosted_configuration_is_the_external_capture_with_full_registry_payloads() {
             }
         }
     }
-    assert_eq!(registry_count, 4);
+    let expected_registry_sizes = std::collections::BTreeMap::from([
+        ("minecraft:banner_pattern".to_owned(), 43),
+        ("minecraft:cat_variant".to_owned(), 11),
+        ("minecraft:chat_type".to_owned(), 7),
+        ("minecraft:chicken_variant".to_owned(), 3),
+        ("minecraft:cow_variant".to_owned(), 3),
+        ("minecraft:damage_type".to_owned(), 50),
+        ("minecraft:dialog".to_owned(), 3),
+        ("minecraft:dimension_type".to_owned(), 4),
+        ("minecraft:enchantment".to_owned(), 43),
+        ("minecraft:frog_variant".to_owned(), 3),
+        ("minecraft:instrument".to_owned(), 8),
+        ("minecraft:jukebox_song".to_owned(), 21),
+        ("minecraft:painting_variant".to_owned(), 51),
+        ("minecraft:pig_variant".to_owned(), 3),
+        ("minecraft:test_environment".to_owned(), 1),
+        ("minecraft:test_instance".to_owned(), 1),
+        ("minecraft:timeline".to_owned(), 4),
+        ("minecraft:trim_material".to_owned(), 11),
+        ("minecraft:trim_pattern".to_owned(), 18),
+        ("minecraft:wolf_sound_variant".to_owned(), 7),
+        ("minecraft:wolf_variant".to_owned(), 9),
+        ("minecraft:worldgen/biome".to_owned(), 65),
+        ("minecraft:zombie_nautilus_variant".to_owned(), 2),
+    ]);
+    assert_eq!(registries, expected_registry_sizes);
     let play = protocol.begin_play(7);
     let ServerDirective::Send { packet_id, payload } = &play[0] else { panic!("join"); };
     assert_eq!(*packet_id, 48);

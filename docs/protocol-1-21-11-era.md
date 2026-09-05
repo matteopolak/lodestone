@@ -200,12 +200,12 @@ happened to the 1.20.6 era.
 
 `server_protocol::V774ServerProtocol` implements offline login, configuration,
 the Overworld join and teleport, chunk batches, and block breaking updates.
-Its `src/generated/hosting-configuration.txt` contains registry, feature and
-tag packets extracted from this family's committed real-server join capture.
-The capture retains four registries; all retained entries have payloads, so
-these entries do not require known-pack agreement. The remaining synchronized
-registries still need authoritative fixtures and external-client validation.
-Dimension and plains biome IDs come from that ordered registry stream.
+Its `src/generated/hosting-configuration.txt` contains all 23 synchronized
+registries, plus feature and tag packets, captured directly from the headless
+1.21.11 server. Every entry has its NBT payload and requires no known-pack
+agreement. Dimension and plains biome IDs come from the ordered registry stream.
+The source server jar's SHA-256 is
+`f83b8e093865806f931c7e34aae41b177d4c076335263dd124c75d6d65dd1726`.
 
 Chunks cover y=-64 through 319 with typed heightmap arrays, uncounted palette
 long arrays and inline light framing. The teleport includes its leading ID,
@@ -218,9 +218,14 @@ family's light-update packet. Computation is isolated to each column, so
 cross-border light contribution and external-client acceptance remain open.
 
 Extend the family's `server_protocol` and its `tests/server_protocol.rs` wire
-controls together. When replacing the authoritative capture, re-extract
-configuration packet IDs 7, 12 and 13; the fixture identity test checks the
-production payloads against that capture. `tests/server_integration.rs` verifies
+controls together. `tests/hosting_configuration.rs` records every synchronized
+registry without a per-ID cap and stops at FinishConfiguration. With the
+headless oracle running, use
+`LODESTONE_REGEN=1 cargo test -p lodestone-v1-21-11 --test hosting_configuration --no-fail-fast -- --ignored --nocapture`.
+Without `LODESTONE_REGEN`, the test compares a fresh capture with the committed
+fixture. Each capture has a 30-second deadline and performs no gameplay actions.
+The hermetic companion reads the actual hosted connection and requires every
+fixture payload before its finish signal. `tests/server_integration.rs` verifies
 registry-selected login, Play, chunk receipt and a block break through the real
 integrated-server loop. Its enclosed-room light gate reads the client's render
 light snapshots, checking sky 0 inside and 15 outside, torch emission 14,

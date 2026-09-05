@@ -251,11 +251,11 @@ The same feature registers `V766ServerProtocol` for hosting protocol 766.
 `server_protocol::V766ServerProtocol` implements offline login, configuration,
 the Overworld join and teleport, chunk batches, and block breaking updates.
 The configuration fixture in `src/generated/hosting-configuration.txt` contains
-only registry, feature and tag packets from the committed real-server join
-capture. The capture retains four registries; every retained entry includes its
-payload and needs no known-pack agreement. The remaining synchronized registries
-still need authoritative fixtures and external-client validation. Dimension and
-plains biome IDs are resolved from the retained ordered stream.
+all eight synchronized registries, plus features and tags, recorded directly
+from the headless 1.20.6 server. Every registry entry has its NBT payload, so no
+known-pack agreement is needed. Dimension and plains biome IDs are resolved
+from the captured ordered stream. The source server jar's SHA-256 is
+`c6d01d018ca782e506f0ec60652d47fd565078be9122b625c1681bc86c29c7ec`.
 
 Chunks cover y=-64 through 319, use anonymous NBT heightmaps, counted palette
 long arrays, and inline light framing without a trust-edges byte. The outbound
@@ -269,9 +269,15 @@ columns cannot contribute light across borders. External-client acceptance and
 broader Play coverage remain unverified.
 
 To extend hosting, change this family's `server_protocol` and add outside wire
-controls to `tests/server_protocol.rs`. Re-extract the fixture's configuration
-packet IDs 7, 12 and 13 if the authoritative join capture changes; the fixture
-identity test detects drift. `tests/server_integration.rs` checks the actual
+controls to `tests/server_protocol.rs`. `tests/hosting_configuration.rs` records
+all registry packets without a per-ID cap and stops at FinishConfiguration.
+With the headless oracle running, use
+`LODESTONE_REGEN=1 cargo test -p lodestone-v1-20-6 --test hosting_configuration --no-fail-fast -- --ignored --nocapture`.
+Omit `LODESTONE_REGEN` to compare the committed fixture against a fresh capture.
+Each capture is bounded to 30 seconds and performs no gameplay actions.
+Its hermetic companion reads an actual registry-selected hosted connection and
+requires every recorded payload to arrive before the finish signal.
+`tests/server_integration.rs` checks the actual
 registry-selected server/client path through Play, chunk receipt and block break.
 Its enclosed-room lighting gate checks sky 0 inside and 15 outside, torch 14,
 adjacent air 13, and extinction after removing the torch. Fixture opacity and
