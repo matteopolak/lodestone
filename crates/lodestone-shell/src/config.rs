@@ -54,6 +54,18 @@ pub const MIN_RENDER_DISTANCE: u32 = 2;
 /// client takes that branch unconditionally — there is no JVM heap cap to ask.
 pub const MAX_RENDER_DISTANCE: u32 = 32;
 
+/// Largest coarse visual horizon in chunks.
+///
+/// This is deliberately independent from [`MAX_RENDER_DISTANCE`]: increasing
+/// it never changes the server view radius, streamed chunks, mesh queue, or
+/// normal terrain allocation. The renderer's fixed 9-by-9 tile atlas is sized
+/// for this ceiling.
+pub const MAX_HORIZON_DISTANCE_CHUNKS: u32 = 256;
+
+/// The coarse horizon is opt-in. Keeping a fresh install at zero preserves the
+/// pre-horizon renderer's GPU allocation and world-generation cost.
+pub const DEFAULT_HORIZON_DISTANCE_CHUNKS: u32 = 0;
+
 /// Vanilla's `weatherRadius` bounds and default — a clamped range `3..=10`
 /// defaulting to `10`. The same pair
 /// `menu::options::INT_RANGE_SLIDERS`' `"weatherRadius"` row places the handle
@@ -710,6 +722,14 @@ pub struct Options {
     /// Same migration as [`Self::sensitivity`]; consumers already existed at
     /// `sim/build.rs`'s world radius and `sim/camera.rs`'s fog.
     pub render_distance: u32,
+    /// Optional coarse visual horizon beyond [`Self::render_distance`], in
+    /// chunks. `0` disables it. It neither requests nor meshes real chunks:
+    /// the local Overworld estimate is capped at
+    /// [`MAX_HORIZON_DISTANCE_CHUNKS`].
+    ///
+    /// This is intentionally not a vanilla setting. The Video screen calls it
+    /// **Distant Horizon** so it cannot be mistaken for real Render Distance.
+    pub horizon_distance_chunks: u32,
     /// Vanilla's `options.advancedItemTooltips`, toggled by
     /// **F3+H** and by nothing else.
     ///
@@ -985,6 +1005,7 @@ impl Default for Options {
             show_subtitles: false,
             sensitivity: DEFAULT_SENSITIVITY,
             render_distance: DEFAULT_RENDER_DISTANCE,
+            horizon_distance_chunks: DEFAULT_HORIZON_DISTANCE_CHUNKS,
             advanced_item_tooltips: false,
             pause_on_lost_focus: true,
             sound_volumes: [1.0; 11],
@@ -1172,6 +1193,12 @@ impl Options {
             .and_then(|v| u32::try_from(v).ok())
             .filter(|v| (MIN_RENDER_DISTANCE..=MAX_RENDER_DISTANCE).contains(v))
             .unwrap_or(DEFAULT_RENDER_DISTANCE);
+        let horizon_distance_chunks = obj
+            .get("horizon_distance_chunks")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v <= MAX_HORIZON_DISTANCE_CHUNKS)
+            .unwrap_or(DEFAULT_HORIZON_DISTANCE_CHUNKS);
         let advanced_item_tooltips = obj
             .get("advanced_item_tooltips")
             .and_then(serde_json::Value::as_bool)
@@ -1347,6 +1374,7 @@ impl Options {
             show_subtitles,
             sensitivity,
             render_distance,
+            horizon_distance_chunks,
             advanced_item_tooltips,
             pause_on_lost_focus,
             sound_volumes,
@@ -1510,6 +1538,12 @@ impl Options {
         }
         if self.render_distance != default.render_distance {
             obj.insert("render_distance".into(), self.render_distance.into());
+        }
+        if self.horizon_distance_chunks != default.horizon_distance_chunks {
+            obj.insert(
+                "horizon_distance_chunks".into(),
+                self.horizon_distance_chunks.into(),
+            );
         }
         if self.advanced_item_tooltips != default.advanced_item_tooltips {
             obj.insert(
@@ -3499,7 +3533,7 @@ mod tests {
         );
     }
 
-    /// Both new fields survive a save/load round trip, and are omitted from the
+    /// The migrated normal-distance fields survive a save/load round trip, and are omitted from the
     /// file entirely while they hold their defaults — the same rule every other
     /// opt-in field in `save_to` follows.
     #[test]
@@ -3514,12 +3548,34 @@ mod tests {
 
         let mut opts = Options::default();
         opts.render_distance = 24;
+        opts.horizon_distance_chunks = 128;
         opts.sensitivity = 0.125;
         opts.save_to(&path).unwrap();
         let back = Options::load_from(&path);
         assert_eq!(back.render_distance, 24);
+        assert_eq!(back.horizon_distance_chunks, 128);
         assert!((back.sensitivity - 0.125).abs() < 1e-6);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn horizon_distance_is_a_bounded_opt_in_setting() {
+        assert_eq!(
+            Options::from_json("{\"horizon_distance_chunks\": 0}").horizon_distance_chunks,
+            0
+        );
+        assert_eq!(
+            Options::from_json("{\"horizon_distance_chunks\": 256}").horizon_distance_chunks,
+            MAX_HORIZON_DISTANCE_CHUNKS
+        );
+        for invalid in ["257", "-1", "\"far\"", "null"] {
+            let json = format!("{{\"horizon_distance_chunks\": {invalid}}}");
+            assert_eq!(
+                Options::from_json(&json).horizon_distance_chunks,
+                DEFAULT_HORIZON_DISTANCE_CHUNKS,
+                "{invalid} must leave the opt-in horizon disabled"
+            );
+        }
     }
 
     /// A hand-edited or corrupt file must not be able to produce a black screen.

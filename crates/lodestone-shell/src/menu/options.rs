@@ -225,7 +225,8 @@ pub enum OptionWidget {
 /// A persisted option this client genuinely honours.
 ///
 /// See [`crate::config::Options`], whose fields (besides `keybinds`, not a
-/// vanilla `OptionInstance`) this enum enumerates one-for-one. **`render_distance`
+/// vanilla `OptionInstance`) this enum enumerates one-for-one except the
+/// Lodestone-specific distant-horizon control. **`render_distance`
 /// and `sensitivity` are not here**; both live outside this persisted option table.
 /// `docs/ui-framework.md` is wrong to list them: both live on
 /// [`crate::config::Config`], which is parsed from argv every run and *never
@@ -327,6 +328,11 @@ pub enum LiveOption {
     /// from the stored value directly — [`LiveOption::unit_double`] answers
     /// `None` for it on purpose.
     RenderDistance,
+    /// Lodestone's coarse, fixed-budget visual horizon. This is deliberately
+    /// distinct from [`Self::RenderDistance`]: it does not alter the server
+    /// view radius or real chunk mesh distance, and zero disables its GPU
+    /// allocation and query work.
+    DistantHorizon,
     /// `options.damageTiltStrength` →
     /// [`crate::config::Options::damage_tilt_strength`]. A `UnitDouble`
     /// defaulting to `1.0`, labelled with `Options::percentValueOrOffLabel`
@@ -600,6 +606,7 @@ impl LiveOption {
             // handle at `min(8, 1) = 1.0`, pinned to the far end of the track for
             // every value above 1. It goes through `SliderRange` instead.
             LiveOption::RenderDistance
+            | LiveOption::DistantHorizon
             | LiveOption::GuiScale
             | LiveOption::ViewBobbing
             | LiveOption::ShowSubtitles
@@ -679,6 +686,7 @@ impl LiveOption {
             LiveOption::GlintStrength => Some(&mut options.glint_strength),
             LiveOption::SoundVolume(index) => options.sound_volumes.get_mut(index as usize),
             LiveOption::RenderDistance
+            | LiveOption::DistantHorizon
             | LiveOption::GuiScale
             | LiveOption::ViewBobbing
             | LiveOption::ShowSubtitles
@@ -765,6 +773,12 @@ impl LiveOption {
     /// [`Cell::slider_fraction`] places the handle with are one table.
     #[must_use]
     pub(super) fn int_range(self) -> Option<SliderRange> {
+        if self == LiveOption::DistantHorizon {
+            return Some(SliderRange {
+                min: 0,
+                max: crate::config::MAX_HORIZON_DISTANCE_CHUNKS as i32,
+            });
+        }
         let accessor = match self {
             LiveOption::RenderDistance => "renderDistance",
             LiveOption::SprintWindow => "sprintWindow",
@@ -986,6 +1000,11 @@ impl Cell {
         // existed.
         if spec.live == Some(LiveOption::RenderDistance) {
             return Some(render_distance_slider_fraction(options.render_distance));
+        }
+        if spec.live == Some(LiveOption::DistantHorizon) {
+            return Some(horizon_distance_slider_fraction(
+                options.horizon_distance_chunks,
+            ));
         }
         // `framerateLimit`'s `IntRange(1, 26)` over `fps / 10` — same shape as
         // the arm above, same reason.
@@ -1485,6 +1504,20 @@ pub fn render_distance_slider_fraction(chunks: u32) -> f32 {
     range.to_slider_value(i32::try_from(chunks).unwrap_or(range.min))
 }
 
+/// `Distant Horizon`'s fraction from the persisted visual-horizon distance.
+///
+/// Unlike [`render_distance_slider_fraction`], this is not a vanilla range:
+/// zero is an intentional OFF value, while the far endpoint is the fixed
+/// representation limit rather than a chunk-streaming limit.
+#[must_use]
+pub fn horizon_distance_slider_fraction(chunks: u32) -> f32 {
+    SliderRange {
+        min: 0,
+        max: crate::config::MAX_HORIZON_DISTANCE_CHUNKS as i32,
+    }
+    .to_slider_value(i32::try_from(chunks).unwrap_or(0))
+}
+
 /// `sprintWindow`'s slider fraction from the real, persisted tick count.
 ///
 /// Reuses the same [`INT_RANGE_SLIDERS`] row the inactive version used, so the
@@ -1807,6 +1840,13 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         // **capital** C, which is the sort of thing that only a look at the
         // language file gets right.
         LiveOption::RenderDistance => format!("{} Chunks", options.render_distance),
+        LiveOption::DistantHorizon => {
+            if options.horizon_distance_chunks == 0 {
+                "OFF".to_string()
+            } else {
+                format!("{} Chunks", options.horizon_distance_chunks)
+            }
+        }
         // `Options::percentValueOrOffLabel`: `value == 0.0 ?
         // genericValueLabel(caption, OPTION_OFF) : percentValueLabel(caption,
         // value)`. So this is **not** the plain percent transcription its
@@ -2247,6 +2287,15 @@ static VIDEO: &[Entry] = &[
         ),
         slider("chunkSectionFadeInTime", "Chunk Fade Time"),
     ),
+    // This client-specific control is intentionally separated from the normal
+    // chunk-distance rows above. Its label must make clear that it is a coarse
+    // visual horizon, never a larger server streaming radius.
+    head("Distant Terrain"),
+    big(live_slider(
+        "distantHorizon",
+        "Distant Horizon",
+        LiveOption::DistantHorizon,
+    )),
 ];
 
 /// `ControlsScreen.addOptions` (vanilla's own controls-screen rendering's own source file).
@@ -4137,7 +4186,9 @@ mod tests {
         // vanilla's own online-options screen rendering's seven controls (`:85-116`) plus its Done.
         let expected = [
             (SettingsPage::Root, 13),
-            (SettingsPage::Video, 32),
+            // The vanilla census is 32. Distant Horizon is one explicit
+            // Lodestone-only control, separated under its own header.
+            (SettingsPage::Video, 33),
             (SettingsPage::Controls, 10),
             (SettingsPage::Mouse, 8),
             (SettingsPage::Sound, 17),
@@ -4219,6 +4270,7 @@ mod tests {
                 // `BlendedTintCursor`, fed the frozen `BLEND_RADIUS`.
                 LiveOption::BiomeBlendRadius,
                 LiveOption::RenderDistance,
+                LiveOption::DistantHorizon,
                 // Also Video, in the `(ambientOcclusion, cloudStatus)` pair: the
                 // three-state Clouds cycle, whose `SkyFrame::with_cloud_status`
                 // consumer had zero production callers.
@@ -5367,6 +5419,7 @@ mod tests {
         // live rows.
         LiveOption::Sensitivity,
         LiveOption::RenderDistance,
+        LiveOption::DistantHorizon,
         // The remaining three Controls/Mouse rows are listed next. Their
         // consumers are the input boundary, auto-jump gate and sprint window;
         // the four toggle-mode rows are listed above.
@@ -5486,6 +5539,7 @@ mod tests {
                 | LiveOption::ChatColors
                 | LiveOption::Sensitivity
                 | LiveOption::RenderDistance
+                | LiveOption::DistantHorizon
                 | LiveOption::DiscreteMouseScroll
                 | LiveOption::AutoJump
                 | LiveOption::SprintWindow

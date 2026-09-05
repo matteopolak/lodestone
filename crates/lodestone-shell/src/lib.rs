@@ -77,6 +77,7 @@ pub mod entities;
 pub mod friends_runtime;
 pub mod gpu;
 pub mod hud;
+pub(crate) mod horizon;
 pub mod interact;
 /// Which username and UUID a join presents: the selected Microsoft account, or
 /// the persisted offline identity when there is none. One producer, so the
