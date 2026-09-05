@@ -6,13 +6,14 @@ use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Hand, Vec3f,
-    VersionAdapter,
+    AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
+    ConnectionState, Directive, Hand, Vec3f, VersionAdapter,
 };
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_7::{V5Adapter, V5ServerProtocol};
 use lodestone_v1_7::packet_ids::{handshaking, play};
 use lodestone_v1_7::packets::handshake::SetProtocol;
+use lodestone_world::World;
 
 const CTX: Ctx = Ctx { version: 5 };
 
@@ -177,6 +178,92 @@ fn legacy_chat_uses_its_single_string_body_for_chat_commands_and_replies() {
         payload,
         b"\x1c{\"text\":\"legacy \\\"chat\\\"\\n\"}",
         "the JSON component is length-prefixed once; the era has no position byte"
+    );
+}
+
+#[test]
+fn registry_selected_arm_animation_connects_protocol_5_to_the_shared_swing_broadcast() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(5)
+        .expect("protocol 5 must resolve to its hosted server protocol");
+    let adapter = V5Adapter::new();
+
+    // Protocol 5's request includes a sender id and animation ordinal. The
+    // host derives the sender from the connection, so the literal id is
+    // intentionally unrelated to the local client entity id. Both canonical
+    // hand actions have the same main-hand wire representation in this era.
+    for hand in [Hand::Main, Hand::Off] {
+        let action = ClientAction::SwingArm { hand };
+        let Some((packet_id, payload)) = adapter
+            .encode_action(ConnectionState::Play, &action)
+            .expect("protocol-5 adapter encodes arm swings")
+        else {
+            panic!("{action:?} must produce a protocol-5 packet");
+        };
+        assert_eq!(packet_id, play::serverbound::ARM_ANIMATION);
+        assert_eq!(payload, &[0, 0, 0, 0, 1], "entity id 0 and swing ordinal 1");
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &[0, 0, 1, 65, 1]),
+            ServerBound::Swing { hand: 0 },
+            "a literal request with an unrelated sender id must reach the shared swing consumer"
+        );
+    }
+
+    // Clientbound animation is an independently assembled varint entity id
+    // followed by the raw action byte. Protocol 5's client adapter already
+    // lifts these two action values into distinct canonical events.
+    for (action, expected) in [
+        (0, AnimationAction::SwingMainHand),
+        // The shared server's off-hand ordinal is deliberately degraded to
+        // protocol 5's only honest swing rather than becoming a critical hit.
+        (3, AnimationAction::SwingMainHand),
+    ] {
+        let ServerDirective::Send { packet_id, payload } =
+            protocol.encode_animate(321, action)
+        else {
+            panic!("the protocol-5 host must encode an animation reply");
+        };
+        assert_eq!(packet_id, play::clientbound::ANIMATION);
+        assert_eq!(payload, vec![0xc1, 0x02, 0]);
+        assert_eq!(
+            adapter
+                .handle_packet(&mut World::new(), ConnectionState::Play, packet_id, &payload)
+                .expect("the protocol-5 client decodes host animation"),
+            vec![Directive::Emit(ClientEvent::EntityAnimation {
+                entity_id: 321,
+                action: expected,
+            })]
+        );
+    }
+
+    // Controls distinguish the swing ordinal from the other animation codes,
+    // reject a valid prefix with trailing bytes, and keep Play packet ids out
+    // of Login.
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::ARM_ANIMATION,
+            &[0, 0, 0, 0, 0],
+        ),
+        ServerBound::Ignored,
+        "ordinal 0 is not a swing"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::ARM_ANIMATION,
+            &[0, 0, 0, 0, 1, 0],
+        ),
+        ServerBound::Ignored,
+        "a trailing byte must not be accepted as a swing"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Login,
+            play::serverbound::ARM_ANIMATION,
+            &[0, 0, 0, 0, 1],
+        ),
+        ServerBound::Ignored,
+        "the Play packet must not be accepted before Play"
     );
 }
 

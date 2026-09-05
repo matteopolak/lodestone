@@ -19,9 +19,10 @@ use crate::PROTOCOL;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::game::{
     ClientboundChat, ClientboundPositionLook, JoinGame, KeepAliveRequest, KeepAliveResponse,
-    ServerboundChat, ServerboundFlying, ServerboundLook, ServerboundPosition,
-    ServerboundPositionLook,
+    ServerboundArmAnimation, ServerboundChat, ServerboundFlying, ServerboundLook,
+    ServerboundPosition, ServerboundPositionLook,
 };
+use crate::packets::entity::Animation;
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess};
 use crate::packets::settings::Settings;
@@ -386,6 +387,22 @@ impl ServerProtocol for V5ServerProtocol {
                     sequence: 0,
                 }
             }
+            // Protocol 5 carries the sender id and an animation ordinal in
+            // this request, but the host derives the sender from the
+            // connection. Only ordinal 1 is the arm swing; every other
+            // ordinal is a different animation and must not reach the swing
+            // consumer. The body is decoded exactly so a valid request with
+            // trailing bytes cannot be accepted as a second frame.
+            State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
+                let Some(ServerboundArmAnimation { animation, .. }) = decode_full(payload) else {
+                    return ServerBound::Ignored;
+                };
+                if animation == 1 {
+                    ServerBound::Swing { hand: 0 }
+                } else {
+                    ServerBound::Ignored
+                }
+            }
             // Protocol 5 has no teleport-confirm packet. Its position and
             // position/look frames are both the teleport echo and ordinary
             // movement, distinguished by the server's pending-position state.
@@ -528,6 +545,18 @@ impl ServerProtocol for V5ServerProtocol {
             &ClientboundChat {
                 message: legacy_text_component(message),
             },
+        )
+    }
+
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        // Protocol 5 predates the off-hand. The shared server uses action 3
+        // for an off-hand swing, but this era's client interprets that byte as
+        // a critical-hit animation. Degrade that one canonical action to the
+        // only honest swing representation rather than showing a false hit.
+        let animation = if action == 3 { 0 } else { action };
+        send(
+            play::clientbound::ANIMATION,
+            &Animation { entity_id, animation },
         )
     }
 
