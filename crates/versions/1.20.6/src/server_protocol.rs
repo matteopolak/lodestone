@@ -221,6 +221,7 @@ fn encode_chunk_body(
     cx: i32,
     cz: i32,
     column: &ChunkColumn,
+    light: &lodestone_world::ColumnLight,
 ) -> Result<Vec<u8>, ChunkEncodeError> {
     let Some(column_end) = column.min_y.checked_add(column.height) else {
         return Err(ChunkEncodeError::new("protocol-766 column bounds overflow"));
@@ -281,7 +282,7 @@ fn encode_chunk_body(
         .var_bytes(&sections.into_vec())
         .map_err(|error| ChunkEncodeError::new(error.to_string()))?;
     packet.var_i32(0);
-    served_light(column).encode(&mut packet);
+    light.encode(&mut packet);
     Ok(packet.into_vec())
 }
 
@@ -509,7 +510,21 @@ impl ServerProtocol for V766ServerProtocol {
     ) -> Result<ServerDirective, ChunkEncodeError> {
         Ok(ServerDirective::Send {
             packet_id: play::clientbound::MAP_CHUNK,
-            payload: encode_chunk_body(cx, cz, column)?,
+            payload: encode_chunk_body(cx, cz, column, &served_light(column))?,
+        })
+    }
+
+    fn try_encode_chunk_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        let light = served_light_with_neighbours(column, neighbours);
+        Ok(ServerDirective::Send {
+            packet_id: play::clientbound::MAP_CHUNK,
+            payload: encode_chunk_body(cx, cz, column, &light)?,
         })
     }
 

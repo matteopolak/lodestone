@@ -223,4 +223,11 @@ fn a_loaded_neighbour_contributes_sky_light_across_the_east_border() {
         Some(14),
         "the adjacent open column is one horizontal step from local x=15"
     );
+    let ServerDirective::Send { payload, .. } = protocol
+        .try_encode_chunk_with_neighbours(0, 0, &center, &[(1, 0, ChunkColumn::new(-64, 384))])
+        .unwrap() else { panic!("chunk"); };
+    let mut reader = Reader::new(&payload);
+    let chunk = LevelChunk::decode(&mut reader, &ChunkShape::overworld(774)).unwrap();
+    reader.ensure_empty().unwrap();
+    assert_eq!(chunk.light.section_sky_light(10, 15, 4, 8), Some(14));
 }

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, Rotation, Vec3};
-use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
+use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, ServerProtocol};
 use lodestone_v1_21_11::adapter_for;
 
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
@@ -52,6 +52,10 @@ struct BoundaryFixtureSource {
 }
 
 impl ChunkSource for BoundaryFixtureSource {
+    fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        ((cx, cz) == (1, 0)).then(|| self.column(cx, cz))
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         if (cx, cz) == (0, 0) {
             self.center.lock().expect("boundary column lock poisoned").clone()
@@ -169,8 +173,11 @@ async fn movement_recenters_the_hosted_view_onto_the_next_chunk() {
 }
 
 #[tokio::test]
-async fn breaking_a_border_roof_block_updates_light_from_the_open_east_column() {
+async fn initial_and_live_border_light_use_the_open_east_column() {
     let target = BlockPos::new(15, 100, 8);
+    assert!(lodestone_registry::server_protocol_for_protocol(774)
+        .expect("protocol 774 must resolve to the hosted family")
+        .uses_cross_column_light());
     let mut center = ChunkColumn::new(-64, 384);
     for z in 0..16 {
         for x in 0..16 {
@@ -193,8 +200,8 @@ async fn breaking_a_border_roof_block_updates_light_from_the_open_east_column() 
     handle.wait_for_chunk(chunk, Duration::from_secs(10)).await.unwrap();
     assert_eq!(
         handle.section_light(chunk, 11).unwrap().sky_at(15, 4, 8),
-        0,
-        "initial isolated chunk light is the required negative control"
+        14,
+        "the initial chunk must include the open east column"
     );
     handle.send_action(ClientAction::Move {
         pos: Vec3::new(12.0, 100.0, 8.0),

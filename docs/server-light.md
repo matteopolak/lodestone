@@ -53,9 +53,13 @@ only the edited one. That fanout matters at both edges and corners: changing one
 the light a client renders in either column. The calculation is intentionally not cached on a
 `ChunkColumn`, avoiding a stale-derived-data path after a retained column is edited.
 
-Initial chunk-batch encoding still receives a single column, so it retains the isolated answer at a
-seam until the batch encoder gains the same neighborhood input. That bootstrap limitation is separate
-from the live edit path proven here.
+Initial chunk batches obtain the already-resident members of the same 3×3 view before the protocol
+encoder writes the inline-light payload, so a boundary emitter or occluder is correct from the first
+client-visible chunk when its neighbour is loaded. A missing neighbour stays an opaque seam, exactly
+like the isolated result; this read must never generate eight extra columns. Protocols that do not
+opt into cross-column light keep their one-column encoder and do not pay for adjacent reads. The
+detached worker encoder is likewise bypassed for an opted-in family until it can carry the same
+neighbourhood explicitly.
 
 The update still travels on the acting connection. Broadcasting the result to other players sharing
 the world remains separate multiplayer work.
@@ -85,9 +89,9 @@ fail in.
   coordinates; absent columns must use that family's ordinary generated or unloaded-column result.
   Add a direct solver control and a client-observed edit test where the isolated result is provably
   different.
-- **Extending cross-column light to initial chunks**: extend the chunk-batch encoding seam to obtain
-  the same 3×3 neighborhood before calling the version encoder. Do not claim that dynamic relights
-  cover this case: the initial and live packet paths are intentionally separate.
+- **Extending an off-task chunk encoder to cross-column light**: carry the same 3×3 neighborhood into
+  its worker-facing contract before enabling it for a family that opts into cross-column light. Do not
+  fall back to the isolated encoder: the initial and live packet paths must agree at a border.
 - **Do not widen the relight predicate to fire on every placement "to be safe."** A resend recomputes
   and re-sends a whole column's worth of data; firing it on every ordinary, non-light-relevant edit
   (a block swapped for another of identical light behavior) turns routine building into a stream of

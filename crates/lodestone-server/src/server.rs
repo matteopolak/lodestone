@@ -1543,24 +1543,28 @@ where
     // Only the `Shared` arm can offload (a borrowed source is not `'static`), which
     // is the same fork `SourceRef` already encodes; both arms emit the same bytes in
     // the same order.
-    let offloaded = match source {
-        SourceRef::Shared(src) => {
-            crate::chunk::generate_and_encode_columns_offloaded(
-                Arc::clone(src),
-                update.added.clone(),
-                proto.chunk_encoder(),
-            )
-            .await
+    let offloaded = if proto.uses_cross_column_light() {
+        None
+    } else {
+        match source {
+            SourceRef::Shared(src) => {
+                crate::chunk::generate_and_encode_columns_offloaded(
+                    Arc::clone(src),
+                    update.added.clone(),
+                    proto.chunk_encoder(),
+                )
+                .await
+            }
+            SourceRef::Dimension(src) => {
+                crate::chunk::generate_and_encode_columns_offloaded(
+                    Arc::clone(src),
+                    update.added.clone(),
+                    proto.chunk_encoder(),
+                )
+                .await
+            }
+            SourceRef::Borrowed(_) => None,
         }
-        SourceRef::Dimension(src) => {
-            crate::chunk::generate_and_encode_columns_offloaded(
-                Arc::clone(src),
-                update.added.clone(),
-                proto.chunk_encoder(),
-            )
-            .await
-        }
-        SourceRef::Borrowed(_) => None,
     };
     match offloaded {
         Some(Ok(frames)) => batch.extend(frames),
@@ -1570,7 +1574,7 @@ where
         None => {
             let columns = source.generate(update.added.clone()).await;
             for (&(x, z), column) in update.added.iter().zip(columns.iter()) {
-                match proto.try_encode_chunk(x, z, column) {
+                match encode_chunk_with_source(proto, source.get(), x, z, column) {
                     Ok(directive) => batch.push(directive),
                     Err(error) => {
                         return return_chunk_encode_error(conn, proto, state, None, error).await;
@@ -2069,15 +2073,40 @@ fn live_publish_player(
 /// pre-existing shape for a protocol with no off-task encoder and for the
 /// non-`'static` [`SourceRef::Borrowed`] arm. Both produce the same bytes, so no
 /// caller has to know which one it is on.
-fn encode_column<P: ServerProtocol>(
+fn encode_chunk_with_source<P: ServerProtocol>(
     proto: &P,
+    source: &dyn ChunkSource,
+    cx: i32,
+    cz: i32,
+    column: &ChunkColumn,
+) -> Result<ServerDirective, ChunkEncodeError> {
+    if !proto.uses_cross_column_light() {
+        return proto.try_encode_chunk(cx, cz, column);
+    }
+    let neighbours = (-1..=1)
+        .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+        .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+        .filter_map(|(dx, dz)| {
+            source
+                .resident_column(cx + dx, cz + dz)
+                .map(|column| (dx, dz, column))
+        })
+        .collect::<Vec<_>>();
+    proto.try_encode_chunk_with_neighbours(cx, cz, column, &neighbours)
+}
+
+fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
+    proto: &P,
+    source: SourceRef<'_, S>,
     cx: i32,
     cz: i32,
     payload: crate::join_scheduler::ColumnPayload,
 ) -> Result<ServerDirective, ChunkEncodeError> {
     match payload {
         crate::join_scheduler::ColumnPayload::Encoded(directive) => Ok(directive),
-        crate::join_scheduler::ColumnPayload::Column(column) => proto.try_encode_chunk(cx, cz, &column),
+        crate::join_scheduler::ColumnPayload::Column(column) => {
+            encode_chunk_with_source(proto, source.get(), cx, cz, &column)
+        }
     }
 }
 
@@ -3601,7 +3630,11 @@ where
                             (join_cx, join_cz),
                             None,
                         )
-                        .encoding_with(proto.chunk_encoder());
+                        .encoding_with(if proto.uses_cross_column_light() {
+                            None
+                        } else {
+                            proto.chunk_encoder()
+                        });
                         while batch_size < prestream {
                             let next = match pipeline.next().await {
                                 Ok(next) => next,
@@ -3619,7 +3652,7 @@ where
                             let Some(((cx, cz), payload)) = next else {
                                 break;
                             };
-                            let directive = match encode_column(proto, cx, cz, payload) {
+                            let directive = match encode_column(proto, source, cx, cz, payload) {
                                 Ok(directive) => directive,
                                 Err(error) => {
                                     return return_chunk_encode_error(
@@ -3669,7 +3702,13 @@ where
                         for ring in &rings {
                             let columns = source.generate(ring.clone()).await;
                             for (&(cx, cz), column) in ring.iter().zip(columns.iter()) {
-                                let directive = match proto.try_encode_chunk(cx, cz, column) {
+                                let directive = match encode_chunk_with_source(
+                                    proto,
+                                    source.get(),
+                                    cx,
+                                    cz,
+                                    column,
+                                ) {
                                     Ok(directive) => directive,
                                     Err(error) => {
                                         return return_chunk_encode_error(
@@ -12838,7 +12877,7 @@ where
                         join_batch_open = true;
                         join_batch_size = 0;
                     }
-                    let directive = match encode_column(proto, cx, cz, payload) {
+                    let directive = match encode_column(proto, source, cx, cz, payload) {
                         Ok(directive) => directive,
                         Err(error) => {
                             return return_chunk_encode_error(
@@ -15207,7 +15246,7 @@ where
             let Some(((cx, cz), payload)) = next else {
                 break;
             };
-            let directive = match encode_column(proto, cx, cz, payload) {
+            let directive = match encode_column(proto, source, cx, cz, payload) {
                 Ok(directive) => directive,
                 Err(error) => {
                     return return_chunk_encode_error(

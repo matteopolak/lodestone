@@ -1915,6 +1915,7 @@ pub trait ChunkEncoder: Send + Sync + 'static {
     ) -> Result<ServerDirective, ChunkEncodeError> {
         Ok(self.encode_chunk(cx, cz, column))
     }
+
 }
 
 impl<E: ChunkEncoder + ?Sized> ChunkEncoder for Box<E> {
@@ -1930,6 +1931,7 @@ impl<E: ChunkEncoder + ?Sized> ChunkEncoder for Box<E> {
     ) -> Result<ServerDirective, ChunkEncodeError> {
         (**self).try_encode_chunk(cx, cz, column)
     }
+
 }
 
 pub trait ServerProtocol: Send + Sync {
@@ -2217,6 +2219,21 @@ pub trait ServerProtocol: Send + Sync {
         column: &ChunkColumn,
     ) -> Result<ServerDirective, ChunkEncodeError> {
         Ok(self.encode_chunk(cx, cz, column))
+    }
+
+    /// Encodes one terrain column with its eight adjacent columns available.
+    ///
+    /// Initial chunk batches use this when a protocol includes light derived
+    /// across a column border. The default keeps every one-column encoder's
+    /// previous output.
+    fn try_encode_chunk_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+        _neighbours: &[(i32, i32, ChunkColumn)],
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        self.try_encode_chunk(cx, cz, column)
     }
 
     /// The same encoder as [`encode_chunk`](Self::encode_chunk), detached from
@@ -3631,6 +3648,16 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         column: &ChunkColumn,
     ) -> Result<ServerDirective, ChunkEncodeError> {
         (**self).try_encode_chunk(cx, cz, column)
+    }
+
+    fn try_encode_chunk_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        (**self).try_encode_chunk_with_neighbours(cx, cz, column, neighbours)
     }
 
     fn chunk_encoder(&self) -> Option<std::sync::Arc<dyn ChunkEncoder>> {

@@ -215,13 +215,12 @@ long arrays and inline light framing. The teleport includes its leading ID,
 three velocity fields and 32-bit flags. Canonical block states must have a
 unique exact inverse; unsupported states, non-plains biomes and block entities
 produce explicit chunk-encoding errors. Sky and block light use the shared
-solver with canonical per-state opacity and emission. Initial chunks include
-the result; block edits trigger the normal server relight path and this
-family's light-update packet. A relevant edit supplies the shared solver with
-the loaded 3×3 column neighbourhood, so adjacent columns contribute at seams;
-it recomputes and sends that whole bounded footprint. Initial chunk batches
-still use their single-column encoder input, so cross-column light at first
-load and external-client acceptance remain open.
+solver with canonical per-state opacity and emission. Initial chunks and
+relevant block edits supply the shared solver with the loaded 3×3 column
+neighbourhood, so adjacent columns contribute at seams from the first load
+when already resident and throughout later relights. Missing columns retain an
+opaque seam rather than being generated for light. An edit recomputes and sends
+that whole bounded footprint. External-client acceptance remains open.
 
 Extend the family's `server_protocol` and its `tests/server_protocol.rs` wire
 controls together. `tests/hosting_configuration.rs` records every synchronized
