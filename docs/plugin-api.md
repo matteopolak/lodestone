@@ -373,6 +373,8 @@ guest cannot choose an item, hand, or held-use lifecycle state, and the live cli
 release action's protocol encoding.
 The no-argument `stab` action is separately guarded by `act:stab`; it carries no selected-item or
 attack-state data, and the live client owns its protocol encoding.
+The no-argument `respawn` action is separately guarded by `act:respawn`; it only asks, leaving the
+server authoritative over whether the local player's current state permits respawn.
 Placement returns a finite, generation-bounded result only to a guest granted `observe:place`; a
 multi-tick break claim remains
 outside the ABI because it needs a separate cancellation and ownership contract. Command

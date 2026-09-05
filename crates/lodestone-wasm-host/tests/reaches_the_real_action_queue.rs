@@ -196,6 +196,16 @@ fn stab_host_policy() -> CapabilitySet {
     policy
 }
 
+fn respawn_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActRespawn])
+}
+
+fn respawn_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActRespawn);
+    policy
+}
+
 fn inventory_event() -> GameEvent {
     GameEvent(ClientEvent::InventorySlotChanged {
         slot: 4,
@@ -624,6 +634,64 @@ fn a_wasm_stab_without_its_capability_is_refused() {
             .iter()
             .any(|action| matches!(action, ClientAction::Stab)),
         "a refused stab must not reach the action queue: {:?}",
+        action_queue(&app)
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+/// A guest can ask the server to respawn the local player without receiving or
+/// forging any player state; server-side legality remains authoritative.
+#[test]
+fn a_wasm_respawn_request_reaches_the_real_action_queue() {
+    let wasm = support::build_example_plugin(&["respawn"]);
+    let mut host = PluginHost::new(respawn_host_policy()).expect("engine");
+    host.load_file("respawn", &wasm, &respawn_capabilities())
+        .expect("the explicitly granted respawn fixture must load");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(
+        &mut app,
+        PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0),
+    );
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        action_queue(&app)
+            .iter()
+            .any(|action| matches!(action, ClientAction::Respawn)),
+        "the guest respawn request must reach the real action queue: {:?}",
+        action_queue(&app)
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// A default policy rejects the same guest output before it reaches the client
+/// queue, while leaving the guest loaded and accounting for the refusal.
+#[test]
+fn a_wasm_respawn_request_without_its_capability_is_refused() {
+    let wasm = support::build_example_plugin(&["respawn"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "respawn",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log]),
+    )
+    .expect("the guest remains loadable when the respawn grant is withheld");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(
+        &mut app,
+        PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0),
+    );
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        !action_queue(&app)
+            .iter()
+            .any(|action| matches!(action, ClientAction::Respawn)),
+        "a refused respawn request must not reach the action queue: {:?}",
         action_queue(&app)
     );
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);

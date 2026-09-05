@@ -377,6 +377,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::SwapItemWithOffhand => Capability::ActSwapOffhand,
         Action::ReleaseUseItem => Capability::ActReleaseUseItem,
         Action::Stab => Capability::ActStab,
+        Action::Respawn => Capability::ActRespawn,
         Action::SetLook(_) => Capability::ActLook,
         Action::SetMovement(_) => Capability::ActMovement,
         Action::SetBreak(_) => Capability::ActBreak,
@@ -416,6 +417,7 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
         }
         Action::ReleaseUseItem => LoweredAction::Client(ClientAction::ReleaseUseItem),
         Action::Stab => LoweredAction::Client(ClientAction::Stab),
+        Action::Respawn => LoweredAction::Client(ClientAction::Respawn),
         Action::SetLook(look) => LoweredAction::Intent(IntentAction::Look(look.map(|look| {
             lodestone_ecs::player::LookIntent {
                 yaw: look.yaw,
@@ -672,6 +674,18 @@ mod tests {
             lower_action(Action::Stab, &CapabilitySet::default_policy()),
             Err(Capability::ActStab),
             "piercing-weapon stabs need their own explicit capability"
+        );
+        assert_eq!(
+            lower_action(
+                Action::Respawn,
+                &CapabilitySet::from_iter([Capability::ActRespawn]),
+            ),
+            Ok(LoweredAction::Client(ClientAction::Respawn))
+        );
+        assert_eq!(
+            lower_action(Action::Respawn, &CapabilitySet::default_policy()),
+            Err(Capability::ActRespawn),
+            "respawn requests need their own explicit capability"
         );
     }
 
