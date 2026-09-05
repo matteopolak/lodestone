@@ -86,6 +86,7 @@ use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 use bevy_ecs::world::World;
 use lodestone_model::{
     ClientEvent, Difficulty, DimensionId, DimensionTypeInfo, GameMode, Identifier, ResolvedText,
+    Text,
 };
 
 use crate::ingest::{IngestBatch, IngestQueuePlugin};
@@ -244,6 +245,26 @@ pub struct SessionDebugFeeds(pub lodestone_game::debug_feeds::DebugFeedStore);
 /// server-authored and untrusted.
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct SessionServerInfo(pub lodestone_game::serverinfo::ServerInfoStore);
+
+/// The public name and icon the connected server last announced.
+///
+/// Unlike [`SessionServerInfo`], whose packets describe interactive server
+/// facilities, this is the server-list identity the play connection repeats.
+/// [`lodestone_shell::hud::DebugStats`] reads the message of the day from this
+/// component, so an adapter decode is visible in the on-screen F3 overlay.
+/// `None` means this protocol family has not sent a server-data packet yet;
+/// it is not an empty message of the day.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServerData {
+    /// The server-authored message of the day, retaining its component styling.
+    pub motd: Text,
+    /// The optional favicon PNG, retained for a future in-session identity UI.
+    pub icon: Option<Vec<u8>>,
+}
+
+/// The most recent [`ServerData`] packet, if the server has sent one.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct SessionServerData(pub Option<ServerData>);
 
 /// Server-announced item-use cooldown groups, read by the hotbar cooldown veil.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
@@ -862,6 +883,21 @@ pub fn apply_server_info(batch: Res<IngestBatch>, mut info: Query<&mut SessionSe
     }
 }
 
+/// `IngestSet::Apply`: `ServerDataReceived` -> [`SessionServerData`].
+pub fn apply_server_data(batch: Res<IngestBatch>, mut data: Query<&mut SessionServerData>) {
+    for event in batch.events() {
+        let ClientEvent::ServerDataReceived { motd, icon } = event else {
+            continue;
+        };
+        for mut server_data in &mut data {
+            server_data.0 = Some(ServerData {
+                motd: motd.clone(),
+                icon: icon.clone(),
+            });
+        }
+    }
+}
+
 /// `IngestSet::Apply`: `ItemCooldown` -> [`SessionItemCooldowns`].
 pub fn apply_item_cooldowns(
     batch: Res<IngestBatch>,
@@ -1258,6 +1294,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             SessionStatistics::default(),
             SessionDebugFeeds::default(),
             SessionServerInfo::default(),
+            SessionServerData::default(),
             SessionItemCooldowns::default(),
             ServerChunkCacheCenter::default(),
             SessionWaypoints::default(),
@@ -1332,6 +1369,7 @@ impl Plugin for SessionPlugin {
                     apply_trades,
                     apply_debug_feeds,
                     apply_server_info,
+                    apply_server_data,
                     apply_item_cooldowns,
                     apply_waypoints,
                     apply_local_player_state,
@@ -2790,6 +2828,54 @@ mod tests {
                 .0,
             Some(11),
             "control: a remaining terminal event must not overwrite the scalar"
+        );
+    }
+
+    /// This must run through `NetIngest`: a route-table arm alone only asks the
+    /// session router to inspect an event. The F3 reader needs the packet's
+    /// exact text and optional icon to survive this scheduled fold.
+    #[test]
+    fn server_data_reaches_its_session_component_through_the_real_schedule() {
+        let (mut app, entity) = session_app();
+        assert!(
+            app.world()
+                .get::<SessionServerData>(entity)
+                .unwrap()
+                .0
+                .is_none(),
+            "control: no packet must not invent public server data"
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::ServerDataReceived {
+                motd: Text::literal("Copper Canyon"),
+                icon: Some(vec![0x89, 0x50, 0x4e, 0x47]),
+            },
+        );
+        let data = app
+            .world()
+            .get::<SessionServerData>(entity)
+            .unwrap()
+            .0
+            .as_ref()
+            .expect("the scheduled fold must retain the packet");
+        assert_eq!(data.motd.to_plain_string(), "Copper Canyon");
+        assert_eq!(data.icon.as_deref(), Some(&[0x89, 0x50, 0x4e, 0x47][..]));
+
+        // Exact negative control: a still-terminal packet must not accidentally
+        // match this fold and replace the announced identity.
+        fold(&mut app, ClientEvent::PlayerCombatEntered);
+        assert_eq!(
+            app.world()
+                .get::<SessionServerData>(entity)
+                .unwrap()
+                .0
+                .as_ref()
+                .unwrap()
+                .motd
+                .to_plain_string(),
+            "Copper Canyon"
         );
     }
 

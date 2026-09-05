@@ -1473,7 +1473,8 @@ mod tests {
     use lodestone_ecs::player::SelectedSlot;
     use lodestone_ecs::session::{
         ServerDifficulty, ServerSimulationDistance, SessionBlockDestruction, SessionGameRules,
-        SessionRecipeBookSettings, SessionSpawnPoint, SessionTabList, SessionWorldBorder,
+        SessionRecipeBookSettings, SessionServerData, SessionSpawnPoint, SessionTabList,
+        SessionWorldBorder,
     };
     use lodestone_model::Difficulty;
 
@@ -1664,6 +1665,45 @@ mod tests {
             ecs.get::<ServerSimulationDistance>(state.session).unwrap().0,
             Some(11),
             "combat enter is not a simulation-distance update"
+        );
+    }
+
+    /// The adapter invokes `SharedState::apply`, not the session fold directly.
+    /// This checks that the route table sends the real server-data packet through
+    /// the shared session component that the shell reads for its F3 line.
+    #[test]
+    fn apply_routes_server_data_through_the_real_path() {
+        let state = SharedState::default();
+        state.apply(&ClientEvent::ServerDataReceived {
+            motd: Text::literal("Copper Canyon"),
+            icon: Some(vec![0x89, 0x50, 0x4e, 0x47]),
+        });
+        {
+            let ecs = state.ecs.read();
+            let data = ecs
+                .get::<SessionServerData>(state.session)
+                .expect("local player has the server-data component")
+                .0
+                .as_ref()
+                .expect("ServerDataReceived must reach the session component");
+            assert_eq!(data.motd.to_plain_string(), "Copper Canyon");
+            assert_eq!(data.icon.as_deref(), Some(&[0x89, 0x50, 0x4e, 0x47][..]));
+        }
+
+        // Exact negative control: another still-terminal packet must not create
+        // or overwrite the public identity stored by ServerDataReceived.
+        state.apply(&ClientEvent::PlayerCombatEntered);
+        let ecs = state.ecs.read();
+        assert_eq!(
+            ecs.get::<SessionServerData>(state.session)
+                .unwrap()
+                .0
+                .as_ref()
+                .unwrap()
+                .motd
+                .to_plain_string(),
+            "Copper Canyon",
+            "combat enter must not masquerade as a server-data update"
         );
     }
 
