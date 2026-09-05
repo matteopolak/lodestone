@@ -5239,9 +5239,33 @@ mod tests {
             (64 + x * 3 + z * 11) as u16
         });
         source.set_motion_blocking(heights);
+        let opaque_pos = lodestone_model::BlockPos::new(52, 6, -76);
+        let opaque_nbt = lodestone_core::Nbt::Compound(vec![
+            ("id".to_owned(), lodestone_core::Nbt::String("example:archive".to_owned())),
+            ("x".to_owned(), lodestone_core::Nbt::Int(opaque_pos.x)),
+            ("y".to_owned(), lodestone_core::Nbt::Int(opaque_pos.y)),
+            ("z".to_owned(), lodestone_core::Nbt::Int(opaque_pos.z)),
+            (
+                "example:payload".to_owned(),
+                lodestone_core::Nbt::String("preserve me".to_owned()),
+            ),
+        ]);
+        source.set_block_entities(vec![
+            (
+                lodestone_model::BlockPos::new(50, 3, -77),
+                crate::block_entities::BlockEntity::Beacon(Default::default()),
+            ),
+            (
+                opaque_pos,
+                crate::block_entities::BlockEntity::Opaque {
+                    id: "example:archive".to_owned(),
+                    nbt: opaque_nbt,
+                },
+            ),
+        ]);
         server
             .write_dirty_native_chunk(3, -5, &source)
-            .expect("write native terrain-only chunk");
+            .expect("write native chunk with resident block entities");
         server.shutdown().await;
 
         let second_storage = crate::world_storage::WorldStorage::open(
@@ -5277,6 +5301,11 @@ mod tests {
             loaded.motion_blocking(),
             Some(&heights),
             "the stored heightmap must survive a server restart, not merely the segment round trip"
+        );
+        assert_eq!(
+            loaded.block_entities(),
+            source.block_entities(),
+            "the selected server storage path must reopen resident simulated and opaque entities"
         );
         assert!(
             reopened.load_native_chunk(4, -5, 0, 16).unwrap().is_none(),
