@@ -26,6 +26,13 @@ pub enum ClientError {
     #[error("timed out waiting for server data")]
     Timeout,
 
+    /// The TCP connection itself did not complete within its configured budget.
+    #[error("TCP connection timed out after {seconds}s")]
+    ConnectTimeout {
+        /// Configured connection budget in whole seconds.
+        seconds: u64,
+    },
+
     /// The background driver task panicked. This indicates a bug.
     #[error("client driver task panicked")]
     DriverPanicked,
@@ -290,5 +297,12 @@ mod cause_chain_tests {
             "detector control: this variant must genuinely have no source, or the \
              assertion above proves nothing about the walk"
         );
+    }
+
+    #[test]
+    fn connect_timeout_is_not_reported_as_server_silence() {
+        let error = ClientError::ConnectTimeout { seconds: 10 };
+        assert_eq!(error.to_string(), "TCP connection timed out after 10s");
+        assert!(!error.to_string().contains("server data"));
     }
 }

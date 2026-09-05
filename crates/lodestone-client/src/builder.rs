@@ -72,6 +72,10 @@ pub struct ClientBuilder {
     // always supplied via `connect_with`, so this is intentionally unused there.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     connect_timeout: Option<Duration>,
+    /// Concrete TCP endpoint when it differs from the address sent in the
+    /// protocol handshake, such as a target selected by an SRV record.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    connect_target: Option<(String, u16)>,
     event_buffer: usize,
     /// A prior session's cookie store, seeded via [`Self::seed_cookies`] for the
     /// reconnect leg of a [`crate::error::SessionOutcome::Transferred`].
@@ -141,6 +145,7 @@ impl ClientBuilder {
             player_loaded: PlayerLoadedPolicy::default(),
             read_timeout: None,
             connect_timeout: None,
+            connect_target: None,
             event_buffer: DEFAULT_EVENT_BUFFER,
             initial_cookies: HashMap::new(),
             ecs: None,
@@ -293,6 +298,18 @@ impl ClientBuilder {
         self
     }
 
+    /// Overrides the concrete TCP endpoint without changing the server address
+    /// presented to the protocol adapter during the handshake.
+    ///
+    /// This is primarily for SRV resolution: the socket dials the record's
+    /// target while virtual-hosting proxies still receive the hostname the
+    /// player entered.
+    #[must_use]
+    pub fn connect_target(mut self, host: String, port: u16) -> Self {
+        self.connect_target = Some((host, port));
+        self
+    }
+
     /// Sets the event channel capacity. Must be non-zero.
     #[must_use]
     pub fn event_buffer(mut self, capacity: usize) -> Self {
@@ -331,14 +348,20 @@ impl ClientBuilder {
     /// # Errors
     ///
     /// Returns [`ClientError::Transport`] if the TCP connection cannot be
-    /// established, or [`ClientError::Timeout`] if it exceeds `connect_timeout`.
+    /// established, or [`ClientError::ConnectTimeout`] if it exceeds
+    /// `connect_timeout`.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn connect(self) -> Result<(ClientHandle, EventStream), ClientError> {
-        let address = (self.server.host.clone(), self.server.port);
+        let address = self
+            .connect_target
+            .clone()
+            .unwrap_or_else(|| (self.server.host.clone(), self.server.port));
         let connection = match self.connect_timeout {
             Some(duration) => crate::native_time::timeout(duration, Connection::connect(address))
                 .await
-                .map_err(|_| ClientError::Timeout)??,
+                .map_err(|_| ClientError::ConnectTimeout {
+                    seconds: duration.as_secs(),
+                })??,
             None => Connection::connect(address).await?,
         };
         Ok(self.start(connection))

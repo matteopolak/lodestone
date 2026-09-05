@@ -1583,10 +1583,10 @@ impl RemoteAuth {
 enum Origin {
     /// Dial a real server over TCP. `auth` says which identity to present.
     Remote {
-        /// Host to dial.
+        /// Hostname the player entered and the protocol handshake presents.
         host: String,
-        /// Port to dial.
-        port: u16,
+        /// Explicit port, or `None` when the join should resolve an SRV target.
+        port: Option<u16>,
         /// Which identity to join under, resolved in [`run_async`].
         auth: RemoteAuth,
     },
@@ -1792,7 +1792,7 @@ impl NetClient {
     #[must_use]
     pub fn connect(
         host: String,
-        port: u16,
+        port: Option<u16>,
         protocol: i32,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     ) -> Self {
@@ -1833,7 +1833,7 @@ impl NetClient {
     ///
     /// [`unit_tests_never_resolve_a_real_microsoft_account`]: tests::unit_tests_never_resolve_a_real_microsoft_account
     /// [`a_production_join_requests_the_selected_microsoft_account`]: tests::a_production_join_requests_the_selected_microsoft_account
-    fn production_origin(host: String, port: u16) -> Origin {
+    fn production_origin(host: String, port: Option<u16>) -> Origin {
         Origin::Remote {
             host,
             port,
@@ -1851,7 +1851,7 @@ impl NetClient {
     fn offline_origin(host: String, port: u16) -> Origin {
         Origin::Remote {
             host,
-            port,
+            port: Some(port),
             auth: RemoteAuth::Offline,
         }
     }
@@ -1948,7 +1948,7 @@ impl NetClient {
         Self::connect_impl(
             Origin::Remote {
                 host,
-                port,
+                port: Some(port),
                 auth: RemoteAuth::Session(auth),
             },
             protocol,
@@ -3094,8 +3094,16 @@ async fn run_async(
         // teardown below writes through, and it is `None` for every other origin.
         #[cfg(not(target_arch = "wasm32"))]
         let mut lan_autosave: Option<lodestone_server::region_source::WorldSaveHandle> = None;
-        let (server, auth, integrated_io) = match origin {
-            Origin::Remote { host, port, auth } => (ServerAddress { host, port }, auth, None),
+        let (server, auth, integrated_io, remote_port) = match origin {
+            Origin::Remote { host, port, auth } => (
+                ServerAddress {
+                    host,
+                    port: port.unwrap_or(lodestone_net::DEFAULT_PORT),
+                },
+                auth,
+                None,
+                Some(port),
+            ),
             Origin::Integrated {
                 protocol: server_protocol,
                 seed,
@@ -3475,6 +3483,7 @@ async fn run_async(
                             // has nothing to prove and no session to spend.
                             RemoteAuth::Offline,
                             Some(io),
+                            None,
                         )
                     }
                     // Open to LAN: there is a real socket, so the host dials it
@@ -3512,6 +3521,7 @@ async fn run_async(
                                 RemoteAuth::Offline
                             }
                         },
+                        None,
                         None,
                     ),
                     // Unreachable by construction — `open_lan_world` returns an
@@ -3681,6 +3691,8 @@ async fn run_async(
         // server directly, no relay involved), hence the `cfg`.
         #[cfg(target_arch = "wasm32")]
         let relay_destination = (server.host.clone(), server.port);
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder_server_host = server.host.clone();
         let mut builder = ClientBuilder::new(server, profile, adapter)
             .connect_timeout(Some(Duration::from_secs(10)))
             // Arm the read timeout so a server that hangs (sends
@@ -3689,6 +3701,31 @@ async fn run_async(
             // keep-alive keeps a healthy session clear of it — see [`READ_TIMEOUT`].
             .read_timeout(Some(READ_TIMEOUT))
             .respawn_policy(RespawnPolicy::Manual);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(explicit_port) = remote_port {
+            let resolved = match lodestone_net::resolve_server_address(
+                &builder_server_host,
+                explicit_port,
+            )
+            .await
+            {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    let _ = tx.try_send(NetUpdate::Error(format!("connect: {error}")));
+                    return;
+                }
+            };
+            tracing::info!(
+                target: "net_join",
+                entered_host = %builder_server_host,
+                entered_port = ?explicit_port,
+                dial_host = %resolved.host,
+                dial_port = resolved.port,
+                protocol,
+                "resolved multiplayer endpoint"
+            );
+            builder = builder.connect_target(resolved.host, resolved.port);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             builder = builder.authentication_intent(auth);
@@ -5884,7 +5921,7 @@ mod tests {
     /// satisfied by simply never resolving anything.
     #[test]
     fn unit_tests_never_resolve_a_real_microsoft_account() {
-        let origin = NetClient::production_origin("example.invalid".into(), 25565);
+        let origin = NetClient::production_origin("example.invalid".into(), Some(25565));
         let Origin::Remote { auth, .. } = origin else {
             panic!("production_origin must build a Remote origin");
         };
@@ -5892,6 +5929,22 @@ mod tests {
             matches!(auth, RemoteAuth::Offline),
             "a unit-test build must not reach the keychain or Microsoft"
         );
+    }
+
+    #[test]
+    fn production_origin_preserves_whether_the_player_entered_a_port() {
+        let bare = NetClient::production_origin("play.example.invalid".into(), None);
+        let explicit = NetClient::production_origin("play.example.invalid".into(), Some(25570));
+
+        let Origin::Remote { port: bare, .. } = bare else {
+            panic!("production_origin must build a Remote origin");
+        };
+        let Origin::Remote { port: explicit, .. } = explicit else {
+            panic!("production_origin must build a Remote origin");
+        };
+
+        assert_eq!(bare, None, "a bare hostname must remain eligible for SRV");
+        assert_eq!(explicit, Some(25570), "an entered port must remain authoritative");
     }
 
     /// `usernames_are_unique_per_call` used to live here, asserting a property
@@ -5927,7 +5980,7 @@ mod tests {
         let expected = crate::offline_identity::OfflineIdentity::load();
         let observed: Vec<Uuid> = (0..2)
             .map(|_| {
-                let client = NetClient::connect("127.0.0.1".into(), 1, 776, None);
+                let client = NetClient::connect("127.0.0.1".into(), Some(1), 776, None);
                 let deadline = crate::platform::Instant::now() + Duration::from_secs(5);
                 let mut uuid = None;
                 while crate::platform::Instant::now() < deadline && uuid.is_none() {
@@ -6010,7 +6063,7 @@ mod tests {
     /// the publish depended on a successful handshake, this would time out.
     #[test]
     fn local_uuid_is_published_before_the_connection_even_resolves() {
-        let client = NetClient::connect("127.0.0.1".into(), 1, 776, None);
+        let client = NetClient::connect("127.0.0.1".into(), Some(1), 776, None);
         let deadline = crate::platform::Instant::now() + Duration::from_secs(5);
         let mut uuid = None;
         while crate::platform::Instant::now() < deadline && uuid.is_none() {

@@ -198,7 +198,7 @@ impl WindowApp {
                 // only for a saved `ServerEntry`, which is exactly what this
                 // arm (and only this arm) holds.
                 crate::net::set_pending_server_pack_policy(entry.pack_status);
-                self.connect_to(entry.host.clone(), entry.effective_port());
+                self.connect_to(entry.host.clone(), entry.port);
             }
             MenuAction::Quit => {}
             MenuAction::Reprobe(Some(entry)) => self.statuses.refresh_one(&entry),
