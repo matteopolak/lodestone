@@ -1,10 +1,12 @@
 //! Operator-configured experimental Java adapter over the public server read API.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Duration;
 
-use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost, BlockStateWrite};
+use lodestone_jvm_bridge::adapter::{
+    AdapterEvent, AdapterHost, BlockStateWrite, PlayerIdentity,
+};
 use lodestone_jvm_bridge::paper::{
     PaperBootstrapConfig, PaperBootstrapPlan, PaperPluginConstructionBlocker,
     PaperPluginConstructionReadiness, PaperServerFacadeInput,
@@ -13,6 +15,62 @@ use lodestone_jvm_bridge::runtime::JvmConfig;
 use lodestone_server::IntegratedServer;
 
 const MAX_PENDING_BLOCK_CHANGE_EVENTS: usize = 64;
+const MAX_PENDING_PLAYER_LIFECYCLE_EVENTS: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlayerLifecycleEvent {
+    Joined(PlayerIdentity),
+    Disconnected(PlayerIdentity),
+}
+
+/// Reconciles the server-owned value roster with the adapter worker. The
+/// tracker stores identities only: no ECS entity, connection, or world guard
+/// crosses into the JVM bridge.
+#[derive(Debug, Default)]
+struct PlayerLifecycleTracker {
+    observed: HashMap<PlayerIdentity, ()>,
+    pending: VecDeque<PlayerLifecycleEvent>,
+}
+
+impl PlayerLifecycleTracker {
+    fn observe(&mut self, current: impl IntoIterator<Item = PlayerIdentity>) -> Result<(), String> {
+        let current: HashMap<_, _> = current.into_iter().map(|player| (player, ())).collect();
+        let disconnected = self
+            .observed
+            .keys()
+            .filter(|player| !current.contains_key(*player))
+            .cloned()
+            .collect::<Vec<_>>();
+        let joined = current
+            .keys()
+            .filter(|player| !self.observed.contains_key(*player))
+            .cloned()
+            .collect::<Vec<_>>();
+        let transition_count = disconnected.len().saturating_add(joined.len());
+        if self.pending.len().saturating_add(transition_count)
+            > MAX_PENDING_PLAYER_LIFECYCLE_EVENTS
+        {
+            return Err(format!(
+                "player lifecycle queue limit {MAX_PENDING_PLAYER_LIFECYCLE_EVENTS} exceeded"
+            ));
+        }
+        // Release departed generations before minting replacements. This also
+        // makes a same-UUID name change safe when the registry is at capacity.
+        for player in disconnected {
+            self.pending
+                .push_back(PlayerLifecycleEvent::Disconnected(player));
+        }
+        for player in joined {
+            self.pending.push_back(PlayerLifecycleEvent::Joined(player));
+        }
+        self.observed = current;
+        Ok(())
+    }
+
+    fn pop(&mut self) -> Option<PlayerLifecycleEvent> {
+        self.pending.pop_front()
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct JavaAdapter {
@@ -21,6 +79,7 @@ pub(crate) struct JavaAdapter {
     paper_construction: Option<PaperPluginConstructionReadiness>,
     paper_construction_receiver: Option<Receiver<PaperPluginConstructionReadiness>>,
     pending_block_change_events: VecDeque<BlockStateWrite>,
+    player_lifecycle: PlayerLifecycleTracker,
     last_dispatched: Option<u64>,
 }
 
@@ -130,6 +189,7 @@ impl JavaAdapter {
             paper_construction: None,
             paper_construction_receiver,
             pending_block_change_events: VecDeque::new(),
+            player_lifecycle: PlayerLifecycleTracker::default(),
             last_dispatched: None,
         })
     }
@@ -202,6 +262,12 @@ impl JavaAdapter {
             Some(AdapterEvent::TickCompleted(tick)) => {
                 tracing::debug!(tick, "Java adapter callback completed");
             }
+            Some(AdapterEvent::PlayerJoinedCompleted { player, handle }) => {
+                tracing::debug!(?player, handle, "Java adapter player join callback completed");
+            }
+            Some(AdapterEvent::PlayerDisconnectedCompleted { player, handle }) => {
+                tracing::debug!(?player, ?handle, "Java adapter player disconnect callback completed");
+            }
             Some(AdapterEvent::BlockStateChangedCompleted { change, listener_failures }) => {
                 tracing::debug!(?change, listeners = listener_failures.len(), "Java adapter block-change callback completed");
                 for failure in listener_failures {
@@ -233,8 +299,36 @@ impl JavaAdapter {
             server.server_tick_count()
                 .ok_or_else(|| "primary-world server tick is unavailable".to_owned())
         });
+        // Read a value-only roster after all world-port servicing has returned.
+        // Dispatch below is the only point that can invoke Java, and it runs
+        // on the adapter worker rather than beneath any server-world guard.
+        let players = server
+            .players()
+            .map(|registry| {
+                registry
+                    .view(None)
+                    .roster
+                    .into_iter()
+                    .map(|listing| PlayerIdentity::new(listing.uuid.into_bytes(), listing.username))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.player_lifecycle.observe(players)?;
         if self.host.is_idle() {
-            if let Some(change) = self.pending_block_change_events.pop_front() {
+            if let Some(player) = self.player_lifecycle.pop() {
+                match player {
+                    PlayerLifecycleEvent::Joined(player) => {
+                        self.host
+                            .dispatch_player_joined(player)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    PlayerLifecycleEvent::Disconnected(player) => {
+                        self.host
+                            .dispatch_player_disconnected(player)
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+            } else if let Some(change) = self.pending_block_change_events.pop_front() {
                 self.host.dispatch_block_state_changed(change).map_err(|error| error.to_string())?;
             } else if let Some(tick) = server.server_tick_count() {
                 if self.last_dispatched != Some(tick) {
@@ -390,5 +484,28 @@ mod tests {
         assert!(error.contains("invalid Paper bootstrap configuration"), "{error}");
         assert!(error.contains("Paper server jar"), "{error}");
         assert!(error.len() < 4096, "Paper configuration error must stay bounded");
+    }
+
+    #[test]
+    fn player_lifecycle_tracker_emits_join_then_disconnect_for_value_identity() {
+        let player = PlayerIdentity::new([3; 16], "Alice");
+        let mut tracker = PlayerLifecycleTracker::default();
+        tracker.observe([player.clone()]).expect("one player fits");
+        assert_eq!(tracker.pop(), Some(PlayerLifecycleEvent::Joined(player.clone())));
+        tracker.observe([]).expect("disconnect fits");
+        assert_eq!(tracker.pop(), Some(PlayerLifecycleEvent::Disconnected(player)));
+        assert_eq!(tracker.pop(), None);
+    }
+
+    #[test]
+    fn player_lifecycle_tracker_rejects_an_unbounded_pending_burst() {
+        let players = (0..=MAX_PENDING_PLAYER_LIFECYCLE_EVENTS)
+            .map(|index| PlayerIdentity::new([index as u8; 16], format!("p{index}")))
+            .collect::<Vec<_>>();
+        let mut tracker = PlayerLifecycleTracker::default();
+        let error = tracker
+            .observe(players)
+            .expect_err("pending lifecycle events must stay bounded");
+        assert!(error.contains("player lifecycle queue limit"), "{error}");
     }
 }

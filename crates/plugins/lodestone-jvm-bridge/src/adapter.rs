@@ -2,14 +2,16 @@
 //!
 //! This is a bootstrap contract for developing the Paper host, not a Java plugin
 //! discovery mechanism. The supplied class declares `static void onTick(long)`,
-//! `static void onBlockStateChanged(int, int, int, int)`, and `static native
-//! int blockStateId(int, int, int)`. Native requests cross the world port; the
-//! worker never receives world state. The resident block-change listener may
-//! also receive a value-only player identity as an opaque handle for the
-//! duration of its callback. A host must service the port and poll completion,
-//! and must not dispatch another callback until idle.
+//! `static void onBlockStateChanged(int, int, int, int)`,
+//! `static void onPlayerJoined(long)`, `static void onPlayerDisconnected(long)`,
+//! and `static native int blockStateId(int, int, int)`. Native requests cross
+//! the world port; the worker never receives world state. The resident
+//! block-change listener may also receive a value-only player identity as an
+//! opaque handle for the duration of its callback. A host must service the
+//! port and poll completion, and must not dispatch another callback until idle.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
@@ -135,6 +137,12 @@ thread_local! {
     };
     static CURRENT_RESIDENT_BLOCK_HANDLE: RefCell<Option<ObjectRef>> = const { RefCell::new(None) };
     static CURRENT_RESIDENT_PLAYER_HANDLE: RefCell<Option<ObjectRef>> = const { RefCell::new(None) };
+    /// Handles for players currently reported by the host's connection
+    /// registry. Unlike callback-scoped handles, these survive a join callback
+    /// until the matching disconnect callback releases them.
+    static ACTIVE_PLAYER_HANDLES: RefCell<Option<HashMap<PlayerIdentity, ObjectRef>>> = const {
+        RefCell::new(None)
+    };
     static LIFECYCLE_IDENTITY: RefCell<Vec<LifecycleIdentity>> = const {
         RefCell::new(Vec::new())
     };
@@ -396,6 +404,66 @@ fn resident_player_handle(
     })
 }
 
+/// Gets the one worker-owned handle for a currently connected player. The
+/// reverse map makes a repeated roster observation idempotent without asking
+/// the registry to expose slot indices or pointers.
+fn active_player_handle(
+    identity: &LifecycleIdentity,
+    player: &PlayerIdentity,
+) -> Result<ObjectRef, AdapterError> {
+    ACTIVE_PLAYER_HANDLES.with(|slot| {
+        let mut active = slot.borrow_mut();
+        let active = active.as_mut().ok_or_else(|| {
+            AdapterError::new("player lifecycle registry requires the adapter worker thread")
+        })?;
+        if let Some(handle) = active.get(player) {
+            return Ok(*handle);
+        }
+        let handle = resident_player_handle(identity, player)?;
+        active.insert(player.clone(), handle);
+        Ok(handle)
+    })
+}
+
+/// Finds the worker-owned handle for one currently connected player. Unknown
+/// disconnects are intentionally a no-op: lifecycle cleanup must never mint a
+/// new object merely to release it.
+fn active_player_handle_for(player: &PlayerIdentity) -> Option<ObjectRef> {
+    ACTIVE_PLAYER_HANDLES.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|active| active.get(player).copied())
+    })
+}
+
+/// Removes and invalidates the worker-owned handle for one disconnected
+/// player.
+fn release_active_player_handle(
+    identity: &LifecycleIdentity,
+    player: &PlayerIdentity,
+) -> Option<ObjectRef> {
+    let handle = ACTIVE_PLAYER_HANDLES.with(|slot| {
+        slot.borrow_mut()
+            .as_mut()
+            .and_then(|active| active.remove(player))
+    })?;
+    RESIDENT_OBJECT_HANDLES.with(|slot| {
+        if let Some(registry) = slot.borrow_mut().as_mut() {
+            let released = registry.release_matching(|kind, payload| {
+                matches!(
+                    (kind, payload),
+                    (
+                        ObjectKind::Player,
+                        ResidentObject::Player { owner, player: resident }
+                    ) if owner == identity && resident == player
+                )
+            });
+            debug_assert_eq!(released, 1, "active player handle must have one registry entry");
+        }
+    });
+    Some(handle)
+}
+
 fn resolve_resident_block_handle(
     bits: i64,
 ) -> Result<(i32, i32, i32), AdapterError> {
@@ -505,6 +573,8 @@ pub(crate) fn with_lifecycle_identity<T>(
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AdapterCommand {
     Tick(u64),
+    PlayerJoined(PlayerIdentity),
+    PlayerDisconnected(PlayerIdentity),
     BlockStateChanged {
         change: BlockStateWrite,
         player: Option<PlayerIdentity>,
@@ -517,6 +587,20 @@ enum AdapterCommand {
 pub enum AdapterEvent {
     Ready,
     TickCompleted(u64),
+    /// A host-confirmed player join was delivered to the worker callback.
+    /// `handle` is opaque Java `long` data and remains valid until the matching
+    /// disconnect transition completes.
+    PlayerJoinedCompleted {
+        player: PlayerIdentity,
+        handle: i64,
+    },
+    /// A host-confirmed player disconnect was delivered and its handle was
+    /// invalidated. `handle` is `None` only when a host reports a disconnect
+    /// for a player this worker had not observed joining.
+    PlayerDisconnectedCompleted {
+        player: PlayerIdentity,
+        handle: Option<i64>,
+    },
     /// The adapter callback and every registered isolated listener were
     /// invoked on the one worker. Listener failures are reported here instead
     /// of making the adapter terminal.
@@ -647,6 +731,33 @@ impl AdapterHost {
             return Err(AdapterError::new("adapter tick exceeds Java long range"));
         }
         self.dispatch_command(AdapterCommand::Tick(tick), "tick")
+    }
+
+    /// Queues a host-confirmed player join for the adapter worker.
+    ///
+    /// The worker mints the generation-checked handle and invokes the adapter's
+    /// `onPlayerJoined(long)` callback outside every server-world guard. The
+    /// identity is copied by value; no ECS entity, connection, or lock guard
+    /// crosses this boundary. A repeated join for the same profile is
+    /// idempotent while that profile remains active.
+    pub fn dispatch_player_joined(&mut self, player: PlayerIdentity) -> Result<(), AdapterError> {
+        self.dispatch_command(AdapterCommand::PlayerJoined(player), "player join")
+    }
+
+    /// Queues a host-confirmed player disconnect for the adapter worker.
+    ///
+    /// The worker invokes `onPlayerDisconnected(long)` while the old handle is
+    /// still resolvable, then advances its generation and releases the slot.
+    /// A disconnect for an unobserved profile completes with no handle and does
+    /// not mint one just to tear it down.
+    pub fn dispatch_player_disconnected(
+        &mut self,
+        player: PlayerIdentity,
+    ) -> Result<(), AdapterError> {
+        self.dispatch_command(
+            AdapterCommand::PlayerDisconnected(player),
+            "player disconnect",
+        )
     }
 
     /// Queues one host-confirmed block-state change for the adapter worker.
@@ -780,6 +891,20 @@ impl AdapterHost {
                 }
                 (
                     State::Running {
+                        command: AdapterCommand::PlayerJoined(expected),
+                        ..
+                    },
+                    AdapterEvent::PlayerJoinedCompleted { player, .. },
+                ) if expected == player => Ok(Some(event)),
+                (
+                    State::Running {
+                        command: AdapterCommand::PlayerDisconnected(expected),
+                        ..
+                    },
+                    AdapterEvent::PlayerDisconnectedCompleted { player, .. },
+                ) if expected == player => Ok(Some(event)),
+                (
+                    State::Running {
                         command: AdapterCommand::BlockStateChanged {
                             change: expected,
                             player,
@@ -866,6 +991,7 @@ fn run_java<S>(
                     MAX_RESIDENT_OBJECT_HANDLES,
                 ))
             });
+            ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
             CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
             CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
             RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS
@@ -880,6 +1006,7 @@ fn run_java<S>(
             })?;
             let class = runtime.load_isolated_class(env, &config, class_name)
                 .map_err(|error| java_error(env, class_name, error))?;
+            let adapter_identity = lifecycle_identity(class_name, "adapter", class_name);
             register_block_query(env, &class, "blockStateId", "(III)I")
                 .map_err(|error| java_error(env, &format!("{class_name}.blockStateId(III)I"), error))?;
             env.get_static_method_id(&class, jni_str!("onTick"), jni_sig!("(J)V"))
@@ -890,6 +1017,22 @@ fn run_java<S>(
                     &format!("{class_name}.onBlockStateChanged(IIII)V"),
                     error,
                 ))?;
+            env.get_static_method_id(&class, jni_str!("onPlayerJoined"), jni_sig!("(J)V"))
+                .map_err(|error| java_error(
+                    env,
+                    &format!("{class_name}.onPlayerJoined(J)V"),
+                    error,
+                ))?;
+            env.get_static_method_id(
+                &class,
+                jni_str!("onPlayerDisconnected"),
+                jni_sig!("(J)V"),
+            )
+            .map_err(|error| java_error(
+                env,
+                &format!("{class_name}.onPlayerDisconnected(J)V"),
+                error,
+            ))?;
             if events.send(Ok(AdapterEvent::Ready)).is_err() {
                 return Ok(());
             }
@@ -907,6 +1050,62 @@ fn run_java<S>(
                                 ))
                         })?;
                         AdapterEvent::TickCompleted(tick)
+                    }
+                    AdapterCommand::PlayerJoined(player) => {
+                        let handle = active_player_handle(&adapter_identity, &player)
+                            .map_err(|error| AdapterError::new(error.to_string()))?;
+                        env.with_local_frame(16, |env| {
+                            env.call_static_method(
+                                &class,
+                                jni_str!("onPlayerJoined"),
+                                jni_sig!("(J)V"),
+                                &[JValue::Long(handle.to_bits())],
+                            )
+                            .map(|_| ())
+                            .map_err(|error| java_error(
+                                env,
+                                &format!("{class_name}.onPlayerJoined(J)V"),
+                                error,
+                            ))
+                        })?;
+                        AdapterEvent::PlayerJoinedCompleted {
+                            handle: handle.to_bits(),
+                            player,
+                        }
+                    }
+                    AdapterCommand::PlayerDisconnected(player) => {
+                        let handle = active_player_handle_for(&player);
+                        if let Some(handle) = handle {
+                            // Keep the old slot live for the callback so a
+                            // plugin may inspect the departing player. The
+                            // release occurs immediately after this call,
+                            // before completion is reported to the host.
+                            env.with_local_frame(16, |env| {
+                                env.call_static_method(
+                                    &class,
+                                    jni_str!("onPlayerDisconnected"),
+                                    jni_sig!("(J)V"),
+                                    &[JValue::Long(handle.to_bits())],
+                                )
+                                .map(|_| ())
+                                .map_err(|error| java_error(
+                                    env,
+                                    &format!("{class_name}.onPlayerDisconnected(J)V"),
+                                    error,
+                                ))
+                            })?;
+                            // The callback above is intentionally the last
+                            // place the handle can resolve. Release after it,
+                            // so an old Java long fails as stale from the next
+                            // command onward.
+                            let released =
+                                release_active_player_handle(&adapter_identity, &player);
+                            debug_assert_eq!(released, Some(handle));
+                        }
+                        AdapterEvent::PlayerDisconnectedCompleted {
+                            handle: handle.map(ObjectRef::to_bits),
+                            player,
+                        }
                     }
                     AdapterCommand::BlockStateChanged { change, player } => {
                         let state_id = i32::try_from(change.state_id).map_err(|_| {
@@ -948,6 +1147,7 @@ fn run_java<S>(
             Ok(())
         })();
         clear_resident_handles();
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
         CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
         CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
         CALLBACK_PORT.with(|slot| *slot.borrow_mut() = None);
@@ -1790,6 +1990,85 @@ mod tests {
                 listener_failures: Vec::new(),
             },
         );
+    }
+
+    #[test]
+    fn player_lifecycle_dispatch_preserves_order_and_identity() {
+        let player = PlayerIdentity::new([4; 16], "Alice");
+        let joined = player.clone();
+        let disconnected = player.clone();
+        let mut host = AdapterHost::spawn(
+            Duration::from_secs(2),
+            move |commands, events, _, _, _| {
+                events.send(Ok(AdapterEvent::Ready)).unwrap();
+                assert_eq!(
+                    commands.recv().expect("join transition"),
+                    AdapterCommand::PlayerJoined(joined.clone()),
+                );
+                events
+                    .send(Ok(AdapterEvent::PlayerJoinedCompleted {
+                        player: joined,
+                        handle: 4,
+                    }))
+                    .unwrap();
+                assert_eq!(
+                    commands.recv().expect("disconnect transition"),
+                    AdapterCommand::PlayerDisconnected(disconnected.clone()),
+                );
+                events
+                    .send(Ok(AdapterEvent::PlayerDisconnectedCompleted {
+                        player: disconnected,
+                        handle: Some(4),
+                    }))
+                    .unwrap();
+            },
+        )
+        .unwrap();
+        assert_eq!(await_event(&mut host), AdapterEvent::Ready);
+        host.dispatch_player_joined(player.clone())
+            .expect("join dispatch");
+        assert_eq!(
+            await_event(&mut host),
+            AdapterEvent::PlayerJoinedCompleted {
+                player: player.clone(),
+                handle: 4,
+            },
+        );
+        host.dispatch_player_disconnected(player.clone())
+            .expect("disconnect dispatch");
+        assert_eq!(
+            await_event(&mut host),
+            AdapterEvent::PlayerDisconnectedCompleted {
+                player,
+                handle: Some(4),
+            },
+        );
+    }
+
+    #[test]
+    fn active_player_handle_release_advances_generation_and_bounds_cleanup() {
+        let identity = lifecycle_identity("adapter", "adapter", "fixture.Adapter");
+        let player = PlayerIdentity::new([5; 16], "Alice");
+        RESIDENT_OBJECT_HANDLES.with(|slot| {
+            *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(1));
+        });
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
+        let first = active_player_handle(&identity, &player).expect("active player handle");
+        assert_eq!(active_player_handle_for(&player), Some(first));
+        assert_eq!(resolve_resident_player_handle(first.to_bits()), Ok("Alice".to_owned()));
+        assert_eq!(release_active_player_handle(&identity, &player), Some(first));
+        assert_eq!(active_player_handle_for(&player), None);
+        assert_eq!(
+            resolve_resident_player_handle(first.to_bits()),
+            Err(AdapterError::new(
+                "playerHandleName: the referenced object no longer exists",
+            )),
+        );
+        let replacement = active_player_handle(&identity, &player).expect("reusable slot");
+        assert_ne!(replacement, first);
+        assert_eq!(release_active_player_handle(&identity, &player), Some(replacement));
+        RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
     }
 
     #[test]
