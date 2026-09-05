@@ -4227,6 +4227,10 @@ pub fn route(event: &ClientEvent) -> Route {
         // result before surfacing this event, so a caller can reconnect with
         // the target and the driver's preserved cookie store.
         ClientEvent::TransferRequested { .. } => CLIENT,
+        // `Driver::emit` removes the deleted full signature from its pending
+        // acknowledgement tracker before surfacing the event, so the server
+        // is not acknowledged for a message it withdrew.
+        ClientEvent::ChatMessageDeleted { .. } => CLIENT,
         // `SharedState::apply`'s own arm, ahead of both `handles_event` calls:
         // straight into the `WorldTime` resource.
         ClientEvent::TimeChanged { .. } => CLIENT,
@@ -4358,7 +4362,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::CustomPayload { .. }
         | ClientEvent::ServerDataReceived { .. }
         | ClientEvent::PongReceived { .. }
-        | ClientEvent::ChatMessageDeleted { .. }
         | ClientEvent::PlayerLookAt { .. } => Route::NOWHERE,
     }
 }
@@ -4443,7 +4446,9 @@ mod block_state_ref_tests {
 
 #[cfg(test)]
 mod route_tests {
-    use super::{ClientEvent, Difficulty, LevelEventData, Route, Uuid, route};
+    use super::{
+        ClientEvent, Difficulty, LevelEventData, PackedMessageSignature, Route, Uuid, route,
+    };
     use crate::{ids::Identifier, math::BlockPos};
 
     /// **The guard that protects the guard.**
@@ -4576,6 +4581,21 @@ mod route_tests {
         let r = route(&event);
         assert!(!r.ingest && !r.session && !r.shell);
         assert!(r.client, "the driver answers resource-pack pushes automatically");
+        assert!(!r.is_island());
+    }
+
+    /// `Driver::emit` withdraws a deleted full signature from its pending
+    /// acknowledgement tracker before the event reaches the shell. The route
+    /// must record that client-internal consumer so the event is not counted as
+    /// an island.
+    #[test]
+    fn deleted_chat_reaches_the_client_driver() {
+        let event = ClientEvent::ChatMessageDeleted {
+            signature: PackedMessageSignature::Full(vec![0; 256]),
+        };
+        let r = route(&event);
+        assert!(!r.ingest && !r.session && !r.shell);
+        assert!(r.client, "the driver withdraws deleted chat signatures");
         assert!(!r.is_island());
     }
 
