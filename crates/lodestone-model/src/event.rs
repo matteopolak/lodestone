@@ -4365,7 +4365,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::PlayerCombatEnded { .. }
         | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
-        | ClientEvent::ResourcePackPushed { .. }
         | ClientEvent::CustomPayload { .. }
         | ClientEvent::ServerDataReceived { .. }
         | ClientEvent::PongReceived { .. }
