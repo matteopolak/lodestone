@@ -3925,6 +3925,7 @@ where
             | ServerBound::RecipeBookSettingsChanged { .. }
             | ServerBound::ResourcePackResponse { .. }
             | ServerBound::PlayerLoaded
+            | ServerBound::PlayerAbilitiesChanged { .. }
             | ServerBound::BlockEntityTagQuery { .. }
             | ServerBound::EntityTagQuery { .. }
             | ServerBound::ContainerClosed { .. }
@@ -5561,10 +5562,11 @@ where
 ///
 /// One helper because the pair must never be split — a client told it is in
 /// creative without the abilities packet is in creative and cannot fly.
-fn game_mode_directives<P: ServerProtocol>(proto: &P, mode: GameMode) -> [ServerDirective; 2] {
+fn game_mode_directives<P: ServerProtocol>(proto: &P, mode: GameMode, abilities: &mut Abilities) -> [ServerDirective; 2] {
+    abilities.set_game_mode(mode);
     [
         proto.encode_game_mode(mode),
-        proto.encode_player_abilities(Abilities::for_mode(mode)),
+        proto.encode_player_abilities(*abilities),
     ]
 }
 
@@ -5613,6 +5615,7 @@ async fn apply_own_effect<T, P>(
     proto: &P,
     state: &mut State,
     game_mode: &mut GameMode,
+    abilities: &mut Abilities,
     inventory: &mut PlayerInventory,
     players: Option<&PlayerRegistry>,
     player_uuid: uuid::Uuid,
@@ -5658,7 +5661,7 @@ where
             if let Some(registry) = players {
                 registry.set_game_mode(player_uuid, mode);
             }
-            for directive in game_mode_directives(proto, mode) {
+            for directive in game_mode_directives(proto, mode, abilities) {
                 apply(conn, state, directive).await?;
             }
             // The tab-list entry's own game mode (`UPDATE_GAME_MODE`, action
@@ -10286,6 +10289,8 @@ async fn dispatch_play_packet<T, P, S>(
     // because the creative consequences below (instant break, damage immunity)
     // read it on later packets.
     game_mode: &mut GameMode,
+    // The live ability record preserves client flight across mode changes.
+    abilities: &mut Abilities,
     // The player's per-player respawn point, written by the bed
     // arm of `apply_use_item_on` and threaded through `serve_play`'s session
     // state. Read back by no caller yet — the placement half of P2 is the
@@ -10359,6 +10364,9 @@ where
             rotation,
             on_ground,
         } => {
+            if abilities.flying {
+                fall.reset();
+            }
             // Hunger exhaustion for the distance just travelled — vanilla's
             // vanilla's own check-movement-statistics routine, which is driven by the
             // position delta rather than by a per-tick constant. Charged **before**
@@ -10523,6 +10531,9 @@ where
             pitch,
             on_ground,
         } => {
+            if abilities.flying {
+                fall.reset();
+            }
             *player_rot = Some(Rotation { yaw, pitch });
             fall_status_sample(
                 conn,
@@ -10545,6 +10556,9 @@ where
         // edge. This records a landing even when the final movement packet
         // carries no position change.
         ServerBound::PlayerStatusOnly { on_ground } => {
+            if abilities.flying {
+                fall.reset();
+            }
             fall_status_sample(
                 conn,
                 state,
@@ -10845,6 +10859,12 @@ where
         }
         ServerBound::PlayerLoaded => {
             *client_loaded = true;
+        }
+        ServerBound::PlayerAbilitiesChanged { flying } => {
+            abilities.flying = flying && abilities.may_fly;
+            if abilities.flying {
+                fall.cancel();
+            }
         }
         ServerBound::BlockEntityTagQuery { transaction_id, pos } => {
             if let Some(tag) = block_entity_query_tag(block_entities, commands.permission_level, pos) {
@@ -11824,6 +11844,7 @@ where
                                     proto,
                                     state,
                                     game_mode,
+                                    abilities,
                                     inventory,
                                     players,
                                     player_uuid,
@@ -11873,7 +11894,7 @@ where
             if commands.permission_level >= COMMANDS_GAMEMASTER_LEVEL {
                 *game_mode = mode;
             }
-            for directive in game_mode_directives(proto, *game_mode) {
+            for directive in game_mode_directives(proto, *game_mode, abilities) {
                 apply(conn, state, directive).await?;
             }
         }
@@ -12398,6 +12419,7 @@ where
     let mut pending_break: Option<PendingBreak> = None;
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_loaded = false;
+    let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
     let mut player_rot: Option<Rotation> = None;
@@ -12761,6 +12783,7 @@ where
                     client_channels,
                     plugin_channels,
                     &mut game_mode,
+                    &mut abilities,
                     &mut respawn,
                     sleep_vote,
                     border,
@@ -14287,6 +14310,7 @@ where
                             proto,
                             &mut state,
                             &mut game_mode,
+                            &mut abilities,
                             &mut inventory,
                             Some(registry),
                             player_uuid,
@@ -14938,6 +14962,7 @@ where
     // remains driven by inbound `PlayerMoved` packets.
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_loaded = false;
+    let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
     let mut player_rot: Option<Rotation> = None;
@@ -15125,6 +15150,7 @@ where
             client_channels,
             plugin_channels,
             &mut game_mode,
+            &mut abilities,
             &mut respawn,
             sleep_vote,
             border,

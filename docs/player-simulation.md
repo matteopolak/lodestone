@@ -207,6 +207,15 @@ too fast.
 
 ### Creative flight
 
+The hosting connection retains its `Abilities` record. A 26.2 client may change
+only `flying`, and a request to start flying is accepted only while `may_fly` is
+true. Both the game-mode packet and command effects update that same record:
+creative preserves current flight, spectator enables it, and survival/adventure
+clear it. The response therefore preserves a flying player's state instead of
+reconstructing a grounded default. Flight and walking speed values survive mode
+changes. Incoming movement while flying resets the server's fall tracker, so
+flight descent cannot accumulate damage for a later grounded mode.
+
 Two unrelated systems: **creative flight** (`Abilities.flying`,
 server-granted, collides with terrain, ordinary air-travel arithmetic with
 three modifications) and a developer **free-fly/noclip** camera, since
