@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
 #[cfg(feature = "jvm")]
-use jni::objects::{Global, IntoAuto, JClass, JObject, JObjectArray};
+use jni::objects::{Global, IntoAuto, JClass, JObject, JObjectArray, JString};
 #[cfg(feature = "jvm")]
 use jni::{Env, jni_sig, jni_str};
 #[cfg(feature = "jvm")]
@@ -186,6 +186,7 @@ impl PaperLifecycleLoadRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaperPluginLifecycleStep {
     Load,
+    Construct,
     Enable,
     Disable,
 }
@@ -195,6 +196,7 @@ pub enum PaperPluginLifecycleStep {
 pub enum PaperPluginLifecyclePhase {
     Discovered,
     Loaded,
+    Constructed,
     Enabled,
     Disabled,
     Failed,
@@ -206,7 +208,8 @@ impl PaperPluginLifecyclePhase {
         matches!(
             (self, step),
             (Self::Discovered, PaperPluginLifecycleStep::Load)
-                | (Self::Loaded, PaperPluginLifecycleStep::Enable)
+                | (Self::Loaded, PaperPluginLifecycleStep::Construct)
+                | (Self::Constructed, PaperPluginLifecycleStep::Enable)
                 | (Self::Enabled, PaperPluginLifecycleStep::Disable)
         )
     }
@@ -223,6 +226,13 @@ impl PaperPluginLifecycleFailure {
     fn load(message: impl Into<String>) -> Self {
         Self {
             step: PaperPluginLifecycleStep::Load,
+            message: message.into(),
+        }
+    }
+
+    fn construct(message: impl Into<String>) -> Self {
+        Self {
+            step: PaperPluginLifecycleStep::Construct,
             message: message.into(),
         }
     }
@@ -266,6 +276,18 @@ impl PaperPluginLifecycleStatus {
         self.failure = Some(PaperPluginLifecycleFailure::load(message));
     }
 
+    #[cfg(feature = "jvm")]
+    fn constructed(&mut self) {
+        debug_assert!(self.phase.accepts(PaperPluginLifecycleStep::Construct));
+        self.phase = PaperPluginLifecyclePhase::Constructed;
+    }
+
+    fn failed_to_construct(&mut self, message: impl Into<String>) {
+        debug_assert!(self.phase.accepts(PaperPluginLifecycleStep::Construct));
+        self.phase = PaperPluginLifecyclePhase::Failed;
+        self.failure = Some(PaperPluginLifecycleFailure::construct(message));
+    }
+
     /// The validated descriptor that supplies this entry's identity.
     pub fn descriptor(&self) -> &PaperPluginDescriptor {
         &self.descriptor
@@ -307,6 +329,15 @@ impl PaperPluginLifecycleStatusSet {
         self.plugins[index].failed_to_load(message);
     }
 
+    #[cfg(feature = "jvm")]
+    fn constructed(&mut self, index: usize) {
+        self.plugins[index].constructed();
+    }
+
+    fn failed_to_construct(&mut self, index: usize, message: impl Into<String>) {
+        self.plugins[index].failed_to_construct(message);
+    }
+
     /// Statuses in deterministic descriptor discovery order.
     pub fn plugins(&self) -> &[PaperPluginLifecycleStatus] {
         &self.plugins
@@ -327,6 +358,11 @@ impl PaperPluginLifecycleStatusSet {
 pub enum PaperServerFacadeInput {
     /// No Java-facing server capability is available to a retained loader.
     Unavailable,
+    /// Permits only a Java-language zero-argument entry construction on the
+    /// worker that owns this token. It supplies no server object, no event
+    /// surface, and no plugin compatibility promise.
+    #[cfg(feature = "jvm")]
+    EntryConstructionOnly(NativeServerSurface),
     /// The isolated native shim can read or replace an already-resident block
     /// state and read the live server tick through its owning adapter worker's
     /// request ports.
@@ -346,20 +382,34 @@ impl PaperServerFacadeInput {
         Self::NativeServerSurface(surface)
     }
 
+    /// Consumes the adapter worker token for the entry-only construction seam.
+    ///
+    /// This deliberately proves only that construction stays on the worker
+    /// which owns the bounded request ports. It does not expose those ports to
+    /// the entry or make them a Java plugin API.
+    #[cfg(feature = "jvm")]
+    pub fn entry_construction_only(surface: NativeServerSurface) -> Self {
+        Self::EntryConstructionOnly(surface)
+    }
+
     fn state(&self) -> PaperServerFacadeState {
         match self {
             Self::Unavailable => PaperServerFacadeState::Unavailable,
+            #[cfg(feature = "jvm")]
+            Self::EntryConstructionOnly(_) => PaperServerFacadeState::EntryConstructionOnly,
             #[cfg(feature = "jvm")]
             Self::NativeServerSurface(_) => PaperServerFacadeState::NativeServerSurface,
         }
     }
 
-    fn construction_blocker(&self) -> PaperPluginConstructionBlocker {
+    fn construction_blocker(&self) -> Option<PaperPluginConstructionBlocker> {
         match self {
-            Self::Unavailable => PaperPluginConstructionBlocker::ServerFacadeUnavailable,
+            Self::Unavailable => Some(PaperPluginConstructionBlocker::ServerFacadeUnavailable),
+            #[cfg(feature = "jvm")]
+            Self::EntryConstructionOnly(_) => None,
             #[cfg(feature = "jvm")]
             Self::NativeServerSurface(_) => {
-                PaperPluginConstructionBlocker::PluginConstructionUnsupported
+                Some(PaperPluginConstructionBlocker::PluginConstructionUnsupported)
             }
         }
     }
@@ -375,6 +425,9 @@ impl PaperServerFacadeInput {
 pub enum PaperServerFacadeState {
     /// No compatible server facade has been supplied to the retained loader.
     Unavailable,
+    /// Construction is deliberately limited to a retained Java entry object;
+    /// no compatible server facade has been supplied.
+    EntryConstructionOnly,
     /// The private loader has only the narrow native server mutation seam.
     NativeServerSurface,
 }
@@ -383,6 +436,9 @@ impl fmt::Display for PaperServerFacadeState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unavailable => formatter.write_str("no compatible server facade is installed"),
+            Self::EntryConstructionOnly => formatter.write_str(
+                "entry-only construction is enabled without a compatible server facade",
+            ),
             Self::NativeServerSurface => {
                 formatter.write_str("the isolated native server mutation seam is installed")
             }
@@ -451,7 +507,7 @@ pub enum PaperPluginConstructorShape {
 pub struct PaperPluginConstructionStatus {
     descriptor: PaperPluginDescriptor,
     constructor: PaperPluginConstructorShape,
-    blocker: PaperPluginConstructionBlocker,
+    blocker: Option<PaperPluginConstructionBlocker>,
 }
 
 impl PaperPluginConstructionStatus {
@@ -465,9 +521,14 @@ impl PaperPluginConstructionStatus {
         self.constructor
     }
 
-    /// The explicit reason no constructor may run yet.
-    pub fn blocker(&self) -> PaperPluginConstructionBlocker {
+    /// The explicit reason no constructor may run yet, if construction is blocked.
+    pub fn blocker(&self) -> Option<PaperPluginConstructionBlocker> {
         self.blocker
+    }
+
+    /// Whether this entry may be constructed by the configured narrow mode.
+    pub fn is_eligible(&self) -> bool {
+        self.blocker.is_none()
     }
 }
 
@@ -475,9 +536,8 @@ impl PaperPluginConstructionStatus {
 ///
 /// This records every descriptor, including failed loads, so an operator can
 /// distinguish a bad entry jar, no facade, and a deliberately narrow facade
-/// input. No variant currently permits construction: adding one requires a
-/// real server-owned facade attached to the same retained loader as its entry
-/// class.
+/// input. `EntryConstructionOnly` permits only a retained Java object on the
+/// same worker; it is expressly not a compatible server facade.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaperPluginConstructionReadiness {
     facade: PaperServerFacadeState,
@@ -508,13 +568,13 @@ impl PaperPluginConstructionReadiness {
                     constructor: *constructor,
                     blocker: match constructor {
                         PaperPluginConstructorShape::EntryLoadFailed => {
-                            PaperPluginConstructionBlocker::EntryLoadFailed
+                            Some(PaperPluginConstructionBlocker::EntryLoadFailed)
                         }
                         PaperPluginConstructorShape::MissingPublicNoArguments => {
-                            PaperPluginConstructionBlocker::EntryConstructorUnavailable
+                            Some(PaperPluginConstructionBlocker::EntryConstructorUnavailable)
                         }
                         PaperPluginConstructorShape::InspectionFailed => {
-                            PaperPluginConstructionBlocker::EntryConstructorUninspectable
+                            Some(PaperPluginConstructionBlocker::EntryConstructorUninspectable)
                         }
                         PaperPluginConstructorShape::PublicNoArguments => {
                             facade_input.construction_blocker()
@@ -560,13 +620,30 @@ pub struct PaperLifecycleLoad {
 ///
 /// Owning the lifecycle load here keeps the non-initialized class and its fresh
 /// loader alive for the same worker lifetime as the construction snapshot.
-    /// The snapshot currently blocks every constructor explicitly, whether its
-    /// loader lacks a facade or retains only the narrow native read surface.
 #[cfg(feature = "jvm")]
 pub struct PaperPluginConstructionPlan {
     lifecycle: PaperLifecycleLoad,
     readiness: PaperPluginConstructionReadiness,
     _facade_input: PaperServerFacadeInput,
+}
+
+/// Retained plugin entry instances constructed by the narrow entry-only mode.
+///
+/// This keeps the loaders and classes that define every instance alive. It has
+/// no callback API: construction is the whole experimental boundary, not an
+/// implementation of a plugin lifecycle or server facade.
+#[cfg(feature = "jvm")]
+pub struct PaperPluginEntryConstruction {
+    lifecycle: PaperLifecycleLoad,
+    readiness: PaperPluginConstructionReadiness,
+    plugins: Vec<PaperConstructedPlugin>,
+}
+
+/// One retained Java object associated with its validated plugin descriptor.
+#[cfg(feature = "jvm")]
+pub struct PaperConstructedPlugin {
+    descriptor: PaperPluginDescriptor,
+    instance: Global<JObject<'static>>,
 }
 
 /// One successfully loaded plugin entry, kept with its identity and loader.
@@ -611,6 +688,28 @@ impl fmt::Debug for PaperPluginConstructionPlan {
             .field("loader_count", &self.lifecycle.loader_count())
             .field("readiness", &self.readiness)
             .finish()
+    }
+}
+
+#[cfg(feature = "jvm")]
+impl fmt::Debug for PaperPluginEntryConstruction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PaperPluginEntryConstruction")
+            .field("loader_count", &self.lifecycle.loader_count())
+            .field("constructed_plugins", &self.plugins.len())
+            .field("status", &self.lifecycle.status)
+            .finish()
+    }
+}
+
+#[cfg(feature = "jvm")]
+impl fmt::Debug for PaperConstructedPlugin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PaperConstructedPlugin")
+            .field("descriptor", &self.descriptor)
+            .finish_non_exhaustive()
     }
 }
 
@@ -698,6 +797,93 @@ impl PaperPluginConstructionPlan {
     pub fn loader_count(&self) -> usize {
         self.lifecycle.loader_count()
     }
+
+    /// Constructs every eligible entry on this lifecycle's adapter worker.
+    ///
+    /// Each constructor is attempted once, in deterministic descriptor order.
+    /// A constructor exception changes only that descriptor to `Failed` with a
+    /// `Construct` failure; later eligible entries still run. This is available
+    /// only after the caller explicitly selected `EntryConstructionOnly`, so it
+    /// does not manufacture a server facade or imply Bukkit/Paper support.
+    pub fn construct_entries(mut self, env: &mut Env<'_>) -> PaperPluginEntryConstruction {
+        let mut entries = Vec::new();
+        let mut loaded = self.lifecycle.plugins.iter();
+        for index in 0..self.lifecycle.status.plugins().len() {
+            let phase = self.lifecycle.status.plugins()[index].phase();
+            if phase != PaperPluginLifecyclePhase::Loaded {
+                continue;
+            }
+            let plugin = loaded
+                .next()
+                .expect("every loaded lifecycle status retains its entry class");
+            if !self.readiness.plugins()[index].is_eligible() {
+                continue;
+            }
+            match plugin.construct(env) {
+                Ok(instance) => {
+                    self.lifecycle.status.constructed(index);
+                    entries.push(PaperConstructedPlugin {
+                        descriptor: plugin.descriptor.clone(),
+                        instance,
+                    });
+                }
+                Err(error) => self.lifecycle.status.failed_to_construct(
+                    index,
+                    format!(
+                        "could not construct plugin {:?} entry class {}: {error}",
+                        plugin.descriptor.name(),
+                        plugin.descriptor.main_class(),
+                    ),
+                ),
+            }
+        }
+        assert!(
+            loaded.next().is_none(),
+            "every retained entry class has a lifecycle status",
+        );
+        PaperPluginEntryConstruction {
+            lifecycle: self.lifecycle,
+            readiness: self.readiness,
+            plugins: entries,
+        }
+    }
+}
+
+#[cfg(feature = "jvm")]
+impl PaperPluginEntryConstruction {
+    /// The original preflight snapshot for this construction attempt.
+    pub fn readiness(&self) -> &PaperPluginConstructionReadiness {
+        &self.readiness
+    }
+
+    /// Per-descriptor outcomes after isolated constructor attempts.
+    pub fn status(&self) -> &PaperPluginLifecycleStatusSet {
+        &self.lifecycle.status
+    }
+
+    /// Successfully constructed entries in deterministic descriptor order.
+    pub fn plugins(&self) -> &[PaperConstructedPlugin] {
+        &self.plugins
+    }
+
+    /// Number of retained bootstrap and plugin loaders.
+    pub fn loader_count(&self) -> usize {
+        self.lifecycle.loader_count()
+    }
+}
+
+#[cfg(feature = "jvm")]
+impl PaperConstructedPlugin {
+    /// The descriptor identity associated with this retained Java object.
+    pub fn descriptor(&self) -> &PaperPluginDescriptor {
+        &self.descriptor
+    }
+
+    /// Confirms that the Java instance is retained with its loader lifetime.
+    pub fn retains_instance(&self) -> bool {
+        let _ = &self.instance;
+        true
+    }
 }
 
 #[cfg(feature = "jvm")]
@@ -751,6 +937,36 @@ impl PaperLoadedPlugin {
             }
         }
     }
+
+    fn construct(&self, env: &mut Env<'_>) -> Result<Global<JObject<'static>>, String> {
+        let result = env.with_local_frame(16, |env| {
+            let entry_class = env.new_local_ref(self.entry_class.as_obj())?;
+            let entry_class = env.cast_local::<JClass>(entry_class)?;
+            let instance = env.new_object(entry_class, jni_sig!("()V"), &[])?;
+            env.new_global_ref(instance)
+        });
+        match result {
+            Ok(instance) => Ok(instance),
+            Err(error) => Err(construction_error(env, error)),
+        }
+    }
+}
+
+#[cfg(feature = "jvm")]
+fn construction_error(env: &mut Env<'_>, error: jni::errors::Error) -> String {
+    let description = env.exception_occurred().and_then(|exception| {
+        env.exception_clear();
+        let description = env.call_method(
+            &exception,
+            jni_str!("toString"),
+            jni_sig!("()Ljava/lang/String;"),
+            &[],
+        ).ok()?.l().ok()?;
+        let description = env.cast_local::<JString>(description).ok()?;
+        description.try_to_string(env).ok()
+    });
+    env.exception_clear();
+    description.unwrap_or_else(|| error.to_string())
 }
 
 impl PaperBootstrapPlan {
@@ -992,10 +1208,16 @@ fn validate_construction_facade(
     match (native_shim, facade_input) {
         (false, PaperServerFacadeInput::Unavailable) => Ok(()),
         #[cfg(feature = "jvm")]
+        (false, PaperServerFacadeInput::EntryConstructionOnly(_)) => Ok(()),
+        #[cfg(feature = "jvm")]
         (true, PaperServerFacadeInput::NativeServerSurface(_)) => Ok(()),
         #[cfg(feature = "jvm")]
         (false, PaperServerFacadeInput::NativeServerSurface(_)) => Err(PaperBootstrapError::new(
             "the native server mutation facade input requires the shared isolated native shim",
+        )),
+        #[cfg(feature = "jvm")]
+        (true, PaperServerFacadeInput::EntryConstructionOnly(_)) => Err(PaperBootstrapError::new(
+            "entry-only construction cannot be combined with the isolated native shim",
         )),
         (true, PaperServerFacadeInput::Unavailable) => Err(PaperBootstrapError::new(
             "an isolated native shim requires the adapter worker's server-owned read capabilities",
@@ -1706,10 +1928,12 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_phase_requires_load_then_enable_then_disable() {
+    fn lifecycle_phase_requires_load_then_construct_then_enable_then_disable() {
         assert!(PaperPluginLifecyclePhase::Discovered.accepts(PaperPluginLifecycleStep::Load));
         assert!(!PaperPluginLifecyclePhase::Discovered.accepts(PaperPluginLifecycleStep::Enable));
-        assert!(PaperPluginLifecyclePhase::Loaded.accepts(PaperPluginLifecycleStep::Enable));
+        assert!(PaperPluginLifecyclePhase::Loaded.accepts(PaperPluginLifecycleStep::Construct));
+        assert!(!PaperPluginLifecyclePhase::Loaded.accepts(PaperPluginLifecycleStep::Enable));
+        assert!(PaperPluginLifecyclePhase::Constructed.accepts(PaperPluginLifecycleStep::Enable));
         assert!(!PaperPluginLifecyclePhase::Loaded.accepts(PaperPluginLifecycleStep::Disable));
         assert!(PaperPluginLifecyclePhase::Enabled.accepts(PaperPluginLifecycleStep::Disable));
         assert!(!PaperPluginLifecyclePhase::Disabled.accepts(PaperPluginLifecycleStep::Load));
@@ -1749,7 +1973,7 @@ mod tests {
         assert_eq!(readiness.plugins()[0].descriptor().main_class(), "b.Main");
         assert_eq!(
             readiness.plugins()[0].blocker(),
-            PaperPluginConstructionBlocker::EntryLoadFailed,
+            Some(PaperPluginConstructionBlocker::EntryLoadFailed),
         );
         assert_eq!(
             readiness.plugins()[0].constructor(),
@@ -1762,7 +1986,7 @@ mod tests {
         );
         assert_eq!(
             readiness.plugins()[1].blocker(),
-            PaperPluginConstructionBlocker::ServerFacadeUnavailable,
+            Some(PaperPluginConstructionBlocker::ServerFacadeUnavailable),
         );
         assert_eq!(
             PaperPluginConstructionBlocker::ServerFacadeUnavailable.to_string(),
@@ -1793,17 +2017,38 @@ mod tests {
         assert_eq!(readiness.plugins()[0].descriptor().name(), "Missing");
         assert_eq!(
             readiness.plugins()[0].blocker(),
-            PaperPluginConstructionBlocker::EntryConstructorUnavailable,
+            Some(PaperPluginConstructionBlocker::EntryConstructorUnavailable),
         );
         assert_eq!(readiness.plugins()[1].descriptor().name(), "Opaque");
         assert_eq!(
             readiness.plugins()[1].blocker(),
-            PaperPluginConstructionBlocker::EntryConstructorUninspectable,
+            Some(PaperPluginConstructionBlocker::EntryConstructorUninspectable),
         );
         assert_eq!(
             PaperPluginConstructionBlocker::EntryConstructorUnavailable.to_string(),
             "the isolated plugin entry has no public zero-argument constructor",
         );
+    }
+
+    #[test]
+    fn construction_failure_is_isolated_and_names_its_step() {
+        let fixture = Fixture::new();
+        fixture.paper_jar();
+        fixture.plugin_jar("entry.jar", PAPER_DESCRIPTOR, valid_descriptor("Entry", "a.Main"));
+        fixture.plugin_jar("later.jar", BUKKIT_DESCRIPTOR, valid_descriptor("Later", "b.Main"));
+        let plan = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
+            .discover()
+            .expect("discover construction fixture");
+        let mut status = PaperPluginLifecycleStatusSet::discovered(plan.plugins());
+        status.loaded(0);
+        status.loaded(1);
+        status.failed_to_construct(0, "fixture constructor threw");
+
+        assert_eq!(status.plugins()[0].phase(), PaperPluginLifecyclePhase::Failed);
+        let failure = status.plugins()[0].failure().expect("failure must be retained");
+        assert_eq!(failure.step(), PaperPluginLifecycleStep::Construct);
+        assert_eq!(failure.message(), "fixture constructor threw");
+        assert_eq!(status.plugins()[1].phase(), PaperPluginLifecyclePhase::Loaded);
     }
 
     #[test]
