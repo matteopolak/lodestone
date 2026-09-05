@@ -106,6 +106,11 @@ what a count gate can do.
   everywhere — the GPU-adapter-dependent arena occupancy metrics are the case today.
   Such an entry is reported `SKIP`, does not count toward `--min-compared`, and carries
   an `optional_because` string saying why.
+- **Numeric fields must be finite.** `value` and `tolerance_pct` are JSON numbers, not
+  strings or `NaN`/infinity extensions; tolerance is also non-negative. A non-finite
+  latest result is a gate-input error rather than a reason to reuse an older healthy
+  value for that metric. This prevents `Infinity` from silently widening a count gate
+  until arbitrary drift passes.
 
 ## How the gate cannot pass vacuously
 
@@ -133,7 +138,7 @@ success in this repo while cargo returned 101.
 
 `python3 scripts/test-bench-gate.py` — stdlib only, no pytest, the same shape as
 `scripts/test-profile-cost-table.py` and for the same reason (these are Python scripts
-and no crate owns them). 28 checks over synthetic fixtures in a temporary directory;
+and no crate owns them). 31 checks over synthetic fixtures in a temporary directory;
 nothing is written inside the checkout.
 
 The centre of it is a planted regression in the exact shape of the real one: a fixture
@@ -157,6 +162,7 @@ edited) each turn the suite red:
 | ignore unit mismatch | a unit change is a failure, not a silent comparison |
 | `--update` widens the tolerance | `--update` preserves the tolerance |
 | accept duplicate baseline keys | one observed record cannot satisfy coverage twice |
+| accept non-finite values | `Infinity` cannot widen a gate and `NaN` cannot revive a stale result |
 
 Two of these were written *after* a mutation survived, which is the whole point of
 running the mutations rather than reasoning about them: the "unrun bench" check was

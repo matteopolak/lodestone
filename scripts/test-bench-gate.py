@@ -350,7 +350,49 @@ def main() -> int:
             f"exit {got.returncode}\n{got.stdout}{got.stderr}",
         )
 
-        # 10. The structural rule: a duration can never enter a baseline. This
+        # 10. Python accepts NaN and Infinity as JSON extensions, but a
+        # non-finite tolerance can widen the band until every regression
+        # passes. Reject it as an invalid gate input rather than treating a
+        # wildly changed count as healthy.
+        work = make_case(
+            root,
+            "non-finite-tolerance",
+            [dict(SECTION_ENTRY, tolerance_pct=float("inf"))],
+            [record("drawn_sections", 999, "sections")],
+        )
+        got = run_gate(work)
+        check(
+            "a non-finite tolerance cannot turn arbitrary drift green",
+            got.returncode == 2 and "finite, non-negative" in got.stderr,
+            f"exit {got.returncode}\n{got.stdout}{got.stderr}",
+        )
+
+        # A corrupted latest result must not be skipped in favour of a stale
+        # healthy value for the same key. The update path consumes the exact
+        # same input and must refuse it too.
+        work = make_case(
+            root,
+            "non-finite-result",
+            [SECTION_ENTRY],
+            [
+                record("drawn_sections", 347, "sections"),
+                record("drawn_sections", float("nan"), "sections"),
+            ],
+        )
+        got = run_gate(work)
+        check(
+            "a non-finite latest result is not replaced by a stale healthy value",
+            got.returncode == 2 and "non-finite value" in got.stderr,
+            f"exit {got.returncode}\n{got.stdout}{got.stderr}",
+        )
+        got = run_gate(work, "--update")
+        check(
+            "--update rejects a non-finite result too",
+            got.returncode == 2 and "non-finite value" in got.stderr,
+            f"exit {got.returncode}\n{got.stdout}{got.stderr}",
+        )
+
+        # 11. The structural rule: a duration can never enter a baseline. This
         #    is the wall-clock-ceiling trap made unreachable rather than
         #    documented.
         work = make_case(
@@ -385,7 +427,7 @@ def main() -> int:
             f"exit {got.returncode}\n{got.stdout}{got.stderr}",
         )
 
-        # 11. A metric that changed unit changed meaning.
+        # 12. A metric that changed unit changed meaning.
         work = make_case(
             root,
             "unit-drift",
@@ -399,7 +441,7 @@ def main() -> int:
             f"exit {got.returncode}\n{got.stdout}",
         )
 
-        # 12. Zero is a real baseline value (a healthy leak probe records
+        # 13. Zero is a real baseline value (a healthy leak probe records
         #     exactly zero bytes of growth) and a ratio against it is
         #     undefined, so the tolerance reads as an absolute allowance.
         zero_entry = {
@@ -431,7 +473,7 @@ def main() -> int:
             f"exit {got.returncode}\n{got.stdout}",
         )
 
-        # 13. --update is the documented answer to a legitimate change: it
+        # 14. --update is the documented answer to a legitimate change: it
         #     moves the value, preserves the tolerance, and makes the move a
         #     reviewable diff.
         work = make_case(
@@ -467,7 +509,7 @@ def main() -> int:
             upd.stdout,
         )
 
-        # 14. A recorder that wrote a null value must not crash the gate for
+        # 15. A recorder that wrote a null value must not crash the gate for
         #     every other metric in the same file. One real bench in this
         #     repository records `null` for a rate whose denominator was zero.
         work = root / "null-value"
