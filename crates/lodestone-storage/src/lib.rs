@@ -487,6 +487,23 @@ impl NativeStore {
             .collect()
     }
 
+    /// Snapshots every latest committed native general-record key in canonical order.
+    ///
+    /// The returned keys retain their producer-owned coordinates and local IDs;
+    /// callers must decode a key's envelope before deciding which typed general
+    /// record to export. Like [`Self::committed_chunk_coordinates`], this is a
+    /// point-in-time copy from the recovered latest-record index, so replacements
+    /// appear once and an incomplete final transaction appears never. It neither
+    /// reads record frames nor deserializes general-record payloads.
+    #[must_use]
+    pub fn committed_general_keys(&self) -> Vec<RecordKey> {
+        self.index
+            .keys()
+            .filter(|key| key.kind == RecordKind::General)
+            .copied()
+            .collect()
+    }
+
     /// Replaces the append history with one transaction containing every latest record.
     ///
     /// The replacement is first written and synced as `world.ls.compacting`.
@@ -1197,6 +1214,53 @@ mod tests {
                 },
             ],
             "a recovered uncommitted tail must not become part of enumeration"
+        );
+    }
+
+    #[test]
+    fn general_key_enumeration_is_sorted_unique_and_excludes_recovered_tail() {
+        let directory = tempdir().unwrap();
+        let path;
+        let first = RecordKey::general(-4, 2, 9);
+        let second = RecordKey::general(0, 0, 3);
+        let third = RecordKey::general(0, 0, 8);
+        {
+            let mut store = NativeStore::open(directory.path()).unwrap();
+            store
+                .write_transaction([
+                    RecordWrite::new(third, world_properties(3)),
+                    RecordWrite::new(RecordKey::chunk(-9, 7), chunk(-9, 7, 1)),
+                    RecordWrite::new(first, world_properties(1)),
+                    RecordWrite::new(second, world_properties(2)),
+                ])
+                .unwrap();
+            store
+                .write_transaction([RecordWrite::new(first, world_properties(4))])
+                .unwrap();
+            path = store.segment_path().to_owned();
+            assert_eq!(store.committed_general_keys(), [first, second, third]);
+        }
+
+        let body = encode_body_for_test(&[RecordWrite::new(
+            RecordKey::general(-99, -99, 1),
+            world_properties(5),
+        )]);
+        let header = encode_transaction_header(
+            TRANSACTION_START_MAGIC,
+            1,
+            body.len() as u64,
+            crc32(&body),
+        );
+        let mut interrupted = OpenOptions::new().append(true).open(&path).unwrap();
+        interrupted.write_all(&header).unwrap();
+        interrupted.write_all(&body).unwrap();
+        drop(interrupted);
+
+        let recovered = NativeStore::open(directory.path()).unwrap();
+        assert_eq!(
+            recovered.committed_general_keys(),
+            [first, second, third],
+            "a recovered uncommitted tail must not become part of general-key enumeration"
         );
     }
 
