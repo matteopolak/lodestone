@@ -4,7 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, ChatMode, ClientAction, ClientSettings,
+    DisplayedSkinParts, MainHand, ParticleStatus,
+};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_8::adapter;
 
@@ -99,6 +102,48 @@ async fn registry_selected_legacy_server_reaches_play_and_confirms_a_block_break
         .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air))
         .await
         .expect("the server block-update must replace the known block with air");
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn client_settings_expand_the_hosted_view_on_the_client() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
+        .expect("protocol 47 must resolve to a hosted family");
+    let source = Arc::new(LegacyFixtureSource::new());
+    // Start at radius zero so column (1, 0) can only arrive after the
+    // settings packet reaches `ViewTracker::set_view_radius`.
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, _events) = ClientBuilder::new(address(), profile(), Box::new(adapter()))
+        .player_loaded_policy(PlayerLoadedPolicy::Manual)
+        .connect_with(client_io);
+
+    handle
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("legacy login must reach Play");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
+        .await
+        .expect("the initial radius-zero chunk must arrive");
+    handle
+        .send_action(ClientAction::SetClientSettings(ClientSettings {
+            locale: "en_us".to_owned(),
+            view_distance: 1,
+            chat_mode: ChatMode::Full,
+            chat_colors: true,
+            skin_parts: DisplayedSkinParts::default(),
+            main_hand: MainHand::Right,
+            text_filtering: false,
+            allow_server_listing: true,
+            particle_status: ParticleStatus::All,
+        }))
+        .expect("joined client accepts a settings update");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
+        .await
+        .expect("the settings-driven view expansion must stream a new column");
 
     handle.shutdown();
     server.shutdown().await;

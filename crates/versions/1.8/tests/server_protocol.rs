@@ -144,6 +144,23 @@ fn keep_alive_uses_the_protocol_47_varint_body_in_both_directions() {
 }
 
 #[test]
+fn client_settings_lift_the_protocol_47_view_distance() {
+    let protocol = V47ServerProtocol;
+    // `en_us`, distance 6, full chat with colours, and every displayed skin
+    // part. Protocol 47 ends here; it has no main-hand field.
+    let body = [5, b'e', b'n', b'_', b'u', b's', 6, 0, 1, 0x7f];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::SETTINGS, &body),
+        ServerBound::ClientInformationChanged { view_distance: 6 }
+    );
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::SETTINGS, &[5, b'e', b'n', b'_', b'u', b's', 6, 0, 1, 0x7f, 0]),
+        ServerBound::Ignored,
+        "a settings packet with a trailing byte must not resize the client view"
+    );
+}
+
+#[test]
 fn unsupported_states_are_errors_not_air_substitutions() {
     let protocol = V47ServerProtocol;
     assert!(protocol

@@ -19,6 +19,7 @@ use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGame};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
+use crate::packets::settings::Settings;
 
 const CTX: Ctx = Ctx { version: PROTOCOL };
 const COMPRESSION_THRESHOLD: i32 = 256;
@@ -217,6 +218,13 @@ impl ServerProtocol for V47ServerProtocol {
                 decode_full::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {
                     ServerBound::KeepAlive {
                         id: i64::from(response.id),
+                    }
+                })
+            }
+            State::Play if packet_id == play::serverbound::SETTINGS => {
+                decode_full::<Settings>(payload).map_or(ServerBound::Ignored, |settings| {
+                    ServerBound::ClientInformationChanged {
+                        view_distance: settings.view_distance,
                     }
                 })
             }

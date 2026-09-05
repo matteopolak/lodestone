@@ -151,6 +151,23 @@ fn keep_alive_uses_the_protocol_5_i32_body_in_both_directions() {
 }
 
 #[test]
+fn client_settings_lift_the_legacy_view_distance() {
+    let protocol = V5ServerProtocol;
+    // `en_us`, distance 6, full chat with colours, normal difficulty, cape
+    // shown. The literal is the packet's six fields, not a codec round trip.
+    let body = [5, b'e', b'n', b'_', b'u', b's', 6, 0, 1, 2, 1];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::SETTINGS, &body),
+        ServerBound::ClientInformationChanged { view_distance: 6 }
+    );
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::SETTINGS, &[5, b'e', b'n', b'_', b'u', b's', 6, 0, 1, 2, 1, 0]),
+        ServerBound::Ignored,
+        "a settings packet with a trailing byte must not resize the client view"
+    );
+}
+
+#[test]
 fn unsupported_states_are_errors_not_air_substitutions() {
     let protocol = V5ServerProtocol;
     assert!(protocol

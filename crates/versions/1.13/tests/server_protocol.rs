@@ -135,6 +135,31 @@ fn keep_alive_uses_the_protocol_404_i64_body_in_both_directions() {
 }
 
 #[test]
+fn client_settings_lift_the_protocol_404_view_distance() {
+    let protocol = V404ServerProtocol;
+    // `en_us`, distance 6, hidden chat (VarInt 2), colours, every skin part,
+    // right main hand. These literal fields separate this layout from 1.8.
+    let body = [5, b'e', b'n', b'_', b'u', b's', 6, 2, 1, 0x7f, 1];
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            lodestone_v1_13::packet_ids::play::serverbound::SETTINGS,
+            &body,
+        ),
+        ServerBound::ClientInformationChanged { view_distance: 6 }
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            lodestone_v1_13::packet_ids::play::serverbound::SETTINGS,
+            &[5, b'e', b'n', b'_', b'u', b's', 6, 2, 1, 0x7f, 1, 0],
+        ),
+        ServerBound::Ignored,
+        "a settings packet with a trailing byte must not resize the client view"
+    );
+}
+
+#[test]
 fn states_missing_from_the_404_table_are_errors_not_air_substitutions() {
     let protocol = V404ServerProtocol;
     assert!(protocol

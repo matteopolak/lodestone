@@ -26,6 +26,7 @@ use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGame};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
+use crate::packets::settings::Settings;
 
 const CTX_340: Ctx = Ctx { version: PROTOCOL };
 const CTX_110: Ctx = Ctx {
@@ -68,6 +69,7 @@ struct ServerPacketIds {
     compression: i32,
     login_success: i32,
     block_dig: i32,
+    settings: i32,
     keep_alive_clientbound: i32,
     keep_alive_serverbound: i32,
     join: i32,
@@ -82,6 +84,7 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     compression: login::clientbound::COMPRESS,
     login_success: login::clientbound::SUCCESS,
     block_dig: play::serverbound::BLOCK_DIG,
+    settings: play::serverbound::SETTINGS,
     keep_alive_clientbound: play::clientbound::KEEP_ALIVE,
     keep_alive_serverbound: play::serverbound::KEEP_ALIVE,
     join: play::clientbound::LOGIN,
@@ -96,6 +99,7 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_316::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_316::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_316::play::serverbound::BLOCK_DIG,
+    settings: crate::packet_ids_316::play::serverbound::SETTINGS,
     keep_alive_clientbound: crate::packet_ids_316::play::clientbound::KEEP_ALIVE,
     keep_alive_serverbound: crate::packet_ids_316::play::serverbound::KEEP_ALIVE,
     join: crate::packet_ids_316::play::clientbound::LOGIN,
@@ -110,6 +114,7 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_210::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_210::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_210::play::serverbound::BLOCK_DIG,
+    settings: crate::packet_ids_210::play::serverbound::SETTINGS,
     keep_alive_clientbound: crate::packet_ids_210::play::clientbound::KEEP_ALIVE,
     keep_alive_serverbound: crate::packet_ids_210::play::serverbound::KEEP_ALIVE,
     join: crate::packet_ids_210::play::clientbound::LOGIN,
@@ -124,6 +129,7 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_110::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_110::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_110::play::serverbound::BLOCK_DIG,
+    settings: crate::packet_ids_110::play::serverbound::SETTINGS,
     keep_alive_clientbound: crate::packet_ids_110::play::clientbound::KEEP_ALIVE,
     keep_alive_serverbound: crate::packet_ids_110::play::serverbound::KEEP_ALIVE,
     join: crate::packet_ids_110::play::clientbound::LOGIN,
@@ -465,6 +471,13 @@ fn decode_packet(
                     face,
                     sequence: 0,
                 }
+            }
+            State::Play if packet_id == ids.settings => {
+                decode_full::<Settings>(payload, ctx).map_or(ServerBound::Ignored, |settings| {
+                    ServerBound::ClientInformationChanged {
+                        view_distance: settings.view_distance,
+                    }
+                })
             }
             State::Play if packet_id == ids.keep_alive_serverbound => {
                 let id = if uses_varint_keep_alive(protocol) {

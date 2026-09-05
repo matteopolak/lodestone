@@ -22,6 +22,7 @@ use crate::packets::game::{
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess};
+use crate::packets::settings::Settings;
 use crate::packets::world::{BlockChange, BlockDig};
 use crate::packets::position::PositionIbi;
 
@@ -295,6 +296,13 @@ impl ServerProtocol for V5ServerProtocol {
                 decode_full::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {
                     ServerBound::KeepAlive {
                         id: i64::from(response.keep_alive_id),
+                    }
+                })
+            }
+            State::Play if packet_id == play::serverbound::SETTINGS => {
+                decode_full::<Settings>(payload).map_or(ServerBound::Ignored, |settings| {
+                    ServerBound::ClientInformationChanged {
+                        view_distance: settings.view_distance,
                     }
                 })
             }

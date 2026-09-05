@@ -171,6 +171,12 @@ a fixed signed `i64` id in both directions. Its server-protocol control pins an 
 proves a trailing byte is not accepted as an acknowledgement; it is not an external-client
 validation.
 
+The hosted decoder also turns serverbound `settings` into
+`ServerBound::ClientInformationChanged`, allowing its signed-byte requested view distance to resize
+the server's chunk window. The remaining locale, VarInt chat mode, colour flag, skin-parts byte,
+and VarInt main hand are decoded to preserve the protocol-404 boundary but have no host-side
+consumer. A literal-body control fixes this six-field layout and rejects a trailing byte.
+
 ### The negative control, and what it actually measured
 
 The 1.14 era found that **no** misroute between its protocols produces a
