@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
 #[cfg(feature = "jvm")]
-use jni::objects::{Global, JObject};
+use jni::objects::{Global, JClass, JObject};
 #[cfg(feature = "jvm")]
 use jni::Env;
 #[cfg(feature = "jvm")]
@@ -134,16 +134,176 @@ pub struct PaperBootstrapPlan {
     plugins: Vec<PaperPluginDescriptor>,
 }
 
+/// The only lifecycle operations a server-owned Java-plugin host may perform.
+///
+/// A descriptor first becomes `Loaded`; only a loaded plugin may later be
+/// enabled, and only an enabled plugin may later be disabled. The bridge does
+/// not expose enable or disable callbacks yet: invoking either would run
+/// arbitrary plugin code before the compatible server API exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperPluginLifecycleStep {
+    Load,
+    Enable,
+    Disable,
+}
+
+/// The durable phase of one descriptor-driven plugin entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperPluginLifecyclePhase {
+    Discovered,
+    Loaded,
+    Enabled,
+    Disabled,
+    Failed,
+}
+
+impl PaperPluginLifecyclePhase {
+    /// Whether this phase permits the next lifecycle operation.
+    pub fn accepts(self, step: PaperPluginLifecycleStep) -> bool {
+        matches!(
+            (self, step),
+            (Self::Discovered, PaperPluginLifecycleStep::Load)
+                | (Self::Loaded, PaperPluginLifecycleStep::Enable)
+                | (Self::Enabled, PaperPluginLifecycleStep::Disable)
+        )
+    }
+}
+
+/// A bounded failure recorded against one lifecycle entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaperPluginLifecycleFailure {
+    step: PaperPluginLifecycleStep,
+    message: String,
+}
+
+impl PaperPluginLifecycleFailure {
+    fn load(message: impl Into<String>) -> Self {
+        Self {
+            step: PaperPluginLifecycleStep::Load,
+            message: message.into(),
+        }
+    }
+
+    /// The operation that failed.
+    pub fn step(&self) -> PaperPluginLifecycleStep {
+        self.step
+    }
+
+    /// The bounded host diagnostic for this one entry.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// Observable lifecycle state for one validated plugin descriptor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaperPluginLifecycleStatus {
+    descriptor: PaperPluginDescriptor,
+    phase: PaperPluginLifecyclePhase,
+    failure: Option<PaperPluginLifecycleFailure>,
+}
+
+impl PaperPluginLifecycleStatus {
+    fn discovered(descriptor: PaperPluginDescriptor) -> Self {
+        Self {
+            descriptor,
+            phase: PaperPluginLifecyclePhase::Discovered,
+            failure: None,
+        }
+    }
+
+    fn loaded(&mut self) {
+        debug_assert!(self.phase.accepts(PaperPluginLifecycleStep::Load));
+        self.phase = PaperPluginLifecyclePhase::Loaded;
+    }
+
+    fn failed_to_load(&mut self, message: impl Into<String>) {
+        debug_assert!(self.phase.accepts(PaperPluginLifecycleStep::Load));
+        self.phase = PaperPluginLifecyclePhase::Failed;
+        self.failure = Some(PaperPluginLifecycleFailure::load(message));
+    }
+
+    /// The validated descriptor that supplies this entry's identity.
+    pub fn descriptor(&self) -> &PaperPluginDescriptor {
+        &self.descriptor
+    }
+
+    /// The entry's completed lifecycle phase.
+    pub fn phase(&self) -> PaperPluginLifecyclePhase {
+        self.phase
+    }
+
+    /// The entry-local failure, if its `Load` attempt was isolated and failed.
+    pub fn failure(&self) -> Option<&PaperPluginLifecycleFailure> {
+        self.failure.as_ref()
+    }
+}
+
+/// A server-owned snapshot of the descriptor lifecycle.
+///
+/// Bootstrap remains a process-wide prerequisite, so its load error is
+/// terminal. Plugin entry errors are instead recorded on the affected
+/// descriptor and do not prevent later isolated loaders from being checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaperPluginLifecycleStatusSet {
+    plugins: Vec<PaperPluginLifecycleStatus>,
+}
+
+impl PaperPluginLifecycleStatusSet {
+    fn discovered(plugins: &[PaperPluginDescriptor]) -> Self {
+        Self {
+            plugins: plugins.iter().cloned().map(PaperPluginLifecycleStatus::discovered).collect(),
+        }
+    }
+
+    fn loaded(&mut self, index: usize) {
+        self.plugins[index].loaded();
+    }
+
+    fn failed_to_load(&mut self, index: usize, message: impl Into<String>) {
+        self.plugins[index].failed_to_load(message);
+    }
+
+    /// Statuses in deterministic descriptor discovery order.
+    pub fn plugins(&self) -> &[PaperPluginLifecycleStatus] {
+        &self.plugins
+    }
+}
+
 /// Loader state retained after non-initializing lifecycle entry loading.
 ///
 /// Each global reference owns one fresh isolated loader. Keeping those loaders
-/// alive preserves the definitions selected from its private classpath and the
-/// native registration installed on its shim definition. It intentionally
-/// retains neither an entry class nor a plugin object: construction and
-/// enablement remain a later, server-lifecycle-owned decision.
+/// and their non-initialized entry classes alive preserves the definitions
+/// selected from private classpaths and the native registration installed on a
+/// shim definition. It retains no plugin object: construction and enablement
+/// remain a later, server-lifecycle-owned decision.
 #[cfg(feature = "jvm")]
 pub struct PaperLifecycleLoad {
-    loaders: Vec<Global<JObject<'static>>>,
+    bootstrap_loader: Global<JObject<'static>>,
+    plugins: Vec<PaperLoadedPlugin>,
+    status: PaperPluginLifecycleStatusSet,
+}
+
+/// One successfully loaded plugin entry, kept with its identity and loader.
+///
+/// The global references are intentionally private. Later lifecycle work must
+/// add a server-owned API state before it can construct from the retained entry
+/// class or invoke plugin code.
+#[cfg(feature = "jvm")]
+pub struct PaperLoadedPlugin {
+    descriptor: PaperPluginDescriptor,
+    loader: Global<JObject<'static>>,
+    entry_class: Global<JClass<'static>>,
+}
+
+#[cfg(feature = "jvm")]
+impl fmt::Debug for PaperLoadedPlugin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PaperLoadedPlugin")
+            .field("descriptor", &self.descriptor)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "jvm")]
@@ -151,7 +311,9 @@ impl fmt::Debug for PaperLifecycleLoad {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PaperLifecycleLoad")
-            .field("loader_count", &self.loaders.len())
+            .field("loader_count", &self.loader_count())
+            .field("loaded_plugins", &self.plugins.len())
+            .field("status", &self.status)
             .finish()
     }
 }
@@ -160,7 +322,37 @@ impl fmt::Debug for PaperLifecycleLoad {
 impl PaperLifecycleLoad {
     /// Number of isolated loaders retained by this successful lifecycle load.
     pub fn loader_count(&self) -> usize {
-        self.loaders.len()
+        1 + self.plugins.len()
+    }
+
+    /// Confirms that the bootstrap loader remains owned with this lifecycle.
+    pub fn retains_bootstrap_loader(&self) -> bool {
+        let _ = &self.bootstrap_loader;
+        true
+    }
+
+    /// Per-descriptor load outcomes, including isolated failures.
+    pub fn status(&self) -> &PaperPluginLifecycleStatusSet {
+        &self.status
+    }
+
+    /// Successfully loaded entries, each retained beside its private loader.
+    pub fn loaded_plugins(&self) -> &[PaperLoadedPlugin] {
+        &self.plugins
+    }
+}
+
+#[cfg(feature = "jvm")]
+impl PaperLoadedPlugin {
+    /// The descriptor identity associated with this loader and entry class.
+    pub fn descriptor(&self) -> &PaperPluginDescriptor {
+        &self.descriptor
+    }
+
+    /// Confirms that this descriptor remains associated with its loader and class.
+    pub fn retains_entry_association(&self) -> bool {
+        let _ = (&self.loader, &self.entry_class);
+        true
     }
 }
 
@@ -203,12 +395,15 @@ impl PaperBootstrapPlan {
     ///
     /// The seam is JVM-independent so hosts can prove their ordering and error
     /// policy without starting a JVM. A successful callback means only that a
-    /// class was loaded without initialization. It does not construct a plugin,
-    /// invoke an entry point, initialize Paper, or establish API compatibility.
+    /// class was loaded without initialization. Bootstrap failure remains
+    /// terminal, but an individual plugin failure is retained in the returned
+    /// status set and later plugins still receive their isolated `Load` check.
+    /// It does not construct a plugin, invoke an entry point, initialize Paper,
+    /// or establish API compatibility.
     pub fn load_lifecycle_entries<E>(
         &self,
         mut load_class: impl FnMut(&[PathBuf], &str) -> Result<(), E>,
-    ) -> Result<(), PaperBootstrapError>
+    ) -> Result<PaperPluginLifecycleStatusSet, PaperBootstrapError>
     where
         E: fmt::Display,
     {
@@ -218,17 +413,19 @@ impl PaperBootstrapPlan {
                 "could not load Paper bootstrap class {BOOTSTRAP_CLASS}: {error}"
             ))
         })?;
-        for plugin in &self.plugins {
+        let mut status = PaperPluginLifecycleStatusSet::discovered(&self.plugins);
+        for (index, plugin) in self.plugins.iter().enumerate() {
             let plugin_paths = self.loader_paths(Some(plugin.jar()));
-            load_class(&plugin_paths, plugin.main_class()).map_err(|error| {
-                PaperBootstrapError::new(format!(
+            match load_class(&plugin_paths, plugin.main_class()) {
+                Ok(()) => status.loaded(index),
+                Err(error) => status.failed_to_load(index, format!(
                     "could not load plugin {:?} entry class {}: {error}",
                     plugin.name(),
                     plugin.main_class(),
-                ))
-            })?;
+                )),
+            }
         }
-        Ok(())
+        Ok(status)
     }
 
     fn loader_paths(&self, plugin_jar: Option<&Path>) -> Vec<PathBuf> {
@@ -245,8 +442,8 @@ impl PaperBootstrapPlan {
     /// This is the real JVM consumer of [`Self::load_lifecycle_entries`]. It
     /// deliberately calls `ClassLoader.loadClass`, which does not initialize
     /// the loaded class. If requested, it first validates and registers the
-    /// bridge's one native shim member in that *same* fresh loader. The returned
-    /// local class references are discarded immediately; retaining loaders,
+    /// bridge's one native shim member in that *same* fresh loader. It retains
+    /// the non-initialized entry class with its loader and descriptor. Plugin
     /// construction, enablement, and event dispatch are later lifecycle work.
     #[cfg(feature = "jvm")]
     pub fn load_lifecycle_entries_in_runtime<'local>(
@@ -255,25 +452,32 @@ impl PaperBootstrapPlan {
         env: &mut Env<'local>,
     ) -> Result<PaperLifecycleLoad, PaperBootstrapError> {
         let bootstrap_paths = self.loader_paths(None);
-        let mut loaders = Vec::with_capacity(self.plugins.len() + 1);
-        loaders.push(self.load_one_entry_in_runtime(runtime, env, &bootstrap_paths, BOOTSTRAP_CLASS)
+        let (bootstrap_loader, _) = self.load_one_entry_in_runtime(runtime, env, &bootstrap_paths, BOOTSTRAP_CLASS)
             .map_err(|error| PaperBootstrapError::lifecycle(
                 format!("could not load Paper bootstrap class {BOOTSTRAP_CLASS}"),
                 error,
-            ))?);
-        for plugin in &self.plugins {
+            ))?;
+        let mut status = PaperPluginLifecycleStatusSet::discovered(&self.plugins);
+        let mut plugins = Vec::with_capacity(self.plugins.len());
+        for (index, plugin) in self.plugins.iter().enumerate() {
             let plugin_paths = self.loader_paths(Some(plugin.jar()));
-            loaders.push(self.load_one_entry_in_runtime(runtime, env, &plugin_paths, plugin.main_class())
-                .map_err(|error| PaperBootstrapError::lifecycle(
-                    format!(
-                        "could not load plugin {:?} entry class {}",
-                        plugin.name(),
-                        plugin.main_class(),
-                    ),
-                    error,
-                ))?);
+            match self.load_one_entry_in_runtime(runtime, env, &plugin_paths, plugin.main_class()) {
+                Ok((loader, entry_class)) => {
+                    status.loaded(index);
+                    plugins.push(PaperLoadedPlugin {
+                        descriptor: plugin.clone(),
+                        loader,
+                        entry_class,
+                    });
+                }
+                Err(error) => status.failed_to_load(index, format!(
+                    "could not load plugin {:?} entry class {}: {error}",
+                    plugin.name(),
+                    plugin.main_class(),
+                )),
+            }
         }
-        Ok(PaperLifecycleLoad { loaders })
+        Ok(PaperLifecycleLoad { bootstrap_loader, plugins, status })
     }
 
     #[cfg(feature = "jvm")]
@@ -283,7 +487,7 @@ impl PaperBootstrapPlan {
         env: &mut Env<'local>,
         paths: &[PathBuf],
         binary_name: &str,
-    ) -> Result<Global<JObject<'static>>, PaperBootstrapError> {
+    ) -> Result<(Global<JObject<'static>>, Global<JClass<'static>>), PaperBootstrapError> {
         let config = paths.iter().fold(JvmConfig::new(), |config, path| {
             config.with_classpath(path)
         });
@@ -295,8 +499,10 @@ impl PaperBootstrapPlan {
                     return Err(crate::runtime::JvmError::new(error.to_string()));
                 }
             }
-            runtime.load_class_from_loader(env, loader, binary_name)?;
-            env.new_global_ref(loader).map_err(crate::runtime::JvmError::from)
+            let entry_class = runtime.load_class_from_loader(env, loader, binary_name)?;
+            let loader = env.new_global_ref(loader).map_err(crate::runtime::JvmError::from)?;
+            let entry_class = env.new_global_ref(entry_class).map_err(crate::runtime::JvmError::from)?;
+            Ok((loader, entry_class))
         });
         if let Some(error) = native_error.into_inner() {
             return Err(PaperBootstrapError::native_surface(error));
@@ -958,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_loader_orders_isolated_requests_and_names_plugin_failures() {
+    fn lifecycle_loader_isolates_plugin_failures_and_retains_load_status() {
         let fixture = Fixture::new();
         fixture.paper_jar();
         fixture.plugin_jar("z-last.jar", BUKKIT_DESCRIPTOR, valid_descriptor("Zulu", "z.Main"));
@@ -969,7 +1175,7 @@ mod tests {
             .discover()
             .expect("discover lifecycle fixture");
         let mut requests = Vec::new();
-        let error = plan.load_lifecycle_entries(|paths, class| {
+        let status = plan.load_lifecycle_entries(|paths, class| {
             requests.push((paths.to_vec(), class.to_owned()));
             if class == "z.Main" {
                 Err("fixture loader rejected Zulu")
@@ -977,9 +1183,9 @@ mod tests {
                 Ok(())
             }
         })
-        .expect_err("one plugin loader failure must stop the lifecycle");
+        .expect("one plugin loader failure must be isolated");
 
-        assert_eq!(requests.len(), 3, "the later plugin must not load after failure");
+        assert_eq!(requests.len(), 3, "every plugin must receive an isolated load attempt");
         assert_eq!(requests[0].1, BOOTSTRAP_CLASS);
         assert_eq!(requests[1].1, "a.Main");
         assert_eq!(requests[2].1, "z.Main");
@@ -1000,8 +1206,23 @@ mod tests {
                 fixture.plugins_path().join("z-last.jar"),
             ]
         );
-        assert!(error.to_string().contains("plugin \"Zulu\" entry class z.Main"), "{error}");
-        assert!(error.to_string().contains("fixture loader rejected Zulu"), "{error}");
+        assert_eq!(status.plugins()[0].phase(), PaperPluginLifecyclePhase::Loaded);
+        assert_eq!(status.plugins()[1].phase(), PaperPluginLifecyclePhase::Failed);
+        let failure = status.plugins()[1].failure().expect("Zulu must name its own failure");
+        assert_eq!(failure.step(), PaperPluginLifecycleStep::Load);
+        assert!(failure.message().contains("plugin \"Zulu\" entry class z.Main"), "{failure:?}");
+        assert!(failure.message().contains("fixture loader rejected Zulu"), "{failure:?}");
+    }
+
+    #[test]
+    fn lifecycle_phase_requires_load_then_enable_then_disable() {
+        assert!(PaperPluginLifecyclePhase::Discovered.accepts(PaperPluginLifecycleStep::Load));
+        assert!(!PaperPluginLifecyclePhase::Discovered.accepts(PaperPluginLifecycleStep::Enable));
+        assert!(PaperPluginLifecyclePhase::Loaded.accepts(PaperPluginLifecycleStep::Enable));
+        assert!(!PaperPluginLifecyclePhase::Loaded.accepts(PaperPluginLifecycleStep::Disable));
+        assert!(PaperPluginLifecyclePhase::Enabled.accepts(PaperPluginLifecycleStep::Disable));
+        assert!(!PaperPluginLifecyclePhase::Disabled.accepts(PaperPluginLifecycleStep::Load));
+        assert!(!PaperPluginLifecyclePhase::Failed.accepts(PaperPluginLifecycleStep::Enable));
     }
 
     #[test]
