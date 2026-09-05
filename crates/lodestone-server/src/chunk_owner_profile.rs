@@ -15,6 +15,13 @@ pub const SCENE_NAME: &str = "chunk-owner-mixed-8";
 pub const OWNER_COUNT: usize = 8;
 /// Ambient producers spread across the same eight chunk owners.
 pub const AMBIENT_MOB_COUNT: usize = 64;
+/// The normal finite run length used by the benchmark and Samply entry point.
+pub const DEFAULT_PROFILE_TICKS: u64 = 128;
+/// Hard ceiling for one local profiling invocation.
+///
+/// The workload advances a paused clock, but a caller-controlled unbounded
+/// count would still turn a finite investigation into an accidental campaign.
+pub const MAX_PROFILE_TICKS: u64 = 512;
 
 const FLOOR_TOP: i32 = 4;
 const TICK_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
@@ -27,6 +34,17 @@ pub struct ChunkOwnerProfileReport {
     pub ticks: u64,
     /// The integrated loop's phase and owner-boundary counters.
     pub stats: TickStats,
+}
+
+/// Reject a zero or unbounded profiling tick count before a runtime starts.
+pub fn validate_profile_ticks(ticks: u64) -> Result<u64, String> {
+    if (1..=MAX_PROFILE_TICKS).contains(&ticks) {
+        Ok(ticks)
+    } else {
+        Err(format!(
+            "profile ticks must be 1..={MAX_PROFILE_TICKS}, got {ticks}"
+        ))
+    }
 }
 
 /// Runs the named workload. With the `profile-harness` feature, a paused
@@ -182,4 +200,17 @@ impl ChunkSource for ProfileWorld {
     }
 
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DEFAULT_PROFILE_TICKS, MAX_PROFILE_TICKS, validate_profile_ticks};
+
+    #[test]
+    fn profile_tick_count_has_a_finite_nonzero_envelope() {
+        assert_eq!(validate_profile_ticks(DEFAULT_PROFILE_TICKS), Ok(DEFAULT_PROFILE_TICKS));
+        assert_eq!(validate_profile_ticks(MAX_PROFILE_TICKS), Ok(MAX_PROFILE_TICKS));
+        assert!(validate_profile_ticks(0).is_err());
+        assert!(validate_profile_ticks(MAX_PROFILE_TICKS + 1).is_err());
+    }
 }

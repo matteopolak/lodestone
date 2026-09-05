@@ -363,9 +363,9 @@ profile-heavy-server capture:
 bench-chunk-owner-tick:
     cargo bench {{jflag}} -p lodestone-server --features profile-harness --bench chunk_owner_tick -- --quick
 
-samply-chunk-owner-tick capture:
-    cargo build --release {{jflag}} -p lodestone-server --features profile-harness --example chunk-owner-tick-profile
-    samply record --save-only --unstable-presymbolicate -o {{capture}} -- target/release/examples/chunk-owner-tick-profile 128
+samply-chunk-owner-tick *args:
+    cargo build --release {{jflag}} --target-dir {{tdir}} -p lodestone-server --features profile-harness --example chunk-owner-tick-profile
+    python3 scripts/samply-chunk-owner-tick.py --server {{tdir}}/release/examples/chunk-owner-tick-profile {{args}}
 
 # A finite, adapter-free profiling input for the 256-chunk coarse horizon.
 # It requests 256 reduced far columns plus a fixed tile budget per recenter and
