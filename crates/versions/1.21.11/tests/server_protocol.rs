@@ -213,6 +213,24 @@ fn a_loaded_neighbour_contributes_sky_light_across_the_east_border() {
             &[(1, 0, ChunkColumn::new(-64, 384))],
         )
         .unwrap();
+    let all_neighbours = (-1..=1)
+        .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+        .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+        .map(|(dx, dz)| (dx, dz, ChunkColumn::new(-64, 384)))
+        .collect::<Vec<_>>();
+    assert_eq!(all_neighbours.len(), 8, "the full fixture must supply every neighbour");
+    let with_all = protocol
+        .compute_column_light_with_neighbours(&center, &all_neighbours)
+        .unwrap();
+    let without_east = all_neighbours
+        .iter()
+        .filter(|(dx, dz, _)| (*dx, *dz) != (1, 0))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(without_east.len(), 7, "control must remove only the open east column");
+    let without_east = protocol
+        .compute_column_light_with_neighbours(&center, &without_east)
+        .unwrap();
     assert_eq!(
         isolated.section_sky_light(10, 15, 4, 8),
         Some(0),
@@ -223,11 +241,25 @@ fn a_loaded_neighbour_contributes_sky_light_across_the_east_border() {
         Some(14),
         "the adjacent open column is one horizontal step from local x=15"
     );
+    assert_eq!(
+        with_all.section_sky_light(10, 15, 4, 8),
+        Some(14),
+        "a fully resident open 3x3 must retain the east sky path"
+    );
+    assert_eq!(
+        without_east.section_sky_light(10, 15, 4, 8),
+        Some(7),
+        "control: the north/south sky paths reach the east border only after eight steps"
+    );
     let ServerDirective::Send { payload, .. } = protocol
-        .try_encode_chunk_with_neighbours(0, 0, &center, &[(1, 0, ChunkColumn::new(-64, 384))])
+        .try_encode_chunk_with_neighbours(0, 0, &center, &all_neighbours)
         .unwrap() else { panic!("chunk"); };
     let mut reader = Reader::new(&payload);
     let chunk = LevelChunk::decode(&mut reader, &ChunkShape::overworld(774)).unwrap();
     reader.ensure_empty().unwrap();
-    assert_eq!(chunk.light.section_sky_light(10, 15, 4, 8), Some(14));
+    assert_eq!(
+        chunk.light.section_sky_light(10, 15, 4, 8),
+        Some(14),
+        "the full-neighbour answer must reach protocol-774 bytes"
+    );
 }
