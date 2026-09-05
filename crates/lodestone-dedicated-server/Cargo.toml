@@ -85,5 +85,6 @@ tracing-subscriber = { workspace = true }
 bevy_app = { workspace = true }
 bevy_ecs = { workspace = true }
 lodestone-world = { workspace = true }
+lodestone-model = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
