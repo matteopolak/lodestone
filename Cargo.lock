@@ -3002,7 +3002,9 @@ dependencies = [
  "bevy_app",
  "bevy_ecs",
  "lodestone-ecs",
+ "lodestone-model",
  "lodestone-physics",
+ "lodestone-shell",
 ]
 
 [[package]]
