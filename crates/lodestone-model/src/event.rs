@@ -3857,8 +3857,8 @@ pub struct Route {
     /// rather than "nothing I happened to check". Exactly three such places:
     ///
     /// * `Driver::emit`'s auto-response switch (keep-alive, chat acknowledgement,
-    ///   `player_loaded`, auto-respawn, transfer outcome) — a protocol reply or
-    ///   session result, not screen state.
+    ///   `player_loaded`, auto-respawn, cookie response/store, transfer outcome) —
+    ///   a protocol reply or session result, not screen state.
     /// * `LocalEcho::apply`, which is down to `TeleportPlayer` alone.
     /// * `SharedState::apply`'s own `TimeChanged` arm, which writes `WorldTime`
     ///   ahead of consulting either `handles_event`.
@@ -4211,6 +4211,10 @@ pub fn route(event: &ClientEvent) -> Route {
         // before the shell event loop runs, so this is a client-internal
         // consumer rather than an island.
         ClientEvent::Ping { .. } => CLIENT,
+        // `Driver::emit` answers from its in-memory cookie store immediately;
+        // the resulting `CookieResponse` action is sent before the event reaches
+        // the shell, so this is a client-internal consumer rather than an island.
+        ClientEvent::CookieRequested { .. } => CLIENT,
         // `Driver::emit` records the existing `SessionOutcome::Transferred`
         // result before surfacing this event, so a caller can reconnect with
         // the target and the driver's preserved cookie store.
@@ -4341,7 +4345,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::PlayerCombatEnded { .. }
         | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
-        | ClientEvent::CookieRequested { .. }
         | ClientEvent::CookieStored { .. }
         | ClientEvent::ResourcePackPushed { .. }
         | ClientEvent::ResourcePackPopped { .. }
@@ -4434,7 +4437,7 @@ mod block_state_ref_tests {
 #[cfg(test)]
 mod route_tests {
     use super::{ClientEvent, Difficulty, LevelEventData, Route, route};
-    use crate::math::BlockPos;
+    use crate::{ids::Identifier, math::BlockPos};
 
     /// **The guard that protects the guard.**
     ///
@@ -4518,6 +4521,21 @@ mod route_tests {
         let r = route(&riding);
         assert!(r.ingest, "the component pair is per-entity ECS state");
         assert!(r.session, "the local player's own ride state is a session scalar");
+        assert!(!r.is_island());
+    }
+
+    /// `Driver::emit` consumes a cookie request by producing the matching
+    /// `CookieResponse` action before the event reaches any router. The route
+    /// must record that client-internal consumer so this automatically answered
+    /// event is not counted as an island.
+    #[test]
+    fn cookie_request_reaches_the_client_driver() {
+        let event = ClientEvent::CookieRequested {
+            key: Identifier::new("lodestone", "route-test").unwrap(),
+        };
+        let r = route(&event);
+        assert!(!r.ingest && !r.session && !r.shell);
+        assert!(r.client, "the driver answers cookie requests automatically");
         assert!(!r.is_island());
     }
 
