@@ -218,7 +218,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 29] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 32] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -335,6 +335,9 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 29] = [
         name: "playerHandleIsRetained",
         descriptor: "(J)Z",
     },
+    NativeMethodSpec { name: "playerHandleX", descriptor: "(J)D" },
+    NativeMethodSpec { name: "playerHandleY", descriptor: "(J)D" },
+    NativeMethodSpec { name: "playerHandleZ", descriptor: "(J)D" },
 ];
 
 const ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS: [IsolatedDescriptorMemberSpec; 4] = [
@@ -411,6 +414,9 @@ const ISOLATED_SHIM_REGISTRATION: &[NativeRegistrationStep] = registration_steps
     ISOLATED_SHIM_METHODS[26],
     ISOLATED_SHIM_METHODS[27],
     ISOLATED_SHIM_METHODS[28],
+    ISOLATED_SHIM_METHODS[29],
+    ISOLATED_SHIM_METHODS[30],
+    ISOLATED_SHIM_METHODS[31],
 );
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -1045,6 +1051,9 @@ fn method_id(
             jni_str!("playerHandleIsRetained"),
             jni_sig!("(J)Z"),
         ),
+        ("playerHandleX", "(J)D") | ("playerHandleY", "(J)D") | ("playerHandleZ", "(J)D") => {
+            env.get_static_method_id(class, JNIString::new(method.name), jni_sig!("(J)D"))
+        }
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -1244,6 +1253,9 @@ fn register_method(
             method.name,
             method.descriptor,
         ),
+        ("playerHandleX", "(J)D") | ("playerHandleY", "(J)D") | ("playerHandleZ", "(J)D") => {
+            adapter::register_player_handle_position_query(env, class, method.name, method.descriptor)
+        }
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -1470,6 +1482,9 @@ mod tests {
                     name: "playerHandleIsRetained",
                     descriptor: "(J)Z",
                 },
+                NativeMethodSpec { name: "playerHandleX", descriptor: "(J)D" },
+                NativeMethodSpec { name: "playerHandleY", descriptor: "(J)D" },
+                NativeMethodSpec { name: "playerHandleZ", descriptor: "(J)D" },
             ],
         );
         let methods = isolated_shim_methods();
@@ -1650,7 +1665,10 @@ mod tests {
              public static native long activePlayerHandleAt(int index); \
              public static native int activePlayerCount(); \
              public static native boolean playerHandleIsActive(long handle); \
-             public static native boolean playerHandleIsRetained(long handle); }",
+             public static native boolean playerHandleIsRetained(long handle); \
+             public static native double playerHandleX(long handle); \
+             public static native double playerHandleY(long handle); \
+             public static native double playerHandleZ(long handle); }",
         )
         .expect("shim source");
         let descriptor_source = source_root.join("IsolatedPluginDescriptor.java");
@@ -1748,7 +1766,10 @@ mod tests {
              public static native long activePlayerHandleAt(int index); \
              public static native int activePlayerCount(); \
              public static native boolean playerHandleIsActive(long handle); \
-             public static native boolean playerHandleIsRetained(long handle); }",
+             public static native boolean playerHandleIsRetained(long handle); \
+             public static native double playerHandleX(long handle); \
+             public static native double playerHandleY(long handle); \
+             public static native double playerHandleZ(long handle); }",
         )
         .expect("shim source");
         let descriptor_source = shim_source_root.join("IsolatedPluginDescriptor.java");

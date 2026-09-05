@@ -5,7 +5,7 @@ use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Duration;
 
 use lodestone_jvm_bridge::adapter::{
-    AdapterEvent, AdapterHost, BlockStateWrite, PlayerIdentity,
+    AdapterEvent, AdapterHost, BlockStateWrite, PlayerIdentity, PlayerPosition,
 };
 use lodestone_jvm_bridge::native_surface::OperatorBlockStateMember;
 use lodestone_jvm_bridge::paper::{
@@ -323,6 +323,24 @@ impl JavaAdapter {
         self.host.service_pending_server_tick(64, || {
             server.server_tick_count()
                 .ok_or_else(|| "primary-world server tick is unavailable".to_owned())
+        });
+        self.host.service_pending_player_positions(64, |query| {
+            let uuid = uuid::Uuid::from_bytes(query.uuid);
+            server
+                .players()
+                .and_then(|registry| {
+                    registry
+                        .view(None)
+                        .entities
+                        .into_iter()
+                        .find(|player| player.uuid == uuid)
+                })
+                .map(|player| PlayerPosition {
+                    x: player.position.x,
+                    y: player.position.y,
+                    z: player.position.z,
+                })
+                .ok_or_else(|| format!("player {uuid} is not connected"))
         });
         // Read a value-only roster after all world-port servicing has returned.
         // Dispatch below is the only point that can invoke Java, and it runs
