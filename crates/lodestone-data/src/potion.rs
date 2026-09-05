@@ -332,14 +332,6 @@ pub fn mob_effect_tooltip_for(effect_id: MobEffectId) -> (&'static str, bool) {
         .expect("the display table covers every generated mob-effect id")
 }
 
-/// Resolves a raw item-component effect id to tooltip data when it belongs to
-/// the built-in census. Unknown extension values remain in the component but
-/// do not claim a built-in tooltip.
-#[must_use]
-pub fn mob_effect_tooltip(effect_id: i32) -> Option<(&'static str, bool)> {
-    MobEffectId::from_registry_id(effect_id).map(mob_effect_tooltip_for)
-}
-
 /// The raw `(mob_effect_index, amplifier, base_duration_ticks)` triples backing
 /// [`potion_effect_entries`], for a caller that needs each entry's *canonical*
 /// mob-effect id (via [`crate::mob_effects::mob_effect_name`], called with
@@ -407,18 +399,6 @@ const EFFECT_ATTRIBUTE_MODIFIERS: &[(usize, &str, f64, bool)] = &[
     (25, "Luck", 1.0, false),                    // luck
     (26, "Luck", -1.0, false),                   // unluck
 ];
-
-/// Attribute modifiers produced by one mob-effect instance at `amplifier`.
-#[must_use]
-pub fn mob_effect_attribute_modifiers(
-    effect_id: i32,
-    amplifier: u8,
-) -> Vec<AttributeModifierEntry> {
-    let Some(effect_id) = MobEffectId::from_registry_id(effect_id) else {
-        return Vec::new();
-    };
-    mob_effect_attribute_modifiers_for(effect_id, amplifier)
-}
 
 /// Returns the built-in attribute modifiers for a validated mob effect.
 #[must_use]
@@ -604,18 +584,27 @@ mod tests {
 
     #[test]
     fn custom_effect_tooltip_data_covers_the_whole_registry() {
-        for effect_id in 0..40 {
-            let (name, _harmful) = mob_effect_tooltip(effect_id)
-                .unwrap_or_else(|| panic!("missing tooltip data for mob effect id {effect_id}"));
-            assert!(!name.is_empty(), "mob effect id {effect_id}");
+        for raw_id in 0..40 {
+            let effect_id = MobEffectId::from_registry_id(raw_id)
+                .unwrap_or_else(|| panic!("generated mob effect id {raw_id} validates"));
+            let (name, _harmful) = mob_effect_tooltip_for(effect_id);
+            assert!(!name.is_empty(), "mob effect id {effect_id:?}");
         }
-        assert_eq!(mob_effect_tooltip(26), Some(("Bad Luck", true)));
-        assert_eq!(mob_effect_tooltip(29), Some(("Dolphin's Grace", false)));
-        assert_eq!(mob_effect_tooltip(-1), None);
-        assert_eq!(mob_effect_tooltip(40), None);
+
+        let bad_luck = MobEffectId::from_registry_id(26).expect("Bad Luck validates");
+        let dolphins_grace =
+            MobEffectId::from_registry_id(29).expect("Dolphin's Grace validates");
+        assert_eq!(mob_effect_tooltip_for(bad_luck), ("Bad Luck", true));
+        assert_eq!(mob_effect_tooltip_for(dolphins_grace), ("Dolphin's Grace", false));
+        assert_eq!(MobEffectId::from_registry_id(-1), None);
+        assert_eq!(MobEffectId::from_registry_id(40), None);
+        assert_eq!(MobEffectId::from_registry_id(i32::MAX), None);
 
         assert_eq!(
-            mob_effect_attribute_modifiers(2, 1),
+            mob_effect_attribute_modifiers_for(
+                MobEffectId::from_registry_id(2).expect("haste validates"),
+                1,
+            ),
             vec![AttributeModifierEntry {
                 attribute_name: "Attack Speed",
                 amount: 0.2,
