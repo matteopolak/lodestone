@@ -58,7 +58,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**2 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**0 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -69,7 +69,13 @@ exactly `Route::NOWHERE`, excluding the `..Route::NOWHERE` struct-update spread 
 that set other flags) and fails if this line drifts from the real count — update the number and
 the source together whenever a variant is added or wired.
 
-The current terminal routes are `PlayerCombatEntered` and `PlayerCombatEnded`.
+There are currently no terminal routes. `PlayerCombatEntered` and
+`PlayerCombatEnded` fold into one local combat-session component: enter records
+an active encounter, while end replaces it with the exact server-reported tick
+duration. The F3 HUD reads that component as `Combat: active` or `Combat: ended
+(N ticks)`; it does not manufacture a client-side timer. Repeated packets simply
+replace that latest authoritative state, and an unreported session draws no
+combat line.
 `MountScreenOpened` folds straight into the menu session: unlike an ordinary container it has no
 `ScreenOpened` companion, so its own window id and storage-column count build the immediately
 visible, server-owned menu and the usual content/slot updates reconcile into that same menu.
@@ -163,7 +169,7 @@ None. No features, no environment variables.
 
 - `crates/lodestone-model/src/event.rs` — `Route`, `route`, and the table; also
   `include_str!`s this very file to check the island count against its own source, so this
-  file's path and the exact `**N of 134**` phrasing are load-bearing, not decorative.
+  file's path and the exact `**N of 136**` phrasing are load-bearing, not decorative.
 - `crates/lodestone-ecs/src/ingest.rs`, `session.rs` — `handles_event`, each a one-line
   derivation of `route(e).ingest` / `route(e).session`.
 - `crates/lodestone-shell/src/net.rs` — the `debug_assert!` in `forward`'s catch-all.

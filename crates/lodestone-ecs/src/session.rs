@@ -270,6 +270,26 @@ pub struct SessionServerData(pub Option<ServerData>);
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionItemCooldowns(pub lodestone_game::cooldown::ItemCooldowns);
 
+/// The local player's latest server-announced combat-session state.
+///
+/// `None` means neither combat packet has arrived. Entering combat is distinct
+/// from an ended encounter with a zero duration, so the HUD can report only
+/// facts the server actually announced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombatSession {
+    /// The server has announced that combat tracking is active.
+    Active,
+    /// The server ended tracking and reported the encounter duration in ticks.
+    Ended {
+        /// The exact signed value supplied by the packet.
+        duration_ticks: i32,
+    },
+}
+
+/// The latest [`CombatSession`] packet state, read by the F3 HUD line.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionCombat(pub Option<CombatSession>);
+
 /// The center of the chunk square the server is currently streaming.
 ///
 /// This is deliberately separate from the local player's position. During a
@@ -910,6 +930,22 @@ pub fn apply_item_cooldowns(
     }
 }
 
+/// `IngestSet::Apply`: combat enter/end packets -> [`SessionCombat`].
+pub fn apply_combat_session(batch: Res<IngestBatch>, mut combat: Query<&mut SessionCombat>) {
+    for event in batch.events() {
+        let state = match event {
+            ClientEvent::PlayerCombatEntered => CombatSession::Active,
+            ClientEvent::PlayerCombatEnded { duration_ticks } => CombatSession::Ended {
+                duration_ticks: *duration_ticks,
+            },
+            _ => continue,
+        };
+        for mut session in &mut combat {
+            session.0 = Some(state);
+        }
+    }
+}
+
 /// `IngestSet::Apply`: `WaypointUpdated` -> [`SessionWaypoints`].
 pub fn apply_waypoints(batch: Res<IngestBatch>, mut waypoints: Query<&mut SessionWaypoints>) {
     for event in batch.events() {
@@ -1296,6 +1332,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             SessionServerInfo::default(),
             SessionServerData::default(),
             SessionItemCooldowns::default(),
+            SessionCombat::default(),
             ServerChunkCacheCenter::default(),
             SessionWaypoints::default(),
             SessionRegistryOrder::default(),
@@ -1371,6 +1408,7 @@ impl Plugin for SessionPlugin {
                     apply_server_info,
                     apply_server_data,
                     apply_item_cooldowns,
+                    apply_combat_session,
                     apply_waypoints,
                     apply_local_player_state,
                 )
@@ -2820,14 +2858,14 @@ mod tests {
             "the scheduled fold must preserve the server's exact scalar"
         );
 
-        fold(&mut app, ClientEvent::PlayerCombatEntered);
+        fold(&mut app, ClientEvent::Ping { id: 7 });
         assert_eq!(
             app.world()
                 .get::<ServerSimulationDistance>(entity)
                 .unwrap()
                 .0,
             Some(11),
-            "control: a remaining terminal event must not overwrite the scalar"
+            "control: an unrelated client-only event must not overwrite the scalar"
         );
     }
 
@@ -2863,9 +2901,9 @@ mod tests {
         assert_eq!(data.motd.to_plain_string(), "Copper Canyon");
         assert_eq!(data.icon.as_deref(), Some(&[0x89, 0x50, 0x4e, 0x47][..]));
 
-        // Exact negative control: a still-terminal packet must not accidentally
-        // match this fold and replace the announced identity.
-        fold(&mut app, ClientEvent::PlayerCombatEntered);
+        // Exact negative control: an unrelated client-only packet must not
+        // accidentally match this fold and replace the announced identity.
+        fold(&mut app, ClientEvent::Ping { id: 7 });
         assert_eq!(
             app.world()
                 .get::<SessionServerData>(entity)
@@ -2876,6 +2914,57 @@ mod tests {
                 .motd
                 .to_plain_string(),
             "Copper Canyon"
+        );
+    }
+
+    /// Combat enter/end packets reach the real scheduled fold as one session
+    /// record. The exact end duration is server-authored, so it is retained
+    /// instead of being reconstructed from the client's clock.
+    #[test]
+    fn combat_session_tracks_enter_end_repeats_and_unrelated_events() {
+        fn combat(app: &App, entity: bevy_ecs::entity::Entity) -> Option<CombatSession> {
+            app.world().get::<SessionCombat>(entity).unwrap().0
+        }
+
+        let (mut app, entity) = session_app();
+        assert_eq!(combat(&app, entity), None, "control: no packet means no combat state");
+
+        fold(&mut app, ClientEvent::PlayerCombatEntered);
+        assert_eq!(combat(&app, entity), Some(CombatSession::Active));
+
+        // Repeated enter packets do not invent a separate client-side session.
+        fold(&mut app, ClientEvent::PlayerCombatEntered);
+        assert_eq!(combat(&app, entity), Some(CombatSession::Active));
+
+        fold(
+            &mut app,
+            ClientEvent::PlayerCombatEnded {
+                duration_ticks: 240,
+            },
+        );
+        assert_eq!(
+            combat(&app, entity),
+            Some(CombatSession::Ended {
+                duration_ticks: 240,
+            }),
+            "the fold must preserve the server's exact duration"
+        );
+
+        // The latest repeated end packet is authoritative too.
+        fold(
+            &mut app,
+            ClientEvent::PlayerCombatEnded { duration_ticks: 7 },
+        );
+        assert_eq!(
+            combat(&app, entity),
+            Some(CombatSession::Ended { duration_ticks: 7 })
+        );
+
+        fold(&mut app, ClientEvent::Ping { id: 7 });
+        assert_eq!(
+            combat(&app, entity),
+            Some(CombatSession::Ended { duration_ticks: 7 }),
+            "an unrelated event must not overwrite the combat session"
         );
     }
 
@@ -2902,7 +2991,7 @@ mod tests {
             "the observer after SessionSet::Fold must see the final nested group's write"
         );
 
-        fold(&mut app, ClientEvent::PlayerCombatEntered);
+        fold(&mut app, ClientEvent::Ping { id: 7 });
         assert_eq!(
             app.world().resource::<ObservedSimulationDistance>().0,
             Some(13),

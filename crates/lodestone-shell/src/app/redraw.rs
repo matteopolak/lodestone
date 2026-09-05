@@ -1442,6 +1442,9 @@ impl WindowApp {
         // session fold every frame so the F3 line proves the live adapter route
         // reached a player-visible consumer.
         self.sim.stats.server_motd = self.sim.server_motd();
+        // Combat enter/end packets fold into one authoritative session state;
+        // this F3 line is the visible consumer and never starts a local timer.
+        self.sim.stats.combat_session = self.sim.combat_session();
         // The F3+B / F3+G state, for the overlay's own `Debug overlays:` line —
         // vanilla's `Debug charts:` block, carrying the two toggles that exist
         // here. Copied from the `Arc<AtomicBool>`s the world-line source closure

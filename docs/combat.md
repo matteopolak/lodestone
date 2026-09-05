@@ -10,6 +10,20 @@ tags how a hit is reduced.
 
 ## How it works
 
+### Server-announced combat sessions
+
+The player combat enter/end packets do not carry hit feedback or a local timer;
+they announce the server's combat-tracking lifecycle. `SessionCombat` folds the
+latest packet on the shared local-player entity as either active or ended with
+the exact reported duration in ticks. `Sim::combat_session` reads that one
+component, and the F3 HUD displays `Combat: active` or `Combat: ended (N
+ticks)`. It draws no combat line until the server sends one of these packets.
+
+Repeated enter or end packets replace the same state record; no client-side
+encounter queue or elapsed clock is inferred. Keep that property when adding
+combat UI: duration is server-authored and an absent packet is different from a
+zero-duration end.
+
 ### Swing, targeting and sending the attack
 
 `Sim::begin_attack` (`crates/lodestone-shell/src/sim.rs`) mirrors vanilla's own

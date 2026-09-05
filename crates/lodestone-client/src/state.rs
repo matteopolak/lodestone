@@ -1472,7 +1472,8 @@ mod tests {
     use super::*;
     use lodestone_ecs::player::SelectedSlot;
     use lodestone_ecs::session::{
-        ServerDifficulty, ServerSimulationDistance, SessionBlockDestruction, SessionGameRules,
+        CombatSession, ServerDifficulty, ServerSimulationDistance, SessionBlockDestruction,
+        SessionCombat, SessionGameRules,
         SessionRecipeBookSettings, SessionServerData, SessionSpawnPoint, SessionTabList,
         SessionWorldBorder,
     };
@@ -1657,14 +1658,14 @@ mod tests {
             );
         }
 
-        // Exact negative control: a remaining terminal event must neither be
-        // routed into this fold nor overwrite the already observed value.
-        state.apply(&ClientEvent::PlayerCombatEntered);
+        // Exact negative control: an unrelated client-only event must neither
+        // be routed into this fold nor overwrite the already observed value.
+        state.apply(&ClientEvent::Ping { id: 7 });
         let ecs = state.ecs.read();
         assert_eq!(
             ecs.get::<ServerSimulationDistance>(state.session).unwrap().0,
             Some(11),
-            "combat enter is not a simulation-distance update"
+            "an unrelated event is not a simulation-distance update"
         );
     }
 
@@ -1690,9 +1691,9 @@ mod tests {
             assert_eq!(data.icon.as_deref(), Some(&[0x89, 0x50, 0x4e, 0x47][..]));
         }
 
-        // Exact negative control: another still-terminal packet must not create
-        // or overwrite the public identity stored by ServerDataReceived.
-        state.apply(&ClientEvent::PlayerCombatEntered);
+        // Exact negative control: another client-only packet must not create or
+        // overwrite the public identity stored by ServerDataReceived.
+        state.apply(&ClientEvent::Ping { id: 7 });
         let ecs = state.ecs.read();
         assert_eq!(
             ecs.get::<SessionServerData>(state.session)
@@ -1703,7 +1704,45 @@ mod tests {
                 .motd
                 .to_plain_string(),
             "Copper Canyon",
-            "combat enter must not masquerade as a server-data update"
+            "an unrelated event must not masquerade as a server-data update"
+        );
+    }
+
+    /// The adapter enters through `SharedState::apply`, so this is the route
+    /// detector for the combat HUD state rather than a unit test of the fold.
+    #[test]
+    fn apply_routes_combat_enter_and_end_through_the_real_path() {
+        let state = SharedState::default();
+        state.apply(&ClientEvent::PlayerCombatEntered);
+        state.apply(&ClientEvent::PlayerCombatEntered);
+        {
+            let ecs = state.ecs.read();
+            assert_eq!(
+                ecs.get::<SessionCombat>(state.session).unwrap().0,
+                Some(CombatSession::Active),
+                "repeated enters retain one active server session"
+            );
+        }
+
+        state.apply(&ClientEvent::PlayerCombatEnded {
+            duration_ticks: 240,
+        });
+        state.apply(&ClientEvent::PlayerCombatEnded { duration_ticks: 7 });
+        {
+            let ecs = state.ecs.read();
+            assert_eq!(
+                ecs.get::<SessionCombat>(state.session).unwrap().0,
+                Some(CombatSession::Ended { duration_ticks: 7 }),
+                "the latest repeated end keeps its exact server duration"
+            );
+        }
+
+        state.apply(&ClientEvent::Ping { id: 7 });
+        let ecs = state.ecs.read();
+        assert_eq!(
+            ecs.get::<SessionCombat>(state.session).unwrap().0,
+            Some(CombatSession::Ended { duration_ticks: 7 }),
+            "an unrelated event must not overwrite the combat session"
         );
     }
 
@@ -1725,11 +1764,11 @@ mod tests {
         assert_eq!(open.window_id, 12);
         assert_eq!(open.menu.slot_count(), 2 + 3 * 5 + 36);
 
-        state.apply(&ClientEvent::PlayerCombatEntered);
+        state.apply(&ClientEvent::Ping { id: 7 });
         assert_eq!(
             state.open_menu().map(|menu| menu.window_id),
             Some(12),
-            "control: a terminal combat event must not replace the announced mount screen"
+            "control: an unrelated event must not replace the announced mount screen"
         );
     }
 
@@ -2109,17 +2148,16 @@ mod tests {
     /// merely decorative: it pins that `SharedState::apply` really does consult
     /// `route()` rather than folding everything it is handed.
     ///
-    /// `PlayerCombatEntered` is a deliberately stranded event. If it were to
-    /// start mutating any of the three new components, the folds would be
-    /// matching too broadly.
+    /// A client-only ping is deliberately unrelated to the three components.
+    /// If it starts mutating any of them, the folds are matching too broadly.
     #[test]
-    fn a_still_stranded_combat_event_reaches_none_of_the_new_components() {
+    fn an_unrelated_ping_reaches_none_of_the_new_components() {
         let state = SharedState::default();
         assert!(
-            lodestone_model::event::route(&ClientEvent::PlayerCombatEntered).is_island(),
-            "premise: this control is only meaningful while the variant is still an island"
+            lodestone_model::event::route(&ClientEvent::Ping { id: 7 }).client,
+            "premise: the ping must stay outside the session fold"
         );
-        state.apply(&ClientEvent::PlayerCombatEntered);
+        state.apply(&ClientEvent::Ping { id: 7 });
         let ecs = state.ecs.read();
         let b = ecs.get::<SessionWorldBorder>(state.session).unwrap().0;
         assert!(!b.initialized, "border must be untouched");

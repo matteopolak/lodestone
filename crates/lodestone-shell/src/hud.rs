@@ -624,6 +624,9 @@ pub struct DebugStats {
     /// The public message of the day the connected server announced during
     /// play, flattened to one line for F3. `None` means no packet has arrived.
     pub server_motd: Option<String>,
+    /// The latest server-announced local combat state. `None` means neither
+    /// combat packet arrived, rather than an inferred idle state.
+    pub combat_session: Option<lodestone_ecs::CombatSession>,
     /// Sky and block light at the player's feet, as the client's own world
     /// reports them — `None` before login or for an unloaded section, which is
     /// the honest "no data" state and is drawn as such.
@@ -1082,6 +1085,15 @@ impl DebugStats {
         }
         if let Some(motd) = &self.server_motd {
             out.push(format!("MOTD: {motd}"));
+        }
+        if let Some(combat) = self.combat_session {
+            let line = match combat {
+                lodestone_ecs::CombatSession::Active => "Combat: active".to_owned(),
+                lodestone_ecs::CombatSession::Ended { duration_ticks } => {
+                    format!("Combat: ended ({duration_ticks} ticks)")
+                }
+            };
+            out.push(line);
         }
         out.extend([
             // `LevelExtractor.sectionStatistics`, `"C: %d/%d %sD: %d, %s"` —
@@ -8081,6 +8093,36 @@ mod tests {
                 ..Default::default()
             }),
             Some("MOTD: Copper Canyon".to_owned())
+        );
+    }
+
+    /// Combat state has a visible F3 consumer. The absence control matters: an
+    /// idle-looking session is not evidence that the server sent an end packet.
+    #[test]
+    fn debug_overlay_shows_only_reported_combat_session() {
+        fn combat_line(stats: &DebugStats) -> Option<String> {
+            stats
+                .right_lines()
+                .into_iter()
+                .find(|line| line.starts_with("Combat:"))
+        }
+
+        assert_eq!(combat_line(&DebugStats::default()), None);
+        assert_eq!(
+            combat_line(&DebugStats {
+                combat_session: Some(lodestone_ecs::CombatSession::Active),
+                ..Default::default()
+            }),
+            Some("Combat: active".to_owned())
+        );
+        assert_eq!(
+            combat_line(&DebugStats {
+                combat_session: Some(lodestone_ecs::CombatSession::Ended {
+                    duration_ticks: 240,
+                }),
+                ..Default::default()
+            }),
+            Some("Combat: ended (240 ticks)".to_owned())
         );
     }
 
