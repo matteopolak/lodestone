@@ -94,6 +94,16 @@ The registry-selected control drives both legal hand values from client action
 through the hosted decoder and back through the clientbound adapter, so this
 is not merely a decode-only packet entry.
 
+Block use now crosses the same hosted boundary. Protocol 404's `block_place`
+body puts packed `x,y,z` position before its direction and hand, then carries
+three cursor floats; it has neither an inline held-item stack nor a prediction
+sequence. The host validates both ordinals, resolves the held item from its
+own inventory view, and lifts the result to `ServerBound::UseItemOn` with
+sequence zero. The independent wire fixture uses negative coordinates so the
+pre-1.14 position layout cannot be mistaken for the later layout, while the
+registry-selected adapter-to-host control proves a client action reaches the
+shared placement consumer and cannot bypass the Play-state gate.
+
 The packed `position` row is the widest single difference from the era above:
 fifteen of the twenty-eight packets whose shape changes between 1.13.2 and
 1.14.4 change *only* because they carry a position. That is why

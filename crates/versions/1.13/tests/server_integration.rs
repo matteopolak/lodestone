@@ -4,9 +4,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, Rotation, Vec3};
-use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
-use lodestone_v1_13::adapter;
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Hand, Rotation, Vec3,
+    Vec3f, VersionAdapter,
+};
+use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, ServerBound};
+use lodestone_v1_13::{adapter, V404Adapter};
 
 const PROTOCOL: i32 = 404;
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
@@ -62,6 +65,42 @@ fn address() -> ServerAddress {
         host: "memory".to_owned(),
         port: 0,
     }
+}
+
+#[test]
+fn registry_selected_404_host_consumes_adapter_block_use() {
+    let action = ClientAction::UseItemOn {
+        hand: Hand::Off,
+        pos: BlockPos::new(5, -10, -7),
+        face: BlockFace::South,
+        cursor: Vec3f::new(0.25, 1.0, 0.75),
+        inside_block: true,
+        sequence: 17,
+    };
+    let Some((packet_id, payload)) = V404Adapter::new()
+        .encode_action(ConnectionState::Play, &action)
+        .expect("the protocol-404 adapter encodes a block use")
+    else {
+        panic!("protocol-404 block use must have a serverbound packet");
+    };
+    let host = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
+        .expect("protocol 404 must resolve to its hosted family");
+    assert_eq!(
+        host.decode(lodestone_core::State::Play, packet_id, &payload),
+        ServerBound::UseItemOn {
+            pos: BlockPos::new(5, -10, -7),
+            face: BlockFace::South,
+            cursor: Vec3f::new(0.25, 1.0, 0.75),
+            sequence: 0,
+            hand: 1,
+        },
+        "the registry-selected host must deliver the adapter's action to the shared placement consumer"
+    );
+    assert_eq!(
+        host.decode(lodestone_core::State::Configuration, packet_id, &payload),
+        ServerBound::Ignored,
+        "a Play block-use body must not bypass the connection-state gate"
+    );
 }
 
 #[tokio::test]
