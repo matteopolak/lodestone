@@ -74,6 +74,7 @@ use std::path::PathBuf;
 
 use lodestone::mesher::{ColumnSource, SectionKey, mesh_snapshot_models, snapshot_section_in};
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockStateRegistry;
 use lodestone_render::{BlockModels, BlocksJsonRegistry, ModelMesh, SkyDefault, blocks_json_registry};
 use lodestone_world::{
@@ -317,23 +318,24 @@ fn a_leaf_canopy_interior_darkens_and_glass_does_not() {
     let air = air_id(&reg);
     let leaves = state_id(&reg, "minecraft:oak_leaves");
     let glass = state_id(&reg, "minecraft:glass");
+    let leaves_state = StateId::new(leaves).expect("registry leaf id is in the state census");
+    let glass_state = StateId::new(glass).expect("registry glass id is in the state census");
 
     // --- Premises, before any meshing. Each of these being false would make
     // every assertion below pass with the fix reverted.
     assert!(
-        !models.occludes(leaves),
+        !models.occludes(leaves_state),
         "premise: leaves do not occlude for culling (cutout sprite). If they did, the two \
          predicates would agree and this gate would measure nothing"
     );
     assert!(
-        !models.occludes(glass),
+        !models.occludes(glass_state),
         "premise: glass does not occlude for culling either — so the *only* difference between \
          the two scenes is the AO predicate's answer"
     );
     assert_eq!(
         lodestone_data::shade_brightness::occludes_ambient_light(
-            lodestone_data::block_states::StateId::new(leaves)
-                .expect("registry leaf id is in the state census"),
+            leaves_state,
         ),
         true,
         "premise: vanilla's getShadeBrightness is 0.2 for leaves (full collision cube, no \
@@ -342,8 +344,7 @@ fn a_leaf_canopy_interior_darkens_and_glass_does_not() {
     );
     assert_eq!(
         lodestone_data::shade_brightness::occludes_ambient_light(
-            lodestone_data::block_states::StateId::new(glass)
-                .expect("registry glass id is in the state census"),
+            glass_state,
         ),
         false,
         "premise: TransparentBlock overrides getShadeBrightness to 1.0, so glass is exempt \

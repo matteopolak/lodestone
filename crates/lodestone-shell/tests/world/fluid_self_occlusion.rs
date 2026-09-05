@@ -59,6 +59,7 @@ use std::path::PathBuf;
 
 use lodestone::mesher::{ColumnSource, SectionKey, mesh_snapshot_fluids, snapshot_section_in};
 use lodestone_assets::{Direction, ResourceManager, ResourceSource, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockAabb, BlockStateRegistry};
 use lodestone_render::{
     BlockModels, BlocksJsonRegistry, ModelMesh, RenderLayer, SkyDefault, blocks_json_registry,
@@ -400,16 +401,18 @@ fn the_fixture_is_a_stair_and_a_water_source_in_one_cell() {
     );
 
     let cell = models
-        .fluid(stair)
+        .fluid(StateId::new(stair).expect("oak stairs exists"))
         .expect("a waterlogged stair must classify as a fluid cell");
     assert_eq!(cell.kind, lodestone_render::FluidKind::Water);
     assert!(
-        !models.quads(stair).is_empty(),
+        !models
+            .quads(StateId::new(stair).expect("oak stairs exists"))
+            .is_empty(),
         "and it must also carry solid model geometry — a cell that is only water \
          cannot z-fight against a block in the same cell"
     );
     assert_eq!(
-        models.layer(stair),
+        models.layer(StateId::new(stair).expect("oak stairs exists")),
         RenderLayer::Solid,
         "the `canOcclude` stand-in: oak planks are fully opaque"
     );
@@ -445,7 +448,9 @@ fn the_fixture_is_a_stair_and_a_water_source_in_one_cell() {
             ("waterlogged", "false"),
         ],
     );
-    assert!(models.fluid(dry).is_none());
+    assert!(models
+        .fluid(StateId::new(dry).expect("dry oak stairs exists"))
+        .is_none());
     assert_eq!(
         lodestone_data::outline_shapes::outline_boxes(
             lodestone_data::block_states::StateId::new(dry).expect("dry oak stairs exists"),
@@ -574,7 +579,7 @@ fn a_waterlogged_block_emits_no_fluid_face_its_own_geometry_already_covers() {
         println!(
             "{label:<22} {total:>3} quads  {:<52} layer={:?}",
             render(&counts),
-            models.layer(*state)
+            models.layer(StateId::new(*state).expect("fixture state is in the census"))
         );
         if counts != *expected {
             mismatches.push(format!(
@@ -605,11 +610,11 @@ fn a_waterlogged_block_emits_no_fluid_face_its_own_geometry_already_covers() {
                 .to_string(),
         );
     }
-    if models.layer(leaves) == RenderLayer::Solid {
+    if models.layer(StateId::new(leaves).expect("oak leaves exists")) == RenderLayer::Solid {
         mismatches.push(format!(
             "control_leaves is vacuous the other way: leaves classify as {:?}, so the gate \
              that is supposed to spare them does not fire",
-            models.layer(leaves)
+            models.layer(StateId::new(leaves).expect("oak leaves exists"))
         ));
     }
 

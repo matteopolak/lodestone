@@ -47,6 +47,7 @@ use std::path::PathBuf;
 
 use lodestone::mesher::{ColumnSource, SectionKey, mesh_snapshot_fluids, snapshot_section_in};
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockStateRegistry;
 use lodestone_render::{BlockModels, SkyDefault, blocks_json_registry};
 use lodestone_world::{
@@ -285,7 +286,7 @@ fn the_fixture_has_real_water_on_both_sides_of_the_seam() {
     // holds but `BlockModels` does not call a fluid would mesh to nothing at all.
     let models = load_models(&root);
     let cell = models
-        .fluid(water)
+        .fluid(StateId::new(water).expect("water state is in the built-in census"))
         .expect("BlockModels must classify minecraft:water[level=0] as a fluid");
     assert_eq!(
         cell.kind,

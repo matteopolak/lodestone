@@ -51,6 +51,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lodestone_assets::{ParticleAtlas, ResourceLocation};
+use lodestone_data::block_states::StateId;
 use lodestone_data::item::Item;
 use lodestone_model::event::{BlockStateRef, ParticleOptions};
 use lodestone_particle::{
@@ -272,10 +273,14 @@ impl Particles {
         let (state_uv, state_tint) = match models {
             Some(m) => (
                 (0..m.state_count() as u32)
-                    .map(|id| m.particle_uv(id))
+                    .map(|raw| StateId::new(raw).and_then(|state| m.particle_uv(state)))
                     .collect(),
                 (0..m.state_count() as u32)
-                    .map(|id| m.particle_tint(id).unwrap_or([1.0; 3]))
+                    .map(|raw| {
+                        StateId::new(raw)
+                            .and_then(|state| m.particle_tint(state))
+                            .unwrap_or([1.0; 3])
+                    })
                     .collect(),
             ),
             None => (Vec::new(), Vec::new()),

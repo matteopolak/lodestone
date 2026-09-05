@@ -55,6 +55,7 @@ use std::path::PathBuf;
 
 use lodestone::mesher::{SectionKey, mesh_snapshot_models_layers, snapshot_section};
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockStateRegistry;
 use lodestone_render::{
     BlockModels, BlocksJsonRegistry, ModelMesh, RenderLayer, blocks_json_registry,
@@ -106,6 +107,10 @@ fn load_models(root: &std::path::Path) -> BlockModels {
 
 fn registry(root: &std::path::Path) -> BlocksJsonRegistry {
     blocks_json_registry(&root.join("generated/reports/blocks.json")).expect("blocks.json")
+}
+
+fn typed_state(raw: u32) -> StateId {
+    StateId::new(raw).expect("state id from blocks.json is in the built-in census")
 }
 
 /// The first state of `name` whose properties contain every `(key, value)` in
@@ -208,7 +213,7 @@ fn a_block_states_opaque_faces_are_not_alpha_tested_because_a_sibling_face_is_cu
     // feeds occlusion and the packed fast path, which are per-block in vanilla
     // too, so it is *correct* that it did not move.
     assert_eq!(
-        models.layer(grass),
+        models.layer(typed_state(grass)),
         RenderLayer::Cutout,
         "grass_block's block-state layer must still be Cutout — if it is not, this gate's \
          premise (that per-quad and per-block-state disagree here) has evaporated"
@@ -260,7 +265,7 @@ fn grass_blocks_ten_baked_quads_split_six_solid_four_cutout_by_their_own_sprites
     let reg = registry(&root);
     let grass = state_id(&reg, "minecraft:grass_block", &[("snowy", "false")]);
 
-    let quads = models.quads(grass);
+    let quads = models.quads(typed_state(grass));
     let layers: Vec<Option<RenderLayer>> = quads
         .iter()
         .map(|q| models.sprite_layer(q.sprite))
