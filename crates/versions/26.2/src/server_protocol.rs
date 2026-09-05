@@ -103,6 +103,7 @@ use lodestone_data::block_states::{block_name, properties};
 use lodestone_data::entity_types::entity_type_id;
 use lodestone_data::menus::{MenuId, menu_id};
 use lodestone_data::mob_effects::{mob_effect_id, mob_effect_name};
+use lodestone_data::sound_events::{SoundEventId, sound_event_id};
 use crate::entity_variants;
 use crate::packet_ids::{MINECRAFT_VERSION, configuration, handshaking, login, play, status};
 use crate::packets::chunk::ChunkShape;
@@ -505,17 +506,16 @@ const JOIN_GAME_MODE: i32 = 0;
 /// The `minecraft:sound_event` registry id for
 /// `minecraft:entity.generic.explode` (vanilla's own sound-events registry's own generic-explode accessor),
 /// resolved by name the same way [`stone_id`]/[`air_id`] resolve block
-/// states — bounded by [`SOUND_EVENT_COUNT`] so a name this table has never
-/// had (a stale or ahead-of-version generated table) fails loudly here
-/// rather than scanning forever. Used by [`V770ServerProtocol::encode_explode`]
+/// states — the typed lookup makes a name this table has never had (a stale or
+/// ahead-of-version generated table) fail loudly here. Used by
+/// [`V770ServerProtocol::encode_explode`]
 /// to build the `Holder<SoundEvent>` **registry-reference** encoding a real
 /// vanilla server sends for this sound — see that method's own doc comment
 /// for why that is the byte-accurate choice, verified against
 /// vanilla's own codec library's own holder's decompiled encode arm, not the decoder's own
 /// (weaker) direct-literal-name path.
-fn explosion_sound_registry_id() -> i32 {
-    (0..lodestone_data::sound_events::SOUND_EVENT_COUNT as i32)
-        .find(|&id| lodestone_data::sound_events::sound_event_name(id) == Some("minecraft:entity.generic.explode"))
+fn explosion_sound_registry_id() -> SoundEventId {
+    sound_event_id("minecraft:entity.generic.explode")
         .expect(
             "generated sound-event table has no `minecraft:entity.generic.explode` entry — \
              regenerate or fix the table",
@@ -532,22 +532,10 @@ const SOUND_POSITION_SCALE: f64 = 8.0;
 /// The `minecraft:sound_event` registry id for `name`, or `None` if
 /// 26.2 has no such sound.
 ///
-/// Indexed once into a `name -> id` map rather than scanned per call: a busy tick
-/// can carry several sounds and the table is ~1,500 entries. The `None` is
+/// The data census indexes names once and validates its result. The `None` is
 /// load-bearing — see [`V770ServerProtocol::encode_sound`].
-fn sound_event_registry_id(name: &str) -> Option<i32> {
-    static INDEX: std::sync::OnceLock<std::collections::HashMap<&'static str, i32>> =
-        std::sync::OnceLock::new();
-    INDEX
-        .get_or_init(|| {
-            (0..lodestone_data::sound_events::SOUND_EVENT_COUNT as i32)
-                .filter_map(|id| {
-                    lodestone_data::sound_events::sound_event_name(id).map(|name| (name, id))
-                })
-                .collect()
-        })
-        .get(name)
-        .copied()
+fn sound_event_registry_id(name: &str) -> Option<SoundEventId> {
+    sound_event_id(name)
 }
 
 /// The `minecraft:particle_type` registry id for `name`, or `None`
@@ -5637,7 +5625,7 @@ impl ServerProtocol for V770ServerProtocol {
     /// what a real vanilla server sends for its own generic-explode sound
     /// constant (a
     /// registered constant, never a direct/inline holder). The registry id is
-    /// resolved by name via [`lodestone_data::sound_events::sound_event_name`]
+    /// resolved by name via [`lodestone_data::sound_events::sound_event_id`]
     /// (the same reverse-by-name-scan idiom [`stone_id`]/[`air_id`] above
     /// already establish for block states) rather than hand-picking a
     /// literal index, so a regenerated sound-event table cannot silently
@@ -5804,7 +5792,7 @@ impl ServerProtocol for V770ServerProtocol {
         w.bool(false); // playerKnockback: Optional<Vec3>, never present.
         w.var_i32(PARTICLE_ID_EXPLOSION_EMITTER);
         let sound_id = explosion_sound_registry_id();
-        w.var_i32(sound_id + 1); // Holder::REFERENCE encoding: registryId + 1.
+        w.var_i32(sound_id.raw() + 1); // Holder::REFERENCE encoding: registryId + 1.
         w.var_i32(0); // blockParticles: empty WeightedList.
         ServerDirective::Send {
             packet_id: play::clientbound::EXPLODE,
@@ -5849,7 +5837,7 @@ impl ServerProtocol for V770ServerProtocol {
             return ServerDirective::None;
         };
         let mut w = Writer::default();
-        w.var_i32(registry_id + 1); // Holder::REFERENCE: registryId + 1.
+        w.var_i32(registry_id.raw() + 1); // Holder::REFERENCE: registryId + 1.
         w.var_i32(i32::from(category.ordinal()));
         w.i32((pos.x * SOUND_POSITION_SCALE) as i32);
         w.i32((pos.y * SOUND_POSITION_SCALE) as i32);

@@ -79,7 +79,7 @@
 
 use crate::block_states::StateId;
 use crate::generated_sound_types as table;
-use crate::sound_events;
+use crate::sound_events::{self, SoundEventId};
 
 pub use table::{ENTRY_COUNT, STATE_COUNT};
 
@@ -94,7 +94,7 @@ pub const EMPTY_SOUND: &str = "minecraft:intentionally_empty";
 /// The five surface sounds and the volume/pitch pair vanilla's own sound-type
 /// record carries, for one block state.
 ///
-/// The sound fields are `minecraft:sound_event` registry ids; resolve them with
+/// The sound fields are validated `minecraft:sound_event` registry ids; resolve them with
 /// the `*_sound_name` accessors, which go through [`crate::sound_events`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlockSoundType {
@@ -103,15 +103,15 @@ pub struct BlockSoundType {
     /// Vanilla's own sound-type pitch accessor. `1.0` for all but `METAL` (`1.5`).
     pub pitch: f32,
     /// Vanilla's own sound-type break-sound accessor — `LEVEL_EVENT` 2001's sound.
-    pub break_sound: u16,
+    pub break_sound: SoundEventId,
     /// Vanilla's own sound-type step-sound accessor — footsteps.
-    pub step_sound: u16,
+    pub step_sound: SoundEventId,
     /// Vanilla's own sound-type place-sound accessor — the block-item place step's sound.
-    pub place_sound: u16,
+    pub place_sound: SoundEventId,
     /// Vanilla's own sound-type hit-sound accessor — the tick-rate sound while mining.
-    pub hit_sound: u16,
+    pub hit_sound: SoundEventId,
     /// Vanilla's own sound-type fall-sound accessor — landing on the surface.
-    pub fall_sound: u16,
+    pub fall_sound: SoundEventId,
 }
 
 impl BlockSoundType {
@@ -136,36 +136,34 @@ impl BlockSoundType {
         self.pitch * 0.8
     }
 
-    /// `minecraft:*` identifier of [`Self::break_sound`], or `None` if the id is
-    /// outside the sound-event registry (which the generated table makes
-    /// impossible — the oracle refuses to emit an unregistered id).
+    /// `minecraft:*` identifier of [`Self::break_sound`].
     #[must_use]
-    pub fn break_sound_name(self) -> Option<&'static str> {
-        sound_events::sound_event_name(i32::from(self.break_sound))
+    pub fn break_sound_name(self) -> &'static str {
+        sound_events::sound_event_name(self.break_sound)
     }
 
     /// `minecraft:*` identifier of [`Self::step_sound`].
     #[must_use]
-    pub fn step_sound_name(self) -> Option<&'static str> {
-        sound_events::sound_event_name(i32::from(self.step_sound))
+    pub fn step_sound_name(self) -> &'static str {
+        sound_events::sound_event_name(self.step_sound)
     }
 
     /// `minecraft:*` identifier of [`Self::place_sound`].
     #[must_use]
-    pub fn place_sound_name(self) -> Option<&'static str> {
-        sound_events::sound_event_name(i32::from(self.place_sound))
+    pub fn place_sound_name(self) -> &'static str {
+        sound_events::sound_event_name(self.place_sound)
     }
 
     /// `minecraft:*` identifier of [`Self::hit_sound`].
     #[must_use]
-    pub fn hit_sound_name(self) -> Option<&'static str> {
-        sound_events::sound_event_name(i32::from(self.hit_sound))
+    pub fn hit_sound_name(self) -> &'static str {
+        sound_events::sound_event_name(self.hit_sound)
     }
 
     /// `minecraft:*` identifier of [`Self::fall_sound`].
     #[must_use]
-    pub fn fall_sound_name(self) -> Option<&'static str> {
-        sound_events::sound_event_name(i32::from(self.fall_sound))
+    pub fn fall_sound_name(self) -> &'static str {
+        sound_events::sound_event_name(self.fall_sound)
     }
 
     /// Whether `name` is the [`EMPTY_SOUND`] sentinel, i.e. a slot vanilla
@@ -189,21 +187,26 @@ pub fn sound_type(id: StateId) -> BlockSoundType {
     BlockSoundType {
         volume,
         pitch,
-        break_sound,
-        step_sound,
-        place_sound,
-        hit_sound,
-        fall_sound,
+        break_sound: SoundEventId::new(i32::from(break_sound))
+            .expect("sound-type generator emits only registered sound events"),
+        step_sound: SoundEventId::new(i32::from(step_sound))
+            .expect("sound-type generator emits only registered sound events"),
+        place_sound: SoundEventId::new(i32::from(place_sound))
+            .expect("sound-type generator emits only registered sound events"),
+        hit_sound: SoundEventId::new(i32::from(hit_sound))
+            .expect("sound-type generator emits only registered sound events"),
+        fall_sound: SoundEventId::new(i32::from(fall_sound))
+            .expect("sound-type generator emits only registered sound events"),
     }
 }
 
 /// The break sound name for block-state `id`, ready to hand to a sound engine.
 ///
-/// `None` when the sound is the [`EMPTY_SOUND`] sentinel or its generated event
-/// id does not resolve. Raw ids must first pass [`StateId::new`].
+/// `None` when the sound is the [`EMPTY_SOUND`] sentinel. Raw state ids must
+/// first pass [`StateId::new`].
 #[must_use]
 pub fn break_sound_name(id: StateId) -> Option<&'static str> {
-    let name = sound_type(id).break_sound_name()?;
+    let name = sound_type(id).break_sound_name();
     (!BlockSoundType::is_empty_sound(name)).then_some(name)
 }
 
@@ -211,7 +214,7 @@ pub fn break_sound_name(id: StateId) -> Option<&'static str> {
 /// [`break_sound_name`].
 #[must_use]
 pub fn place_sound_name(id: StateId) -> Option<&'static str> {
-    let name = sound_type(id).place_sound_name()?;
+    let name = sound_type(id).place_sound_name();
     (!BlockSoundType::is_empty_sound(name)).then_some(name)
 }
 
@@ -222,6 +225,6 @@ pub fn place_sound_name(id: StateId) -> Option<&'static str> {
 /// selecting the surface below the player's feet (see `docs/sound.md`).
 #[must_use]
 pub fn step_sound_name(id: StateId) -> Option<&'static str> {
-    let name = sound_type(id).step_sound_name()?;
+    let name = sound_type(id).step_sound_name();
     (!BlockSoundType::is_empty_sound(name)).then_some(name)
 }

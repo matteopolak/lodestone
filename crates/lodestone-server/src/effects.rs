@@ -194,20 +194,11 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
 /// `true` iff `name` is a real entry in 26.2's `minecraft:sound_event` registry.
 ///
 /// The guard every derivation in this module ends with — see the module doc.
-/// Backed by a set built once from the generated table (~1,500 entries), so a
-/// derivation costs a hash rather than a scan.
+/// The data census validates the name and returns a typed built-in id; custom,
+/// malformed, and future names remain explicit misses rather than aliases.
 #[must_use]
 pub fn sound_exists(name: &str) -> bool {
-    use std::collections::HashSet;
-    use std::sync::OnceLock;
-    static NAMES: OnceLock<HashSet<&'static str>> = OnceLock::new();
-    NAMES
-        .get_or_init(|| {
-            (0..lodestone_data::sound_events::SOUND_EVENT_COUNT as i32)
-                .filter_map(lodestone_data::sound_events::sound_event_name)
-                .collect()
-        })
-        .contains(name)
+    lodestone_data::sound_events::sound_event_id(name).is_some()
 }
 
 /// The first name in `candidates` that 26.2 actually has, as an owned `String`.

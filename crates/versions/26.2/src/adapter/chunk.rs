@@ -4,6 +4,7 @@
 use super::*;
 use super::player::game_mode;
 use lodestone_data::block::Block;
+use lodestone_data::sound_events::SoundEventId;
 
 impl V770Adapter {
     /// Clientbound play-state packets in the chunk domain, split out of the
@@ -972,7 +973,8 @@ fn read_sound_holder(reader: &mut Reader<'_>) -> Result<(String, Option<f32>), A
         Ok((name, range))
     } else {
         let index = holder_id - 1;
-        sound_event(index)
+        SoundEventId::new(index)
+            .map(super::sound_event)
             .map(|(name, range)| (name.to_owned(), range))
             .ok_or_else(|| AdapterError::Decode(format!("unknown sound event id {index}")))
     }

@@ -408,8 +408,11 @@ fn dump_sound_event_ids_agree_with_the_registries_json_table() {
     );
     for (&id, name) in &dump.sound_names {
         assert_eq!(
-            sound_events::sound_event_name(i32::from(id)),
-            Some(name.as_str()),
+            sound_events::sound_event_name(
+                sound_events::SoundEventId::new(i32::from(id))
+                    .expect("sound oracle only emits registered event ids"),
+            ),
+            name.as_str(),
             "sound event registry id {id}: the live registry says {name}, \
              src/generated/sound_events.rs disagrees"
         );
@@ -514,7 +517,7 @@ fn committed_entries_match_the_dump() {
                 actual.place_sound,
                 actual.hit_sound,
                 actual.fall_sound,
-            ] == expected.sounds;
+            ].map(|sound| sound.raw()) == expected.sounds.map(i32::from);
         if !matches {
             wrong.push((id, dump.block_of(id)));
         }
@@ -660,7 +663,7 @@ fn break_and_place_scaling_matches_vanilla_for_every_population() {
     assert_eq!(anvil.break_or_place_volume(), (0.3f32 + 1.0) / 2.0);
     // Spelled out so a swapped `(v + 1) / 2` vs `v / 2 + 1` is caught: 0.65, not 1.15.
     assert!((anvil.break_or_place_volume() - 0.65).abs() < 1e-6);
-    assert_eq!(anvil.break_sound_name(), Some("minecraft:block.anvil.break"));
+    assert_eq!(anvil.break_sound_name(), "minecraft:block.anvil.break");
 
     // METAL, the only pitch != 1.0: 1.5 -> 1.2. Gold, not iron — see
     // [`the_common_break_sounds_match_vanilla_by_name`].
@@ -682,7 +685,7 @@ fn the_empty_sound_sentinel_is_reported_as_absent() {
     let id = state_id(id);
     let sound = sound_types::sound_type(id);
     // `CACTUS_FLOWER` is `(1.0, 1.0, CACTUS_FLOWER_BREAK, EMPTY, CACTUS_FLOWER_PLACE, EMPTY, EMPTY)`.
-    assert_eq!(sound.step_sound_name(), Some(sound_types::EMPTY_SOUND));
+    assert_eq!(sound.step_sound_name(), sound_types::EMPTY_SOUND);
     assert_eq!(sound_types::step_sound_name(id), None, "no step sound to play");
     assert_eq!(
         sound_types::break_sound_name(id),
@@ -704,38 +707,23 @@ fn validated_state_lookup_is_total_and_invalid_raw_ids_stop_at_boundary() {
     let air = StateId::new(0).expect("air is a valid state");
     assert_eq!(
         sound_types::sound_type(air).break_sound_name(),
-        Some("minecraft:block.stone.break")
+        "minecraft:block.stone.break"
     );
     assert!(StateId::new(sound_types::STATE_COUNT).is_none());
     assert!(StateId::new(u32::MAX).is_none());
 }
 
-/// Every state resolves — no hole anywhere in the 32,366, and every referenced
-/// sound event resolves to a name. Without this the by-name tests above could all
-/// pass while most of the table was garbage.
+/// Every state resolves — no hole anywhere in the 32,366. The fixture test above
+/// independently verifies every referenced sound event against the registry report.
 #[test]
 fn every_state_resolves_to_a_named_sound_type() {
-    let mut unresolved_sound = 0usize;
     let mut empty_break = Vec::new();
     for id in 0..sound_types::STATE_COUNT {
         let state = state_id(id);
-        let sound = sound_types::sound_type(state);
-        for name in [
-            sound.break_sound_name(),
-            sound.step_sound_name(),
-            sound.place_sound_name(),
-            sound.hit_sound_name(),
-            sound.fall_sound_name(),
-        ] {
-            if name.is_none() {
-                unresolved_sound += 1;
-            }
-        }
         if sound_types::break_sound_name(state).is_none() {
             empty_break.push(block_states::block_name(id).unwrap_or("?"));
         }
     }
-    assert_eq!(unresolved_sound, 0, "sound ids that resolve to no name");
     // Measured: exactly three blocks carry the empty sound-type constant, and all three are
     // fluids, which no `LEVEL_EVENT` 2001 can name. Asserted by name so a version
     // bump that empties a *solid* surface's break slot is visible rather than

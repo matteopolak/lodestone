@@ -56,10 +56,14 @@ expression appears at both of vanilla's own call sites.
 The census lookup accepts `lodestone_data::block_states::StateId`, not a raw
 integer. Packet, chunk and prediction boundaries validate their raw state id
 once with `StateId::new`; after that, every one of the 32,366 states has a
-total `BlockSoundType` lookup. An unknown raw id remains silent at those
-boundaries. The sound-name helpers still return `Option` because
-`minecraft:intentionally_empty` is a valid sound-event sentinel that means
-there is deliberately no sample to play.
+total `BlockSoundType` lookup. Each row's five event references are likewise
+validated `SoundEventId` values, so their name lookups are total. A packet
+holder validates its positive registry reference after subtracting one; its
+zero-form inline definition keeps the supplied resource key, including a
+custom or future name, rather than being forced into the built-in census. An
+unknown positive id is rejected at that boundary. The surface-sound helpers
+still return `Option` because `minecraft:intentionally_empty` is a valid
+sound-event sentinel that means there is deliberately no sample to play.
 
 The explosion sound was missing for a structural reason, not a routing gap:
 v26-2 never decoded packet id 36 (`minecraft:explode`) at all, so there was
