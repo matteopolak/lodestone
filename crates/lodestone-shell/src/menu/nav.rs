@@ -898,7 +898,8 @@ impl MainButton {
             // docs.
             | MainButton::Language
             | MainButton::Accessibility => true,
-            MainButton::Realms | MainButton::Friends => false,
+            MainButton::Realms => false,
+            MainButton::Friends => true,
         }
     }
 
@@ -1109,6 +1110,7 @@ impl PauseButton {
                 // `UPDATE_ADVANCEMENTS` decode shows real progress —
                 // see `menu::advancements`' module docs.
                 | PauseButton::Advancements
+                | PauseButton::Friends
                 // hosted-world opener has a caller. Always
                 // enabled rather than session-aware, because `enabled` is a pure
                 // function of the variant at every call site — see the variant's
@@ -1396,6 +1398,9 @@ pub struct MenuNav {
     /// [`Self::settings`] is: `Screen::Social` is one screen regardless of how
     /// far its list is scrolled, and `UiState` models legal screen edges only.
     social: crate::menu::social::SocialNav,
+    /// The Friends screen's credential-free view, focus and queued intents.
+    /// The app refreshes the view; only it can forward intents to the worker.
+    friends: crate::menu::friends::FriendsNav,
     /// The Statistics screen's own scroll cursor. No persisted
     /// state of its own — see [`crate::menu::stats::StatsNav`]'s doc.
     stats: crate::menu::stats::StatsNav,
@@ -1643,6 +1648,7 @@ impl MenuNav {
             menu_cursor: None,
             settings: crate::menu::options::SettingsNav::new(),
             social: crate::menu::social::SocialNav::with_path(hidden_players_path),
+            friends: crate::menu::friends::FriendsNav::default(),
             stats: crate::menu::stats::StatsNav::default(),
             stats_snapshot: crate::menu::stats::StatsSnapshot::default(),
             server_links: crate::menu::server_links::ServerLinksNav::default(),
@@ -2057,6 +2063,22 @@ impl MenuNav {
         self.social.refresh(entries);
     }
 
+    /// Replace Friends' credential-free presentation state. The app is the
+    /// only source: menu code cannot reach a session, token, or service.
+    pub fn refresh_friends_view(&mut self, view: crate::friends_runtime::FriendsView) {
+        self.friends.refresh(view);
+    }
+
+    #[must_use]
+    pub fn friends(&self) -> &crate::menu::friends::FriendsNav {
+        &self.friends
+    }
+
+    /// Drain user gestures for the app to forward to its private Friends worker.
+    pub fn take_friends_intents(&mut self) -> Vec<crate::menu::friends::FriendsIntent> {
+        self.friends.take_intents()
+    }
+
     /// Replaces the Spectator Menu's roster — the same shape
     /// [`Self::refresh_social`] immediately above has, for the identical
     /// reason: `app/session.rs`'s per-frame reconciliation is what can reach
@@ -2329,6 +2351,13 @@ impl MenuNav {
                 self.social.entries().len(),
                 self.social.scroll(),
             )),
+            super::Screen::Friends => Some(super::friends::list_spec(
+                self.friends.view().snapshot.as_ref().map_or(0, |snapshot| match self.friends.tab() {
+                    super::friends::FriendsTab::Friends => snapshot.friends.len(),
+                    super::friends::FriendsTab::Pending => snapshot.incoming.len() + snapshot.outgoing.len(),
+                }),
+                self.friends.scroll(),
+            )),
             // Every other settings page uses entry heights that
             // are **non-uniform** — a header is taller than a control row — so
             // this is the one arm that goes through `ListSpec::with_heights`.
@@ -2449,6 +2478,11 @@ impl MenuNav {
                 let before = self.social.scroll();
                 self.social.scroll_by(notches, canvas_height);
                 self.social.scroll() != before
+            }
+            super::Screen::Friends => {
+                let before = self.friends.scroll();
+                self.friends.scroll_by(notches, canvas_height);
+                self.friends.scroll() != before
             }
             // Every other settings page. Same ordering as `active_list`.
             super::Screen::Settings => {
@@ -3032,6 +3066,7 @@ impl MenuNav {
             // arm above: without this, a click would have to route through
             // `Enter`, which would activate whichever row was previously focused.
             Screen::Social => self.social.hover_row(row),
+            Screen::Friends => self.friends.hover_row(row),
             // The command block edit screen — plain hover
             // tracking, like `Screen::Paused`/`Screen::Death` above: this
             // screen has no keyboard-focus cursor to move (see
@@ -3246,6 +3281,12 @@ impl MenuNav {
         if ui.screen() == Screen::Social {
             let outcome = self.social.click_row(row);
             return self.apply_social(ui, outcome);
+        }
+        if ui.screen() == Screen::Friends {
+            if self.friends.click_row(row) {
+                ui.close_friends();
+            }
+            return MenuAction::None;
         }
         // The fourth. A click on a *row* here is
         // `AbstractSelectionList.mouseClicked` — it selects, and only the favicon's
@@ -3593,6 +3634,7 @@ impl MenuNav {
             // keeps Up/Down/Enter and Escape's screen-specific meaning in one
             // place instead of splitting it across two functions.
             Screen::Social => self.key_social(ui, key),
+            Screen::Friends => self.key_friends(ui, key),
             // Statistics — its own arm for the same reason
             // `Screen::Social`'s is: routing Escape through the catch-all's
             // `UiState::on_escape` would also work (its `Screen::Statistics`
@@ -3739,11 +3781,16 @@ impl MenuNav {
                         ui.open_settings();
                         MenuAction::None
                     }
+                    MainButton::Friends => {
+                        self.friends.reset();
+                        ui.open_friends_from_title();
+                        MenuAction::None
+                    }
                     // Unreachable — every variant below is disabled above.
                     // Spelled out instead of `_` so making one of them *enabled*
                     // without giving it an action is a compile-visible mistake
                     // rather than a silently dead button.
-                    MainButton::Realms | MainButton::Friends => MenuAction::None,
+                    MainButton::Realms => MenuAction::None,
                 }
             }
             MenuKey::Escape => {
@@ -5735,6 +5782,11 @@ impl MenuNav {
                         ui.open_social_from_pause();
                         MenuAction::None
                     }
+                    PauseButton::Friends => {
+                        self.friends.reset();
+                        ui.open_friends_from_pause();
+                        MenuAction::None
+                    }
                     // Statistics follows the same "reset on every entry" rule as
                     // `PauseButton::PlayerReporting` immediately above.
                     PauseButton::Statistics => {
@@ -5765,8 +5817,7 @@ impl MenuNav {
                     // as `Respawn` and `Singleplayer`.
                     PauseButton::OpenToLan => MenuAction::OpenToLan,
                     PauseButton::ReportBugs
-                    | PauseButton::Feedback
-                    | PauseButton::Friends => MenuAction::None,
+                    | PauseButton::Feedback => MenuAction::None,
                 }
             }
             MenuKey::Escape => {
@@ -5857,6 +5908,24 @@ impl MenuNav {
             }
             _ => MenuAction::None,
         }
+    }
+
+    /// Friends is a credential-free menu consumer. It only queues a refresh or
+    /// an already-supported relationship change; the app owns forwarding those
+    /// intents to the private service worker.
+    fn key_friends(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Up => self.friends.step(false),
+            MenuKey::Down | MenuKey::Tab => self.friends.step(true),
+            MenuKey::Enter => {
+                if self.friends.enter() {
+                    ui.close_friends();
+                }
+            }
+            MenuKey::Escape => ui.close_friends(),
+            _ => {}
+        }
+        MenuAction::None
     }
 
     /// What a [`crate::menu::social::SocialOutcome`] means at the `UiState`
@@ -6225,6 +6294,9 @@ pub fn on_screen_frame<'a>(
     if let Some(frame) = server_links_overlay_frame(ui, nav) {
         return Some(frame);
     }
+    if let Some(frame) = friends_overlay_frame(ui, nav) {
+        return Some(frame);
+    }
     // The fourth overlay screen, and the second instance of the exact
     // shape above. `command_block_overlay_frame` is the *same call* the draw
     // path in `app/redraw.rs` makes — see its own doc for why it is a function
@@ -6478,6 +6550,20 @@ pub fn social_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::re
     Some(frame)
 }
 
+/// Friends opened from pause is an overlay; the title route stays in the
+/// ordinary full-frame dispatcher.
+#[must_use]
+pub fn friends_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::render::MenuFrame<'a>> {
+    if !ui.friends_in_world() {
+        return None;
+    }
+    let mut frame = crate::menu::friends::frame(nav.friends());
+    super::render::stamp_canvas_facts(&mut frame, ui, nav);
+    frame.backdrop = super::render::MenuBackdrop::Dim;
+    frame.blur = true;
+    Some(frame)
+}
+
 /// The Server Links screen's overlay frame, or `None` when it is not up —
 /// one expression with two consumers, [`settings_overlay_frame`]'s exact
 /// shape and for the same underlying reason: this screen can only ever be
@@ -6600,6 +6686,7 @@ pub fn routes_menu_input(ui: &UiState) -> bool {
         // movement) instead of answering the dialog — the screen would open,
         // draw, and never receive a single Accept/Decline.
         || ui.is_resource_pack_prompt()
+        || ui.screen() == Screen::Friends
         // Server Links (like the `Screen::ResourcePackPrompt` arm above) is
         // `owns_frame == false` unconditionally — it is never routed through
         // the Clear pass, only ever drawn as an overlay — so without this arm
