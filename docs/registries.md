@@ -109,7 +109,12 @@ in `block_event`, tool rules); `StateId` has 32,366 values in **name-sorted** or
 chunk palettes, `block_update`) and is a validated newtype rather than an enum, because
 32,366 hand-named variants buys nothing when no code ever matches on one. The orders are
 unrelated permutations — going between them always goes through the generated join
-(`StateId::block`, `Block::default_state`), never by assuming the indexes coincide.
+(`StateId::block`, `Block::default_state`), never by assuming the indexes coincide. At an
+in-process built-in-state boundary, resolve text with `StateId::from_state_str` and use
+`StateId::block`/`StateId::properties`; call `StateId::raw` only where a protocol packet actually
+writes the global state id. A dynamic plugin or data-pack state that does not resolve must stay
+text in its owning registry or import path, rather than being substituted with a built-in state
+merely to obtain this type.
 The raw block-state table keeps its first field as the alphabetical block index required by
 the name-keyed state report, but it does **not** carry a second block-name column: lookup
 resolves that field through `generated_block_enum::REGISTRY_IDS_BY_NAME` into the one

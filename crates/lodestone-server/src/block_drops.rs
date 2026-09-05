@@ -234,9 +234,13 @@ pub fn block_loot_table_id(block_state: &str) -> Option<ResourceKey> {
 /// `age=7` matcher *because zero is not seven* rather than because the string
 /// happened to omit the property.
 ///
-/// `lodestone_data::block_states::state_id` is the resolution — the committed
-/// 32,366-state table, with its default-plus-overrides fallback — and
-/// `properties` reads the canonical `(name, value)` list straight back out.
+/// [`lodestone_data::block_states::StateId::from_state_str`] is the resolution
+/// boundary — the committed 32,366-state table, with its
+/// default-plus-overrides fallback — and
+/// [`StateId::properties`](lodestone_data::block_states::StateId::properties)
+/// reads the canonical `(name, value)` list straight back out. No raw numeric
+/// state id enters this in-process path: only a protocol encoder needs
+/// [`StateId::raw`](lodestone_data::block_states::StateId::raw).
 ///
 /// Falls back to the properties written in the string for a state the census
 /// cannot resolve at all. That path is the *conservative* direction rather than a
@@ -259,16 +263,17 @@ pub fn loot_block_state(block_state: &str) -> Option<LootBlockState> {
     };
     // The census is keyed by fully-qualified name, so a namespace-less input has
     // to be re-qualified before the lookup — and the bracket part carried across
-    // verbatim, since `state_id`'s tiers are what turn a partial property list
-    // into a real state.
+    // verbatim, since `StateId::from_state_str`'s tiers are what turn a partial
+    // property list into a real state.
     let query = match block_state.split_once('[') {
         Some((_, rest)) => format!("{block}[{rest}"),
         None => block.to_string(),
     };
-    if let Some(properties) = lodestone_data::block_states::state_id(&query)
-        .and_then(lodestone_data::block_states::properties)
-    {
-        return Some(LootBlockState::with_properties(block, properties.iter().copied()));
+    if let Some(state) = lodestone_data::block_states::StateId::from_state_str(&query) {
+        return Some(LootBlockState::with_properties(
+            block,
+            state.properties().iter().copied(),
+        ));
     }
     Some(LootBlockState::with_properties(block, parsed_properties(block_state)))
 }
