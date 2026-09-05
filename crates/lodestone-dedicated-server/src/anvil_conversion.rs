@@ -27,7 +27,7 @@ const USAGE: &str = concat!(
     "--min-y <blocks> --height <blocks> [--apply --acknowledge <review-token>]\n",
     "  lodestone-server anvil-convert export --source <native-store> ",
     "--destination <anvil-world> --native-path <native-store> --min-y <blocks> ",
-    "--height <blocks> --chunk <x,z> [--chunk <x,z> ...] --game-time <ticks> ",
+    "--height <blocks> (--chunk <x,z> [--chunk <x,z> ...] | --all-terrain) --game-time <ticks> ",
     "--timestamp <seconds> --compression <gzip|zlib|uncompressed|lz4> ",
     "[--apply --acknowledge <review-token>]\n\n",
     "Without --apply this command only reports its payload-free preflight and refuses mutation. ",
@@ -59,6 +59,7 @@ struct ConversionLaunch {
     height: i32,
     dimension: Option<String>,
     chunks: Vec<ChunkCoordinate>,
+    all_terrain: bool,
     game_time: Option<u64>,
     timestamp: Option<u32>,
     compression: Option<CompressionScheme>,
@@ -95,6 +96,7 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
     let mut height = None;
     let mut dimension = None;
     let mut chunks = Vec::new();
+    let mut all_terrain = false;
     let mut game_time = None;
     let mut timestamp = None;
     let mut compression = None;
@@ -118,6 +120,7 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
             }
             "--dimension" => dimension = Some(next_arg("--dimension", &mut args)?),
             "--chunk" => chunks.push(parse_chunk(&next_arg("--chunk", &mut args)?)?),
+            "--all-terrain" => all_terrain = true,
             "--game-time" => {
                 game_time = Some(parse_number("--game-time", &next_arg("--game-time", &mut args)?)?);
             }
@@ -143,6 +146,7 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
         height: height.ok_or_else(|| "--height is required".to_owned())?,
         dimension,
         chunks,
+        all_terrain,
         game_time,
         timestamp,
         compression,
@@ -174,6 +178,7 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
                 return Err("import requires a non-empty --dimension".to_owned());
             }
             if !launch.chunks.is_empty()
+                || launch.all_terrain
                 || launch.game_time.is_some()
                 || launch.timestamp.is_some()
                 || launch.compression.is_some()
@@ -185,8 +190,11 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
             if launch.dimension.is_some() {
                 return Err("--dimension is import-only; export is terrain-only".to_owned());
             }
-            if launch.chunks.is_empty() {
-                return Err("export requires at least one explicit --chunk <x,z>".to_owned());
+            if launch.all_terrain && !launch.chunks.is_empty() {
+                return Err("export accepts either --all-terrain or explicit --chunk values, not both".to_owned());
+            }
+            if !launch.all_terrain && launch.chunks.is_empty() {
+                return Err("export requires --all-terrain or at least one explicit --chunk <x,z>".to_owned());
             }
             if launch.game_time.is_none()
                 || launch.timestamp.is_none()
@@ -252,8 +260,22 @@ fn execute_import(launch: &ConversionLaunch) -> Result<String, String> {
 }
 
 fn execute_export(launch: &ConversionLaunch, storage: &WorldStorage) -> Result<String, String> {
+    let chunks = if launch.all_terrain {
+        storage
+            .native_chunk_coordinates()
+            .map_err(|error| format!("could not enumerate committed native terrain: {error}"))?
+            .into_iter()
+            .map(|coordinate| ChunkCoordinate {
+                x: coordinate.column_x,
+                z: coordinate.column_z,
+            })
+            .collect()
+    } else {
+        launch.chunks.clone()
+    };
+    let selected_count = chunks.len();
     let input = WorldExportInput::new(
-        launch.chunks.clone(),
+        chunks,
         launch.min_y,
         launch.height,
         launch.game_time.expect("validated export game time"),
@@ -264,7 +286,10 @@ fn execute_export(launch: &ConversionLaunch, storage: &WorldStorage) -> Result<S
     let report = preflight_world_export(storage, &input)
         .map_err(|error| format!("export preflight failed: {error}"))?;
     let token = review_token(launch, &report);
-    let mut output = format_review(Direction::Export, &report, &token);
+    let mut output = format!(
+        "Selected {selected_count} terrain chunks.\n{}",
+        format_review(Direction::Export, &report, &token)
+    );
     require_apply(launch, &report, &token, &mut output)?;
     let result = export_world_directory(
         storage,
@@ -338,7 +363,7 @@ fn format_review<T: fmt::Debug>(direction: Direction, report: &T, token: &str) -
 
 fn review_token<T: fmt::Debug>(launch: &ConversionLaunch, report: &T) -> String {
     let reviewed = format!(
-        "v1|{:?}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        "v2|{:?}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
         launch.direction,
         launch.source.display(),
         launch.destination.display(),
@@ -347,6 +372,7 @@ fn review_token<T: fmt::Debug>(launch: &ConversionLaunch, report: &T) -> String 
         launch.height,
         launch.dimension,
         launch.chunks,
+        launch.all_terrain,
         launch.game_time,
         launch.timestamp,
         report,
@@ -401,7 +427,7 @@ mod tests {
 
     use super::*;
 
-    const SCRATCH: &str = "/private/tmp/lodestone-wave-storage-cli-711";
+    const SCRATCH: &str = "/private/tmp/lodestone-wave-storage-enum-711";
 
     struct Scratch;
 
@@ -456,15 +482,22 @@ mod tests {
         storage
             .write_dirty_chunk(NativeDirtyChunkRecord::new(0, 0, &column, &light, &scheduled))
             .expect("write complete typed native fixture chunk");
+        storage
+            .write_dirty_chunk(NativeDirtyChunkRecord::new(-1, 0, &column, &light, &scheduled))
+            .expect("write a second complete typed native fixture chunk");
         drop(storage);
 
         let export = [
             "export", "--source", native_source.to_str().unwrap(), "--destination",
             anvil_destination.to_str().unwrap(), "--native-path",
-            native_source.to_str().unwrap(), "--min-y", "0", "--height", "16", "--chunk",
-            "0,0", "--game-time", "0", "--timestamp", "1", "--compression", "zlib",
+            native_source.to_str().unwrap(), "--min-y", "0", "--height", "16", "--all-terrain",
+            "--game-time", "0", "--timestamp", "1", "--compression", "zlib",
         ];
         let preview = run(export).expect_err("default export reports and refuses mutation");
+        assert!(
+            preview.contains("Selected 2 terrain chunks."),
+            "all-terrain preview reports its exact recovered-index selection"
+        );
         assert!(preview.contains("Refusing mutation without --apply."));
         assert!(!anvil_destination.exists(), "preview cannot publish a destination");
 
@@ -506,6 +539,12 @@ mod tests {
                 .expect("read imported chunk")
                 .is_some()
         );
+        assert!(
+            reopened
+                .load_chunk(-1, 0, 0, 16)
+                .expect("read second imported chunk")
+                .is_some()
+        );
     }
 
     #[test]
@@ -524,5 +563,21 @@ mod tests {
         ])
         .expect_err("conversion endpoints must not alias");
         assert!(ambiguous.contains("different paths"));
+        let explicit = parse([
+            "export", "--source", "/tmp/native", "--destination", "/tmp/anvil",
+            "--native-path", "/tmp/native", "--min-y", "0", "--height", "16", "--chunk",
+            "0,0", "--game-time", "0", "--timestamp", "1", "--compression", "zlib",
+        ])
+        .expect("an explicit chunk selection remains supported");
+        assert!(!explicit.all_terrain);
+        assert_eq!(explicit.chunks, [ChunkCoordinate { x: 0, z: 0 }]);
+        let mixed = parse([
+            "export", "--source", "/tmp/native", "--destination", "/tmp/anvil",
+            "--native-path", "/tmp/native", "--min-y", "0", "--height", "16", "--chunk",
+            "0,0", "--all-terrain", "--game-time", "0", "--timestamp", "1",
+            "--compression", "zlib",
+        ])
+        .expect_err("selection modes must remain unambiguous");
+        assert!(mixed.contains("either --all-terrain or explicit --chunk"));
     }
 }

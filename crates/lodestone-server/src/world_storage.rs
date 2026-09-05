@@ -14,7 +14,8 @@ use std::sync::Mutex;
 
 use lodestone_core::{Reader, Writer, read_named_nbt, write_named_nbt};
 use lodestone_storage::{
-    ExtensionRegistration, NativeStore, RecordKey, RecordWrite, StoreError,
+    ExtensionRegistration, NativeChunkCoordinate, NativeStore, RecordKey, RecordWrite,
+    StoreError,
 };
 use lodestone_storage_schema::{
     BiomeSection, BuiltinDimension, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1,
@@ -637,6 +638,7 @@ impl std::error::Error for EntityRecordError {}
 trait DirtyRecordStore: Send {
     fn write_transaction(&mut self, writes: Vec<RecordWrite>) -> Result<(), StoreError>;
     fn get(&mut self, key: RecordKey) -> Result<Option<StorageRecord>, StoreError>;
+    fn committed_chunk_coordinates(&self) -> Vec<NativeChunkCoordinate>;
     fn extension_table(&self) -> ExtensionTable;
     fn register_extensions(
         &mut self,
@@ -651,6 +653,10 @@ impl DirtyRecordStore for NativeStore {
 
     fn get(&mut self, key: RecordKey) -> Result<Option<StorageRecord>, StoreError> {
         NativeStore::get(self, key)
+    }
+
+    fn committed_chunk_coordinates(&self) -> Vec<NativeChunkCoordinate> {
+        NativeStore::committed_chunk_coordinates(self)
     }
 
     fn extension_table(&self) -> ExtensionTable {
@@ -736,6 +742,24 @@ impl WorldStorage {
             .lock()
             .expect("world storage lock poisoned")
             .extension_table())
+    }
+
+    /// Snapshots every committed native terrain-column coordinate.
+    ///
+    /// The native format version selected here has no dimension key, so this
+    /// result contains only horizontal columns. The store copies its recovered
+    /// latest-record index while holding the backend lock; it does not seek to
+    /// or deserialize chunk payloads, and a concurrent writer cannot change
+    /// the returned selection after this method returns. Anvil has no matching
+    /// typed index and rejects the request instead of implying a world scan.
+    pub fn native_chunk_coordinates(&self) -> Result<Vec<NativeChunkCoordinate>, Error> {
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        Ok(native
+            .lock()
+            .expect("world storage lock poisoned")
+            .committed_chunk_coordinates())
     }
 
     /// Registers named extension schemas in the selected native backend.
@@ -1941,6 +1965,10 @@ mod tests {
             Ok(None)
         }
 
+        fn committed_chunk_coordinates(&self) -> Vec<NativeChunkCoordinate> {
+            Vec::new()
+        }
+
         fn extension_table(&self) -> ExtensionTable {
             ExtensionTable {
                 table_version: FORMAT_VERSION_V1,
@@ -2026,6 +2054,10 @@ mod tests {
         ));
         assert!(matches!(
             storage.load_chunk(0, 0, 1, 0),
+            Err(Error::AnvilDoesNotAcceptTypedRecords)
+        ));
+        assert!(matches!(
+            storage.native_chunk_coordinates(),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
         assert!(matches!(
