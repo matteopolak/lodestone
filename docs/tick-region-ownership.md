@@ -201,6 +201,13 @@ leash in one owner cannot overtake another owner's earlier action. Each plan
 also carries a monotonically increasing generation: incomplete, duplicate,
 mixed, stale, and replayed completions fail before the central writer mutates
 either a leash or the item registry.
+
+The ignored `measure_dense_leash_owner_workers` control measured four native
+owners on this host: 256 leashes took 0.545 ms in one lane and 0.195 ms in four
+lanes (2.798×), while 2,048 took 10.951 ms and 4.515 ms respectively (2.425×).
+Those are a named dense, mob-held-leash scene rather than a general tick-time
+claim; they justify the 256-leash dispatch threshold, not a promise that every
+leash distribution benefits from workers.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
