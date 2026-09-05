@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Hand, Rotation, Vec3,
-    Vec3f, VersionAdapter,
+    BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent, ConnectionState,
+    Hand, Rotation, Vec3, Vec3f, VersionAdapter,
 };
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, ServerBound};
 use lodestone_v1_13::{adapter, V404Adapter};
@@ -101,6 +101,42 @@ fn registry_selected_404_host_consumes_adapter_block_use() {
         ServerBound::Ignored,
         "a Play block-use body must not bypass the connection-state gate"
     );
+}
+
+#[tokio::test]
+async fn registry_selected_404_host_echoes_legacy_chat_to_the_client_event_stream() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
+        .expect("protocol 404 must resolve to its hosted family");
+    let source = Arc::new(FlatFixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, mut events) = ClientBuilder::new(address(), profile(), Box::new(adapter()))
+        .player_loaded_policy(PlayerLoadedPolicy::Manual)
+        .connect_with(client_io);
+
+    handle
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("protocol-404 chat fixture reaches Play");
+    handle
+        .send_action(ClientAction::SendChat {
+            text: "legacy \"chat\"".to_owned(),
+        })
+        .expect("joined client accepts chat");
+
+    let (text, kind) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::Chat { text, kind, .. }) = events.recv().await {
+                return (text.to_plain_string(), kind);
+            }
+        }
+    })
+    .await
+    .expect("the hosted server must echo legacy chat before the deadline");
+    assert_eq!(text, "<FlatFixture> legacy \"chat\"");
+    assert_eq!(kind, ChatKind::System);
+
+    handle.shutdown();
+    server.shutdown().await;
 }
 
 #[tokio::test]

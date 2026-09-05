@@ -165,6 +165,58 @@ fn client_settings_lift_the_protocol_404_view_distance() {
 }
 
 #[test]
+fn hosted_chat_lifts_a_literal_body_and_emits_a_json_system_reply() {
+    let protocol = V404ServerProtocol;
+    // A raw string body for `hi \"x\"\n`; this avoids using the packet codec to
+    // specify the serverbound wire layout under test.
+    const REQUEST: [u8; 8] = [0x07, b'h', b'i', b' ', b'\"', b'x', b'\"', b'\n'];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::CHAT, &REQUEST),
+        ServerBound::Chat {
+            message: "hi \"x\"\n".to_owned(),
+            timestamp_millis: 0,
+            salt: 0,
+            signature: None,
+        }
+    );
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::CHAT, &[0x04, b'o']),
+        ServerBound::Ignored,
+        "a truncated chat string must not reach the shared consumer"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::CHAT,
+            &[REQUEST.as_slice(), &[0]].concat(),
+        ),
+        ServerBound::Ignored,
+        "a trailing byte must not be accepted as part of a protocol-404 chat body"
+    );
+    assert_eq!(
+        protocol.decode(State::Configuration, play::serverbound::CHAT, &REQUEST),
+        ServerBound::Ignored,
+        "chat must not bypass the direct login-to-Play boundary"
+    );
+
+    let ServerDirective::Send { packet_id, payload } =
+        protocol.encode_system_chat("plain \"wire\"\n")
+    else {
+        panic!("protocol-404 system chat must produce a packet");
+    };
+    assert_eq!(packet_id, play::clientbound::CHAT);
+    assert_eq!(
+        payload,
+        vec![
+            0x1b, b'{', b'\"', b't', b'e', b'x', b't', b'\"', b':', b'\"', b'p', b'l', b'a',
+            b'i', b'n', b' ', b'\\', b'\"', b'w', b'i', b'r', b'e', b'\\', b'\"', b'\\', b'n',
+            b'\"', b'}', 0x01,
+        ],
+        "the clientbound body is a JSON text component followed by ordinary system-chat position"
+    );
+}
+
+#[test]
 fn block_dig_non_breaking_statuses_reach_their_server_consumers() {
     let protocol = V404ServerProtocol;
     let adapter = V404Adapter::new();
