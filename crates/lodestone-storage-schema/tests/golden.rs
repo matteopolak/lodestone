@@ -2,7 +2,8 @@ use lodestone_storage_schema::generated::{general_record, storage_record};
 use lodestone_storage_schema::{
     validate_extension_table, validate_record, validate_record_with_extensions, BiomeSection,
     BuiltinBiome, BuiltinDimension, ExtensionTable, FORMAT_VERSION_V1, GameMode, GeneralRecord,
-    PlayerRecord, StorageRecord, ValidationError,
+    PlayerRecord, ScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord,
+    ValidationError,
 };
 use prost::Message;
 
@@ -151,6 +152,52 @@ fn invalid_palette_width_is_rejected_before_storage() {
         validate_record(&record),
         Err(ValidationError::InvalidPaletteBits(16))
     );
+}
+
+#[test]
+fn scheduled_tick_enums_reject_unknown_or_unspecified_actions_before_storage() {
+    let mut record = StorageRecord::decode(fixture(CHUNK_V1).as_slice()).unwrap();
+    set_scheduled_tick(
+        &mut record,
+        ScheduledTickKind::Repeater as i32,
+        ScheduledTickPriority::High as i32,
+    );
+    validate_record(&record).unwrap();
+
+    set_scheduled_tick(&mut record, 99, ScheduledTickPriority::High as i32);
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::UnknownScheduledTickKind(99))
+    );
+    set_scheduled_tick(
+        &mut record,
+        ScheduledTickKind::Unspecified as i32,
+        ScheduledTickPriority::High as i32,
+    );
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::UnknownScheduledTickKind(0))
+    );
+    set_scheduled_tick(&mut record, ScheduledTickKind::Repeater as i32, 99);
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::UnknownScheduledTickPriority(99))
+    );
+}
+
+fn set_scheduled_tick(record: &mut StorageRecord, kind: i32, priority: i32) {
+    let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+        unreachable!();
+    };
+    chunk.block_scheduled_ticks = vec![ScheduledTick {
+        x: -16,
+        y: 70,
+        z: 32,
+        kind,
+        trigger_tick: 123,
+        priority,
+        insertion_order: 9,
+    }];
 }
 
 #[test]

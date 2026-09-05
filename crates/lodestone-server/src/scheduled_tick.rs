@@ -113,6 +113,21 @@ pub struct ScheduledTick<T> {
     sub_tick_order: u64,
 }
 
+/// One pending tick in the native-storage handoff.
+///
+/// Unlike [`ScheduledTick`], this record deliberately exposes the global
+/// insertion sequence. A native reopen must restore that value rather than
+/// assigning a fresh one, because it is the final tie-breaker when entries in
+/// different chunk-owned queues share a trigger tick and priority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedScheduledTick {
+    pub pos: (i32, i32, i32),
+    pub kind: String,
+    pub trigger_tick: u64,
+    pub priority: TickPriority,
+    pub insertion_order: u64,
+}
+
 /// `BinaryHeap` wrapper implementing the real drain order
 /// with the comparison inverted, so
 /// `BinaryHeap` (a max-heap) pops the real-engine-*smallest* entry first — i.e.
@@ -546,6 +561,30 @@ impl<T: Eq + Hash + Clone> ChunkScheduledTickQueue<T> {
         scheduled
     }
 
+    fn restore(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: T,
+        trigger_tick: u64,
+        priority: TickPriority,
+        insertion_order: u64,
+    ) -> bool {
+        let chunk = Self::chunk_for(pos);
+        let scheduled = self.queues.entry(chunk).or_default().schedule_with_sub_tick_order(
+            pos,
+            kind,
+            trigger_tick,
+            priority,
+            insertion_order,
+        );
+        if scheduled {
+            self.next_sub_tick_order = self
+                .next_sub_tick_order
+                .max(insertion_order.saturating_add(1));
+        }
+        scheduled
+    }
+
     /// `true` iff `pos`'s local queue holds a pending tick of `kind`.
     #[must_use]
     pub fn has_scheduled(&self, pos: (i32, i32, i32), kind: &T) -> bool {
@@ -724,6 +763,10 @@ pub struct StagedTick {
     /// `true` for the real per-world fluid-tick queue, `false` for the
     /// block-tick queue.
     pub fluid: bool,
+    /// The saved global insertion sequence, when this tick came from the
+    /// typed native record path. Anvil restores have no such field and are
+    /// deliberately assigned a fresh sequence at the next merge.
+    pub insertion_order: Option<u64>,
 }
 
 /// The pair of queues [`ScheduledTickHandle`] guards, mirroring the real
@@ -782,13 +825,25 @@ impl ScheduledTickHandle {
         };
         for tick in staged {
             if tick.fluid {
-                guard
-                    .fluid
-                    .schedule(tick.pos, tick.kind, tick.trigger_tick, tick.priority);
+                if let Some(order) = tick.insertion_order {
+                    guard
+                        .fluid
+                        .restore(tick.pos, tick.kind, tick.trigger_tick, tick.priority, order);
+                } else {
+                    guard
+                        .fluid
+                        .schedule(tick.pos, tick.kind, tick.trigger_tick, tick.priority);
+                }
             } else {
-                guard
-                    .block
-                    .schedule(tick.pos, tick.kind, tick.trigger_tick, tick.priority);
+                if let Some(order) = tick.insertion_order {
+                    guard
+                        .block
+                        .restore(tick.pos, tick.kind, tick.trigger_tick, tick.priority, order);
+                } else {
+                    guard
+                        .block
+                        .schedule(tick.pos, tick.kind, tick.trigger_tick, tick.priority);
+                }
             }
         }
         f(&mut guard)
@@ -823,6 +878,69 @@ impl ScheduledTickHandle {
             .expect("staged tick lock poisoned")
             .extend(ticks);
         count
+    }
+
+    /// Snapshots both queues' pending records belonging to one chunk column.
+    ///
+    /// The result is sorted by the one world-wide insertion sequence rather
+    /// than container or heap iteration order. This is non-destructive and is
+    /// the only native-storage read boundary for scheduled ticks.
+    #[must_use]
+    pub fn snapshot_column(
+        &self,
+        column_x: i32,
+        column_z: i32,
+    ) -> (Vec<PersistedScheduledTick>, Vec<PersistedScheduledTick>) {
+        self.with(|queues| {
+            let snapshot = |queue: &ChunkScheduledTickQueue<String>| {
+                let mut ticks: Vec<_> = queue
+                    .iter()
+                    .filter(|tick| {
+                        (tick.pos.0.div_euclid(16), tick.pos.2.div_euclid(16))
+                            == (column_x, column_z)
+                    })
+                    .map(|tick| PersistedScheduledTick {
+                        pos: tick.pos,
+                        kind: tick.kind.clone(),
+                        trigger_tick: tick.trigger_tick,
+                        priority: tick.priority,
+                        insertion_order: tick.sub_tick_order,
+                    })
+                    .collect();
+                ticks.sort_by_key(|tick| tick.insertion_order);
+                ticks
+            };
+            (snapshot(&queues.block), snapshot(&queues.fluid))
+        })
+    }
+
+    /// Stages typed native records for their next queue merge without changing
+    /// their stored global insertion order.
+    pub fn stage_persisted(
+        &self,
+        block: Vec<PersistedScheduledTick>,
+        fluid: Vec<PersistedScheduledTick>,
+    ) -> u64 {
+        let ticks = block
+            .into_iter()
+            .map(|tick| StagedTick {
+                pos: tick.pos,
+                kind: tick.kind,
+                trigger_tick: tick.trigger_tick,
+                priority: tick.priority,
+                fluid: false,
+                insertion_order: Some(tick.insertion_order),
+            })
+            .chain(fluid.into_iter().map(|tick| StagedTick {
+                pos: tick.pos,
+                kind: tick.kind,
+                trigger_tick: tick.trigger_tick,
+                priority: tick.priority,
+                fluid: true,
+                insertion_order: Some(tick.insertion_order),
+            }))
+            .collect();
+        self.stage(ticks)
     }
 
     /// Records the tick the queues' `trigger_tick`s are relative to.
