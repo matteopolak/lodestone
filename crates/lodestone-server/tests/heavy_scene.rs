@@ -26,6 +26,7 @@ fn invalid_scenario_parameters_are_rejected_before_actions_exist() {
         HeavySceneSpec::MAX_SCALE + 1
     )
     .is_err());
+    assert!(HeavySceneSpec::new(HeavyScenario::DenseMixed, 17, 2).is_err());
     assert!(HeavyScenario::parse_name("not-a-scenario").is_none());
 }
 
@@ -53,6 +54,36 @@ fn mixed_plan_contains_every_client_witness_family() {
     }
     assert!(!plan.commands.setup.is_empty());
     assert!(!plan.commands.mutation.is_empty());
+}
+
+#[test]
+fn dense_mixed_plan_uses_the_bounded_high_pressure_composition() {
+    let plan = HeavySceneSpec::new(HeavyScenario::DenseMixed, 17, 1)
+        .unwrap()
+        .build_plan()
+        .unwrap();
+    let count = |needle: &str| {
+        plan.commands
+            .setup
+            .iter()
+            .filter(|line| line.contains(needle))
+            .count()
+    };
+    assert_eq!(count("summon minecraft:"), 2_048);
+    assert_eq!(count("minecraft:oak_wall_sign"), 1_536);
+    assert_eq!(count("minecraft:sea_lantern"), 1_024);
+    assert_eq!(count("minecraft:water"), 1_024);
+    assert_eq!(count("minecraft:white_stained_glass") + count("minecraft:glass_pane"), 768);
+    assert_eq!(count("minecraft:repeating_command_block"), 512);
+    assert_eq!(count("minecraft:chest") + count("minecraft:purple_shulker_box")
+        + count("minecraft:white_banner") + count("minecraft:conduit"), 512);
+    assert_eq!(plan.commands.setup.len(), 7_937);
+    assert_eq!(plan.commands.after_join, ["tp @a 0 220 0 0 90"]);
+    assert!(plan
+        .commands
+        .setup
+        .iter()
+        .all(|line| line.len() <= HeavySceneSpec::MAX_COMMAND_BYTES));
 }
 
 #[test]

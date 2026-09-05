@@ -41,10 +41,24 @@ pub enum HeavyScenario {
     Entity,
     Scheduled,
     Mixed,
+    DenseMixed,
 }
 
 impl HeavyScenario {
-    pub const ALL: [Self; 9] = [
+    /// The independently selectable scene families. Composite scenes reuse
+    /// these builders so setup remains one normal command path.
+    pub const FOCUSED: [Self; 8] = [
+        Self::Palette,
+        Self::Transparency,
+        Self::Light,
+        Self::Liquid,
+        Self::Sign,
+        Self::BlockEntity,
+        Self::Entity,
+        Self::Scheduled,
+    ];
+
+    pub const ALL: [Self; 10] = [
         Self::Palette,
         Self::Transparency,
         Self::Light,
@@ -54,6 +68,7 @@ impl HeavyScenario {
         Self::Entity,
         Self::Scheduled,
         Self::Mixed,
+        Self::DenseMixed,
     ];
 
     #[must_use]
@@ -68,6 +83,7 @@ impl HeavyScenario {
             Self::Entity => "entity",
             Self::Scheduled => "scheduled",
             Self::Mixed => "mixed",
+            Self::DenseMixed => "dense-mixed",
         }
     }
 
@@ -83,6 +99,7 @@ impl HeavyScenario {
             "entity" => Self::Entity,
             "scheduled" => Self::Scheduled,
             "mixed" => Self::Mixed,
+            "dense-mixed" => Self::DenseMixed,
             _ => return None,
         })
     }
@@ -441,15 +458,15 @@ fn runtime_requirements_for_scenario(scenario: HeavyScenario) -> Vec<WitnessRequ
         HeavyScenario::Sign
         | HeavyScenario::BlockEntity
         | HeavyScenario::Scheduled
-        | HeavyScenario::Mixed => requirements_for_scenario(scenario),
+        | HeavyScenario::Mixed
+        | HeavyScenario::DenseMixed => requirements_for_scenario(scenario),
     }
 }
 
 fn requirements_for_scenario(scenario: HeavyScenario) -> Vec<WitnessRequirement> {
-    if scenario == HeavyScenario::Mixed {
-        return HeavyScenario::ALL
+    if matches!(scenario, HeavyScenario::Mixed | HeavyScenario::DenseMixed) {
+        return HeavyScenario::FOCUSED
             .into_iter()
-            .filter(|candidate| *candidate != HeavyScenario::Mixed)
             .flat_map(requirements_for_scenario)
             .collect();
     }
@@ -462,7 +479,9 @@ fn requirements_for_scenario(scenario: HeavyScenario) -> Vec<WitnessRequirement>
         HeavyScenario::BlockEntity => &[4],
         HeavyScenario::Entity => &[5],
         HeavyScenario::Scheduled => &[6],
-        HeavyScenario::Mixed => unreachable!("mixed is handled above"),
+        HeavyScenario::Mixed | HeavyScenario::DenseMixed => {
+            unreachable!("composite scenes are handled above")
+        }
     };
     indexes
         .iter()
@@ -620,9 +639,13 @@ fn build_liquid(scale: u32) -> BuildOutput {
 fn sign_commands(scale: u32) -> Vec<String> {
     (0..24u32.saturating_mul(scale))
         .map(|index| {
+            // A compact grid keeps the dense composition inside one normal
+            // client render-distance view instead of making the sign count a
+            // long, mostly culled strip.
+            let x = -48 + i32::try_from(index % 48).expect("bounded sign column") * 2;
+            let z = 24 + i32::try_from(index / 48).expect("bounded sign row") * 2;
             format!(
-                "setblock {} 65 24 minecraft:oak_wall_sign[facing=north]{{front_text:{{has_glowing_text:1b,color:\"yellow\",messages:[{{text:\"HEAVY-{index:03}\"}},{{text:\"sign\"}},{{text:\"text\"}},{{text:\"witness\"}}]}}}}",
-                -48 + i32::try_from(index * 2).expect("bounded sign index")
+                "setblock {x} 65 {z} minecraft:oak_wall_sign[facing=north]{{front_text:{{has_glowing_text:1b,color:\"yellow\",messages:[{{text:\"HEAVY-{index:03}\"}},{{text:\"sign\"}},{{text:\"text\"}},{{text:\"witness\"}}]}}}}"
             )
         })
         .collect()
@@ -638,12 +661,13 @@ fn build_sign(scale: u32) -> BuildOutput {
 fn block_entity_commands(scale: u32) -> Vec<String> {
     (0..4u32.saturating_mul(scale))
         .flat_map(|index| {
-            let x = 8 + i32::try_from(index * 2).expect("bounded block entity index");
+            let x = 64 + i32::try_from(index % 32).expect("bounded block entity column") * 2;
+            let z = 24 + i32::try_from(index / 32).expect("bounded block entity row") * 2;
             [
-                format!("setblock {x} 65 24 minecraft:chest[facing=north]"),
-                format!("setblock {x} 66 24 minecraft:purple_shulker_box[facing=up]"),
-                format!("setblock {x} 67 24 minecraft:white_banner[rotation=0]"),
-                format!("setblock {x} 68 24 minecraft:conduit[waterlogged=false]"),
+                format!("setblock {x} 65 {z} minecraft:chest[facing=north]"),
+                format!("setblock {x} 66 {z} minecraft:purple_shulker_box[facing=up]"),
+                format!("setblock {x} 67 {z} minecraft:white_banner[rotation=0]"),
+                format!("setblock {x} 68 {z} minecraft:conduit[waterlogged=false]"),
             ]
         })
         .collect()
@@ -692,11 +716,37 @@ fn build_scheduled(scale: u32) -> BuildOutput {
     out
 }
 
+fn dense_scale(scenario: HeavyScenario, requested: u32) -> u32 {
+    let multiplier = match scenario {
+        HeavyScenario::Palette => 8,
+        HeavyScenario::Transparency => 16,
+        HeavyScenario::Light => 64,
+        HeavyScenario::Liquid => 32,
+        HeavyScenario::Sign => 64,
+        HeavyScenario::BlockEntity => 32,
+        HeavyScenario::Entity => 2,
+        HeavyScenario::Scheduled => 64,
+        HeavyScenario::Mixed | HeavyScenario::DenseMixed => {
+            unreachable!("density is selected for focused builders")
+        }
+    };
+    requested.saturating_mul(multiplier)
+}
+
 fn build_for_scenario(spec: &HeavySceneSpec) -> BuildOutput {
-    if spec.scenario == HeavyScenario::Mixed {
+    if matches!(spec.scenario, HeavyScenario::Mixed | HeavyScenario::DenseMixed) {
         let mut mixed = BuildOutput::default();
-        for scenario in HeavyScenario::ALL.into_iter().filter(|scenario| *scenario != HeavyScenario::Mixed) {
-            let part = build_for_scenario(&HeavySceneSpec { scenario, ..spec.clone() });
+        for scenario in HeavyScenario::FOCUSED {
+            let scale = if spec.scenario == HeavyScenario::DenseMixed {
+                dense_scale(scenario, spec.scale)
+            } else {
+                spec.scale
+            };
+            let part = build_for_scenario(&HeavySceneSpec {
+                scenario,
+                scale,
+                ..spec.clone()
+            });
             mixed.setup.extend(part.setup);
             mixed.after_join.extend(part.after_join);
             mixed.mutation.extend(part.mutation);
@@ -713,13 +763,19 @@ fn build_for_scenario(spec: &HeavySceneSpec) -> BuildOutput {
         HeavyScenario::BlockEntity => build_block_entities(spec.scale),
         HeavyScenario::Entity => build_entities(spec.scale, spec.seed),
         HeavyScenario::Scheduled => build_scheduled(spec.scale),
-        HeavyScenario::Mixed => unreachable!("mixed is handled before the scenario match"),
+        HeavyScenario::Mixed | HeavyScenario::DenseMixed => {
+            unreachable!("composite scenes are handled before the scenario match")
+        }
     }
 }
 
 impl HeavySceneSpec {
     pub const MAX_COMMAND_BYTES: usize = 32_000;
     pub const MAX_SCALE: u32 = 16;
+    /// This composition deliberately fixes its high density at scale one. A
+    /// second multiplier would turn one local Samply setup into more than
+    /// fifteen thousand sequential server commands.
+    pub const MAX_DENSE_MIXED_SCALE: u32 = 1;
     /// The live entity rehearsal keeps the per-process mob simulation bounded;
     /// larger scales remain available for immutable plan emission and an
     /// external client profile, but are rejected before a server starts.
@@ -733,6 +789,12 @@ impl HeavySceneSpec {
             return Err(HeavyError::Argument(format!(
                 "scale must not exceed {}",
                 Self::MAX_SCALE
+            )));
+        }
+        if scenario == HeavyScenario::DenseMixed && scale > Self::MAX_DENSE_MIXED_SCALE {
+            return Err(HeavyError::Argument(format!(
+                "dense-mixed scale must not exceed {}",
+                Self::MAX_DENSE_MIXED_SCALE
             )));
         }
         Ok(Self { scenario, seed, scale })
@@ -772,7 +834,11 @@ impl HeavySceneSpec {
     }
 
     pub fn build_plan(&self) -> Result<HeavyScenePlan, HeavyError> {
-        let built = build_for_scenario(self);
+        let mut built = build_for_scenario(self);
+        // The Python runner sends this phase only after the benchmark player
+        // has joined. A top-down view covers the compact mixed volumes, so a
+        // successful profile cannot be a populated but never-submitted scene.
+        built.after_join.push("tp @a 0 220 0 0 90".to_string());
         let commands = OrderedSceneCommands {
             setup: built.setup,
             after_join: built.after_join,

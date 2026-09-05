@@ -457,6 +457,11 @@ bench-client-heavy:
 profile-client-heavy:
     python3 scripts/client-frame-benchmark.py --workload heavyweight --heavy-scenario mixed --samply
 
+# One dense, fixed-envelope Samply capture: thousands of entities plus dense
+# sign, light, liquid, palette, transparent, block-entity, and scheduled work.
+profile-client-heavy-dense:
+    python3 scripts/client-frame-benchmark.py --workload heavyweight --heavy-scenario dense-mixed --heavy-scale 1 --samply
+
 # Validate a saved heavyweight capture, Samply sidecar, and emitted scene record
 # without launching the client, server, GPU, or Samply.
 validate-client-heavy-profile capture:
