@@ -2312,6 +2312,7 @@ mod tests {
                     .as_ref()
                     .expect("registry")
                     .resolve(first, ObjectKind::Block)
+                    .map(|_| ())
             }),
             Err(ResolveError::Stale),
         );
@@ -2412,8 +2413,8 @@ mod tests {
                     .expect("registry")
                     .clear()
             }),
-            1,
-            "worker cleanup must release the replacement too",
+            2,
+            "worker cleanup must release the replacement and the other owner's handle",
         );
         assert_eq!(
             RESIDENT_OBJECT_HANDLES.with(|slot| {
@@ -2421,6 +2422,7 @@ mod tests {
                     .as_ref()
                     .expect("registry")
                     .resolve(replacement, ObjectKind::Player)
+                    .map(|_| ())
             }),
             Err(ResolveError::Stale),
             "worker cleanup must invalidate every outstanding player handle",

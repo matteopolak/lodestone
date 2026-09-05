@@ -183,7 +183,7 @@ fn burst(p: &mut Particles, models: &BlockModels, state: StateId) -> Burst {
     let widest = (0..3).max_by(|a, b| own[*a].total_cmp(&own[*b])).unwrap();
     assert!(
         own[widest] > 0.0,
-        "state {state} has an all-zero particle tint; the control cannot be reconstructed from it"
+        "state {state:?} has an all-zero particle tint; the control cannot be reconstructed from it"
     );
 
     let mut subj = [0f32; 3];

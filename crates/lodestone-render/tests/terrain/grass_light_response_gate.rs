@@ -650,7 +650,7 @@ fn the_grass_block_side_overlay_survives_the_depth_test() {
     // The two North-facing quads, in baked order. Anti-vacuity: assert the
     // fixture really is the coplanar pair before measuring it.
     let north: Vec<BakedQuad> = models
-        .quads(state)
+        .quads(state_id(state))
         .iter()
         .filter(|q| q.direction == Direction::North)
         .cloned()
