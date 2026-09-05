@@ -156,7 +156,7 @@ impl ChunkShape {
             block_kind: PaletteKind::block_states().with_framing(LongArrayFraming::Prefixed),
             biome_kind: PaletteKind::biomes().with_framing(LongArrayFraming::Prefixed),
             canonical,
-            air_id: canonical.air_state_id(),
+            air_id: canonical.air_state_id().raw(),
             biome_id: 0,
         }
     }
@@ -412,7 +412,7 @@ fn read_section_values(
         // and per-cell is what makes the tally count *blocks* substituted.
         let translated: Vec<u32> = raw_blocks
             .iter()
-            .map(|&state_id| shape.canonical.resolve_or_air(state_id, fallback))
+            .map(|&state_id| shape.canonical.resolve_or_air(state_id, fallback).raw())
             .collect();
         out.push((index, translated));
     }

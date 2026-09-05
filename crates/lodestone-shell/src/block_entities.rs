@@ -131,12 +131,18 @@ use crate::{
 };
 
 #[cfg(test)]
+fn known_state_id(raw: u32) -> StateId {
+    StateId::new(raw).expect("test state id is in the canonical census")
+}
+
+#[cfg(test)]
 mod frame_snapshot_tests {
     use super::*;
 
-    fn first_state(name: &str) -> u32 {
+    fn first_state(name: &str) -> StateId {
         (0..lodestone_data::block_states::STATE_COUNT)
             .find(|&id| lodestone_data::block_states::block_name(id) == Some(name))
+            .and_then(StateId::new)
             .unwrap_or_else(|| panic!("missing state for {name}"))
     }
 
@@ -190,7 +196,7 @@ pub const VIEW_DISTANCE: f32 = 64.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BlockEntityFrameCandidate {
     pos: [i32; 3],
-    state_id: u32,
+    state_id: StateId,
     light: u8,
 }
 
@@ -284,11 +290,14 @@ pub(crate) fn block_entity_frame_snapshot(
             if centre.distance_squared(eye) > cutoff {
                 continue;
             }
-            let state_id = chunk.column.get_block(
+            let raw_state_id = chunk.column.get_block(
                 usize::from(entity.rel_x),
                 block[1],
                 usize::from(entity.rel_z),
             );
+            let Some(state_id) = StateId::new(raw_state_id) else {
+                continue;
+            };
             candidates.push(BlockEntityFrameCandidate {
                 pos: block,
                 state_id,
@@ -1761,8 +1770,8 @@ fn shake_direction_from_3d(b1: u8) -> Option<BellShakeDirection> {
 /// happen, and for anything else means the caller pointed this at a block that
 /// is not a chest.
 #[must_use]
-fn chest_orientation(state_id: u32) -> Option<(f32, ChestHalf)> {
-    let props = lodestone_data::block_states::properties(state_id)?;
+fn chest_orientation(state_id: StateId) -> Option<(f32, ChestHalf)> {
+    let props = state_id.properties();
     let mut yaw = None;
     let mut half = ChestHalf::Single;
     for (name, value) in props {
@@ -1782,8 +1791,8 @@ fn chest_orientation(state_id: u32) -> Option<(f32, ChestHalf)> {
 /// Resolves one block state id into a chest material, or `None` if it is not a
 /// chest at all.
 #[must_use]
-fn chest_material(state_id: u32) -> Option<ChestMaterial> {
-    let name = lodestone_data::block_states::block_name(state_id)?;
+fn chest_material(state_id: StateId) -> Option<ChestMaterial> {
+    let name = state_id.name();
     let path = name.strip_prefix("minecraft:").unwrap_or(name);
     ChestMaterial::from_block_path(path)
 }
@@ -1841,7 +1850,7 @@ pub fn chest_candidates(
 #[must_use]
 pub fn chest_spawn(
     block: [i32; 3],
-    state_id: u32,
+    state_id: StateId,
     openness: f32,
     light: u8,
 ) -> Option<ChestSpawn> {
@@ -1917,8 +1926,8 @@ pub(crate) fn chest_spawns_from_snapshot(
 /// which cannot happen for a real skull and for anything else means the
 /// caller pointed this at a block that is not one.
 #[must_use]
-fn skull_orientation(state_id: u32) -> Option<SkullOrientation> {
-    let props = lodestone_data::block_states::properties(state_id)?;
+fn skull_orientation(state_id: StateId) -> Option<SkullOrientation> {
+    let props = state_id.properties();
     for (name, value) in props {
         match *name {
             "rotation" => {
@@ -1941,8 +1950,8 @@ fn skull_orientation(state_id: u32) -> Option<SkullOrientation> {
 /// is not a skull at all. All seven of vanilla's own skull-block types resolve —
 /// see [`lodestone_render::SkullType::from_block_path`].
 #[must_use]
-fn skull_type_for_state(state_id: u32) -> Option<SkullType> {
-    let name = lodestone_data::block_states::block_name(state_id)?;
+fn skull_type_for_state(state_id: StateId) -> Option<SkullType> {
+    let name = state_id.name();
     let path = name.strip_prefix("minecraft:").unwrap_or(name);
     SkullType::from_block_path(path)
 }
@@ -2000,7 +2009,7 @@ fn player_head_skin_url(nbt: &Nbt) -> Option<Arc<str>> {
 /// looking at, so a stale or orphan record whose state is not a skull draws
 /// nothing.
 #[must_use]
-pub fn skull_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<SkullSpawn> {
+pub fn skull_spawn(block: [i32; 3], state_id: StateId, light: u8) -> Option<SkullSpawn> {
     let skull_type = skull_type_for_state(state_id)?;
     let orientation = skull_orientation(state_id)?;
     Some(SkullSpawn {
@@ -2022,7 +2031,7 @@ fn skull_candidates(
     world: &World,
     chunks: impl IntoIterator<Item = ChunkPos>,
     eye: Vec3,
-) -> Vec<([i32; 3], u32, Option<Arc<str>>)> {
+) -> Vec<([i32; 3], StateId, Option<Arc<str>>)> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
     for pos in chunks {
@@ -2037,9 +2046,12 @@ fn skull_candidates(
             if centre.distance_squared(eye) > cutoff {
                 continue;
             }
-            let state_id = chunk
+            let raw_state_id = chunk
                 .column
                 .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            let Some(state_id) = StateId::new(raw_state_id) else {
+                continue;
+            };
             let skin = (skull_type_for_state(state_id) == Some(SkullType::Player))
                 .then(|| player_head_skin_url(&be.nbt))
                 .flatten();
@@ -2125,11 +2137,8 @@ pub(crate) fn request_player_head_skins(skulls: &[SkullSpawn]) {
 /// `FACING`/`ATTACHMENT`/`POWERED` combination) draws the identical rig, so
 /// this only needs to confirm the block *is* one.
 #[must_use]
-fn bell_is_present(state_id: u32) -> bool {
-    let Some(name) = lodestone_data::block_states::block_name(state_id) else {
-        return false;
-    };
-    name == "minecraft:bell"
+fn bell_is_present(state_id: StateId) -> bool {
+    state_id.name() == "minecraft:bell"
 }
 
 /// One candidate resolved into a [`BellSpawn`], or `None` if the state at
@@ -2142,7 +2151,7 @@ fn bell_is_present(state_id: u32) -> bool {
 #[must_use]
 pub fn bell_spawn(
     block: [i32; 3],
-    state_id: u32,
+    state_id: StateId,
     light: u8,
     shakes: &BellShakes,
     partial_tick: f32,
@@ -2211,8 +2220,8 @@ pub(crate) fn bell_spawns_from_snapshot(
 /// — unlike a chest, where a missing `facing` is treated as a failure, because a
 /// shulker box genuinely has a sensible default and vanilla uses it.
 #[must_use]
-fn shulker_orientation(state_id: u32) -> Option<(Option<&'static str>, ShulkerFacing)> {
-    let name = lodestone_data::block_states::block_name(state_id)?;
+fn shulker_orientation(state_id: StateId) -> Option<(Option<&'static str>, ShulkerFacing)> {
+    let name = state_id.name();
     let path = name.strip_prefix("minecraft:").unwrap_or(name);
     let colour = if path == "shulker_box" {
         None
@@ -2224,13 +2233,11 @@ fn shulker_orientation(state_id: u32) -> Option<(Option<&'static str>, ShulkerFa
         Some(*SHULKER_COLOURS.iter().find(|c| **c == stem)?)
     };
     let mut facing = ShulkerFacing::Up;
-    if let Some(props) = lodestone_data::block_states::properties(state_id) {
-        for (name, value) in props {
-            if *name == "facing"
-                && let Some(parsed) = ShulkerFacing::from_name(value)
-            {
-                facing = parsed;
-            }
+    for (name, value) in state_id.properties() {
+        if *name == "facing"
+            && let Some(parsed) = ShulkerFacing::from_name(value)
+        {
+            facing = parsed;
         }
     }
     Some((colour, facing))
@@ -2242,7 +2249,7 @@ fn shulker_orientation(state_id: u32) -> Option<(Option<&'static str>, ShulkerFa
 /// `progress` is fixed at `0.0` — closed. See [`ShulkerSpawn::progress`] for why
 /// that is the honest value rather than a placeholder.
 #[must_use]
-pub fn shulker_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<ShulkerSpawn> {
+pub fn shulker_spawn(block: [i32; 3], state_id: StateId, light: u8) -> Option<ShulkerSpawn> {
     let (colour, facing) = shulker_orientation(state_id)?;
     Some(ShulkerSpawn {
         pos: block,
@@ -2335,10 +2342,7 @@ pub(crate) fn lectern_spawns_from_snapshot(
 ) -> Vec<LecternSpawn> {
     let mut out = Vec::new();
     for candidate in &snapshot.candidates {
-        let Some(state_id) = StateId::new(candidate.state_id) else {
-            continue;
-        };
-        if let Some(spawn) = lectern_spawn(candidate.pos, state_id, candidate.light) {
+        if let Some(spawn) = lectern_spawn(candidate.pos, candidate.state_id, candidate.light) {
             out.push(spawn);
         }
     }
@@ -2446,7 +2450,7 @@ pub(crate) fn enchanting_table_spawns_from_snapshot(
 ) -> Vec<lodestone_render::EnchantingTableSpawn> {
     let mut out = Vec::new();
     for candidate in &snapshot.candidates {
-        if !is_enchanting_table(candidate.state_id) {
+        if !is_enchanting_table(candidate.state_id.raw()) {
             continue;
         }
         let block = candidate.pos;
@@ -2826,8 +2830,8 @@ fn sign_kind_for_path(path: &str) -> Option<SignKind> {
 /// question production asks — a diagnostic with its own copy of this rule
 /// could agree with itself and disagree with the draw.
 #[must_use]
-pub(crate) fn sign_kind_for_state(state_id: u32) -> Option<SignKind> {
-    let name = lodestone_data::block_states::block_name(state_id)?;
+pub(crate) fn sign_kind_for_state(state_id: StateId) -> Option<SignKind> {
+    let name = state_id.name();
     let path = name.strip_prefix("minecraft:").unwrap_or(name);
     sign_kind_for_path(path)
 }
@@ -2841,8 +2845,8 @@ pub(crate) fn sign_kind_for_state(state_id: u32) -> Option<SignKind> {
 /// `pub(crate)` for `crate::sign_diagnostics`, for the same reason
 /// [`sign_kind_for_state`] is.
 #[must_use]
-pub(crate) fn sign_orientation(state_id: u32) -> Option<SignOrientation> {
-    let props = lodestone_data::block_states::properties(state_id)?;
+pub(crate) fn sign_orientation(state_id: StateId) -> Option<SignOrientation> {
+    let props = state_id.properties();
     for (name, value) in props {
         match *name {
             "rotation" => {
@@ -2877,7 +2881,7 @@ fn sign_candidates(
     world: &World,
     chunks: impl IntoIterator<Item = ChunkPos>,
     eye: Vec3,
-) -> Vec<([i32; 3], u32, SignText)> {
+) -> Vec<([i32; 3], StateId, SignText)> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
     for pos in chunks {
@@ -2892,9 +2896,12 @@ fn sign_candidates(
             if centre.distance_squared(eye) > cutoff {
                 continue;
             }
-            let state_id = chunk
+            let raw_state_id = chunk
                 .column
                 .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            let Some(state_id) = StateId::new(raw_state_id) else {
+                continue;
+            };
             // `chunk.block_entities` is every block entity in the column —
             // chests, furnaces, hoppers, barrels, beds — not just signs, and
             // this runs once per rendered frame. Resolving the state first
@@ -2919,7 +2926,7 @@ fn sign_candidates(
 /// sign at all and how it sits, so a stale or orphan record whose state is
 /// not a sign draws nothing.
 #[must_use]
-fn sign_spawn(block: [i32; 3], state_id: u32, text: SignText, light: u8) -> Option<SignSpawn> {
+fn sign_spawn(block: [i32; 3], state_id: StateId, text: SignText, light: u8) -> Option<SignSpawn> {
     let kind = sign_kind_for_state(state_id)?;
     let orientation = sign_orientation(state_id)?;
     Some(SignSpawn {
@@ -3428,8 +3435,7 @@ fn conduit_positions_from_snapshot(snapshot: &BlockEntityFrameSnapshot) -> Vec<[
         .candidates
         .iter()
         .filter_map(|candidate| {
-            (lodestone_data::block_states::block_name(candidate.state_id)? == "minecraft:conduit")
-                .then_some(candidate.pos)
+            (candidate.state_id.name() == "minecraft:conduit").then_some(candidate.pos)
         })
         .collect()
 }
@@ -3595,9 +3601,7 @@ pub(crate) fn conduit_spawns_from_snapshot(
 ) -> Vec<ConduitSpawn> {
     let mut out = Vec::new();
     for candidate in &snapshot.candidates {
-        if lodestone_data::block_states::block_name(candidate.state_id)
-            != Some("minecraft:conduit")
-        {
+        if candidate.state_id.name() != "minecraft:conduit" {
             continue;
         }
         if let Some(spawn) = ticks.resolve(candidate.pos, partial_tick, candidate.light) {
@@ -4481,7 +4485,11 @@ mod skull_tests {
         let state = (0..lodestone_data::block_states::STATE_COUNT)
             .find(|id| lodestone_data::block_states::block_name(*id) == Some("minecraft:skeleton_skull"))
             .expect("skeleton skull must be in the state table");
-        let spawn = skull_spawn([0, 0, 0], state, lodestone_render::ENTITY_FULLBRIGHT)
+        let spawn = skull_spawn(
+            [0, 0, 0],
+            known_state_id(state),
+            lodestone_render::ENTITY_FULLBRIGHT,
+        )
             .expect("a skeleton skull must resolve");
         assert_eq!(spawn.texture, lodestone_render::skull_texture_stem(SkullType::Skeleton));
         assert!(player_head_skin_url(&player_head_profile(Nbt::String("not-base64".to_owned()))).is_none());
@@ -4531,9 +4539,15 @@ mod bell_tests {
         let id = (0..lodestone_data::block_states::STATE_COUNT)
             .find(|id| lodestone_data::block_states::block_name(*id) == Some("minecraft:bell"))
             .expect("bell must be in the 26.2 state table");
-        assert!(bell_is_present(id));
+        assert!(bell_is_present(known_state_id(id)));
         let shakes = BellShakes::new();
-        let spawn = bell_spawn([1, 2, 3], id, lodestone_render::ENTITY_FULLBRIGHT, &shakes, 0.0)
+        let spawn = bell_spawn(
+            [1, 2, 3],
+            known_state_id(id),
+            lodestone_render::ENTITY_FULLBRIGHT,
+            &shakes,
+            0.0,
+        )
             .expect("must resolve");
         assert_eq!(spawn.pos, [1, 2, 3]);
         assert_eq!(spawn.shake, None, "an unrung bell is at rest");
@@ -4550,7 +4564,13 @@ mod bell_tests {
         let pos = [4, 5, 6];
         let mut shakes = BellShakes::new();
         assert!(shakes.apply_block_event(pos, 1, 2), "b0 == 1 with a north face rings");
-        let spawn = bell_spawn(pos, id, lodestone_render::ENTITY_FULLBRIGHT, &shakes, 0.0)
+        let spawn = bell_spawn(
+            pos,
+            known_state_id(id),
+            lodestone_render::ENTITY_FULLBRIGHT,
+            &shakes,
+            0.0,
+        )
             .expect("must resolve");
         assert_eq!(spawn.shake, Some((BellShakeDirection::North, 0.0)));
 
@@ -4609,11 +4629,11 @@ mod bell_tests {
             else {
                 continue;
             };
-            assert!(!bell_is_present(id), "{name} matched as a bell");
+            assert!(!bell_is_present(known_state_id(id)), "{name} matched as a bell");
             assert_eq!(
                 bell_spawn(
                     [0, 0, 0],
-                    id,
+                    known_state_id(id),
                     lodestone_render::ENTITY_FULLBRIGHT,
                     &BellShakes::new(),
                     0.0,
@@ -4653,8 +4673,10 @@ mod sign_tests {
             match lodestone_data::block_states::block_name(id) {
                 Some("minecraft:oak_sign") => {
                     ground_states += 1;
-                    assert!(sign_kind_for_state(id).is_some());
-                    match sign_orientation(id).expect("a ground sign must have an orientation") {
+                    assert!(sign_kind_for_state(known_state_id(id)).is_some());
+                    match sign_orientation(known_state_id(id))
+                        .expect("a ground sign must have an orientation")
+                    {
                         SignOrientation::Ground { rotation_segment } => {
                             ground_segments.insert(rotation_segment);
                         }
@@ -4663,8 +4685,10 @@ mod sign_tests {
                 }
                 Some("minecraft:oak_wall_sign") => {
                     wall_states += 1;
-                    assert!(sign_kind_for_state(id).is_some());
-                    match sign_orientation(id).expect("a wall sign must have an orientation") {
+                    assert!(sign_kind_for_state(known_state_id(id)).is_some());
+                    match sign_orientation(known_state_id(id))
+                        .expect("a wall sign must have an orientation")
+                    {
                         SignOrientation::Wall { facing_yaw_deg } => {
                             wall_yaws.insert(facing_yaw_deg as i32);
                         }
@@ -4702,9 +4726,12 @@ mod sign_tests {
                 let found = (0..lodestone_data::block_states::STATE_COUNT)
                     .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()));
                 let id = found.unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
-                assert!(sign_kind_for_state(id).is_some(), "{name} (state {id}) not a sign");
                 assert!(
-                    sign_orientation(id).is_some(),
+                    sign_kind_for_state(known_state_id(id)).is_some(),
+                    "{name} (state {id}) not a sign"
+                );
+                assert!(
+                    sign_orientation(known_state_id(id)).is_some(),
                     "{name} (state {id}) resolved no orientation"
                 );
             }
@@ -4734,12 +4761,12 @@ mod sign_tests {
                 .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()));
             let id = found.unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
             assert_eq!(
-                sign_kind_for_state(id),
+                sign_kind_for_state(known_state_id(id)),
                 Some(SignKind::Hanging),
                 "{name} (state {id}) must resolve as a hanging sign"
             );
             assert!(
-                sign_orientation(id).is_some(),
+                sign_orientation(known_state_id(id)).is_some(),
                 "{name} (state {id}) resolved no orientation"
             );
         }
@@ -4748,7 +4775,7 @@ mod sign_tests {
             let id = (0..lodestone_data::block_states::STATE_COUNT)
                 .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()))
                 .unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
-            assert_eq!(sign_kind_for_state(id), Some(SignKind::Plain), "{name}");
+            assert_eq!(sign_kind_for_state(known_state_id(id)), Some(SignKind::Plain), "{name}");
         }
     }
 
@@ -4774,8 +4801,12 @@ mod sign_tests {
                     .collect();
                 assert!(!ids.is_empty(), "{name} is not in the 26.2 state table");
                 for id in ids {
-                    assert_eq!(sign_kind_for_state(id), Some(SignKind::Hanging), "{name}");
-                    match sign_orientation(id) {
+                    assert_eq!(
+                        sign_kind_for_state(known_state_id(id)),
+                        Some(SignKind::Hanging),
+                        "{name}"
+                    );
+                    match sign_orientation(known_state_id(id)) {
                         Some(SignOrientation::Wall { .. }) if wall => {}
                         Some(SignOrientation::Ground { .. }) if !wall => {}
                         other => panic!("{name} (state {id}) resolved {other:?}, wall={wall}"),
@@ -4797,7 +4828,7 @@ mod sign_tests {
                 continue;
             };
             assert!(
-                sign_kind_for_state(id).is_none(),
+                sign_kind_for_state(known_state_id(id)).is_none(),
                 "{name} matched a sign kind"
             );
         }
@@ -4819,7 +4850,12 @@ mod sign_tests {
             text: "LODESTONE PROBE".to_owned(),
             ..Default::default()
         }];
-        let spawn = sign_spawn([0, 64, 0], id, text, lodestone_render::ENTITY_FULLBRIGHT)
+        let spawn = sign_spawn(
+            [0, 64, 0],
+            known_state_id(id),
+            text,
+            lodestone_render::ENTITY_FULLBRIGHT,
+        )
             .expect("a real oak_sign state must resolve to a spawn");
         assert_eq!(spawn.front.lines[0][0].text, "LODESTONE PROBE");
         assert!(matches!(spawn.orientation, SignOrientation::Ground { .. }));
@@ -4840,9 +4876,10 @@ mod shulker_tests {
 
     /// Finds the first state id whose block name matches, against the real 26.2
     /// table rather than a fixture.
-    fn state_named(name: &str) -> u32 {
+    fn state_named(name: &str) -> StateId {
         (0..lodestone_data::block_states::STATE_COUNT)
             .find(|id| lodestone_data::block_states::block_name(*id) == Some(name))
+            .and_then(StateId::new)
             .unwrap_or_else(|| panic!("{name} must be in the 26.2 state table"))
     }
 
@@ -4873,7 +4910,7 @@ mod shulker_tests {
             if lodestone_data::block_states::block_name(id) != Some("minecraft:shulker_box") {
                 continue;
             }
-            let (_, facing) = shulker_orientation(id).expect("resolves");
+            let (_, facing) = shulker_orientation(known_state_id(id)).expect("resolves");
             seen.insert(facing);
         }
         assert_eq!(
@@ -4965,14 +5002,12 @@ mod shulker_tests {
     }
 
     #[test]
-    fn an_out_of_census_lectern_candidate_stops_at_the_snapshot_boundary() {
-        let snapshot = BlockEntityFrameSnapshot {
-            candidates: vec![BlockEntityFrameCandidate {
-                pos: [1, 2, 3],
-                state_id: u32::MAX,
-                light: lodestone_render::ENTITY_FULLBRIGHT,
-            }],
-        };
+    fn an_out_of_census_lectern_candidate_cannot_cross_the_snapshot_boundary() {
+        assert!(
+            StateId::new(u32::MAX).is_none(),
+            "an unvalidated raw id cannot construct a frame candidate"
+        );
+        let snapshot = BlockEntityFrameSnapshot::default();
 
         assert!(lectern_spawns_from_snapshot(&snapshot).is_empty());
     }
@@ -7049,7 +7084,7 @@ pub(crate) fn copper_golem_statue_spawns_from_snapshot(
     for candidate in &snapshot.candidates {
         if let Some(spawn) = copper_golem_statue_spawn(
             candidate.pos,
-            candidate.state_id,
+            candidate.state_id.raw(),
             candidate.light,
         ) {
             out.push(spawn);

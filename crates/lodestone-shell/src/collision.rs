@@ -104,7 +104,7 @@ use lodestone_physics::{Aabb, CollisionView, FluidCell, HorizontalDir, Vec3d};
 use lodestone_render::{BlockAtlas, BlockClassifier, FluidKind};
 use lodestone_world::{ChunkPos, ChunkSection, World};
 
-use crate::blocks::{demo_fluid, id, vanilla_fluid};
+use crate::blocks::{DemoStateId, demo_fluid, id, vanilla_fluid};
 use crate::raycast::PickBox;
 
 // ---------------------------------------------------------------------------
@@ -534,7 +534,7 @@ impl<'a> WorldCollision<'a> {
     #[must_use]
     pub fn is_pickable(&self, x: i32, y: i32, z: i32) -> bool {
         let b = self.block_at(x, y, z);
-        b != id::AIR && demo_fluid(b).is_none()
+        b != id::AIR && DemoStateId::new(b).and_then(demo_fluid).is_none()
     }
 
     /// The boxes [`crate::raycast::raycast`] clips against in this cell — the demo
@@ -608,7 +608,7 @@ impl BlockView for WorldCollision<'_> {
     }
 
     fn fluid_kind_of(&self, state: u32) -> Option<FluidKind> {
-        demo_fluid(state)
+        DemoStateId::new(state).and_then(demo_fluid)
     }
 
     /// **Always `None`, on purpose.** `fluid_at` must report the fluid's *amount*
@@ -1172,7 +1172,8 @@ impl LiveCollision {
     #[must_use]
     fn outline_of(&self, state: u32) -> &'static [BlockAabb] {
         if let Some(version) = &self.version
-            && let Some(shape) = version.block_outline(state)
+            && let Some(state_id) = StateId::new(state)
+            && let Some(shape) = version.block_outline(state_id.raw())
         {
             return shape;
         }
@@ -1185,7 +1186,10 @@ impl LiveCollision {
         {
             return FULL_CUBE;
         }
-        if vanilla_fluid(&self.atlas, state).is_none() {
+        if StateId::new(state)
+            .and_then(|state_id| vanilla_fluid(&self.atlas, state_id))
+            .is_none()
+        {
             FULL_CUBE
         } else {
             NO_COLLISION
@@ -1345,7 +1349,7 @@ impl BlockView for LiveCollision {
     }
 
     fn fluid_kind_of(&self, state: u32) -> Option<FluidKind> {
-        vanilla_fluid(&self.atlas, state)
+        StateId::new(state).and_then(|state_id| vanilla_fluid(&self.atlas, state_id))
     }
 
     /// The fluid's amount and falling flag, from the same

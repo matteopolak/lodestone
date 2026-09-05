@@ -39,6 +39,7 @@
 //! substitute air and logs the tally; this module only resolves and counts.
 
 use crate::generated_canonical;
+use lodestone_data::block_states::StateId;
 
 /// One protocol's `wire state id -> canonical 26.2 state id` mapping.
 ///
@@ -69,16 +70,16 @@ impl CanonicalTable {
     /// carries no runtime dependency on `lodestone-data` for the mapping —
     /// `cargo xtask check-deletable` stays accurate.
     #[must_use]
-    pub const fn air_state_id(&self) -> u32 {
-        self.air
+    pub fn air_state_id(&self) -> StateId {
+        canonical_state(self.air)
     }
 
     /// Resolves a flat wire state id to its canonical 26.2 state id, or
     /// [`None`] if `state_id` is not a real state in this protocol
     /// (`state_id >= state_count()`).
     #[must_use]
-    pub fn resolve(&self, state_id: u32) -> Option<u32> {
-        self.states.get(state_id as usize).copied()
+    pub fn resolve(&self, state_id: u32) -> Option<StateId> {
+        self.states.get(state_id as usize).copied().map(canonical_state)
     }
 
     /// Resolves `state_id` to a canonical 26.2 state id, substituting
@@ -86,15 +87,19 @@ impl CanonicalTable {
     /// The single integration point `packets/chunk.rs` calls per decoded
     /// cell.
     #[must_use]
-    pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> u32 {
+    pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> StateId {
         match self.resolve(state_id) {
             Some(id) => id,
             None => {
                 tally.out_of_range += 1;
-                self.air
+                self.air_state_id()
             }
         }
     }
+}
+
+fn canonical_state(raw: u32) -> StateId {
+    StateId::new(raw).expect("generated canonical table contains a known 26.2 state")
 }
 
 /// The era's block-state table. One protocol, one table — see the module

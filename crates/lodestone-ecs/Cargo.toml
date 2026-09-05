@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+lodestone-data = { workspace = true }
 # The workspace's one portable clock seam — see `lodestone_time`'s crate docs. It
 # is here because `Instant::now()` and `SystemTime::now()` COMPILE for wasm32 and
 # then TRAP at runtime (measured, executed in a wasm VM: `RuntimeError:

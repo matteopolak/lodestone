@@ -1509,7 +1509,7 @@ impl V404Adapter {
         let mut tally = FallbackTally::default();
         let state = adapter.current_shape().canonical.resolve_or_air(raw, &mut tally);
         let pos = pos.0;
-        world.set_block(pos.x, pos.y, pos.z, state);
+        world.set_block(pos.x, pos.y, pos.z, state.raw());
         // Writing a state is what creates/removes a block entity in vanilla
         // (done inside the chunk's own block-state setter, no packet
         // involved).
@@ -1517,8 +1517,7 @@ impl V404Adapter {
             pos.x,
             pos.y,
             pos.z,
-            lodestone_data::block_states::StateId::new(state)
-                .and_then(block_entity_type)
+            block_entity_type(state)
                 .map(|kind| kind.raw()),
         );
         Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {

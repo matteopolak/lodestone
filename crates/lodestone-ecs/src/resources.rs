@@ -2,6 +2,7 @@
 //! never a component on some entity.
 
 use bevy_ecs::resource::Resource;
+use lodestone_data::block_states::StateId;
 
 /// The server's authoritative clock, folded from `ClientEvent::TimeChanged`.
 ///
@@ -211,8 +212,8 @@ impl VersionData {
     /// deliberately not distinguished: the correct response to both is the same,
     /// refuse to dig.
     #[must_use]
-    pub fn block_hardness(&self, state_id: u32) -> Option<lodestone_model::BlockHardness> {
-        self.0.as_ref()?.block_hardness(state_id)
+    pub fn block_hardness(&self, state_id: StateId) -> Option<lodestone_model::BlockHardness> {
+        self.0.as_ref()?.block_hardness(state_id.raw())
     }
 
     /// The held item's mining contribution for a block-state id, or `None` when
@@ -221,9 +222,9 @@ impl VersionData {
     pub fn tool_mining(
         &self,
         held: Option<&lodestone_model::ItemStack>,
-        state_id: u32,
+        state_id: StateId,
     ) -> Option<lodestone_model::ToolMining> {
-        self.0.as_ref()?.tool_mining(held, state_id)
+        self.0.as_ref()?.tool_mining(held, state_id.raw())
     }
 
     /// The version's pick/outline geometry for a block-state id, block-local
@@ -237,8 +238,8 @@ impl VersionData {
     /// answers for free. This is the read that lets it build the same
     /// `pick_boxes` closure a live mouse cast already uses.
     #[must_use]
-    pub fn block_outline(&self, state_id: u32) -> Option<&'static [lodestone_model::BlockAabb]> {
-        self.0.as_ref()?.block_outline(state_id)
+    pub fn block_outline(&self, state_id: StateId) -> Option<&'static [lodestone_model::BlockAabb]> {
+        self.0.as_ref()?.block_outline(state_id.raw())
     }
 
     /// The version's per-entity-type physics facts for a resolved entity type, or

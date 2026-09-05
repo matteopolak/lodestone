@@ -95,6 +95,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use glam::Vec3;
+use lodestone_data::block_states::StateId;
 use lodestone_core::Nbt;
 use lodestone_render::SignSpawn;
 use lodestone_world::{ChunkPos, SignText, World};
@@ -182,7 +183,7 @@ impl Verdict {
 /// Split out from [`report`] so it is callable from a test that builds a real
 /// [`World`] — the classification is the part worth pinning, not the scan.
 #[must_use]
-pub fn classify(world: &World, block: [i32; 3], state_id: u32) -> Verdict {
+pub fn classify(world: &World, block: [i32; 3], state_id: StateId) -> Verdict {
     let [x, y, z] = block;
     let pos = ChunkPos::from_block(x, z);
     let Some(chunk) = world.get(pos) else {
@@ -198,8 +199,7 @@ pub fn classify(world: &World, block: [i32; 3], state_id: u32) -> Verdict {
         return Verdict::NoRecord;
     };
 
-    let expected = lodestone_data::block_states::StateId::new(state_id)
-        .and_then(lodestone_data::block_entity_types::block_entity_type)
+    let expected = lodestone_data::block_entity_types::block_entity_type(state_id)
         .map(|kind| kind.raw());
     if expected != Some(record.type_id) {
         return Verdict::TypeMismatch {
@@ -265,16 +265,16 @@ pub fn report(handle: &SharedHandle, eye: Vec3, spawned: &[SignSpawn]) {
     let blank = found.iter().filter(|(_, _, v)| v.is_blank()).count();
     for (block, state_id, verdict) in found.iter().filter(|(_, _, v)| v.is_blank()).take(MAX_LINES)
     {
-        let name = lodestone_data::block_states::block_name(*state_id).unwrap_or("<unknown state>");
+        let name = state_id.name();
         let drawn = spawned.iter().any(|s| s.pos == *block);
         let detail = detail_for(&world, *block, verdict);
         tracing::debug!(
             target: TARGET,
-            "{} at {},{},{} ({name}, state {state_id}, in this frame's spawn list: {drawn}){detail}",
+            "{} at {},{},{} ({name}, state {}, in this frame's spawn list: {drawn}){detail}",
             verdict.tag(),
             block[0],
             block[1],
-            block[2],
+            block[2], state_id.raw(),
         );
     }
 
@@ -367,7 +367,7 @@ fn record_nbt<'a>(world: &'a World, block: [i32; 3]) -> Option<&'a Nbt> {
 }
 
 /// Every sign block state in the box, classified.
-fn scan(world: &World, eye: Vec3, radius: i32) -> Vec<([i32; 3], u32, Verdict)> {
+fn scan(world: &World, eye: Vec3, radius: i32) -> Vec<([i32; 3], StateId, Verdict)> {
     let (ex, ey, ez) = (
         eye.x.floor() as i32,
         eye.y.floor() as i32,
@@ -384,11 +384,14 @@ fn scan(world: &World, eye: Vec3, radius: i32) -> Vec<([i32; 3], u32, Verdict)> 
             for x in (ex - radius).max(cx * 16)..=(ex + radius).min(cx * 16 + 15) {
                 for z in (ez - radius).max(cz * 16)..=(ez + radius).min(cz * 16 + 15) {
                     for y in y_lo..=y_hi {
-                        let state_id = chunk.column.get_block(
+                        let raw_state_id = chunk.column.get_block(
                             (x & 15) as usize,
                             y,
                             (z & 15) as usize,
                         );
+                        let Some(state_id) = StateId::new(raw_state_id) else {
+                            continue;
+                        };
                         if crate::block_entities::sign_kind_for_state(state_id).is_some() {
                             let block = [x, y, z];
                             out.push((block, state_id, classify(world, block, state_id)));
@@ -627,9 +630,8 @@ mod tests {
 
     const SIGN_BLOCK: [i32; 3] = [3, 65, 9];
 
-    fn oak_sign_state() -> u32 {
-        lodestone_data::block_states::state_id("minecraft:oak_sign")
-            .expect("26.2 has minecraft:oak_sign")
+    fn oak_sign_state() -> StateId {
+        StateId::from_state_str("minecraft:oak_sign").expect("26.2 has minecraft:oak_sign")
     }
 
     /// A world holding one chunk whose block at [`SIGN_BLOCK`] is a standing

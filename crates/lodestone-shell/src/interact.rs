@@ -70,6 +70,7 @@ use lodestone_ecs::ecs::prelude::{Commands, Entity, Query, Res, ResMut, With};
 use lodestone_ecs::ecs::resource::Resource;
 use lodestone_ecs::ecs::schedule::IntoScheduleConfigs;
 use lodestone_client::{BlockPos, ClientAction, ClientHandle, Hand, Rotation};
+use lodestone_data::block_states::StateId;
 use lodestone_ecs::player::{
     ActionQueue, BreakIntent, BreakOutcome, BreakRejection, BreakStatus, Dead, Egress, Flying,
     LastFlyingSent, LastSprintingSent, LocalPlayer, MovementIntent, PhysicsState, PlaceIntent,
@@ -590,6 +591,9 @@ fn resolve_intent_ray(
         let Some(state) = net.block_at(BlockPos::new(x, y, z)) else {
             return;
         };
+        let Some(state) = StateId::new(state) else {
+            return;
+        };
         let Some(boxes) = version.block_outline(state) else {
             return;
         };
@@ -778,7 +782,14 @@ pub fn drive_mining(
         queue.0.extend(mining.0.stop());
         return;
     };
-    let Some(entry) = version.block_hardness(id_value) else {
+    let Some(state_id) = StateId::new(id_value) else {
+        if via_intent {
+            outcome.0 = BreakStatus::Rejected(BreakRejection::UnknownBlockState);
+        }
+        queue.0.extend(mining.0.stop());
+        return;
+    };
+    let Some(entry) = version.block_hardness(state_id) else {
         if via_intent {
             outcome.0 = BreakStatus::Rejected(BreakRejection::UnknownBlockState);
         }
@@ -818,7 +829,7 @@ pub fn drive_mining(
         .and_then(|menus| menus.0.player_native(slot.0))
         .map(crate::sim::tool_mining_item);
     let tool = version
-        .tool_mining(held.as_ref(), id_value)
+        .tool_mining(held.as_ref(), state_id)
         .unwrap_or_else(|| bare_handed_tool_mining(entry));
     let inputs = dig_break_inputs(
         entry,

@@ -13,11 +13,10 @@ numeric: public functions with state_id, block_state, effect_id, item_id, entity
 text: public String fields whose names end in url, dimension, potion, effect, state, kind, mode, key, or id
 ```
 
-The snapshot contains **98 numeric APIs** and **64 text fields**, **162 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
+The snapshot contains **88 numeric APIs** and **64 text fields**, **152 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
 
 | disposition | sites |
 |---|---:|
-| `canonical-block-state` | 22 |
 | `dimension-resource-url` | 16 |
 | `entity-network-id` | 32 |
 | `intentional-cache-index` | 6 |
@@ -26,14 +25,14 @@ The snapshot contains **98 numeric APIs** and **64 text fields**, **162 sites to
 | `intentional-ring-buffer-index` | 1 |
 | `intentional-storage-boundary` | 2 |
 | `intentional-user-or-format-text` | 2 |
-| `intentional-wire-boundary` | 24 |
+| `intentional-wire-boundary` | 36 |
 | `inventory-menu-slot` | 32 |
 | `potion-and-state-value` | 13 |
 | `prediction-sequence` | 2 |
 | `recipe-item-id` | 2 |
 | `typed-discriminator` | 5 |
 
-Migration families are `canonical-block-state`, `prediction-sequence`, `recipe-item-id`, `entity-network-id`, `inventory-menu-slot`, `potion-and-state-value`, `typed-discriminator`, and `dimension-resource-url`.
+Migration families are `prediction-sequence`, `recipe-item-id`, `entity-network-id`, `inventory-menu-slot`, `potion-and-state-value`, `typed-discriminator`, and `dimension-resource-url`.
 
 Intentional categories retain primitives because the representation is the interface: bytes/integers at wire boundaries, strings in storage/import formats, external identity strings, cache or ring-buffer indices, observability labels, secrets, and user-authored or format-defined text.
 
@@ -65,8 +64,6 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-ecs/src/entity.rs:     pub fn remove(&mut self, entity_id: i32) -> Option<Entity> {` | `entity-network-id` |
 | `crates/lodestone-shell/src/sim/meshing.rs:     pub(crate) fn settle_placement_predictions(&mut self, sequence: i32) {` | `prediction-sequence` |
 | `crates/lodestone-client/src/state.rs:     pub(crate) fn entity(&self, entity_id: i32) -> Option<EntityView> {` | `entity-network-id` |
-| `crates/lodestone-ecs/src/resources.rs:     pub fn block_hardness(&self, state_id: u32) -> Option<lodestone_model::BlockHardness> {` | `canonical-block-state` |
-| `crates/lodestone-ecs/src/resources.rs:     pub fn block_outline(&self, state_id: u32) -> Option<&'static [lodestone_model::BlockAabb]> {` | `canonical-block-state` |
 | `crates/lodestone-shell/src/sim/session.rs:     pub fn select_slot(&mut self, slot: usize) {` | `inventory-menu-slot` |
 | `crates/lodestone-shell/src/sim/session.rs:     pub fn send_container_button_click(&self, window_id: i32, button_id: i32) {` | `inventory-menu-slot` |
 | `crates/lodestone-server/src/mobs/vehicles.rs:     pub fn vehicle_ridden_by(&self, player_entity_id: i32) -> Option<i32> {` | `entity-network-id` |
@@ -86,11 +83,6 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-server/src/block_entities.rs:     pub fn set_crafter_slot_state(&mut self, slot: usize, enabled: bool) -> bool {` | `inventory-menu-slot` |
 | `crates/lodestone-render/src/block_models.rs: pub fn biome_tint_kind_for_slot(slot: u8) -> Option<TintKind> {` | `inventory-menu-slot` |
 | `crates/lodestone-render/src/block_models.rs:     pub(crate) fn reserve(&mut self, slot: u8, rgb: u32) {` | `inventory-menu-slot` |
-| `crates/versions/1.17/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<u32> {` | `canonical-block-state` |
-| `crates/versions/1.17/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> u32 {` | `canonical-block-state` |
-| `crates/lodestone-shell/src/blocks.rs: pub fn vanilla_fluid(atlas: &BlockAtlas, state_id: u32) -> Option<FluidKind> {` | `canonical-block-state` |
-| `crates/lodestone-shell/src/blocks.rs: pub fn demo_fluid(state_id: u32) -> Option<FluidKind> {` | `canonical-block-state` |
-| `crates/lodestone-shell/src/blocks.rs:     pub fn fluid(&self, state_id: u32) -> Option<FluidKind> {` | `canonical-block-state` |
 | `crates/lodestone-game/src/menu.rs:     pub fn item_combiner(container_size: usize, result_slot: usize, layout: SpecialLayout) -> Self {` | `inventory-menu-slot` |
 | `crates/lodestone-game/src/click.rs: pub fn quick_craft_mask(header: i32, kind: i32) -> i32 {` | `inventory-menu-slot` |
 | `crates/lodestone-game/src/click.rs:     pub fn quick_craft_remainder(&self, painted: &[usize], kind: i32, source: &ItemStack) -> i32 {` | `inventory-menu-slot` |
@@ -111,32 +103,17 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-game/src/recipe_sync.rs:     pub fn stonecutter_results_for(&self, input_item_id: i32) -> impl Iterator<Item = &[i32]> {` | `recipe-item-id` |
 | `crates/lodestone-game/src/recipe_sync.rs:     pub fn unlocked_producing(&self, item_id: i32) -> impl Iterator<Item = (i32, &KnownRecipe)> {` | `recipe-item-id` |
 | `crates/versions/26.2/src/packets/metadata.rs: pub fn write_update_attributes(w: &mut Writer, entity_id: i32, attributes: &[EntityAttributeSnapshot]) {` | `intentional-wire-boundary` |
-| `crates/lodestone-shell/src/sign_diagnostics.rs: pub fn classify(world: &World, block: [i32; 3], state_id: u32) -> Verdict {` | `canonical-block-state` |
-| `crates/versions/1.19/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<u32> {` | `canonical-block-state` |
-| `crates/versions/1.19/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> u32 {` | `canonical-block-state` |
 | `crates/lodestone-shell/src/entities.rs: pub fn begin_item_pickup(world: &mut World, item_entity_id: i32, collector_id: i32) -> bool {` | `entity-network-id` |
 | `crates/lodestone-shell/src/entities.rs:     pub fn set_item_stack(&mut self, entity_id: i32, item: ResourceLocation) {` | `entity-network-id` |
 | `crates/lodestone-shell/src/entities.rs:     pub fn set_item_stack_with_count(&mut self, entity_id: i32, item: ResourceLocation, count: u32) {` | `entity-network-id` |
 | `crates/lodestone-shell/src/entities.rs:     pub fn item_stack(&self, entity_id: i32) -> Option<&ResourceLocation> {` | `entity-network-id` |
 | `crates/lodestone-shell/src/entities.rs:     pub fn item_count(&self, entity_id: i32) -> Option<u32> {` | `entity-network-id` |
 | `crates/lodestone-shell/src/menu/book_view.rs:     pub fn lectern(open: BookViewOpen, window_id: i32, page: i32) -> Self {` | `inventory-menu-slot` |
-| `crates/versions/1.21.11/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<u32> {` | `canonical-block-state` |
-| `crates/versions/1.21.11/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> u32 {` | `canonical-block-state` |
-| `crates/versions/1.13/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<u32> {` | `canonical-block-state` |
-| `crates/versions/1.13/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> u32 {` | `canonical-block-state` |
 | `crates/lodestone-shell/src/gpu/distant_terrain.rs:     pub(crate) fn rejects_unpopulated_submission(&self, slot: usize) -> bool {` | `intentional-ring-buffer-index` |
-| `crates/lodestone-shell/src/block_entities.rs: pub fn skull_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<SkullSpawn> {` | `canonical-block-state` |
-| `crates/lodestone-shell/src/block_entities.rs: pub fn shulker_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<ShulkerSpawn> {` | `canonical-block-state` |
-| `crates/lodestone-shell/src/block_entities.rs: pub(crate) fn sign_kind_for_state(state_id: u32) -> Option<SignKind> {` | `canonical-block-state` |
-| `crates/lodestone-shell/src/block_entities.rs: pub(crate) fn sign_orientation(state_id: u32) -> Option<SignOrientation> {` | `canonical-block-state` |
-| `crates/versions/1.20.6/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<u32> {` | `canonical-block-state` |
-| `crates/versions/1.20.6/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> u32 {` | `canonical-block-state` |
 | `crates/lodestone-worldgen-core/src/engine/scratch.rs:     pub(crate) fn cell_get(&self, slot: usize, cx: i32, cy: i32, cz: i32) -> Option<[f64; 8]> {` | `intentional-cache-index` |
 | `crates/lodestone-worldgen-core/src/engine/scratch.rs:     pub(crate) fn cell_put(&mut self, slot: usize, cx: i32, cy: i32, cz: i32, v: [f64; 8]) {` | `intentional-cache-index` |
 | `crates/lodestone-worldgen-core/src/engine/scratch.rs:     pub(crate) fn slot_get(&self, slot: usize, key: (i32, i32, i32)) -> Option<f64> {` | `intentional-cache-index` |
 | `crates/lodestone-worldgen-core/src/engine/scratch.rs:     pub(crate) fn slot_put(&mut self, slot: usize, key: (i32, i32, i32), v: f64) {` | `intentional-cache-index` |
-| `crates/versions/1.14/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<u32> {` | `canonical-block-state` |
-| `crates/versions/1.14/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> u32 {` | `canonical-block-state` |
 | `crates/lodestone-worldgen-core/src/counters.rs:     pub fn bump_slot_miss(slot: usize) {` | `intentional-cache-index` |
 | `crates/lodestone-worldgen-core/src/counters.rs:     pub fn bump_slot_miss(_slot: usize) {}` | `intentional-cache-index` |
 | `crates/lodestone-worldgen/src/structure/mod.rs:     pub state: String,` | `potion-and-state-value` |
@@ -203,10 +180,22 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/versions/1.7/src/packets/login.rs:     pub server_id: String,` | `intentional-wire-boundary` |
 | `crates/versions/1.21.11/src/packets/configuration.rs:     pub id: String,` | `intentional-wire-boundary` |
 | `crates/versions/1.21.11/src/packets/configuration.rs:     pub id: String,` | `intentional-wire-boundary` |
+| `crates/versions/1.13/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<StateId> {` | `intentional-wire-boundary` |
+| `crates/versions/1.13/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> StateId {` | `intentional-wire-boundary` |
+| `crates/versions/1.14/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<StateId> {` | `intentional-wire-boundary` |
+| `crates/versions/1.14/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> StateId {` | `intentional-wire-boundary` |
+| `crates/versions/1.17/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<StateId> {` | `intentional-wire-boundary` |
+| `crates/versions/1.17/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> StateId {` | `intentional-wire-boundary` |
+| `crates/versions/1.19/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<StateId> {` | `intentional-wire-boundary` |
+| `crates/versions/1.19/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> StateId {` | `intentional-wire-boundary` |
+| `crates/versions/1.20.6/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<StateId> {` | `intentional-wire-boundary` |
+| `crates/versions/1.20.6/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> StateId {` | `intentional-wire-boundary` |
+| `crates/versions/1.21.11/src/canonical.rs:     pub fn resolve(&self, state_id: u32) -> Option<StateId> {` | `intentional-wire-boundary` |
+| `crates/versions/1.21.11/src/canonical.rs:     pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> StateId {` | `intentional-wire-boundary` |
 
 ## How to change it
 
-When a migration family lands, update all rows in that family together and rerun the two census expressions. Remove rows that no longer match; add newly exposed candidates and classify them in the same commit. A primitive may move to an intentional category only when its boundary role is documented and tested.
+When a migration family lands, update all rows in that family together and rerun the two census expressions. Remove rows that no longer match; add newly exposed candidates and classify them in the same commit. A primitive may move to an intentional category only when its boundary role is documented and tested. Canonical block states now cross production APIs as `lodestone_data::block_states::StateId`: raw values are allowed only at decode, chunk-store, or version-adapter boundaries, and are validated before state-specific work.
 
 Container synchronization state now uses `lodestone_model::ContainerStateId`; keep packet decoding and encoding at its `from_wire`/`as_wire` boundary rather than restoring integer casts in menu consumers.
 

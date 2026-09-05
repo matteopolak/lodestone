@@ -397,13 +397,13 @@ fn the_protocol_resolves_a_table_of_the_dumps_size() {
     // against a literal, so a registry regeneration that moves air is a
     // failure here instead of a wrong fallback block at runtime.
     assert_eq!(
-        block_states::block_name(table.air_state_id()),
-        Some("minecraft:air"),
+        table.air_state_id().name(),
+        "minecraft:air",
         "the baked air id must name 26.2's air block"
     );
     assert_eq!(
-        block_states::properties(table.air_state_id()).map(<[_]>::len),
-        Some(0),
+        table.air_state_id().properties().len(),
+        0,
         "26.2's air block carries no properties"
     );
 }
@@ -452,7 +452,7 @@ fn discriminating_states_resolve_to_their_26_2_ids_not_their_wire_ids() {
             .unwrap_or_else(|| panic!("{probe} is absent from the 26.2 registry"));
         assert_eq!(
             table.resolve(state.id),
-            Some(expected),
+            Some(block_states::StateId::new(expected).expect("oracle id is canonical")),
             "{probe}: wire state {} must map to 26.2 state {expected}",
             state.id
         );
@@ -513,7 +513,7 @@ fn the_renamed_chain_maps_to_the_iron_one() {
             });
         assert_eq!(
             table.resolve(state.id),
-            Some(expected),
+            Some(block_states::StateId::new(expected).expect("oracle id is canonical")),
             "chain wire state {} ({:?}) must map to 26.2 state {expected}",
             state.id,
             state.properties
