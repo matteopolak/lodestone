@@ -342,6 +342,17 @@ What exists:
   must fail on the fixed partial-stack witness, proving that the comparison
   reads real slot state rather than accepting an inert model.
 
+- `tests/differential_hopper_model.rs` — a bounded, hermetic transfer-state
+  comparison for `lodestone_server::Hopper::tick`. It drives the production
+  hopper through a generated sequence of neighbour-slot edits and enabled or
+  locked ticks, then compares every own, above, and below slot plus cooldown
+  and transfer flags with an independent five-slot model. The fixed prefix
+  exercises ejection and suction on the same ready tick, followed by seven
+  cooldown ticks and the exact eighth-tick retry. A fixed ChaCha seed bounds
+  160 cases with at most 24 generated operations per case. The detector
+  control omits ejection from the model and must fail after shrinking, so a
+  comparison that only observes suction or accepts every trace cannot pass.
+
 - `tests/differential_generated_text_nbt.rs` — a bounded fixed-seed model
   check for the modern NBT text fold. A grammar independently builds scalar,
   list, and compound `text`/`extra` values, and a separate plain-text fold is
