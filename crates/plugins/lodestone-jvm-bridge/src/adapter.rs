@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use jni::errors::ThrowRuntimeExAndDefault;
 use jni::objects::{JClass, JString};
+use jni::strings::JNIString;
 use jni::sys::jint;
 use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
 
@@ -249,7 +250,7 @@ fn run_java(
             )))?;
             let class = runtime.load_isolated_class(env, &config, class_name)
                 .map_err(|error| java_error(env, class_name, error))?;
-            register_block_query(env, &class)
+            register_block_query(env, &class, "blockStateId", "(III)I")
                 .map_err(|error| java_error(env, &format!("{class_name}.blockStateId(III)I"), error))?;
             env.get_static_method_id(&class, jni_str!("onTick"), jni_sig!("(J)V"))
                 .map_err(|error| java_error(env, &format!("{class_name}.onTick(J)V"), error))?;
@@ -294,12 +295,20 @@ fn java_error(env: &mut Env<'_>, operation: &str, error: impl fmt::Display) -> A
 }
 
 #[allow(unsafe_code)]
-fn register_block_query(env: &mut Env<'_>, class: &JClass<'_>) -> jni::errors::Result<()> {
-    env.get_static_method_id(class, jni_str!("blockStateId"), jni_sig!("(III)I"))?;
+pub(crate) fn register_block_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
     // SAFETY: the static native accepts exactly three jint arguments and
-    // returns jint. EnvUnowned contains every Rust unwind at the FFI boundary.
+    // returns jint. Callers first validate the supplied method name and
+    // descriptor against that exact declaration. EnvUnowned contains every
+    // Rust unwind at the FFI boundary.
     unsafe {
-        let method = NativeMethod::from_raw_parts(jni_str!("blockStateId"), jni_str!("(III)I"),
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(&name, &signature,
             native_block_state_id as *mut c_void);
         env.register_native_methods(class, &[method])
     }

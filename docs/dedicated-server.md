@@ -252,8 +252,11 @@ An adapter run may also validate and load, without initialization, an operator-s
 bootstrap and each discovered plugin entry class: set both
 `LODESTONE_PAPER_JAR` and `LODESTONE_PAPER_PLUGIN_DIRECTORY`, and optionally
 `LODESTONE_PAPER_SHIM_PATH` for one shim directory or jar that precedes the Paper jar in isolated
-resolution. Invalid paths, plugin descriptors, or declared main-class archive entries stop cleanly
-before JVM startup. Each plugin entry gets a fresh shim-first isolated loader that sees only the shim,
+resolution. When a shim path is set it must contain the operator-built
+`lodestone.bridge.IsolatedPaperShim` declaration with its one static native block-state query; the
+host validates and registers it in every fresh loader before that loader sees a lifecycle entry.
+Invalid paths, declarations, plugin descriptors, or declared main-class archive entries stop cleanly
+before readiness. Each plugin entry gets a fresh shim-first isolated loader that sees only the shim,
 server, and that plugin jar. A lifecycle-load failure also saves and stops the server, so a requested
 Paper intake cannot silently degrade into an ordinary adapter run. These loads do not initialize
 Paper, retain a plugin loader, instantiate or enable a plugin, or provide Paper-plugin compatibility.

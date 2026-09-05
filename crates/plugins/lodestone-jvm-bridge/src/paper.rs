@@ -17,6 +17,8 @@ use zip::ZipArchive;
 use jni::Env;
 #[cfg(feature = "jvm")]
 use crate::runtime::{JvmConfig, JvmRuntime};
+#[cfg(feature = "jvm")]
+use crate::native_surface;
 
 const BOOTSTRAP_CLASS: &str = "io.papermc.paper.PaperBootstrap";
 const BOOTSTRAP_ENTRY: &str = "io/papermc/paper/PaperBootstrap.class";
@@ -37,6 +39,7 @@ pub struct PaperBootstrapConfig {
     paper_jar: PathBuf,
     plugins_directory: PathBuf,
     shim_paths: Vec<PathBuf>,
+    native_shim: bool,
     max_plugins: usize,
 }
 
@@ -48,6 +51,7 @@ impl PaperBootstrapConfig {
             paper_jar: paper_jar.as_ref().to_owned(),
             plugins_directory: plugins_directory.as_ref().to_owned(),
             shim_paths: Vec::new(),
+            native_shim: false,
             max_plugins: DEFAULT_MAX_PLUGINS,
         }
     }
@@ -62,6 +66,18 @@ impl PaperBootstrapConfig {
         self
     }
 
+    /// Requires the bridge's narrow native surface from the configured shim paths.
+    ///
+    /// This does not claim a plugin API. It asks every fresh lifecycle loader
+    /// to resolve `lodestone.bridge.IsolatedPaperShim`, validate its one static
+    /// native declaration, and register it before that loader sees a bootstrap
+    /// or plugin entry class.
+    #[must_use]
+    pub fn with_isolated_native_shim(mut self) -> Self {
+        self.native_shim = true;
+        self
+    }
+
     /// Limits discovered plugin jars before opening any descriptor.
     #[must_use]
     pub fn with_max_plugins(mut self, max_plugins: usize) -> Self {
@@ -73,6 +89,11 @@ impl PaperBootstrapConfig {
     pub fn discover(self) -> Result<PaperBootstrapPlan, PaperBootstrapError> {
         if self.max_plugins == 0 {
             return Err(PaperBootstrapError::new("Paper plugin limit must be positive"));
+        }
+        if self.native_shim && self.shim_paths.is_empty() {
+            return Err(PaperBootstrapError::new(
+                "an isolated native shim requires at least one shim path",
+            ));
         }
         validate_paper_jar(&self.paper_jar)?;
         for shim in &self.shim_paths {
@@ -96,6 +117,7 @@ impl PaperBootstrapConfig {
         Ok(PaperBootstrapPlan {
             paper_jar: self.paper_jar,
             shim_paths: self.shim_paths,
+            native_shim: self.native_shim,
             plugins,
         })
     }
@@ -106,6 +128,7 @@ impl PaperBootstrapConfig {
 pub struct PaperBootstrapPlan {
     paper_jar: PathBuf,
     shim_paths: Vec<PathBuf>,
+    native_shim: bool,
     plugins: Vec<PaperPluginDescriptor>,
 }
 
@@ -118,6 +141,11 @@ impl PaperBootstrapPlan {
     /// Validated plugins in stable jar-path order.
     pub fn plugins(&self) -> &[PaperPluginDescriptor] {
         &self.plugins
+    }
+
+    /// Whether lifecycle loaders must install the bridge's isolated native shim.
+    pub fn requires_isolated_native_shim(&self) -> bool {
+        self.native_shim
     }
 
     /// Starts the JVM without placing operator jars on its system classpath.
@@ -184,23 +212,62 @@ impl PaperBootstrapPlan {
     ///
     /// This is the real JVM consumer of [`Self::load_lifecycle_entries`]. It
     /// deliberately calls `ClassLoader.loadClass`, which does not initialize
-    /// the loaded class. The returned local class references are discarded
-    /// immediately; retaining loaders, construction, enablement, and event
-    /// dispatch are later lifecycle work.
+    /// the loaded class. If requested, it first validates and registers the
+    /// bridge's one native shim member in that *same* fresh loader. The returned
+    /// local class references are discarded immediately; retaining loaders,
+    /// construction, enablement, and event dispatch are later lifecycle work.
     #[cfg(feature = "jvm")]
     pub fn load_lifecycle_entries_in_runtime<'local>(
         &self,
         runtime: &JvmRuntime,
         env: &mut Env<'local>,
     ) -> Result<(), PaperBootstrapError> {
-        self.load_lifecycle_entries(|paths, binary_name| {
-            let config = paths.iter().fold(JvmConfig::new(), |config, path| {
-                config.with_classpath(path)
-            });
-            runtime
-                .load_isolated_class(env, &config, binary_name)
-                .map(|_| ())
-        })
+        let bootstrap_paths = self.loader_paths(None);
+        self.load_one_entry_in_runtime(runtime, env, &bootstrap_paths, BOOTSTRAP_CLASS)
+            .map_err(|error| PaperBootstrapError::lifecycle(
+                format!("could not load Paper bootstrap class {BOOTSTRAP_CLASS}"),
+                error,
+            ))?;
+        for plugin in &self.plugins {
+            let plugin_paths = self.loader_paths(Some(plugin.jar()));
+            self.load_one_entry_in_runtime(runtime, env, &plugin_paths, plugin.main_class())
+                .map_err(|error| PaperBootstrapError::lifecycle(
+                    format!(
+                        "could not load plugin {:?} entry class {}",
+                        plugin.name(),
+                        plugin.main_class(),
+                    ),
+                    error,
+                ))?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "jvm")]
+    fn load_one_entry_in_runtime<'local>(
+        &self,
+        runtime: &JvmRuntime,
+        env: &mut Env<'local>,
+        paths: &[PathBuf],
+        binary_name: &str,
+    ) -> Result<(), PaperBootstrapError> {
+        let config = paths.iter().fold(JvmConfig::new(), |config, path| {
+            config.with_classpath(path)
+        });
+        let native_error = std::cell::RefCell::new(None);
+        let loaded = runtime.with_isolated_loader(env, &config, |env, loader| {
+            if self.native_shim {
+                if let Err(error) = native_surface::install_in_loader(runtime, env, loader) {
+                    *native_error.borrow_mut() = Some(error.clone());
+                    return Err(crate::runtime::JvmError::new(error.to_string()));
+                }
+            }
+            runtime.load_class_from_loader(env, loader, binary_name).map(|_| ())
+        });
+        if let Some(error) = native_error.into_inner() {
+            return Err(PaperBootstrapError::native_surface(error));
+        }
+        loaded.map_err(|error| PaperBootstrapError::new(error.to_string()))
     }
 }
 
@@ -261,17 +328,47 @@ pub enum PaperPluginDescriptorKind {
 
 /// A bounded, actionable jar or descriptor discovery failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PaperBootstrapError(String);
+pub struct PaperBootstrapError {
+    message: String,
+    #[cfg(feature = "jvm")]
+    native_surface: Option<crate::native_surface::NativeSurfaceError>,
+}
 
 impl PaperBootstrapError {
     fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            #[cfg(feature = "jvm")]
+            native_surface: None,
+        }
+    }
+
+    #[cfg(feature = "jvm")]
+    fn native_surface(error: crate::native_surface::NativeSurfaceError) -> Self {
+        Self {
+            message: error.to_string(),
+            native_surface: Some(error),
+        }
+    }
+
+    #[cfg(feature = "jvm")]
+    fn lifecycle(prefix: String, error: Self) -> Self {
+        Self {
+            message: format!("{prefix}: {}", error.message),
+            native_surface: error.native_surface,
+        }
+    }
+
+    /// The typed shim-registration cause, if lifecycle setup reached that seam.
+    #[cfg(feature = "jvm")]
+    pub fn native_surface_error(&self) -> Option<&crate::native_surface::NativeSurfaceError> {
+        self.native_surface.as_ref()
     }
 }
 
 impl fmt::Display for PaperBootstrapError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.message)
     }
 }
 
@@ -707,12 +804,14 @@ mod tests {
         );
         let plan = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
             .with_shim_path(fixture.root.join("shim"))
+            .with_isolated_native_shim()
             .discover()
             .expect("discover plugins");
         assert_eq!(plan.plugins().iter().map(PaperPluginDescriptor::name).collect::<Vec<_>>(), ["Alpha", "Zulu"]);
         assert_eq!(plan.plugins()[0].kind(), PaperPluginDescriptorKind::Paper);
         assert_eq!(plan.plugins()[1].kind(), PaperPluginDescriptorKind::Bukkit);
         assert_eq!(plan.plugins()[0].main_class_entry(), "a/Main.class");
+        assert!(plan.requires_isolated_native_shim());
     }
 
     #[test]
@@ -812,6 +911,16 @@ mod tests {
             .discover()
             .expect_err("missing bootstrap class must fail");
         assert!(error.to_string().contains(BOOTSTRAP_ENTRY));
+    }
+
+    #[test]
+    fn native_shim_request_requires_an_operator_shim_path_before_jvm_startup() {
+        let fixture = Fixture::new();
+        let error = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
+            .with_isolated_native_shim()
+            .discover()
+            .expect_err("a native shim cannot be resolved without a shim path");
+        assert!(error.to_string().contains("requires at least one shim path"), "{error}");
     }
 
     #[test]

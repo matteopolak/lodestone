@@ -177,7 +177,7 @@ impl JavaAdapterConfig {
                     if shim_path.is_empty() {
                         return Err("LODESTONE_PAPER_SHIM_PATH must name a shim directory or jar when set".to_owned());
                     }
-                    config = config.with_shim_path(shim_path);
+                    config = config.with_shim_path(shim_path).with_isolated_native_shim();
                 }
                 Some(config)
             }
