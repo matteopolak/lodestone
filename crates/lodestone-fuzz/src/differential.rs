@@ -128,7 +128,7 @@ pub struct ScriptStep {
 /// An ordered action sequence. Fixed live comparisons construct this by hand;
 /// hermetic differential tests can generate it through their test-support
 /// layer without adding a property-test runtime to this library.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Script {
     pub steps: Vec<ScriptStep>,
 }
@@ -149,6 +149,223 @@ impl Script {
     fn steps_at(&self, tick: u64) -> impl Iterator<Item = &Action> {
         self.steps.iter().filter(move |s| s.tick == tick).map(|s| &s.action)
     }
+}
+
+/// The maximum number of actions a fixed replay accepts. This is a harness
+/// limit, not a gameplay rule: it keeps a checked-in or pasted replay small
+/// enough to inspect and makes the amount of work a replay can request
+/// explicit before either oracle is contacted.
+pub const MAX_FIXED_REPLAY_STEPS: usize = 256;
+
+/// The maximum number of positions compared on each fixed-replay tick.
+/// Candidate states are deliberately caller-owned because an RCON-backed
+/// oracle can classify a state only against a supplied alphabet.
+pub const MAX_FIXED_REPLAY_PROBES: usize = 256;
+
+/// The maximum number of candidate states permitted at one probe position.
+pub const MAX_FIXED_REPLAY_CANDIDATES: usize = 64;
+
+/// The maximum number of ticks a fixed replay may run, including the first
+/// action tick and any trailing settle ticks.
+pub const MAX_FIXED_REPLAY_TICKS: u64 = 4_096;
+
+/// One position and its finite comparison alphabet in a [`BlockStateRegion`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockStateProbe {
+    pub pos: (i32, i32, i32),
+    pub candidates: Vec<String>,
+}
+
+/// A bounded block-state region compared after every replay tick.
+///
+/// The region owns the candidate alphabet rather than asking an oracle to
+/// enumerate states. That preserves the RCON seam: a real server can test a
+/// position against each supplied candidate, while an in-process oracle can
+/// use an ordinary state read and return the same answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockStateRegion {
+    probes: Vec<BlockStateProbe>,
+}
+
+impl BlockStateRegion {
+    /// Builds a nonempty, finite comparison region suitable for a fixed
+    /// replay. A duplicate position would make a report ambiguous about which
+    /// alphabet was intended, so it is rejected before an oracle is created.
+    pub fn new(probes: Vec<BlockStateProbe>) -> Result<Self, FixedReplayError> {
+        if probes.is_empty() {
+            return Err(FixedReplayError::EmptyRegion);
+        }
+        if probes.len() > MAX_FIXED_REPLAY_PROBES {
+            return Err(FixedReplayError::TooManyProbes {
+                actual: probes.len(),
+                maximum: MAX_FIXED_REPLAY_PROBES,
+            });
+        }
+        for (index, probe) in probes.iter().enumerate() {
+            if probe.candidates.is_empty() {
+                return Err(FixedReplayError::EmptyCandidates { probe: index });
+            }
+            if probe.candidates.len() > MAX_FIXED_REPLAY_CANDIDATES {
+                return Err(FixedReplayError::TooManyCandidates {
+                    probe: index,
+                    actual: probe.candidates.len(),
+                    maximum: MAX_FIXED_REPLAY_CANDIDATES,
+                });
+            }
+            if probes[..index].iter().any(|earlier| earlier.pos == probe.pos) {
+                return Err(FixedReplayError::DuplicateProbe { pos: probe.pos });
+            }
+        }
+        Ok(Self { probes })
+    }
+
+    /// The region entries in deterministic comparison order.
+    #[must_use]
+    pub fn probes(&self) -> &[BlockStateProbe] {
+        &self.probes
+    }
+
+    fn as_differential_region(&self) -> Vec<((i32, i32, i32), Vec<String>)> {
+        self.probes
+            .iter()
+            .map(|probe| (probe.pos, probe.candidates.clone()))
+            .collect()
+    }
+}
+
+/// Configuration rejected before a fixed replay contacts either oracle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FixedReplayError {
+    EmptyRegion,
+    TooManyProbes { actual: usize, maximum: usize },
+    EmptyCandidates { probe: usize },
+    TooManyCandidates { probe: usize, actual: usize, maximum: usize },
+    DuplicateProbe { pos: (i32, i32, i32) },
+    TooManySteps { actual: usize, maximum: usize },
+    StepsOutOfOrder { step: usize, previous_tick: u64, tick: u64 },
+    TickHorizonOverflow,
+    TickHorizonTooLong { actual: u64, maximum: u64 },
+}
+
+impl std::fmt::Display for FixedReplayError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyRegion => write!(formatter, "a fixed replay needs at least one block-state probe"),
+            Self::TooManyProbes { actual, maximum } => write!(
+                formatter,
+                "a fixed replay has {actual} probes, exceeding the {maximum}-probe limit"
+            ),
+            Self::EmptyCandidates { probe } => {
+                write!(formatter, "fixed replay probe {probe} needs at least one candidate state")
+            }
+            Self::TooManyCandidates {
+                probe,
+                actual,
+                maximum,
+            } => write!(
+                formatter,
+                "fixed replay probe {probe} has {actual} candidates, exceeding the {maximum}-candidate limit"
+            ),
+            Self::DuplicateProbe { pos } => {
+                write!(formatter, "fixed replay probes {pos:?} more than once")
+            }
+            Self::TooManySteps { actual, maximum } => write!(
+                formatter,
+                "a fixed replay has {actual} actions, exceeding the {maximum}-action limit"
+            ),
+            Self::StepsOutOfOrder {
+                step,
+                previous_tick,
+                tick,
+            } => write!(
+                formatter,
+                "fixed replay action {step} is scheduled at tick {tick} after tick {previous_tick}"
+            ),
+            Self::TickHorizonOverflow => write!(formatter, "fixed replay tick horizon overflows u64"),
+            Self::TickHorizonTooLong { actual, maximum } => write!(
+                formatter,
+                "fixed replay runs for {actual} ticks, exceeding the {maximum}-tick limit"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FixedReplayError {}
+
+/// A deterministic action script plus the complete information needed to
+/// replay its comparison. `seed` is an opaque caller-supplied identifier for
+/// this fixed case; generation and shrinking intentionally do not consume it
+/// yet, so rerunning the same value never depends on a random-number source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixedActionReplay {
+    pub seed: u64,
+    pub script: Script,
+    pub region: BlockStateRegion,
+    pub settle_ticks: u64,
+}
+
+impl FixedActionReplay {
+    /// Validates the bounded work envelope before constructing a replay.
+    pub fn new(
+        seed: u64,
+        script: Script,
+        region: BlockStateRegion,
+        settle_ticks: u64,
+    ) -> Result<Self, FixedReplayError> {
+        if script.steps.len() > MAX_FIXED_REPLAY_STEPS {
+            return Err(FixedReplayError::TooManySteps {
+                actual: script.steps.len(),
+                maximum: MAX_FIXED_REPLAY_STEPS,
+            });
+        }
+        for (index, pair) in script.steps.windows(2).enumerate() {
+            if pair[1].tick < pair[0].tick {
+                return Err(FixedReplayError::StepsOutOfOrder {
+                    step: index + 1,
+                    previous_tick: pair[0].tick,
+                    tick: pair[1].tick,
+                });
+            }
+        }
+        let ticks = script
+            .last_tick()
+            .checked_add(settle_ticks)
+            .and_then(|last_tick| last_tick.checked_add(1))
+            .ok_or(FixedReplayError::TickHorizonOverflow)?;
+        if ticks > MAX_FIXED_REPLAY_TICKS {
+            return Err(FixedReplayError::TickHorizonTooLong {
+                actual: ticks,
+                maximum: MAX_FIXED_REPLAY_TICKS,
+            });
+        }
+        Ok(Self {
+            seed,
+            script,
+            region,
+            settle_ticks,
+        })
+    }
+
+    /// Executes the script through the existing tick-aligned comparison loop.
+    /// The returned report retains this complete replay configuration whether
+    /// the result is agreement, a first divergence, or an oracle failure.
+    #[must_use]
+    pub fn run<L: WorldOracle, R: WorldOracle>(&self, left: &mut L, right: &mut R) -> ReplayReport {
+        let region = self.region.as_differential_region();
+        ReplayReport {
+            replay: self.clone(),
+            outcome: run_differential(&self.script, &region, left, right, self.settle_ticks),
+        }
+    }
+}
+
+/// The result of [`FixedActionReplay::run`]. On divergence, `outcome` names
+/// the first divergent tick while `replay` holds the seed, actions, region,
+/// and settle horizon needed to repeat the exact case.
+#[derive(Debug, Clone)]
+pub struct ReplayReport {
+    pub replay: FixedActionReplay,
+    pub outcome: DifferentialOutcome,
 }
 
 /// One side of a differential comparison: something that can have an
