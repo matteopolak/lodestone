@@ -1,5 +1,5 @@
 use lodestone_server::heavy_scene::{
-    HeavyRunRecord, HeavyScenario, HeavySceneSpec, HeavyServerArgs, HeavyServerHarness,
+    HeavyScenario, HeavySceneSpec, HeavyServerArgs, HeavyServerHarness,
 };
 use lodestone_v26_2::V770ServerProtocol;
 
@@ -134,28 +134,41 @@ async fn server_harness_rejects_a_removed_palette_producer() {
     assert!(!error.to_string().contains("chunk_payload_bytes=0"));
 }
 
-#[tokio::test]
-async fn unsupported_runtime_scenarios_fail_before_starting_a_server() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn entity_runtime_streams_the_real_tick_population_to_the_wire() {
     let mut args = HeavyServerArgs::for_test(HeavyScenario::Entity);
     args.output = std::env::temp_dir().join(format!(
-        "lodestone-heavy-server-unsupported-{}.jsonl",
+        "lodestone-heavy-server-entity-{}.jsonl",
         std::process::id()
     ));
     let plan = args.spec.build_plan().unwrap();
+    let record = HeavyServerHarness::run(args, plan, V770ServerProtocol)
+        .await
+        .unwrap();
+    assert!(record.requested.entities_spawned >= 1024);
+    assert!(record.installed.entities_spawned >= record.requested.entities_spawned);
+    assert!(record.consumed.entities_extracted >= record.requested.entities_spawned);
+    assert_eq!(record.consumed.entities_drawn, record.consumed.entities_extracted);
+    assert!(record.consumed.server_ticks > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn entity_runtime_fails_when_the_population_producer_is_removed() {
+    let mut args = HeavyServerArgs::for_test(HeavyScenario::Entity);
+    args.output = std::env::temp_dir().join(format!(
+        "lodestone-heavy-server-entity-empty-{}.jsonl",
+        std::process::id()
+    ));
+    let mut plan = args.spec.build_plan().unwrap();
+    plan.commands.setup.clear();
     let error = HeavyServerHarness::run(args, plan, V770ServerProtocol)
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("not supported yet"));
-    let output = std::fs::read_to_string(
-        std::env::temp_dir().join(format!(
-            "lodestone-heavy-server-unsupported-{}.jsonl",
-            std::process::id()
-        )),
-    )
-    .unwrap();
-    let record: HeavyRunRecord = serde_json::from_str(output.lines().last().unwrap()).unwrap();
-    assert_eq!(record.status, "failed");
-    assert!(record.failure.unwrap().contains("integrated entity/tick producer"));
+    let message = error.to_string();
+    assert!(message.contains("world.entities_drawn"), "{message}");
+    assert!(message.contains("installed entities_spawned=0"), "{message}");
+    assert!(message.contains("consumed entities_extracted=0"), "{message}");
+    assert!(!message.contains("chunk_payload_bytes=0"), "{message}");
 }
 
 #[tokio::test]

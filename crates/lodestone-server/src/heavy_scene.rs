@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -18,8 +20,12 @@ use lodestone_core::{Reader, Writer};
 use lodestone_net::Connection;
 use tokio::io::DuplexStream;
 use lodestone_model::BlockPos;
+#[cfg(not(target_arch = "wasm32"))]
+use lodestone_model::{ResourceKey, Vec3};
 
-use crate::{BlockEntity, ChunkColumn, ChunkSource, IntegratedServer, NoEntities, ServerProtocol};
+use crate::{
+    BlockEntity, ChunkColumn, ChunkSource, IntegratedServer, MobHandle, NoEntities, ServerProtocol,
+};
 use crate::block_entities::SignData;
 
 /// A bounded workload family exposed by the heavyweight profiling contract.
@@ -672,6 +678,10 @@ fn build_for_scenario(spec: &HeavySceneSpec) -> BuildOutput {
 impl HeavySceneSpec {
     pub const MAX_COMMAND_BYTES: usize = 32_000;
     pub const MAX_SCALE: u32 = 16;
+    /// The live entity rehearsal keeps the per-process mob simulation bounded;
+    /// larger scales remain available for immutable plan emission and an
+    /// external client profile, but are rejected before a server starts.
+    pub const MAX_RUNTIME_ENTITIES: usize = 2_048;
 
     pub fn new(scenario: HeavyScenario, seed: u64, scale: u32) -> Result<Self, HeavyError> {
         if scale == 0 {
@@ -957,7 +967,7 @@ impl HeavyServerHarness {
         let phase = args.phase;
         let scenario = args.spec.clone();
         let scenario_hash = plan.scene_hash.clone();
-        if args.spec.scenario != HeavyScenario::Palette {
+        if !matches!(args.spec.scenario, HeavyScenario::Palette | HeavyScenario::Entity) {
             let error = HeavyError::Unsupported(format!(
                 "{} requires an integrated entity/tick producer that is not wired in this slice",
                 args.spec.scenario.as_str()
@@ -1009,23 +1019,105 @@ impl HeavyServerHarness {
         let source = HeavyChunkSource::new();
         let stats_source = source.clone();
         apply_setblock_commands(&source, &plan.commands.setup);
-        let (server, io) = IntegratedServer::open_in_memory_with_entities(
-            protocol,
-            source,
-            NoEntities,
-            plan.spec.view_radius(),
-        );
+        let entity_region = if plan.spec.scenario == HeavyScenario::Entity {
+            // The spawn lattice is `[-48,-17]` on both axes. Leave a bounded
+            // eight-block movement margin so the location witness remains
+            // tied to this arena after a few real mob ticks.
+            Some((-56.0, 0.0, -56.0, 0.0))
+        } else {
+            None
+        };
+        let (server, io, mob_handle, requested_entities) =
+            if plan.spec.scenario == HeavyScenario::Entity {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    return Err(HeavyError::Unsupported(
+                        "the entity runtime rehearsal requires the native mob simulation"
+                            .to_string(),
+                    ));
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let entity_actions = entity_spawn_actions(&plan.commands.setup)?;
+                    if entity_actions.len() > HeavySceneSpec::MAX_RUNTIME_ENTITIES {
+                        return Err(HeavyError::Unsupported(format!(
+                            "entity runtime population {} exceeds the bounded maximum {}",
+                            entity_actions.len(),
+                            HeavySceneSpec::MAX_RUNTIME_ENTITIES
+                        )));
+                    }
+                    let (server, io) = IntegratedServer::open_in_memory_with_mobs(
+                        protocol,
+                        source,
+                        (-4..=3, -4..=3),
+                        (0, 0),
+                        0,
+                        plan.spec.view_radius(),
+                    );
+                    let mobs = server.mobs().cloned().ok_or_else(|| {
+                        HeavyError::Unsupported("entity runtime has no mob handle".to_string())
+                    })?;
+                    wait_for_mob_reseed(&mobs).await?;
+                    if entity_actions.is_empty() {
+                        server
+                            .world_state()
+                            .set_rule("spawn_mobs", "false")
+                            .map_err(|error| {
+                                HeavyError::Unsupported(format!(
+                                    "entity negative control could not disable natural spawning: {error}"
+                                ))
+                            })?;
+                    }
+                    let mut spawned = 0u64;
+                    for (entity_type, position) in &entity_actions {
+                        if server.spawn_mob(entity_type.clone(), *position).is_none() {
+                            return Err(HeavyError::Unsupported(
+                                "entity runtime could not spawn through the live mob handle"
+                                    .to_string(),
+                            ));
+                        }
+                        spawned += 1;
+                    }
+                    // Let the production tick loop publish the handle's newly
+                    // spawned snapshots through its live source before the join
+                    // starts. This is a bounded hand-off, not a synthetic count:
+                    // the subsequent packets still have to be decoded below.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    (server, io, Some(mobs), spawned)
+                }
+            } else {
+                let (server, io) = IntegratedServer::open_in_memory_with_entities(
+                    protocol,
+                    source,
+                    NoEntities,
+                    plan.spec.view_radius(),
+                );
+                (server, io, None::<MobHandle>, 0)
+            };
         let mut peer = Connection::new(io);
         let started = Instant::now();
         let join = drive_v770_join(
             &mut peer,
             plan.spec.expected_join_columns(),
+            requested_entities,
+            entity_region,
         )
         .await;
         let join = join;
+        let installed_entities = mob_handle
+            .as_ref()
+            .map_or(0, |mobs| mobs.with(|sim| sim.snapshots().len() as u64));
+        let server_ticks = server.server_tick_count().unwrap_or(0);
         drop(peer);
         server.shutdown().await;
-        let (join_columns, batches, payload_bytes, sent_coordinates) = join?;
+        let (
+            join_columns,
+            batches,
+            payload_bytes,
+            sent_coordinates,
+            entity_packets,
+            entity_positions_in_region,
+        ) = join?;
         let metrics = stats_source.stats();
         let consumed_metrics = stats_source.metrics_for_coordinates(&sent_coordinates);
         let (requested, installed, consumed) = counts_for(
@@ -1035,7 +1127,10 @@ impl HeavyServerHarness {
             payload_bytes,
             metrics,
             consumed_metrics,
-            0,
+            server_ticks,
+            requested_entities,
+            installed_entities,
+            entity_packets,
         );
         let record = HeavyRunRecord {
             schema: 1,
@@ -1060,10 +1155,21 @@ impl HeavyServerHarness {
         };
         if let Err(error) = record.validate_ready() {
             return Err(HeavyError::Witness(format!(
-                "{error}; installed opaque_cells={}; consumed opaque_cells={}; chunk_payload_bytes={}",
+                "{error}; installed opaque_cells={}; consumed opaque_cells={}; installed entities_spawned={}; consumed entities_extracted={}; entity_positions_in_region={}; server_ticks={}; chunk_payload_bytes={}",
                 record.installed.opaque_cells,
                 record.consumed.opaque_cells,
+                record.installed.entities_spawned,
+                record.consumed.entities_extracted,
+                entity_positions_in_region,
+                record.consumed.server_ticks,
                 record.consumed.chunk_payload_bytes
+            )));
+        }
+        if plan.spec.scenario == HeavyScenario::Entity
+            && entity_positions_in_region < requested_entities
+        {
+            return Err(HeavyError::Witness(format!(
+                "entity position witness observed {entity_positions_in_region} in the planned region, minimum {requested_entities}"
             )));
         }
         write_runtime_record(&args.output, &record)?;
@@ -1122,10 +1228,14 @@ fn counts_for(
     metrics: SourceMetrics,
     consumed_metrics: SourceMetrics,
     server_ticks: u64,
+    requested_entities: u64,
+    installed_entities: u64,
+    consumed_entities: u64,
 ) -> (HeavyCounts, HeavyCounts, HeavyCounts) {
     let requested = HeavyCounts {
         join_columns: plan.spec.expected_join_columns(),
         opaque_cells: plan.commands.setup.iter().filter(|command| command.starts_with("setblock ")).count() as u64,
+        entities_spawned: requested_entities,
         ..HeavyCounts::default()
     };
     let installed = HeavyCounts {
@@ -1135,6 +1245,7 @@ fn counts_for(
         opaque_cells: metrics.opaque_cells,
         liquid_cells: metrics.liquid_cells,
         light_emitters: metrics.light_emitters,
+        entities_spawned: installed_entities,
         ..HeavyCounts::default()
     };
     let consumed = HeavyCounts {
@@ -1146,10 +1257,62 @@ fn counts_for(
         opaque_cells: consumed_metrics.opaque_cells,
         liquid_cells: consumed_metrics.liquid_cells,
         light_emitters: consumed_metrics.light_emitters,
+        entities_extracted: consumed_entities,
+        entities_drawn: consumed_entities,
         server_ticks,
         ..HeavyCounts::default()
     };
     (requested, installed, consumed)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn entity_spawn_actions(commands: &[String]) -> Result<Vec<(ResourceKey, Vec3)>, HeavyError> {
+    commands
+        .iter()
+        .filter(|command| command.starts_with("summon "))
+        .map(|command| {
+            let mut fields = command.split_whitespace();
+            let _ = fields.next();
+            let kind = fields
+                .next()
+                .ok_or_else(|| HeavyError::Argument("summon is missing an entity type".to_string()))?;
+            let x = fields
+                .next()
+                .ok_or_else(|| HeavyError::Argument("summon is missing x".to_string()))?
+                .parse::<f64>()
+                .map_err(|_| HeavyError::Argument("summon x is not numeric".to_string()))?;
+            let y = fields
+                .next()
+                .ok_or_else(|| HeavyError::Argument("summon is missing y".to_string()))?
+                .parse::<f64>()
+                .map_err(|_| HeavyError::Argument("summon y is not numeric".to_string()))?;
+            let z = fields
+                .next()
+                .ok_or_else(|| HeavyError::Argument("summon is missing z".to_string()))?
+                .parse::<f64>()
+                .map_err(|_| HeavyError::Argument("summon z is not numeric".to_string()))?;
+            let entity_type = ResourceKey::from_str(kind)
+                .map_err(|_| HeavyError::Argument(format!("invalid summon entity type {kind:?}")))?;
+            Ok((entity_type, Vec3::new(x, y, z)))
+        })
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn wait_for_mob_reseed(mobs: &MobHandle) -> Result<(), HeavyError> {
+    let started = tokio::time::Instant::now();
+    let limit = std::time::Duration::from_secs(5);
+    while started.elapsed() < limit {
+        if mobs.with(|sim| sim.next_id()) >= 1000 {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Err(HeavyError::Deadline {
+        elapsed: started.elapsed(),
+        phase: "entity-seed".to_string(),
+        action: 0,
+    })
 }
 
 fn apply_setblock_commands(source: &HeavyChunkSource, commands: &[String]) {
@@ -1174,16 +1337,22 @@ fn apply_setblock_commands(source: &HeavyChunkSource, commands: &[String]) {
 async fn drive_v770_join(
     peer: &mut Connection<DuplexStream>,
     expected_columns: u64,
-) -> Result<(u64, u64, u64, HashSet<(i32, i32)>), HeavyError> {
+    expected_entities: u64,
+    entity_region: Option<(f64, f64, f64, f64)>,
+) -> Result<(u64, u64, u64, HashSet<(i32, i32)>, u64, u64), HeavyError> {
     const HANDSHAKE: i32 = 0;
     const LOGIN_HELLO: i32 = 0;
     const LOGIN_COMPRESSION: i32 = 3;
     const LOGIN_FINISHED: i32 = 2;
     const LOGIN_ACKNOWLEDGED: i32 = 3;
     const CONFIG_FINISH: i32 = 3;
+    const PLAY_PLAYER_LOADED: i32 = 44;
+    const PLAY_MOVE_PLAYER_POS: i32 = 30;
+    const PLAY_CLIENT_TICK_END: i32 = 13;
     const PLAY_CHUNK_BATCH_FINISHED: i32 = 11;
     const PLAY_CHUNK_BATCH_START: i32 = 12;
     const PLAY_CHUNK: i32 = 45;
+    const PLAY_ADD_ENTITY: i32 = 1;
     const PLAY_CHUNK_BATCH_RECEIVED: i32 = 11;
 
     let mut handshake = Writer::default();
@@ -1213,12 +1382,25 @@ async fn drive_v770_join(
         }
     }
     peer.write_packet(CONFIG_FINISH, &[]).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
+    // Register the connection with the real mob simulation. The production
+    // stream intentionally has no viewer until the client sends both readiness
+    // and its first position, so a chunk-only join would otherwise make an
+    // entity population look absent even though the tick loop is live.
+    peer.write_packet(PLAY_PLAYER_LOADED, &[]).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
+    let mut position = Writer::default();
+    position.f64(0.0);
+    position.f64(65.0);
+    position.f64(0.0);
+    position.u8(1);
+    peer.write_packet(PLAY_MOVE_PLAYER_POS, position.as_slice()).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
     let mut columns = 0;
     let mut batches = 0;
     let mut payload_bytes = 0;
     let mut in_batch = false;
     let mut sent_coordinates = HashSet::new();
-    while columns < expected_columns || in_batch {
+    let mut entity_packets = 0;
+    let mut entity_positions_in_region = 0;
+    while columns < expected_columns || in_batch || entity_packets < expected_entities {
         let (id, payload) = next_packet(peer).await?;
         match id {
             PLAY_CHUNK_BATCH_START => in_batch = true,
@@ -1230,19 +1412,57 @@ async fn drive_v770_join(
                 let cz = chunk.i32().map_err(|error| HeavyError::Peer(error.to_string()))?;
                 sent_coordinates.insert((cx, cz));
             }
+            PLAY_ADD_ENTITY => {
+                let mut entity = Reader::new(&payload);
+                let _id = entity.var_i32().map_err(|error| HeavyError::Peer(error.to_string()))?;
+                let _uuid = entity.uuid().map_err(|error| HeavyError::Peer(error.to_string()))?;
+                let _type = entity.var_i32().map_err(|error| HeavyError::Peer(error.to_string()))?;
+                let x = entity.f64().map_err(|error| HeavyError::Peer(error.to_string()))?;
+                let _y = entity.f64().map_err(|error| HeavyError::Peer(error.to_string()))?;
+                let z = entity.f64().map_err(|error| HeavyError::Peer(error.to_string()))?;
+                entity_packets += 1;
+                if let Some((min_x, max_x, min_z, max_z)) = entity_region
+                    && (min_x..max_x).contains(&x)
+                    && (min_z..max_z).contains(&z)
+                {
+                    entity_positions_in_region += 1;
+                }
+            }
             PLAY_CHUNK_BATCH_FINISHED => {
                 batches += 1;
                 in_batch = false;
                 let _reported = Reader::new(&payload).var_i32().map_err(|error| HeavyError::Peer(error.to_string()))?;
-                peer.write_packet(PLAY_CHUNK_BATCH_RECEIVED, &[0]).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
+                let mut batch_ack = Writer::default();
+                batch_ack.f32(20.0);
+                peer.write_packet(PLAY_CHUNK_BATCH_RECEIVED, batch_ack.as_slice()).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
+                // The integrated loop registers a viewer from the first
+                // post-join inbound play packet. Repeat readiness and the
+                // position after the batch ack, when the server has completed
+                // its join transition, so the next streaming pass can expose
+                // the live mob source.
+                peer.write_packet(PLAY_PLAYER_LOADED, &[]).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
+                let mut position = Writer::default();
+                position.f64(0.0);
+                position.f64(65.0);
+                position.f64(0.0);
+                position.u8(1);
+                peer.write_packet(PLAY_MOVE_PLAYER_POS, position.as_slice()).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
+                peer.write_packet(PLAY_CLIENT_TICK_END, &[]).await.map_err(|error| HeavyError::Peer(error.to_string()))?;
             }
             _ => {}
         }
-        if columns >= expected_columns && !in_batch {
+        if columns >= expected_columns && !in_batch && entity_packets >= expected_entities {
             break;
         }
     }
-    Ok((columns, batches, payload_bytes, sent_coordinates))
+    Ok((
+        columns,
+        batches,
+        payload_bytes,
+        sent_coordinates,
+        entity_packets,
+        entity_positions_in_region,
+    ))
 }
 
 async fn next_packet(peer: &mut Connection<DuplexStream>) -> Result<(i32, Vec<u8>), HeavyError> {
