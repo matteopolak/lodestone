@@ -78,6 +78,7 @@ Protocol 47 completes the same held-item action across the remaining hosted fami
 Hosted protocols 498, 578, and 754 use their own clientbound and serverbound packet ids for the
 shared signed 64-bit keep-alive body. Challenges and exact replies reach the common connection
 liveness state; malformed, trailing, or pre-Play replies cannot acknowledge a challenge.
+Protocols 756 and 758 use the same body contract through their own packet tables.
 
 ## Client compatibility roadmap
 

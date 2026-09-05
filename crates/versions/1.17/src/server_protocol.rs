@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::PROTOCOL_1_17_1;
 use crate::adapter::PROTOCOL_1_18_2;
 use crate::canonical::{wire_state_for_756, wire_state_for_758};
+use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packet_ids::{handshaking, login, play};
 use crate::packet_ids_758::{handshaking as handshaking_758, login as login_758, play as play_758};
 use crate::packets::game::{
@@ -382,6 +383,11 @@ impl ServerProtocol for V756ServerProtocol {
                 };
                 ServerBound::CarriedItemChanged { slot }
             }
+            State::Play if packet_id == play::serverbound::KEEP_ALIVE => {
+                decode_full::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {
+                    ServerBound::KeepAlive { id: response.id }
+                })
+            }
             // The four movement forms have distinct payloads.  In particular,
             // only the first two carry a position, which is what drives the
             // integrated server's view recentering and tick-area publication.
@@ -534,6 +540,10 @@ impl ServerProtocol for V756ServerProtocol {
             packet_id: play::clientbound::ANIMATION,
             payload: payload.into_vec(),
         }
+    }
+
+    fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+        send(play::clientbound::KEEP_ALIVE, &KeepAliveRequest { id })
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
@@ -791,6 +801,11 @@ impl ServerProtocol for V758ServerProtocol {
                 };
                 ServerBound::CarriedItemChanged { slot }
             }
+            State::Play if packet_id == play_758::serverbound::KEEP_ALIVE => {
+                decode_full_758::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {
+                    ServerBound::KeepAlive { id: response.id }
+                })
+            }
             State::Play if packet_id == play_758::serverbound::POSITION => {
                 decode_full_758::<ServerboundPosition>(payload).map_or(
                     ServerBound::Ignored,
@@ -943,6 +958,10 @@ impl ServerProtocol for V758ServerProtocol {
             packet_id: play_758::clientbound::ANIMATION,
             payload: payload.into_vec(),
         }
+    }
+
+    fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+        send_758(play_758::clientbound::KEEP_ALIVE, &KeepAliveRequest { id })
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
