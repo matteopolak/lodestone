@@ -323,6 +323,35 @@ impl JavaAdapter {
         });
         let available_block_change_events = MAX_PENDING_BLOCK_CHANGE_EVENTS
             .saturating_sub(self.pending_block_change_events.len());
+        self.host.service_pending_block_state_write_batches(1, |batch| {
+            if batch.writes.len() > available_block_change_events {
+                return Err(format!(
+                    "resident block-change queue has capacity for {available_block_change_events} replacements"
+                ));
+            }
+            let writes = batch.writes.into_iter()
+                .map(|write| {
+                    let state = lodestone_data::block_states::StateId::new(write.state_id)
+                        .ok_or_else(|| format!(
+                            "block state id {} is outside this server's state table",
+                            write.state_id,
+                        ))?;
+                    server.resident_block_state_id(write.x, write.y, write.z)
+                        .ok_or_else(|| format!(
+                            "primary-world block unavailable at {},{},{}",
+                            write.x, write.y, write.z,
+                        ))?;
+                    Ok((write, state))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            for (write, state) in &writes {
+                server.set_resident_block_state_id(write.x, write.y, write.z, *state)?;
+            }
+            self.pending_block_change_events.extend(writes.into_iter().map(|(write, _)| write));
+            Ok(())
+        });
+        let available_block_change_events = MAX_PENDING_BLOCK_CHANGE_EVENTS
+            .saturating_sub(self.pending_block_change_events.len());
         self.host.service_pending_block_writes(available_block_change_events, |write| {
             let state = lodestone_data::block_states::StateId::new(write.state_id)
                 .ok_or_else(|| format!("block state id {} is outside this server's state table", write.state_id))?;
