@@ -26,6 +26,39 @@ use super::*;
 // Not reachable through `super::*`: the disconnect and failure arms build a
 // `SessionEnd` whose reason is a styled `Text` rather than a formatted string.
 
+/// Recovers a structured component that arrived wrapped in a plain string.
+///
+/// Some proxies bridge an older JSON disconnect packet into a modern text
+/// packet by placing the complete JSON document inside a literal component.
+/// The protocol decoder correctly preserves that outer literal, but displaying
+/// it directly exposes braces and style fields to the player. Limit the
+/// compatibility parse to an otherwise-unadorned disconnect literal so normal
+/// chat text containing JSON remains literal.
+fn embedded_disconnect_component(reason: lodestone_model::Text) -> lodestone_model::Text {
+    let lodestone_model::Text {
+        content: lodestone_model::text::TextContent::Literal(raw),
+        style,
+        extra,
+        click: None,
+        hover: None,
+        insertion: None,
+    } = &reason
+    else {
+        return reason;
+    };
+    if !style.is_empty() || !extra.is_empty() {
+        return reason;
+    }
+
+    let trimmed = raw.trim_start();
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        return reason;
+    }
+
+    let parsed = lodestone_model::Text::from_json(raw);
+    if parsed == reason { reason } else { parsed }
+}
+
 impl Sim {
     /// Fold this frame's entity state into the render-side component set, so
     /// [`entity_draws`](Self::entity_draws) yields smooth per-frame transforms.
@@ -307,10 +340,29 @@ impl Sim {
                     // — a second explosion's push stacks onto whatever this
                     // one already imparted rather than overwriting it.
                     if let Some(kb) = knockback {
-                        self.player_mut(|player| {
+                        let (position, velocity_before, velocity_after) = self.player_mut(|player| {
+                            let position = player.position;
+                            let velocity_before = player.velocity;
                             player.velocity =
                                 player.velocity.add(Vec3d::new(kb.x, kb.y, kb.z));
+                            (position, velocity_before, player.velocity)
                         });
+                        tracing::debug!(
+                            target: "net_join",
+                            position_x = position.x,
+                            position_y = position.y,
+                            position_z = position.z,
+                            impulse_x = kb.x,
+                            impulse_y = kb.y,
+                            impulse_z = kb.z,
+                            velocity_before_x = velocity_before.x,
+                            velocity_before_y = velocity_before.y,
+                            velocity_before_z = velocity_before.z,
+                            velocity_after_x = velocity_after.x,
+                            velocity_after_y = velocity_after.y,
+                            velocity_after_z = velocity_after.z,
+                            "explosion impulse applied to local predicted velocity"
+                        );
                     }
                 }
                 NetUpdate::SignEditorOpened { pos, is_front_text } => {
@@ -439,6 +491,22 @@ impl Sim {
                             (dx * dx + dy * dy + dz * dz).sqrt()
                         },
                         "xfer: teleport applied to the simulation"
+                    );
+                    tracing::debug!(
+                        target: "net_join",
+                        teleport_count = self.teleport_count,
+                        from_x = was.x,
+                        from_y = was.y,
+                        from_z = was.z,
+                        resolved_x = placed.x,
+                        resolved_y = placed.y,
+                        resolved_z = placed.z,
+                        correction_distance = {
+                            let (dx, dy, dz) =
+                                (placed.x - was.x, placed.y - was.y, placed.z - was.z);
+                            (dx * dx + dy * dy + dz * dz).sqrt()
+                        },
+                        "server player correction applied to local simulation"
                     );
                 }
                 NetUpdate::Chat {
@@ -861,6 +929,7 @@ impl Sim {
                     // `"disconnected: "` prefix was ours, not vanilla's, which
                     // puts its screen title in a separate widget above the
                     // reason rather than gluing it on.
+                    let reason = embedded_disconnect_component(*reason);
                     let reason = self.resolve_text(&reason);
                     self.reset_for_server_transfer();
                     self.status = format!("disconnected: {}", reason.to_plain_string());

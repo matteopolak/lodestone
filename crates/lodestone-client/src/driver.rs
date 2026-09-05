@@ -6,7 +6,8 @@ use std::time::Duration;
 use lodestone_game::chat_ack::{LastSeenTracker, MessageSignature};
 use lodestone_model::{
     AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, DimensionId, LoginProfile,
-    PackedMessageSignature, ResourceKey, ResourcePackResponseKind, ServerAddress, VersionAdapter,
+    PackedMessageSignature, ResourceKey, ResourcePackResponseKind, Rotation, ServerAddress, Vec3,
+    VersionAdapter,
 };
 use lodestone_net::{Connection, NetError, Transport};
 #[cfg(not(target_arch = "wasm32"))]
@@ -1023,6 +1024,88 @@ impl<T: Transport> Driver<T> {
         // forwarded so a caller still observes it before the session ends.
         let mut transfer: Option<SessionOutcome> = None;
 
+        if let ClientEvent::TeleportPlayer {
+            pos,
+            rotation,
+            flags,
+        } = &event
+        {
+            let predicted_pos = self.read_model.position().unwrap_or_default();
+            let predicted_rotation = self.read_model.rotation();
+            let resolved_pos = Vec3::new(
+                if flags.relative_x {
+                    predicted_pos.x + pos.x
+                } else {
+                    pos.x
+                },
+                if flags.relative_y {
+                    predicted_pos.y + pos.y
+                } else {
+                    pos.y
+                },
+                if flags.relative_z {
+                    predicted_pos.z + pos.z
+                } else {
+                    pos.z
+                },
+            );
+            let resolved_rotation = Rotation::new(
+                if flags.relative_yaw {
+                    predicted_rotation.yaw + rotation.yaw
+                } else {
+                    rotation.yaw
+                },
+                if flags.relative_pitch {
+                    predicted_rotation.pitch + rotation.pitch
+                } else {
+                    rotation.pitch
+                },
+            );
+            let dx = resolved_pos.x - predicted_pos.x;
+            let dy = resolved_pos.y - predicted_pos.y;
+            let dz = resolved_pos.z - predicted_pos.z;
+            tracing::debug!(
+                target: "net_join",
+                state = ?self.state,
+                predicted_x = predicted_pos.x,
+                predicted_y = predicted_pos.y,
+                predicted_z = predicted_pos.z,
+                predicted_yaw = predicted_rotation.yaw,
+                predicted_pitch = predicted_rotation.pitch,
+                raw_x = pos.x,
+                raw_y = pos.y,
+                raw_z = pos.z,
+                raw_yaw = rotation.yaw,
+                raw_pitch = rotation.pitch,
+                relative_x = flags.relative_x,
+                relative_y = flags.relative_y,
+                relative_z = flags.relative_z,
+                relative_yaw = flags.relative_yaw,
+                relative_pitch = flags.relative_pitch,
+                resolved_x = resolved_pos.x,
+                resolved_y = resolved_pos.y,
+                resolved_z = resolved_pos.z,
+                resolved_yaw = resolved_rotation.yaw,
+                resolved_pitch = resolved_rotation.pitch,
+                correction_distance = (dx * dx + dy * dy + dz * dz).sqrt(),
+                "server player correction decoded; any protocol acknowledgement required by this family is written before this event"
+            );
+        }
+        if let ClientEvent::EntityVelocity {
+            entity_id,
+            velocity,
+        } = &event
+        {
+            tracing::debug!(
+                target: "net_join",
+                entity_id,
+                velocity_x = velocity.x,
+                velocity_y = velocity.y,
+                velocity_z = velocity.z,
+                "server entity velocity decoded; compare entity_id with the session login id"
+            );
+        }
+
         match &event {
             ClientEvent::KeepAlive { id } => {
                 if self.keep_alive.is_automatic() {
@@ -1503,6 +1586,28 @@ impl<T: Transport> Driver<T> {
 
         match self.adapter.encode_action(self.state, &action) {
             Ok(Some((packet_id, payload))) => {
+                if let ClientAction::Move {
+                    pos,
+                    rotation,
+                    on_ground,
+                    horizontal_collision,
+                } = &action
+                {
+                    tracing::debug!(
+                        target: "net_join",
+                        state = ?self.state,
+                        packet_id,
+                        payload_len = payload.len(),
+                        x = pos.x,
+                        y = pos.y,
+                        z = pos.z,
+                        yaw = rotation.yaw,
+                        pitch = rotation.pitch,
+                        on_ground,
+                        horizontal_collision,
+                        "outbound movement encoded"
+                    );
+                }
                 if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
                     tracing::warn!(%error, "failed to write client action");
                 }
