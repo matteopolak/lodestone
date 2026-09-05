@@ -57,13 +57,15 @@ for both block and fluid callbacks: it requires a complete, unique owner set,
 then restores every global drain slot before a callback can mutate the world.
 Thus an owner finishing first cannot move its tick ahead of an earlier
 `(trigger, priority, insertion)` entry. `BlockEntityRegistry::tick_plan`
-assigns its tick-start snapshot to chunk owners. It executes one owner batch at a time and returns a
-`BlockEntityTickEffectBatch` for each owner, including an empty batch when no
-visible write occurred. `tick::apply_block_entity_effect_batches` is the sole
-central consumer: it validates the complete tick-start batch set, restores its
+assigns its tick-start snapshot to chunk owners. Resident non-hopper batches
+run from immutable clones through the bounded executor on native worlds once
+their scene reaches 128 entries; the registry lock is held only for the
+snapshot and central commit. Browser builds retain the ordered serial arm, and
+hoppers remain serial because their vertical mutable container relation has no
+cross-owner hand-off yet. `tick::apply_block_entity_effect_batches` is the
+sole world writer: it validates the complete tick-start batch set, restores its
 serial slots after independent completion, then applies and publishes furnace
-changes in the established order. This makes the message boundary real without
-claiming workers can run concurrently. The ambient entity-effect phase uses the
+changes in the established order. The ambient entity-effect phase uses the
 same shape: `MobSim::take_ambient_sound_effect_batches` groups each emitted
 effect under `EntityTickOwner::Chunk`, and
 `tick::apply_entity_effect_batches` is the only publisher to the connection

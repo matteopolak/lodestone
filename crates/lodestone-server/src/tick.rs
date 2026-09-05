@@ -2310,12 +2310,11 @@ async fn run_tick_loop_with_weather_impl<W>(
         // schedule the decay) and the live `world`, neither of which `MobSim`
         // holds — see `crate::mobs::ProjectileBlockHit`'s own doc comment.
         let projectile_block_hits = mobs.with(MobSim::take_projectile_block_hits);
-        // Apply the hopper redstone lock. `tick_all`'s unlocked shorthand
-        // would tick every hopper as `enabled: true` forever, which is what this
-        // line used to do — see `BlockEntityRegistry::tick_all_with_hopper_lock`,
-        // and note this is the **only** production caller holding both a
-        // `ChunkSource` and the registry, so it is the only place the lock can be
-        // read at all.
+        // Advance immutable non-hopper snapshots first, then apply the hopper
+        // redstone lock on its still-serial mutable-neighbour path. The
+        // unlocked shorthand would tick every hopper as `enabled: true`
+        // forever, so this remains the only production caller that can read
+        // the lock from both a `ChunkSource` and the registry.
         //
         // Read off the block state rather than recomputed from neighbours here,
         // because the block state is vanilla's own source of truth:
@@ -2331,12 +2330,13 @@ async fn run_tick_loop_with_weather_impl<W>(
         // has no eviction). `is_column_resident` answers with no generation at
         // all, so a hopper outside every loaded chunk now costs a `HashMap`
         // lookup instead of a worldgen call.
-        let furnace_effect_batches = block_entities.with(|registry| {
-            registry.tick_all_by_owner_with_hopper_lock(
-                &|pos| world.is_column_resident(pos.x.div_euclid(16), pos.z.div_euclid(16)),
-                &|pos| crate::redstone::hopper_enabled(&world.block_state(pos.x, pos.y, pos.z)),
-            )
+        let furnace_effect_batches = block_entities.tick_non_hoppers_by_owner(&|pos| {
+            world.is_column_resident(pos.x.div_euclid(16), pos.z.div_euclid(16))
         });
+        block_entities.tick_hoppers_with_lock(
+            &|pos| world.is_column_resident(pos.x.div_euclid(16), pos.z.div_euclid(16)),
+            &|pos| crate::redstone::hopper_enabled(&world.block_state(pos.x, pos.y, pos.z)),
+        );
         clock.record_owner_work(OwnerTickStats {
             block_entity_batches: furnace_effect_batches.len() as u64,
             block_entity_effects: furnace_effect_batches
