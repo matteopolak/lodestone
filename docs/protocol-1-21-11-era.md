@@ -206,6 +206,16 @@ choose a projectile direction without relying on a stale movement sample. Its fo
 the grounded bit from
 their shared flags byte, preserving the position and optional rotation the
 shared server uses to recenter the view and check interactions.
+
+The initial view is a typed `ChunkBatchStart`, its columns, then a typed
+`ChunkBatchFinished`; the serverbound `ChunkBatchReceived` decoder becomes
+`ServerBound::ChunkBatchAcknowledged`. The shared server consumes that event
+with connection-local `awaiting_chunk_batch_ack` and
+`pending_chunk_batches` state: it writes at most one queued batch until the
+client replies, then releases the next batch. `chunks_per_tick` remains the
+client's request rather than a server-side within-batch rate, so changing
+batch sizing belongs in the shared consumer rather than either protocol codec.
+
 Its `src/generated/hosting-configuration.txt` contains all 23 synchronized
 registries, plus feature and tag packets, captured directly from the headless
 1.21.11 server. Every entry has its NBT payload and requires no known-pack
