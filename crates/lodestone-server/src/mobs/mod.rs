@@ -98,7 +98,7 @@ use crate::server::EntitySource;
 /// This is deliberately a planning boundary rather than a worker handle. The
 /// simulation still visits entities in its established vector order; effects
 /// retain that sequence when the central tick task consumes owner batches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntityTickOwner {
     /// The column containing the entity when it produced the effect.
     Chunk { cx: i32, cz: i32 },
@@ -135,6 +135,22 @@ pub struct EntityTickEffectBatch {
     /// The owner that produced every effect in this batch.
     pub owner: EntityTickOwner,
     effects: Vec<EntityTickEffect>,
+}
+
+/// One completed chunk-owner batch of entity-push impulses.
+#[derive(Debug, Clone)]
+pub(crate) struct EntityPushOwnerBatch {
+    owner: EntityTickOwner,
+    expected_batch_count: usize,
+    effects: Vec<EntityPushEffect>,
+}
+
+#[derive(Debug, Clone)]
+struct EntityPushEffect {
+    owner: EntityTickOwner,
+    serial: usize,
+    id: i32,
+    impulse: Vec3,
 }
 
 impl EntityTickEffectBatch {
@@ -180,6 +196,47 @@ fn batch_entity_tick_effects(
         }
     }
     batches
+}
+
+fn merge_entity_push_owner_batches(
+    mut batches: Vec<EntityPushOwnerBatch>,
+) -> Vec<EntityPushEffect> {
+    let expected_batch_count = batches
+        .first()
+        .map(|batch| batch.expected_batch_count)
+        .expect("entity-push completion must contain every tick-start owner batch");
+    let mut owners = std::collections::HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.expected_batch_count, expected_batch_count,
+            "entity-push completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "entity-push completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "an entity-push owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "entity-push completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "entity-push completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
 }
 
 mod block_ids;
@@ -6096,9 +6153,17 @@ impl<'w> MobSim<'w> {
     /// * **Mount cramming damage is not modelled** — vanilla's own
     ///   `maxEntityCramming` gamerule check in the same method.
     fn push_entities(&mut self) {
+        let batches = self.tick_entity_push_owner_batches();
+        self.apply_entity_push_owner_batches(batches);
+    }
+
+    /// Computes one deferred impulse for every tick-start mob and groups the
+    /// results by source chunk. Cross-owner pairs are read-only here; no mob
+    /// receives an impulse until the central apply step validates the plan.
+    pub(crate) fn tick_entity_push_owner_batches(&self) -> Vec<EntityPushOwnerBatch> {
         let n = self.mobs.len();
         if n == 0 {
-            return;
+            return Vec::new();
         }
         let positions: Vec<Vec3> = self.mobs.iter().map(SimMob::position).collect();
         let widths: Vec<f64> = self
@@ -6134,9 +6199,56 @@ impl<'w> MobSim<'w> {
             }
         }
 
-        for (mob, impulse) in self.mobs.iter_mut().zip(impulses) {
-            if impulse.x != 0.0 || impulse.z != 0.0 {
-                mob.apply_knockback(impulse);
+        let mut batches = Vec::<EntityPushOwnerBatch>::new();
+        for (serial, (mob, impulse)) in self.mobs.iter().zip(impulses).enumerate() {
+            let owner = entity_tick_owner(positions[serial]);
+            let effect = EntityPushEffect {
+                owner,
+                serial,
+                id: mob.id,
+                impulse,
+            };
+            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
+                batch.effects.push(effect);
+            } else {
+                batches.push(EntityPushOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects: vec![effect],
+                });
+            }
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
+
+    /// Validates and centrally applies completed entity-push owner batches.
+    pub(crate) fn apply_entity_push_owner_batches(&mut self, batches: Vec<EntityPushOwnerBatch>) {
+        if batches.is_empty() {
+            assert!(
+                self.mobs.is_empty(),
+                "entity-push completion must retain every live tick-start mob"
+            );
+            return;
+        }
+        let effects = merge_entity_push_owner_batches(batches);
+        assert_eq!(
+            effects.len(),
+            self.mobs.len(),
+            "entity-push completion must retain every live tick-start mob"
+        );
+        for (mob, effect) in self.mobs.iter().zip(&effects) {
+            assert_eq!(
+                mob.id, effect.id,
+                "entity-push completion must retain the tick-start entity order"
+            );
+        }
+        for (mob, effect) in self.mobs.iter_mut().zip(effects) {
+            if effect.impulse.x != 0.0 || effect.impulse.z != 0.0 {
+                mob.apply_knockback(effect.impulse);
             }
         }
     }
@@ -10677,6 +10789,71 @@ mod follow_range_tests {
              toward -x; pig ended at x={}",
             moved.x
         );
+    }
+
+    fn push_owner_fixture() -> MobSim<'static> {
+        let world = Box::leak(Box::new(flat_world()));
+        let mut sim = MobSim::new(world);
+        let pig = ResourceKey::from_str("minecraft:pig").expect("valid key");
+        for position in [
+            Vec3::new(-0.4, 0.0, 0.0),
+            Vec3::new(-0.1, 0.0, 0.0),
+            Vec3::new(16.1, 0.0, 0.0),
+            Vec3::new(16.4, 0.0, 0.0),
+        ] {
+            sim.spawn_species(pig.clone(), position);
+        }
+        sim
+    }
+
+    fn mob_velocities(sim: &MobSim<'_>) -> Vec<(i32, Vec3)> {
+        sim.mobs.iter().map(|mob| (mob.id, mob.velocity())).collect()
+    }
+
+    #[test]
+    fn entity_push_owner_batches_restore_entity_order_after_reversed_completion() {
+        let mut serial = push_owner_fixture();
+        let serial_batches = serial.tick_entity_push_owner_batches();
+        assert_eq!(
+            serial_batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
+            [
+                EntityTickOwner::Chunk { cx: -1, cz: 0 },
+                EntityTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "negative fractional positions use Euclidean chunk ownership"
+        );
+        serial.apply_entity_push_owner_batches(serial_batches);
+        let expected = mob_velocities(&serial);
+
+        let mut completed = push_owner_fixture();
+        let mut batches = completed.tick_entity_push_owner_batches();
+        batches.reverse();
+        let raw_slots = batches
+            .iter()
+            .flat_map(|batch| batch.effects.iter())
+            .map(|effect| effect.serial)
+            .collect::<Vec<_>>();
+        assert_ne!(raw_slots, vec![0, 1, 2, 3], "control must actually reorder completion slots");
+        completed.apply_entity_push_owner_batches(batches);
+        assert_eq!(mob_velocities(&completed), expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "every tick-start owner batch exactly once")]
+    fn entity_push_owner_batch_merge_rejects_a_missing_owner() {
+        let sim = push_owner_fixture();
+        let mut batches = sim.tick_entity_push_owner_batches();
+        batches.pop();
+        let _ = merge_entity_push_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not contain one owner twice")]
+    fn entity_push_owner_batch_merge_rejects_a_duplicate_owner() {
+        let sim = push_owner_fixture();
+        let mut batches = sim.tick_entity_push_owner_batches();
+        batches[1] = batches[0].clone();
+        let _ = merge_entity_push_owner_batches(batches);
     }
 
     /// A killed mob drops its loot table's items.

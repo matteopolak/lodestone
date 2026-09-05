@@ -160,6 +160,14 @@ planning boundary, not independent random work. The validated
 `MobSim::apply_fishing_tick_owner_batches` central writer restores those slots
 before replacing or expiring a bobber, so completion order cannot change which
 bobber receives a bite roll or which visible transform is published.
+Entity pushing now has an owner completion boundary in the same production
+pass. Its pair scan remains global and read-only because an overlap may cross a
+chunk edge, but `MobSim::tick_entity_push_owner_batches` records one deferred
+impulse for every tick-start mob under that mob's source chunk. Zero impulses
+are retained so completeness is checkable. The validated
+`MobSim::apply_entity_push_owner_batches` central writer restores the original
+mob-vector slots before applying any impulse, so reversing owner completion
+cannot change the accumulated velocities or silently omit an unaffected mob.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
@@ -247,6 +255,12 @@ are interleaved in the serial simulation list, applying all of one owner's
 effects before another's changes observable packet order. Add both a
 negative-coordinate control and an interleaved-owner order control before a
 future executor is allowed to run owners separately.
+
+Keep entity-push pair discovery global unless a replacement defines an
+explicit cross-owner neighbour exchange. Owners may compute from the shared
+tick-start snapshot, but only `apply_entity_push_owner_batches` may mutate live
+velocities. Preserve one completion per mob, including zero impulses, and keep
+the reversed, missing, and duplicate owner controls when changing this seam.
 
 Do not move the shared spawner RNG or entity creation into an owner worker.
 Keep `SpawnerTickBatchBuilder` on the existing registry traversal, return one
