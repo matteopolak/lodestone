@@ -126,6 +126,16 @@ fn inventory_quick_move_host_policy() -> CapabilitySet {
     policy
 }
 
+fn inventory_double_click_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActInventoryDoubleClick])
+}
+
+fn inventory_double_click_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActInventoryDoubleClick);
+    policy
+}
+
 fn inventory_hotbar_swap_capabilities() -> CapabilitySet {
     CapabilitySet::from_iter([Capability::Log, Capability::ActInventoryHotbarSwap])
 }
@@ -1215,6 +1225,57 @@ fn a_wasm_inventory_quick_move_is_default_denied_before_the_shell_handoff() {
             .take()
             .is_empty(),
         "an ungranted quick move must not reach the shell handoff"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+#[test]
+fn a_wasm_inventory_double_click_reaches_the_bounded_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-double-click"]);
+    let mut host = PluginHost::new(inventory_double_click_host_policy()).expect("engine");
+    host.load_file(
+        "inventory-double-click",
+        &wasm,
+        &inventory_double_click_capabilities(),
+    )
+    .expect("the explicitly granted double-click fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take(),
+        vec![InventoryClickIntent::Slot {
+            slot: 36,
+            mode: InventoryClickMode::DoubleClick,
+        }],
+        "the guest must hand off only a bounded slot, never cursor or menu state"
+    );
+}
+
+#[test]
+fn a_wasm_inventory_double_click_is_default_denied_before_the_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-double-click"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "inventory-double-click",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log]),
+    )
+    .expect("a data-flow action may be withheld after the guest loads");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take()
+            .is_empty()
     );
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
 }

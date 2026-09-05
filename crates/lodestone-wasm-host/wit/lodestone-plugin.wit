@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.21.0;
+package lodestone:plugin@0.22.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -387,6 +387,9 @@ interface types {
         /// quick-move button, validates the live menu, predicts, asks the veto,
         /// and owns state ids, changed slots, and packet egress.
         inventory-quick-move(u16),
+        /// Collect matching items into the carried stack through the shell's
+        /// live menu predictor — capability `act:inventory-double-click`.
+        inventory-double-click(u16),
         /// Request one bounded number-key swap through the shell's live menu
         /// predictor — capability `act:inventory-hotbar-swap`.
         ///
@@ -477,7 +480,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.21.0"`.
+        /// `"lodestone:plugin@0.22.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.

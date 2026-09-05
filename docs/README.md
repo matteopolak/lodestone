@@ -667,13 +667,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   instance, identified by both its discovery-root-relative `plugin.toml` path and that
   manifest's `name`.
 - [WASM plugin intents](./wasm-plugin-intents.md) — The desktop WASM plugin host
-  exposes copied local-player look, movement, block-breaking, and one-shot placement
-  intents without giving a guest a world handle. A guest can install a yaw/pitch
-  target, override one tick's input axes and buttons, start or abort a block break,
-  request a block placement, swap a live menu slot with a hotbar position, throw one
-  item or a complete stack from a live menu slot, drop its carried cursor stack, or
-  drop the selected stack while native systems retain simulation and network
-  ownership.
+  exposes copied local-player look, movement, block-breaking, one-shot placement, and
+  bounded inventory intents without giving a guest a world handle. A guest can request
+  ordinary clicks, bulk transfers, pickup-all double clicks, hotbar swaps, drops,
+  held-item actions, or respawn while native systems retain menu, simulation, and
+  network ownership.
 - [World events](./world-events.md) — Server-driven world state that is not tied to
   any one player: rain/thunder weather and lightning strikes, the regional-difficulty
   scalar that scales spawns and damage over time, Bad-Omen-triggered raids and

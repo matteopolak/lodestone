@@ -1064,6 +1064,7 @@ fn submit_wasm_menu_clicks(
                         lodestone_wasm_host::InventoryClickButton::Right,
                     ) => Click::right(slot),
                     lodestone_wasm_host::InventoryClickMode::QuickMove => Click::shift(slot),
+                    lodestone_wasm_host::InventoryClickMode::DoubleClick => Click::double(slot),
                     lodestone_wasm_host::InventoryClickMode::HotbarSwap(hotbar) if hotbar < 9 => {
                         Click::hotbar_swap(slot, hotbar)
                     }
@@ -1159,6 +1160,12 @@ mod wasm_menu_click_tests {
                 items[36] = Some(ItemStack::new(
                     "minecraft:stone".parse().expect("constant item key"),
                     4,
+                ));
+            }
+            if packet_id == SEED_CURSOR_PACKET {
+                items[36] = Some(ItemStack::new(
+                    "minecraft:stone".parse().expect("constant item key"),
+                    2,
                 ));
             }
             Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
@@ -1335,6 +1342,45 @@ mod wasm_menu_click_tests {
             "the invalid hotbar key must not precede the barrier"
         );
         drop(events);
+    }
+
+    #[tokio::test]
+    async fn bounded_double_clicks_reach_the_live_pickup_all_predictor() {
+        let (client_io, server_io) = memory_pair();
+        let (handle, mut events) = ClientBuilder::new(
+            ServerAddress { host: "memory".into(), port: 0 },
+            LoginProfile { username: "PluginTest".into(), uuid: Uuid::nil() },
+            Box::new(ClickAdapter { expected: ContainerClickType::PickupAll }),
+        )
+        .connect_with(client_io);
+        let mut peer = Connection::new(server_io);
+        peer.write_packet(SEED_CURSOR_PACKET, &[])
+            .await
+            .expect("the wire seed must reach the client read model");
+        events.recv().await.expect("the menu seed must be folded before the click");
+
+        submit_wasm_menu_clicks(
+            &handle,
+            vec![InventoryClickIntent::Slot {
+                slot: 36,
+                mode: InventoryClickMode::DoubleClick,
+            }],
+        );
+
+        let packet = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("pickup-all must reach the client action queue")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes pickup-all");
+        assert_eq!(packet.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            packet.1,
+            [0_i32, 7, 36, 0]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the live predictor must supply the window and state while choosing pickup-all"
+        );
     }
 
     /// A no-argument guest request uses the same live predictor for an outside

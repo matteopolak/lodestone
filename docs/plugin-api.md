@@ -359,8 +359,10 @@ stops dispatch. A trap, fuel exhaustion, or future native context this ABI canno
 current action, unloads the failing guest where applicable, and lets later actions be considered by
 the remaining guests. The `veto:actions` data-flow capability gates delivery to the export.
 
-The ABI includes copied look and movement intent plus one-shot placement and a deliberately narrow
-inventory-click action: the guest supplies only a `u16` menu slot and left/right button. The shell
+The ABI includes copied look and movement intent plus one-shot placement and deliberately narrow
+inventory actions. Pickup-all double click has its own `act:inventory-double-click` grant and carries
+only a `u16` slot; the live carried stack determines what matching items can be collected. For an
+ordinary inventory click, the guest supplies only a `u16` menu slot and left/right button. The shell
 checks that slot against the active menu, then calls the existing client predictor; state id, cursor,
 changed-slot list, cancellation, and packet egress never cross the boundary. The guest cannot provide a
 world handle, block state, held item, prediction sequence, or raw packet. The same ABI also includes a
