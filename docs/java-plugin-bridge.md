@@ -491,7 +491,7 @@ because it requires the checksum-pinned container runtime rather than the ordina
 With `lodestone-jvm-bridge --features jvm`, a host can construct `runtime::JvmConfig`, explicitly
 call `runtime::JvmRuntime::start`, and use `with_attached_thread` for a scoped JNI environment.
 The default feature set is empty: depending on the crate or constructing a config does not load a
-JVM, and no server host currently enables it. The attachment callback receives no ECS handle or
+JVM. The attachment callback receives no ECS handle or
 world guard; world access remains the bounded `WorldPort` request/response path serviced by the
 tick side. Callback errors map to `JvmError`, while the existing port retains its timeout and
 panic/error mapping. This is the host-callable runtime seam, not broad event compatibility or a
@@ -599,11 +599,11 @@ be revisited then rather than assumed now.
 
 `crates/plugins/lodestone-jvm-bridge/tests/zero_cost_graph.rs`:
 
-- **no crate in the workspace names the bridge** (a manifest scan across workspace-member
-  `Cargo.toml` files under `crates/` and `xtask/`), with one control that finds `lodestone-ecs`'s many
-  dependents and another that proves the standalone invocation workspace really names the bridge but
-  is not classified as a production member — because a parser that read nothing would certify the
-  bridge as unreferenced forever;
+- **production edges must be default-off** (a manifest scan across workspace-member `Cargo.toml`
+  files under `crates/` and `xtask/`). The dedicated host is the permitted consumer, with an optional
+  dependency enabled only by its `jvm` feature and an empty default feature list. Negative controls
+  reject unconditional and default-enabled edges. Additional controls find `lodestone-ecs`'s real
+  dependents and exclude the standalone invocation workspace from the production graph;
 - **the bridge names no unconditional JVM-linking crate**, permitting `optional = true` only, and
   asserts that the `jvm` feature is absent from the default feature set.
 

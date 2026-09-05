@@ -10,9 +10,9 @@
 # "Licensing" section for what is settled, and for the two questions that are
 # explicitly for counsel rather than engineering.
 #
-# **This crate is not a dependency of anything.** Nothing in the workspace names
-# it, by design — the whole point is that a user who loads no Java plugin pays
-# nothing. `tests/zero_cost_graph.rs` is the guard on that, with a control.
+# **Production dependencies must be optional.** The dedicated host may opt in
+# through its default-off `jvm` feature. `tests/zero_cost_graph.rs` guards the
+# manifest boundary with unconditional/default-enabled negative controls.
 #
 # **JVM support is opt-in.** The default feature set is empty; `jni` is an
 # optional dependency behind the `jvm` feature, so an ordinary build has no
