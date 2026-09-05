@@ -26,10 +26,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 ACTION = "start_destroy_block"
 SCHEMA = 2
 
-# This is intentionally a small modern-host gate. The remaining hosted rows stay
-# in ROWS so `--list` remains a registry cross-check, but they are not silently
-# reported as passing this configuration/chunk-batch contract.
-GATE_PROTOCOLS = (766, 774)
+# This is intentionally a small high-value host gate. The remaining hosted rows
+# stay in ROWS so `--list` remains a registry cross-check, but they are not
+# silently reported as passing this session contract.
+GATE_PROTOCOLS = (762, 766, 774, 776)
 STAGES = (
     "configuration",
     "chunk_batch_acknowledgement",
@@ -45,28 +45,30 @@ class Row:
     family: str
     protocol: int
     release: str
+    configuration_mode: str
+    chunk_batch_mode: str
 
 
 # These are the registry's hostable rows, not all joinable revisions. Each
 # release string is the external client's provenance identity and each feature
 # builds the matching server family without naming a version crate in Rust.
 ROWS = (
-    Row("v1-7", 5, "1.7.10"),
-    Row("v1-8", 47, "1.8.9"),
-    Row("v1-9", 110, "1.9.4"),
-    Row("v1-9", 210, "1.10.2"),
-    Row("v1-9", 316, "1.11.2"),
-    Row("v1-9", 340, "1.12.2"),
-    Row("v1-13", 404, "1.13.2"),
-    Row("v1-14", 498, "1.14.4"),
-    Row("v1-14", 578, "1.15.2"),
-    Row("v1-14", 754, "1.16.5"),
-    Row("v1-17", 756, "1.17.1"),
-    Row("v1-17", 758, "1.18.2"),
-    Row("v1-19", 762, "1.19.4"),
-    Row("v1-20-6", 766, "1.20.6"),
-    Row("v1-21-11", 774, "1.21.11"),
-    Row("v26-2", 776, "26.2"),
+    Row("v1-7", 5, "1.7.10", "login_to_play", "unbatched"),
+    Row("v1-8", 47, "1.8.9", "login_to_play", "unbatched"),
+    Row("v1-9", 110, "1.9.4", "login_to_play", "unbatched"),
+    Row("v1-9", 210, "1.10.2", "login_to_play", "unbatched"),
+    Row("v1-9", 316, "1.11.2", "login_to_play", "unbatched"),
+    Row("v1-9", 340, "1.12.2", "login_to_play", "unbatched"),
+    Row("v1-13", 404, "1.13.2", "login_to_play", "unbatched"),
+    Row("v1-14", 498, "1.14.4", "login_to_play", "unbatched"),
+    Row("v1-14", 578, "1.15.2", "login_to_play", "unbatched"),
+    Row("v1-14", 754, "1.16.5", "login_to_play", "unbatched"),
+    Row("v1-17", 756, "1.17.1", "login_to_play", "unbatched"),
+    Row("v1-17", 758, "1.18.2", "login_to_play", "unbatched"),
+    Row("v1-19", 762, "1.19.4", "login_to_play", "unbatched"),
+    Row("v1-20-6", 766, "1.20.6", "configuration", "acknowledged"),
+    Row("v1-21-11", 774, "1.21.11", "configuration", "acknowledged"),
+    Row("v26-2", 776, "26.2", "configuration", "acknowledged"),
 )
 
 
@@ -132,15 +134,35 @@ def _observed_stage(stage: Any, expected: str) -> dict[str, Any]:
     return {"name": expected, "observed": True, "observation": observation}
 
 
-def validate_stages(value: Any) -> list[dict[str, Any]]:
+def validate_stages(value: Any, row: Row) -> list[dict[str, Any]]:
     if not isinstance(value, list) or len(value) != len(STAGES):
         raise RuntimeError(f"evidence stages must contain exactly {len(STAGES)} ordered entries")
     stages = [_observed_stage(stage, expected) for stage, expected in zip(value, STAGES)]
 
+    configuration = value[0]
+    if configuration.get("mode") != row.configuration_mode:
+        raise RuntimeError(
+            f"evidence stage configuration.mode must be {row.configuration_mode!r}, "
+            f"got {configuration.get('mode')!r}"
+        )
+    stages[0]["mode"] = row.configuration_mode
+
     batch = value[1]
+    if batch.get("mode") != row.chunk_batch_mode:
+        raise RuntimeError(
+            "evidence stage chunk_batch_acknowledgement.mode must be "
+            f"{row.chunk_batch_mode!r}, got {batch.get('mode')!r}"
+        )
     batch_count = batch.get("batch_count")
-    if isinstance(batch_count, bool) or not isinstance(batch_count, int) or batch_count < 1:
+    if isinstance(batch_count, bool) or not isinstance(batch_count, int) or batch_count < 0:
+        raise RuntimeError("evidence stage chunk_batch_acknowledgement.batch_count must be non-negative")
+    if row.chunk_batch_mode == "acknowledged" and batch_count < 1:
         raise RuntimeError("evidence stage chunk_batch_acknowledgement.batch_count must be positive")
+    if row.chunk_batch_mode == "unbatched" and batch_count != 0:
+        raise RuntimeError(
+            "evidence stage chunk_batch_acknowledgement.batch_count must be zero for unbatched protocols"
+        )
+    stages[1]["mode"] = row.chunk_batch_mode
     stages[1]["batch_count"] = batch_count
 
     movement = value[3]
@@ -184,7 +206,7 @@ def validate_evidence(evidence: pathlib.Path, row: Row, started_at: float) -> di
     for key, wanted in expected.items():
         if value.get(key) != wanted:
             raise RuntimeError(f"evidence {key} must be {wanted!r}, got {value.get(key)!r}")
-    stages = validate_stages(value.get("stages"))
+    stages = validate_stages(value.get("stages"), row)
     provenance = value.get("provenance")
     if not isinstance(provenance, dict):
         raise RuntimeError("evidence provenance must be an object")
@@ -248,6 +270,8 @@ def run_row(row: Row, args: argparse.Namespace) -> dict[str, Any]:
                 client = [
                     args.driver, "--release", row.release, "--protocol", str(row.protocol),
                     "--host", "127.0.0.1", "--port", str(port), "--action", ACTION,
+                    "--configuration-mode", row.configuration_mode,
+                    "--chunk-batch-mode", row.chunk_batch_mode,
                     "--required-stages", ",".join(STAGES), "--evidence-schema", str(SCHEMA),
                     "--evidence", str(evidence), "--deadline-seconds", str(args.deadline_seconds),
                 ]
@@ -258,7 +282,8 @@ def run_row(row: Row, args: argparse.Namespace) -> dict[str, Any]:
                 print(f"Attach release {row.release} (protocol {row.protocol}) to 127.0.0.1:{port}.")
                 print(
                     f"Perform {' -> '.join(STAGES)} ({ACTION} is the play action), "
-                    f"then write the driver evidence to {evidence}."
+                    f"using configuration={row.configuration_mode} and "
+                    f"chunk_batch={row.chunk_batch_mode}; then write the driver evidence to {evidence}."
                 )
                 end = time.monotonic() + args.deadline_seconds
                 while time.monotonic() < end and not evidence.exists():
@@ -298,7 +323,9 @@ def main() -> int:
     selected_protocols = tuple(args.protocol or GATE_PROTOCOLS)
     unknown = set(selected_protocols) - set(GATE_PROTOCOLS)
     if unknown:
-        parser.error(f"not in the external-client gate: {sorted(unknown)}; choose 766 or 774")
+        parser.error(
+            f"not in the external-client gate: {sorted(unknown)}; choose 762, 766, 774, or 776"
+        )
     selected = tuple(row for row in ROWS if row.protocol in selected_protocols)
     args.output.mkdir(parents=True)
     results = [run_row(row, args) for row in selected]
