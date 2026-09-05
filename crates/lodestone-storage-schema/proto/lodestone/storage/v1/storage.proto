@@ -233,9 +233,11 @@ message PlayerRecord {
   // before this independently consumable full-player field was introduced.
   GameMode game_mode = 8;
   // Absent for locator-only and early native records. This group contains the
-  // complete scalar player state currently consumed by the live server loop;
-  // inventory remains a separate future typed vocabulary.
+  // Complete scalar player state currently consumed by the live server loop.
   PlayerRuntimeState runtime_state = 9;
+  // Sparse durable inventory state; session-only menu and crafting state stays
+  // outside the world format.
+  PlayerInventory inventory = 10;
 }
 
 message PlayerRuntimeState {
@@ -244,6 +246,22 @@ message PlayerRuntimeState {
   sint32 experience_level = 3;
   float experience_progress = 4;
   sint32 experience_total = 5;
+}
+
+message PlayerInventory {
+  uint32 selected_hotbar_slot = 1;
+  repeated PlayerInventorySlot occupied_slots = 2;
+}
+
+message PlayerInventorySlot {
+  uint32 slot = 1;
+  // Canonical resource key remains textual because plugin/datapack items do
+  // not have durable built-in ordinals.
+  string item_key = 2;
+  uint32 count = 3;
+  // The modeled custom-data component is intentionally opaque NBT; plugins
+  // own its schema and the normal extension registry cannot type it globally.
+  bytes custom_data = 4;
 }
 
 message EntityRecord {

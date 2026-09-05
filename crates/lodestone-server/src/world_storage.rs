@@ -12,7 +12,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use lodestone_core::{Reader, Writer, read_named_nbt, write_named_nbt};
+use lodestone_core::{Nbt, Reader, Writer, read_named_nbt, read_network_nbt, write_named_nbt};
 use lodestone_storage::{
     Compaction, ExtensionRegistration, NativeChunkCoordinate, NativeStore, RecordKey, RecordWrite,
     StoreError,
@@ -20,7 +20,8 @@ use lodestone_storage::{
 use lodestone_storage_schema::{
     BiomeSection, BuiltinDimension, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1,
     EntityRecord, GameMode as StoredGameMode, GeneralRecord, LightData as StoredLightData,
-    LightSection, PlayerRecord,
+    LightSection, PlayerInventory as StoredPlayerInventory,
+    PlayerInventorySlot as StoredPlayerInventorySlot, PlayerRecord,
     RegisteredExtension, WorldProperties,
     ScheduledTick as StoredScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord,
     generated::{general_record, light_data, storage_record},
@@ -69,7 +70,7 @@ pub struct NativePlayerRecord {
 /// [`NativePlayerRecord`] so existing locator producers keep their exact
 /// contract, while an importer with a complete player root can persist this
 /// independently consumable value in the same atomic record replacement.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NativePlayerData {
     /// The durable player identity and locator.
     pub locator: NativePlayerRecord,
@@ -77,6 +78,8 @@ pub struct NativePlayerData {
     pub game_mode: Option<lodestone_model::GameMode>,
     /// Live scalar state that the server can both restore and mutate.
     pub runtime: Option<NativePlayerRuntimeState>,
+    /// Sparse persistent inventory, including its selected hotbar slot.
+    pub inventory: Option<crate::inventory::PlayerInventory>,
 }
 
 /// The complete non-inventory player state owned by the live server loop.
@@ -93,6 +96,7 @@ impl From<NativePlayerRecord> for NativePlayerData {
             locator,
             game_mode: None,
             runtime: None,
+            inventory: None,
         }
     }
 }
@@ -721,6 +725,12 @@ pub enum PlayerRecordError {
     UnsupportedGameMode(i32),
     /// This bounded reader cannot preserve opaque player extensions.
     UnsupportedExtensions,
+    /// An item carries a modeled component the native item vocabulary cannot preserve.
+    UnsupportedItemComponents { slot: usize },
+    /// A stored item key is not canonical.
+    InvalidItemKey { slot: u32 },
+    /// The stored custom-data component is not one complete compound network NBT value.
+    InvalidCustomData { slot: u32 },
     /// The key's 96-bit UUID prefix resolves to a different complete UUID.
     KeyCollision {
         requested: [u8; 16],
@@ -760,6 +770,15 @@ impl fmt::Display for PlayerRecordError {
             }
             Self::UnsupportedExtensions => {
                 formatter.write_str("player record carries unsupported extension payloads")
+            }
+            Self::UnsupportedItemComponents { slot } => {
+                write!(formatter, "player inventory slot {slot} carries unsupported item components")
+            }
+            Self::InvalidItemKey { slot } => {
+                write!(formatter, "player inventory slot {slot} has an invalid item key")
+            }
+            Self::InvalidCustomData { slot } => {
+                write!(formatter, "player inventory slot {slot} has invalid custom data")
             }
             Self::KeyCollision { requested, stored } => write!(
                 formatter,
@@ -2186,6 +2205,11 @@ fn general_uuid_key(uuid: [u8; 16], domain: u32) -> RecordKey {
 fn encode_player(player: NativePlayerData) -> Result<StorageRecord, PlayerRecordError> {
     let dimension = player.locator.dimension as i32;
     validate_player_dimension(dimension)?;
+    let inventory = player
+        .inventory
+        .as_ref()
+        .map(encode_player_inventory)
+        .transpose()?;
     Ok(StorageRecord {
         format_version: FORMAT_VERSION_V1,
         record: Some(storage_record::Record::General(GeneralRecord {
@@ -2207,6 +2231,7 @@ fn encode_player(player: NativePlayerData) -> Result<StorageRecord, PlayerRecord
                         experience_total: runtime.experience.total(),
                     }
                 }),
+                inventory,
             })),
             extensions: Vec::new(),
         })),
@@ -2262,7 +2287,79 @@ fn decode_player(
                 runtime.experience_total,
             ),
         }),
+        inventory: player
+            .inventory
+            .map(decode_player_inventory)
+            .transpose()?,
     })
+}
+
+fn encode_player_inventory(
+    inventory: &crate::inventory::PlayerInventory,
+) -> Result<StoredPlayerInventory, PlayerRecordError> {
+    let mut occupied_slots = Vec::new();
+    for slot in 0..crate::inventory::PLAYER_NATIVE_SIZE {
+        let Some(stack) = inventory.native(slot) else {
+            continue;
+        };
+        let mut unsupported = stack.components.clone();
+        let custom_data = unsupported.custom_data.take().unwrap_or_default();
+        unsupported.max_stack_size = None;
+        unsupported.max_damage = None;
+        unsupported.equippable = None;
+        if unsupported != lodestone_model::ItemComponents::default() {
+            return Err(PlayerRecordError::UnsupportedItemComponents { slot });
+        }
+        validate_player_custom_data(slot as u32, &custom_data)?;
+        occupied_slots.push(StoredPlayerInventorySlot {
+            slot: slot as u32,
+            item_key: stack.item.to_string(),
+            count: stack.count,
+            custom_data,
+        });
+    }
+    Ok(StoredPlayerInventory {
+        selected_hotbar_slot: u32::from(inventory.selected_hotbar_slot()),
+        occupied_slots,
+    })
+}
+
+fn decode_player_inventory(
+    inventory: StoredPlayerInventory,
+) -> Result<crate::inventory::PlayerInventory, PlayerRecordError> {
+    let mut decoded = crate::inventory::PlayerInventory::new();
+    let selected = u8::try_from(inventory.selected_hotbar_slot).unwrap_or(u8::MAX);
+    if !decoded.set_selected_hotbar_slot(selected) {
+        return Err(PlayerRecordError::UnsupportedItemComponents {
+            slot: usize::from(selected),
+        });
+    }
+    for stored in inventory.occupied_slots {
+        let item = stored
+            .item_key
+            .parse()
+            .map_err(|_| PlayerRecordError::InvalidItemKey { slot: stored.slot })?;
+        let mut stack = lodestone_model::ItemStack::new(item, stored.count);
+        if !stored.custom_data.is_empty() {
+            validate_player_custom_data(stored.slot, &stored.custom_data)?;
+            stack.components.custom_data = Some(stored.custom_data);
+        }
+        decoded.set_native(stored.slot as usize, Some(stack));
+    }
+    Ok(decoded)
+}
+
+fn validate_player_custom_data(slot: u32, bytes: &[u8]) -> Result<(), PlayerRecordError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let mut reader = Reader::new(bytes);
+    let custom = read_network_nbt(&mut reader)
+        .map_err(|_| PlayerRecordError::InvalidCustomData { slot })?;
+    if !matches!(custom, Nbt::Compound(_)) || reader.ensure_empty().is_err() {
+        return Err(PlayerRecordError::InvalidCustomData { slot });
+    }
+    Ok(())
 }
 
 fn encode_player_game_mode(mode: Option<lodestone_model::GameMode>) -> i32 {
@@ -2813,6 +2910,7 @@ mod tests {
                 locator: player,
                 game_mode: None,
                 runtime: None,
+                inventory: None,
             }),
             "a locator-only writer must reopen with every locator field and no invented game mode"
         );
@@ -2939,6 +3037,14 @@ mod tests {
 
     #[test]
     fn native_player_data_reopens_game_mode_and_refuses_unknown_mode() {
+        let mut inventory = crate::inventory::PlayerInventory::new();
+        let mut stack = lodestone_model::ItemStack::new(
+            "minecraft:stone".parse().expect("canonical item key"),
+            12,
+        );
+        stack.components.custom_data = Some(vec![10, 0]);
+        inventory.set_native(6, Some(stack));
+        assert!(inventory.set_selected_hotbar_slot(6));
         let player = NativePlayerData {
             locator: NativePlayerRecord {
                 uuid: [0x6d; 16],
@@ -2955,14 +3061,15 @@ mod tests {
                 air_supply: 87,
                 experience: crate::experience::PlayerExperience::restored(9, 0.375, 144),
             }),
+            inventory: Some(inventory),
         };
-        let record = encode_player(player).expect("typed game mode encodes");
+        let record = encode_player(player.clone()).expect("typed game mode encodes");
         assert_eq!(
             decode_player(player.locator.uuid, record).expect("known game mode decodes"),
             player
         );
 
-        let mut invalid = encode_player(player).expect("typed game mode encodes again");
+        let mut invalid = encode_player(player.clone()).expect("typed game mode encodes again");
         let Some(storage_record::Record::General(general)) = &mut invalid.record else {
             panic!("player encoder must produce a general record");
         };
@@ -3114,6 +3221,7 @@ mod tests {
             },
             game_mode: Some(lodestone_model::GameMode::Creative),
             runtime: None,
+            inventory: None,
         };
         let entity = NativeEntityRecord {
             uuid: [2; 16],
@@ -3130,7 +3238,7 @@ mod tests {
             .write_dirty_world_properties(properties.clone())
             .expect("write properties");
         storage
-            .write_dirty_player_data(player)
+            .write_dirty_player_data(player.clone())
             .expect("write player data");
         assert_eq!(
             storage
@@ -3174,6 +3282,7 @@ mod tests {
             },
             game_mode: None,
             runtime: None,
+            inventory: None,
         };
         let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
             directory: directory.clone(),
@@ -3183,7 +3292,7 @@ mod tests {
         storage
             .write_dirty([RecordWrite::new(
                 actual,
-                encode_player(player).expect("player record encodes"),
+                encode_player(player.clone()).expect("player record encodes"),
             )])
             .expect("native store permits general producer-owned keys");
 

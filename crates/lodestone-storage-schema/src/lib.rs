@@ -10,8 +10,8 @@ pub mod generated {
 pub use generated::{
     BiomeSection, BuiltinBiome, BuiltinDimension, ChunkRecord, ChunkSection, EntityRecord,
     ExtensionTable, ExtensionValue, GameMode, GeneralRecord, LightData, LightSection,
-    PlayerRecord, PlayerRuntimeState, RegisteredExtension, ScheduledTick, ScheduledTickKind,
-    ScheduledTickPriority, StorageRecord, WorldProperties,
+    PlayerInventory, PlayerInventorySlot, PlayerRecord, PlayerRuntimeState, RegisteredExtension,
+    ScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord, WorldProperties,
 };
 
 /// The only storage-record format understood by the initial schema.
@@ -276,6 +276,29 @@ fn validate_player(player: &PlayerRecord) -> Result<(), ValidationError> {
             return Err(ValidationError::InvalidPlayerExperience);
         }
     }
+    if let Some(inventory) = &player.inventory {
+        if inventory.selected_hotbar_slot > 8 {
+            return Err(ValidationError::InvalidSelectedHotbarSlot(
+                inventory.selected_hotbar_slot,
+            ));
+        }
+        let mut seen = [false; 41];
+        for item in &inventory.occupied_slots {
+            let Ok(slot) = usize::try_from(item.slot) else {
+                return Err(ValidationError::InvalidPlayerInventorySlot(item.slot));
+            };
+            if slot >= seen.len() {
+                return Err(ValidationError::InvalidPlayerInventorySlot(item.slot));
+            }
+            if seen[slot] {
+                return Err(ValidationError::DuplicatePlayerInventorySlot(item.slot));
+            }
+            seen[slot] = true;
+            if item.item_key.is_empty() || item.count == 0 {
+                return Err(ValidationError::InvalidPlayerInventoryItem(item.slot));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -321,6 +344,10 @@ pub enum ValidationError {
     InvalidPlayerHealth,
     InvalidPlayerAirSupply(i32),
     InvalidPlayerExperience,
+    InvalidSelectedHotbarSlot(u32),
+    InvalidPlayerInventorySlot(u32),
+    DuplicatePlayerInventorySlot(u32),
+    InvalidPlayerInventoryItem(u32),
     ZeroExtensionId,
     DuplicateExtensionId(u32),
     UnregisteredExtensionId(u32),
@@ -407,6 +434,18 @@ impl std::fmt::Display for ValidationError {
                 write!(formatter, "invalid player air supply {air}")
             }
             Self::InvalidPlayerExperience => formatter.write_str("invalid player experience"),
+            Self::InvalidSelectedHotbarSlot(slot) => {
+                write!(formatter, "invalid selected hotbar slot {slot}")
+            }
+            Self::InvalidPlayerInventorySlot(slot) => {
+                write!(formatter, "invalid player inventory slot {slot}")
+            }
+            Self::DuplicatePlayerInventorySlot(slot) => {
+                write!(formatter, "duplicate player inventory slot {slot}")
+            }
+            Self::InvalidPlayerInventoryItem(slot) => {
+                write!(formatter, "invalid player inventory item in slot {slot}")
+            }
             Self::ZeroExtensionId => formatter.write_str("extension local ID zero is reserved"),
             Self::DuplicateExtensionId(id) => write!(formatter, "duplicate extension local ID {id}"),
             Self::UnregisteredExtensionId(id) => {

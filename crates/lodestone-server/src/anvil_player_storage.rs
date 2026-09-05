@@ -114,7 +114,7 @@ pub fn discover_player_files(
         .collect())
 }
 
-/// A player value that the native locator cannot retain.
+/// A player value that the current typed native player record cannot retain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedPlayerData {
     /// The source game-data version validates the Anvil schema but has no
@@ -128,10 +128,8 @@ pub enum UnsupportedPlayerData {
     FallDistance,
     /// Ground contact has no native locator field.
     GroundState,
-    /// The selected inventory slot has no native locator field.
-    SelectedSlot,
-    /// Inventory contents have no native locator field.
-    Inventory,
+    /// The Anvil decoder cannot prove that no unmodeled item component existed.
+    UnverifiedInventoryComponents,
     /// Root fields the player schema preserves but does not model have no
     /// native locator field.
     PreservedRootFields,
@@ -476,7 +474,7 @@ pub enum Error {
     Storage(#[source] crate::world_storage::Error),
 }
 
-/// Inventories every source field that one native locator cannot retain.
+/// Inventories every source field that one typed native player record cannot retain.
 ///
 /// The report is payload-free: it records field categories and precision loss,
 /// never the player inventory or preserved root values themselves.
@@ -489,8 +487,7 @@ pub fn preflight_player(player: &PlayerData) -> PlayerImportReport {
             UnsupportedPlayerData::FireTicks,
             UnsupportedPlayerData::FallDistance,
             UnsupportedPlayerData::GroundState,
-            UnsupportedPlayerData::SelectedSlot,
-            UnsupportedPlayerData::Inventory,
+            UnsupportedPlayerData::UnverifiedInventoryComponents,
         ],
         blockers: Vec::new(),
     };
@@ -712,6 +709,7 @@ fn player_data_from_player(uuid: uuid::Uuid, player: &PlayerData) -> NativePlaye
             air_supply: player.air_supply,
             experience: player.experience,
         }),
+        inventory: Some(player.to_inventory()),
     }
 }
 
@@ -733,6 +731,7 @@ fn player_data_from_player_unchecked(uuid: uuid::Uuid, player: &PlayerData) -> N
             air_supply: player.air_supply,
             experience: player.experience,
         }),
+        inventory: Some(player.to_inventory()),
     }
 }
 
@@ -845,12 +844,6 @@ mod tests {
         assert!(
             report
                 .unsupported()
-                .contains(&UnsupportedPlayerData::Inventory),
-            "the partial native record must make inventory loss visible"
-        );
-        assert!(
-            report
-                .unsupported()
                 .contains(&UnsupportedPlayerData::PreservedRootFields),
             "unknown Anvil root fields must not disappear from preflight"
         );
@@ -884,6 +877,7 @@ mod tests {
                     air_supply: 240,
                     experience: crate::experience::PlayerExperience::restored(7, 0.25, 341),
                 }),
+                inventory: Some(fixture_player().to_inventory()),
             }),
             "fixture expectations name the typed native fields independently of conversion"
         );
