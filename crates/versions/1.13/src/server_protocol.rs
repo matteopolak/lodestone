@@ -18,8 +18,9 @@ use crate::canonical::wire_state_for;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
-    ServerboundArmAnimation, ServerboundPosition, ServerboundPositionLook, TeleportConfirm,
+    BlockDig, BlockPlace, ClientboundChat, ClientboundPositionLook, JoinGame,
+    ServerboundArmAnimation, ServerboundChat, ServerboundFlying, ServerboundLook,
+    ServerboundPosition, ServerboundPositionLook, TeleportConfirm,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -51,6 +52,30 @@ fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
     let value = T::decode(&mut reader, CTX).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
+}
+
+/// Wraps server-provided plain text in the JSON component carried by this
+/// era's ordinary chat packet.
+fn legacy_text_component(message: &str) -> String {
+    let mut json = String::with_capacity(message.len() + 11);
+    json.push_str("{\"text\":\"");
+    for ch in message.chars() {
+        match ch {
+            '\"' => json.push_str("\\\""),
+            '\\' => json.push_str("\\\\"),
+            '\n' => json.push_str("\\n"),
+            '\r' => json.push_str("\\r"),
+            '\t' => json.push_str("\\t"),
+            ch if ch <= '\u{001f}' => {
+                use std::fmt::Write as _;
+                write!(json, "\\u{:04x}", ch as u32)
+                    .expect("writing into a String cannot fail");
+            }
+            ch => json.push(ch),
+        }
+    }
+    json.push_str("\"}");
+    json
 }
 
 fn block_action(status: i32) -> Option<BlockActionKind> {
@@ -307,6 +332,16 @@ impl ServerProtocol for V404ServerProtocol {
             State::Play if packet_id == play::serverbound::BLOCK_PLACE => {
                 decode_full::<BlockPlace>(payload).map_or(ServerBound::Ignored, block_use)
             }
+            State::Play if packet_id == play::serverbound::CHAT => {
+                decode_full::<ServerboundChat>(payload).map_or(ServerBound::Ignored, |chat| {
+                    ServerBound::Chat {
+                        message: chat.message,
+                        timestamp_millis: 0,
+                        salt: 0,
+                        signature: None,
+                    }
+                })
+            }
             // `arm_animation` is a one-field packet, but it is a visible
             // multiplayer action: the shared host appends it to its broadcast
             // feed and every other connection renders the matching clientbound
@@ -470,6 +505,16 @@ impl ServerProtocol for V404ServerProtocol {
 
     fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
         ServerDirective::None
+    }
+
+    fn encode_system_chat(&self, message: &str) -> ServerDirective {
+        send(
+            play::clientbound::CHAT,
+            &ClientboundChat {
+                message: legacy_text_component(message),
+                position: 1,
+            },
+        )
     }
 
     fn encode_keep_alive(&self, id: i64) -> ServerDirective {

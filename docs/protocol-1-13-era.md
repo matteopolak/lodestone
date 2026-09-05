@@ -216,6 +216,13 @@ the server's chunk window. The remaining locale, VarInt chat mode, colour flag, 
 and VarInt main hand are decoded to preserve the protocol-404 boundary but have no host-side
 consumer. A literal-body control fixes this six-field layout and rejects a trailing byte.
 
+Ordinary chat uses one serverbound string and a clientbound JSON text component plus position byte.
+The host lifts the former into the shared unsigned chat input with zero timestamp and salt, and
+wraps broadcast text as normal system chat. The 404 adapter already owns both sides of this route;
+the registry-selected in-memory check sends quoted text and observes the formatted system-chat event,
+while literal fixtures reject truncated, trailing, and non-Play request bodies and pin JSON escaping
+in the response. This is an in-memory routing proof, not release-client acceptance.
+
 ### The negative control, and what it actually measured
 
 The 1.14 era found that **no** misroute between its protocols produces a
