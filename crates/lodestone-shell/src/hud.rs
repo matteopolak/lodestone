@@ -1282,6 +1282,9 @@ pub const RECIPE_TOAST_DESCRIPTION: &str = "Check your recipe book";
 /// (`assets/minecraft/textures/gui/sprites/toast/recipe.png`), so the sprite
 /// path is reachable rather than permanently falling back.
 pub const RECIPE_TOAST_SPRITE: &str = "toast/recipe";
+/// Friends service toast background. A missing GUI-atlas sprite falls back to
+/// the same opaque dark plate used by [`FriendsToastView`]'s draw path.
+pub const FRIENDS_TOAST_SPRITE: &str = "friends/toast_background";
 /// `ToastManager`'s slide duration in milliseconds — the bare `600L` at
 /// vanilla's own toast-manager type (it has no named constant there).
 pub const RECIPE_TOAST_SLIDE_MS: u64 = 600;
@@ -1350,6 +1353,15 @@ pub struct AdvancementToastView {
     /// Its icon, `None` for an id the atlas key parser rejects.
     pub icon: Option<HotbarSlot>,
     /// See [`RecipeToastView::visible_portion`].
+    pub visible_portion: f32,
+}
+
+/// One Friends-service notification using the shared top-right toast slot.
+#[derive(Debug, Clone)]
+pub struct FriendsToastView {
+    /// Profile-less service message, wrapped to the toast's text column.
+    pub message: String,
+    /// Horizontal slide fraction; `1.0` is fully visible.
     pub visible_portion: f32,
 }
 
@@ -1753,6 +1765,9 @@ pub struct HudFrame<'a> {
     /// [`Self::recipe_toast`] — vanilla's own toast manager stacks them, and this
     /// client only ever has one queue live at a time.
     pub advancement_toast: Option<AdvancementToastView>,
+    /// A Friends-service notification. The app schedules it only while the
+    /// recipe and advancement queues do not own the shared top-right slot.
+    pub friends_toast: Option<FriendsToastView>,
 }
 
 impl<'a> HudFrame<'a> {
@@ -1807,6 +1822,7 @@ impl<'a> HudFrame<'a> {
             attack_indicator: crate::config::AttackIndicator::Crosshair,
             recipe_toast: None,
             advancement_toast: None,
+            friends_toast: None,
         }
     }
 }
@@ -3788,6 +3804,9 @@ impl HudGeometry {
         if let Some(toast) = &frame.advancement_toast {
             draw_advancement_toast(&mut b, toast);
         }
+        if let Some(toast) = &frame.friends_toast {
+            draw_friends_toast(&mut b, toast);
+        }
 
         // A chat `hover_event` tooltip, drawn absolutely last — vanilla's own
         // tooltip layer composites over everything, including toasts
@@ -4454,6 +4473,31 @@ fn draw_advancement_toast(b: &mut Builder, toast: &AdvancementToastView) {
     if let Some(icon) = &toast.icon {
         // `fakeItem(iconItem, 8, 8)`, unscaled.
         b.item_icon(icon, tx + 8.0, ty + 8.0, 16.0);
+    }
+}
+
+fn draw_friends_toast(b: &mut Builder, toast: &FriendsToastView) {
+    let (tx, ty, tw, _) = recipe_toast_rect(b.w, toast.visible_portion);
+    let lines = b.wrap_legacy(&toast.message, tw - 7.0 - 4.0, 1.0);
+    let content_h = lines.len().max(2) as f32 * 11.0;
+    let th = 7.0 + content_h + 3.0;
+    let quads = b.gui_geometry(FRIENDS_TOAST_SPRITE, tx, ty, tw, th);
+    if quads.is_empty() {
+        b.rect_px(tx, ty, tw, th, [0.05, 0.05, 0.08, 0.94]);
+    } else {
+        for quad in quads {
+            b.push_sprite_quad(quad, [1.0, 1.0, 1.0, 1.0]);
+        }
+    }
+    let text_y = ty + 7.0 + (content_h - lines.len() as f32 * 11.0) * 0.5;
+    for (index, line) in lines.iter().enumerate() {
+        b.text(
+            line,
+            tx + 7.0,
+            text_y + index as f32 * 11.0,
+            1.0,
+            [1.0, 1.0, 1.0, 1.0],
+        );
     }
 }
 

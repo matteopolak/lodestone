@@ -220,7 +220,7 @@ impl DistantTerrainRenderer {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
@@ -438,8 +438,17 @@ impl DistantTerrainRenderer {
         &self,
         queue: &wgpu::Queue,
         view_proj: [[f32; 4]; 4],
-        fog: FogUniform,
+        mut fog: FogUniform,
     ) {
+        // Normal terrain fades at the streamed-chunk edge. Reusing that end
+        // unchanged would make every coarse sample beyond the near field equal
+        // the sky colour and therefore invisible. Preserve the sourced colour
+        // and enabled lanes, but move this pass's render-distance ramp to its
+        // own configured outer edge.
+        let fog_end = self.outer_radius_blocks;
+        fog.color_start[3] =
+            (fog_end - lodestone_render::fog::render_distance_fade_span(fog_end)).max(0.0);
+        fog.end_enabled[0] = fog_end;
         update_model_shared_camera_buffer(queue, &self.camera_buffer, view_proj, fog);
         let mut bytes = self.tile_uniform_bytes.borrow_mut();
         for (slot, tile) in self.terrain.tiles().enumerate() {

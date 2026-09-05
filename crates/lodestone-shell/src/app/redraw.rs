@@ -425,6 +425,18 @@ impl WindowApp {
                 self.sim.translator().as_ref(),
             )
         });
+        let toast_now = recipe_toast_now_ms();
+        let recipe_toast = recipe_toast_view(&self.recipe_toasts, toast_now);
+        let friends_toast = self
+            .friends
+            .toast(
+                toast_now,
+                recipe_toast.is_none() && advancement_toast.is_none(),
+            )
+            .map(|toast| crate::hud::FriendsToastView {
+                message: toast.message,
+                visible_portion: 1.0,
+            });
         let advancements_title = advancements_open
             .then(|| {
                 let translate = self.sim.translator();
@@ -1916,10 +1928,11 @@ impl WindowApp {
         // today, because the queue's only possible producer is the
         // `recipe_book_add` decode that does not exist yet — see the field's own
         // doc. Wired here anyway so it lights up the moment that lands.
-        hud_frame.recipe_toast = recipe_toast_view(&self.recipe_toasts, recipe_toast_now_ms());
+        hud_frame.recipe_toast = recipe_toast;
         // The advancement-completion toast, resolved above the
         // field-borrow split like every other `Sim`-derived view.
         hud_frame.advancement_toast = advancement_toast;
+        hud_frame.friends_toast = friends_toast;
         // Always `Some`: `Sim::attack_strength_scale` is defined on both the
         // demo and live worlds (the ticker and the `attack_speed` attribute
         // default both exist before any server connection), unlike
