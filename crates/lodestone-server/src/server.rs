@@ -1914,9 +1914,10 @@ fn player_store<S: ChunkSource + ?Sized>(source: &S) -> Option<crate::player_dat
 /// The complete Anvil [`PlayerData`](crate::player_data::PlayerData) remains
 /// the source of truth whenever it has a value for inventory, health, game
 /// mode or opaque fields. This session adds a typed locator and can fill the
-/// independently consumable native game-mode gap only when Anvil has none. It
-/// marks itself blocked after a corrupt read so a later disconnect cannot
-/// overwrite evidence needed for recovery.
+/// independently consumable native game-mode gap only when Anvil has none. A
+/// built-in saved dimension selects that world's sibling source before chunks
+/// stream. A corrupt read, unavailable sibling, or protocol without the needed
+/// dimension frame blocks a later overwrite so recovery evidence survives.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 struct NativePlayerSession {
@@ -1933,20 +1934,11 @@ impl NativePlayerSession {
         let uuid = *uuid.as_bytes();
         match storage.load_player_data(uuid) {
             Ok(loaded) => {
-                let save_blocked = loaded.is_some_and(|record| {
-                    record.locator.dimension
-                        != lodestone_storage_schema::BuiltinDimension::Overworld
-                });
-                if save_blocked {
-                    tracing::warn!(
-                        "native player locator for {uuid:02x?} names a non-overworld dimension; it will not be overwritten until dimension-aware join restore exists"
-                    );
-                }
                 Some(Self {
                     storage,
                     uuid,
                     loaded,
-                    save_blocked,
+                    save_blocked: false,
                 })
             }
             Err(error) => {
@@ -1964,26 +1956,68 @@ impl NativePlayerSession {
     }
 
     fn join_position(&self, fallback: Vec3) -> Vec3 {
+        if self.save_blocked {
+            return fallback;
+        }
         let Some(record) = self.loaded.map(|data| data.locator) else {
             return fallback;
         };
-        if record.dimension != lodestone_storage_schema::BuiltinDimension::Overworld {
-            tracing::warn!(
-                "native player locator for {:?} names a non-overworld dimension; using the world spawn until dimension-aware join restore exists",
-                self.uuid
-            );
-            return fallback;
-        }
         native_position(record)
     }
 
     fn initial_rotation(&self) -> Option<Rotation> {
         self.loaded
             .map(|data| data.locator)
-            .filter(|record| {
-                record.dimension == lodestone_storage_schema::BuiltinDimension::Overworld
-            })
+            .filter(|_| !self.save_blocked)
             .map(native_rotation)
+    }
+
+    fn dimension(&self) -> Option<crate::dimension::Dimension> {
+        if self.save_blocked {
+            return None;
+        }
+        self.loaded.map(|data| match data.locator.dimension {
+            lodestone_storage_schema::BuiltinDimension::Overworld => {
+                crate::dimension::Dimension::Overworld
+            }
+            lodestone_storage_schema::BuiltinDimension::Nether => {
+                crate::dimension::Dimension::Nether
+            }
+            lodestone_storage_schema::BuiltinDimension::End => crate::dimension::Dimension::End,
+            lodestone_storage_schema::BuiltinDimension::Unspecified => {
+                unreachable!("native player decoder rejects unspecified dimensions")
+            }
+        })
+    }
+
+    fn block_restore(&mut self, reason: &str) {
+        tracing::warn!(
+            "native player locator for {:?} cannot restore its dimension ({reason}); it will not be overwritten this session",
+            self.uuid
+        );
+        self.save_blocked = true;
+    }
+
+    fn restored_source(
+        &mut self,
+        home: &dyn ChunkSource,
+        protocol_supports_dimension: bool,
+    ) -> Option<Arc<dyn ChunkSource>> {
+        let dimension = self.dimension()?;
+        if dimension == home.dimension().unwrap_or(crate::dimension::Dimension::Overworld) {
+            return None;
+        }
+        if !protocol_supports_dimension {
+            self.block_restore("the selected protocol cannot encode the saved dimension");
+            return None;
+        }
+        match home.sibling(dimension) {
+            Some(sibling) => Some(sibling),
+            None => {
+                self.block_restore("the world has no source for the saved dimension");
+                None
+            }
+        }
     }
 
     fn game_mode(&self) -> Option<GameMode> {
@@ -2006,9 +2040,7 @@ impl NativePlayerSession {
             .or_else(|| {
                 self.loaded
                     .map(|data| data.locator)
-                    .filter(|record| {
-                        record.dimension == lodestone_storage_schema::BuiltinDimension::Overworld
-                    })
+                    .filter(|_| !self.save_blocked)
                     .map(native_position)
             })
             .unwrap_or(fallback);
@@ -2016,9 +2048,7 @@ impl NativePlayerSession {
             .or_else(|| {
                 self.loaded
                     .map(|data| data.locator)
-                    .filter(|record| {
-                        record.dimension == lodestone_storage_schema::BuiltinDimension::Overworld
-                    })
+                    .filter(|_| !self.save_blocked)
                     .map(native_rotation)
             })
             .unwrap_or_default();
@@ -3683,10 +3713,27 @@ where
                 #[cfg(target_arch = "wasm32")]
                 let saved_player: Option<()> = None;
                 #[cfg(not(target_arch = "wasm32"))]
-                let native_player = NativePlayerSession::load(
+                let mut native_player = NativePlayerSession::load(
                     source.get(),
                     login_uuid.unwrap_or_default(),
                 );
+                #[cfg(not(target_arch = "wasm32"))]
+                let restored_dimension_source = native_player.as_mut().and_then(|native| {
+                    let dimension = native.dimension()?;
+                    let protocol_supports_dimension = !proto
+                        .encode_dimension_change_with_teleport_id(
+                            1,
+                            dimension.key(),
+                            spawn.pos,
+                            game_mode,
+                        )
+                        .is_empty();
+                    native.restored_source(source.get(), protocol_supports_dimension)
+                });
+                #[cfg(not(target_arch = "wasm32"))]
+                let source = restored_dimension_source
+                    .as_ref()
+                    .map_or(source, SourceRef::Dimension);
 
                 // Where the player actually re-enters the world. `spawn.pos`
                 // stays the **world** spawn: it is what `serve_play` uses for a
@@ -3720,14 +3767,30 @@ where
                     .unwrap_or(game_mode);
 
                 state = State::Play;
-                let initial_teleport_id = proto.uses_teleport_acknowledgements().then_some(0);
+                #[cfg(not(target_arch = "wasm32"))]
+                let restored_other_dimension = restored_dimension_source.is_some();
+                #[cfg(target_arch = "wasm32")]
+                let restored_other_dimension = false;
+                let initial_teleport_id = proto
+                    .uses_teleport_acknowledgements()
+                    .then_some(i32::from(restored_other_dimension));
                 for directive in proto.begin_play_at_with_teleport_id(
                     view_radius,
                     join_pos,
                     game_mode,
-                    initial_teleport_id.unwrap_or(0),
+                    0,
                 ) {
                     apply(conn, &mut state, directive).await?;
+                }
+                if restored_other_dimension {
+                    for directive in proto.encode_dimension_change_with_teleport_id(
+                        initial_teleport_id.unwrap_or(0),
+                        source.dimension().key(),
+                        join_pos,
+                        game_mode,
+                    ) {
+                        apply(conn, &mut state, directive).await?;
+                    }
                 }
                 // Vanilla's own "place new player" step sends the abilities
                 // packet right after the login packet, and it is not optional:
@@ -3916,12 +3979,10 @@ where
                         }
                         join_stream = crate::join_scheduler::JoinChunkStream::windowed(pipeline);
                     }
-                    // The `Dimension` arm rides here rather than with `Shared`
-                    // because it is **unreachable at join**: a connection joins in
-                    // whichever dimension its own source names, and a portal trip
-                    // re-streams through `send_view_update`, not through this block.
-                    // Sharing the ring path costs it nothing it can reach and keeps
-                    // the offload fork below reading as the two arms it is about.
+                    // The `Dimension` arm reaches this path when a native player
+                    // locator restores directly into a sibling dimension. Its
+                    // erased source cannot inhabit the generic shared pipeline,
+                    // so it uses the same ordered ring path as a borrowed source.
                     SourceRef::Borrowed(_) | SourceRef::Dimension(_) => {
                         // A borrowed source is not `'static`, so it cannot be
                         // spawned; each ring on this arm blocks until its
@@ -19458,6 +19519,98 @@ mod tests {
         let handles = dimension_scoped_handles(Some(&sibling));
         assert!(handles.block_entities.is_none());
         assert!(handles.block_ticks.is_none());
+    }
+
+    struct NativeRestoreWorld;
+
+    impl ChunkSource for NativeRestoreWorld {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 256)
+        }
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            "minecraft:air".to_owned()
+        }
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        fn dimension(&self) -> Option<crate::dimension::Dimension> {
+            Some(crate::dimension::Dimension::Overworld)
+        }
+        fn sibling(
+            &self,
+            dimension: crate::dimension::Dimension,
+        ) -> Option<Arc<dyn ChunkSource>> {
+            (dimension == crate::dimension::Dimension::Nether)
+                .then(|| Arc::new(DimensionOnly(dimension)) as Arc<dyn ChunkSource>)
+        }
+    }
+
+    fn native_nether_session() -> (tempfile::TempDir, NativePlayerSession) {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            crate::world_storage::WorldStorage::open(
+                crate::world_storage::WorldStorageBackend::LodestoneNative {
+                    directory: directory.path().to_owned(),
+                },
+            )
+            .unwrap(),
+        );
+        let loaded = crate::world_storage::NativePlayerData {
+            locator: crate::world_storage::NativePlayerRecord {
+                uuid: [0x71; 16],
+                dimension: lodestone_storage_schema::BuiltinDimension::Nether,
+                x_fixed: 12_500,
+                y_fixed: 64_250,
+                z_fixed: -3_750,
+                yaw_millidegrees: 91_000,
+                pitch_millidegrees: -12_500,
+            },
+            game_mode: Some(GameMode::Creative),
+        };
+        (
+            directory,
+            NativePlayerSession {
+                storage,
+                uuid: loaded.locator.uuid,
+                loaded: Some(loaded),
+                save_blocked: false,
+            },
+        )
+    }
+
+    #[test]
+    fn native_nether_restore_selects_the_sibling_and_uses_its_pose() {
+        let (_directory, mut session) = native_nether_session();
+        let sibling = session
+            .restored_source(&NativeRestoreWorld, true)
+            .expect("a hosted saved dimension must become the join source");
+        assert_eq!(sibling.dimension(), Some(crate::dimension::Dimension::Nether));
+        assert_eq!(
+            session.join_position(Vec3::new(8.0, 80.0, 8.0)),
+            Vec3::new(12.5, 64.25, -3.75),
+        );
+        assert_eq!(session.initial_rotation(), Some(Rotation::new(91.0, -12.5)));
+    }
+
+    #[test]
+    fn native_dimension_restore_failure_preserves_the_record() {
+        let (_directory, mut session) = native_nether_session();
+        assert!(session.restored_source(&NativeRestoreWorld, false).is_none());
+        let fallback = Vec3::new(8.0, 80.0, 8.0);
+        assert_eq!(session.join_position(fallback), fallback);
+        assert!(
+            session
+                .snapshot(
+                    Some((1.0, 2.0, 3.0)),
+                    None,
+                    fallback,
+                    crate::dimension::Dimension::Overworld,
+                    GameMode::Survival,
+                )
+                .is_none(),
+            "a failed cross-dimension restore must not overwrite its evidence on disconnect"
+        );
     }
 
     /// No saved player at all falls back to the world spawn.
