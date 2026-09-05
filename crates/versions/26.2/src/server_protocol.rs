@@ -2804,21 +2804,6 @@ fn encode_column_body(
     w.into_vec()
 }
 
-/// Resolves a `minecraft:block_entity_type` registry key to its protocol-776
-/// registry id, or `None` for a key this version does not have.
-///
-/// A 49-entry linear scan over [`lodestone_data::block_entity_types`]'s own
-/// name table, in the same shape as [`resolve_biome_id`] — the table is indexed
-/// *by* id, and there is no reverse map in `lodestone-data`. Called once per
-/// block entity in a column, of which the overwhelming majority have zero, so a
-/// map would cost more to build than the scans it saves.
-fn resolve_block_entity_type_id(name: &str) -> Option<u32> {
-    (0..lodestone_data::block_entity_types::TYPE_COUNT)
-        .filter_map(lodestone_data::block_entity_types::BlockEntityType::new)
-        .find(|&kind| lodestone_data::block_entity_types::block_entity_type_name(kind) == name)
-        .map(lodestone_data::block_entity_types::BlockEntityType::raw)
-}
-
 /// Writes the chunk packet's block-entity array: a VarInt count
 /// then, per entry, the section-relative XZ packed into one byte (`x << 4 | z`),
 /// the **absolute** Y as a big-endian short, the block-entity type's registry id
@@ -2839,11 +2824,16 @@ fn resolve_block_entity_type_id(name: &str) -> Option<u32> {
 /// not write, so "this NBT does not encode" is a real input, not an invariant to
 /// `expect` on.
 fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) {
-    let entries: Vec<(lodestone_model::BlockPos, u32, Vec<u8>)> = source
+    let entries: Vec<(
+        lodestone_model::BlockPos,
+        lodestone_data::block_entity_types::BlockEntityType,
+        Vec<u8>,
+    )> = source
         .block_entities()
         .iter()
         .filter_map(|(pos, entity)| {
-            let type_id = resolve_block_entity_type_id(entity.type_id())?;
+            let type_id =
+                lodestone_data::block_entity_types::block_entity_type_id(entity.type_id())?;
             let nbt = lodestone_server::chunk_nbt::block_entity_to_nbt(*pos, entity);
             let mut body = Writer::default();
             write_network_nbt(&mut body, &nbt).ok()?;
@@ -2855,7 +2845,7 @@ fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) {
     for (pos, type_id, nbt) in entries {
         w.u8((((pos.x & 15) << 4) | (pos.z & 15)) as u8);
         w.i16(pos.y as i16);
-        w.var_i32(type_id as i32);
+        w.var_i32(type_id.raw() as i32);
         w.bytes(&nbt);
     }
 }
@@ -5195,7 +5185,9 @@ impl ServerProtocol for V770ServerProtocol {
         block_entity_type: &str,
         nbt: &lodestone_core::Nbt,
     ) -> ServerDirective {
-        let Some(type_id) = resolve_block_entity_type_id(block_entity_type) else {
+        let Some(type_id) =
+            lodestone_data::block_entity_types::block_entity_type_id(block_entity_type)
+        else {
             return ServerDirective::None;
         };
         let mut body = Writer::default();
@@ -5204,7 +5196,7 @@ impl ServerProtocol for V770ServerProtocol {
         }
         let mut w = Writer::default();
         w.i64(pack_block_pos(pos.x, pos.y, pos.z));
-        w.var_i32(type_id as i32);
+        w.var_i32(type_id.raw() as i32);
         w.bytes(&body.into_vec());
         ServerDirective::Send {
             packet_id: play::clientbound::BLOCK_ENTITY_DATA,

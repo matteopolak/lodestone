@@ -113,6 +113,15 @@ literal controls in the item-enum and packet fixtures pin `air = 0`, `stone = 1`
 and independently selected encoded item values, so the conversion is not only a
 round trip over generated tables.
 
+Block-entity types use the same boundary discipline without an enum: there are
+49 fixed entries, represented by the validated `BlockEntityType` newtype. The
+state-to-type census returns that type, `block_entity_type_id` resolves an
+in-process record's key back to it, and packet writers call `raw` only at the
+VarInt write. This prevents a block-state id or arbitrary `u32` from reaching a
+block-entity packet by accident. A key not in the built-in census stays a miss;
+it must remain in the dynamic registry that supplied it rather than being
+coerced into a built-in slot.
+
 **`Block` and `StateId` are two different id spaces and conflating them is the mistake that
 surfaces late.** `Block` has 1,196 values in **registration** order (wire use: `Holder<Block>`
 in `block_event`, tool rules); `StateId` has 32,366 values in **name-sorted** order (wire use:
