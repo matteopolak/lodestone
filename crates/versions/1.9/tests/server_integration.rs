@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent, Rotation, Vec3};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent, Rotation, Vec3,
+};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_9::adapter_for;
 
@@ -146,6 +148,43 @@ async fn assert_teleport_confirmation_unblocks_movement(protocol_version: i32) {
         .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
         .await
         .expect("confirmed teleport must unblock movement and recenter the view");
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_340_echoes_legacy_chat_to_the_client_event_stream() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(340)
+        .expect("protocol 340 must resolve to the hosted legacy family");
+    let source = Arc::new(LegacyFixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, mut events) = ClientBuilder::new(
+        address(),
+        profile(),
+        Box::new(adapter_for(340)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(client_io);
+
+    handle.wait_for_spawn(Duration::from_secs(10)).await.expect("must join Play");
+    handle
+        .send_action(ClientAction::SendChat {
+            text: "legacy chat \"escapes\"".to_owned(),
+        })
+        .expect("joined client accepts chat");
+
+    let (text, kind) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::Chat { text, kind, .. }) = events.recv().await {
+                return (text.to_plain_string(), kind);
+            }
+        }
+    })
+    .await
+    .expect("the server must echo legacy chat through the client event stream");
+    assert_eq!(text, "<LegacyFixture> legacy chat \"escapes\"");
+    assert_eq!(kind, ChatKind::System);
+
     handle.shutdown();
     server.shutdown().await;
 }

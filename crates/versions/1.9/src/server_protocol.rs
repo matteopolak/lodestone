@@ -23,8 +23,9 @@ use crate::packets::common::{
     KeepAliveRequest, KeepAliveRequestVarInt, KeepAliveResponse, KeepAliveResponseVarInt,
 };
 use crate::packets::game::{
-    BlockDig, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
-    ServerboundPosition, ServerboundPositionLook, TeleportConfirm,
+    BlockDig, ClientboundChat, ClientboundPositionLook, JoinGame, ServerboundChat,
+    ServerboundFlying, ServerboundLook, ServerboundPosition, ServerboundPositionLook,
+    TeleportConfirm,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -72,6 +73,7 @@ struct ServerPacketIds {
     compression: i32,
     login_success: i32,
     block_dig: i32,
+    chat_serverbound: i32,
     teleport_confirm: i32,
     flying: i32,
     position_serverbound: i32,
@@ -84,6 +86,7 @@ struct ServerPacketIds {
     position: i32,
     map_chunk: i32,
     block_change: i32,
+    chat_clientbound: i32,
 }
 
 const IDS_340: ServerPacketIds = ServerPacketIds {
@@ -92,6 +95,7 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     compression: login::clientbound::COMPRESS,
     login_success: login::clientbound::SUCCESS,
     block_dig: play::serverbound::BLOCK_DIG,
+    chat_serverbound: play::serverbound::CHAT,
     teleport_confirm: play::serverbound::TELEPORT_CONFIRM,
     flying: play::serverbound::FLYING,
     position_serverbound: play::serverbound::POSITION,
@@ -104,6 +108,7 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     position: play::clientbound::POSITION,
     map_chunk: play::clientbound::MAP_CHUNK,
     block_change: play::clientbound::BLOCK_CHANGE,
+    chat_clientbound: play::clientbound::CHAT,
 };
 
 const IDS_316: ServerPacketIds = ServerPacketIds {
@@ -112,6 +117,7 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_316::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_316::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_316::play::serverbound::BLOCK_DIG,
+    chat_serverbound: crate::packet_ids_316::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_316::play::serverbound::TELEPORT_CONFIRM,
     flying: crate::packet_ids_316::play::serverbound::FLYING,
     position_serverbound: crate::packet_ids_316::play::serverbound::POSITION,
@@ -124,6 +130,7 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     position: crate::packet_ids_316::play::clientbound::POSITION,
     map_chunk: crate::packet_ids_316::play::clientbound::MAP_CHUNK,
     block_change: crate::packet_ids_316::play::clientbound::BLOCK_CHANGE,
+    chat_clientbound: crate::packet_ids_316::play::clientbound::CHAT,
 };
 
 const IDS_210: ServerPacketIds = ServerPacketIds {
@@ -132,6 +139,7 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_210::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_210::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_210::play::serverbound::BLOCK_DIG,
+    chat_serverbound: crate::packet_ids_210::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_210::play::serverbound::TELEPORT_CONFIRM,
     flying: crate::packet_ids_210::play::serverbound::FLYING,
     position_serverbound: crate::packet_ids_210::play::serverbound::POSITION,
@@ -144,6 +152,7 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     position: crate::packet_ids_210::play::clientbound::POSITION,
     map_chunk: crate::packet_ids_210::play::clientbound::MAP_CHUNK,
     block_change: crate::packet_ids_210::play::clientbound::BLOCK_CHANGE,
+    chat_clientbound: crate::packet_ids_210::play::clientbound::CHAT,
 };
 
 const IDS_110: ServerPacketIds = ServerPacketIds {
@@ -152,6 +161,7 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_110::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_110::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_110::play::serverbound::BLOCK_DIG,
+    chat_serverbound: crate::packet_ids_110::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_110::play::serverbound::TELEPORT_CONFIRM,
     flying: crate::packet_ids_110::play::serverbound::FLYING,
     position_serverbound: crate::packet_ids_110::play::serverbound::POSITION,
@@ -164,6 +174,7 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     position: crate::packet_ids_110::play::clientbound::POSITION,
     map_chunk: crate::packet_ids_110::play::clientbound::MAP_CHUNK,
     block_change: crate::packet_ids_110::play::clientbound::BLOCK_CHANGE,
+    chat_clientbound: crate::packet_ids_110::play::clientbound::CHAT,
 };
 
 fn send<T: Encode>(packet_id: i32, packet: &T, ctx: Ctx, protocol: i32) -> ServerDirective {
@@ -500,6 +511,20 @@ fn decode_packet(
                     sequence: 0,
                 }
             }
+            State::Play if packet_id == ids.chat_serverbound => {
+                decode_full::<ServerboundChat>(payload, ctx).map_or(ServerBound::Ignored, |chat| {
+                    // This era predates signed chat. Its one-string body has no
+                    // timestamp, salt, or signature, so the shared server's
+                    // permissive legacy-chat path receives their explicit
+                    // unsigned values rather than manufacturing a signature.
+                    ServerBound::Chat {
+                        message: chat.message,
+                        timestamp_millis: 0,
+                        salt: 0,
+                        signature: None,
+                    }
+                })
+            }
             State::Play if packet_id == ids.teleport_confirm => {
                 decode_full::<TeleportConfirm>(payload, ctx).map_or(ServerBound::Ignored, |confirm| {
                     ServerBound::TeleportationAccepted { id: confirm.teleport_id }
@@ -666,6 +691,52 @@ fn encode_keep_alive(
     }
 }
 
+/// Serializes a plain server message as the legacy JSON text-component form.
+///
+/// The 1.9-era `chat` packet carries JSON rather than the later network NBT
+/// component. Only a literal component is needed here: chat decoration has
+/// already happened in the shared server before it calls `encode_system_chat`.
+fn legacy_text_component(message: &str) -> String {
+    let mut json = String::with_capacity(message.len() + 11);
+    json.push_str("{\"text\":\"");
+    for ch in message.chars() {
+        match ch {
+            '"' => json.push_str("\\\""),
+            '\\' => json.push_str("\\\\"),
+            '\n' => json.push_str("\\n"),
+            '\r' => json.push_str("\\r"),
+            '\t' => json.push_str("\\t"),
+            ch if ch <= '\u{001f}' => {
+                use std::fmt::Write as _;
+                write!(json, "\\u{:04x}", ch as u32)
+                    .expect("writing into a String cannot fail");
+            }
+            ch => json.push(ch),
+        }
+    }
+    json.push_str("\"}");
+    json
+}
+
+fn encode_system_chat(
+    protocol: i32,
+    ids: ServerPacketIds,
+    ctx: Ctx,
+    message: &str,
+) -> ServerDirective {
+    send(
+        ids.chat_clientbound,
+        &ClientboundChat {
+            message: legacy_text_component(message),
+            // The pre-1.13 `chat` packet uses position 1 for ordinary system
+            // chat. The shared server has already excluded action-bar output.
+            position: 1,
+        },
+        ctx,
+        protocol,
+    )
+}
+
 macro_rules! impl_server_protocol {
     ($type:ty, $protocol:expr, $ids:expr, $ctx:expr) => {
         impl ServerProtocol for $type {
@@ -728,6 +799,10 @@ macro_rules! impl_server_protocol {
                 encode_keep_alive($protocol, $ids, $ctx, id)
             }
 
+            fn encode_system_chat(&self, message: &str) -> ServerDirective {
+                encode_system_chat($protocol, $ids, $ctx, message)
+            }
+
             fn encode_block_update(
                 &self,
                 x: i32,
@@ -750,3 +825,64 @@ impl_server_protocol!(V340ServerProtocol, PROTOCOL, IDS_340, CTX_340);
 impl_server_protocol!(V110ServerProtocol, PROTOCOL_1_9_4, IDS_110, CTX_110);
 impl_server_protocol!(V210ServerProtocol, PROTOCOL_1_10_2, IDS_210, CTX_210);
 impl_server_protocol!(V316ServerProtocol, PROTOCOL_1_11_2, IDS_316, CTX_316);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // VarInt length 14 followed by `legacy "chat"\n`. This is deliberately
+    // a literal wire body: encoding the packet here would let a matching
+    // encoder and decoder hide the same length or trailing-byte mistake.
+    const CHAT_BODY: &[u8] = b"\x0elegacy \"chat\"\n";
+    const CHAT_BODY_WITH_TRAILING_BYTE: &[u8] = b"\x0elegacy \"chat\"\n\0";
+    const SYSTEM_CHAT_BODY: &[u8] = b"\x1c{\"text\":\"legacy \\\"chat\\\"\\n\"}\x01";
+
+    #[test]
+    fn every_hosted_table_lifts_literal_legacy_chat_and_encodes_its_echo() {
+        for (protocol, ids, ctx) in [
+            (PROTOCOL_1_9_4, IDS_110, CTX_110),
+            (PROTOCOL_1_10_2, IDS_210, CTX_210),
+            (PROTOCOL_1_11_2, IDS_316, CTX_316),
+            (PROTOCOL, IDS_340, CTX_340),
+        ] {
+            assert_eq!(
+                decode_packet(protocol, ids, ctx, State::Play, ids.chat_serverbound, CHAT_BODY),
+                ServerBound::Chat {
+                    message: "legacy \"chat\"\n".to_owned(),
+                    timestamp_millis: 0,
+                    salt: 0,
+                    signature: None,
+                },
+                "protocol {protocol} must consume its generated chat id"
+            );
+            assert_eq!(
+                decode_packet(
+                    protocol,
+                    ids,
+                    ctx,
+                    State::Play,
+                    ids.chat_serverbound,
+                    CHAT_BODY_WITH_TRAILING_BYTE,
+                ),
+                ServerBound::Ignored,
+                "protocol {protocol} must not accept a chat prefix with extra bytes"
+            );
+
+            let ServerDirective::Send { packet_id, payload } =
+                encode_system_chat(protocol, ids, ctx, "legacy \"chat\"\n")
+            else {
+                panic!("protocol {protocol} must encode a legacy chat reply");
+            };
+            assert_eq!(packet_id, ids.chat_clientbound);
+            assert_eq!(payload, SYSTEM_CHAT_BODY);
+        }
+    }
+
+    #[test]
+    fn legacy_chat_component_escapes_each_json_control_boundary() {
+        assert_eq!(
+            legacy_text_component("quote=\" slash=\\ newline=\n control=\u{0007}"),
+            "{\"text\":\"quote=\\\" slash=\\\\ newline=\\n control=\\u0007\"}"
+        );
+    }
+}
