@@ -346,10 +346,75 @@ class SummaryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "moving segment"):
             MODULE.validate_run(rows, log, "terrain")
 
-    def test_hardware_builtin_fullscreen_framebuffer_is_parsed(self):
+    def test_render_submission_witness_is_required_in_both_segments(self):
         rows = [
             {"segment": "terrain.stationary", "frame_interval_ms": "10"},
             {"segment": "terrain.moving", "frame_interval_ms": "11"},
+        ]
+        with self.assertRaisesRegex(ValueError, "no world.model_sections_visited samples"):
+            MODULE.validate_run(rows, self.fullscreen_log(), "terrain")
+
+        rows[0]["world.model_sections_visited"] = "0"
+        rows[1]["world.model_sections_visited"] = "1"
+        with self.assertRaisesRegex(ValueError, "stationary.*zero"):
+            MODULE.validate_run(rows, self.fullscreen_log(), "terrain")
+
+    def test_render_submission_witness_accepts_positive_integer_counts(self):
+        rows = [
+            {
+                "segment": "terrain.stationary",
+                "frame_interval_ms": "10",
+                "world.model_sections_visited": "17",
+            },
+            {
+                "segment": "terrain.moving",
+                "frame_interval_ms": "11",
+                "world.model_sections_visited": "23",
+            },
+        ]
+        self.assertEqual(
+            MODULE.validate_run(rows, self.fullscreen_log(), "terrain"),
+            (3024, 1898),
+        )
+
+    def test_render_submission_witness_rejects_non_count_values(self):
+        for value, message in (
+            ("1.5", "invalid"),
+            ("-1", "invalid"),
+            ("nan", "invalid"),
+            ("inf", "invalid"),
+            ("not-a-number", "non-numeric"),
+        ):
+            with self.subTest(value=value):
+                rows = [
+                    {
+                        "segment": "terrain.stationary",
+                        "frame_interval_ms": "10",
+                        "world.model_sections_visited": value,
+                    },
+                    {
+                        "segment": "terrain.moving",
+                        "frame_interval_ms": "11",
+                        "world.model_sections_visited": "2",
+                    },
+                ]
+                with self.assertRaisesRegex(
+                    ValueError, f"{message} world.model_sections_visited"
+                ):
+                    MODULE.validate_run(rows, self.fullscreen_log(), "terrain")
+
+    def test_hardware_builtin_fullscreen_framebuffer_is_parsed(self):
+        rows = [
+            {
+                "segment": "terrain.stationary",
+                "frame_interval_ms": "10",
+                "world.model_sections_visited": "17",
+            },
+            {
+                "segment": "terrain.moving",
+                "frame_interval_ms": "11",
+                "world.model_sections_visited": "23",
+            },
         ]
         self.assertEqual(
             MODULE.validate_run(rows, self.fullscreen_log(), "terrain"),
@@ -358,8 +423,16 @@ class SummaryTests(unittest.TestCase):
 
     def test_external_or_nonfullscreen_window_is_rejected(self):
         rows = [
-            {"segment": "terrain.stationary", "frame_interval_ms": "10"},
-            {"segment": "terrain.moving", "frame_interval_ms": "11"},
+            {
+                "segment": "terrain.stationary",
+                "frame_interval_ms": "10",
+                "world.model_sections_visited": "17",
+            },
+            {
+                "segment": "terrain.moving",
+                "frame_interval_ms": "11",
+                "world.model_sections_visited": "23",
+            },
         ]
         external = (
             "benchmark window ready framebuffer_width=2560 "

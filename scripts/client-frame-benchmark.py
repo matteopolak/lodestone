@@ -247,7 +247,13 @@ def summarize_gpu_log(log_text: str) -> dict:
 def validate_run(
     rows: list[Mapping[str, str]], log_text: str, workload: str
 ) -> tuple[int, int]:
-    """Reject incomplete or mislabeled runs before they enter the history."""
+    """Reject incomplete, mislabeled, or no-op runs before they enter history.
+
+    ``world.model_sections_visited`` is emitted by the production client's
+    world submission path. Requiring a positive sample in both measured
+    segments keeps a disconnected or skipped render bridge from becoming a
+    seemingly valid timing record.
+    """
     if "benchmark complete" not in log_text:
         raise ValueError("completion marker missing from client log")
     if "selected hardware built-in display for fullscreen benchmark" not in log_text:
@@ -277,6 +283,36 @@ def validate_run(
         label = f"{workload}.{suffix}"
         if not any(row.get("segment") == label for row in rows):
             raise ValueError(f"{suffix} segment has no frame rows")
+
+    for suffix in ("stationary", "moving"):
+        label = f"{workload}.{suffix}"
+        segment_rows = [row for row in rows if row.get("segment") == label]
+        model_sections = []
+        for row in segment_rows:
+            raw = row.get("world.model_sections_visited", "").strip()
+            if not raw:
+                continue
+            try:
+                value = float(raw)
+            except ValueError as error:
+                raise ValueError(
+                    f"{label} has a non-numeric world.model_sections_visited value: {raw!r}"
+                ) from error
+            if not math.isfinite(value) or value < 0 or not value.is_integer():
+                raise ValueError(
+                    f"{label} has an invalid world.model_sections_visited value: {raw!r}"
+                )
+            model_sections.append(value)
+        if not model_sections:
+            raise ValueError(
+                f"{label} has no world.model_sections_visited samples; "
+                "the production render submission path was not observed"
+            )
+        if max(model_sections) <= 0:
+            raise ValueError(
+                f"{label} has zero world.model_sections_visited samples; "
+                "the production render submission path did no work"
+            )
     return framebuffer
 
 

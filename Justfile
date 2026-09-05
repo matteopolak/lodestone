@@ -450,6 +450,11 @@ bench-client-showcase:
 bench-client-smoke:
     python3 scripts/client-frame-benchmark.py --workload showcase --smoke
 
+# Hermetic controls for the live-client runner's completion, provenance, and
+# production-render witness checks. Does not launch a server, client, or GPU.
+test-client-frame-benchmark:
+    python3 scripts/test-client-frame-benchmark.py
+
 # Hermitcraft S10 at RD24, once with F3 closed and once open. Install the
 # pinned world first with `python3 scripts/install-client-benchmark-world.py`.
 bench-client-megaworld:
