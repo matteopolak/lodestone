@@ -47,6 +47,44 @@ impl ChunkSource for FixtureSource {
     }
 }
 
+struct BoundaryFixtureSource {
+    center: Mutex<ChunkColumn>,
+}
+
+impl ChunkSource for BoundaryFixtureSource {
+    fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        if (cx, cz) == (0, 0) {
+            self.center.lock().expect("boundary column lock poisoned").clone()
+        } else {
+            ChunkColumn::new(-64, 384)
+        }
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        if (x.div_euclid(16), z.div_euclid(16)) == (0, 0) {
+            self.center
+                .lock()
+                .expect("boundary column lock poisoned")
+                .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+                .to_owned()
+        } else {
+            "minecraft:air".to_owned()
+        }
+    }
+
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_owned()
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+        assert_eq!((x.div_euclid(16), z.div_euclid(16)), (0, 0));
+        self.center
+            .lock()
+            .expect("boundary column lock poisoned")
+            .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+    }
+}
+
 #[tokio::test]
 async fn registry_selected_protocol_774_reaches_play_and_confirms_a_block_break() {
     let protocol = lodestone_registry::server_protocol_for_protocol(774)
@@ -126,6 +164,62 @@ async fn movement_recenters_the_hosted_view_onto_the_next_chunk() {
         .expect("the position packet recenters the hosted view on chunk (1, 0)");
     let flower = lodestone_data::block_states::state_id("minecraft:dandelion").unwrap();
     assert_eq!(handle.block_at(BlockPos::new(24, 100, 8)), Some(flower));
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn breaking_a_border_roof_block_updates_light_from_the_open_east_column() {
+    let target = BlockPos::new(15, 100, 8);
+    let mut center = ChunkColumn::new(-64, 384);
+    for z in 0..16 {
+        for x in 0..16 {
+            center.set_block(x, 101, z, "minecraft:stone");
+        }
+    }
+    center.set_block(target.x, target.y, target.z, "minecraft:dirt");
+    let source = Arc::new(BoundaryFixtureSource { center: Mutex::new(center) });
+    let protocol = lodestone_registry::server_protocol_for_protocol(774).unwrap();
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, _) = ClientBuilder::new(
+        ServerAddress { host: "memory".to_owned(), port: 0 },
+        LoginProfile { username: "BorderLight".to_owned(), uuid: uuid::Uuid::new_v4() },
+        Box::new(adapter_for(774)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(client_io);
+    let chunk = lodestone_client::ChunkPos::new(0, 0);
+    handle.wait_for_spawn(Duration::from_secs(10)).await.unwrap();
+    handle.wait_for_chunk(chunk, Duration::from_secs(10)).await.unwrap();
+    assert_eq!(
+        handle.section_light(chunk, 11).unwrap().sky_at(15, 4, 8),
+        0,
+        "initial isolated chunk light is the required negative control"
+    );
+    handle.send_action(ClientAction::Move {
+        pos: Vec3::new(12.0, 100.0, 8.0),
+        rotation: Rotation::new(90.0, 0.0),
+        on_ground: true,
+        horizontal_collision: false,
+    }).unwrap();
+    handle.send_action(ClientAction::BlockAction {
+        action: BlockActionKind::StartDestroy,
+        pos: target,
+        face: BlockFace::Up,
+        sequence: 29,
+    }).unwrap();
+    handle.send_action(ClientAction::BlockAction {
+        action: BlockActionKind::StopDestroy,
+        pos: target,
+        face: BlockFace::Up,
+        sequence: 30,
+    }).unwrap();
+    handle.wait_for(Duration::from_secs(10), move |client| {
+        client.block_at(target) == Some(lodestone_data::block_states::air_state_id())
+    }).await.expect("the client observes the border block break");
+    handle.wait_for(Duration::from_secs(10), move |client| {
+        client.section_light(chunk, 11).is_some_and(|light| light.sky_at(15, 4, 8) == 14)
+    }).await.expect("the relight observes the open eastern neighbour at the border");
     handle.shutdown();
     server.shutdown().await;
 }

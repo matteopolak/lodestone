@@ -2253,7 +2253,7 @@ pub trait ServerProtocol: Send + Sync {
     /// This is the ninth of nine links in the "torches emit no light" chain, and
     /// it was the only missing one: the client decode, `LightPatch`'s three-state
     /// merge and the re-mesh signal all already existed. See [`crate::light`] for
-    /// the audit and `docs/server-chunk-light.md` for the wire format.
+    /// the audit and `docs/server-light.md` for the wire format.
     ///
     /// # The wire order is not [`ColumnLight`]'s argument order
     ///
@@ -2288,22 +2288,38 @@ pub trait ServerProtocol: Send + Sync {
     /// [`encode_chunk`](Self::encode_chunk) crosses. So the implementor converts
     /// and floods, and the server only decides *when* to ask.
     ///
-    /// The result is the **isolated** compute — light entering from a neighbouring
-    /// column is not pulled in. That is the same residual `encode_chunk` already
-    /// carries (`docs/server-chunk-light.md` records it as a measured Δ5 sky-light
-    /// dark bias at column borders), and closing it needs light computed in the
-    /// chunk source where the 3×3 neighbourhood is resident, not a wider signature
-    /// here. **If a column ever carries precomputed light, `ChunkColumn::set_block`
-    /// and `ChunkStore::set_block` must invalidate it** — both write blocks into a
-    /// retained column without touching anything derived from them, and stale
-    /// light produces a correct-looking wire, a re-meshed client, and no change on
-    /// screen.
+    /// The default result is an **isolated** compute. Families that opt into
+    /// [`compute_column_light_with_neighbours`](Self::compute_column_light_with_neighbours)
+    /// receive the loaded 3×3 neighbourhood instead, which supplies every cell
+    /// that can contribute across the centre column's border. This remains a
+    /// transient compute: no column carries a light cache that block writes could
+    /// leave stale.
     ///
     /// The default answers `None`, which the server reads as "this family cannot
     /// compute light", and it falls back to the column resend.
     fn compute_column_light(&self, column: &ChunkColumn) -> Option<lodestone_world::ColumnLight> {
         let _ = column;
         None
+    }
+
+    /// Whether this family uses the loaded 3×3 chunk neighbourhood when it
+    /// computes light. The default preserves the isolated light compute for
+    /// families that have not adopted cross-column propagation.
+    fn uses_cross_column_light(&self) -> bool {
+        false
+    }
+
+    /// Computes light for `column` with the eight adjacent columns available.
+    /// Each tuple is a chunk-relative `(dx, dz)` in `-1..=1`, excluding
+    /// `(0, 0)`. This is called only when [`uses_cross_column_light`](Self::uses_cross_column_light)
+    /// is true; the default delegates to the isolated compute so an implementor
+    /// cannot accidentally claim the capability without producing light.
+    fn compute_column_light_with_neighbours(
+        &self,
+        column: &ChunkColumn,
+        _neighbours: &[(i32, i32, ChunkColumn)],
+    ) -> Option<lodestone_world::ColumnLight> {
+        self.compute_column_light(column)
     }
 
     /// Emits any directives to send right after the initial chunk batch has
@@ -3636,6 +3652,18 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn compute_column_light(&self, column: &ChunkColumn) -> Option<lodestone_world::ColumnLight> {
         (**self).compute_column_light(column)
+    }
+
+    fn uses_cross_column_light(&self) -> bool {
+        (**self).uses_cross_column_light()
+    }
+
+    fn compute_column_light_with_neighbours(
+        &self,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+    ) -> Option<lodestone_world::ColumnLight> {
+        (**self).compute_column_light_with_neighbours(column, neighbours)
     }
 
     fn welcome_message(&self) -> Vec<ServerDirective> {

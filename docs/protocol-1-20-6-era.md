@@ -267,9 +267,11 @@ non-plains biomes and block entities return explicit chunk-encoding errors.
 Sky and block light are computed over canonical states with the shared light
 solver and the canonical per-state opacity/emission table. Initial chunks carry
 the result inline; edits use the server's relight path and this family's
-light-update packet. The compute is isolated to one column, so neighbouring
-columns cannot contribute light across borders. External-client acceptance and
-broader Play coverage remain unverified.
+light-update packet. A relevant edit supplies the shared solver with the loaded
+3×3 column neighbourhood, so adjacent columns contribute at seams; it
+recomputes and sends that whole bounded footprint. Initial chunk batches still
+use their single-column encoder input, so cross-column light at first load,
+external-client acceptance, and broader Play coverage remain unverified.
 
 To extend hosting, change this family's `server_protocol` and add outside wire
 controls to `tests/server_protocol.rs`. `tests/hosting_configuration.rs` records
@@ -284,9 +286,11 @@ requires every recorded payload to arrive before the finish signal.
 path through Play, chunk receipt, movement-driven view recentering, and block
 break.
 Its enclosed-room lighting gate checks sky 0 inside and 15 outside, torch 14,
-adjacent air 13, and extinction after removing the torch. Fixture opacity and
-emission are cross-checked against the protocol-766 block report in the vendored
-dataset. The test reads the same client light snapshots that feed rendering.
+adjacent air 13, and extinction after removing the torch. A separate boundary
+gate starts from isolated sky 0 beneath an opaque roof, removes a border
+occluder, and observes the independent 14-level light entering from the open
+east column in the client's render-light snapshot. Fixture opacity and emission
+are cross-checked against the protocol-766 block report in the vendored dataset.
 
 ## Dependencies
 

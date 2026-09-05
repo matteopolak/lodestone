@@ -142,6 +142,22 @@ fn served_light(column: &ChunkColumn) -> lodestone_world::ColumnLight {
     lodestone_world::compute_column_light(&HostedLightVolume(column), &CanonicalLightProperties)
 }
 
+fn served_light_with_neighbours(
+    column: &ChunkColumn,
+    neighbours: &[(i32, i32, ChunkColumn)],
+) -> lodestone_world::ColumnLight {
+    let center = HostedLightVolume(column);
+    let volumes = neighbours
+        .iter()
+        .map(|(_, _, neighbour)| HostedLightVolume(neighbour))
+        .collect::<Vec<_>>();
+    let mut neighbourhood = lodestone_world::Neighbourhood::new(&center);
+    for ((dx, dz, _), volume) in neighbours.iter().zip(&volumes) {
+        neighbourhood = neighbourhood.with(*dx, *dz, volume);
+    }
+    lodestone_world::compute_column_light_with_neighbours(&neighbourhood, &CanonicalLightProperties)
+}
+
 fn wire_inverse() -> &'static std::collections::BTreeMap<u32, Option<u32>> {
     static INVERSE: std::sync::OnceLock<std::collections::BTreeMap<u32, Option<u32>>> =
         std::sync::OnceLock::new();
@@ -519,6 +535,22 @@ impl ServerProtocol for V774ServerProtocol {
             return None;
         }
         Some(served_light(column))
+    }
+
+    fn uses_cross_column_light(&self) -> bool {
+        true
+    }
+
+    fn compute_column_light_with_neighbours(
+        &self,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+    ) -> Option<lodestone_world::ColumnLight> {
+        let end = column.min_y.checked_add(column.height)?;
+        if column.min_y > MIN_Y || end < MIN_Y + HEIGHT {
+            return None;
+        }
+        Some(served_light_with_neighbours(column, neighbours))
     }
 
     fn encode_light_update(&self, cx: i32, cz: i32, light: &lodestone_world::ColumnLight) -> ServerDirective {

@@ -5218,14 +5218,11 @@ where
 ///
 /// # What this does *not* fix
 ///
-/// `compute_column_light` is the **isolated** compute, so light still does not
-/// cross a column border and the measured Δ5 sky-light dark bias at borders is
-/// unchanged — this is a cheaper carrier for the same values, not a better
-/// computation. `should_relight` compares emission and dampening. The border
-/// case needs light computed where the 3×3 neighbourhood is resident (the
-/// chunk source) and carried on the column; see
-/// `crate::light` and `docs/server-chunk-light.md`, including the invalidation
-/// trap that makes stale light look like a working fix.
+/// Families that opt into cross-column light receive a fresh 3×3 neighbourhood
+/// for each recompute, and this function resends that same 3×3 footprint after
+/// a relevant edit. Other families retain the isolated single-column path.
+/// `should_relight` compares emission and dampening; see `crate::light` and
+/// `docs/server-light.md`.
 ///
 /// The remaining cost on this task is the `source.column(cx, cz)` fetch itself —
 /// a retained-column clone warm, a full generation cold — which is why the
@@ -5247,7 +5244,15 @@ where
     if !crate::light::should_relight(old_state, new_state) {
         return Ok(());
     }
-    send_column_light(conn, proto, source, state, pos.x.div_euclid(16), pos.z.div_euclid(16)).await
+    send_lighting_for_edit(
+        conn,
+        proto,
+        source,
+        state,
+        pos.x.div_euclid(16),
+        pos.z.div_euclid(16),
+    )
+    .await
 }
 
 /// [`resend_column_for_light`] with the predicate removed — recompute and send one
@@ -5291,7 +5296,17 @@ where
     // Both halves have to be present for the cheap path: a family that can
     // compute light but not encode the packet (or the reverse) would otherwise
     // silently send nothing, which is the exact island this replaces.
-    if let Some(light) = proto.compute_column_light(&column) {
+    let light = if proto.uses_cross_column_light() {
+        let neighbours = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+            .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+            .map(|(dx, dz)| (dx, dz, source.column(cx + dx, cz + dz)))
+            .collect::<Vec<_>>();
+        proto.compute_column_light_with_neighbours(&column, &neighbours)
+    } else {
+        proto.compute_column_light(&column)
+    };
+    if let Some(light) = light {
         let directive = proto.encode_light_update(cx, cz, &light);
         if !matches!(directive, ServerDirective::None) {
             apply(conn, state, directive).await?;
@@ -5309,6 +5324,32 @@ where
     };
     apply(conn, state, directive).await?;
     apply(conn, state, proto.end_chunk_batch(1)).await?;
+    Ok(())
+}
+
+/// Recomputes every column a boundary edit can affect. A light source can cross
+/// either seam and a corner, so the correct bounded footprint is the edited
+/// column plus all eight neighbours; the light engine's 15-block radius cannot
+/// reach beyond that 3×3 footprint.
+async fn send_lighting_for_edit<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    cx: i32,
+    cz: i32,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + ?Sized,
+{
+    let radius = i32::from(proto.uses_cross_column_light());
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            send_column_light(conn, proto, source, state, cx + dx, cz + dz).await?;
+        }
+    }
     Ok(())
 }
 
@@ -14255,7 +14296,7 @@ where
                 //
                 // Deduplicated by column, and that is what makes it affordable: a
                 // fluid cascade rewrites many cells in one column in a single tick,
-                // and each relight is a whole-column flood. `send_column_light`
+                // and each relight is a whole-column flood. `send_lighting_for_edit`
                 // is used because the feed carries only
                 // the replacement state; without a comparison baseline, a
                 // predicate cannot gate the resend.
@@ -14271,7 +14312,7 @@ where
                 // column at a time has nothing to offload, and it is the same
                 // accessor `resend_column_for_light`'s callers already use.
                 for (cx, cz) in relight {
-                    send_column_light(conn, proto, source.get(), &mut state, cx, cz).await?;
+                    send_lighting_for_edit(conn, proto, source.get(), &mut state, cx, cz).await?;
                 }
                 // Drain the feed's effect lane: world-tick sounds, particles,
                 // and level events. These effects share the feed's single
