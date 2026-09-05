@@ -107,6 +107,23 @@ pub struct NativeEntityRecord {
     pub rotation: lodestone_model::Rotation,
 }
 
+/// One complete, currently supported typed general record in native storage.
+///
+/// This is an export/read boundary, not an opaque general-record passthrough.
+/// The returned value has already been checked against its reserved key and
+/// decoded through the same bounded readers used by direct lookups. A future
+/// general body needs an explicit variant and consumer here before a snapshot
+/// can expose it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NativeGeneralRecord {
+    /// The world's one typed scalar-properties record.
+    WorldProperties(WorldProperties),
+    /// One bounded player locator plus supported player fields.
+    Player(NativePlayerData),
+    /// One bounded resident-entity pose.
+    Entity(NativeEntityRecord),
+}
+
 /// One source-column batch in a reviewed resident-entity import.
 ///
 /// The column and vertical extent remain part of the input, so every pose is
@@ -238,6 +255,8 @@ pub enum Error {
     Entity(EntityRecordError),
     /// The one native world-properties record is malformed or unsupported.
     WorldProperties(WorldPropertiesError),
+    /// A committed general record cannot be safely exposed as a typed value.
+    GeneralRecord(GeneralRecordError),
 }
 
 impl fmt::Display for Error {
@@ -252,6 +271,9 @@ impl fmt::Display for Error {
             Self::Entity(error) => write!(formatter, "native entity record failed: {error}"),
             Self::WorldProperties(error) => {
                 write!(formatter, "native world-properties record failed: {error}")
+            }
+            Self::GeneralRecord(error) => {
+                write!(formatter, "native general-record snapshot failed: {error}")
             }
         }
     }
@@ -286,6 +308,12 @@ impl From<EntityRecordError> for Error {
 impl From<WorldPropertiesError> for Error {
     fn from(error: WorldPropertiesError) -> Self {
         Self::WorldProperties(error)
+    }
+}
+
+impl From<GeneralRecordError> for Error {
+    fn from(error: GeneralRecordError) -> Self {
+        Self::GeneralRecord(error)
     }
 }
 
@@ -591,6 +619,56 @@ impl fmt::Display for WorldPropertiesError {
 
 impl std::error::Error for WorldPropertiesError {}
 
+/// A committed general record that cannot be routed to one supported typed
+/// native value.
+#[derive(Debug, PartialEq)]
+pub enum GeneralRecordError {
+    /// The envelope did not contain a general body.
+    MissingGeneralBody,
+    /// The general body did not select a known typed native record.
+    MissingTypedBody,
+    /// The world's scalar record was not stored at its one reserved key.
+    WorldPropertiesKey { actual: RecordKey },
+    /// A player body's UUID-derived key does not match its stored key.
+    PlayerKey { expected: RecordKey, actual: RecordKey },
+    /// An entity body's UUID-derived key does not match its stored key.
+    EntityKey { expected: RecordKey, actual: RecordKey },
+    /// The world-properties body failed its bounded typed reader.
+    WorldProperties(WorldPropertiesError),
+    /// The player body failed its bounded typed reader.
+    Player(PlayerRecordError),
+    /// The entity body failed its bounded typed reader.
+    Entity(EntityRecordError),
+}
+
+impl fmt::Display for GeneralRecordError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingGeneralBody => formatter.write_str("record does not contain a general body"),
+            Self::MissingTypedBody => {
+                formatter.write_str("general record does not select a supported typed body")
+            }
+            Self::WorldPropertiesKey { actual } => write!(
+                formatter,
+                "world-properties record uses {actual:?}, not its reserved key"
+            ),
+            Self::PlayerKey { expected, actual } => write!(
+                formatter,
+                "player record key {actual:?} does not match UUID-derived key {expected:?}"
+            ),
+            Self::EntityKey { expected, actual } => write!(
+                formatter,
+                "entity record key {actual:?} does not match UUID-derived key {expected:?}"
+            ),
+            Self::WorldProperties(error) => write!(formatter, "world-properties body failed: {error}"),
+            Self::Player(error) => write!(formatter, "player body failed: {error}"),
+            Self::Entity(error) => write!(formatter, "entity body failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for GeneralRecordError {}
+
 /// A malformed, unsupported, or ambiguous native player locator record.
 #[derive(Debug, Eq, PartialEq)]
 pub enum PlayerRecordError {
@@ -757,6 +835,7 @@ trait DirtyRecordStore: Send {
     fn write_transaction(&mut self, writes: Vec<RecordWrite>) -> Result<(), StoreError>;
     fn get(&mut self, key: RecordKey) -> Result<Option<StorageRecord>, StoreError>;
     fn committed_chunk_coordinates(&self) -> Vec<NativeChunkCoordinate>;
+    fn committed_general_keys(&self) -> Vec<RecordKey>;
     fn extension_table(&self) -> ExtensionTable;
     fn register_extensions(
         &mut self,
@@ -775,6 +854,10 @@ impl DirtyRecordStore for NativeStore {
 
     fn committed_chunk_coordinates(&self) -> Vec<NativeChunkCoordinate> {
         NativeStore::committed_chunk_coordinates(self)
+    }
+
+    fn committed_general_keys(&self) -> Vec<RecordKey> {
+        NativeStore::committed_general_keys(self)
     }
 
     fn extension_table(&self) -> ExtensionTable {
@@ -878,6 +961,32 @@ impl WorldStorage {
             .lock()
             .expect("world storage lock poisoned")
             .committed_chunk_coordinates())
+    }
+
+    /// Snapshots every committed supported native general record in key order.
+    ///
+    /// The store keeps its lock while it copies the recovered key index and
+    /// decodes each selected envelope, so a later writer cannot replace one
+    /// record between discovery and decoding. Each body must occupy the exact
+    /// key reserved by its typed identity; malformed, extension-bearing, or
+    /// unknown bodies fail the entire snapshot rather than becoming an opaque
+    /// export candidate. Anvil has no native general-record index and rejects
+    /// this request without reading compatibility files.
+    pub fn native_general_records(&self) -> Result<Vec<NativeGeneralRecord>, Error> {
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        let mut native = native.lock().expect("world storage lock poisoned");
+        native
+            .committed_general_keys()
+            .into_iter()
+            .map(|key| {
+                let record = native
+                    .get(key)?
+                    .expect("a key copied from the native index must remain readable while locked");
+                decode_general_record(key, record).map_err(Into::into)
+            })
+            .collect()
     }
 
     /// Registers named extension schemas in the selected native backend.
@@ -1841,6 +1950,60 @@ fn decode_world_properties(record: StorageRecord) -> Result<WorldProperties, Wor
     Ok(properties)
 }
 
+fn decode_general_record(
+    key: RecordKey,
+    record: StorageRecord,
+) -> Result<NativeGeneralRecord, GeneralRecordError> {
+    let Some(storage_record::Record::General(general)) = record.record.as_ref() else {
+        return Err(GeneralRecordError::MissingGeneralBody);
+    };
+    match general.record.as_ref() {
+        Some(general_record::Record::WorldProperties(_)) => {
+            if key != WORLD_PROPERTIES_KEY {
+                return Err(GeneralRecordError::WorldPropertiesKey { actual: key });
+            }
+            decode_world_properties(record)
+                .map(NativeGeneralRecord::WorldProperties)
+                .map_err(GeneralRecordError::WorldProperties)
+        }
+        Some(general_record::Record::Player(player)) => {
+            let actual = player.player_uuid.len();
+            let uuid = player
+                .player_uuid
+                .as_slice()
+                .try_into()
+                .map_err(|_| GeneralRecordError::Player(PlayerRecordError::InvalidUuidLength {
+                    actual,
+                }))?;
+            let expected = player_key(uuid);
+            if key != expected {
+                return Err(GeneralRecordError::PlayerKey { expected, actual: key });
+            }
+            decode_player(uuid, record)
+                .map(NativeGeneralRecord::Player)
+                .map_err(GeneralRecordError::Player)
+        }
+        Some(general_record::Record::Entity(entity)) => {
+            let actual = entity.entity_uuid.len();
+            let uuid = entity
+                .entity_uuid
+                .as_slice()
+                .try_into()
+                .map_err(|_| GeneralRecordError::Entity(EntityRecordError::InvalidUuidLength {
+                    actual,
+                }))?;
+            let expected = entity_key(uuid);
+            if key != expected {
+                return Err(GeneralRecordError::EntityKey { expected, actual: key });
+            }
+            decode_entity(uuid, record)
+                .map(NativeGeneralRecord::Entity)
+                .map_err(GeneralRecordError::Entity)
+        }
+        None => Err(GeneralRecordError::MissingTypedBody),
+    }
+}
+
 fn encode_world_properties(properties: WorldProperties) -> StorageRecord {
     StorageRecord {
         format_version: FORMAT_VERSION_V1,
@@ -2276,6 +2439,10 @@ mod tests {
             Vec::new()
         }
 
+        fn committed_general_keys(&self) -> Vec<RecordKey> {
+            Vec::new()
+        }
+
         fn extension_table(&self) -> ExtensionTable {
             ExtensionTable {
                 table_version: FORMAT_VERSION_V1,
@@ -2389,6 +2556,10 @@ mod tests {
         ));
         assert!(matches!(
             storage.native_chunk_coordinates(),
+            Err(Error::AnvilDoesNotAcceptTypedRecords)
+        ));
+        assert!(matches!(
+            storage.native_general_records(),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
         assert!(matches!(
@@ -2722,6 +2893,120 @@ mod tests {
             "one UUID must not make a player locator and resident entity alias"
         );
         drop(reopened);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_general_snapshot_decodes_reserved_typed_records_in_key_order() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-general-snapshot-{}-{unique}",
+            std::process::id()
+        ));
+        let properties = WorldProperties {
+            game_data_version: GAME_DATA_VERSION,
+            seed: 12_345,
+            spawn_dimension: BuiltinDimension::Overworld as i32,
+            spawn_x: 1,
+            spawn_y: 64,
+            spawn_z: -2,
+            day_time: 54_321,
+            default_game_mode: StoredGameMode::Survival as i32,
+        };
+        let player = NativePlayerData {
+            locator: NativePlayerRecord {
+                uuid: [1; 16],
+                dimension: BuiltinDimension::Nether,
+                x_fixed: -11,
+                y_fixed: 22,
+                z_fixed: -33,
+                yaw_millidegrees: 44,
+                pitch_millidegrees: -55,
+            },
+            game_mode: Some(lodestone_model::GameMode::Creative),
+        };
+        let entity = NativeEntityRecord {
+            uuid: [2; 16],
+            entity_type: "minecraft:cow".parse().expect("valid entity type"),
+            dimension: BuiltinDimension::End,
+            position: lodestone_model::Vec3::new(32.5, 70.25, -4.75),
+            rotation: lodestone_model::Rotation::new(45.0, -20.0),
+        };
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        storage
+            .write_dirty_world_properties(properties.clone())
+            .expect("write properties");
+        storage
+            .write_dirty_player_data(player)
+            .expect("write player data");
+        assert_eq!(
+            storage
+                .write_dirty_entities(2, -1, 0, 128, [entity.clone()])
+                .expect("write entity"),
+            1
+        );
+
+        assert_eq!(
+            storage.native_general_records().expect("decode typed snapshot"),
+            [
+                NativeGeneralRecord::WorldProperties(properties),
+                NativeGeneralRecord::Player(player),
+                NativeGeneralRecord::Entity(entity),
+            ],
+            "the recovered index order must become an ordered, complete typed snapshot"
+        );
+        drop(storage);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_general_snapshot_refuses_a_typed_body_under_the_wrong_key() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-general-snapshot-key-{}-{unique}",
+            std::process::id()
+        ));
+        let player = NativePlayerData {
+            locator: NativePlayerRecord {
+                uuid: [0x5a; 16],
+                dimension: BuiltinDimension::Overworld,
+                x_fixed: 0,
+                y_fixed: 64,
+                z_fixed: 0,
+                yaw_millidegrees: 0,
+                pitch_millidegrees: 0,
+            },
+            game_mode: None,
+        };
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        let actual = RecordKey::general(8, 9, 10);
+        storage
+            .write_dirty([RecordWrite::new(
+                actual,
+                encode_player(player).expect("player record encodes"),
+            )])
+            .expect("native store permits general producer-owned keys");
+
+        assert!(matches!(
+            storage.native_general_records(),
+            Err(Error::GeneralRecord(GeneralRecordError::PlayerKey {
+                actual: rejected,
+                ..
+            })) if rejected == actual
+        ));
+        drop(storage);
         std::fs::remove_dir_all(directory).expect("remove native test segment");
     }
 
