@@ -89,7 +89,7 @@ impl JavaAdapter {
                         format!("could not load configured Paper lifecycle entries: {error}")
                     })?;
                     let facade_input = if plan.requires_isolated_native_shim() {
-                        PaperServerFacadeInput::native_server_read(native_surface)
+                        PaperServerFacadeInput::native_server_surface(native_surface)
                     } else {
                         PaperServerFacadeInput::Unavailable
                     };
@@ -203,6 +203,11 @@ impl JavaAdapter {
             server.resident_block_state_id(query.x, query.y, query.z)
                 .map(|state| state.raw())
                 .ok_or_else(|| format!("primary-world block unavailable at {},{},{}", query.x, query.y, query.z))
+        });
+        self.host.service_pending_block_writes(64, |write| {
+            let state = lodestone_data::block_states::StateId::new(write.state_id)
+                .ok_or_else(|| format!("block state id {} is outside this server's state table", write.state_id))?;
+            server.set_resident_block_state_id(write.x, write.y, write.z, state)
         });
         self.host.service_pending_server_tick(64, || {
             server.server_tick_count()

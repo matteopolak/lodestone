@@ -548,8 +548,9 @@ isolated, reported against that descriptor, and does not stop the host from chec
 entries. When the operator
 also requests the isolated native shim, the shared bootstrap loader first resolves
 `lodestone.bridge.IsolatedPaperShim`, verifies its exact static native
-`blockStateId(int, int, int): int` and `serverTickCount(): long` declarations, then registers both
-Rust callbacks before it loads the bootstrap or plugin entry. Each plugin child inherits that one
+`blockStateId(int, int, int): int`, `serverTickCount(): long`, and
+`setBlockStateId(int, int, int, int): int` declarations, then registers all three Rust callbacks
+before it loads the bootstrap or plugin entry. Each plugin child inherits that one
 registration and definition, preventing the same Java API type from being separately defined for
 each plugin loader.
 
@@ -573,7 +574,7 @@ the server-owned API state that this bridge does not yet provide. The retained l
 immediately wrapped in `PaperPluginConstructionPlan`. Its descriptor-backed readiness snapshot keeps
 each plugin's validated name, version, kind, and main class beside the same worker-lifetime loader
 that resolved its entry. It reports `PaperServerFacadeState::Unavailable` when no native surface was
-installed, `PaperServerFacadeState::NativeServerRead` when the narrow native reads are installed, and
+installed, `PaperServerFacadeState::NativeServerSurface` when the narrow native state seam is installed, and
 `EntryLoadFailed` for an entry with no retained class. There is deliberately no ready-to-construct
 state and no Java constructor call: a later slice must install a real,
 server-owned facade through that retained loader before it may add one. Enablement, disabling, and
@@ -624,8 +625,12 @@ public block-state accessor, and polls `TickCompleted` before dispatching again.
 one outstanding tick, so a slow callback cannot silently build a backlog. `BlockStateQuery` uses
 absolute primary-world block coordinates. The host returns either a real `u32` state ID or a named
 error; an unavailable chunk must not be reported as air. Values outside Java's nonnegative `int`
-range fail explicitly. This bootstrap exposes an observation only, not block mutation or event
-cancellation semantics.
+range fail explicitly. The isolated shim additionally exposes `setBlockStateId(x, y, z, stateId)`:
+the host validates the non-negative integer against its generated built-in state table, then replaces
+the block only when its primary-world column is already resident and `y` is in that column's stored
+extent. It returns the accepted state id; an unavailable column, invalid state, or out-of-height
+coordinate is a named Java error. The call neither loads nor generates terrain, and it has no event
+cancellation, physics propagation, block-entity, packet-broadcast, or plugin lifecycle semantics.
 
 The registered native function receives a thread-local `WorldPort`, never an ECS world. It enters
 the shared callback-depth guard, applies the port deadline, and contains panics/errors at the JNI
@@ -692,11 +697,13 @@ worker-lifetime lifecycle state and snapshots each descriptor's Load status befo
 bootstrap loader sees shim paths and the server jar; each plugin child sees only its own jar and
 inherits those shared definitions. The worker also snapshots each
 descriptor's construction prerequisite. Without `LODESTONE_PAPER_SHIM_PATH`, no facade is available.
-With it, the dedicated host supplies one Java-facing, loader-local native read surface: block state and
-the current server tick. `AdapterHost::start_with_setup` mints the corresponding capability token only
+With it, the dedicated host supplies one Java-facing, loader-local native state surface: resident
+block-state reads, validated resident block-state replacement, and the current server tick.
+`AdapterHost::start_with_setup` mints the corresponding capability token only
 from its worker's request ports; consuming it keeps that token with the retained loader state, and the
 dedicated `JavaAdapter::poll` call is the matching live producer through
-`IntegratedServer::resident_block_state_id` and `IntegratedServer::server_tick_count`. A lifecycle caller
+`IntegratedServer::resident_block_state_id`, `IntegratedServer::set_resident_block_state_id`, and
+`IntegratedServer::server_tick_count`. A lifecycle caller
 cannot claim that seam with an enum value while no request producer exists. It is not a Bukkit `Server`,
 a plugin loader, or a construction permit: loaded entries remain blocked from construction with a named
 insufficient-facade result. These
@@ -709,19 +716,21 @@ A malformed Paper configuration or bootstrap Load failure saves the world before
 can continue. A plugin-entry Load failure is instead retained as disabled descriptor status, rather
 than silently removing the operator input or preventing the later isolated entries from being checked.
 
-The admin loop services at most 64 block queries and 64 server-tick queries per 1 ms poll. Block
+The admin loop services at most 64 block queries, 64 block writes, and 64 server-tick queries per 1 ms poll. Block
 queries use `IntegratedServer::resident_block_state_id`, which reaches the live primary `ChunkStore`,
 checks presence, and reads the cell under one cache lock. It never invokes generation, reads disk,
 clones a whole column, or returns air for unavailable terrain. `Arc`, borrowed-source and dimension
 wrappers forward this capability. A source with no retained read capability returns `None`; the host
 converts this into a named Java error. Extreme and out-of-height Y coordinates are also unavailable.
 The Rust API returns validated `StateId`; conversion to a raw integer happens only at the Java wire
-boundary. Tick queries use `IntegratedServer::server_tick_count`; an inactive server is likewise a
+boundary. Writes validate that raw value back into `StateId`, render its canonical state string, and
+write through the same live source only after its resident-column preflight succeeds. Tick queries use
+`IntegratedServer::server_tick_count`; an inactive server is likewise a
 named error rather than a fabricated zero, because zero may be a valid future tick count.
 
 The adapter observes the latest completed server tick whenever it becomes idle. Intervening server
 ticks are **coalesced**, not replayed with historical state; the same tick is never dispatched twice.
-This is a read-only bootstrap observation contract, not Paper's per-tick event semantics. Readiness
+This is a narrow native state contract, not Paper's per-tick event semantics. Readiness
 and failures are logged; an asynchronous failure disables the adapter while the server continues.
 Shutdown drops the adapter before saving. Closed stdin suspends only the console-input future, so
 adapter polling and termination signals continue under a supervisor.

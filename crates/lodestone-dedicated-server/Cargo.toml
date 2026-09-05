@@ -30,6 +30,7 @@ path = "src/main.rs"
 [dependencies]
 lodestone-jvm-bridge = { path = "../plugins/lodestone-jvm-bridge", optional = true, features = ["jvm"] }
 lodestone-server = { path = "../lodestone-server" }
+lodestone-data.workspace = true
 # The `ServerProtocol` to host, reached through the registry rather than by
 # naming a version crate directly.
 #

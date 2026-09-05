@@ -114,7 +114,7 @@ fn lifecycle_entries_load_without_initialization() {
             assert_eq!(lifecycle.loaded_plugins()[0].descriptor().name(), "Fixture");
             assert!(lifecycle.loaded_plugins()[0].retains_entry_association());
             let construction = lifecycle
-                .into_construction_plan(PaperServerFacadeInput::native_server_read(
+                .into_construction_plan(PaperServerFacadeInput::native_server_surface(
                     native_surface,
                 ))
                 .expect("retain worker-owned native facade state");
@@ -137,7 +137,7 @@ fn lifecycle_entries_load_without_initialization() {
     let readiness = construction_receiver
         .try_recv()
         .expect("worker must publish construction state before readiness");
-    assert_eq!(readiness.facade(), PaperServerFacadeState::NativeServerRead);
+    assert_eq!(readiness.facade(), PaperServerFacadeState::NativeServerSurface);
     assert_eq!(readiness.plugins()[0].descriptor().name(), "Fixture");
     assert_eq!(
         readiness.plugins()[0].blocker().to_string(),

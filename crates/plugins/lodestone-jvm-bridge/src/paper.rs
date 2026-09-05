@@ -22,7 +22,7 @@ use crate::runtime::{JvmConfig, JvmRuntime};
 #[cfg(feature = "jvm")]
 use crate::native_surface;
 #[cfg(feature = "jvm")]
-use crate::adapter::NativeServerReadSurface;
+use crate::adapter::NativeServerSurface;
 
 const BOOTSTRAP_CLASS: &str = "io.papermc.paper.PaperBootstrap";
 const BOOTSTRAP_ENTRY: &str = "io/papermc/paper/PaperBootstrap.class";
@@ -316,8 +316,8 @@ impl PaperPluginLifecycleStatusSet {
 /// A concrete Java-facing capability supplied by the hosting server.
 ///
 /// This is deliberately an input, not a claim that a Bukkit `Server` object
-/// exists. `NativeServerRead` means the host installed the narrow native
-/// block-state and tick-count declarations in the shared server loader, where
+/// exists. `NativeServerSurface` means the host installed the narrow native
+/// block-state read/write and tick-count declarations in the shared server loader, where
 /// every isolated plugin loader inherits them, and will service their requests
 /// from live server state. It is useful to retain as an exact, real
 /// Java-facing capability, but cannot safely construct a plugin:
@@ -327,10 +327,11 @@ impl PaperPluginLifecycleStatusSet {
 pub enum PaperServerFacadeInput {
     /// No Java-facing server capability is available to a retained loader.
     Unavailable,
-    /// The isolated native shim can read a loaded block-state ID and the live
-    /// server tick through its owning adapter worker's request ports.
+    /// The isolated native shim can read or replace an already-resident block
+    /// state and read the live server tick through its owning adapter worker's
+    /// request ports.
     #[cfg(feature = "jvm")]
-    NativeServerRead(NativeServerReadSurface),
+    NativeServerSurface(NativeServerSurface),
 }
 
 impl PaperServerFacadeInput {
@@ -341,15 +342,15 @@ impl PaperServerFacadeInput {
     /// dedicated-server producers, rather than an enum claim a lifecycle host
     /// can manufacture while no native query can be answered.
     #[cfg(feature = "jvm")]
-    pub fn native_server_read(surface: NativeServerReadSurface) -> Self {
-        Self::NativeServerRead(surface)
+    pub fn native_server_surface(surface: NativeServerSurface) -> Self {
+        Self::NativeServerSurface(surface)
     }
 
     fn state(&self) -> PaperServerFacadeState {
         match self {
             Self::Unavailable => PaperServerFacadeState::Unavailable,
             #[cfg(feature = "jvm")]
-            Self::NativeServerRead(_) => PaperServerFacadeState::NativeServerRead,
+            Self::NativeServerSurface(_) => PaperServerFacadeState::NativeServerSurface,
         }
     }
 
@@ -357,7 +358,7 @@ impl PaperServerFacadeInput {
         match self {
             Self::Unavailable => PaperPluginConstructionBlocker::ServerFacadeUnavailable,
             #[cfg(feature = "jvm")]
-            Self::NativeServerRead(_) => {
+            Self::NativeServerSurface(_) => {
                 PaperPluginConstructionBlocker::PluginConstructionUnsupported
             }
         }
@@ -374,16 +375,16 @@ impl PaperServerFacadeInput {
 pub enum PaperServerFacadeState {
     /// No compatible server facade has been supplied to the retained loader.
     Unavailable,
-    /// The private loader has only the native read-only server seam.
-    NativeServerRead,
+    /// The private loader has only the narrow native server mutation seam.
+    NativeServerSurface,
 }
 
 impl fmt::Display for PaperServerFacadeState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unavailable => formatter.write_str("no compatible server facade is installed"),
-            Self::NativeServerRead => {
-                formatter.write_str("the isolated native server-read seam is installed")
+            Self::NativeServerSurface => {
+                formatter.write_str("the isolated native server mutation seam is installed")
             }
         }
     }
@@ -741,7 +742,7 @@ impl PaperBootstrapPlan {
     /// This is the real JVM consumer of [`Self::load_lifecycle_entries`]. It
     /// deliberately calls `ClassLoader.loadClass`, which does not initialize
     /// the loaded class. If requested, it first validates and registers the
-    /// bridge's native server-read members in that *same* fresh loader. It
+    /// bridge's native server-state members in that *same* fresh loader. It
     /// retains
     /// the non-initialized entry class with its loader and descriptor. Plugin
     /// construction, enablement, and event dispatch are later lifecycle work.
@@ -872,10 +873,10 @@ fn validate_construction_facade(
     match (native_shim, facade_input) {
         (false, PaperServerFacadeInput::Unavailable) => Ok(()),
         #[cfg(feature = "jvm")]
-        (true, PaperServerFacadeInput::NativeServerRead(_)) => Ok(()),
+        (true, PaperServerFacadeInput::NativeServerSurface(_)) => Ok(()),
         #[cfg(feature = "jvm")]
-        (false, PaperServerFacadeInput::NativeServerRead(_)) => Err(PaperBootstrapError::new(
-            "the native server-read facade input requires the shared isolated native shim",
+        (false, PaperServerFacadeInput::NativeServerSurface(_)) => Err(PaperBootstrapError::new(
+            "the native server mutation facade input requires the shared isolated native shim",
         )),
         (true, PaperServerFacadeInput::Unavailable) => Err(PaperBootstrapError::new(
             "an isolated native shim requires the adapter worker's server-owned read capabilities",
