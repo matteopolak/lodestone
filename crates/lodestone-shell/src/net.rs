@@ -124,7 +124,7 @@ use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::TabList;
 use lodestone_model::Vec3f;
 use lodestone_model::action::ResourcePackResponseKind;
-use lodestone_model::event::{ParticleOptions, SoundCategory};
+use lodestone_model::event::{BlockStateRef, LevelEventData, ParticleOptions, SoundCategory};
 // `SectionLight` is imported anonymously: it is the trait carrying
 // `sky_light`/`block_light` on `WorldSectionLight`, and naming it would collide
 // with `lodestone_world::SectionLight`, the *storage* type of the same name that
@@ -929,8 +929,10 @@ pub enum NetUpdate {
     BlockDestroyed {
         /// Block position that broke.
         pos: lodestone_model::BlockPos,
-        /// The block state id the cell held before breaking.
-        state: u32,
+        /// The block state the cell held before breaking. Its source tag stays
+        /// intact until the particle resolver reaches its generated-model
+        /// boundary.
+        state: BlockStateRef,
     },
     /// The server asked for a burst of particles at a world position
     /// (`LEVEL_PARTICLES`) — vanilla's general particle-effect packet, as
@@ -4866,13 +4868,11 @@ fn forward(
         ClientEvent::LevelEvent {
             event: 2001,
             pos,
-            data,
+            data: LevelEventData::BlockState(state),
             ..
         } => NetUpdate::BlockDestroyed {
             pos,
-            // Vanilla reads this as an unsigned state id; a negative here would
-            // be an out-of-range id that the model lookup rejects anyway.
-            state: data as u32,
+            state,
         },
         // The general particle-effect packet. `long_distance` is named after
         // what the field actually controls downstream (see
@@ -5986,6 +5986,85 @@ mod tests {
             }
             other => panic!("expected Particles, got {other:?}"),
         }
+    }
+
+    /// Event `2001` is the other block-state particle ingress. Its payload
+    /// arrives after a version adapter has identified the numbering source, so
+    /// this router must carry the tag unchanged rather than reclassifying a
+    /// small protocol-local number as canonical.
+    #[test]
+    fn forward_preserves_level_event_block_state_sources() {
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        let state = BlockStateRef::canonical(17);
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::LevelEvent {
+                event: 2001,
+                pos: BlockPos::new(1, 2, 3),
+                data: LevelEventData::BlockState(state),
+                global: false,
+            },
+        )
+        .expect("forward does not stop the loop");
+        assert!(matches!(
+            rx.try_recv().expect("the canonical event reaches the shell"),
+            NetUpdate::BlockDestroyed {
+                pos: BlockPos { x: 1, y: 2, z: 3 },
+                state: BlockStateRef::Canonical(17),
+            }
+        ));
+
+        // Negative control: the same valid-looking number from a different
+        // protocol stays local. If the router reconstructed a canonical tag
+        // from the raw number, this would be indistinguishable from the arm
+        // above until the generated-model consumer rendered the wrong block.
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::LevelEvent {
+                event: 2001,
+                pos: BlockPos::new(4, 5, 6),
+                data: LevelEventData::BlockState(BlockStateRef::protocol_local(17)),
+                global: false,
+            },
+        )
+        .expect("forward does not stop the loop");
+        assert!(matches!(
+            rx.try_recv().expect("the protocol-local event remains observable"),
+            NetUpdate::BlockDestroyed {
+                state: BlockStateRef::ProtocolLocal(17),
+                ..
+            }
+        ));
+
+        // A raw payload is not a state merely because an event code happens
+        // to be 2001. This control prevents a future generic producer from
+        // bypassing the adapter-side source classification.
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::LevelEvent {
+                event: 2001,
+                pos: BlockPos::new(7, 8, 9),
+                data: LevelEventData::Raw(17),
+                global: false,
+            },
+        )
+        .expect("forward does not stop the loop");
+        assert!(
+            rx.try_recv().is_err(),
+            "a raw level-event payload must not bypass block-state source tagging"
+        );
     }
 
     /// Player report: "the creeper has a hiss but no explosion sound."

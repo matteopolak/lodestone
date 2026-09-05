@@ -271,7 +271,9 @@ impl Sim {
             // block's outline shape, which the shell does not carry, so debris
             // from a slab or fence fills the whole cell rather than hugging the
             // model.
-            self.particles_mut(|p| p.destroy_block(hit.block, broken, [1.0; 3]));
+            self.particles_mut(|p| {
+                p.destroy_block(hit.block, BlockStateRef::canonical(broken), [1.0; 3]);
+            });
             // Vanilla's own break is *predicted*, not received: the client's
             // own destroy-block path runs a will-destroy hook, then spawns the
             // destroy particles, then raises a level event, and

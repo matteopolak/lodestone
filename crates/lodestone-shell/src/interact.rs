@@ -80,7 +80,7 @@ use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
 use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, FrameClock, GameTick, TickSet, VersionData};
 use lodestone_game::mining::Mining;
 use lodestone_game::placement::{Placement, UseOnContext, UseOnDecision};
-use lodestone_model::{BlockFace, PlayerCommand};
+use lodestone_model::{BlockFace, BlockStateRef, PlayerCommand};
 use lodestone_physics::Vec3d;
 
 use crate::blocks::id;
@@ -865,9 +865,12 @@ pub fn drive_mining(
         // Full-cube shape and untinted white, for the same reason as the
         // destroy-burst debris: the shell does not carry a block's outline shape,
         // so the chip approximates with the unit cube rather than the true model.
-        particles
-            .0
-            .breaking_block(hit.block, id_value, [1.0; 3], particle_face(face));
+        particles.0.breaking_block(
+            hit.block,
+            BlockStateRef::canonical(id_value),
+            [1.0; 3],
+            particle_face(face),
+        );
     }
     // The debris burst at the moment a block actually breaks.
     // Keyed on **destruction**, not on the `StopDestroy` packet.
@@ -970,7 +973,11 @@ pub fn drive_mining(
         //
         // `id_value`, not `id::AIR`: the burst must show the block that *was*
         // there, not the air it just became.
-        particles.0.destroy_block(hit.block, id_value, [1.0; 3]);
+        particles.0.destroy_block(
+            hit.block,
+            BlockStateRef::canonical(id_value),
+            [1.0; 3],
+        );
         // The break sound, predicted locally for the same reason
         // `drive_placement`'s is: vanilla's own server-side player-game-mode
         // destroy-block calls

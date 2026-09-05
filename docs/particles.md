@@ -52,13 +52,16 @@ opaque `SpriteSource::BlockState(StateId)` with no atlas and no tint opinion; `l
 The shell is the generated-state ingress for both decoded block-particle options and local break effects.
 The version-free `lodestone_model::BlockStateRef` tags a 26.2 global id as `Canonical`, while a legacy
 family or synchronized extension keeps its numeric value as `ProtocolLocal`; an overlapping small number
-must not accidentally become a 26.2 state just because it fits this build's table. The particle seam
-validates only `Canonical` ids into `lodestone_data::block_states::StateId`; particle emitters and
-`SpriteSource::BlockState` retain that proof, and the shell lowers it to a raw atlas index only at the
-final indexed lookup. An out-of-census canonical value drops there; a protocol-local/custom value is
-not rendered by this built-in resolver rather than being coerced into a built-in state. A version or
-dynamic-registry renderer can dispatch on its `BlockStateRef` source without reconstructing intent from
-the raw number.
+must not accidentally become a 26.2 state just because it fits this build's table. The same tag reaches
+the destroy-burst route through `LevelEventData::BlockState`: adapters classify level-event `2001` before
+the generic `ClientEvent::LevelEvent` loses its protocol context, `net.rs` forwards it as
+`NetUpdate::BlockDestroyed`, and `sim/net_apply.rs` hands it to `Particles::destroy_block` unchanged.
+The particle seam validates only `Canonical` ids into `lodestone_data::block_states::StateId`; particle
+emitters and `SpriteSource::BlockState` retain that proof, and the shell lowers it to a raw atlas index
+only at the final indexed lookup. An out-of-census canonical value drops there; a protocol-local/custom
+value is not rendered by this built-in resolver rather than being coerced into a built-in state. A version
+or dynamic-registry renderer can dispatch on its `BlockStateRef` source without reconstructing intent
+from the raw number.
 
 Item crumbs follow the same ownership rule. `SpriteSource::Item` carries the generated
 `lodestone_data::item::Item` enum, not a numeric registry value. The only two producers are a local

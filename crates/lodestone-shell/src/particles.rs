@@ -228,6 +228,32 @@ pub struct Particles {
     last: ParticleFrame,
 }
 
+/// Lowers a source-tagged state only where the built-in particle tables need a
+/// generated-state index. A protocol-local value can overlap this build's
+/// census, but its numeric range is not permission to render it as 26.2.
+fn built_in_state_for_particles(
+    state: BlockStateRef,
+    effect: &str,
+) -> Option<lodestone_data::block_states::StateId> {
+    let BlockStateRef::Canonical(raw) = state else {
+        tracing::debug!(
+            target: "particles",
+            raw = state.raw(),
+            "protocol-local or custom block state for {effect}; not rendered by the built-in resolver"
+        );
+        return None;
+    };
+    let Some(state) = lodestone_data::block_states::StateId::new(raw) else {
+        tracing::debug!(
+            target: "particles",
+            raw,
+            "out-of-census canonical block state for {effect}; dropped"
+        );
+        return None;
+    };
+    Some(state)
+}
+
 impl Particles {
     /// Build the simulation. `models`, when present, supplies each block state's
     /// `#particle` sprite; without it terrain particles still *simulate* but
@@ -373,12 +399,8 @@ impl Particles {
     /// particle tint, not a replacement for it — see
     /// [`state_tint_of`](Self::state_tint_of). Callers that have nothing special
     /// to say pass `[1.0; 3]`.
-    pub fn destroy_block(&mut self, block: [i32; 3], state: u32, tint: [f32; 3]) {
-        let Some(state) = lodestone_data::block_states::StateId::new(state) else {
-            tracing::debug!(
-                target: "particles",
-                "unknown block state for destroy debris; dropped"
-            );
+    pub fn destroy_block(&mut self, block: [i32; 3], state: BlockStateRef, tint: [f32; 3]) {
+        let Some(state) = built_in_state_for_particles(state, "destroy debris") else {
             return;
         };
         let tint = self.state_tint_of(state, tint);
@@ -398,12 +420,14 @@ impl Particles {
     /// exactly as in [`destroy_block`](Self::destroy_block): the two emitters
     /// both construct vanilla's own terrain particle, so they must tint identically or a
     /// block's mining flecks and its final burst come out different colours.
-    pub fn breaking_block(&mut self, block: [i32; 3], state: u32, tint: [f32; 3], face: emit::Face) {
-        let Some(state) = lodestone_data::block_states::StateId::new(state) else {
-            tracing::debug!(
-                target: "particles",
-                "unknown block state for mining debris; dropped"
-            );
+    pub fn breaking_block(
+        &mut self,
+        block: [i32; 3],
+        state: BlockStateRef,
+        tint: [f32; 3],
+        face: emit::Face,
+    ) {
+        let Some(state) = built_in_state_for_particles(state, "mining debris") else {
             return;
         };
         let tint = self.state_tint_of(state, tint);
@@ -3036,7 +3060,7 @@ mod tests {
         p.sheet_uv = Arc::new(HashMap::from([((Sheet::Flame, 0u16), rect)]));
 
         // Terrain debris — the block-model atlas.
-        p.destroy_block([0, 64, 0], 1, [1.0; 3]);
+        p.destroy_block([0, 64, 0], BlockStateRef::canonical(1), [1.0; 3]);
         let terrain = p.extract(&Camera::default(), 0.0, &|_, _, _| {
             Some(lodestone_particle::FULL_BRIGHT)
         });
@@ -3179,7 +3203,11 @@ mod tests {
     #[test]
     fn terrain_particles_without_models_are_counted_unresolved() {
         let mut p = Particles::new(None);
-        p.destroy_block([0, 64, 0], 1, [1.0, 1.0, 1.0]);
+        p.destroy_block(
+            [0, 64, 0],
+            BlockStateRef::canonical(1),
+            [1.0, 1.0, 1.0],
+        );
         assert!(
             p.engine.particles().len() >= 64,
             "a full cube throws 4^3 fragments; got {}",
@@ -3204,7 +3232,11 @@ mod tests {
         let rect = [0.25f32, 0.5, 0.3125, 0.5625];
         let mut p = Particles::new(None);
         p.state_uv = Arc::new(vec![None, Some(rect)]);
-        p.destroy_block([0, 64, 0], 1, [1.0, 1.0, 1.0]);
+        p.destroy_block(
+            [0, 64, 0],
+            BlockStateRef::canonical(1),
+            [1.0, 1.0, 1.0],
+        );
 
         let camera = Camera::default();
         let frame = p.extract(&camera, 0.0, &|_, _, _| Some(lodestone_particle::FULL_BRIGHT));
@@ -3747,7 +3779,11 @@ mod tests {
         let rect = [0.0f32, 0.0, 1.0, 1.0];
         let mut p = Particles::new(None);
         p.state_uv = Arc::new(vec![None, Some(rect)]);
-        p.destroy_block([0, 64, 0], 1, [1.0, 1.0, 1.0]);
+        p.destroy_block(
+            [0, 64, 0],
+            BlockStateRef::canonical(1),
+            [1.0, 1.0, 1.0],
+        );
 
         // The shade now travels in its own instance lane instead of being folded
         // into `colour`, so these read it directly rather than dividing out the
@@ -3853,7 +3889,7 @@ mod tests {
 
         let colour_of = |p: &mut Particles, state: u32| -> [f32; 4] {
             p.engine.clear();
-            p.destroy_block([0, 64, 0], state, [1.0; 3]);
+            p.destroy_block([0, 64, 0], BlockStateRef::canonical(state), [1.0; 3]);
             let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
                 Some(lodestone_particle::FULL_BRIGHT)
             });
@@ -3885,7 +3921,7 @@ mod tests {
         // A caller-supplied tint composes with the state's, rather than being
         // ignored or replacing it.
         p.engine.clear();
-        p.destroy_block([0, 64, 0], 2, [0.5, 0.5, 0.5]);
+        p.destroy_block([0, 64, 0], BlockStateRef::canonical(2), [0.5, 0.5, 0.5]);
         let _ = p.extract(&Camera::default(), 0.0, &|_, _, _| {
             Some(lodestone_particle::FULL_BRIGHT)
         });
@@ -3897,26 +3933,55 @@ mod tests {
         );
     }
 
-    /// Direct local destroy effects share the same state ingress as the packet
-    /// family: an out-of-census state is dropped before it can become a sprite
-    /// lookup. The valid-state control prevents a no-op emitter from passing.
+    /// Direct local destroy effects lower only canonical values at the same
+    /// generated-state boundary as the packet family. A protocol-local value
+    /// may overlap the census but must still be dropped; the canonical control
+    /// proves the detector is not a no-op.
     #[test]
-    fn direct_destroy_effects_reject_out_of_census_states() {
+    fn direct_destroy_effects_respect_source_and_census() {
         let mut p = Particles::new(None);
+        let stone = lodestone_data::block::Block::Stone.default_state().raw();
         p.destroy_block(
             [0, 64, 0],
-            lodestone_data::block::Block::Stone.default_state().raw(),
+            BlockStateRef::protocol_local(stone),
             [1.0; 3],
         );
+        assert!(
+            p.engine.is_empty(),
+            "a protocol-local value must not select a built-in sprite merely because its raw number fits"
+        );
+        p.destroy_block([0, 64, 0], BlockStateRef::canonical(stone), [1.0; 3]);
         assert_eq!(
             p.engine.particles().len(),
             64,
             "a valid built-in state must still produce the full-cube burst"
         );
         p.engine.clear();
+        p.breaking_block(
+            [0, 64, 0],
+            BlockStateRef::protocol_local(stone),
+            [1.0; 3],
+            emit::Face::Up,
+        );
+        assert!(
+            p.engine.is_empty(),
+            "the mining-hit emitter must reject the same protocol-local state"
+        );
+        p.breaking_block(
+            [0, 64, 0],
+            BlockStateRef::canonical(stone),
+            [1.0; 3],
+            emit::Face::Up,
+        );
+        assert_eq!(
+            p.engine.particles().len(),
+            1,
+            "the canonical mining-hit control must emit exactly one fragment"
+        );
+        p.engine.clear();
         p.destroy_block(
             [0, 64, 0],
-            lodestone_data::block_states::STATE_COUNT,
+            BlockStateRef::canonical(lodestone_data::block_states::STATE_COUNT),
             [1.0; 3],
         );
         assert!(
@@ -3942,7 +4007,11 @@ mod tests {
         }
 
         let mut p = Particles::new(None);
-        p.destroy_block([0, 64, 0], 1, [1.0, 1.0, 1.0]);
+        p.destroy_block(
+            [0, 64, 0],
+            BlockStateRef::canonical(1),
+            [1.0, 1.0, 1.0],
+        );
         let start = p.engine.particles().len();
         assert!(start >= 64);
         for _ in 0..200 {

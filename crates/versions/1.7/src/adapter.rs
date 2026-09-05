@@ -9,12 +9,12 @@ use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::block_states;
 use lodestone_data::mob_effects::mob_effect_name;
 use lodestone_model::{
-    AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockPos, ChatKind, ChatMode,
-    ChunkPos, ClientAction, ClientActionKind, ClientEvent, ClientSettings, ConnectionState,
+    AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockPos, BlockStateRef, ChatKind,
+    ChatMode, ChunkPos, ClientAction, ClientActionKind, ClientEvent, ClientSettings, ConnectionState,
     Directive, EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment,
     EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile,
-    PlayerCommand, PlayerListEntry, ResourceKey, Rotation, SectionPos, ServerAddress,
-    SoundCategory, TeleportFlags, Text, Vec3, VersionAdapter,
+    LevelEventData, PlayerCommand, PlayerListEntry, ResourceKey, Rotation, SectionPos,
+    ServerAddress, SoundCategory, TeleportFlags, Text, Vec3, VersionAdapter,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk, WorldSink};
 
@@ -53,6 +53,17 @@ use crate::packets::world::{
 
 /// Protocol version implemented by this adapter.
 pub const PROTOCOL: i32 = 5;
+
+/// Tags the block-break event's payload without pretending protocol 5's state
+/// numbering is this build's generated numbering. All other event payloads
+/// retain their signed event-specific shape.
+fn level_event_data(event: i32, data: i32) -> LevelEventData {
+    if event == 2001 {
+        LevelEventData::BlockState(BlockStateRef::protocol_local(data as u32))
+    } else {
+        LevelEventData::Raw(data)
+    }
+}
 
 /// Every protocol number this family speaks.
 ///
@@ -1029,7 +1040,7 @@ impl V5Adapter {
         Ok(vec![Directive::Emit(ClientEvent::LevelEvent {
             event: body.effect_id,
             pos: body.location.to_model(),
-            data: body.data,
+            data: level_event_data(body.effect_id, body.data),
             global: body.global,
         })])
     }

@@ -10,7 +10,8 @@
 //! helper so the adapter's unpacking is pinned against a separate implementation.
 
 use lodestone_model::{
-    BlockPos, ClientEvent, ConnectionState, Difficulty, Directive, GameMode, VersionAdapter,
+    BlockPos, BlockStateRef, ClientEvent, ConnectionState, Difficulty, Directive, GameMode,
+    LevelEventData, VersionAdapter,
 };
 use lodestone_v26_2::V770Adapter;
 use lodestone_v26_2::packet_ids::play;
@@ -364,7 +365,7 @@ fn level_event_emits_positioned_event() {
                 y: 70,
                 z: -20
             },
-            data: 42,
+            data: LevelEventData::BlockState(BlockStateRef::canonical(42)),
             global: false,
         })]
     );
@@ -384,7 +385,7 @@ fn level_event_global_flag_is_surfaced() {
         vec![Directive::Emit(ClientEvent::LevelEvent {
             event: 1023,
             pos: BlockPos { x: 0, y: 0, z: 0 },
-            data: 0,
+            data: LevelEventData::Raw(0),
             global: true,
         })]
     );

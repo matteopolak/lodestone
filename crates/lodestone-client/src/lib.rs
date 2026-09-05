@@ -128,10 +128,10 @@ pub use handle::WorldDimensions;
 // Re-export the model types a client user needs so they can build a session and
 // use the bot API without depending on `lodestone-model` directly.
 pub use lodestone_model::{
-    BlockPos, BossAction, BossColor, BossOverlay, ChatAckInfo, ChatKind, ChunkPos, ClientAction,
-    ClientEvent, CollisionRule, ConnectionState, DimensionId, DimensionTypeInfo, Directive,
-    DisplaySlot,
-    EntityAttributeSnapshot, GameMode, Hand, LoginProfile, NumberFormat, ObjectiveMode,
+    BlockPos, BlockStateRef, BossAction, BossColor, BossOverlay, ChatAckInfo, ChatKind, ChunkPos,
+    ClientAction, ClientEvent, CollisionRule, ConnectionState, DimensionId, DimensionTypeInfo,
+    Directive, DisplaySlot, EntityAttributeSnapshot, GameMode, Hand, LevelEventData, LoginProfile,
+    NumberFormat, ObjectiveMode,
     ObjectiveRenderType, PlayerListEntry, Reported, ResourceKey, Rotation, ServerAddress,
     TeamAction, TeamColor, TeamParameters, Text, Vec3, VersionAdapter, Visibility,
 };

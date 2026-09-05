@@ -16,9 +16,9 @@
 
 use lodestone_core::{Ctx, Encode, Reader, Writer};
 use lodestone_model::{
-    ClientAction, ClientEvent, CollisionRule, ConnectionState, Difficulty, DisplaySlot,
-    EquipmentSlot, ObjectiveMode, ObjectiveRenderType, SoundCategory, TeamAction, TeamColor,
-    VersionAdapter, Visibility,
+    BlockStateRef, ClientAction, ClientEvent, CollisionRule, ConnectionState, Difficulty,
+    DisplaySlot, EquipmentSlot, LevelEventData, ObjectiveMode, ObjectiveRenderType, SoundCategory,
+    TeamAction, TeamColor, VersionAdapter, Visibility,
 };
 use lodestone_v1_8::V47Adapter;
 use lodestone_v1_8::packet_ids::play;
@@ -406,8 +406,34 @@ fn world_event_dispatches_level_event_with_distinct_fields() {
         ClientEvent::LevelEvent { event, pos, data, global } => {
             assert_eq!(event, 1003);
             assert_eq!((pos.x, pos.y, pos.z), (4, 5, 6));
-            assert_eq!(data, 17);
+            assert_eq!(data, LevelEventData::Raw(17));
             assert!(global);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+/// The payload's small number deliberately overlaps modern generated state
+/// tables. Its legacy source tag, rather than that coincidence, decides which
+/// renderer may resolve it.
+#[test]
+fn legacy_destroy_event_keeps_its_protocol_local_state_source() {
+    let payload = encode(&WorldEvent {
+        effect_id: 2001,
+        location: lodestone_v1_8::packets::position::Position(lodestone_model::BlockPos::new(
+            4, 5, 6,
+        )),
+        data: 17,
+        global: false,
+    });
+    match only_event(dispatch(play::clientbound::WORLD_EVENT, &payload)) {
+        ClientEvent::LevelEvent { event, data, .. } => {
+            assert_eq!(event, 2001);
+            assert_eq!(
+                data,
+                LevelEventData::BlockState(BlockStateRef::protocol_local(17)),
+                "a legacy block-break event must not become canonical by numeric overlap"
+            );
         }
         other => panic!("unexpected event: {other:?}"),
     }

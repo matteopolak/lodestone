@@ -33,7 +33,7 @@ use lodestone_model::{
     ItemEnchantment, ItemPrototype, ItemProfile, ItemStack, ItemTool, JigsawJoint, LoginProfile,
     LookAnchor, MainHand, MapDecoration, MapPatch, MerchantOffer as ModelMerchantOffer,
     NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
-    ParticleOptions, ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry,
+    LevelEventData, ParticleOptions, ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry,
     PlayerLookAtEntity,
     PotDecorations, ProfileProperty as ModelProfileProperty,
     RecipeBookEntry, RecipeBookType,

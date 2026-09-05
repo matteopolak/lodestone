@@ -624,7 +624,11 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::LevelEvent {
                 event: level_event.event,
                 pos: unpack_block_pos(level_event.position),
-                data: level_event.data,
+                data: if level_event.event == 2001 {
+                    LevelEventData::BlockState(BlockStateRef::canonical(level_event.data as u32))
+                } else {
+                    LevelEventData::Raw(level_event.data)
+                },
                 global: level_event.global,
             })]);
         }

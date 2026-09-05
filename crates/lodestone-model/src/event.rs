@@ -1736,6 +1736,36 @@ impl BlockStateRef {
     }
 }
 
+/// A level event's payload, retaining block-state numbering provenance for the
+/// one event whose payload names a block state.
+///
+/// Most level-event payloads are event-specific signed integers and remain
+/// [`Self::Raw`]. Event `2001` carries a state id instead; adapters turn that
+/// payload into [`Self::BlockState`] while they still know whether the wire
+/// numbering is canonical or protocol-local. This prevents a shell consumer
+/// from recovering intent by range-checking a bare integer after that source
+/// information has already been lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LevelEventData {
+    /// An event-specific signed payload with no block-state interpretation.
+    Raw(i32),
+    /// Event `2001`'s pre-destruction block state.
+    BlockState(BlockStateRef),
+}
+
+impl LevelEventData {
+    /// The original 32 payload bits, for callers that deliberately handle an
+    /// event's protocol-specific data rather than a built-in block-state
+    /// lookup.
+    #[must_use]
+    pub const fn raw_i32(self) -> i32 {
+        match self {
+            Self::Raw(raw) => raw,
+            Self::BlockState(state) => state.raw() as i32,
+        }
+    }
+}
+
 /// A `minecraft:particle_type` registry entry's type-specific payload —
 /// [`ClientEvent::Particles`]'s `options`.
 ///
@@ -2180,8 +2210,10 @@ pub enum ClientEvent {
         event: i32,
         /// Event block position.
         pos: BlockPos,
-        /// Event-specific data.
-        data: i32,
+        /// Event-specific data. Event `2001` carries [`LevelEventData::BlockState`]
+        /// so its state-id source survives until a version-aware consumer or a
+        /// generated-model boundary can resolve it.
+        data: LevelEventData,
         /// Whether the event is global rather than distance-limited.
         global: bool,
     },
@@ -4353,7 +4385,7 @@ mod equipment_slot_tests {
 
 #[cfg(test)]
 mod block_state_ref_tests {
-    use super::BlockStateRef;
+    use super::{BlockStateRef, LevelEventData};
 
     #[test]
     fn canonical_and_protocol_local_state_ids_keep_the_same_raw_value_distinct() {
@@ -4377,11 +4409,21 @@ mod block_state_ref_tests {
         assert_eq!(local.raw(), u32::MAX);
         assert!(matches!(local, BlockStateRef::ProtocolLocal(u32::MAX)));
     }
+
+    #[test]
+    fn level_event_data_keeps_raw_payload_bits_when_it_tags_a_state() {
+        let raw = LevelEventData::Raw(-1);
+        let tagged = LevelEventData::BlockState(BlockStateRef::protocol_local(u32::MAX));
+
+        assert_eq!(raw.raw_i32(), -1);
+        assert_eq!(tagged.raw_i32(), -1);
+        assert_ne!(raw, tagged, "a state source must not collapse into raw event data");
+    }
 }
 
 #[cfg(test)]
 mod route_tests {
-    use super::{ClientEvent, Difficulty, Route, route};
+    use super::{ClientEvent, Difficulty, LevelEventData, Route, route};
     use crate::math::BlockPos;
 
     /// **The guard that protects the guard.**
@@ -4512,7 +4554,7 @@ mod route_tests {
         let level = ClientEvent::LevelEvent {
             event: 1234,
             pos: BlockPos::new(0, 0, 0),
-            data: 0,
+            data: LevelEventData::Raw(0),
             global: false,
         };
         let r = route(&level);
