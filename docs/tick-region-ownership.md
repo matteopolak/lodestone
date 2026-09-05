@@ -70,6 +70,15 @@ Effects carry that original sequence because entities from two chunks may be
 interleaved; the central publisher restores it rather than changing behavior to
 owner-major order. Negative positions use `floor` followed by Euclidean chunk
 division, so an entity at `x = -0.5` belongs to chunk `-1`, not chunk `0`.
+Spawner blocks are a separate cross-owner hand-off even though their mutable
+delay state remains in the block-entity registry. `SpawnerTickBatchBuilder`
+records each selected resident spawner's chunk owner while retaining the
+existing registry traversal and the one world-wide spawner RNG stream.
+`apply_spawner_tick_owner_batches` is the real central `MobSim` consumer: it
+requires every unique owner completion and restores the original global attempt
+slots before allocating entity ids. Empty owner batches are required because a
+waiting spawner still advanced its owner pass. This keeps entity-id allocation
+and the client-visible snapshot order independent of owner completion order.
 Falling blocks use the same completion discipline at their landing hand-off:
 `MobSim::tick_falling_block_owner_batches` snapshots every live block's chunk
 owner before its serial motion step and returns one batch per owner, including
@@ -164,6 +173,15 @@ are interleaved in the serial simulation list, applying all of one owner's
 effects before another's changes observable packet order. Add both a
 negative-coordinate control and an interleaved-owner order control before a
 future executor is allowed to run owners separately.
+
+Do not move the shared spawner RNG or entity creation into an owner worker.
+Keep `SpawnerTickBatchBuilder` on the existing registry traversal, return one
+completion for every selected resident owner, and use
+`apply_spawner_tick_owner_batches` for the only `MobSim` write. Entity ids and
+future random decisions both depend on restored global attempt slots. Preserve
+the reversed-completion comparison against an independently written serial
+attempt list, plus the missing and duplicate owner controls, whenever this
+boundary changes.
 
 Falling-block motion remains serial. Keep its tick-start owner snapshot and
 empty completions even when a block stays airborne, and route every landing

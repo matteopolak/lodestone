@@ -66,6 +66,8 @@
 //! and nearby-entity counting, the same shape [`crate::spawn_egg::use_spawn_egg`]
 //! takes a `block_state` closure.
 
+use std::collections::HashSet;
+
 use lodestone_data::entity_types;
 use lodestone_model::{BlockPos, Difficulty, ResourceKey, Vec3};
 
@@ -128,6 +130,179 @@ pub struct SpawnAttempt {
     /// Feet position, already the random cell vanilla's own `spawnPos`
     /// arithmetic picked.
     pub position: Vec3,
+}
+
+/// The chunk that owns one spawner block at the start of a tick.
+///
+/// The spawner's state stays in the block-entity registry, but its resulting
+/// entity creation crosses into [`crate::MobSim`]. Keeping the source owner on
+/// that hand-off means a future executor cannot make entity-id allocation
+/// depend on which chunk reports first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SpawnerTickOwner {
+    /// The chunk containing the spawner block.
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl SpawnerTickOwner {
+    fn for_position(pos: BlockPos) -> Self {
+        Self::Chunk {
+            cx: pos.x.div_euclid(16),
+            cz: pos.z.div_euclid(16),
+        }
+    }
+}
+
+/// One spawn decision tagged with its former global serial slot.
+#[derive(Debug, Clone, PartialEq)]
+struct SpawnerTickAttempt {
+    owner: SpawnerTickOwner,
+    serial: usize,
+    attempt: SpawnAttempt,
+}
+
+/// A selected chunk owner's completion from the mob-spawner pass.
+///
+/// Empty batches are intentional: a loaded spawner whose delay has not yet
+/// elapsed still completed its owner pass and must remain visible to the
+/// central consumer's completeness check.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SpawnerTickOwnerBatch {
+    owner: SpawnerTickOwner,
+    serial: usize,
+    batch_count: usize,
+    attempts: Vec<SpawnerTickAttempt>,
+}
+
+impl SpawnerTickOwnerBatch {
+    /// Number of entity creations this owner handed to the central writer.
+    #[must_use]
+    pub(crate) fn attempt_count(&self) -> usize {
+        self.attempts.len()
+    }
+}
+
+/// Builds the tick-start owner completions while preserving the old serial
+/// registry traversal and the single shared spawner RNG stream.
+#[derive(Debug, Default)]
+pub(crate) struct SpawnerTickBatchBuilder {
+    batches: Vec<SpawnerTickOwnerBatch>,
+    next_attempt_serial: usize,
+}
+
+impl SpawnerTickBatchBuilder {
+    /// Adds the owner of one selected, resident spawner and returns its handle.
+    /// Repeated spawners in a chunk share one completion batch.
+    pub(crate) fn record_owner(&mut self, pos: BlockPos) -> SpawnerTickOwner {
+        let owner = SpawnerTickOwner::for_position(pos);
+        if !self.batches.iter().any(|batch| batch.owner == owner) {
+            self.batches.push(SpawnerTickOwnerBatch {
+                owner,
+                serial: self.batches.len(),
+                batch_count: 0,
+                attempts: Vec::new(),
+            });
+        }
+        owner
+    }
+
+    /// Retains a decision in the original registry/RNG traversal order.
+    pub(crate) fn record_attempt(&mut self, owner: SpawnerTickOwner, attempt: SpawnAttempt) {
+        self.batches
+            .iter_mut()
+            .find(|batch| batch.owner == owner)
+            .expect("a spawner attempt must belong to a selected tick-start owner")
+            .attempts
+            .push(SpawnerTickAttempt {
+                owner,
+                serial: self.next_attempt_serial,
+                attempt,
+            });
+        self.next_attempt_serial += 1;
+    }
+
+    /// Finishes the complete, bounded owner plan.
+    #[must_use]
+    pub(crate) fn finish(mut self) -> Vec<SpawnerTickOwnerBatch> {
+        let batch_count = self.batches.len();
+        for batch in &mut self.batches {
+            batch.batch_count = batch_count;
+        }
+        self.batches
+    }
+}
+
+/// Restores the old global spawn-attempt order at the central entity writer.
+///
+/// A worker may later complete chunk owners in any order, but it may not omit,
+/// duplicate, or substitute an owner batch. Entity ids are allocated in this
+/// merged order, so changing it changes both snapshots and client-visible
+/// `ADD_ENTITY` order.
+#[must_use]
+pub(crate) fn merge_spawner_tick_owner_batches(
+    mut batches: Vec<SpawnerTickOwnerBatch>,
+) -> Vec<SpawnAttempt> {
+    let expected_count = batches.first().map_or(0, |batch| batch.batch_count);
+    assert_eq!(
+        batches.len(),
+        expected_count,
+        "spawner owner completion omitted or duplicated a plan batch"
+    );
+    assert!(
+        batches
+            .iter()
+            .all(|batch| batch.batch_count == expected_count),
+        "spawner owner completions disagree about their tick-start plan"
+    );
+    let mut owners = HashSet::new();
+    assert!(
+        batches.iter().all(|batch| owners.insert(batch.owner)),
+        "spawner owner completion has a duplicate owner"
+    );
+    batches.sort_unstable_by_key(|batch| batch.serial);
+    for (serial, batch) in batches.iter().enumerate() {
+        assert_eq!(
+            batch.serial, serial,
+            "spawner owner completion has a missing or stale plan slot"
+        );
+    }
+
+    let mut attempts = Vec::new();
+    for batch in batches {
+        for attempt in batch.attempts {
+            assert_eq!(
+                attempt.owner, batch.owner,
+                "a spawner owner completion contains another owner's attempt"
+            );
+            attempts.push(attempt);
+        }
+    }
+    attempts.sort_unstable_by_key(|attempt| attempt.serial);
+    for (serial, attempt) in attempts.iter().enumerate() {
+        assert_eq!(
+            attempt.serial, serial,
+            "spawner owner completion has a duplicate, missing, or stale attempt slot"
+        );
+    }
+    attempts.into_iter().map(|attempt| attempt.attempt).collect()
+}
+
+/// Central entity-writer half of the spawner owner boundary.
+///
+/// The live tick loop is the sole caller. It validates every owner completion
+/// and only then allocates entity ids through [`crate::MobSim::spawn_species`].
+/// The returned ids remain in the old global attempt order.
+pub(crate) fn apply_spawner_tick_owner_batches(
+    mobs: &crate::MobHandle,
+    batches: Vec<SpawnerTickOwnerBatch>,
+) -> Vec<i32> {
+    let attempts = merge_spawner_tick_owner_batches(batches);
+    mobs.with(|sim| {
+        attempts
+            .into_iter()
+            .map(|attempt| sim.spawn_species(attempt.entity_type, attempt.position).id())
+            .collect()
+    })
 }
 
 /// Per-tick facts [`SpawnerState::tick`] cannot compute itself, mirroring the
@@ -729,5 +904,78 @@ mod tests {
             "{} of 50 candidates fell outside the spawn_range=4 box: {out_of_range:?}",
             out_of_range.len()
         );
+    }
+
+    fn owner_batches_for_merge_test() -> (Vec<SpawnerTickOwnerBatch>, Vec<SpawnAttempt>) {
+        let first = SpawnAttempt {
+            entity_type: key("minecraft:zombie"),
+            position: Vec3::new(-0.5, 64.0, 0.5),
+        };
+        let second = SpawnAttempt {
+            entity_type: key("minecraft:pig"),
+            position: Vec3::new(32.5, 64.0, 0.5),
+        };
+        let third = SpawnAttempt {
+            entity_type: key("minecraft:zombie"),
+            position: Vec3::new(-0.5, 65.0, 0.5),
+        };
+        let serial_reference = vec![first.clone(), second.clone(), third.clone()];
+        let mut builder = SpawnerTickBatchBuilder::default();
+        let west = builder.record_owner(BlockPos::new(-1, 64, 0));
+        builder.record_attempt(west, first);
+        let east = builder.record_owner(BlockPos::new(32, 64, 0));
+        builder.record_attempt(east, second);
+        builder.record_attempt(west, third);
+        (builder.finish(), serial_reference)
+    }
+
+    /// Completion order is deliberately not entity-allocation order. This
+    /// reference is an independent serial attempt list, rather than a second
+    /// merge of the same batches, so an owner-major hand-off cannot pass by
+    /// agreeing with itself.
+    #[test]
+    fn reversed_owner_completion_restores_the_independent_serial_attempt_order() {
+        let (mut batches, serial_reference) = owner_batches_for_merge_test();
+        batches.reverse();
+        assert_eq!(
+            merge_spawner_tick_owner_batches(batches),
+            serial_reference,
+            "completion order must not change entity allocation order"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "spawner owner completion omitted or duplicated a plan batch")]
+    fn a_missing_spawner_owner_completion_fails_closed() {
+        let (mut batches, _) = owner_batches_for_merge_test();
+        batches.pop();
+        let _ = merge_spawner_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "spawner owner completion has a duplicate owner")]
+    fn a_duplicate_spawner_owner_completion_fails_closed() {
+        let (mut batches, _) = owner_batches_for_merge_test();
+        batches[1] = batches[0].clone();
+        let _ = merge_spawner_tick_owner_batches(batches);
+    }
+
+    /// The live central writer consumes the merged attempts, rather than
+    /// leaving the owner batches as an unobserved planning structure.
+    #[test]
+    fn owner_batches_reach_real_mob_snapshots_in_serial_attempt_order() {
+        let (batches, serial_reference) = owner_batches_for_merge_test();
+        let mobs = crate::MobHandle::new(crate::ChunkWorld::new(0, 128));
+        let ids = apply_spawner_tick_owner_batches(&mobs, batches);
+        assert_eq!(ids.len(), serial_reference.len());
+        let snapshots = mobs.with(|sim| sim.snapshots());
+        for (id, attempt) in ids.into_iter().zip(serial_reference) {
+            let snapshot = snapshots
+                .iter()
+                .find(|snapshot| snapshot.id == id)
+                .expect("the central owner consumer must create a live entity snapshot");
+            assert_eq!(snapshot.entity_type, attempt.entity_type);
+            assert_eq!(snapshot.position, attempt.position);
+        }
     }
 }

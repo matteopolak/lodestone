@@ -53,6 +53,7 @@ use bevy_ecs::world::World;
 use crate::block_entities::BlockEntityHandle;
 use crate::border::{BorderFeed, WorldBorder};
 use crate::chunk::ChunkSource;
+use crate::mob_spawner::{apply_spawner_tick_owner_batches, SpawnerTickBatchBuilder};
 use crate::mobs::{
     merge_falling_block_tick_effect_batches, Detonation, EntityTickEffectBatch, EntityTickOwner,
     LiveMobSource, MobHandle, MobSim,
@@ -249,6 +250,10 @@ pub struct OwnerTickStats {
     pub block_entity_batches: u64,
     /// Visible block-entity effects contained in those batches.
     pub block_entity_effects: u64,
+    /// Mob-spawner owner batches accepted by the central entity writer.
+    pub spawner_batches: u64,
+    /// Entity creation attempts restored from those batches.
+    pub spawner_attempts: u64,
     /// Ambient entity-effect owner batches returned to the central publisher.
     pub entity_effect_batches: u64,
     /// Ambient entity effects contained in those batches.
@@ -894,7 +899,7 @@ pub struct TickClock {
     /// duration, so it stays cheap and load-invariant to read even after
     /// millions of ticks, unlike re-deriving it from the (bounded) record.
     phase_over_budget: [AtomicU64; TICK_PHASE_COUNT],
-    owner_stats: [AtomicU64; 8],
+    owner_stats: [AtomicU64; 10],
     /// The largest single phase duration ever recorded, and which phase.
     worst_phase: Mutex<Option<WorstPhaseWindow>>,
 }
@@ -917,7 +922,7 @@ impl TickClock {
             phase_history: std::array::from_fn(|_| Mutex::new(VecDeque::with_capacity(TICK_HISTORY_LEN))),
             phase_sample_count: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
             phase_over_budget: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
-            owner_stats: [const { AtomicU64::new(0) }; 8],
+            owner_stats: [const { AtomicU64::new(0) }; 10],
             worst_phase: Mutex::new(None),
         }
     }
@@ -990,6 +995,8 @@ impl TickClock {
             stats.scheduled_fluid_ticks,
             stats.block_entity_batches,
             stats.block_entity_effects,
+            stats.spawner_batches,
+            stats.spawner_attempts,
             stats.entity_effect_batches,
             stats.entity_effects,
         ]) {
@@ -1008,8 +1015,10 @@ impl TickClock {
             scheduled_fluid_ticks: read(3),
             block_entity_batches: read(4),
             block_entity_effects: read(5),
-            entity_effect_batches: read(6),
-            entity_effects: read(7),
+            spawner_batches: read(6),
+            spawner_attempts: read(7),
+            entity_effect_batches: read(8),
+            entity_effects: read(9),
         }
     }
 
@@ -2351,7 +2360,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());
         let spawner_blocks_work = world_state.spawner_blocks_work();
         let spawner_difficulty = world_state.difficulty().0;
-        let mut spawner_attempts: Vec<crate::mob_spawner::SpawnAttempt> = Vec::new();
+        let mut spawner_batches = SpawnerTickBatchBuilder::default();
         block_entities.with(|registry| {
             // Positions snapshotted up front — `tick_all_with_hopper_lock`'s own
             // doc explains why a plain `HashMap` iterator cannot be walked while
@@ -2369,6 +2378,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 if !world.is_column_resident(pos.x.div_euclid(16), pos.z.div_euclid(16)) {
                     continue;
                 }
+                let owner = spawner_batches.record_owner(pos);
                 let Some(crate::block_entities::BlockEntity::Spawner(state)) =
                     registry.get_mut(pos)
                 else {
@@ -2424,14 +2434,23 @@ async fn run_tick_loop_with_weather_impl<W>(
                     is_valid_position: &is_valid_position,
                     nearby_count: &nearby_count,
                 };
-                spawner_attempts.extend(state.tick(&ctx, &mut spawner_rng));
+                for attempt in state.tick(&ctx, &mut spawner_rng) {
+                    spawner_batches.record_attempt(owner, attempt);
+                }
             }
         });
-        for attempt in spawner_attempts {
-            mobs.with(|sim| {
-                sim.spawn_species(attempt.entity_type, attempt.position);
-            });
-        }
+        let spawner_batches = spawner_batches.finish();
+        let spawner_batch_count = spawner_batches.len() as u64;
+        let spawner_attempt_count = spawner_batches
+            .iter()
+            .map(|batch| batch.attempt_count() as u64)
+            .sum();
+        apply_spawner_tick_owner_batches(&mobs, spawner_batches);
+        clock.record_owner_work(OwnerTickStats {
+            spawner_batches: spawner_batch_count,
+            spawner_attempts: spawner_attempt_count,
+            ..OwnerTickStats::default()
+        });
 
         // The zombie reinforcement check uses the
         // placement half — `MobSim::attack_from_player` already decided
