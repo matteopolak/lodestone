@@ -307,7 +307,14 @@ async fn main() {
 /// the process out from under it.
 async fn run_until_shutdown(server: IntegratedServer) {
     #[cfg(not(feature = "jvm"))]
-    if ["LODESTONE_JAVA_ADAPTER_CLASS", "LODESTONE_JAVA_CLASSPATH", "LODESTONE_JAVA_DEADLINE_MS"]
+    if [
+        "LODESTONE_JAVA_ADAPTER_CLASS",
+        "LODESTONE_JAVA_CLASSPATH",
+        "LODESTONE_JAVA_DEADLINE_MS",
+        "LODESTONE_PAPER_JAR",
+        "LODESTONE_PAPER_PLUGIN_DIRECTORY",
+        "LODESTONE_PAPER_SHIM_PATH",
+    ]
         .iter().any(|key| std::env::var_os(key).is_some())
     {
         tracing::error!("Java adapter configuration requires a build with --features jvm; saving and stopping");
@@ -374,9 +381,14 @@ async fn run_until_shutdown(server: IntegratedServer) {
                 #[cfg(feature = "jvm")]
                 if let Some(adapter) = java_adapter.as_mut() {
                     if let Err(error) = adapter.poll(&server) {
-                        tracing::error!(%error, "experimental Java adapter disabled");
-                        java_adapter = None;
-                        java_poll = None;
+                        if adapter.requires_paper_bootstrap() {
+                            tracing::error!(%error, "configured Paper bootstrap failed; saving and stopping");
+                            break;
+                        } else {
+                            tracing::error!(%error, "experimental Java adapter disabled");
+                            java_adapter = None;
+                            java_poll = None;
+                        }
                     }
                 }
             },
@@ -530,7 +542,7 @@ mod tests {
         assert_eq!(server.resident_block_state_id(11, 7, 13).map(|state| state.raw()), Some(0));
         let mut adapter = java_adapter::JavaAdapter::start(
             lodestone_jvm_bridge::runtime::JvmConfig::new().with_classpath(classes.path()),
-            "lodestone.fixture.WorldAdapter", Duration::from_secs(5)).unwrap();
+            "lodestone.fixture.WorldAdapter", Duration::from_secs(5), None).unwrap();
         let mut completed = false;
         let error = loop {
             assert!(std::time::Instant::now() < limit, "adapter did not finish");

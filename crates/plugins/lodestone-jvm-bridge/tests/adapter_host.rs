@@ -28,7 +28,10 @@ fn rejects_zero_deadline_before_starting_a_jvm() {
 fn java_adapter_registration_world_query_and_exception_are_connected() {
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
+    use jni::jni_str;
     use lodestone_jvm_bridge::adapter::AdapterEvent;
 
     let jdk = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"));
@@ -46,8 +49,18 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
         .arg("--create").arg("--file").arg(&adapter_jar).arg("-C").arg(&classes).arg(".")
         .output().expect("jar");
     assert!(archive.status.success(), "jar: {}", String::from_utf8_lossy(&archive.stderr));
-    let mut host = AdapterHost::start(JvmConfig::new().with_classpath(&adapter_jar),
-        "lodestone.fixture.BridgeAdapter", Duration::from_secs(5)).expect("worker startup");
+    let setup_ran = Arc::new(AtomicBool::new(false));
+    let setup_observed = Arc::clone(&setup_ran);
+    let mut host = AdapterHost::start_with_setup(
+        JvmConfig::new().with_classpath(&adapter_jar),
+        "lodestone.fixture.BridgeAdapter",
+        Duration::from_secs(5),
+        move |_, env| {
+            env.find_class(jni_str!("java/lang/Object")).map_err(|error| error.to_string())?;
+            setup_observed.store(true, Ordering::SeqCst);
+            Ok(())
+        },
+    ).expect("worker startup");
     let mut ready = false;
     let mut success = false;
     let mut queries = Vec::new();
@@ -65,6 +78,7 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
         match host.poll() {
             Ok(Some(AdapterEvent::Ready)) => {
                 assert!(!ready);
+                assert!(setup_ran.load(Ordering::SeqCst), "setup must finish before readiness");
                 ready = true;
                 host.dispatch_tick(37).unwrap();
             }
