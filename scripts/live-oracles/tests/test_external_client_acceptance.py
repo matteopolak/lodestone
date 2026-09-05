@@ -19,19 +19,56 @@ sys.modules[SPEC.name] = RUNNER
 SPEC.loader.exec_module(RUNNER)
 
 
+def valid_stages(row: object) -> list[dict[str, object]]:
+    return [
+        {
+            "name": "configuration",
+            "observed": True,
+            "observation": "login flow completed",
+            "mode": row.configuration_mode,
+        },
+        {
+            "name": "chunk_batch_acknowledgement",
+            "observed": True,
+            "observation": "initial chunk delivery observed",
+            "mode": row.chunk_batch_mode,
+            "batch_count": 1 if row.chunk_batch_mode == "acknowledged" else 0,
+        },
+        {"name": "join", "observed": True, "observation": "world entered"},
+        {
+            "name": "movement",
+            "observed": True,
+            "observation": "position update sent",
+            "movement_count": 1,
+        },
+        {
+            "name": "play_action",
+            "observed": True,
+            "observation": "block break result captured",
+            "kind": RUNNER.ACTION,
+            "action_count": 1,
+            "result_observed": True,
+        },
+        {
+            "name": "disconnect",
+            "observed": True,
+            "observation": "client observed EOF",
+            "clean": True,
+            "initiated_by": "client",
+        },
+    ]
+
+
 class EvidenceContractTests(unittest.TestCase):
     def test_matrix_has_one_release_per_hosted_protocol(self) -> None:
         protocols = [row.protocol for row in RUNNER.ROWS]
         self.assertEqual(len(protocols), len(set(protocols)))
         self.assertEqual(protocols, sorted(protocols))
-        self.assertIn(5, protocols)
-        self.assertIn(754, protocols)
-        self.assertIn(756, protocols)
-        self.assertIn(758, protocols)
-        self.assertIn(766, protocols)
-        self.assertIn(774, protocols)
-        self.assertIn(776, protocols)
-        self.assertEqual(RUNNER.GATE_PROTOCOLS, (754, 756, 758, 762, 766, 774, 776))
+        self.assertEqual(
+            protocols,
+            [5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, 762, 766, 774, 776],
+        )
+        self.assertEqual(RUNNER.GATE_PROTOCOLS, tuple(protocols))
         gated = {
             row.protocol: (row.release, row.configuration_mode, row.chunk_batch_mode)
             for row in RUNNER.ROWS
@@ -40,6 +77,15 @@ class EvidenceContractTests(unittest.TestCase):
         self.assertEqual(
             gated,
             {
+                5: ("1.7.10", "login_to_play", "unbatched"),
+                47: ("1.8.9", "login_to_play", "unbatched"),
+                110: ("1.9.4", "login_to_play", "unbatched"),
+                210: ("1.10.2", "login_to_play", "unbatched"),
+                316: ("1.11.2", "login_to_play", "unbatched"),
+                340: ("1.12.2", "login_to_play", "unbatched"),
+                404: ("1.13.2", "login_to_play", "unbatched"),
+                498: ("1.14.4", "login_to_play", "unbatched"),
+                578: ("1.15.2", "login_to_play", "unbatched"),
                 754: ("1.16.5", "login_to_play", "unbatched"),
                 756: ("1.17.1", "login_to_play", "unbatched"),
                 758: ("1.18.2", "login_to_play", "unbatched"),
@@ -134,8 +180,37 @@ class EvidenceContractTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "client_build must be '1.20.6'"):
                 RUNNER.validate_evidence(evidence, row, time.time() - 1)
 
+    def test_exact_client_build_provenance_is_checked_for_every_gate_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            directory = pathlib.Path(temp)
+            (directory / "screen.png").write_bytes(b"external pixels")
+            (directory / "release-client.log").write_text("joined then disconnected\n", encoding="utf-8")
+            for row in RUNNER.ROWS:
+                with self.subTest(protocol=row.protocol):
+                    evidence = directory / f"evidence-{row.protocol}.json"
+                    evidence.write_text(
+                        json.dumps(
+                            {
+                                "schema": RUNNER.SCHEMA,
+                                "protocol": row.protocol,
+                                "release": row.release,
+                                "stages": valid_stages(row),
+                                "provenance": {
+                                    "client_binary": "/Applications/Release.app",
+                                    "client_build": row.release,
+                                    "capture_method": "UI automation plus client log",
+                                    "capture": "screen.png",
+                                    "client_log": "release-client.log",
+                                },
+                            },
+                        ),
+                        encoding="utf-8",
+                    )
+                    result = RUNNER.validate_evidence(evidence, row, time.time() - 1)
+                    self.assertEqual(result["client_build"], row.release)
+
     def test_pre_configuration_rows_record_direct_play_and_unbatched_chunks(self) -> None:
-        for protocol in (754, 756, 758, 762):
+        for protocol in (5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, 762):
             with self.subTest(protocol=protocol):
                 row = next(row for row in RUNNER.ROWS if row.protocol == protocol)
                 stages = [

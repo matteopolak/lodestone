@@ -63,6 +63,18 @@ rejected rather than clamped into a plausible placement. The separate
 `(-1, -1, -1), -1` in-air sentinel remains ignored: this packet does not carry
 the click-time look direction required by the shared in-air-use consumer.
 
+### External-client acceptance
+
+The opt-in release-client gate covers hosted protocol **47** (1.8.9). Run it with
+`just external-client-acceptance --protocol 47 --output /private/tmp/lodestone-v47` and an
+external driver. The six-stage evidence records direct login-to-Play (`configuration.mode:
+"login_to_play"`) and unbatched initial chunks (`chunk_batch_acknowledgement.mode: "unbatched",
+batch_count: 0`), then requires world join, deliberate movement, one observed
+`start_destroy_block` result, and a client-initiated clean disconnect. Provenance must identify the
+exact 1.8.9 client build and retain non-empty capture and client-log artifacts. No client was
+launched while this document was updated; protocol 47 remains unverified by a real release client
+until its manual run produces a passing `report.json`.
+
 ## How to change it
 
 Keep protocol-47 section encoding local to this family. Its raw state-word layout differs from the

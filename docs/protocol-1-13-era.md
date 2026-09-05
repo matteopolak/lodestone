@@ -225,6 +225,18 @@ assert directly — and not a per-packet one. The measured split is asserted, so
 a change on either side surfaces as a mismatch to re-derive rather than as a
 silently weaker control.
 
+### External-client acceptance
+
+The opt-in release-client gate covers hosted protocol **404** (1.13.2). Run it with
+`just external-client-acceptance --protocol 404 --output /private/tmp/lodestone-v404` and an
+external driver. The six-stage evidence records direct login-to-Play (`configuration.mode:
+"login_to_play"`) and unbatched initial chunks (`chunk_batch_acknowledgement.mode: "unbatched",
+batch_count: 0`), then requires world join, deliberate movement, one observed
+`start_destroy_block` result, and a client-initiated clean disconnect. Provenance must identify the
+exact 1.13.2 client build and retain non-empty capture and client-log artifacts. No client was
+launched while this document was updated; protocol 404 remains unverified by a real release client
+until its manual run produces a passing `report.json`.
+
 ## How to change it
 
 - **Adding a second protocol to this era** (there is none; 1.13.0/1.13.1 speak
