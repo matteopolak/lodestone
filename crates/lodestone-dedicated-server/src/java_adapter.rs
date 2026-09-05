@@ -347,6 +347,8 @@ impl JavaAdapter {
                         lodestone_model::GameMode::Adventure => PlayerGameMode::Adventure,
                         lodestone_model::GameMode::Spectator => PlayerGameMode::Spectator,
                     },
+                    experience_level: player.xp_level,
+                    experience_points: player.xp_points,
                 })
                 .ok_or_else(|| format!("player {uuid} is not connected"))
         });

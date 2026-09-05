@@ -111,6 +111,8 @@ pub struct PlayerSnapshot {
     pub yaw: f32,
     pub pitch: f32,
     pub game_mode: PlayerGameMode,
+    pub experience_level: i32,
+    pub experience_points: i32,
 }
 
 /// The closed game-mode vocabulary carried across the host port.
@@ -1053,6 +1055,26 @@ fn resolve_resident_player_game_mode(bits: i64) -> Result<jint, AdapterError> {
         PlayerGameMode::Creative => 1,
         PlayerGameMode::Adventure => 2,
         PlayerGameMode::Spectator => 3,
+    })
+}
+
+fn resolve_resident_player_experience(
+    bits: i64,
+    points: bool,
+    operation: &str,
+) -> Result<jint, AdapterError> {
+    let player = resolve_resident_player_handle(bits, operation)?;
+    let port = PLAYER_POSITION_PORT.with(|slot| slot.borrow().clone()).ok_or_else(|| {
+        AdapterError::new(format!("{operation} requires the adapter worker thread"))
+    })?;
+    let snapshot = port
+        .request(PlayerSnapshotQuery { uuid: player.uuid() })
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?;
+    Ok(if points {
+        snapshot.experience_points
+    } else {
+        snapshot.experience_level
     })
 }
 
@@ -2417,6 +2439,8 @@ pub(crate) fn register_player_handle_position_query(
         "playerHandlePitch" => native_player_handle_pitch as *mut c_void,
         "playerHandleEntityId" => native_player_handle_entity_id as *mut c_void,
         "playerHandleGameMode" => native_player_handle_game_mode as *mut c_void,
+        "playerHandleExperienceLevel" => native_player_handle_experience_level as *mut c_void,
+        "playerHandleExperiencePoints" => native_player_handle_experience_points as *mut c_void,
         _ => unreachable!("validated player coordinate member"),
     };
     // SAFETY: each validated native accepts one opaque handle and returns one
@@ -2765,6 +2789,32 @@ extern "system" fn native_player_handle_game_mode<'local>(
         let _depth = CallbackDepthGuard::enter()
             .map_err(|error| AdapterError::new(error.to_string()))?;
         resolve_resident_player_game_mode(bits)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_experience_level<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resolve_resident_player_experience(bits, false, "playerHandleExperienceLevel")
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_experience_points<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resolve_resident_player_experience(bits, true, "playerHandleExperiencePoints")
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -4410,6 +4460,10 @@ mod tests {
             let yaw = resolve_resident_player_rotation(handle.to_bits(), 0, "playerHandleYaw");
             let entity_id = resolve_resident_player_entity_id(handle.to_bits());
             let game_mode = resolve_resident_player_game_mode(handle.to_bits());
+            let level =
+                resolve_resident_player_experience(handle.to_bits(), false, "playerHandleExperienceLevel");
+            let points =
+                resolve_resident_player_experience(handle.to_bits(), true, "playerHandleExperiencePoints");
             let non_finite =
                 resolve_resident_player_position(handle.to_bits(), 0, "playerHandleX");
             assert_eq!(release_resident_handles(&identity), 1);
@@ -4417,39 +4471,45 @@ mod tests {
             PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = None);
             RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
             sender
-                .send((result, yaw, entity_id, game_mode, non_finite, stale))
+                .send((result, yaw, entity_id, game_mode, level, points, non_finite, stale))
                 .expect("position results");
         });
         let limit = Instant::now() + Duration::from_secs(1);
         let mut requests = 0;
-        while requests < 5 {
+        while requests < 7 {
             requests += servicer.service_all_pending(1, |query| {
                 assert_eq!(query, PlayerSnapshotQuery { uuid: [7; 16] });
-                if requests < 4 {
+                if requests < 6 {
                     Ok(PlayerSnapshot {
                         entity_id: 91,
                         x: 12.5, y: 64.0, z: -9.25, yaw: 45.0, pitch: -12.0,
                         game_mode: PlayerGameMode::Adventure,
+                        experience_level: 7,
+                        experience_points: 23,
                     })
                 } else {
                     Ok(PlayerSnapshot {
                         entity_id: 91,
                         x: f64::NAN, y: 64.0, z: -9.25, yaw: 45.0, pitch: -12.0,
                         game_mode: PlayerGameMode::Adventure,
+                        experience_level: 7,
+                        experience_points: 23,
                     })
                 }
             });
-            if requests < 5 {
+            if requests < 7 {
                 assert!(Instant::now() < limit, "worker did not request a player position");
                 std::thread::yield_now();
             }
         }
-        let (result, yaw, entity_id, game_mode, non_finite, stale) =
+        let (result, yaw, entity_id, game_mode, level, points, non_finite, stale) =
             receiver.recv().expect("position results");
         assert_eq!(result, Ok(-9.25));
         assert_eq!(yaw, Ok(45.0));
         assert_eq!(entity_id, Ok(91));
         assert_eq!(game_mode, Ok(2));
+        assert_eq!(level, Ok(7));
+        assert_eq!(points, Ok(23));
         assert_eq!(
             non_finite,
             Err(AdapterError::new(
