@@ -18,7 +18,7 @@ use std::path::Path;
 
 use lodestone_anvil::{level_dat, region::RegionFile, world_gen_settings};
 use lodestone_core::{Nbt, Reader, read_named_nbt};
-use lodestone_storage::{RecordKey, RecordWrite};
+use lodestone_storage::RecordWrite;
 use lodestone_storage_schema::{
     BuiltinDimension, FORMAT_VERSION_V1, GameMode, GeneralRecord, StorageRecord,
     WorldProperties,
@@ -28,17 +28,8 @@ use lodestone_world::{ColumnLight, Heightmap, LightData, NibbleArray};
 
 use crate::{chunk_nbt, scheduled_tick, world_storage};
 
-/// The fixed key for the world's one native-properties record.
-///
-/// General record keys are otherwise owned by players and entities. Keeping
-/// this key in a reserved coordinate/local-id slot makes this bounded import
-/// replaceable and avoids retaining a source filename or NBT path in native
-/// storage.
-pub const WORLD_PROPERTIES_KEY: RecordKey = RecordKey::general(
-    i32::MIN,
-    i32::MIN,
-    u32::MAX,
-);
+/// The fixed native key for the world's one typed properties record.
+pub use crate::world_storage::WORLD_PROPERTIES_KEY;
 
 /// The result of importing one bounded chunk.
 ///
@@ -192,7 +183,7 @@ pub fn import_world_properties(
         return Err(Error::AuthorizationDenied { authorization });
     }
 
-    let report = preflight(level, settings);
+    let report = preflight_world_properties(level, settings);
     let required = report.decide(LossDecision::ProceedAndDiscardUnsupported);
     if authorization != required {
         return Err(Error::AuthorizationMismatch {
@@ -703,7 +694,12 @@ fn light_from_nbt(root: &Nbt, min_y: i32, section_count: usize) -> Result<Column
     Ok(light)
 }
 
-fn preflight(
+/// Inventories the one typed native world-properties record before conversion.
+///
+/// The report identifies only supported and discarded source paths. It does
+/// not retain unsupported metadata values or reinterpret them as extensions.
+#[must_use]
+pub fn preflight_world_properties(
     level: &level_dat::LevelDat,
     settings: &world_gen_settings::WorldGenSettings,
 ) -> PreflightReport {
