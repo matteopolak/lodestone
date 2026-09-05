@@ -178,7 +178,7 @@ use lodestone_command::{
     StringArgument, StringReader,
 };
 use lodestone_model::command_tree::{
-    ArgumentParser, CommandSuggestionEntry, CommandTree, NodeKind, StringKind,
+    ArgumentParser, CommandNodeId, CommandSuggestionEntry, CommandTree, NodeKind, StringKind,
 };
 use lodestone_model::text::ResolvedText;
 
@@ -857,7 +857,7 @@ fn read_argument_token(body: &str, start: usize, parser: &ArgumentParser) -> (us
 /// where the next (possibly empty, in-progress) token starts.
 struct ParseWalk {
     spans: Vec<HighlightSpan>,
-    node: usize,
+    node: CommandNodeId,
     next_token_start: usize,
     failed: bool,
 }
@@ -889,7 +889,11 @@ struct ParseWalk {
 /// `spans` is passed through untouched, so **highlighting is unaffected**: the
 /// token was matched and has already had its span pushed by the caller. Only the
 /// completion position differs.
-fn still_typing(spans: Vec<HighlightSpan>, parent: usize, token_start: usize) -> ParseWalk {
+fn still_typing(
+    spans: Vec<HighlightSpan>,
+    parent: CommandNodeId,
+    token_start: usize,
+) -> ParseWalk {
     ParseWalk {
         spans,
         node: parent,
@@ -913,7 +917,7 @@ fn parse_line(tree: &CommandTree, line: &str) -> Option<ParseWalk> {
         kind: HighlightKind::Literal,
     }];
     let mut pos = 1usize;
-    let mut node = tree.root();
+    let mut node = tree.root_id();
     let mut arg_color = 0u8;
     let len = line.len();
 
@@ -937,12 +941,12 @@ fn parse_line(tree: &CommandTree, line: &str) -> Option<ParseWalk> {
         // A redirect is a same-position jump; `effective_children` is the
         // one place that follows it, and it is cycle-guarded — see this
         // module's own doc.
-        let reachable: Vec<usize> = tree
-            .effective_children(node)
+        let reachable: Vec<CommandNodeId> = tree
+            .effective_children_from(node)
             .into_iter()
             .filter(|&idx| {
                 !matches!(
-                    tree.node(idx).map(|n| &n.kind),
+                    tree.node_for(idx).map(|n| &n.kind),
                     Some(NodeKind::Unrecognized { .. })
                 )
             })
@@ -950,7 +954,7 @@ fn parse_line(tree: &CommandTree, line: &str) -> Option<ParseWalk> {
 
         let literal_match = reachable.iter().copied().find(|&idx| {
             matches!(
-                tree.node(idx).map(|n| &n.kind),
+                tree.node_for(idx).map(|n| &n.kind),
                 Some(NodeKind::Literal { name }) if name == word
             )
         });
@@ -970,7 +974,7 @@ fn parse_line(tree: &CommandTree, line: &str) -> Option<ParseWalk> {
         }
 
         let argument_match = reachable.iter().copied().find_map(|idx| match tree
-            .node(idx)
+            .node_for(idx)
             .map(|n| &n.kind)
         {
             Some(NodeKind::Argument { parser, .. }) => Some((idx, parser)),
@@ -1052,12 +1056,12 @@ pub fn complete(tree: &CommandTree, line: &str) -> Completion {
     }
 
     let partial = &line[walk.next_token_start..];
-    let reachable: Vec<usize> = tree
-        .effective_children(walk.node)
+    let reachable: Vec<CommandNodeId> = tree
+        .effective_children_from(walk.node)
         .into_iter()
         .filter(|&idx| {
             !matches!(
-                tree.node(idx).map(|n| &n.kind),
+                tree.node_for(idx).map(|n| &n.kind),
                 Some(NodeKind::Unrecognized { .. })
             )
         })
@@ -1070,7 +1074,7 @@ pub fn complete(tree: &CommandTree, line: &str) -> Completion {
     let mut needs_server = false;
 
     for idx in reachable {
-        match tree.node(idx).map(|n| &n.kind) {
+        match tree.node_for(idx).map(|n| &n.kind) {
             Some(NodeKind::Literal { name }) => {
                 if name.starts_with(partial) {
                     candidates.push(Candidate {
