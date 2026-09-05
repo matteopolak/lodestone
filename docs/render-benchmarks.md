@@ -140,7 +140,11 @@ reporting a successful capture. It is a quick local artifact check: it requires 
 nonempty capture, Samply `*.json.syms.json` sidecar, and the runner's
 `*.record.json` scene record, then verifies the record's capture path, release
 profile, scenario, bounded scales, scene hash, four phase durations, and stationary
-and moving summaries. Its current record schema also names the client camera plan:
+and moving summaries. Each measured summary must retain a positive frame count,
+finite non-negative timing percentiles in order, budget-miss counts, and the
+summary object shapes emitted by the runner. This rejects an otherwise complete
+sidecar handoff whose measured phase is an empty or zero-frame placeholder. Its
+current record schema also names the client camera plan:
 `stationary` holds the production benchmark still during the moving segment, while
 `orbit` drives its deterministic full turn. This prevents two materially different
 render-consumption paths from being compared as if they were one scene. The

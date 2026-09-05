@@ -586,6 +586,69 @@ def _require_nonempty_artifact(path: pathlib.Path, label: str) -> None:
         raise RuntimeError(f"heavyweight profile is missing a nonempty {label}: {path}")
 
 
+def _validate_heavy_segment_summary(segment: str, summary: dict) -> None:
+    """Reject a saved heavyweight record whose measured phase is a no-op.
+
+    ``_heavy_record`` normally receives these fields from ``summarize_rows``.
+    The artifact validator is also an independent handoff boundary, though, so
+    it must not accept an empty object (or a zero-frame placeholder) as proof
+    that the stationary and moving phases ran.
+    """
+    required = {
+        "frames",
+        "p50_ms",
+        "p95_ms",
+        "p99_ms",
+        "mean_ms",
+        "over_16_67",
+        "over_33_3",
+        "phases_ms",
+        "workload_counts",
+    }
+    missing = sorted(required - set(summary))
+    if missing:
+        raise RuntimeError(
+            f"heavyweight scene record segment {segment!r} is missing summary fields: "
+            f"{', '.join(missing)}"
+        )
+
+    frames = summary["frames"]
+    if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
+        raise RuntimeError(
+            f"heavyweight scene record segment {segment!r} must have a positive integer frames count"
+        )
+
+    timings = {}
+    for name in ("p50_ms", "p95_ms", "p99_ms", "mean_ms"):
+        value = summary[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RuntimeError(
+                f"heavyweight scene record segment {segment!r} has a non-numeric {name}"
+            )
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            raise RuntimeError(
+                f"heavyweight scene record segment {segment!r} has an invalid {name}"
+            )
+        timings[name] = value
+    if not timings["p50_ms"] <= timings["p95_ms"] <= timings["p99_ms"]:
+        raise RuntimeError(
+            f"heavyweight scene record segment {segment!r} has unordered percentile timings"
+        )
+
+    for name in ("over_16_67", "over_33_3"):
+        value = summary[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError(
+                f"heavyweight scene record segment {segment!r} has an invalid {name} count"
+            )
+    for name in ("phases_ms", "workload_counts"):
+        if not isinstance(summary[name], dict):
+            raise RuntimeError(
+                f"heavyweight scene record segment {segment!r} has a non-object {name}"
+            )
+
+
 def validate_heavy_profile_artifact(artifact: pathlib.Path) -> dict:
     """Check the local capture's sidecars and emitted heavyweight scene identity.
 
@@ -643,6 +706,8 @@ def validate_heavy_profile_artifact(artifact: pathlib.Path) -> dict:
         )
     ):
         raise RuntimeError(f"heavyweight scene record does not describe this capture: {record_path}")
+    for segment in ("stationary", "moving"):
+        _validate_heavy_segment_summary(segment, record["segments"][segment])
     return record
 
 
