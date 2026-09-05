@@ -368,6 +368,9 @@ separate `drop-selected-item(one|stack)` action guarded by `act:drop-selected-it
 the mode, while the client resolves the selected stack and owns the corresponding action egress.
 It also includes the no-argument `swap-item-with-offhand` action guarded by `act:swap-offhand`; the
 live client retains ownership of both held stacks and its protocol encoding.
+The no-argument `release-use-item` action is separately guarded by `act:release-use-item`; the
+guest cannot choose an item, hand, or held-use lifecycle state, and the live client owns the
+release action's protocol encoding.
 Placement returns a finite, generation-bounded result only to a guest granted `observe:place`; a
 multi-tick break claim remains
 outside the ABI because it needs a separate cancellation and ownership contract. Command

@@ -375,6 +375,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::SendChat(_) | Action::SendCommand(_) => Capability::ActChat,
         Action::SwingArm(_) => Capability::ActInteract,
         Action::SwapItemWithOffhand => Capability::ActSwapOffhand,
+        Action::ReleaseUseItem => Capability::ActReleaseUseItem,
         Action::SetLook(_) => Capability::ActLook,
         Action::SetMovement(_) => Capability::ActMovement,
         Action::SetBreak(_) => Capability::ActBreak,
@@ -412,6 +413,7 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
         Action::SwapItemWithOffhand => {
             LoweredAction::Client(ClientAction::SwapItemWithOffhand)
         }
+        Action::ReleaseUseItem => LoweredAction::Client(ClientAction::ReleaseUseItem),
         Action::SetLook(look) => LoweredAction::Intent(IntentAction::Look(look.map(|look| {
             lodestone_ecs::player::LookIntent {
                 yaw: look.yaw,
@@ -644,6 +646,18 @@ mod tests {
             lower_action(Action::SwapItemWithOffhand, &CapabilitySet::default_policy()),
             Err(Capability::ActSwapOffhand),
             "offhand swaps need their own explicit capability"
+        );
+        assert_eq!(
+            lower_action(
+                Action::ReleaseUseItem,
+                &CapabilitySet::from_iter([Capability::ActReleaseUseItem]),
+            ),
+            Ok(LoweredAction::Client(ClientAction::ReleaseUseItem))
+        );
+        assert_eq!(
+            lower_action(Action::ReleaseUseItem, &CapabilitySet::default_policy()),
+            Err(Capability::ActReleaseUseItem),
+            "held-use releases need their own explicit capability"
         );
     }
 
