@@ -37,7 +37,16 @@ chunk owners. It executes one owner batch at a time and returns a
 visible write occurred. `tick::apply_block_entity_effect_batches` is the sole
 central consumer: it applies each batch and publishes its furnace changes in
 the established owner order. This makes the message boundary real without
-claiming workers can run concurrently. Entities, natural-spawn planning, world
+claiming workers can run concurrently. The ambient entity-effect phase uses the
+same shape: `MobSim::take_ambient_sound_effect_batches` groups each emitted
+effect under `EntityTickOwner::Chunk`, and
+`tick::apply_entity_effect_batches` is the only publisher to the connection
+feed. Entity simulation itself remains serial in its existing vector order.
+Effects carry that original sequence because entities from two chunks may be
+interleaved; the central publisher restores it rather than changing behavior to
+owner-major order. Negative positions use `floor` followed by Euclidean chunk
+division, so an entity at `x = -0.5` belongs to chunk `-1`, not chunk `0`.
+Entities outside this ambient-effect hand-off, natural-spawn planning, world
 border, game rules, time, weather and other cross-column work remain global.
 For a named populated scene,
 `FollowArea::candidate_region_workload` groups the same selected chunks into an
@@ -62,6 +71,14 @@ Keep `FollowArea` as the producer until the live tick loop obtains its work
 through another production-consumed boundary. Any new producer must remove
 duplicates before constructing a plan and preserve a deliberate visit order;
 bypassing that check makes duplicate random ticks possible.
+
+When extending entity ownership, do not publish from a chunk owner. Add a typed
+batch to `MobSim`, retain an explicit source position and old serial sequence,
+and make `tick` centrally consume it. Grouping alone is not parity: if owners
+are interleaved in the serial simulation list, applying all of one owner's
+effects before another's changes observable packet order. Add both a
+negative-coordinate control and an interleaved-owner order control before a
+future executor is allowed to run owners separately.
 
 When recording a candidate report, name the populated scene and the explicit
 edge passed to `candidate_region_workload`. Compare total chunks, the number of

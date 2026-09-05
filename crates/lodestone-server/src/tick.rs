@@ -53,7 +53,9 @@ use bevy_ecs::world::World;
 use crate::block_entities::BlockEntityHandle;
 use crate::border::{BorderFeed, WorldBorder};
 use crate::chunk::ChunkSource;
-use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
+use crate::mobs::{
+    Detonation, EntityTickEffectBatch, EntityTickOwner, LiveMobSource, MobHandle, MobSim,
+};
 use lodestone_entity::ai::mob::EatenBlock;
 use crate::random_tick::RandomTickScheduler;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueueAccess, TickPriority};
@@ -1451,6 +1453,43 @@ fn apply_block_entity_effect_batches<W: ChunkSource>(
     }
 }
 
+/// Publishes entity-owner messages only after their serial simulation phase.
+///
+/// Entity owners produce no world writes here: `BlockTickFeed` remains the
+/// single publisher shared with the connection layer. Batches deliberately do
+/// not imply that their owners ran in parallel. Their effects are restored to
+/// their former serial visit sequence before publication, preserving current
+/// cross-chunk behavior while making a later worker hand-off explicit.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_entity_effect_batches(
+    block_tick_out: &BlockTickFeed,
+    batches: Vec<EntityTickEffectBatch>,
+) {
+    let mut effects = Vec::new();
+    for batch in batches {
+        for effect in batch.effects() {
+            debug_assert_eq!(
+                effect.owner,
+                batch.owner,
+                "an entity owner batch may contain only its own effects"
+            );
+            debug_assert_eq!(
+                effect.owner,
+                EntityTickOwner::Chunk {
+                    cx: (effect.source.x.floor() as i32).div_euclid(16),
+                    cz: (effect.source.z.floor() as i32).div_euclid(16),
+                },
+                "an entity effect must be handed to the publisher by its source owner's chunk"
+            );
+            effects.push(effect.clone());
+        }
+    }
+    effects.sort_unstable_by_key(|effect| effect.sequence);
+    for effect in effects {
+        block_tick_out.publish_effect(effect.effect().clone());
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 async fn run_tick_loop_with_weather_impl<W>(
     mobs: MobHandle,
@@ -2164,13 +2203,13 @@ async fn run_tick_loop_with_weather_impl<W>(
         for effect in mobs.with(MobSim::take_vocalisations) {
             block_tick_out.publish_effect(effect);
         }
-        // Periodic idle mob ambience (cow moos, zombie groans, …) — the
-        // producer `MobSim::tick` rolls every tick per mob
-        // (`roll_ambient_sound`), independent of combat. Same handoff shape
-        // as the hurt/death loop just above, and for the same reason.
-        for effect in mobs.with(MobSim::take_ambient_sounds) {
-            block_tick_out.publish_effect(effect);
-        }
+        // Periodic ambient effects are a real entity simulation phase. Its
+        // chunk owners return messages, and only this central publisher drains
+        // them onto the connection feed; see `apply_entity_effect_batches`.
+        apply_entity_effect_batches(
+            &block_tick_out,
+            mobs.with(MobSim::take_ambient_sound_effect_batches),
+        );
         // Drain target-block projectile impacts here, outside
         // the `scheduled.with` region below) because `MobSim` is the only
         // thing that saw the hit; resolved *inside* it further down because a

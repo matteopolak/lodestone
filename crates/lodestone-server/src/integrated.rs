@@ -4760,6 +4760,68 @@ mod tests {
         }
     }
 
+    /// The live integrated tick loop must consume entity-owner batches rather
+    /// than leaving the new planning API as a closed-loop `MobSim` detail. The
+    /// connection has not completed a login here, so it cannot drain the
+    /// shared effect feed before this test observes the server-side hand-off.
+    #[tokio::test]
+    async fn integrated_server_publishes_a_chunk_owned_ambient_entity_effect() {
+        let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
+            Silent,
+            FluidFixtureSource::water_at_east_edge(),
+            (0..=0, 0..=0),
+            (8, 8),
+            0,
+            2,
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let reseeded = server
+                .mobs()
+                .expect("a ticking integrated server exposes its mob simulation")
+                .with(|sim| sim.next_id() >= 1000);
+            if reseeded {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the integrated server never completed its initial mob simulation seed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            server
+                .spawn_mob(
+                    "minecraft:cow".parse().expect("valid cow key"),
+                    lodestone_model::Vec3::new(0.5, 1.0, 0.5),
+                )
+                .is_some(),
+            "the real integrated server must accept a live entity producer"
+        );
+
+        loop {
+            let effects = server
+                .block_ticks()
+                .expect("a ticking integrated server exposes its effect feed")
+                .drain_effects_for(Uuid::nil());
+            if effects.iter().any(|effect| {
+                matches!(
+                    effect,
+                    crate::effects::WorldEffect::Sound { sound, .. }
+                        if sound == "minecraft:entity.cow.ambient"
+                )
+            }) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the integrated tick loop reached {:?} ticks without centrally publishing the cow's owned ambient effect",
+                server.tick_stats().map(|stats| stats.tick_count),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
     /// **The production wiring check.** `server::tests`
     /// covers the *consumption* side (`dimension_scoped_handles` routing
     /// through whatever a source answers); this covers that `with_nether`'s

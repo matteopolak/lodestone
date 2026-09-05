@@ -92,6 +92,95 @@ use crate::mob_spawn::{
 };
 use crate::server::EntitySource;
 
+/// The chunk-local owner of an entity effect produced during one serial tick.
+///
+/// This is deliberately a planning boundary rather than a worker handle. The
+/// simulation still visits entities in its established vector order; effects
+/// retain that sequence when the central tick task consumes owner batches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityTickOwner {
+    /// The column containing the entity when it produced the effect.
+    Chunk { cx: i32, cz: i32 },
+}
+
+/// One effect handed from an entity-owned simulation phase to the central
+/// publisher.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityTickEffect {
+    /// The owner that produced this effect.
+    pub owner: EntityTickOwner,
+    /// The entity position used to assign that owner.
+    pub source: Vec3,
+    /// Its old serial visit position among effects drained in this hand-off.
+    pub sequence: usize,
+    effect: crate::effects::WorldEffect,
+}
+
+impl EntityTickEffect {
+    /// The wire-visible effect the central publisher must emit.
+    #[must_use]
+    pub fn effect(&self) -> &crate::effects::WorldEffect {
+        &self.effect
+    }
+}
+
+/// The messages one chunk owner returns from an entity simulation phase.
+///
+/// Batches group effects by owner, while [`EntityTickEffect::sequence`] keeps
+/// today's cross-owner serial publication order explicit. A future worker may
+/// produce one batch independently but must still use that central merge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityTickEffectBatch {
+    /// The owner that produced every effect in this batch.
+    pub owner: EntityTickOwner,
+    effects: Vec<EntityTickEffect>,
+}
+
+impl EntityTickEffectBatch {
+    /// Effects in the owner's original serial order.
+    #[must_use]
+    pub fn effects(&self) -> &[EntityTickEffect] {
+        &self.effects
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PendingEntityTickEffect {
+    owner: EntityTickOwner,
+    source: Vec3,
+    effect: crate::effects::WorldEffect,
+}
+
+fn entity_tick_owner(position: Vec3) -> EntityTickOwner {
+    EntityTickOwner::Chunk {
+        cx: (position.x.floor() as i32).div_euclid(16),
+        cz: (position.z.floor() as i32).div_euclid(16),
+    }
+}
+
+fn batch_entity_tick_effects(
+    effects: Vec<PendingEntityTickEffect>,
+) -> Vec<EntityTickEffectBatch> {
+    let mut batches: Vec<EntityTickEffectBatch> = Vec::new();
+    for (sequence, pending) in effects.into_iter().enumerate() {
+        let effect = EntityTickEffect {
+            owner: pending.owner,
+            source: pending.source,
+            sequence,
+            effect: pending.effect,
+        };
+        if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == effect.owner) {
+            batch.effects.push(effect);
+        } else {
+            batches.push(EntityTickEffectBatch {
+                owner: effect.owner,
+                effects: vec![effect],
+            });
+        }
+    }
+    batches
+}
+
 mod block_ids;
 
 // Re-exported so `crate::mobs::block_state_id`/`block_state_id_or_default` keep
@@ -3174,7 +3263,7 @@ pub struct MobSim<'w> {
     /// Before this, `MobSim` had no periodic ambient-sound producer at all —
     /// hurt and death were the only mob sounds a client could ever hear, so
     /// ordinary exploration (no combat) was silent but for footsteps.
-    pending_ambient_sounds: Vec<crate::effects::WorldEffect>,
+    pending_ambient_sounds: Vec<PendingEntityTickEffect>,
     /// Per-entity animation cues awaiting the driver — the *visible* half of the
     /// same hits [`pending_vocalisations`](Self::pending_vocalisations) makes
     /// audible, and recorded at the same funnels for the same reason (this sim
@@ -5282,7 +5371,7 @@ impl<'w> MobSim<'w> {
         // Idle ambient vocalisations rolled this tick — accumulated into a
         // local for the same reason `grazes`/`bred` are: `self.mobs` is
         // mutably borrowed for the whole loop.
-        let mut ambient_sounds: Vec<crate::effects::WorldEffect> = Vec::new();
+        let mut ambient_sounds: Vec<(Vec3, crate::effects::WorldEffect)> = Vec::new();
         // Elder guardian mining-fatigue pulses rolled this tick —
         // accumulated into a local for the same reason `grazes`/`bred` are:
         // `self.mobs` is mutably borrowed for the whole loop, and reading
@@ -5344,7 +5433,7 @@ impl<'w> MobSim<'w> {
             // `roll_ambient_sound`'s own doc.
             if m.health > 0.0 {
                 if let Some(effect) = roll_ambient_sound(m, tick_count) {
-                    ambient_sounds.push(effect);
+                    ambient_sounds.push((m.position(), effect));
                 }
             }
             // Vanilla's own zombified-piglin AI step's private alert-others call
@@ -5527,12 +5616,12 @@ impl<'w> MobSim<'w> {
                         pos.y.floor() as i32,
                         pos.z.floor() as i32,
                     );
-                    ambient_sounds.push(crate::effects::WorldEffect::LevelEvent {
+                    ambient_sounds.push((pos, crate::effects::WorldEffect::LevelEvent {
                         event: crate::effects::SOUND_ZOMBIE_CONVERTED,
                         pos: block_pos,
                         data: 0,
                         global: false,
-                    });
+                    }));
                 } else {
                     m.conversion = Some(state);
                 }
@@ -5558,7 +5647,13 @@ impl<'w> MobSim<'w> {
         }
         self.push_entities();
         self.pending_grazes.extend(grazes);
-        self.pending_ambient_sounds.extend(ambient_sounds);
+        self.pending_ambient_sounds.extend(
+            ambient_sounds.into_iter().map(|(source, effect)| PendingEntityTickEffect {
+                owner: entity_tick_owner(source),
+                source,
+                effect,
+            }),
+        );
         self.pending_mining_fatigue.extend(mining_fatigue);
         // Propagate zombified-piglin alerts after the per-mob loop releases
         // each `SimMob` borrow. The shared box from
@@ -7198,7 +7293,25 @@ impl<'w> MobSim<'w> {
     /// periodic sibling. Drained for the same reason: a slow consumer must not
     /// replay the same moo twice.
     pub fn take_ambient_sounds(&mut self) -> Vec<crate::effects::WorldEffect> {
-        std::mem::take(&mut self.pending_ambient_sounds)
+        let mut effects: Vec<_> = self
+            .take_ambient_sound_effect_batches()
+            .into_iter()
+            .flat_map(|batch| batch.effects)
+            .collect();
+        effects.sort_unstable_by_key(|effect| effect.sequence);
+        effects.into_iter().map(|effect| effect.effect).collect()
+    }
+
+    /// Drains this tick's ambient entity-effect phase as deterministic
+    /// chunk-owner batches.
+    ///
+    /// The producer still simulates entities serially. The batching step is
+    /// intentionally after that real phase: each owner hands effects to the
+    /// central world publisher instead of publishing from an owner. Effects
+    /// carry their former serial sequence so the publisher can preserve parity
+    /// even when two owners' entities were interleaved in the simulation list.
+    pub fn take_ambient_sound_effect_batches(&mut self) -> Vec<EntityTickEffectBatch> {
+        batch_entity_tick_effects(std::mem::take(&mut self.pending_ambient_sounds))
     }
 
     /// Drains every per-entity animation cue recorded since the last call — the
@@ -12405,6 +12518,74 @@ mod ambient_sound_tests {
             }
             other => panic!("expected a Sound effect, got {other:?}"),
         }
+    }
+
+    /// Owner batching must not turn a globally serial entity pass into
+    /// owner-major publication. These effects deliberately interleave origin,
+    /// negative, then origin chunks; the negative source is the control for
+    /// truncating `-0.5 / 16` to the origin instead of using floor and Euclidean
+    /// division.
+    #[test]
+    fn ambient_effect_batches_keep_negative_owners_and_restore_serial_order() {
+        let effect = |data| crate::effects::WorldEffect::LevelEvent {
+            event: crate::effects::SOUND_ZOMBIE_CONVERTED,
+            pos: BlockPos::new(data, 64, 0),
+            data,
+            global: false,
+        };
+        let pending = vec![
+            PendingEntityTickEffect {
+                owner: entity_tick_owner(Vec3::new(0.5, 64.0, 0.5)),
+                source: Vec3::new(0.5, 64.0, 0.5),
+                effect: effect(0),
+            },
+            PendingEntityTickEffect {
+                owner: entity_tick_owner(Vec3::new(-0.5, 64.0, -0.5)),
+                source: Vec3::new(-0.5, 64.0, -0.5),
+                effect: effect(1),
+            },
+            PendingEntityTickEffect {
+                owner: entity_tick_owner(Vec3::new(16.5, 64.0, 0.5)),
+                source: Vec3::new(16.5, 64.0, 0.5),
+                effect: effect(2),
+            },
+            PendingEntityTickEffect {
+                owner: entity_tick_owner(Vec3::new(0.25, 64.0, 0.25)),
+                source: Vec3::new(0.25, 64.0, 0.25),
+                effect: effect(3),
+            },
+        ];
+
+        let batches = batch_entity_tick_effects(pending);
+        assert_eq!(
+            batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
+            vec![
+                EntityTickOwner::Chunk { cx: 0, cz: 0 },
+                EntityTickOwner::Chunk { cx: -1, cz: -1 },
+                EntityTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "owners are deterministic by first serial appearance, including negative chunks"
+        );
+        assert_eq!(
+            batches[0]
+                .effects()
+                .iter()
+                .map(|effect| effect.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 3],
+            "one owner receives its effects in the serial order it produced them"
+        );
+
+        let mut serial: Vec<_> = batches
+            .into_iter()
+            .flat_map(|batch| batch.effects)
+            .collect();
+        serial.sort_unstable_by_key(|effect| effect.sequence);
+        assert_eq!(
+            serial.iter().map(|effect| effect.sequence).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+            "the central hand-off restores the old cross-owner visit order"
+        );
     }
 
     /// **Control: the roll is load-bearing, not vacuous.** A dead mob

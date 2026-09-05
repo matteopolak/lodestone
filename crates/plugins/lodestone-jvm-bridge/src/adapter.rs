@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use jni::errors::ThrowRuntimeExAndDefault;
 use jni::objects::{JClass, JString};
 use jni::strings::JNIString;
-use jni::sys::{jint, jlong, jstring};
+use jni::sys::{jint, jlong};
 use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
 
 use crate::runtime::{JvmConfig, JvmRuntime};
@@ -87,58 +87,6 @@ thread_local! {
     static CALLBACK_PORT: RefCell<Option<BlockPort>> = const { RefCell::new(None) };
     static BLOCK_WRITE_PORT: RefCell<Option<BlockWritePort>> = const { RefCell::new(None) };
     static SERVER_TICK_PORT: RefCell<Option<TickPort>> = const { RefCell::new(None) };
-    static LIFECYCLE_IDENTITY: RefCell<Vec<LifecycleIdentity>> = const {
-        RefCell::new(Vec::new())
-    };
-}
-
-/// Descriptor identity available only during one retained-entry call.
-///
-/// This is deliberately worker-local rather than a JVM property or a static
-/// field: another plugin cannot observe it between callbacks, and nested Java
-/// calls restore the outer identity when they return.
-#[derive(Clone, Debug)]
-struct LifecycleIdentity {
-    name: String,
-    version: String,
-}
-
-struct LifecycleIdentityGuard;
-
-#[derive(Clone, Copy)]
-enum LifecycleIdentityField {
-    Name,
-    Version,
-}
-
-impl Drop for LifecycleIdentityGuard {
-    fn drop(&mut self) {
-        LIFECYCLE_IDENTITY.with(|identities| {
-            identities
-                .borrow_mut()
-                .pop()
-                .expect("a lifecycle identity guard must own one worker-local identity");
-        });
-    }
-}
-
-/// Runs one constructor or lifecycle callback with its descriptor identity.
-///
-/// The caller is the only code that can install this context, and it is
-/// crate-private so it remains coupled to the retained worker-owned entries.
-pub(crate) fn with_lifecycle_identity<T>(
-    name: &str,
-    version: &str,
-    operation: impl FnOnce() -> T,
-) -> T {
-    LIFECYCLE_IDENTITY.with(|identities| {
-        identities.borrow_mut().push(LifecycleIdentity {
-            name: name.to_owned(),
-            version: version.to_owned(),
-        });
-    });
-    let _identity = LifecycleIdentityGuard;
-    operation()
 }
 
 /// One host-to-JVM callback waiting on the dedicated adapter worker.
@@ -621,48 +569,6 @@ pub(crate) fn register_block_state_write(
     }
 }
 
-#[allow(unsafe_code)]
-pub(crate) fn register_lifecycle_plugin_name_query(
-    env: &mut Env<'_>,
-    class: &JClass<'_>,
-    method_name: &str,
-    descriptor: &str,
-) -> jni::errors::Result<()> {
-    // SAFETY: the validated static native takes no arguments and returns a
-    // Java string. Its worker-local context has no route to world state.
-    unsafe {
-        let name = JNIString::new(method_name);
-        let signature = JNIString::new(descriptor);
-        let method = NativeMethod::from_raw_parts(
-            &name,
-            &signature,
-            native_lifecycle_plugin_name as *mut c_void,
-        );
-        env.register_native_methods(class, &[method])
-    }
-}
-
-#[allow(unsafe_code)]
-pub(crate) fn register_lifecycle_plugin_version_query(
-    env: &mut Env<'_>,
-    class: &JClass<'_>,
-    method_name: &str,
-    descriptor: &str,
-) -> jni::errors::Result<()> {
-    // SAFETY: the validated static native takes no arguments and returns a
-    // Java string. Its worker-local context has no route to world state.
-    unsafe {
-        let name = JNIString::new(method_name);
-        let signature = JNIString::new(descriptor);
-        let method = NativeMethod::from_raw_parts(
-            &name,
-            &signature,
-            native_lifecycle_plugin_version as *mut c_void,
-        );
-        env.register_native_methods(class, &[method])
-    }
-}
-
 extern "system" fn native_block_state_id<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -722,68 +628,9 @@ extern "system" fn native_block_state_write<'local>(
     }).resolve::<ThrowRuntimeExAndDefault>()
 }
 
-extern "system" fn native_lifecycle_plugin_name<'local>(
-    mut env: EnvUnowned<'local>,
-    _class: JClass<'local>,
-) -> jstring {
-    env.with_env(|env| lifecycle_identity_string(env, LifecycleIdentityField::Name))
-        .resolve::<ThrowRuntimeExAndDefault>()
-}
-
-extern "system" fn native_lifecycle_plugin_version<'local>(
-    mut env: EnvUnowned<'local>,
-    _class: JClass<'local>,
-) -> jstring {
-    env.with_env(|env| lifecycle_identity_string(env, LifecycleIdentityField::Version))
-        .resolve::<ThrowRuntimeExAndDefault>()
-}
-
-fn lifecycle_identity_string(
-    env: &mut Env<'_>,
-    field: LifecycleIdentityField,
-) -> Result<jstring, AdapterError> {
-    let _depth = CallbackDepthGuard::enter()
-        .map_err(|error| AdapterError::new(error.to_string()))?;
-    let identity = active_lifecycle_identity()?;
-    let value = match field {
-        LifecycleIdentityField::Name => identity.name,
-        LifecycleIdentityField::Version => identity.version,
-    };
-    env.new_string(value)
-        .map(|value| value.into_raw())
-        .map_err(|error| AdapterError::new(format!("plugin descriptor query: {error}")))
-}
-
-fn active_lifecycle_identity() -> Result<LifecycleIdentity, AdapterError> {
-    LIFECYCLE_IDENTITY.with(|identities| identities.borrow().last().cloned())
-        .ok_or_else(|| AdapterError::new(
-            "plugin descriptor queries require an active retained-entry lifecycle call",
-        ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn lifecycle_descriptor_identity_is_worker_scoped_and_restored() {
-        assert!(active_lifecycle_identity().is_err());
-        with_lifecycle_identity("outer", "one", || {
-            let outer = active_lifecycle_identity().expect("outer identity");
-            assert_eq!(outer.name, "outer");
-            assert_eq!(outer.version, "one");
-            with_lifecycle_identity("inner", "two", || {
-                let inner = active_lifecycle_identity().expect("inner identity");
-                assert_eq!(inner.name, "inner");
-                assert_eq!(inner.version, "two");
-            });
-            assert_eq!(
-                active_lifecycle_identity().expect("restored outer identity").name,
-                "outer",
-            );
-        });
-        assert!(active_lifecycle_identity().is_err());
-    }
 
     fn await_event(host: &mut AdapterHost) -> AdapterEvent {
         let limit = Instant::now() + Duration::from_secs(2);
