@@ -102,6 +102,14 @@ old entity-id slots before it updates motion/fuses or queues a detonation. The
 existing `MobSim::take_detonations` drain remains the production consumer for
 the block-destruction and network effects, so a reversed owner completion
 cannot reorder visible explosions.
+Minecart physics has the same boundary. The live tick loop obtains complete
+`MobSim::tick_minecart_owner_batches` results from cloned tick-start cart state
+and calls `MobSim::apply_minecart_tick_owner_batches` as the sole writer to the
+cart registry. The central application requires exactly one completion per
+source chunk and restores entity-id slots before it replaces transforms,
+changes a fuse, or consumes the TNT-minecart explosion stream. Consequently,
+owner completion order cannot reorder either a cart's visible transform or a
+later blast's random draw.
 Experience orbs have a separate motion ownership boundary inside
 `MobSim::tick_orbs`, reached from the live `MobSim::tick_with_terrain` pass.
 `MobSim::tick_orb_owner_batches` clones each tick-start orb under its source
