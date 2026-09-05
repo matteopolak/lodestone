@@ -451,6 +451,16 @@ impl DistantTerrainRenderer {
         }
     }
 
+    /// The negative-control seam for the headless screen gate.
+    ///
+    /// A test feeds it a slot that population deliberately skipped. Keeping
+    /// the check beside the actual draw-list detector proves the control is not
+    /// a second, more permissive assertion over test-only bookkeeping.
+    #[cfg(test)]
+    pub(crate) fn rejects_unpopulated_submission(&self, slot: usize) -> bool {
+        !self.residency.submitted_slots_are_complete([slot])
+    }
+
     fn upload_tile(
         queue: &wgpu::Queue,
         heights_water: &wgpu::Texture,
