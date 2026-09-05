@@ -12,12 +12,12 @@
 //! ordering and retry rules, while tests use synthetic monotonic times rather
 //! than sleeping.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::time::Duration;
 
 use lodestone_auth::friends::{
-    CachedResponse, EntityTag, FriendMutation, FriendsPreferences, FriendsServiceError,
+    CachedResponse, EntityTag, FriendMutation, FriendProfile, FriendsPreferences, FriendsServiceError,
     FriendsSnapshot, PresenceSnapshot, PresenceStatus, RetryHint, UserFriendsAttributes,
 };
 use lodestone_auth::Session;
@@ -97,6 +97,79 @@ pub struct FriendsView {
     pub presence: Option<PresenceSnapshot>,
     pub stale: bool,
     pub error: Option<FriendsError>,
+}
+
+/// A relationship change that frame code may present without a session or any
+/// service implementation detail.
+///
+/// The first successful snapshot is only a baseline. Later snapshots emit a
+/// request when its profile newly enters `incoming`, or a friendship when a
+/// profile moves from `outgoing` to `friends`. Those are the two changes the
+/// public view can establish without guessing at an absent notification
+/// preference or attributing the player's own mutation to somebody else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FriendsNotification {
+    RequestReceived(FriendProfile),
+    FriendshipAccepted(FriendProfile),
+}
+
+/// Diffs credential-free [`FriendsView`] snapshots for presentation consumers.
+///
+/// This is deliberately separate from [`FriendsCoordinator`]: the worker
+/// retains the session and its cache, while this feed consumes the same safe
+/// views an app or HUD already receives. Replacing the selected account or
+/// losing its snapshot seeds a new baseline rather than leaking a prior
+/// account's changes into the next one.
+#[derive(Debug, Default)]
+pub struct FriendsNotificationFeed {
+    account: Option<Uuid>,
+    snapshot: Option<FriendsSnapshot>,
+}
+
+impl FriendsNotificationFeed {
+    /// Incorporates `view`, returning only changes after a baseline exists for
+    /// the selected account.
+    pub fn update(&mut self, view: &FriendsView) -> Vec<FriendsNotification> {
+        let account = view.account.as_ref().map(|account| account.profile_id);
+        if self.account != account {
+            self.account = account;
+            self.snapshot = None;
+        }
+
+        let Some(snapshot) = view.snapshot.as_ref() else {
+            self.snapshot = None;
+            return Vec::new();
+        };
+        let Some(previous) = self.snapshot.replace(snapshot.clone()) else {
+            return Vec::new();
+        };
+
+        let known_incoming = profile_ids(&previous.incoming);
+        let pending_outgoing = profile_ids(&previous.outgoing);
+        let mut notifications = Vec::new();
+        for profile in &snapshot.incoming {
+            if !known_incoming.contains(&profile.profile_id) {
+                notifications.push(FriendsNotification::RequestReceived(profile.clone()));
+            }
+        }
+        for profile in &snapshot.friends {
+            if pending_outgoing.contains(&profile.profile_id) {
+                notifications.push(FriendsNotification::FriendshipAccepted(profile.clone()));
+            }
+        }
+        notifications
+    }
+
+    /// Discards the baseline on an explicit service-side disable or app
+    /// shutdown. A later re-enable starts quietly from its fresh snapshot.
+    pub fn clear(&mut self) {
+        self.account = None;
+        self.snapshot = None;
+    }
+}
+
+fn profile_ids(profiles: &[FriendProfile]) -> HashSet<Uuid> {
+    profiles.iter().map(|profile| profile.profile_id).collect()
 }
 
 /// The service lifecycle rendered by menus. It intentionally says nothing
@@ -802,5 +875,79 @@ mod tests {
         let debug = format!("{runtime:?}");
         assert!(debug.contains("has_session: true"));
         assert!(!debug.contains("friends-runtime-sentinel"));
+    }
+
+    fn profile(id: u128, name: &str) -> FriendProfile {
+        FriendProfile {
+            profile_id: Uuid::from_u128(id),
+            name: name.to_owned(),
+        }
+    }
+
+    fn view(snapshot: FriendsSnapshot) -> FriendsView {
+        FriendsView {
+            account: Some(account()),
+            snapshot: Some(snapshot),
+            ..FriendsView::default()
+        }
+    }
+
+    #[test]
+    fn notification_feed_seeds_then_reports_only_observable_relationship_deltas() {
+        let mut feed = FriendsNotificationFeed::default();
+        let outgoing = profile(2, "Alex");
+        let existing_request = profile(3, "Bea");
+        assert!(feed
+            .update(&view(FriendsSnapshot {
+                outgoing: vec![outgoing.clone()],
+                incoming: vec![existing_request],
+                ..FriendsSnapshot::default()
+            }))
+            .is_empty());
+
+        let new_request = profile(4, "Chen");
+        let notifications = feed.update(&view(FriendsSnapshot {
+            friends: vec![outgoing.clone()],
+            incoming: vec![new_request.clone()],
+            ..FriendsSnapshot::default()
+        }));
+        assert_eq!(
+            notifications,
+            vec![
+                FriendsNotification::RequestReceived(new_request),
+                FriendsNotification::FriendshipAccepted(outgoing),
+            ]
+        );
+        assert!(feed
+            .update(&view(FriendsSnapshot {
+                friends: vec![profile(2, "Alex")],
+                incoming: vec![profile(4, "Chen")],
+                ..FriendsSnapshot::default()
+            }))
+            .is_empty());
+    }
+
+    #[test]
+    fn notification_feed_does_not_carry_a_baseline_between_accounts() {
+        let mut feed = FriendsNotificationFeed::default();
+        assert!(feed
+            .update(&view(FriendsSnapshot {
+                incoming: vec![profile(2, "Alex")],
+                ..FriendsSnapshot::default()
+            }))
+            .is_empty());
+        assert!(feed
+            .update(&FriendsView {
+                account: Some(FriendsAccount {
+                    profile_id: Uuid::from_u128(9),
+                    display_name: "Other player".to_owned(),
+                }),
+                snapshot: Some(FriendsSnapshot {
+                    incoming: vec![profile(2, "Alex"), profile(3, "Bea")],
+                    ..FriendsSnapshot::default()
+                }),
+                ..FriendsView::default()
+            })
+            .is_empty());
     }
 }

@@ -7,13 +7,14 @@
 //! [`crate::friends_runtime::FriendsView`]. A bearer token never crosses back
 //! to `WindowApp`.
 
+use std::collections::VecDeque;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use super::WindowApp;
 use crate::friends_runtime::{
-    FriendsAccount, FriendsClock, FriendsOperation, FriendsResponse, FriendsRuntime, FriendsView,
-    SystemFriendsClock,
+    FriendsAccount, FriendsClock, FriendsNotification, FriendsNotificationFeed, FriendsOperation,
+    FriendsResponse, FriendsRuntime, FriendsView, SystemFriendsClock,
 };
 use lodestone_auth::friends::{
     FriendMutation, FriendsPreferences, FriendsService, FriendsServiceError, PresenceStatus,
@@ -27,10 +28,82 @@ pub(super) struct FriendsApp {
     activity: Option<PresenceStatus>,
     overlay_open: bool,
     view: FriendsView,
+    notifications: FriendsNotificationFeed,
+    toasts: FriendsToastQueue,
     #[cfg(not(target_arch = "wasm32"))]
     worker: NativeFriendsWorker,
     #[cfg(target_arch = "wasm32")]
     worker: LocalFriendsWorker,
+}
+
+/// One credential-free Friends toast ready for the HUD's top-right slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct FriendsToast {
+    pub(super) message: String,
+}
+
+const FRIENDS_TOAST_DISPLAY_MS: u64 = 5_000;
+const MAX_PENDING_FRIENDS_TOASTS: usize = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FriendsToastKind {
+    RequestReceived,
+    FriendshipAccepted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FriendsToastKey {
+    profile_id: uuid::Uuid,
+    kind: FriendsToastKind,
+}
+
+#[derive(Debug)]
+struct TimedFriendsToast {
+    key: FriendsToastKey,
+    toast: FriendsToast,
+    started_at_ms: u64,
+}
+
+/// The app owns presentation timing because `FriendsNotificationFeed` is a
+/// pure view-delta reader. A blocked HUD slot leaves the next toast pending;
+/// its five-second lifetime begins only after it can actually reach pixels.
+#[derive(Debug, Default)]
+struct FriendsToastQueue {
+    pending: VecDeque<(FriendsToastKey, FriendsToast)>,
+    active: Option<TimedFriendsToast>,
+}
+
+impl FriendsToastQueue {
+    fn push(&mut self, key: FriendsToastKey, toast: FriendsToast) {
+        if self.active.as_ref().is_some_and(|active| active.key == key)
+            || self.pending.iter().any(|(pending_key, _)| *pending_key == key)
+            || self.pending.len() == MAX_PENDING_FRIENDS_TOASTS
+        {
+            return;
+        }
+        self.pending.push_back((key, toast));
+    }
+
+    fn current(&mut self, now_ms: u64) -> Option<FriendsToast> {
+        if self.active.as_ref().is_some_and(|active| {
+            now_ms.saturating_sub(active.started_at_ms) >= FRIENDS_TOAST_DISPLAY_MS
+        }) {
+            self.active = None;
+        }
+        if self.active.is_none() {
+            self.active = self.pending.pop_front().map(|(key, toast)| TimedFriendsToast {
+                key,
+                toast,
+                started_at_ms: now_ms,
+            });
+        }
+        self.active.as_ref().map(|active| active.toast.clone())
+    }
+
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.active = None;
+    }
 }
 
 impl FriendsApp {
@@ -40,6 +113,8 @@ impl FriendsApp {
             activity: None,
             overlay_open: false,
             view: FriendsView::default(),
+            notifications: FriendsNotificationFeed::default(),
+            toasts: FriendsToastQueue::default(),
             #[cfg(not(target_arch = "wasm32"))]
             worker: NativeFriendsWorker::new(),
             #[cfg(target_arch = "wasm32")]
@@ -59,6 +134,8 @@ impl FriendsApp {
                 account,
                 ..FriendsView::default()
             };
+            self.notifications.clear();
+            self.toasts.clear();
             self.worker.submit(FriendsCommand::Select(self.account.clone()));
         }
         if self.activity != Some(activity) {
@@ -100,16 +177,61 @@ impl FriendsApp {
         self.account = None;
         self.activity = None;
         self.view = FriendsView::default();
+        self.notifications.clear();
+        self.toasts.clear();
+    }
+
+    /// Returns the next Friends toast only when the shared HUD slot is free.
+    /// The caller owns that slot's cross-feature priority; a Friends change
+    /// remains queued instead of expiring behind a recipe or advancement toast.
+    pub(super) fn toast(&mut self, now_ms: u64, slot_available: bool) -> Option<FriendsToast> {
+        slot_available.then(|| self.toasts.current(now_ms)).flatten()
     }
 
     fn pump(&mut self) {
         while let Some(view) = self.worker.try_view() {
-            if view.account.as_ref().map(|account| account.profile_id)
-                == self.account.as_ref().map(|account| account.profile_id)
-            {
-                self.view = view;
-            }
+            self.apply_view(view);
         }
+    }
+
+    fn apply_view(&mut self, view: FriendsView) {
+        if view.account.as_ref().map(|account| account.profile_id)
+            == self.account.as_ref().map(|account| account.profile_id)
+        {
+            if view.preferences.is_some_and(|preferences| !preferences.enabled) {
+                self.notifications.clear();
+                self.toasts.clear();
+            } else {
+                for notification in self.notifications.update(&view) {
+                    let (key, toast) = toast_for(notification);
+                    self.toasts.push(key, toast);
+                }
+            }
+            self.view = view;
+        }
+    }
+}
+
+fn toast_for(notification: FriendsNotification) -> (FriendsToastKey, FriendsToast) {
+    match notification {
+        FriendsNotification::RequestReceived(profile) => (
+            FriendsToastKey {
+                profile_id: profile.profile_id,
+                kind: FriendsToastKind::RequestReceived,
+            },
+            FriendsToast {
+                message: format!("{} sent you a friend request", profile.name),
+            },
+        ),
+        FriendsNotification::FriendshipAccepted(profile) => (
+            FriendsToastKey {
+                profile_id: profile.profile_id,
+                kind: FriendsToastKind::FriendshipAccepted,
+            },
+            FriendsToast {
+                message: format!("{} accepted your friend request", profile.name),
+            },
+        ),
     }
 }
 
@@ -457,6 +579,7 @@ async fn execute_local(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_auth::friends::{FriendProfile, FriendsSnapshot};
 
     #[derive(Clone, Default)]
     struct Clock {
@@ -485,6 +608,25 @@ mod tests {
         FriendsAccount {
             profile_id: uuid::Uuid::from_u128(1),
             display_name: "Player".to_owned(),
+        }
+    }
+
+    fn profile(id: u128, name: &str) -> FriendProfile {
+        FriendProfile {
+            profile_id: uuid::Uuid::from_u128(id),
+            name: name.to_owned(),
+        }
+    }
+
+    fn enabled_view(snapshot: FriendsSnapshot) -> FriendsView {
+        FriendsView {
+            account: Some(account()),
+            preferences: Some(FriendsPreferences {
+                enabled: true,
+                allow_requests: true,
+            }),
+            snapshot: Some(snapshot),
+            ..FriendsView::default()
         }
     }
 
@@ -537,5 +679,84 @@ mod tests {
         let view = runtime.view();
         assert_eq!(view.account, Some(account()));
         assert!(!format!("{view:?}").contains("must-not-leave-worker"));
+    }
+
+    #[test]
+    fn app_turns_a_credential_free_request_delta_into_a_hud_toast() {
+        let mut app = FriendsApp::new();
+        app.account = Some(account());
+        app.apply_view(enabled_view(FriendsSnapshot::default()));
+        app.apply_view(enabled_view(FriendsSnapshot {
+            incoming: vec![profile(2, "Alex")],
+            ..FriendsSnapshot::default()
+        }));
+
+        assert_eq!(
+            app.toast(100, true),
+            Some(FriendsToast {
+                message: "Alex sent you a friend request".to_owned(),
+            })
+        );
+        assert_eq!(
+            app.toast(5_099, true),
+            Some(FriendsToast {
+                message: "Alex sent you a friend request".to_owned(),
+            })
+        );
+        assert!(app.toast(5_100, true).is_none());
+        app.shutdown();
+    }
+
+    #[test]
+    fn unavailable_hud_slot_does_not_start_a_friends_toast_lifetime() {
+        let mut app = FriendsApp::new();
+        app.account = Some(account());
+        app.apply_view(enabled_view(FriendsSnapshot::default()));
+        app.apply_view(enabled_view(FriendsSnapshot {
+            outgoing: vec![profile(2, "Alex")],
+            ..FriendsSnapshot::default()
+        }));
+        app.apply_view(enabled_view(FriendsSnapshot {
+            friends: vec![profile(2, "Alex")],
+            ..FriendsSnapshot::default()
+        }));
+        assert!(app.toast(10, false).is_none());
+        assert_eq!(
+            app.toast(5_000, true),
+            Some(FriendsToast {
+                message: "Alex accepted your friend request".to_owned(),
+            })
+        );
+        assert!(app.toast(9_999, true).is_some());
+        assert!(app.toast(10_000, true).is_none());
+        app.shutdown();
+    }
+
+    #[test]
+    fn toast_queue_coalesces_a_profile_action_and_stays_bounded() {
+        let mut queue = FriendsToastQueue::default();
+        for id in 0..=MAX_PENDING_FRIENDS_TOASTS {
+            queue.push(
+                FriendsToastKey {
+                    profile_id: uuid::Uuid::from_u128(id as u128),
+                    kind: FriendsToastKind::RequestReceived,
+                },
+                FriendsToast {
+                    message: format!("Request {id}"),
+                },
+            );
+        }
+        assert_eq!(queue.pending.len(), MAX_PENDING_FRIENDS_TOASTS);
+        queue.push(
+            FriendsToastKey {
+                profile_id: uuid::Uuid::from_u128(0),
+                kind: FriendsToastKind::RequestReceived,
+            },
+            FriendsToast {
+                message: "Duplicate request".to_owned(),
+            },
+        );
+        assert_eq!(queue.pending.len(), MAX_PENDING_FRIENDS_TOASTS);
+        assert_eq!(queue.current(0).unwrap().message, "Request 0");
     }
 }
