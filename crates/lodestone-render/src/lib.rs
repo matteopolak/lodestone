@@ -259,8 +259,8 @@ pub use mesher::{
     neighbour_columns, neighbourhood_coords,
 };
 pub use map_item::{
-    MAP_BRIGHTNESS, MAP_COLOR_BASE, MAP_SIZE as MAP_TEXTURE_SIZE, map_color_rgba, map_quad_mesh,
-    map_texture_rgba,
+    MAP_BRIGHTNESS, MAP_COLOR_BASE, MAP_SIZE as MAP_TEXTURE_SIZE, PackedMapColour, map_color_rgba,
+    map_quad_mesh, map_texture_rgba,
 };
 pub use model_arena::{ArenaMesh, ModelMeshArena};
 pub use model_pipeline::{
