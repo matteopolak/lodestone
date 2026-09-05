@@ -1041,7 +1041,7 @@ fn client_event_carriers_cover_play_state_gameplay_packets_without_protocol_ids(
         ClientEvent::LevelEvent {
             event: 1023,
             pos: BlockPos::new(1, 2, 3),
-            data: 7,
+            data: LevelEventData::Raw(7),
             global: false,
         },
         ClientEvent::Particles {

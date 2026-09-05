@@ -53,7 +53,7 @@
 use std::time::{Duration, Instant};
 
 use lodestone_model::{
-    ClientAction, ClientEvent, ConnectionState, Directive, LoginProfile, ServerAddress,
+    ClientAction, ClientEvent, ConnectionState, Directive, LevelEventData, LoginProfile, ServerAddress,
     VersionAdapter,
 };
 use lodestone_net::Connection;
@@ -182,12 +182,20 @@ async fn pump_capturing(
                     pos,
                     data,
                     global: _,
-                }) => out.push(Captured {
-                    raw: raw.clone(),
-                    event,
-                    pos: (pos.x, pos.y, pos.z),
-                    data,
-                }),
+                }) => {
+                    if event == PARTICLES_DESTROY_BLOCK {
+                        assert!(
+                            matches!(data, LevelEventData::BlockState(_)),
+                            "the 26.2 block-break event must retain a canonical state source"
+                        );
+                    }
+                    out.push(Captured {
+                        raw: raw.clone(),
+                        event,
+                        pos: (pos.x, pos.y, pos.z),
+                        data: data.raw_i32(),
+                    });
+                }
                 Directive::Emit(_) => {}
                 other => apply(conn, state, other).await,
             }

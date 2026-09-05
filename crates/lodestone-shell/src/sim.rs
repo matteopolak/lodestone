@@ -39,7 +39,7 @@ use lodestone_game::placement::{
     Axis, Half, OrientationKind, Placement, PlacedState, UseOnContext, UseOnDecision,
 };
 use lodestone_model::event::EquipmentSlot;
-use lodestone_model::{BlockFace, EntityInteraction, Vec3f};
+use lodestone_model::{BlockFace, BlockStateRef, EntityInteraction, Vec3f};
 use lodestone_particle::emit as particle_emit;
 use lodestone_physics::{
     CollisionView, EntityDimensions, FluidState, NearbyEntity, PhysicsProfile, PlayerState, Vec3d,

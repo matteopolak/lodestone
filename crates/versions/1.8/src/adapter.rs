@@ -9,12 +9,13 @@ use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::block_states;
 use lodestone_data::mob_effects::mob_effect_name;
 use lodestone_model::{
-    AdapterError, AnimationAction, BlockActionKind, BlockFace, ChatKind, ChatMode, ChunkPos,
-    ClientAction, ClientEvent, ClientSettings, CollisionRule, ConnectionState, Difficulty,
+    AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockStateRef, ChatKind, ChatMode,
+    ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule, ConnectionState, Difficulty,
     Directive, DisplayedSkinParts, DisplaySlot, EntityEquipment, EntityInteraction,
     EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile, ObjectiveMode,
-    ObjectiveRenderType, PlayerCommand, PlayerListEntry, ProfileProperty, ResourceKey, Rotation,
-    SectionPos, ServerAddress, SoundCategory, TeamAction, TeamColor, TeamParameters,
+    LevelEventData, ObjectiveRenderType, PlayerCommand, PlayerListEntry, ProfileProperty,
+    ResourceKey, Rotation, SectionPos, ServerAddress, SoundCategory, TeamAction, TeamColor,
+    TeamParameters,
     TeleportFlags, Text, Vec3, VersionAdapter, Visibility,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk, WorldSink};
@@ -54,6 +55,17 @@ use crate::packets::world::{
 
 /// Protocol version implemented by this adapter.
 pub const PROTOCOL: i32 = 47;
+
+/// Tags the block-break event's payload without pretending protocol 47's state
+/// numbering is this build's generated numbering. All other event payloads
+/// retain their signed event-specific shape.
+fn level_event_data(event: i32, data: i32) -> LevelEventData {
+    if event == 2001 {
+        LevelEventData::BlockState(BlockStateRef::protocol_local(data as u32))
+    } else {
+        LevelEventData::Raw(data)
+    }
+}
 
 /// Every protocol number this family speaks — the single source of truth for
 /// its coverage.
@@ -2381,7 +2393,7 @@ impl V47Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::LevelEvent {
                 event: body.effect_id,
                 pos: body.location.0,
-                data: body.data,
+                data: level_event_data(body.effect_id, body.data),
                 global: body.global,
             })]);
             }
