@@ -95,7 +95,7 @@ table generalises).
 | Worldgen: custom generator | [`lodestone_worldgen::generator::ChunkGenerator`] | — (a `dyn` trait a plugin *implements*, not an event it *observes*) | yes — one trait object per dimension key | N/A — there is no refusal; the plugin's output *is* the terrain | N/A — nothing else supplies terrain for the same column | N/A — a generator has no lifecycle beyond existing |
 | Worldgen: custom dimension | [`lodestone_server::plugin_dimension::DimensionRegistry`] | — (a registration call, `register(dimension)`) | yes — `Option<Arc<PluginDimension>>` keyed by string, one owner per key | partial — `register` returns `None` on a duplicate key, so *that* refusal is observable; there is no other refusal shape | N/A | N/A — register once, `get`/`chunk_source` forever after |
 | Worldgen: live structure placement | [`lodestone_server::structure_placement::place_structure_live`] | — (a direct function call with a template and origin) | yes — one function, called synchronously | no — returns a plain `usize` (cells written), no verdict a second party could have vetoed | N/A — nothing else contests one placement call | N/A — one-shot, matches its own shape |
-| Entity spawn/despawn | [`lodestone_server::IntegratedServer::spawn_mob_proposed`]/[`despawn_mob`], backed by [`crate::mobs::MobSim::remove_mob`] | partial — `ServerProposalAction::SpawnMob` is observable; legacy `spawn_mob` and `despawn_mob` remain direct | yes — the checked path resolves exactly one action before `MobHandle::with` mutates | partial — checked spawn returns `SpawnProposalRefusal::{Denied, TimedOut, Unavailable}`; direct spawn/despawn retain their legacy `Option` result | partial — native plugins can prioritize allow/deny/replace for checked spawn; despawn has no proposal yet | N/A — install/remove exist (spawn/despawn) but nothing between them is observable by a third party |
+| Entity spawn/despawn | [`lodestone_server::IntegratedServer::spawn_mob_proposed`]/[`despawn_mob_proposed`], backed by [`crate::mobs::MobSim::remove_mob`] | yes — `ServerProposalAction::{SpawnMob, NaturalSpawnMob, DespawnMob}` is observable; legacy `spawn_mob` and `despawn_mob` remain direct | yes — the checked path resolves exactly one action before `MobHandle::with` mutates | yes — checked spawn/despawn return typed `Denied`, `TimedOut`, `Unavailable`, or a mismatched replacement; a permitted missing despawn reports `Ok(false)` | yes — native plugins prioritize allow/deny/replace for checked spawn, natural candidates, and checked despawn; lower numeric priority wins and ties keep schedule order | N/A — install/remove remain one-shot actions, not long-lived subscriptions |
 | Crafting-station hooks | [`lodestone_server::plugin_crafting::CraftingStationHooks`], [`StationVerdict`] | **yes** — [`StationInputs`] is observation-only: the station, its input cells, vanilla's own computed result; never a menu-slot index, a raw click, or a mutable inventory borrow | **yes** — `workstation_result` is the one choke point every one of the five production entry points already passed through before this work | **yes** — `StationVerdict::{Allow, Deny, Replace(ItemStack)}`, always returned, never inferred from silence | **dropped, by name** — "there is no second, *human* source of a workstation result to arbitrate against ('human outranks a plugin' has nothing to outrank)" | **dropped, by name** — "a station evaluation has no lifecycle beyond answering the one question it was asked" |
 
 Reading the table by column rather than by row is the actual finding. Column (1): only crafting
@@ -136,8 +136,12 @@ caller awaits without either a world lock or a mob-handle lock. The bounded queu
 response deadline make a stopped or overloaded tick task observable as `Unavailable` or
 `TimedOut`, rather than silently applying a late mutation.
 
-The remaining gap is narrower: legacy direct spawn, despawn, population-driven spawn, and every
-non-spawn capability do not yet submit `ServerProposal`s.
+The legacy direct methods intentionally remain outside this layer for compatibility. Checked despawn
+and population-driven spawn now share it: the tick loop plans the natural candidates after a short
+mob census lock, stages `NaturalSpawnMob` actions, runs `GameTick`, then takes the resolutions and
+materializes only accepted candidates under a fresh lock. No adjudicator runs while `MobHandle` is
+held. Automatic distance-based despawn and the remaining non-spawn capabilities do not yet submit
+`ServerProposal`s.
 
 ### The substrate now has one production consumer
 
@@ -217,8 +221,9 @@ Nothing above requires touching `spawn_mob`/`despawn_mob`'s existing signatures 
 
 1. **Keep `spawn_mob` direct** while callers migrate deliberately to async
    `spawn_mob_proposed`; the direct-call test remains the compatibility control.
-2. **Add a second action only with a production owner** — likely a checked despawn or a natural-spawn
-   seam — and make it use the same ingress, message, decision resource, and apply pass.
+2. **Add a second action only with a production owner.** Checked despawn and natural spawn now use
+   the same ingress/message/decision/apply pass; future automatic despawn must follow the same
+   no-callback-under-`MobHandle` split rather than adding a direct hook.
 3. **Do not pre-populate `ServerProposal`** with every capability in this document's table. Add an
    action only once a second real need appears; a speculative variant has no production consumer.
    Crafting hooks stay on `StationVerdict` regardless: `docs/plugin-crafting-hooks.md`'s own
@@ -275,6 +280,8 @@ deadline is one second.
 [`lodestone_server::plugin_dimension::DimensionRegistry`]: ../crates/lodestone-server/src/plugin_dimension.rs
 [`lodestone_server::structure_placement::place_structure_live`]: ../crates/lodestone-server/src/structure_placement.rs
 [`lodestone_server::IntegratedServer::spawn_mob`]: ../crates/lodestone-server/src/integrated.rs
+[`lodestone_server::IntegratedServer::spawn_mob_proposed`]: ../crates/lodestone-server/src/integrated.rs
+[`lodestone_server::IntegratedServer::despawn_mob_proposed`]: ../crates/lodestone-server/src/integrated.rs
 [`despawn_mob`]: ../crates/lodestone-server/src/integrated.rs
 [`crate::mobs::MobSim::remove_mob`]: ../crates/lodestone-server/src/mobs/mod.rs
 [`lodestone_server::plugin_crafting::CraftingStationHooks`]: ../crates/lodestone-server/src/plugin_crafting.rs
