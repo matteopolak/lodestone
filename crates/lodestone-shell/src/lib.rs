@@ -78,6 +78,8 @@ pub mod friends_runtime;
 pub mod gpu;
 pub mod hud;
 pub(crate) mod horizon;
+/// Bounded, headless profiler input for the distant-terrain horizon.
+pub mod horizon_profile;
 pub mod interact;
 /// Which username and UUID a join presents: the selected Microsoft account, or
 /// the persisted offline identity when there is none. One producer, so the

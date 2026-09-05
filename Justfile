@@ -367,6 +367,16 @@ samply-chunk-owner-tick capture:
     cargo build --release {{jflag}} -p lodestone-server --features profile-harness --example chunk-owner-tick-profile
     samply record --save-only --unstable-presymbolicate -o {{capture}} -- target/release/examples/chunk-owner-tick-profile 128
 
+# A finite, adapter-free profiling input for the 256-chunk coarse horizon.
+# It requests 256 reduced far columns plus a fixed tile budget per recenter and
+# fails if any far request returns a full column, so Samply has explicit path witnesses.
+profile-distant-horizon:
+    cargo run --release {{jflag}} --target-dir {{tdir}} -p lodestone-shell --bin horizon-profile
+
+samply-distant-horizon capture:
+    cargo build --release {{jflag}} --target-dir {{tdir}} -p lodestone-shell --bin horizon-profile
+    samply record --save-only --unstable-presymbolicate -o {{capture}} -- {{tdir}}/release/horizon-profile
+
 # --- Benchmark baselines and regression detection -------------------------
 #
 # Three recipes, in the order you use them. `bench-record` runs the subset of

@@ -14,6 +14,7 @@ use lodestone_render::{
     DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT, DISTANT_TERRAIN_WGSL, DistantTerrain,
     HORIZON_CELL_BLOCKS, HORIZON_TILE_BLOCKS, HORIZON_TILE_CELLS, HORIZON_TILES_PER_AXIS,
     HorizonCell, HorizonTile,
+    horizon_tile_intersects_radius,
     ModelSharedCameraUniform, fog::FogUniform,
     model_shared_camera_buffer_with_fog, update_model_shared_camera_buffer,
 };
@@ -393,7 +394,9 @@ impl DistantTerrainRenderer {
             terrain
                 .tiles()
                 .nth(slot)
-                .is_some_and(|tile| tile_intersects_radius(tile, camera_block, outer_radius_blocks))
+                .is_some_and(|tile| {
+                    horizon_tile_intersects_radius(tile, camera_block, outer_radius_blocks)
+                })
         }) else {
             return false;
         };
@@ -480,7 +483,7 @@ impl DistantTerrainRenderer {
             .submitted_slots()
             .filter(|slot| {
                 self.terrain.tiles().nth(*slot).is_some_and(|tile| {
-                    tile_intersects_radius(tile, self.camera_block, self.outer_radius_blocks)
+                    horizon_tile_intersects_radius(tile, self.camera_block, self.outer_radius_blocks)
                 })
             })
             .collect();
@@ -554,20 +557,6 @@ fn atlas_origin(slot: usize) -> [i32; 2] {
     ]
 }
 
-fn tile_intersects_radius(tile: &HorizonTile, camera_block: [i32; 2], radius_blocks: f32) -> bool {
-    if radius_blocks <= 0.0 {
-        return false;
-    }
-    let (origin_x, origin_z) = tile.coord().block_origin();
-    let end_x = origin_x.saturating_add(HORIZON_TILE_BLOCKS);
-    let end_z = origin_z.saturating_add(HORIZON_TILE_BLOCKS);
-    let nearest_x = camera_block[0].clamp(origin_x, end_x);
-    let nearest_z = camera_block[1].clamp(origin_z, end_z);
-    let dx = i64::from(nearest_x) - i64::from(camera_block[0]);
-    let dz = i64::from(nearest_z) - i64::from(camera_block[1]);
-    (dx * dx + dz * dz) as f64 <= f64::from(radius_blocks) * f64::from(radius_blocks)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,10 +603,10 @@ mod tests {
         let centre = terrain.tiles().nth(40).expect("centre tile");
         let west = terrain.tiles().nth(36).expect("west edge tile");
         let far_corner = terrain.tiles().next().expect("corner tile");
-        assert!(tile_intersects_radius(centre, [0, 0], 256.0));
-        assert!(!tile_intersects_radius(far_corner, [0, 0], 256.0));
-        assert!(tile_intersects_radius(west, [0, 0], 4096.0));
-        assert!(!tile_intersects_radius(far_corner, [0, 0], 4096.0));
+        assert!(horizon_tile_intersects_radius(centre, [0, 0], 256.0));
+        assert!(!horizon_tile_intersects_radius(far_corner, [0, 0], 256.0));
+        assert!(horizon_tile_intersects_radius(west, [0, 0], 4096.0));
+        assert!(!horizon_tile_intersects_radius(far_corner, [0, 0], 4096.0));
     }
 
     #[test]
