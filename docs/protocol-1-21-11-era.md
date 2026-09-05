@@ -200,7 +200,9 @@ happened to the 1.20.6 era.
 
 `server_protocol::V774ServerProtocol` implements offline login, configuration,
 the Overworld join and teleport, chunk batches, player movement, block
-breaking updates, and block-target uses. Its four Play movement packets decode
+breaking updates, block-target uses, and held-item air uses. The latter carries
+the hand plus the yaw and pitch sampled at use time, so the shared server can
+choose a projectile direction without relying on a stale movement sample. Its four Play movement packets decode
 the grounded bit from
 their shared flags byte, preserving the position and optional rotation the
 shared server uses to recenter the view and check interactions.
@@ -233,8 +235,8 @@ fixture. Each capture has a 30-second deadline and performs no gameplay actions.
 The hermetic companion reads the actual hosted connection and requires every
 fixture payload before its finish signal. `tests/server_integration.rs` verifies
 registry-selected login, Play, chunk receipt, movement-driven view recentering,
-the adapter-to-host block-use consumer boundary (including both hands), and a
-block break through the real integrated-server loop. Its enclosed-room
+the adapter-to-host block-use and air-use consumer boundaries (including both
+hands), and a block break through the real integrated-server loop. Its enclosed-room
 light gate reads the client's render light snapshots, checking sky 0 inside and 15 outside, torch emission 14,
 adjacent air 13, and extinction after removing the source. A separate boundary
 gate starts from isolated sky 0 beneath an opaque roof, removes a border

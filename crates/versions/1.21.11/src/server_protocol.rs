@@ -17,7 +17,7 @@ use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::configuration::RegistryData;
 use crate::packets::game::{
     ClientboundPlayerPosition, JoinGame, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
-    MovePlayerStatusOnly, PlayerAction, SpawnInfo, UseItemOn,
+    MovePlayerStatusOnly, PlayerAction, SpawnInfo, UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginStart, LoginFinished, SetCompression};
@@ -385,6 +385,24 @@ impl ServerProtocol for V774ServerProtocol {
                     sequence,
                     hand,
                 }
+            }
+            State::Play if packet_id == play::serverbound::USE_ITEM => {
+                let Some(UseItem {
+                    hand,
+                    sequence: _,
+                    yaw,
+                    pitch,
+                }) = decode_full(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                let Ok(hand) = u8::try_from(hand) else {
+                    return ServerBound::Ignored;
+                };
+                if hand > 1 {
+                    return ServerBound::Ignored;
+                }
+                ServerBound::UseItem { hand, yaw, pitch }
             }
             State::Play if packet_id == play::serverbound::CHUNK_BATCH_RECEIVED => {
                 decode_full::<crate::packets::game::ChunkBatchReceived>(payload)

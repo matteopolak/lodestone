@@ -4,7 +4,7 @@ use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol
 use lodestone_v1_21_11::{V774ServerProtocol, packet_ids};
 use lodestone_v1_21_11::packets::chunk::{ChunkShape, LevelChunk};
 use lodestone_v1_21_11::packets::configuration::RegistryData;
-use lodestone_v1_21_11::packets::game::{PlayerAction, JoinGame};
+use lodestone_v1_21_11::packets::game::{JoinGame, PlayerAction};
 use lodestone_v1_21_11::packets::position::Position;
 
 const CTX: Ctx = Ctx { version: 774 };
@@ -184,6 +184,38 @@ fn block_use_decodes_the_774_border_flag_before_its_prediction_sequence() {
         protocol.decode(State::Play, 0x3f, &invalid_hand),
         ServerBound::Ignored,
         "only the two real interaction hands reach the server consumer"
+    );
+}
+
+#[test]
+fn air_use_decodes_774_look_angles_and_rejects_invalid_hands() {
+    let protocol = V774ServerProtocol;
+    // Independently assembled protocol-774 body: off hand, prediction
+    // sequence 17, then yaw 90 and pitch -15 in big-endian IEEE-754. Unlike a
+    // block-target use, the look direction is carried by this packet itself.
+    let body = [
+        0x01, 0x11, 0x42, 0xb4, 0x00, 0x00, 0xc1, 0x70, 0x00, 0x00,
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, 0x40, &body),
+        ServerBound::UseItem {
+            hand: 1,
+            yaw: 90.0,
+            pitch: -15.0,
+        }
+    );
+    assert_eq!(
+        protocol.decode(State::Configuration, 0x40, &body),
+        ServerBound::Ignored,
+        "the Play packet must not bypass the configuration-to-Play handoff"
+    );
+    let invalid_hand = [
+        0x02, 0x11, 0x42, 0xb4, 0x00, 0x00, 0xc1, 0x70, 0x00, 0x00,
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, 0x40, &invalid_hand),
+        ServerBound::Ignored,
+        "only the two actual hands may reach the item-use consumer"
     );
 }
 

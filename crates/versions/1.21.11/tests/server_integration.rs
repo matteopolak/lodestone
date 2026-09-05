@@ -56,6 +56,38 @@ fn adapter_block_use_reaches_the_registry_selected_host_consumer() {
     );
 }
 
+#[test]
+fn adapter_air_use_reaches_the_registry_selected_host_consumer() {
+    let adapter = adapter_for(774);
+    let action = ClientAction::UseItem {
+        hand: lodestone_model::Hand::Off,
+        rotation: Rotation::new(90.0, -15.0),
+        sequence: 17,
+    };
+    let Some((packet_id, payload)) = adapter
+        .encode_action(ConnectionState::Play, &action)
+        .expect("the protocol-774 adapter must encode an air use")
+    else {
+        panic!("air use must have a serverbound packet");
+    };
+    let host = lodestone_registry::server_protocol_for_protocol(774)
+        .expect("protocol 774 must resolve to the hosted family");
+    assert_eq!(
+        host.decode(lodestone_core::State::Play, packet_id, &payload),
+        lodestone_server::ServerBound::UseItem {
+            hand: 1,
+            yaw: 90.0,
+            pitch: -15.0,
+        },
+        "the adapter's held-item use reaches the server's projectile and consumption input"
+    );
+    assert_eq!(
+        host.decode(lodestone_core::State::Configuration, packet_id, &payload),
+        lodestone_server::ServerBound::Ignored,
+        "the same bytes must not bypass the configuration-to-Play handoff"
+    );
+}
+
 struct FixtureSource {
     column: Mutex<ChunkColumn>,
 }
