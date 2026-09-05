@@ -284,6 +284,63 @@ async fn a_supplied_server_plugin_runs_on_the_primary_world_tick_task() {
     server.shutdown().await;
 }
 
+#[derive(bevy_ecs::message::Message)]
+struct PluginNotice(u64);
+
+struct NoticeProducer;
+
+impl Plugin for NoticeProducer {
+    fn build(&self, app: &mut App) {
+        app.add_message::<PluginNotice>();
+        app.add_systems(GameTick, (
+            |mut sequence: bevy_ecs::system::Local<u64>,
+             mut notices: bevy_ecs::message::MessageWriter<PluginNotice>| {
+                *sequence += 1;
+                notices.write(PluginNotice(*sequence));
+            }
+        ).in_set(TickSet::Apply));
+    }
+}
+
+struct NoticeConsumer(Arc<AtomicU64>);
+
+impl Plugin for NoticeConsumer {
+    fn build(&self, app: &mut App) {
+        app.add_message::<PluginNotice>();
+        app.insert_resource(PluginTickCount(Arc::clone(&self.0)));
+        app.add_systems(GameTick, (
+            |mut reader: bevy_ecs::message::MessageReader<PluginNotice>,
+             messages: Res<bevy_ecs::message::Messages<PluginNotice>>,
+             observed: Res<PluginTickCount>| {
+                assert!(messages.len() <= 2, "plugin message history must expire");
+                for notice in reader.read() {
+                    observed.0.fetch_add(notice.0, Ordering::Relaxed);
+                }
+            }
+        ).in_set(TickSet::Publish));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn independent_plugins_exchange_bounded_messages_on_the_primary_tick_task() {
+    let observed = Arc::new(AtomicU64::new(0));
+    let plugin_observed = Arc::clone(&observed);
+    let server_app = ServerApp::bootstrap_with(|app| {
+        app.add_plugins((NoticeConsumer(plugin_observed), NoticeProducer));
+    });
+    let (server, _client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
+        Silent, AirWorld, (0..=0, 0..=0), (0, 0), 0, 1, server_app,
+    );
+    assert_eq!(observed.load(Ordering::Relaxed), 0);
+    tokio::task::yield_now().await;
+    for (index, expected_sum) in [1, 3, 6, 10].into_iter().enumerate() {
+        tokio::time::advance(crate::tick::TICK_PERIOD).await;
+        wait_for_completed_ticks(&server, index as u64 + 1).await;
+        assert_eq!(observed.load(Ordering::Relaxed), expected_sum);
+    }
+    server.shutdown().await;
+}
+
 /// Control for the plugin gate: carrying the same observable as a resource is
 /// insufficient unless a caller actually registers the plugin system.
 #[tokio::test(start_paused = true)]

@@ -81,7 +81,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 
 | capability | client, native | client, WASM | server |
 |---|---|---|---|
-| observe a typed event | **done** — `GameEvent(ClientEvent)` via `MessageReader`, off by default, installed for every shipped `App` by `ServerBrandChannelPlugin` in `lodestone_app::client_app` | partial — 3 event kinds of ~110 | **gap** — no event bus; `dispatch_play_packet` applies inline |
+| observe a typed event | **done** — `GameEvent(ClientEvent)` via `MessageReader`, off by default, installed for every shipped `App` by `ServerBrandChannelPlugin` in `lodestone_app::client_app` | partial — 3 event kinds of ~110 | partial — plugin-defined `Message` types use `App::add_message`, independent readers, and tick-owned retention; no built-in gameplay event bus, and `dispatch_play_packet` applies inline |
 | cancel an event (`setCancelled`) | **done** — `ActionVetoes` for all six declared verbs, all asked in production | **gap** — no verdict-shaped export | **gap** — `TickSet::Adjudicate` runs but has no proposal or verdict systems; `CraftingStationHooks` is the one Allow/Deny/Replace hook |
 | priority order across plugins | **done** — `EventPriority::{Lowest..Monitor}` chained into all four schedules | partial — manifest `priority` orders guests; nothing else | **gap** |
 | `MONITOR` read-only | **done** — checked against bevy's per-system access set; blind to deferred `Commands` | **gap** | **gap** |
@@ -123,6 +123,12 @@ event-cancellation, async hand-back, and command surfaces those systems need
 for a broadly portable server plugin.
 
 ### Events and cancellation, the hard half
+
+**Server plugin-defined observations** use Bevy's typed messages directly. `ServerCorePlugin`
+maintains all `App::add_message` registrations before `TickSet::Drain` on the real primary tick
+task, preserving a message until its second subsequent maintenance boundary. Separate plugin readers
+have independent cursors; no frame schedule or world lock is required. This closes message lifetime
+and cross-plugin observation wiring, while built-in gameplay proposals and cancellation remain gaps.
 
 **Client, native.** Observation is `GameEvent`, and the one write site pushes every `ClientEvent`
 with no `match`, so a new variant cannot miss the bus. Cancellation is `ActionVetoes`: a plugin
