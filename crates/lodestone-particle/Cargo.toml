@@ -24,3 +24,7 @@ lodestone-physics = { workspace = true }
 # `java.util.Random`, bit-exact — every particle constant (lifetime, initial
 # velocity, colour jitter, sprite choice) draws from it. See `rng.rs`.
 lodestone-javarandom = { workspace = true }
+# Terrain particles use the generated 26.2 state census as their in-process
+# boundary: wire and plugin state ids are validated by the shell before an
+# emitter sees them, so sprite-bearing particles cannot carry an unknown id.
+lodestone-data = { workspace = true }
