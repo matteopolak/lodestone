@@ -168,6 +168,15 @@ are retained so completeness is checkable. The validated
 `MobSim::apply_entity_push_owner_batches` central writer restores the original
 mob-vector slots before applying any impulse, so reversing owner completion
 cannot change the accumulated velocities or silently omit an unaffected mob.
+Mob burn counters use the same source-chunk boundary after projectile impacts
+have had their established opportunity to ignite a target.
+`MobSim::tick_burning_owner_batches` advances copied counters and records
+deferred damage without mutating live mobs. Every tick-start mob produces a
+completion, including an extinguished or non-burning mob, and
+`MobSim::apply_burning_owner_batches` validates the complete owner set and
+restores mob-vector slots before publishing counters, damage, vocalisations,
+and deaths. Cross-owner completion order therefore cannot move a burn hit or
+death relative to another mob.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
@@ -261,6 +270,13 @@ explicit cross-owner neighbour exchange. Owners may compute from the shared
 tick-start snapshot, but only `apply_entity_push_owner_batches` may mutate live
 velocities. Preserve one completion per mob, including zero impulses, and keep
 the reversed, missing, and duplicate owner controls when changing this seam.
+
+Keep burn planning after projectile impacts: moving it earlier delays newly
+applied ignition by one tick. Burn owners return copied counter state plus a
+deferred damage value; they must not mutate health or publish vocalisations.
+Retain the independently predicted 20-to-19 counter and health transition, the
+interleaved reversed-completion comparison, and the missing and duplicate owner
+controls when extending this phase.
 
 Do not move the shared spawner RNG or entity creation into an owner worker.
 Keep `SpawnerTickBatchBuilder` on the existing registry traversal, return one

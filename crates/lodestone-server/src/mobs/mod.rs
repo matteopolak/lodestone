@@ -153,6 +153,23 @@ struct EntityPushEffect {
     impulse: Vec3,
 }
 
+/// One completed chunk-owner batch of burn-counter updates and damage.
+#[derive(Debug, Clone)]
+pub(crate) struct BurnTickOwnerBatch {
+    owner: EntityTickOwner,
+    expected_batch_count: usize,
+    effects: Vec<BurnTickEffect>,
+}
+
+#[derive(Debug, Clone)]
+struct BurnTickEffect {
+    owner: EntityTickOwner,
+    serial: usize,
+    id: i32,
+    burn: crate::burning::BurnState,
+    damage: f32,
+}
+
 impl EntityTickEffectBatch {
     /// Effects in the owner's original serial order.
     #[must_use]
@@ -234,6 +251,45 @@ fn merge_entity_push_owner_batches(
         assert_eq!(
             effect.serial, serial,
             "entity-push completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
+}
+
+fn merge_burn_tick_owner_batches(mut batches: Vec<BurnTickOwnerBatch>) -> Vec<BurnTickEffect> {
+    let expected_batch_count = batches
+        .first()
+        .map(|batch| batch.expected_batch_count)
+        .expect("burn completion must contain every tick-start owner batch");
+    let mut owners = std::collections::HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.expected_batch_count, expected_batch_count,
+            "burn completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "burn completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "a burn owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "burn completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "burn completion must retain every tick-start serial slot exactly once"
         );
     }
     effects
@@ -6276,17 +6332,74 @@ impl<'w> MobSim<'w> {
     /// [`crate::burning::BurnState::tick`] never fire from this call site —
     /// only the every-20-ticks burn tick itself does.
     fn tick_burning(&mut self) {
-        let mut hits: Vec<(i32, f32)> = Vec::new();
-        for m in &mut self.mobs {
-            if m.in_water() {
-                m.burn.clear();
-                continue;
+        let batches = self.tick_burning_owner_batches();
+        self.apply_burning_owner_batches(batches);
+    }
+
+    /// Plans burn-counter changes under each mob's tick-start chunk owner.
+    pub(crate) fn tick_burning_owner_batches(&self) -> Vec<BurnTickOwnerBatch> {
+        let mut batches = Vec::<BurnTickOwnerBatch>::new();
+        for (serial, m) in self.mobs.iter().enumerate() {
+            let owner = entity_tick_owner(m.position());
+            let mut burn = m.burn;
+            let damage = if m.in_water() {
+                burn.clear();
+                0.0
+            } else {
+                let fire_immune = species::is_fire_immune(&m.entity_type);
+                let fire_resistance = m.effects.get("minecraft:fire_resistance").is_some();
+                burn.tick(None, fire_immune, fire_resistance).damage
+            };
+            let effect = BurnTickEffect {
+                owner,
+                serial,
+                id: m.id,
+                burn,
+                damage,
+            };
+            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
+                batch.effects.push(effect);
+            } else {
+                batches.push(BurnTickOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects: vec![effect],
+                });
             }
-            let fire_immune = species::is_fire_immune(&m.entity_type);
-            let fire_resistance = m.effects.get("minecraft:fire_resistance").is_some();
-            let out = m.burn.tick(None, fire_immune, fire_resistance);
-            if out.damage > 0.0 {
-                hits.push((m.id, out.damage));
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
+
+    /// Validates all burn-owner completions before mutating live mob state.
+    pub(crate) fn apply_burning_owner_batches(&mut self, batches: Vec<BurnTickOwnerBatch>) {
+        if batches.is_empty() {
+            assert!(
+                self.mobs.is_empty(),
+                "burn completion must retain every live tick-start mob"
+            );
+            return;
+        }
+        let effects = merge_burn_tick_owner_batches(batches);
+        assert_eq!(
+            effects.len(),
+            self.mobs.len(),
+            "burn completion must retain every live tick-start mob"
+        );
+        for (m, effect) in self.mobs.iter().zip(&effects) {
+            assert_eq!(
+                m.id, effect.id,
+                "burn completion must retain the tick-start entity order"
+            );
+        }
+        let mut hits: Vec<(i32, f32)> = Vec::new();
+        for (m, effect) in self.mobs.iter_mut().zip(effects) {
+            m.burn = effect.burn;
+            if effect.damage > 0.0 {
+                hits.push((effect.id, effect.damage));
             }
         }
         for (id, damage) in hits {
@@ -10854,6 +10967,81 @@ mod follow_range_tests {
         let mut batches = sim.tick_entity_push_owner_batches();
         batches[1] = batches[0].clone();
         let _ = merge_entity_push_owner_batches(batches);
+    }
+
+    fn burn_owner_fixture() -> MobSim<'static> {
+        let world = Box::leak(Box::new(flat_world()));
+        let mut sim = MobSim::new(world);
+        let pig = ResourceKey::from_str("minecraft:pig").expect("valid key");
+        for position in [
+            Vec3::new(-0.4, 0.0, 0.0),
+            Vec3::new(16.1, 0.0, 0.0),
+            Vec3::new(-0.1, 0.0, 0.0),
+            Vec3::new(16.4, 0.0, 0.0),
+        ] {
+            sim.spawn_species(pig.clone(), position)
+                .ignite_for_seconds(1.0);
+        }
+        sim
+    }
+
+    fn burn_observation(sim: &MobSim<'_>) -> Vec<(i32, f32, i32)> {
+        sim.mobs
+            .iter()
+            .map(|mob| (mob.id, mob.health, mob.burn.remaining()))
+            .collect()
+    }
+
+    #[test]
+    fn burn_owner_batches_restore_entity_order_after_reversed_completion() {
+        let mut serial = burn_owner_fixture();
+        let serial_batches = serial.tick_burning_owner_batches();
+        assert_eq!(
+            serial_batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
+            [
+                EntityTickOwner::Chunk { cx: -1, cz: 0 },
+                EntityTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "negative fractional positions use Euclidean chunk ownership"
+        );
+        serial.apply_burning_owner_batches(serial_batches);
+        let expected = burn_observation(&serial);
+        assert!(
+            expected
+                .iter()
+                .all(|(_, health, remaining)| *health == 9.0 && *remaining == 19),
+            "a 20-tick ignition must damage at remaining 20, then decrement to 19: {expected:?}"
+        );
+
+        let mut completed = burn_owner_fixture();
+        let mut batches = completed.tick_burning_owner_batches();
+        batches.reverse();
+        let raw_slots = batches
+            .iter()
+            .flat_map(|batch| batch.effects.iter())
+            .map(|effect| effect.serial)
+            .collect::<Vec<_>>();
+        assert_eq!(raw_slots, vec![1, 3, 0, 2], "control must interleave owners");
+        completed.apply_burning_owner_batches(batches);
+        assert_eq!(burn_observation(&completed), expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "every tick-start owner batch exactly once")]
+    fn burn_owner_batch_merge_rejects_a_missing_owner() {
+        let sim = burn_owner_fixture();
+        let mut batches = sim.tick_burning_owner_batches();
+        batches.pop();
+        let _ = merge_burn_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not contain one owner twice")]
+    fn burn_owner_batch_merge_rejects_a_duplicate_owner() {
+        let sim = burn_owner_fixture();
+        let mut batches = sim.tick_burning_owner_batches();
+        batches[1] = batches[0].clone();
+        let _ = merge_burn_tick_owner_batches(batches);
     }
 
     /// A killed mob drops its loot table's items.
