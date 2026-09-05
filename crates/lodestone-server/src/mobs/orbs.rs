@@ -107,6 +107,7 @@ impl OrbTickOwner {
 #[derive(Debug, Clone)]
 pub(crate) struct OrbTickOwnerBatch {
     owner: OrbTickOwner,
+    plan: u64,
     expected_batch_count: usize,
     effects: Vec<OrbTickEffect>,
 }
@@ -128,6 +129,15 @@ struct OrbTickEffect {
     /// `None` means this orb expired or crossed the void boundary during its
     /// owner pass and the central writer must remove it.
     orb: Option<OrbState>,
+}
+
+#[derive(Debug, Clone)]
+struct OrbTickInput {
+    owner: OrbTickOwner,
+    serial: usize,
+    id: i32,
+    orb: OrbState,
+    target: Option<Vec3>,
 }
 
 impl<'w> MobSim<'w> {
@@ -267,9 +277,24 @@ impl<'w> MobSim<'w> {
     /// vanilla's.
     // `pub(super)`, not private: `tick_with_terrain` (mod.rs, this file's
     // *parent* module) calls this every tick.
-    pub(super) fn tick_orbs(&mut self, view: &dyn CollisionView) {
+    pub(super) fn tick_orbs(&mut self, block_state: &(dyn Fn(i32, i32, i32) -> String + Sync)) {
         let scanning = self.tick_count % ORB_MERGE_SCAN_PERIOD == 1;
-        let batches = self.tick_orb_owner_batches(view);
+        self.orb_owner_plan = self
+            .orb_owner_plan
+            .checked_add(1)
+            .expect("orb owner plan generation must not overflow");
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = if self.orbs.len() >= 128 {
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1)
+                .min(4)
+        } else {
+            1
+        };
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1;
+        let batches = self.tick_orb_owner_batches_with_workers(block_state, workers);
         self.apply_orb_tick_owner_batches(batches);
         if scanning {
             self.scan_for_orb_merges();
@@ -282,9 +307,13 @@ impl<'w> MobSim<'w> {
     /// the live map. The central application below restores the old entity-id
     /// sequence before expiry or any later merge becomes visible.
     pub(crate) fn tick_orb_owner_batches(
-        &self,
+        &mut self,
         view: &dyn CollisionView,
     ) -> Vec<OrbTickOwnerBatch> {
+        self.orb_owner_plan = self
+            .orb_owner_plan
+            .checked_add(1)
+            .expect("orb owner plan generation must not overflow");
         let mut ids: Vec<i32> = self.orbs.keys().copied().collect();
         ids.sort_unstable();
         let min_y = f64::from(self.world.min_y);
@@ -309,11 +338,70 @@ impl<'w> MobSim<'w> {
             } else {
                 batches.push(OrbTickOwnerBatch {
                     owner,
+                    plan: self.orb_owner_plan,
                     expected_batch_count: 0,
                     effects: vec![effect],
                 });
             }
         }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
+
+    fn tick_orb_owner_batches_with_workers(
+        &self,
+        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        worker_count: usize,
+    ) -> Vec<OrbTickOwnerBatch> {
+        let mut ids: Vec<i32> = self.orbs.keys().copied().collect();
+        ids.sort_unstable();
+        let mut jobs = Vec::<(OrbTickOwner, Vec<OrbTickInput>)>::new();
+        for (serial, id) in ids.into_iter().enumerate() {
+            let orb = self
+                .orbs
+                .get(&id)
+                .cloned()
+                .expect("a tick-start orb id must remain live while planning");
+            let owner = OrbTickOwner::for_position(orb.motion.position);
+            let input = OrbTickInput {
+                owner,
+                serial,
+                id,
+                target: self.nearest_follow_target(orb.motion.position),
+                orb,
+            };
+            if let Some((_, inputs)) = jobs.iter_mut().find(|(candidate, _)| *candidate == owner) {
+                inputs.push(input);
+            } else {
+                jobs.push((owner, vec![input]));
+            }
+        }
+        let min_y = f64::from(self.world.min_y);
+        let plan = self.orb_owner_plan;
+        let mut batches = super::run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
+            let view = super::ItemCollision {
+                block_state,
+                probe_count: std::cell::Cell::new(0),
+            };
+            let effects = inputs
+                .into_iter()
+                .map(|input| OrbTickEffect {
+                    owner: input.owner,
+                    serial: input.serial,
+                    id: input.id,
+                    orb: ticked_orb(input.orb, input.target, &view, min_y),
+                })
+                .collect();
+            OrbTickOwnerBatch {
+                owner,
+                plan,
+                expected_batch_count: 0,
+                effects,
+            }
+        });
         let batch_count = batches.len();
         for batch in &mut batches {
             batch.expected_batch_count = batch_count;
@@ -330,6 +418,15 @@ impl<'w> MobSim<'w> {
         if batches.is_empty() {
             return;
         }
+        let plan = batches[0].plan;
+        assert_eq!(
+            plan, self.orb_owner_plan,
+            "orb completion must belong to the latest tick-start plan"
+        );
+        assert!(
+            plan > self.applied_orb_owner_plan,
+            "orb completion must not replay an already applied tick-start plan"
+        );
         let effects = merge_orb_tick_owner_batches(batches);
         assert_eq!(
             effects.len(),
@@ -355,6 +452,7 @@ impl<'w> MobSim<'w> {
                 }
             }
         }
+        self.applied_orb_owner_plan = plan;
     }
 
     /// `Level.getNearestPlayer(this, 8.0)`, filtered as `followNearbyPlayer` filters
@@ -558,14 +656,16 @@ fn ticked_orb(
 fn merge_orb_tick_owner_batches(
     mut batches: Vec<OrbTickOwnerBatch>,
 ) -> Vec<OrbTickEffect> {
-    let expected_batch_count = batches
+    let first = batches
         .first()
-        .map(|batch| batch.expected_batch_count)
         .expect("orb owner completion must contain every tick-start owner batch");
+    let plan = first.plan;
+    let expected_batch_count = first.expected_batch_count;
     let mut owners = HashSet::new();
     for batch in &batches {
         assert_eq!(
-            batch.expected_batch_count, expected_batch_count,
+            (batch.plan, batch.expected_batch_count),
+            (plan, expected_batch_count),
             "orb owner completions must originate from one tick-start plan"
         );
         assert!(
@@ -625,6 +725,30 @@ mod experience_orb_tests {
         let negative = sim.spawn_orb(3, Vec3::new(-0.5, 3.0, 0.5), still);
         let positive = sim.spawn_orb(7, Vec3::new(16.5, 3.0, 0.5), still);
         (sim, [negative, positive])
+    }
+
+    fn dense_orb_owner_fixture<'w>(world: &'w ChunkWorld, count: usize) -> (MobSim<'w>, Vec<i32>) {
+        let mut sim = MobSim::new(world);
+        let mut ids = Vec::with_capacity(count);
+        for serial in 0..count {
+            let x = [-0.5, 16.5, 32.5, 48.5][serial % 4];
+            ids.push(sim.spawn_orb(
+                3,
+                Vec3::new(x, 3.0, (serial / 4 % 4) as f64 + 0.5),
+                Vec3::new(0.0, 0.0, 0.0),
+            ));
+        }
+        (sim, ids)
+    }
+
+    fn dense_orb_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -2..=66 {
+            for z in -2..=4 {
+                world.set_block(x, 0, z, "minecraft:stone");
+            }
+        }
+        world
     }
 
     /// The independent serial reference for one non-scanning orb pass. It
@@ -727,6 +851,90 @@ mod experience_orb_tests {
         let mut batches = sim.tick_orb_owner_batches(&view);
         batches.push(batches.first().expect("two owners exist").clone());
         sim.apply_orb_tick_owner_batches(batches);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parallel_orb_owner_batches_match_one_lane_with_interleaved_negative_owners() {
+        let world = dense_orb_world();
+        let mut serial = dense_orb_owner_fixture(&world, 256).0;
+        serial.orb_owner_plan = 1;
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let serial_batches = serial.tick_orb_owner_batches_with_workers(&state_at, 1);
+        serial.apply_orb_tick_owner_batches(serial_batches);
+
+        let (mut parallel, ids) = dense_orb_owner_fixture(&world, 256);
+        parallel.orb_owner_plan = 1;
+        let parallel_batches = parallel.tick_orb_owner_batches_with_workers(&state_at, 4);
+        assert_eq!(
+            parallel_batches.iter().map(OrbTickOwnerBatch::owner).collect::<Vec<_>>(),
+            [
+                OrbTickOwner::Chunk { cx: -1, cz: 0 },
+                OrbTickOwner::Chunk { cx: 1, cz: 0 },
+                OrbTickOwner::Chunk { cx: 2, cz: 0 },
+                OrbTickOwner::Chunk { cx: 3, cz: 0 },
+            ],
+            "the parity scene must span an interleaved negative owner plus three positive owners"
+        );
+        parallel.apply_orb_tick_owner_batches(parallel_batches);
+
+        for id in ids {
+            assert_eq!(parallel.orb_state(id), serial.orb_state(id));
+            assert_eq!(parallel.orb_position(id), serial.orb_position(id));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "latest tick-start plan")]
+    fn orb_owner_batches_reject_stale_plan_completions() {
+        let world = flat_world();
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let view = super::super::ItemCollision {
+            block_state: &state_at,
+            probe_count: std::cell::Cell::new(0),
+        };
+        let (mut sim, _) = two_owner_orb_fixture(&world);
+        let stale = sim.tick_orb_owner_batches(&view);
+        let _current = sim.tick_orb_owner_batches(&view);
+        sim.apply_orb_tick_owner_batches(stale);
+    }
+
+    #[test]
+    #[should_panic(expected = "already applied tick-start plan")]
+    fn orb_owner_batches_reject_replayed_completions() {
+        let world = flat_world();
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let view = super::super::ItemCollision {
+            block_state: &state_at,
+            probe_count: std::cell::Cell::new(0),
+        };
+        let (mut sim, _) = two_owner_orb_fixture(&world);
+        let batches = sim.tick_orb_owner_batches(&view);
+        sim.apply_orb_tick_owner_batches(batches.clone());
+        sim.apply_orb_tick_owner_batches(batches);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "manual dense-scene throughput measurement"]
+    fn measure_dense_orb_owner_workers() {
+        let world = dense_orb_world();
+        for orb_count in [256, 2_048] {
+            let sim = dense_orb_owner_fixture(&world, orb_count).0;
+            let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+            let started = std::time::Instant::now();
+            let _ = sim.tick_orb_owner_batches_with_workers(&state_at, 1);
+            let serial = started.elapsed();
+            let started = std::time::Instant::now();
+            let _ = sim.tick_orb_owner_batches_with_workers(&state_at, 4);
+            let parallel = started.elapsed();
+            eprintln!(
+                "dense_orbs owners=4 orbs={orb_count} serial_ms={:.3} parallel_ms={:.3} speedup={:.3}",
+                serial.as_secs_f64() * 1_000.0,
+                parallel.as_secs_f64() * 1_000.0,
+                serial.as_secs_f64() / parallel.as_secs_f64()
+            );
+        }
     }
 
     /// **The denomination ladder reaches real entities.**
