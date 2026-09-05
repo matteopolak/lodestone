@@ -105,7 +105,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.21.0".to_string(),
+            abi: "lodestone:plugin@0.22.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -168,6 +168,9 @@ impl Guest for ChatResponder {
 
         #[cfg(feature = "inventory-quick-move-invalid")]
         return vec![Action::InventoryQuickMove(u16::MAX)];
+
+        #[cfg(feature = "inventory-double-click")]
+        return vec![Action::InventoryDoubleClick(36)];
 
         #[cfg(feature = "inventory-hotbar-swap")]
         return vec![Action::InventoryHotbarSwap(InventoryHotbarSwap {
@@ -234,7 +237,7 @@ impl Guest for ChatResponder {
         #[cfg(feature = "fs-write")]
         return write_files();
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "fs-write")))]
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "fs-write")))]
         return respond(events);
     }
 

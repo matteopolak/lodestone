@@ -133,6 +133,10 @@ pub enum Capability {
     /// operation. The guest supplies only a bounded menu slot; the shell owns
     /// the transfer order, validation, prediction, vetoes, and egress.
     ActInventoryQuickMove,
+    /// Request one pickup-all double click through the shell-owned menu predictor.
+    /// The guest supplies only a bounded slot; the live menu owns carried-stack
+    /// state, prediction, vetoes, and egress.
+    ActInventoryDoubleClick,
     /// Request one number-key swap through the shell-owned menu predictor.
     ///
     /// This is intentionally separate from [`Self::ActInventoryClick`] and
@@ -215,6 +219,7 @@ impl Capability {
         Self::ActSelectSlot,
         Self::ActInventoryClick,
         Self::ActInventoryQuickMove,
+        Self::ActInventoryDoubleClick,
         Self::ActInventoryHotbarSwap,
         Self::ActInventoryThrow,
         Self::ActInventoryDropCursor,
@@ -250,6 +255,7 @@ impl Capability {
             Self::ActSelectSlot => "act:select-slot",
             Self::ActInventoryClick => "act:inventory-click",
             Self::ActInventoryQuickMove => "act:inventory-quick-move",
+            Self::ActInventoryDoubleClick => "act:inventory-double-click",
             Self::ActInventoryHotbarSwap => "act:inventory-hotbar-swap",
             Self::ActInventoryThrow => "act:inventory-throw",
             Self::ActInventoryDropCursor => "act:inventory-drop-cursor",
@@ -300,6 +306,7 @@ impl Capability {
             | Self::ActSelectSlot
             | Self::ActInventoryClick
             | Self::ActInventoryQuickMove
+            | Self::ActInventoryDoubleClick
             | Self::ActInventoryHotbarSwap
             | Self::ActInventoryThrow
             | Self::ActInventoryDropCursor
@@ -488,6 +495,10 @@ mod tests {
         assert!(
             !policy.contains(Capability::ActInventoryClick),
             "act:inventory-click must not be granted by default"
+        );
+        assert!(
+            !policy.contains(Capability::ActInventoryDoubleClick),
+            "act:inventory-double-click must not be granted by default"
         );
         assert!(
             !policy.contains(Capability::ActInventoryHotbarSwap),

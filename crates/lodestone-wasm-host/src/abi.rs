@@ -90,6 +90,8 @@ pub enum InventoryClickMode {
     Pickup(InventoryClickButton),
     /// A shift-click transfer with shell-owned target ordering.
     QuickMove,
+    /// A pickup-all double click resolved against the live carried stack.
+    DoubleClick,
     /// A number-key exchange with one of the nine hotbar positions.
     HotbarSwap(u8),
 }
@@ -385,6 +387,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::SelectSlot(_) => Capability::ActSelectSlot,
         Action::InventoryClick(_) => Capability::ActInventoryClick,
         Action::InventoryQuickMove(_) => Capability::ActInventoryQuickMove,
+        Action::InventoryDoubleClick(_) => Capability::ActInventoryDoubleClick,
         Action::InventoryHotbarSwap(_) => Capability::ActInventoryHotbarSwap,
         Action::InventoryThrow(_) => Capability::ActInventoryThrow,
         Action::InventoryDropCursor => Capability::ActInventoryDropCursor,
@@ -471,6 +474,12 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
                 }),
             }))
         }
+        Action::InventoryDoubleClick(slot) => LoweredAction::Intent(
+            IntentAction::InventoryClick(InventoryClickIntent::Slot {
+                slot,
+                mode: InventoryClickMode::DoubleClick,
+            }),
+        ),
         Action::InventoryQuickMove(slot) => {
             LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent::Slot {
                 slot,
@@ -751,6 +760,32 @@ mod tests {
             ),
             Err(Capability::ActInventoryQuickMove),
             "pickup/place authority must not also grant quick moves"
+        );
+    }
+
+    /// Pickup-all is separately authorized because it may collect matching
+    /// stacks across the active menu rather than touching only one slot.
+    #[test]
+    fn inventory_double_click_lowers_onto_the_shell_owned_menu_predictor() {
+        assert_eq!(
+            lower_action(
+                Action::InventoryDoubleClick(36),
+                &CapabilitySet::from_iter([Capability::ActInventoryDoubleClick]),
+            ),
+            Ok(LoweredAction::Intent(IntentAction::InventoryClick(
+                InventoryClickIntent::Slot {
+                    slot: 36,
+                    mode: InventoryClickMode::DoubleClick,
+                }
+            )))
+        );
+        assert_eq!(
+            lower_action(
+                Action::InventoryDoubleClick(36),
+                &CapabilitySet::from_iter([Capability::ActInventoryClick]),
+            ),
+            Err(Capability::ActInventoryDoubleClick),
+            "pickup/place authority must not also grant pickup-all"
         );
     }
 

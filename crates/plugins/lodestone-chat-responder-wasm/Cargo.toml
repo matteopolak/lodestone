@@ -101,6 +101,8 @@ inventory-quick-move = []
 # The maximum ABI slot confirms the shell rejects malformed quick moves before
 # the live menu predictor can enqueue a container action.
 inventory-quick-move-invalid = []
+# A bounded pickup-all double click resolved entirely by the live menu.
+inventory-double-click = []
 # A copied number-key hotbar swap through the shell's live menu predictor.
 inventory-hotbar-swap = []
 # The valid menu slot paired with an out-of-range hotbar key must be rejected by
