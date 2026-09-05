@@ -81,10 +81,12 @@ class SummaryTests(unittest.TestCase):
         with mock.patch.object(MODULE, "_git_sha", return_value="abc"):
             record = MODULE._heavy_record(
                 "heavyweight", 1, pathlib.Path("/tmp/lodestone"), (2, 7, 2, 3), "closed",
-                3, scene, {"stationary": {}},
+                2, "orbit", scene, {"stationary": {}},
             )
+        self.assertEqual(record["schema"], 2)
         self.assertEqual(record["scene_hash"], "0" * 64)
-        self.assertEqual(record["requested_scale"], 3)
+        self.assertEqual(record["requested_scale"], 2)
+        self.assertEqual(record["camera_plan"], "orbit")
         self.assertNotIn("p50_ms", record)
 
     def test_heavy_profile_artifact_requires_matching_complete_sidecars(self):
@@ -96,7 +98,7 @@ class SummaryTests(unittest.TestCase):
             with mock.patch.object(MODULE, "_git_sha", return_value="abc"):
                 record = MODULE._heavy_record(
                     "heavyweight", 1, pathlib.Path("/tmp/lodestone"), (2, 7, 2, 3), "closed",
-                    2, scene, {"stationary": {}, "moving": {}},
+                    2, "orbit", scene, {"stationary": {}, "moving": {}},
                 )
             MODULE._heavy_profile_record_path(artifact).write_text(
                 json.dumps({**record, "capture": str(artifact)}), encoding="utf-8"
@@ -128,7 +130,7 @@ class SummaryTests(unittest.TestCase):
             artifact.write_bytes(b"capture")
             MODULE._samply_sidecar_path(artifact).write_text("symbols", encoding="utf-8")
             record = {
-                "schema": 1,
+                "schema": 2,
                 "workload": "heavyweight",
                 "profile": "release",
                 "capture": str(artifact),
@@ -137,11 +139,50 @@ class SummaryTests(unittest.TestCase):
                 "seed": 17,
                 "scale": 1,
                 "requested_scale": 1,
+                "camera_plan": "stationary",
                 "durations_seconds": {"warmup": 2, "mutation": 1, "stationary": 2, "moving": 3},
                 "segments": {"stationary": {}, "moving": {}},
             }
             MODULE._heavy_profile_record_path(artifact).write_text(json.dumps(record), encoding="utf-8")
             self.assertEqual(MODULE.main(["--validate-heavy-profile", str(artifact)]), 0)
+
+    def test_heavy_profile_validator_rejects_underidentified_camera_and_dense_scale(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = pathlib.Path(directory) / "profile.json.gz"
+            artifact.write_bytes(b"capture")
+            MODULE._samply_sidecar_path(artifact).write_text("symbols", encoding="utf-8")
+            record = {
+                "schema": 2,
+                "workload": "heavyweight",
+                "profile": "release",
+                "capture": str(artifact),
+                "scene_hash": "a" * 64,
+                "scenario": "dense-mixed",
+                "seed": 17,
+                "scale": 1,
+                "requested_scale": 1,
+                "camera_plan": "orbit",
+                "durations_seconds": {"warmup": 2, "mutation": 1, "stationary": 2, "moving": 3},
+                "segments": {"stationary": {}, "moving": {}},
+            }
+            record_path = MODULE._heavy_profile_record_path(artifact)
+            record_path.write_text(json.dumps(record), encoding="utf-8")
+            self.assertEqual(MODULE.main(["--validate-heavy-profile", str(artifact)]), 0)
+
+            record_path.write_text(
+                json.dumps({key: value for key, value in record.items() if key != "camera_plan"}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "does not describe this capture"):
+                MODULE.validate_heavy_profile_artifact(artifact)
+
+            record_path.write_text(json.dumps({**record, "camera_plan": "flyby"}), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "does not describe this capture"):
+                MODULE.validate_heavy_profile_artifact(artifact)
+
+            record_path.write_text(json.dumps({**record, "scale": 2, "requested_scale": 2}), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "does not describe this capture"):
+                MODULE.validate_heavy_profile_artifact(artifact)
     @staticmethod
     def fullscreen_log(width=3024, height=1898):
         return (
