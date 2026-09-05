@@ -70,6 +70,9 @@ pub enum Capability {
     /// a plugin that may chat from one that may run the commands it is allowed
     /// to type.
     ActChat,
+    /// Send a server command through the live client's ordinary action queue.
+    /// Kept separate from chat because commands can mutate server state.
+    ActCommand,
     /// Push `ClientAction::SwingArm`.
     ActInteract,
     /// Push `ClientAction::SwapItemWithOffhand`.
@@ -209,6 +212,7 @@ impl Capability {
         Self::ObserveInventory,
         Self::ObserveBlocks,
         Self::ActChat,
+        Self::ActCommand,
         Self::ActInteract,
         Self::ActSwapOffhand,
         Self::ActReleaseUseItem,
@@ -246,6 +250,7 @@ impl Capability {
             Self::ObserveInventory => "observe:inventory",
             Self::ObserveBlocks => "observe:blocks",
             Self::ActChat => "act:chat",
+            Self::ActCommand => "act:command",
             Self::ActInteract => "act:interact",
             Self::ActSwapOffhand => "act:swap-offhand",
             Self::ActReleaseUseItem => "act:release-use-item",
@@ -298,6 +303,7 @@ impl Capability {
             | Self::ObserveInventory
             | Self::ObserveBlocks
             | Self::ActChat
+            | Self::ActCommand
             | Self::ActInteract
             | Self::ActSwapOffhand
             | Self::ActReleaseUseItem
@@ -485,6 +491,10 @@ mod tests {
         let policy = CapabilitySet::default_policy();
         assert!(!policy.contains(Capability::FsRead), "fs:read must not be granted by default");
         assert!(!policy.contains(Capability::FsWrite), "fs:write must not be granted by default");
+        assert!(
+            !policy.contains(Capability::ActCommand),
+            "act:command must not be granted by default"
+        );
         assert!(
             !policy.contains(Capability::ScheduleTasks),
             "schedule:tasks must not be granted by default"

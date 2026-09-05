@@ -52,6 +52,16 @@ fn responder_capabilities() -> CapabilitySet {
     CapabilitySet::from_iter([Capability::Log, Capability::ObserveChat, Capability::ActChat])
 }
 
+fn command_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActCommand])
+}
+
+fn command_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActCommand);
+    policy
+}
+
 fn look_capabilities() -> CapabilitySet {
     CapabilitySet::from_iter([Capability::Log, Capability::ActLook])
 }
@@ -305,6 +315,40 @@ fn a_runtime_loaded_wasm_plugin_pushes_a_real_client_action_onto_the_real_queue(
         0,
         "nothing should have been refused: the plugin holds `act:chat`"
     );
+}
+
+#[test]
+fn a_wasm_command_reaches_the_real_action_queue_with_its_own_grant() {
+    let wasm = support::build_example_plugin(&["send-command"]);
+    let mut host = PluginHost::new(command_host_policy()).expect("engine");
+    host.load_file("send-command", &wasm, &command_capabilities())
+        .expect("the command fixture must load with its explicit grant");
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+    assert_eq!(
+        chat_actions(&app),
+        vec![ClientAction::SendCommand {
+            command: "time query daytime".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn ordinary_chat_authority_does_not_grant_wasm_commands() {
+    let wasm = support::build_example_plugin(&["send-command"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "send-command",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log, Capability::ActChat]),
+    )
+    .expect("a data-flow command may be withheld after load");
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+    assert!(chat_actions(&app).is_empty());
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
 }
 
 /// **CONTROL 1 — the registration call removed.** Byte-identical `App` composition
