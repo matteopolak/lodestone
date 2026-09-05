@@ -11,7 +11,10 @@ use lodestone_ecs::events::GameEvent;
 use lodestone_ecs::player::{ActionQueue, Egress, PlaceOutcome, PlaceStatus};
 use lodestone_ecs::GameTick;
 use lodestone_model::{ClientAction, ClientEvent, Text};
-use lodestone_wasm_host::{Capability, CapabilitySet, PluginHost, WasmHostPlugin, WasmPlugins};
+use lodestone_wasm_host::{
+    Capability, CapabilitySet, PluginGrantPolicy, PluginHost, PluginIdentity, WasmHostPlugin,
+    WasmPlugins,
+};
 
 fn build_example_plugin(features: &[&str]) -> PathBuf {
     let plugin_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -44,12 +47,18 @@ fn build_example_plugin(features: &[&str]) -> PathBuf {
     )
 }
 
-fn install_fixture(root: &Path, wasm: &Path, capabilities: &str) {
-    let plugin = root.join("chat-responder");
+fn install_fixture_named(
+    root: &Path,
+    directory_name: &str,
+    manifest_name: &str,
+    wasm: &Path,
+    capabilities: &str,
+) {
+    let plugin = root.join(directory_name);
     std::fs::create_dir_all(&plugin).expect("create plugin directory");
     std::fs::copy(wasm, plugin.join("chat_responder.wasm")).expect("copy guest module");
     let manifest = format!(
-        "name = \"chat-responder\"\n\
+        "name = \"{manifest_name}\"\n\
          version = \"0.1.0\"\n\
          abi = \"{}\"\n\
          module = \"chat_responder.wasm\"\n\
@@ -60,9 +69,17 @@ fn install_fixture(root: &Path, wasm: &Path, capabilities: &str) {
     std::fs::write(plugin.join("plugin.toml"), manifest).expect("write plugin manifest");
 }
 
+fn install_fixture(root: &Path, wasm: &Path, capabilities: &str) {
+    install_fixture_named(root, "chat-responder", "chat-responder", wasm, capabilities);
+}
+
 fn client_sim(plugin_dir: &Path) -> Sim {
+    client_sim_with_grants(plugin_dir, &PluginGrantPolicy::default())
+}
+
+fn client_sim_with_grants(plugin_dir: &Path, grants: &PluginGrantPolicy) -> Sim {
     let mut app = Sim::client_app();
-    lodestone::wasm_plugins::install_from_directory(&mut app, plugin_dir)
+    lodestone::wasm_plugins::install_from_directory_with_grants(&mut app, plugin_dir, grants)
         .expect("create the WASM host");
     Sim::from_app(app, Config::default())
 }
@@ -145,6 +162,65 @@ fn discovered_plugins_reach_the_real_queue_while_absent_and_denied_plugins_do_no
             text: "pong (chat messages seen: 1)".to_owned(),
         }],
         "the discovered guest must reach the shell's real ActionQueue"
+    );
+}
+
+/// Discovery starts fail-closed, but an embedding can deliberately grant the
+/// placement capability pair to exactly one configured manifest instance. The
+/// sibling copies use the same compiled guest and request the same capabilities;
+/// their unchanged denial proves path and manifest-name matching, not a guest
+/// behavioural difference, confines the exception.
+#[test]
+fn discovery_grants_default_denied_placement_only_to_the_configured_manifest_instance() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("shipped-plugin-grant-directory-{}", std::process::id()));
+    let wasm = build_example_plugin(&["place"]);
+    let requested = "\"log\", \"act:chat\", \"act:place\", \"observe:place\"";
+    install_fixture_named(&root, "trusted", "placement-owner", &wasm, requested);
+    install_fixture_named(&root, "same-name-other-path", "placement-owner", &wasm, requested);
+    install_fixture_named(&root, "same-path-shape-other-name", "other-owner", &wasm, requested);
+
+    let mut grants = PluginGrantPolicy::default();
+    grants.grant(
+        PluginIdentity::new("trusted/plugin.toml", "placement-owner"),
+        CapabilitySet::from_iter([Capability::ActPlace, Capability::ObservePlace]),
+    );
+    grants.grant(
+        PluginIdentity::new("same-path-shape-other-name/plugin.toml", "not-other-owner"),
+        CapabilitySet::from_iter([Capability::ActPlace, Capability::ObservePlace]),
+    );
+    let sim = client_sim_with_grants(&root, &grants);
+    assert_eq!(
+        sim.ecs()
+            .read()
+            .resource::<WasmPlugins>()
+            .with_host(|host| host.plugins().len()),
+        1,
+        "only the configured path and manifest name may receive the exception"
+    );
+
+    {
+        let mut ecs = sim.ecs().write();
+        *ecs.resource_mut::<Egress>() = Egress { in_world: true, live: true };
+        ecs.run_schedule(GameTick);
+    }
+    let outcome = {
+        let mut ecs = sim.ecs().write();
+        let mut players = ecs.query_filtered::<&PlaceOutcome, bevy_ecs::query::With<lodestone_ecs::player::LocalPlayer>>();
+        *players.single(&ecs).expect("the local player has a placement outcome")
+    };
+    assert_eq!(
+        outcome.generation, 1,
+        "the configured guest must reach the shell-owned placement lifecycle"
+    );
+
+    sim.ecs().write().run_schedule(GameTick);
+    assert_eq!(
+        chat_actions(&sim),
+        vec![ClientAction::SendChat {
+            text: "place: generation=1 status=rejected".to_owned(),
+        }],
+        "the matching observe grant must return the one bounded production outcome"
     );
 }
 

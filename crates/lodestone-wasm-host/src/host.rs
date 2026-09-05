@@ -37,6 +37,7 @@
 //! deadline configured without one can never trip. That pairing is not built
 //! yet; fuel is what this crate enforces today.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -182,6 +183,84 @@ pub enum LoadError {
     Manifest(#[from] crate::manifest::ManifestError),
     #[error(transparent)]
     Host(#[from] HostError),
+}
+
+/// One configured identity in a discovered plugin directory.
+///
+/// The path is relative to the directory passed to
+/// [`PluginHost::load_directory_with_grants`]. Pairing it with the manifest's
+/// `name` makes a grant apply to one configured instance, rather than to every
+/// copy of a module that happens to report the same name. This is deliberately
+/// the manifest identity: a guest module's `init` name is only a diagnostic
+/// claim and does not decide where operator authority lands.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PluginIdentity {
+    manifest_path: PathBuf,
+    manifest_name: String,
+}
+
+impl PluginIdentity {
+    /// Identify one `plugin.toml` below a discovery directory.
+    #[must_use]
+    pub fn new(manifest_path: impl Into<PathBuf>, manifest_name: impl Into<String>) -> Self {
+        Self {
+            manifest_path: manifest_path.into(),
+            manifest_name: manifest_name.into(),
+        }
+    }
+
+    /// The root-relative manifest path used for matching.
+    #[must_use]
+    pub fn manifest_path(&self) -> &Path {
+        &self.manifest_path
+    }
+
+    /// The `name` declared in that manifest.
+    #[must_use]
+    pub fn manifest_name(&self) -> &str {
+        &self.manifest_name
+    }
+}
+
+/// Per-instance additions to a host's baseline capability policy during directory discovery.
+///
+/// Start empty. An empty policy changes nothing: every discovered plugin is
+/// still evaluated against [`CapabilitySet::default_policy`] (or the explicit
+/// baseline supplied to [`PluginHost::new`]). A grant is matched only when both
+/// the root-relative `plugin.toml` path and the manifest `name` match.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginGrantPolicy {
+    grants: BTreeMap<PluginIdentity, CapabilitySet>,
+}
+
+impl PluginGrantPolicy {
+    /// Add capabilities to one discovered plugin identity.
+    ///
+    /// Repeating the same identity accumulates permissions, which lets an
+    /// embedding compose grants from independent application configuration
+    /// layers without widening any sibling plugin.
+    pub fn grant(&mut self, identity: PluginIdentity, capabilities: CapabilitySet) {
+        self.grants
+            .entry(identity)
+            .or_insert_with(CapabilitySet::empty)
+            .extend_from(&capabilities);
+    }
+
+    /// Return the configured additions for `identity`, if any.
+    #[must_use]
+    pub fn grants_for(&self, identity: &PluginIdentity) -> Option<&CapabilitySet> {
+        self.grants.get(identity)
+    }
+
+    fn additions_for(
+        &self,
+        directory: &Path,
+        manifest_path: &Path,
+        manifest: &crate::manifest::Manifest,
+    ) -> Option<&CapabilitySet> {
+        let relative = manifest_path.strip_prefix(directory).ok()?;
+        self.grants_for(&PluginIdentity::new(relative, &manifest.name))
+    }
 }
 
 /// Per-guest host state: the `T` in `Store<T>`.
@@ -778,7 +857,21 @@ impl PluginHost {
         wasm_path: &Path,
         requested: &CapabilitySet,
     ) -> Result<usize, HostError> {
-        let missing = requested.missing_from(&self.policy);
+        let policy = self.policy.clone();
+        self.load_file_with_policy(name, wasm_path, requested, &policy)
+    }
+
+    /// The implementation behind [`Self::load_file`] and manifest discovery.
+    /// Directory discovery supplies a short-lived effective policy here: the
+    /// host's baseline plus that manifest identity's configured additions.
+    fn load_file_with_policy(
+        &mut self,
+        name: &str,
+        wasm_path: &Path,
+        requested: &CapabilitySet,
+        policy: &CapabilitySet,
+    ) -> Result<usize, HostError> {
+        let missing = requested.missing_from(policy);
         if !missing.is_empty() {
             return Err(HostError::CapabilityDenied {
                 name: name.to_owned(),
@@ -787,13 +880,13 @@ impl PluginHost {
                     .map(|c| c.as_str())
                     .collect::<Vec<_>>()
                     .join(", "),
-                granted: self.policy.to_string(),
+                granted: policy.to_string(),
             });
         }
         // `requested ∩ policy`, which after the check above is just `requested`.
         // Written as the intersection anyway so the invariant does not depend on
         // the early return staying where it is.
-        let granted: CapabilitySet = requested.iter().filter(|c| self.policy.contains(*c)).collect();
+        let granted: CapabilitySet = requested.iter().filter(|c| policy.contains(*c)).collect();
 
         let bytes = std::fs::read(wasm_path).map_err(|e| HostError::Io {
             path: wasm_path.to_path_buf(),
@@ -974,9 +1067,19 @@ impl PluginHost {
     /// is logged so a genuinely mis-copied manifest is still visible.
     pub fn load_manifest(&mut self, manifest_path: &Path) -> Result<usize, LoadError> {
         let manifest = crate::manifest::Manifest::load(manifest_path)?;
+        let policy = self.policy.clone();
+        self.load_manifest_with_policy(manifest_path, manifest, &policy)
+    }
+
+    fn load_manifest_with_policy(
+        &mut self,
+        manifest_path: &Path,
+        manifest: crate::manifest::Manifest,
+        policy: &CapabilitySet,
+    ) -> Result<usize, LoadError> {
         let module = manifest.resolved_module(manifest_path)?;
         let requested = manifest.requested_capabilities()?;
-        let index = self.load_file(&manifest.name, &module, &requested)?;
+        let index = self.load_file_with_policy(&manifest.name, &module, &requested, policy)?;
         let reported = &self.plugins[index].info.name;
         if *reported != manifest.name {
             tracing::warn!(
@@ -999,11 +1102,36 @@ impl PluginHost {
     /// the working plugins down with it. A missing directory is simply no plugins,
     /// which is the normal case for a fresh install.
     pub fn load_directory(&mut self, dir: &Path) -> Vec<Result<usize, LoadError>> {
+        self.load_directory_with_grants(dir, &PluginGrantPolicy::default())
+    }
+
+    /// Load a discovered directory with narrow, manifest-identity grants.
+    ///
+    /// `grants` augments this host's [`Self::policy`] only for exact
+    /// [`PluginIdentity`] matches. The manifest path is made relative to `dir`
+    /// before matching, so the same directory can be discovered after a process
+    /// restart or from a different absolute working directory without changing
+    /// its configured identity. Unmatched plugins receive only the baseline.
+    ///
+    /// The policy is evaluated on every call rather than retained by a loaded
+    /// guest. An embedding that rebuilds its host for a plugin reload therefore
+    /// gets the same grants again, while one that changes the policy must reload
+    /// rather than silently changing a running guest's authority.
+    pub fn load_directory_with_grants(
+        &mut self,
+        dir: &Path,
+        grants: &PluginGrantPolicy,
+    ) -> Vec<Result<usize, LoadError>> {
+        let baseline = self.policy.clone();
         crate::manifest::scan_directory(dir)
             .into_iter()
             .map(|found| {
-                let (path, _manifest) = found?;
-                self.load_manifest(&path)
+                let (path, manifest) = found?;
+                let mut effective = baseline.clone();
+                if let Some(additions) = grants.additions_for(dir, &path, &manifest) {
+                    effective.extend_from(additions);
+                }
+                self.load_manifest_with_policy(&path, manifest, &effective)
             })
             .collect()
     }
