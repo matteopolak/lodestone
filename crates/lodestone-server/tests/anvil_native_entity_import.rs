@@ -99,7 +99,7 @@ fn write_fixture_sidecar(world: &Path) -> EntityStorage {
 }
 
 #[test]
-fn independent_entity_sidecar_fixture_imports_native_pose_after_explicit_loss_acceptance() {
+fn independent_entity_sidecar_fixture_imports_common_state_after_explicit_loss_acceptance() {
     let directory = scratch("fixture");
     let world = directory.join("world");
     let sidecar = write_fixture_sidecar(&world);
@@ -116,8 +116,6 @@ fn independent_entity_sidecar_fixture_imports_native_pose_after_explicit_loss_ac
     assert_eq!(
         report.unsupported(),
         &[
-            UnsupportedEntityData::Motion { entity_index: 0 },
-            UnsupportedEntityData::Health { entity_index: 0 },
             UnsupportedEntityData::PreservedFields {
                 entity_index: 0,
                 fields: 1,
@@ -140,6 +138,10 @@ fn independent_entity_sidecar_fixture_imports_native_pose_after_explicit_loss_ac
             dimension: BuiltinDimension::Overworld,
             position: Vec3::new(96.25, 64.5, 192.75),
             rotation: Rotation::new(-37.5, 12.25),
+            motion: Vec3::new(0.1, -0.08, 0.0),
+            state: Some(lodestone_server::world_storage::NativeEntityState::Living {
+                health: 17.0,
+            }),
         }),
         "native expectations are fixed independently of the conversion mapping",
     );

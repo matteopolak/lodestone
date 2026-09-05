@@ -19,12 +19,14 @@ use lodestone_storage::{
 };
 use lodestone_storage_schema::{
     BiomeSection, BuiltinDimension, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1,
-    EntityRecord, GameMode as StoredGameMode, GeneralRecord, LightData as StoredLightData,
-    LightSection, PlayerInventory as StoredPlayerInventory,
-    PlayerInventorySlot as StoredPlayerInventorySlot, PlayerRecord,
+    EntityRecord, EntityRoster, GameMode as StoredGameMode, GeneralRecord,
+    ItemEntityState as StoredItemEntityState, LightData as StoredLightData,
+    LightSection, LivingEntityState as StoredLivingEntityState,
+    PlayerInventory as StoredPlayerInventory, PlayerInventorySlot as StoredPlayerInventorySlot,
+    PlayerRecord,
     RegisteredExtension, WorldProperties,
     ScheduledTick as StoredScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord,
-    generated::{general_record, light_data, storage_record},
+    generated::{entity_record, general_record, light_data, storage_record},
 };
 
 const GAME_DATA_VERSION: u32 = 46_002;
@@ -39,6 +41,10 @@ const ENTITY_KEY_DOMAIN: u32 = GENERAL_KEY_DOMAIN_BIT;
 /// reserved slot has no source path in its body, so a metadata import replaces
 /// the previous typed record without retaining source file names or NBT.
 pub const WORLD_PROPERTIES_KEY: RecordKey = RecordKey::general(i32::MIN, i32::MIN, u32::MAX);
+
+fn entity_roster_key(dimension: BuiltinDimension) -> RecordKey {
+    RecordKey::general(i32::MIN, i32::MIN + dimension as i32, u32::MAX - 1)
+}
 
 /// One native player record's deliberately bounded, typed locator state.
 ///
@@ -101,13 +107,28 @@ impl From<NativePlayerRecord> for NativePlayerData {
     }
 }
 
-/// One bounded native resident-entity pose.
+/// The durable simulation state attached to one native resident entity.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NativeEntityState {
+    /// State owned by the living-mob simulation.
+    Living { health: f32 },
+    /// State owned by the dropped-item simulation.
+    Item {
+        item: lodestone_model::ResourceKey,
+        count: u8,
+        age: i16,
+        pickup_delay: i16,
+    },
+}
+
+/// One bounded native resident entity.
 ///
 /// The UUID and type key are durable identities; position and rotation retain
 /// the live IEEE values rather than applying an undocumented fixed-point
 /// conversion. This is deliberately not a replacement for an Anvil entity:
-/// motion, health, item state, AI state, and opaque fields have no lossless
-/// native consumer here and are therefore absent.
+/// Species-specific AI memories and opaque fields remain outside this record;
+/// the common living and dropped-item state the simulation can restore is
+/// explicit in [`NativeEntityState`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeEntityRecord {
     /// The complete durable entity identity.
@@ -120,6 +141,11 @@ pub struct NativeEntityRecord {
     pub position: lodestone_model::Vec3,
     /// Exact yaw and pitch.
     pub rotation: lodestone_model::Rotation,
+    /// Current motion in blocks per tick.
+    pub motion: lodestone_model::Vec3,
+    /// Typed live state. Absence keeps older pose-only records readable, but
+    /// those records are not eligible for live restoration.
+    pub state: Option<NativeEntityState>,
 }
 
 /// One complete, currently supported typed general record in native storage.
@@ -137,6 +163,8 @@ pub enum NativeGeneralRecord {
     Player(NativePlayerData),
     /// One bounded resident-entity pose.
     Entity(NativeEntityRecord),
+    /// Atomic liveness set for one dimension's entity records.
+    EntityRoster(EntityRoster),
 }
 
 /// One source-column batch in a reviewed resident-entity import.
@@ -672,12 +700,16 @@ pub enum GeneralRecordError {
     PlayerKey { expected: RecordKey, actual: RecordKey },
     /// An entity body's UUID-derived key does not match its stored key.
     EntityKey { expected: RecordKey, actual: RecordKey },
+    /// An entity roster was not stored at its dimension's reserved key.
+    EntityRosterKey { expected: RecordKey, actual: RecordKey },
     /// The world-properties body failed its bounded typed reader.
     WorldProperties(WorldPropertiesError),
     /// The player body failed its bounded typed reader.
     Player(PlayerRecordError),
     /// The entity body failed its bounded typed reader.
     Entity(EntityRecordError),
+    /// The entity roster failed its bounded typed reader.
+    EntityRoster(String),
 }
 
 impl fmt::Display for GeneralRecordError {
@@ -699,9 +731,14 @@ impl fmt::Display for GeneralRecordError {
                 formatter,
                 "entity record key {actual:?} does not match UUID-derived key {expected:?}"
             ),
+            Self::EntityRosterKey { expected, actual } => write!(
+                formatter,
+                "entity roster key {actual:?} does not match reserved key {expected:?}"
+            ),
             Self::WorldProperties(error) => write!(formatter, "world-properties body failed: {error}"),
             Self::Player(error) => write!(formatter, "player body failed: {error}"),
             Self::Entity(error) => write!(formatter, "entity body failed: {error}"),
+            Self::EntityRoster(error) => write!(formatter, "entity roster failed: {error}"),
         }
     }
 }
@@ -816,6 +853,12 @@ pub enum EntityRecordError {
     NonFinitePosition,
     /// A rotation angle is NaN or infinite.
     NonFiniteRotation,
+    /// A motion coordinate is NaN or infinite.
+    NonFiniteMotion,
+    /// A living body has no positive finite health value.
+    InvalidHealth,
+    /// A dropped-item body has invalid identity, count, age, or pickup delay.
+    InvalidItemState,
     /// A finite coordinate cannot be converted to a server block coordinate.
     CoordinateOutOfRange,
     /// The entity is not resident in the caller's horizontal column.
@@ -836,6 +879,8 @@ pub enum EntityRecordError {
     },
     /// A write batch listed the same complete UUID more than once.
     DuplicateUuid([u8; 16]),
+    /// The compact UUID prefix aliases a reserved general-record key.
+    ReservedKey([u8; 16]),
 }
 
 impl fmt::Display for EntityRecordError {
@@ -859,6 +904,9 @@ impl fmt::Display for EntityRecordError {
             }
             Self::NonFinitePosition => formatter.write_str("entity position contains a non-finite coordinate"),
             Self::NonFiniteRotation => formatter.write_str("entity rotation contains a non-finite angle"),
+            Self::NonFiniteMotion => formatter.write_str("entity motion contains a non-finite coordinate"),
+            Self::InvalidHealth => formatter.write_str("entity health must be positive and finite"),
+            Self::InvalidItemState => formatter.write_str("entity item state is invalid"),
             Self::CoordinateOutOfRange => {
                 formatter.write_str("entity position cannot be converted to a block coordinate")
             }
@@ -879,6 +927,10 @@ impl fmt::Display for EntityRecordError {
                 "entity key collision: requested UUID {requested:02x?} conflicts with stored UUID {stored:02x?}"
             ),
             Self::DuplicateUuid(uuid) => write!(formatter, "duplicate entity UUID in write batch: {uuid:02x?}"),
+            Self::ReservedKey(uuid) => write!(
+                formatter,
+                "entity UUID {uuid:02x?} aliases a reserved native general-record key"
+            ),
         }
     }
 }
@@ -1338,6 +1390,9 @@ impl WorldStorage {
                     chunk.height,
                 )?;
                 let key = entity_key(entity.uuid);
+                if is_reserved_general_key(key) {
+                    return Err(EntityRecordError::ReservedKey(entity.uuid).into());
+                }
                 if let Some(stored) = keys.insert(key, entity.uuid) {
                     return Err(EntityRecordError::KeyCollision {
                         requested: entity.uuid,
@@ -1400,6 +1455,113 @@ impl WorldStorage {
         };
         validate_entity_residency(&entity, column_x, column_z, min_y, height)?;
         Ok(Some(entity))
+    }
+
+    /// Replaces one dimension's live entity roster and writes only entity
+    /// bodies whose encoded value changed. The roster and changed bodies share
+    /// one commit, so a crash exposes either the previous complete population
+    /// or the new one; bodies omitted from the roster are stale and ignored.
+    pub fn replace_live_entities(
+        &self,
+        dimension: BuiltinDimension,
+        entities: impl IntoIterator<Item = NativeEntityRecord>,
+    ) -> Result<usize, Error> {
+        validate_entity_dimension(dimension as i32)?;
+        let mut entities: Vec<_> = entities.into_iter().collect();
+        entities.sort_by_key(|entity| entity.uuid);
+        let mut seen = HashSet::new();
+        for entity in &entities {
+            if entity.dimension != dimension {
+                return Err(EntityRecordError::UnsupportedDimension(entity.dimension as i32).into());
+            }
+            if !seen.insert(entity.uuid) {
+                return Err(EntityRecordError::DuplicateUuid(entity.uuid).into());
+            }
+        }
+        let roster = encode_entity_roster(dimension, entities.iter().map(|entity| entity.uuid));
+        let roster_key = entity_roster_key(dimension);
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        let mut native = native.lock().expect("world storage lock poisoned");
+        let mut writes = Vec::new();
+        for entity in &entities {
+            let key = entity_key(entity.uuid);
+            if is_reserved_general_key(key) {
+                return Err(EntityRecordError::ReservedKey(entity.uuid).into());
+            }
+            let encoded = encode_entity(entity)?;
+            let existing = native.get(key)?;
+            if let Some(record) = existing.clone() {
+                decode_entity(entity.uuid, record)?;
+            }
+            if existing.as_ref() != Some(&encoded) {
+                writes.push(RecordWrite::new(key, encoded));
+            }
+        }
+        let existing_roster = native.get(roster_key)?;
+        if let Some(record) = existing_roster.clone() {
+            let decoded = decode_entity_roster(record).map_err(GeneralRecordError::EntityRoster)?;
+            if decoded.dimension != dimension as i32 {
+                return Err(GeneralRecordError::EntityRoster(
+                    "roster dimension does not match its reserved key".to_owned(),
+                )
+                .into());
+            }
+        }
+        if existing_roster.as_ref() != Some(&roster) {
+            writes.push(RecordWrite::new(roster_key, roster));
+        }
+        let changed = writes.len();
+        if changed != 0 {
+            native.write_transaction(writes)?;
+        }
+        Ok(changed)
+    }
+
+    /// Loads the latest atomic live roster for one dimension. `None` means no
+    /// native producer has published a roster yet, allowing an Anvil fallback;
+    /// `Some(empty)` is an authoritative empty population.
+    pub fn load_live_entities(
+        &self,
+        dimension: BuiltinDimension,
+    ) -> Result<Option<Vec<NativeEntityRecord>>, Error> {
+        validate_entity_dimension(dimension as i32)?;
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        let mut native = native.lock().expect("world storage lock poisoned");
+        let Some(record) = native.get(entity_roster_key(dimension))? else {
+            return Ok(None);
+        };
+        let roster = decode_entity_roster(record).map_err(GeneralRecordError::EntityRoster)?;
+        if roster.dimension != dimension as i32 {
+            return Err(GeneralRecordError::EntityRoster(
+                "roster dimension does not match its reserved key".to_owned(),
+            )
+            .into());
+        }
+        let mut entities = Vec::with_capacity(roster.entity_uuids.len());
+        for bytes in roster.entity_uuids {
+            let actual = bytes.len();
+            let uuid: [u8; 16] = bytes
+                .try_into()
+                .map_err(|_| EntityRecordError::InvalidUuidLength { actual })?;
+            let record = native.get(entity_key(uuid))?.ok_or_else(|| {
+                GeneralRecordError::EntityRoster(format!(
+                    "roster references missing entity UUID {uuid:02x?}"
+                ))
+            })?;
+            let entity = decode_entity(uuid, record)?;
+            if entity.dimension != dimension {
+                return Err(GeneralRecordError::EntityRoster(
+                    "roster references an entity in another dimension".to_owned(),
+                )
+                .into());
+            }
+            entities.push(entity);
+        }
+        Ok(Some(entities))
     }
 
     /// Atomically saves one complete dirty chunk through the native typed
@@ -2166,6 +2328,25 @@ fn decode_general_record(
                 .map(NativeGeneralRecord::Entity)
                 .map_err(GeneralRecordError::Entity)
         }
+        Some(general_record::Record::EntityRoster(roster)) => {
+            let dimension = BuiltinDimension::try_from(roster.dimension)
+                .map_err(|_| GeneralRecordError::EntityRoster(format!(
+                    "unknown built-in dimension {}",
+                    roster.dimension
+                )))?;
+            if dimension == BuiltinDimension::Unspecified {
+                return Err(GeneralRecordError::EntityRoster(
+                    "unspecified dimension".to_owned(),
+                ));
+            }
+            let expected = entity_roster_key(dimension);
+            if key != expected {
+                return Err(GeneralRecordError::EntityRosterKey { expected, actual: key });
+            }
+            decode_entity_roster(record)
+                .map(NativeGeneralRecord::EntityRoster)
+                .map_err(GeneralRecordError::EntityRoster)
+        }
         None => Err(GeneralRecordError::MissingTypedBody),
     }
 }
@@ -2400,9 +2581,98 @@ fn entity_key(uuid: [u8; 16]) -> RecordKey {
     general_uuid_key(uuid, ENTITY_KEY_DOMAIN)
 }
 
+fn is_reserved_general_key(key: RecordKey) -> bool {
+    key == WORLD_PROPERTIES_KEY
+        || [
+            BuiltinDimension::Overworld,
+            BuiltinDimension::Nether,
+            BuiltinDimension::End,
+        ]
+        .into_iter()
+        .any(|dimension| key == entity_roster_key(dimension))
+}
+
+fn encode_entity_roster(
+    dimension: BuiltinDimension,
+    uuids: impl IntoIterator<Item = [u8; 16]>,
+) -> StorageRecord {
+    StorageRecord {
+        format_version: FORMAT_VERSION_V1,
+        record: Some(storage_record::Record::General(GeneralRecord {
+            record: Some(general_record::Record::EntityRoster(EntityRoster {
+                dimension: dimension as i32,
+                entity_uuids: uuids.into_iter().map(Vec::from).collect(),
+            })),
+            extensions: Vec::new(),
+        })),
+    }
+}
+
+fn decode_entity_roster(record: StorageRecord) -> Result<EntityRoster, String> {
+    if record.format_version != FORMAT_VERSION_V1 {
+        return Err(format!(
+            "unsupported roster format version {}",
+            record.format_version
+        ));
+    }
+    let Some(storage_record::Record::General(general)) = record.record else {
+        return Err("record does not contain a general body".to_owned());
+    };
+    if !general.extensions.is_empty() {
+        return Err("entity roster carries unsupported extensions".to_owned());
+    }
+    let Some(general_record::Record::EntityRoster(roster)) = general.record else {
+        return Err("general record does not contain an entity roster".to_owned());
+    };
+    let dimension = BuiltinDimension::try_from(roster.dimension)
+        .map_err(|_| format!("unknown built-in dimension {}", roster.dimension))?;
+    if dimension == BuiltinDimension::Unspecified {
+        return Err("entity roster uses the unspecified dimension".to_owned());
+    }
+    let mut seen = HashSet::new();
+    for bytes in &roster.entity_uuids {
+        let actual = bytes.len();
+        let uuid: [u8; 16] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| format!("entity roster UUID has {actual} bytes"))?;
+        if !seen.insert(uuid) {
+            return Err(format!("entity roster repeats UUID {uuid:02x?}"));
+        }
+    }
+    Ok(roster)
+}
+
 fn encode_entity(entity: &NativeEntityRecord) -> Result<StorageRecord, EntityRecordError> {
     validate_entity_dimension(entity.dimension as i32)?;
-    validate_entity_pose(entity.position, entity.rotation)?;
+    validate_entity_pose(entity.position, entity.rotation, entity.motion)?;
+    let durable_state = match &entity.state {
+        Some(NativeEntityState::Living { health }) => {
+            if !health.is_finite() || *health <= 0.0 {
+                return Err(EntityRecordError::InvalidHealth);
+            }
+            Some(entity_record::DurableState::Living(StoredLivingEntityState {
+                health: *health,
+            }))
+        }
+        Some(NativeEntityState::Item {
+            item,
+            count,
+            age,
+            pickup_delay,
+        }) => {
+            if *count == 0 {
+                return Err(EntityRecordError::InvalidItemState);
+            }
+            Some(entity_record::DurableState::Item(StoredItemEntityState {
+                item_key: item.to_string(),
+                count: u32::from(*count),
+                age: i32::from(*age),
+                pickup_delay: i32::from(*pickup_delay),
+            }))
+        }
+        None => None,
+    };
     Ok(StorageRecord {
         format_version: FORMAT_VERSION_V1,
         record: Some(storage_record::Record::General(GeneralRecord {
@@ -2415,6 +2685,10 @@ fn encode_entity(entity: &NativeEntityRecord) -> Result<StorageRecord, EntityRec
                 z: entity.position.z,
                 yaw: entity.rotation.yaw,
                 pitch: entity.rotation.pitch,
+                motion_x: entity.motion.x,
+                motion_y: entity.motion.y,
+                motion_z: entity.motion.z,
+                durable_state,
                 ..EntityRecord::default()
             })),
             extensions: Vec::new(),
@@ -2456,7 +2730,38 @@ fn decode_entity(
     validate_entity_dimension(entity.dimension)?;
     let position = lodestone_model::Vec3::new(entity.x, entity.y, entity.z);
     let rotation = lodestone_model::Rotation::new(entity.yaw, entity.pitch);
-    validate_entity_pose(position, rotation)?;
+    let motion = lodestone_model::Vec3::new(entity.motion_x, entity.motion_y, entity.motion_z);
+    validate_entity_pose(position, rotation, motion)?;
+    let state = match entity.durable_state {
+        Some(entity_record::DurableState::Living(living)) => {
+            if !living.health.is_finite() || living.health <= 0.0 {
+                return Err(EntityRecordError::InvalidHealth);
+            }
+            Some(NativeEntityState::Living {
+                health: living.health,
+            })
+        }
+        Some(entity_record::DurableState::Item(item)) => {
+            let item_key = item
+                .item_key
+                .parse()
+                .map_err(|_| EntityRecordError::InvalidItemState)?;
+            let count = u8::try_from(item.count).map_err(|_| EntityRecordError::InvalidItemState)?;
+            let age = i16::try_from(item.age).map_err(|_| EntityRecordError::InvalidItemState)?;
+            let pickup_delay = i16::try_from(item.pickup_delay)
+                .map_err(|_| EntityRecordError::InvalidItemState)?;
+            if count == 0 {
+                return Err(EntityRecordError::InvalidItemState);
+            }
+            Some(NativeEntityState::Item {
+                item: item_key,
+                count,
+                age,
+                pickup_delay,
+            })
+        }
+        None => None,
+    };
     Ok(NativeEntityRecord {
         uuid,
         entity_type,
@@ -2464,6 +2769,8 @@ fn decode_entity(
             .expect("validated built-in entity dimension"),
         position,
         rotation,
+        motion,
+        state,
     })
 }
 
@@ -2481,12 +2788,16 @@ fn validate_entity_dimension(dimension: i32) -> Result<(), EntityRecordError> {
 fn validate_entity_pose(
     position: lodestone_model::Vec3,
     rotation: lodestone_model::Rotation,
+    motion: lodestone_model::Vec3,
 ) -> Result<(), EntityRecordError> {
     if !position.x.is_finite() || !position.y.is_finite() || !position.z.is_finite() {
         return Err(EntityRecordError::NonFinitePosition);
     }
     if !rotation.yaw.is_finite() || !rotation.pitch.is_finite() {
         return Err(EntityRecordError::NonFiniteRotation);
+    }
+    if !motion.x.is_finite() || !motion.y.is_finite() || !motion.z.is_finite() {
+        return Err(EntityRecordError::NonFiniteMotion);
     }
     Ok(())
 }
@@ -2498,7 +2809,7 @@ fn validate_entity_residency(
     min_y: i32,
     height: i32,
 ) -> Result<(), EntityRecordError> {
-    validate_entity_pose(entity.position, entity.rotation)?;
+    validate_entity_pose(entity.position, entity.rotation, entity.motion)?;
     let x = entity_block_coordinate(entity.position.x)?;
     let y = entity_block_coordinate(entity.position.y)?;
     let z = entity_block_coordinate(entity.position.z)?;
@@ -2863,6 +3174,8 @@ mod tests {
                     dimension: BuiltinDimension::Overworld,
                     position: lodestone_model::Vec3::new(0.5, 1.0, 0.5),
                     rotation: lodestone_model::Rotation::new(0.0, 0.0),
+                    motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+                    state: None,
                 }],
             ),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
@@ -3093,6 +3406,8 @@ mod tests {
             dimension: BuiltinDimension::Overworld,
             position,
             rotation: lodestone_model::Rotation::new(136.5, -12.25),
+            motion: lodestone_model::Vec3::new(0.125, -0.25, 0.5),
+            state: Some(NativeEntityState::Living { health: 7.5 }),
         }
     }
 
@@ -3137,6 +3452,63 @@ mod tests {
             Err(Error::Entity(EntityRecordError::OutsideColumn { .. }))
         ));
         drop(reopened);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_entity_roster_is_atomic_liveness_and_skips_unchanged_bodies() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-entity-roster-{}-{unique}",
+            std::process::id()
+        ));
+        let entity = native_entity(lodestone_model::Vec3::new(0.5, 64.0, 0.5));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        assert_eq!(
+            storage
+                .replace_live_entities(BuiltinDimension::Overworld, [entity.clone()])
+                .expect("publish first live roster"),
+            2,
+            "the first publish writes one body and its roster"
+        );
+        assert_eq!(
+            storage
+                .replace_live_entities(BuiltinDimension::Overworld, [entity.clone()])
+                .expect("repeat unchanged roster"),
+            0,
+            "an unchanged population appends no duplicate records"
+        );
+        assert_eq!(
+            storage
+                .load_live_entities(BuiltinDimension::Overworld)
+                .unwrap(),
+            Some(vec![entity.clone()])
+        );
+        assert_eq!(
+            storage
+                .replace_live_entities(BuiltinDimension::Overworld, [])
+                .expect("publish authoritative empty roster"),
+            1
+        );
+        drop(storage);
+
+        let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("reopen native store");
+        assert_eq!(
+            reopened
+                .load_live_entities(BuiltinDimension::Overworld)
+                .unwrap(),
+            Some(Vec::new()),
+            "the new roster must suppress a stale entity body after reopen"
+        );
         std::fs::remove_dir_all(directory).expect("remove native test segment");
     }
 
@@ -3229,6 +3601,8 @@ mod tests {
             dimension: BuiltinDimension::End,
             position: lodestone_model::Vec3::new(32.5, 70.25, -4.75),
             rotation: lodestone_model::Rotation::new(45.0, -20.0),
+            motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            state: Some(NativeEntityState::Living { health: 12.0 }),
         };
         let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
             directory: directory.clone(),

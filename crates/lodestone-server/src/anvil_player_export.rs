@@ -64,7 +64,9 @@ pub fn export_all_players(
         .into_iter()
         .filter_map(|record| match record {
             NativeGeneralRecord::Player(player) => Some(player),
-            NativeGeneralRecord::WorldProperties(_) | NativeGeneralRecord::Entity(_) => None,
+            NativeGeneralRecord::WorldProperties(_)
+            | NativeGeneralRecord::Entity(_)
+            | NativeGeneralRecord::EntityRoster(_) => None,
         })
         .collect();
 

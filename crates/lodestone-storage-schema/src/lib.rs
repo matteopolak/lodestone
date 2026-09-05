@@ -9,9 +9,10 @@ pub mod generated {
 
 pub use generated::{
     BiomeSection, BuiltinBiome, BuiltinDimension, ChunkRecord, ChunkSection, EntityRecord,
-    ExtensionTable, ExtensionValue, GameMode, GeneralRecord, LightData, LightSection,
-    PlayerInventory, PlayerInventorySlot, PlayerRecord, PlayerRuntimeState, RegisteredExtension,
-    ScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord, WorldProperties,
+    EntityRoster, ExtensionTable, ExtensionValue, GameMode, GeneralRecord, ItemEntityState,
+    LightData, LightSection, LivingEntityState, PlayerInventory, PlayerInventorySlot, PlayerRecord,
+    PlayerRuntimeState, RegisteredExtension, ScheduledTick, ScheduledTickKind,
+    ScheduledTickPriority, StorageRecord, WorldProperties,
 };
 
 /// The only storage-record format understood by the initial schema.
@@ -218,6 +219,9 @@ fn validate_general(general: &GeneralRecord) -> Result<(), ValidationError> {
     match &general.record {
         Some(generated::general_record::Record::Player(player)) => validate_player(player)?,
         Some(generated::general_record::Record::Entity(entity)) => validate_entity(entity)?,
+        Some(generated::general_record::Record::EntityRoster(roster)) => {
+            validate_entity_roster(roster)?;
+        }
         Some(_) => {}
         None => return Err(ValidationError::MissingGeneralRecord),
     }
@@ -243,6 +247,48 @@ fn validate_entity(entity: &EntityRecord) -> Result<(), ValidationError> {
     }
     if !entity.yaw.is_finite() || !entity.pitch.is_finite() {
         return Err(ValidationError::NonFiniteEntityRotation);
+    }
+    if !entity.motion_x.is_finite()
+        || !entity.motion_y.is_finite()
+        || !entity.motion_z.is_finite()
+    {
+        return Err(ValidationError::NonFiniteEntityMotion);
+    }
+    match &entity.durable_state {
+        Some(generated::entity_record::DurableState::Living(living)) => {
+            if !living.health.is_finite() || living.health <= 0.0 {
+                return Err(ValidationError::InvalidLivingEntityHealth);
+            }
+        }
+        Some(generated::entity_record::DurableState::Item(item)) => {
+            if item.item_key.is_empty()
+                || item.count == 0
+                || item.count > u32::from(u8::MAX)
+                || i16::try_from(item.age).is_err()
+                || i16::try_from(item.pickup_delay).is_err()
+            {
+                return Err(ValidationError::InvalidItemEntityState);
+            }
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn validate_entity_roster(roster: &EntityRoster) -> Result<(), ValidationError> {
+    if BuiltinDimension::try_from(roster.dimension).is_err()
+        || roster.dimension == BuiltinDimension::Unspecified as i32
+    {
+        return Err(ValidationError::UnknownBuiltinDimension(roster.dimension));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for uuid in &roster.entity_uuids {
+        if uuid.len() != 16 {
+            return Err(ValidationError::InvalidEntityUuidLength(uuid.len()));
+        }
+        if !seen.insert(uuid) {
+            return Err(ValidationError::DuplicateEntityRosterUuid);
+        }
     }
     Ok(())
 }
@@ -339,6 +385,10 @@ pub enum ValidationError {
     MissingEntityType,
     NonFiniteEntityPosition,
     NonFiniteEntityRotation,
+    NonFiniteEntityMotion,
+    InvalidLivingEntityHealth,
+    InvalidItemEntityState,
+    DuplicateEntityRosterUuid,
     UnknownBuiltinDimension(i32),
     UnknownPlayerGameMode(i32),
     InvalidPlayerHealth,
@@ -422,6 +472,14 @@ impl std::fmt::Display for ValidationError {
             }
             Self::NonFiniteEntityRotation => {
                 formatter.write_str("entity rotation contains a non-finite angle")
+            }
+            Self::NonFiniteEntityMotion => {
+                formatter.write_str("entity motion contains a non-finite coordinate")
+            }
+            Self::InvalidLivingEntityHealth => formatter.write_str("invalid living-entity health"),
+            Self::InvalidItemEntityState => formatter.write_str("invalid item-entity state"),
+            Self::DuplicateEntityRosterUuid => {
+                formatter.write_str("entity roster repeats a UUID")
             }
             Self::UnknownBuiltinDimension(id) => {
                 write!(formatter, "unknown built-in dimension {id}")

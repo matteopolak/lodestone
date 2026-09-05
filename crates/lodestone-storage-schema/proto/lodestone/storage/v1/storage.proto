@@ -206,6 +206,7 @@ message GeneralRecord {
     WorldProperties world_properties = 1;
     PlayerRecord player = 2;
     EntityRecord entity = 3;
+    EntityRoster entity_roster = 4;
   }
   repeated ExtensionValue extensions = 10;
 }
@@ -287,6 +288,31 @@ message EntityRecord {
   double z = 11;
   float yaw = 12;
   float pitch = 13;
+  double motion_x = 14;
+  double motion_y = 15;
+  double motion_z = 16;
+  oneof durable_state {
+    LivingEntityState living = 17;
+    ItemEntityState item = 18;
+  }
+}
+
+message LivingEntityState {
+  float health = 1;
+}
+
+message ItemEntityState {
+  string item_key = 1;
+  uint32 count = 2;
+  sint32 age = 3;
+  sint32 pickup_delay = 4;
+}
+
+// The roster is the atomic liveness boundary for a dimension. Entity records
+// omitted from the latest roster are stale and never restored.
+message EntityRoster {
+  BuiltinDimension dimension = 1;
+  repeated bytes entity_uuids = 2;
 }
 
 enum BuiltinDimension {

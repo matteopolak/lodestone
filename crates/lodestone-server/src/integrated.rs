@@ -702,6 +702,7 @@ struct NativeSaveContext {
     save: crate::region_source::WorldSaveHandle,
     source: ErasedChunkSource,
     protocol: Arc<Box<dyn ServerProtocol>>,
+    mobs: MobHandle,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -753,7 +754,15 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
             &scheduled,
         )
     });
-    context.storage.write_dirty_chunks(records)
+    let written = context.storage.write_dirty_chunks(records)?;
+    let entities = context.mobs.with(|sim| {
+        sim.native_entities(lodestone_storage_schema::BuiltinDimension::Overworld)
+    });
+    context.storage.replace_live_entities(
+        lodestone_storage_schema::BuiltinDimension::Overworld,
+        entities,
+    )?;
+    Ok(written)
 }
 
 /// A running integrated server that owns its serving task(s).
@@ -1570,6 +1579,8 @@ impl IntegratedServer {
             crate::region_source::ScheduledTickHandle::default(),
             // No world directory, so no `entities/` set to restore from.
             None,
+            // No native world store either.
+            None,
             // Same reasoning: no `poi/` set either, so a fresh index.
             crate::portal::PortalIndex::new(),
             // No world directory, so a Nether/End sibling stays
@@ -1613,6 +1624,7 @@ impl IntegratedServer {
             BlockEntityHandle::default(),
             crate::region_source::ScheduledTickHandle::default(),
             None,
+            None,
             crate::portal::PortalIndex::new(),
             None,
             CommandDispatch::none(),
@@ -1650,6 +1662,7 @@ impl IntegratedServer {
             view_radius,
             BlockEntityHandle::default(),
             crate::region_source::ScheduledTickHandle::default(),
+            None,
             None,
             crate::portal::PortalIndex::new(),
             None,
@@ -1699,6 +1712,10 @@ impl IntegratedServer {
         // `MobHandle::reseed` discards the whole sim, so a restore that ran
         // before it would be silently undone.
         entities_on_disk: Option<crate::entity_storage::EntityStorage>,
+        // The selected native backend, when it owns a typed entity roster.
+        // Passed before tasks spawn so restoration happens after reseeding but
+        // before the population becomes authoritative on the wire.
+        native_entities_on_disk: Option<Arc<crate::world_storage::WorldStorage>>,
         // The shared portal index. Unlike `entities_on_disk`, never `None` in
         // practice by the time this function runs: both callers pass a real
         // index, either fresh ([`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs))
@@ -2012,7 +2029,28 @@ impl IntegratedServer {
             // restore lives in the seed task rather than in
             // `open_persistent_with_mobs` returns while this task continues.
             #[cfg(not(target_arch = "wasm32"))]
-            if let Some(storage) = &entities_on_disk {
+            let mut native_roster_found = native_entities_on_disk.is_some();
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(storage) = &native_entities_on_disk {
+                match storage.load_live_entities(
+                    lodestone_storage_schema::BuiltinDimension::Overworld,
+                ) {
+                    Ok(Some(saved)) => {
+                        native_roster_found = true;
+                        let restored = seed_mobs.with(|sim| sim.restore_native(&saved));
+                        tracing::info!(
+                            "native entity load: restored {restored} of {} roster entries",
+                            saved.len(),
+                        );
+                    }
+                    Ok(None) => native_roster_found = false,
+                    Err(err) => tracing::error!(
+                        "native entity load failed, typed roster not restored: {err}"
+                    ),
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if !native_roster_found && let Some(storage) = &entities_on_disk {
                 let (cx_range, cz_range) = restore_area;
                 match storage.load_area(cx_range, cz_range) {
                     Ok(saved) if !saved.is_empty() => {
@@ -2023,11 +2061,6 @@ impl IntegratedServer {
                         );
                     }
                     Ok(_) => {}
-                    // Logged rather than propagated: this task has no error
-                    // channel, and a world whose mobs cannot be read is still a
-                    // world worth playing. The load is *not* silent, which is the
-                    // property that matters — a blank `entities/` read as "no
-                    // mobs here" is exactly the failure this persistence check exists to stop.
                     Err(err) => tracing::error!("entity load failed, mobs not restored: {err}"),
                 }
             }
@@ -2515,7 +2548,7 @@ impl IntegratedServer {
                 )
             })
             .cloned();
-        persistent.set_native_storage(native_storage);
+        persistent.set_native_storage(native_storage.clone());
         let (mut server, client_end) = Self::open_in_memory_with_mobs_using(
             protocol,
             persistent,
@@ -2531,6 +2564,7 @@ impl IntegratedServer {
             // restored cow is one the next save recognises as its own (see
             // `EntityStorage::save`'s uuid-identity clearing).
             Some(entity_storage.clone()),
+            native_storage.clone(),
         // The restored portal index, so
             // every dimension's `ChunkSource` shares it from the moment the
         // first connection is served — not a separate index restored later.
@@ -2896,6 +2930,7 @@ impl IntegratedServer {
             save: self.save.as_ref()?.clone(),
             source: self.world_source.as_ref()?.clone(),
             protocol: self.host.as_ref()?.protocol.clone(),
+            mobs: self.mobs.as_ref()?.clone(),
         })
     }
 
@@ -5106,6 +5141,7 @@ mod tests {
             block_entities,
             crate::region_source::ScheduledTickHandle::default(),
             None,
+            None,
             crate::portal::PortalIndex::new(),
             None,
             CommandDispatch::none(),
@@ -6228,13 +6264,12 @@ mod tests {
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
     }
 
-    /// The server-level native resident-entity consumer: an explicit typed
-    /// pose crosses a selected backend, then a fresh server reads it after the
-    /// first one has stopped. This deliberately exercises no Anvil entity
-    /// writer because the typed record cannot preserve full entity state.
+    /// The server-level native resident-entity consumer: an atomic typed roster
+    /// restores into the live simulation after reseeding, then shutdown writes
+    /// the simulation's current state back through the same native path.
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn persistent_server_reopens_native_resident_entity_pose() {
+    async fn persistent_server_restores_and_resaves_native_entity_roster() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock after Unix epoch")
@@ -6251,8 +6286,10 @@ mod tests {
             ],
             entity_type: "minecraft:cow".parse().expect("valid entity type"),
             dimension: lodestone_storage_schema::BuiltinDimension::Overworld,
-            position: lodestone_model::Vec3::new(-1.5, 6.25, 31.75),
+            position: lodestone_model::Vec3::new(0.5, 6.25, 0.5),
             rotation: lodestone_model::Rotation::new(136.5, -12.25),
+            motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            state: Some(crate::world_storage::NativeEntityState::Living { health: 7.5 }),
         };
         let first_storage = crate::world_storage::WorldStorage::open(
             crate::world_storage::WorldStorageBackend::LodestoneNative {
@@ -6260,6 +6297,12 @@ mod tests {
             },
         )
         .expect("open first native segment");
+        first_storage
+            .replace_live_entities(
+                lodestone_storage_schema::BuiltinDimension::Overworld,
+                [entity.clone()],
+            )
+            .expect("seed authoritative native roster");
         let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
             Silent,
             &world_dir,
@@ -6274,12 +6317,25 @@ mod tests {
             first_storage,
         )
         .expect("open first persistent server");
-        assert_eq!(
-            server
-                .write_dirty_native_entities(-1, 1, 0, 16, [entity.clone()])
-                .expect("save native resident entity"),
-            1
-        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let restored = server.mobs().is_some_and(|mobs| {
+                mobs.with(|sim| {
+                    sim.native_entities(lodestone_storage_schema::BuiltinDimension::Overworld)
+                        .into_iter()
+                        .any(|actual| {
+                            actual.uuid == entity.uuid
+                                && actual.entity_type == entity.entity_type
+                                && actual.state == entity.state
+                        })
+                })
+            });
+            if restored {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "native roster never reached live MobSim");
+            tokio::task::yield_now().await;
+        }
         server.shutdown().await;
 
         let second_storage = crate::world_storage::WorldStorage::open(
@@ -6288,32 +6344,16 @@ mod tests {
             },
         )
         .expect("reopen native segment");
-        let (reopened, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
-            Silent,
-            &world_dir,
-            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
-            0,
-            16,
-            (0..=0, 0..=0),
-            (0, 0),
-            0,
-            0,
-            std::time::Duration::from_secs(3600),
-            second_storage,
-        )
-        .expect("open second persistent server");
-        assert_eq!(
-            reopened
-                .load_native_entity(entity.uuid, -1, 1, 0, 16)
-                .expect("read reopened resident entity"),
-            Some(entity),
-            "a fresh server must read the durable typed pose rather than the first handle's memory"
-        );
-        assert!(
-            reopened.load_native_entity([0xff; 16], -1, 1, 0, 16).unwrap().is_none(),
-            "a different UUID must not be served from the first server's memory"
-        );
-        reopened.shutdown().await;
+        let saved = second_storage
+            .load_live_entities(lodestone_storage_schema::BuiltinDimension::Overworld)
+            .expect("read shutdown roster")
+            .expect("native roster remains authoritative");
+        let restored = saved
+            .iter()
+            .find(|actual| actual.uuid == entity.uuid)
+            .expect("live entity survives shutdown snapshot");
+        assert_eq!(restored.entity_type, entity.entity_type);
+        assert_eq!(restored.state, entity.state);
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
     }
 
