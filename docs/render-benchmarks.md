@@ -114,6 +114,15 @@ On macOS, the runner also requires fullscreen confirmation on the hardware-built
 display and a native GPU adapter; it does not treat a successful process exit as a
 render witness.
 
+Before interpreting or sharing a saved heavyweight capture, run `just
+validate-client-heavy-profile <capture>`. The runner performs the same check before
+reporting a successful capture. It is a quick local artifact check: it requires a
+nonempty capture, Samply `*.json.syms.json` sidecar, and the runner's
+`*.record.json` scene record, then verifies the record's capture path, release
+profile, scenario, bounded scales, scene hash, four phase durations, and stationary
+and moving summaries. It intentionally does not decode the profile's potentially
+large JSON payload; `profile-cost-table` owns the profile-format parse.
+
 ### The benchmark harness (criterion + `support`)
 
 A generic per-crate criterion harness, currently implemented in the crates most
@@ -190,6 +199,9 @@ fresh per-iteration setup rather than one long-lived `b.iter` closure.
 - `--benchmark heavyweight --heavy-scenario NAME --heavy-seed N --heavy-scale N
   --heavy-camera-plan stationary|orbit --benchmark-mutation SECONDS` — typed
   heavyweight client lifecycle input, normally supplied by the runner's emitted plan.
+- `--validate-heavy-profile CAPTURE` / `just validate-client-heavy-profile <capture>`
+  — validate a completed heavyweight capture and its sidecars without launching any
+  workload or requiring Samply on `PATH`.
 - `bench-results/*.jsonl` and `bench-results/live_frame_profile.jsonl` — gitignored,
   local-only history; a fresh clone has no baseline to compare against.
 - Criterion CLI flags after `--` (`--quick`, `--sample-size`, `--save-baseline`/

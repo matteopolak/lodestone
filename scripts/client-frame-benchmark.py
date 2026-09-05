@@ -538,6 +538,71 @@ def _samply_sidecar_path(artifact: pathlib.Path) -> pathlib.Path:
     return artifact.with_suffix(".syms.json")
 
 
+def _heavy_profile_record_path(artifact: pathlib.Path) -> pathlib.Path:
+    """Return the immutable scene record written next to one Samply capture."""
+    return artifact.with_suffix(".record.json")
+
+
+def _require_nonempty_artifact(path: pathlib.Path, label: str) -> None:
+    if not path.is_file() or path.stat().st_size == 0:
+        raise RuntimeError(f"heavyweight profile is missing a nonempty {label}: {path}")
+
+
+def validate_heavy_profile_artifact(artifact: pathlib.Path) -> dict:
+    """Check the local capture's sidecars and emitted heavyweight scene identity.
+
+    This intentionally does not decode the potentially large profile. The profile
+    analyzer owns that format; this gate establishes that the capture, Samply symbol
+    sidecar, and runner-owned record are a coherent profiling handoff.
+    """
+    artifact = artifact.resolve()
+    _require_nonempty_artifact(artifact, "capture")
+    _require_nonempty_artifact(_samply_sidecar_path(artifact), "symbol sidecar")
+    record_path = _heavy_profile_record_path(artifact)
+    _require_nonempty_artifact(record_path, "scene record")
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"heavyweight scene record is not JSON: {record_path}: {error}") from error
+    if not isinstance(record, dict):
+        raise RuntimeError(f"heavyweight scene record must be a JSON object: {record_path}")
+
+    scene_hash = record.get("scene_hash")
+    required_durations = {"warmup", "mutation", "stationary", "moving"}
+    record_capture = record.get("capture")
+    if (
+        record.get("schema") != 1
+        or record.get("workload") != "heavyweight"
+        or record.get("profile") != "release"
+        or not isinstance(record_capture, str)
+        or pathlib.Path(record_capture).resolve() != artifact
+        or not isinstance(scene_hash, str)
+        or len(scene_hash) != 64
+        or any(character not in "0123456789abcdef" for character in scene_hash)
+        or record.get("scenario") not in HEAVY_SCENARIOS
+        or not isinstance(record.get("seed"), int)
+        or not isinstance(record.get("scale"), int)
+        or not 1 <= record["scale"] <= MAX_HEAVY_SCALE
+        or not isinstance(record.get("requested_scale"), int)
+        or not 1 <= record["requested_scale"] <= MAX_HEAVY_SCALE
+        or not isinstance(record.get("durations_seconds"), dict)
+        or set(record["durations_seconds"]) != required_durations
+        or any(
+            not isinstance(seconds, int) or seconds < 0
+            for seconds in record["durations_seconds"].values()
+        )
+        or sum(record["durations_seconds"].values()) > MAX_HEAVY_TOTAL_SECONDS
+        or not isinstance(record.get("segments"), dict)
+        or not {"stationary", "moving"}.issubset(record["segments"])
+        or any(
+            not isinstance(record["segments"][segment], dict)
+            for segment in ("stationary", "moving")
+        )
+    ):
+        raise RuntimeError(f"heavyweight scene record does not describe this capture: {record_path}")
+    return record
+
+
 def _unique_username(trial: int) -> str:
     suffix = int(time.time() * 1000) % 100_000
     return f"LdB{os.getpid():x}{trial}{suffix}"[:16]
@@ -827,7 +892,13 @@ def _print_spread(workload: str, debug_overlay: str, results: list[dict]) -> Non
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--workload", choices=sorted(ORACLES), required=True)
+    parser.add_argument("--workload", choices=sorted(ORACLES))
+    parser.add_argument(
+        "--validate-heavy-profile",
+        type=pathlib.Path,
+        metavar="CAPTURE",
+        help="validate a saved heavyweight Samply capture and its sidecars without running a scene",
+    )
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--samply", action="store_true")
@@ -841,6 +912,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--binary", type=pathlib.Path, default=ROOT / "target" / "release" / "lodestone"
     )
     args = parser.parse_args(argv)
+    if args.validate_heavy_profile is not None:
+        if args.workload is not None:
+            parser.error("--validate-heavy-profile cannot be combined with --workload")
+        return args
+    if args.workload is None:
+        parser.error("--workload is required unless --validate-heavy-profile is used")
     if args.trials < 1:
         parser.error("--trials must be at least 1")
     if (args.workload == "heavyweight") != (args.heavy_scenario is not None):
@@ -863,6 +940,13 @@ def overlay_arms(workload: str, requested: str | None) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.validate_heavy_profile is not None:
+        record = validate_heavy_profile_artifact(args.validate_heavy_profile)
+        print(
+            "validated heavyweight profile: "
+            f"scenario={record['scenario']} scene_hash={record['scene_hash']}"
+        )
+        return 0
     binary = args.binary.resolve()
     if not binary.is_file():
         raise SystemExit(f"release client not found: {binary}; build it before benchmarking")
@@ -922,12 +1006,13 @@ def main(argv: list[str] | None = None) -> int:
                     heavy_scene, result["segments"],
                 )
                 if profile_artifact is not None:
-                    sidecar = profile_artifact.with_suffix(".record.json")
-                    sidecar.write_text(
+                    record_path = _heavy_profile_record_path(profile_artifact)
+                    record_path.write_text(
                         json.dumps({**record, "capture": str(profile_artifact)}, separators=(",", ":"), sort_keys=True) + "\n",
                         encoding="utf-8",
                     )
-                    print(f"heavyweight capture record: {sidecar}")
+                    validate_heavy_profile_artifact(profile_artifact)
+                    print(f"heavyweight capture record: {record_path}")
                 else:
                     HEAVY_RESULTS.parent.mkdir(parents=True, exist_ok=True)
                     with HEAVY_RESULTS.open("a", encoding="utf-8") as handle:
