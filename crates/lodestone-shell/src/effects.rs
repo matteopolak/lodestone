@@ -660,10 +660,10 @@ mod tests {
         let mut checked = 0usize;
         let mut wrong: Vec<String> = Vec::new();
         for potion in 0..lodestone_data::potion::POTION_COUNT {
-            let entries = lodestone_data::potion::potion_effect_entries(potion as i32);
-            let Some(raw) = lodestone_data::potion::potion_built_in_effects(potion as i32) else {
-                continue;
-            };
+            let potion = lodestone_data::potion::PotionId::from_registry_id(potion as i32)
+                .expect("generated potion id is valid");
+            let entries = lodestone_data::potion::potion_effect_entries(potion);
+            let raw = lodestone_data::potion::potion_built_in_effects(potion);
             for (entry, (effect_index, _, _)) in entries.iter().zip(raw.iter()) {
                 let Some(name) = lodestone_data::mob_effects::mob_effect_name(*effect_index as i32)
                 else {

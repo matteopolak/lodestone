@@ -1101,7 +1101,9 @@ fn potion_color_for(base: &str, suffix: &str, model: &mut lodestone_model::ItemS
     let Some(potion) = lodestone_data::potion::potion_id(&format!("minecraft:{suffix}")) else {
         return;
     };
-    model.components.potion_color = Some(lodestone_data::potion::potion_color(Some(potion), None, &[]));
+    let potion_id = lodestone_data::potion::PotionId::from_registry_id(potion)
+        .expect("generated potion id must validate against its own census");
+    model.components.potion_color = Some(lodestone_data::potion::potion_color(Some(potion_id), None, &[]));
     // Carries the potion's identity, not just its mixed tint, across the crate
     // boundary — `tooltip.rs`'s title and effect-lore lines need to tell
     // `swiftness` from `long_swiftness` from `strong_swiftness`, which all three

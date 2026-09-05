@@ -339,9 +339,12 @@ pub enum SplashEffect {
 /// explicitly, so an empty result is never mistaken for "not looked up yet".
 #[must_use]
 pub fn potion_splash_effects(potion_registry_id: i32, scale: f64, duration_scale: f32) -> Vec<SplashEffect> {
-    let Some(built_in) = lodestone_data::potion::potion_built_in_effects(potion_registry_id) else {
+    let Some(potion_registry_id) =
+        lodestone_data::potion::PotionId::from_registry_id(potion_registry_id)
+    else {
         return Vec::new();
     };
+    let built_in = lodestone_data::potion::potion_built_in_effects(potion_registry_id);
     built_in
         .iter()
         .filter_map(|&(effect_index, amplifier, base_duration)| {
@@ -1376,7 +1379,9 @@ mod tests {
     #[test]
     fn potion_splash_effects_scales_a_timed_effect_by_distance() {
         let swiftness = lodestone_data::potion::potion_id("minecraft:swiftness").expect("swiftness exists");
-        let entries = lodestone_data::potion::potion_effect_entries(swiftness);
+        let potion_id = lodestone_data::potion::PotionId::from_registry_id(swiftness)
+            .expect("generated potion id is valid");
+        let entries = lodestone_data::potion::potion_effect_entries(potion_id);
         assert_eq!(entries.len(), 1, "swiftness carries exactly one built-in effect");
         let base_duration = entries[0].duration_ticks;
         let amplifier = u32::from(entries[0].amplifier);

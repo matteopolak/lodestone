@@ -761,7 +761,8 @@ fn read_potion_contents(
     } else {
         None
     };
-    let color = lodestone_data::potion::potion_color(potion, custom_color, &color_effects);
+    let known_potion = potion.and_then(lodestone_data::potion::PotionId::from_registry_id);
+    let color = lodestone_data::potion::potion_color(known_potion, custom_color, &color_effects);
     Ok((potion, color, custom_effects, custom_name))
 }
 
