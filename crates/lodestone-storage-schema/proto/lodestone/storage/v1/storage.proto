@@ -232,6 +232,18 @@ message PlayerRecord {
   // Unspecified preserves compatibility with locator-only records written
   // before this independently consumable full-player field was introduced.
   GameMode game_mode = 8;
+  // Absent for locator-only and early native records. This group contains the
+  // complete scalar player state currently consumed by the live server loop;
+  // inventory remains a separate future typed vocabulary.
+  PlayerRuntimeState runtime_state = 9;
+}
+
+message PlayerRuntimeState {
+  float health = 1;
+  sint32 air_supply = 2;
+  sint32 experience_level = 3;
+  float experience_progress = 4;
+  sint32 experience_total = 5;
 }
 
 message EntityRecord {

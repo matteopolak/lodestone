@@ -96,6 +96,7 @@ fn player_update() -> RecordWrite {
                     yaw_millidegrees: 90_000,
                     pitch_millidegrees: 0,
                     game_mode: 1,
+                    runtime_state: None,
                 })),
                 extensions: vec![ExtensionValue {
                     local_id: 1,

@@ -2024,6 +2024,10 @@ impl NativePlayerSession {
         self.loaded.and_then(|data| data.game_mode)
     }
 
+    fn runtime(&self) -> Option<crate::world_storage::NativePlayerRuntimeState> {
+        self.loaded.filter(|_| !self.save_blocked).and_then(|data| data.runtime)
+    }
+
     fn snapshot(
         &self,
         player_pos: Option<(f64, f64, f64)>,
@@ -2031,6 +2035,8 @@ impl NativePlayerSession {
         fallback: Vec3,
         dimension: crate::dimension::Dimension,
         game_mode: GameMode,
+        vitals: &PlayerVitals,
+        experience: &crate::experience::PlayerExperience,
     ) -> Option<crate::world_storage::NativePlayerData> {
         if self.save_blocked {
             return None;
@@ -2063,6 +2069,11 @@ impl NativePlayerSession {
                 pitch_millidegrees: native_fixed_rotation(rotation.pitch)?,
             },
             game_mode: Some(game_mode),
+            runtime: Some(crate::world_storage::NativePlayerRuntimeState {
+                health: vitals.health(),
+                air_supply: vitals.air_supply(),
+                experience: *experience,
+            }),
         })
     }
 }
@@ -2126,12 +2137,16 @@ fn persist_native_player(
     fallback: Vec3,
     dimension: crate::dimension::Dimension,
     game_mode: GameMode,
+    vitals: &PlayerVitals,
+    experience: &crate::experience::PlayerExperience,
 ) {
     let Some(session) = session else {
         return;
     };
     let Some(record) =
-        session.snapshot(player_pos, player_rot, fallback, dimension, game_mode)
+        session.snapshot(
+            player_pos, player_rot, fallback, dimension, game_mode, vitals, experience,
+        )
     else {
         tracing::error!(
             "native player locator for {:?} contains a non-finite or out-of-range live value; it was not written",
@@ -2153,12 +2168,16 @@ fn publish_native_player(
     fallback: Vec3,
     dimension: crate::dimension::Dimension,
     game_mode: GameMode,
+    vitals: &PlayerVitals,
+    experience: &crate::experience::PlayerExperience,
 ) {
     let Some(session) = session else {
         return;
     };
     let Some(record) =
-        session.snapshot(player_pos, player_rot, fallback, dimension, game_mode)
+        session.snapshot(
+            player_pos, player_rot, fallback, dimension, game_mode, vitals, experience,
+        )
     else {
         return;
     };
@@ -13079,6 +13098,7 @@ where
     let saved_player = player_store
         .as_ref()
         .and_then(|store| store.read(player_uuid).ok().flatten());
+    let native_runtime = native_player.and_then(NativePlayerSession::runtime);
     // Preserve fields `crate::player_data` does not model—hunger, experience,
     // the ender chest, and the recipe book—in every save. This keeps a full
     // load/modify/save cycle lossless; see `PlayerData::preserved`.
@@ -13086,9 +13106,13 @@ where
         saved_player.as_ref().map(|d| d.preserved.clone()).unwrap_or_default();
     let mut vitals = saved_player
         .as_ref()
-        .map_or_else(PlayerVitals::default, |data| {
-            PlayerVitals::restored(data.health, data.air_supply)
-        });
+        .map(|data| PlayerVitals::restored(data.health, data.air_supply))
+        .or_else(|| {
+            native_runtime.map(|runtime| {
+                PlayerVitals::restored(runtime.health, runtime.air_supply)
+            })
+        })
+        .unwrap_or_default();
     let mut fall = FallTracker::default();
     let mut inventory = saved_player
         .as_ref()
@@ -13128,7 +13152,9 @@ where
     // consistent with the stored experience.
     let mut experience = saved_player
         .as_ref()
-        .map_or_else(crate::experience::PlayerExperience::default, |data| data.experience);
+        .map(|data| data.experience)
+        .or_else(|| native_runtime.map(|runtime| runtime.experience))
+        .unwrap_or_default();
     // Experience-orb pickup starts with no delay, so the first nearby orb is
     // absorbed immediately; `collect_nearby_orbs` decrements this delay after
     // each pickup.
@@ -13396,6 +13422,8 @@ where
                         world_spawn,
                         source.dimension(),
                         game_mode,
+                        &vitals,
+                        &experience,
                     );
                     return Ok(ServeSummary { username, chunks_sent, inventory });
                 };
@@ -15069,6 +15097,8 @@ where
             world_spawn,
             source.dimension(),
             game_mode,
+            &vitals,
+            &experience,
         );
     }
 }
@@ -19567,6 +19597,11 @@ mod tests {
                 pitch_millidegrees: -12_500,
             },
             game_mode: Some(GameMode::Creative),
+            runtime: Some(crate::world_storage::NativePlayerRuntimeState {
+                health: 7.5,
+                air_supply: 42,
+                experience: crate::experience::PlayerExperience::restored(12, 0.5, 345),
+            }),
         };
         (
             directory,
@@ -19591,6 +19626,12 @@ mod tests {
             Vec3::new(12.5, 64.25, -3.75),
         );
         assert_eq!(session.initial_rotation(), Some(Rotation::new(91.0, -12.5)));
+        let runtime = session.runtime().expect("typed runtime state restores");
+        assert_eq!(runtime.health, 7.5);
+        assert_eq!(runtime.air_supply, 42);
+        assert_eq!(runtime.experience.level(), 12);
+        assert_eq!(runtime.experience.progress(), 0.5);
+        assert_eq!(runtime.experience.total(), 345);
     }
 
     #[test]
@@ -19607,6 +19648,8 @@ mod tests {
                     fallback,
                     crate::dimension::Dimension::Overworld,
                     GameMode::Survival,
+                    &PlayerVitals::default(),
+                    &crate::experience::PlayerExperience::default(),
                 )
                 .is_none(),
             "a failed cross-dimension restore must not overwrite its evidence on disconnect"

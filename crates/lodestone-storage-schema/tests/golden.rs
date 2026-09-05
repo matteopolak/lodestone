@@ -2,8 +2,8 @@ use lodestone_storage_schema::generated::{general_record, storage_record};
 use lodestone_storage_schema::{
     validate_extension_table, validate_record, validate_record_with_extensions, BiomeSection,
     BuiltinBiome, BuiltinDimension, EntityRecord, ExtensionTable, FORMAT_VERSION_V1, GameMode,
-    GeneralRecord, LightData, LightSection, PlayerRecord, ScheduledTick, ScheduledTickKind,
-    ScheduledTickPriority, StorageRecord,
+    GeneralRecord, LightData, LightSection, PlayerRecord, PlayerRuntimeState, ScheduledTick,
+    ScheduledTickKind, ScheduledTickPriority, StorageRecord,
     ValidationError,
 };
 use prost::Message;
@@ -11,6 +11,19 @@ use prost::Message;
 const CHUNK_V1: &str = include_str!("fixtures/chunk-v1.hex");
 const WORLD_PROPERTIES_V1: &str = include_str!("fixtures/world-properties-v1.hex");
 const EXTENSIONS_V1: &str = include_str!("fixtures/extensions-v1.hex");
+const PLAYER_RUNTIME_V1: &str = include_str!("fixtures/player-runtime-v1.hex");
+
+#[test]
+fn player_runtime_fixture_is_the_specified_scalar_wire_group() {
+    let expected = fixture(PLAYER_RUNTIME_V1);
+    let runtime = PlayerRuntimeState::decode(expected.as_slice()).unwrap();
+    assert_eq!(runtime.health, 17.5);
+    assert_eq!(runtime.air_supply, 123);
+    assert_eq!(runtime.experience_level, 7);
+    assert_eq!(runtime.experience_progress, 0.25);
+    assert_eq!(runtime.experience_total, 91);
+    assert_eq!(runtime.encode_to_vec(), expected);
+}
 
 #[test]
 fn chunk_fixture_is_the_specified_v1_wire_record() {
@@ -192,6 +205,13 @@ fn player_locator_requires_a_complete_uuid_and_a_builtin_dimension() {
                 yaw_millidegrees: -90_001,
                 pitch_millidegrees: 45_002,
                 game_mode: GameMode::Creative as i32,
+                runtime_state: Some(PlayerRuntimeState {
+                    health: 17.5,
+                    air_supply: 123,
+                    experience_level: 7,
+                    experience_progress: 0.25,
+                    experience_total: 91,
+                }),
             })),
             extensions: Vec::new(),
         })),
@@ -223,6 +243,17 @@ fn player_locator_requires_a_complete_uuid_and_a_builtin_dimension() {
     assert_eq!(
         validate_record(&record),
         Err(ValidationError::UnknownPlayerGameMode(99))
+    );
+
+    player_in(&mut record).game_mode = GameMode::Creative as i32;
+    player_in(&mut record)
+        .runtime_state
+        .as_mut()
+        .unwrap()
+        .experience_progress = 1.0;
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::InvalidPlayerExperience)
     );
 }
 

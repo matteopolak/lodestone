@@ -122,8 +122,8 @@ pub enum UnsupportedPlayerData {
     DataVersion,
     /// Velocity has no native locator field.
     Motion,
-    /// Health, air supply, and fire ticks have no native locator fields.
-    VitalState,
+    /// Fire ticks have no native player field.
+    FireTicks,
     /// Fall distance has no native locator field.
     FallDistance,
     /// Ground contact has no native locator field.
@@ -132,8 +132,6 @@ pub enum UnsupportedPlayerData {
     SelectedSlot,
     /// Inventory contents have no native locator field.
     Inventory,
-    /// Experience values have no native locator field.
-    Experience,
     /// Root fields the player schema preserves but does not model have no
     /// native locator field.
     PreservedRootFields,
@@ -488,12 +486,11 @@ pub fn preflight_player(player: &PlayerData) -> PlayerImportReport {
         unsupported: vec![
             UnsupportedPlayerData::DataVersion,
             UnsupportedPlayerData::Motion,
-            UnsupportedPlayerData::VitalState,
+            UnsupportedPlayerData::FireTicks,
             UnsupportedPlayerData::FallDistance,
             UnsupportedPlayerData::GroundState,
             UnsupportedPlayerData::SelectedSlot,
             UnsupportedPlayerData::Inventory,
-            UnsupportedPlayerData::Experience,
         ],
         blockers: Vec::new(),
     };
@@ -710,6 +707,11 @@ fn player_data_from_player(uuid: uuid::Uuid, player: &PlayerData) -> NativePlaye
             pitch_millidegrees: round_to_i32(f64::from(player.rotation.pitch) * 1_000.0),
         },
         game_mode: player.game_mode,
+        runtime: Some(crate::world_storage::NativePlayerRuntimeState {
+            health: player.health,
+            air_supply: player.air_supply,
+            experience: player.experience,
+        }),
     }
 }
 
@@ -726,6 +728,11 @@ fn player_data_from_player_unchecked(uuid: uuid::Uuid, player: &PlayerData) -> N
             pitch_millidegrees: round_to_i32(f64::from(player.rotation.pitch) * 1_000.0),
         },
         game_mode: player.game_mode,
+        runtime: Some(crate::world_storage::NativePlayerRuntimeState {
+            health: player.health,
+            air_supply: player.air_supply,
+            experience: player.experience,
+        }),
     }
 }
 
@@ -872,6 +879,11 @@ mod tests {
                     pitch_millidegrees: 45_002,
                 },
                 game_mode: Some(lodestone_model::GameMode::Creative),
+                runtime: Some(crate::world_storage::NativePlayerRuntimeState {
+                    health: 13.5,
+                    air_supply: 240,
+                    experience: crate::experience::PlayerExperience::restored(7, 0.25, 341),
+                }),
             }),
             "fixture expectations name the typed native fields independently of conversion"
         );

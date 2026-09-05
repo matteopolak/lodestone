@@ -182,7 +182,7 @@ pub struct WorldProperties {
     #[prost(enumeration = "GameMode", tag = "8")]
     pub default_game_mode: i32,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PlayerRecord {
     #[prost(bytes = "vec", tag = "1")]
     pub player_uuid: ::prost::alloc::vec::Vec<u8>,
@@ -202,6 +202,24 @@ pub struct PlayerRecord {
     /// before this independently consumable full-player field was introduced.
     #[prost(enumeration = "GameMode", tag = "8")]
     pub game_mode: i32,
+    /// Absent for locator-only and early native records. This group contains the
+    /// complete scalar player state currently consumed by the live server loop;
+    /// inventory remains a separate future typed vocabulary.
+    #[prost(message, optional, tag = "9")]
+    pub runtime_state: ::core::option::Option<PlayerRuntimeState>,
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct PlayerRuntimeState {
+    #[prost(float, tag = "1")]
+    pub health: f32,
+    #[prost(sint32, tag = "2")]
+    pub air_supply: i32,
+    #[prost(sint32, tag = "3")]
+    pub experience_level: i32,
+    #[prost(float, tag = "4")]
+    pub experience_progress: f32,
+    #[prost(sint32, tag = "5")]
+    pub experience_total: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EntityRecord {
