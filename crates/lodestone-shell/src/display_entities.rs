@@ -381,9 +381,7 @@ fn extract_display_draws(
             position: Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32),
             entity_yaw: rotation.0.yaw,
             entity_pitch: rotation.0.pitch,
-            billboard: billboard.map_or(lodestone_render::display::BillboardMode::Fixed, |b| {
-                lodestone_render::display::BillboardMode::from_wire(b.0)
-            }),
+            billboard: billboard.map_or(lodestone_render::display::BillboardMode::Fixed, |b| b.0),
             transform,
             // `DisplayText` carries the styled component tree (see its own
             // doc) straight through — `gpu/display_text.rs` reads it with
@@ -547,7 +545,7 @@ mod tests {
         let mut app = test_app();
         let entity = spawn_display(app.world_mut(), 3, "minecraft:block_display");
         app.world_mut().entity_mut(entity).insert((
-            DisplayBillboard(3), // Center
+            DisplayBillboard(lodestone_model::BillboardMode::Center),
             DisplayTranslation(Vec3f::new(0.5, 0.25, -0.5)),
             DisplayScale(Vec3f::new(2.0, 2.0, 2.0)),
             DisplayLeftRotation(ModelQuat::new(0.0, 0.7071, 0.0, 0.7071)),
@@ -725,18 +723,16 @@ mod tests {
         );
     }
 
-    /// An out-of-range billboard byte must fall back to `Fixed` rather than
-    /// panicking or silently misreading — `ByIdMap.OutOfBoundsStrategy.ZERO`,
-    /// ported by `BillboardMode::from_wire`. Exercised here (not just in
-    /// `lodestone-render`'s own unit test) because this is the call site
-    /// that would otherwise need its own `match` and could get the fallback
-    /// wrong independently.
+    /// The typed mode stored by ingest reaches extraction without a second
+    /// ordinal conversion at the render boundary.
     #[test]
-    fn an_out_of_range_billboard_byte_falls_back_to_fixed_rather_than_panicking() {
+    fn a_typed_billboard_mode_reaches_the_draw_unchanged() {
         let mut app = test_app();
         let entity = spawn_display(app.world_mut(), 4, "minecraft:item_display");
-        app.world_mut().entity_mut(entity).insert(DisplayBillboard(200));
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(DisplayBillboard(lodestone_model::BillboardMode::Horizontal));
         let draws = run_extract(&mut app);
-        assert_eq!(draws[0].billboard, lodestone_render::display::BillboardMode::Fixed);
+        assert_eq!(draws[0].billboard, lodestone_render::display::BillboardMode::Horizontal);
     }
 }

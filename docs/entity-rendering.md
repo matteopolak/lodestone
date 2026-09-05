@@ -14,6 +14,13 @@ The wire adapter and render-side type-path consumers resolve their external id o
 path before that lookup; an unknown or plugin type remains a miss and follows
 the caller's existing fallback instead of borrowing a built-in hitbox.
 
+Display-entity billboard metadata crosses the version seam as
+`lodestone_model::BillboardMode`, so the ECS and renderer cannot confuse its
+four semantic modes with an arbitrary byte. The version adapter performs the
+only ordinal conversion and maps unknown values to `Fixed`; the renderer
+re-exports the model type for callers that already use
+`lodestone_render::display::BillboardMode`.
+
 `canonical_model_name(type_path)` maps a registry path to a `lodestone_assets::entity_models` corpus entry. **The corpus is the source of truth**: a type path that *is* a corpus entry name resolves directly; only a few need an explicit alias (`player`/`mannequin` → `player_wide`, `bogged` → `skeleton`, pending its own mesh). Gotcha: an alias onto a nearby mesh must be *written down* the moment the real mesh lands, or it silently survives as a wrong-but-plausible mob once the real one is ported.
 
 `entity_texture_candidates(model_name)` returns in-jar paths in priority order, **derived from each corpus entry's own `EntityTexture`**, never hand-listed. A flat-hue fallback means the sheet wasn't found; the *wrong* mob means resolution picked the wrong entry — different bugs.

@@ -62,62 +62,7 @@
 //! for why that is deliberate.
 
 use glam::{Mat4, Quat, Vec3};
-
-/// Vanilla's display billboard-constraints enum (26.2): which
-/// of the entity's own rotation and the camera's rotation this display faces
-/// with, per axis. See the module doc's table for the exact source of each
-/// axis in each mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BillboardMode {
-    /// Faces its own reported rotation on both axes — never tracks the
-    /// camera. Wire id `0`, the accessor's own default.
-    #[default]
-    Fixed,
-    /// Yaw from the **camera**, pitch from the entity's own rotation — the
-    /// display spins about its own vertical axis to face the viewer and
-    /// never tilts. Wire id `1`.
-    Vertical,
-    /// Yaw from the entity's own rotation, pitch from the **camera**. Wire
-    /// id `2`. Wrong way round in this doc until now: these two variants'
-    /// comments had each other's text, while the module table and
-    /// [`display_orientation`] both matched vanilla's display-orientation-calculation
-    /// function, which is `VERTICAL -> transformYRot(cameraYRot)
-    /// , entityXRot` and `HORIZONTAL -> entityYRot, transformXRot(cameraXRot)`.
-    Horizontal,
-    /// Both axes from the camera — a full billboard. Wire id `3`.
-    Center,
-}
-
-impl BillboardMode {
-    /// The wire id vanilla's billboard-constraints id accessor reports, `Byte`
-    /// metadata index — vanilla's continuous out-of-range fallback
-    /// means an out-of-range byte resolves to `Fixed` (id `0`), which
-    /// [`Self::from_wire`] reproduces via its own `unwrap_or(Fixed)` fallback
-    /// rather than failing.
-    #[must_use]
-    pub fn wire_id(self) -> u8 {
-        match self {
-            BillboardMode::Fixed => 0,
-            BillboardMode::Vertical => 1,
-            BillboardMode::Horizontal => 2,
-            BillboardMode::Center => 3,
-        }
-    }
-
-    /// The inverse of [`Self::wire_id`], with vanilla's own out-of-range
-    /// fallback to `Fixed` rather than a `None`/error — matching
-    /// vanilla's continuous out-of-range fallback, since a byte off the wire is not a
-    /// `Result` this renderer can refuse to draw.
-    #[must_use]
-    pub fn from_wire(id: u8) -> Self {
-        match id {
-            1 => BillboardMode::Vertical,
-            2 => BillboardMode::Horizontal,
-            3 => BillboardMode::Center,
-            _ => BillboardMode::Fixed,
-        }
-    }
-}
+pub use lodestone_model::BillboardMode;
 
 /// Vanilla's camera-yaw-to-entity-yaw transform: `cameraYRot - 180`. Vanilla's camera yaw
 /// and an entity's own yaw are zeroed at opposite headings (the camera looks

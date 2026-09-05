@@ -1318,7 +1318,7 @@ pub fn read_entity_metadata(
             // [`is_display_class`]: index 15's `BYTE` is also the mob class's own mob-flags accessor
             // and the armor-stand class's own client-flags accessor — see [`IDX_DISPLAY_BILLBOARD`].
             (IDX_DISPLAY_BILLBOARD, Value::Byte(b)) if is_display_class(class) => {
-                md.display_billboard = Some(b as u8);
+                md.display_billboard = Some(lodestone_model::BillboardMode::from_wire(b as u8));
             }
             // the display class's own brightness-override accessor. Guarded on
             // [`is_display_class`] for the reason [`IDX_DISPLAY_BRIGHTNESS`]
