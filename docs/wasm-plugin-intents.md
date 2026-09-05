@@ -6,7 +6,7 @@ The desktop WASM plugin host exposes copied local-player look, movement, block-b
 
 ## How it works
 
-`lodestone:plugin@0.16.0` provides `action.set-look(option<look-intent>)`, guarded by `act:look`, `action.set-movement(option<movement-intent>)`, guarded by `act:movement`, `action.set-break(option<break-intent>)`, guarded by `act:break`, `action.place-block(place-intent)`, guarded by `act:place`, `action.select-slot(hotbar-slot)`, guarded by `act:select-slot`, `action.inventory-click(inventory-click)`, guarded by `act:inventory-click`, `action.inventory-quick-move(u16)`, guarded separately by `act:inventory-quick-move`, `action.inventory-hotbar-swap(inventory-hotbar-swap)`, guarded separately by `act:inventory-hotbar-swap`, `action.inventory-throw(inventory-throw)`, guarded separately by `act:inventory-throw`, and the no-argument `action.inventory-drop-cursor`, guarded separately by `act:inventory-drop-cursor`. Pickup/place has a copied `u16` slot plus a left/right button; quick move has only the `u16` slot, so the shell—not the guest—chooses the shift-click mode and its transfer ordering. Hotbar swap has a copied `u16` menu slot and `u8` hotbar index; the shell rejects indices outside `0..=8`, chooses the swap click mode, and validates the live menu. Slot throw has a copied `u16` menu slot plus an explicit `one`/`stack` mode; the shell validates the slot, chooses the throw button, and lets the live predictor own the slot mutation and drop outcome. Cursor drop has no slot or cursor payload: the shell verifies that its active live menu has a carried stack, then chooses the outside click itself. The shell validates each copied request against the active live menu and then calls `ClientHandle::menu_click`, so prediction, the veto, state id, changed-slot list, and egress remain owned by the client read model. `lodestone_wasm_host::abi::lower_action` turns look into `lodestone_ecs::player::LookIntent`; the conductor applies the final look request in load order during `TickSet::Intent`, before `apply_look_intent`.
+`lodestone:plugin@0.17.0` provides `action.set-look(option<look-intent>)`, guarded by `act:look`, `action.set-movement(option<movement-intent>)`, guarded by `act:movement`, `action.set-break(option<break-intent>)`, guarded by `act:break`, `action.place-block(place-intent)`, guarded by `act:place`, `action.select-slot(hotbar-slot)`, guarded by `act:select-slot`, `action.inventory-click(inventory-click)`, guarded by `act:inventory-click`, `action.inventory-quick-move(u16)`, guarded separately by `act:inventory-quick-move`, `action.inventory-hotbar-swap(inventory-hotbar-swap)`, guarded separately by `act:inventory-hotbar-swap`, `action.inventory-throw(inventory-throw)`, guarded separately by `act:inventory-throw`, and the no-argument `action.inventory-drop-cursor`, guarded separately by `act:inventory-drop-cursor`. Pickup/place has a copied `u16` slot plus a left/right button; quick move has only the `u16` slot, so the shell—not the guest—chooses the shift-click mode and its transfer ordering. Hotbar swap has a copied `u16` menu slot and `u8` hotbar index; the shell rejects indices outside `0..=8`, chooses the swap click mode, and validates the live menu. Slot throw has a copied `u16` menu slot plus an explicit `one`/`stack` mode; the shell validates the slot, chooses the throw button, and lets the live predictor own the slot mutation and drop outcome. Cursor drop has no slot or cursor payload: the shell verifies that its active live menu has a carried stack, then chooses the outside click itself. The shell validates each copied request against the active live menu and then calls `ClientHandle::menu_click`, so prediction, the veto, state id, changed-slot list, and egress remain owned by the client read model. `lodestone_wasm_host::abi::lower_action` turns look into `lodestone_ecs::player::LookIntent`; the conductor applies the final look request in load order during `TickSet::Intent`, before `apply_look_intent`.
 
 For movement, the conductor runs after `lodestone_controller::ecs::compute_movement_intent` and before physics. It overwrites only copied axes and button state; item-use effects stay owned by the controller. Finite axes are clamped to `[-1, 1]`, and non-finite axes become neutral. Physics then resolves the request and the existing controller sends the ordinary movement and player-input actions. This is deliberately an intent rather than a raw packet: a guest cannot forge position, collision, or sequence state.
 
@@ -22,6 +22,14 @@ The guest output list is ordered. If multiple guest actions set look or set move
 
 `observe:inventory` grants `event.inventory-slot-changed` only for the existing `ClientEvent::InventorySlotChanged` stream: native player-inventory slots outside an open container. Its `item-stack` is a copied canonical item key and count; item data components, open-container slots, and the cursor stay in the native session model. The client driver publishes the original `ClientEvent` once to `GameEvent`, which is also the native-plugin observation path, and the conductor filters that bus per guest. This adds no inventory cache, packet constructor, or write path.
 
+The filesystem imports are separate capability columns. `filesystem.read-file` is guarded by
+`fs:read`, while `filesystem-write.write-file` is guarded independently by `fs:write`; granting one
+does not link the other interface. Both require `PluginHost::with_filesystem_root`, and every write
+must target an existing directory below that root. Parent traversal and symlink escapes are refused,
+and the host records attempted paths and bytes for diagnostics. `fs:write` is an import capability,
+so a guest that references it without the grant fails during instantiation rather than receiving a
+late data-flow denial.
+
 ## How to change it
 
 Add a new copied intent arm to `crates/lodestone-wasm-host/wit/lodestone-plugin.wit`, give it an explicit capability in `capability.rs`, and make `abi::lower_action` exhaustive over it. Route it through `conductor::PendingWasmIntents` only when it has an existing ECS consumer with a deliberate schedule edge; do not lower an intent into a raw `ClientAction`. Inventory clicks are the narrow exception: `PendingWasmMenuClicks` is drained after the ECS guard because `ClientHandle::menu_click` alone owns the mutable menu predictor. For a one-shot outcome, keep a bounded generation cursor in the host as `LoadedPlugin::observe_place_outcome`; for a continuous lifecycle, keep a per-session status-edge cursor like `LoadedPlugin::observe_break_outcome`. Do not turn either component poll into an every-tick event stream.
@@ -30,7 +38,7 @@ Any WIT change requires increasing `host::ABI_WORLD`, rebuilding guests, and upd
 
 ## Configuration
 
-The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, `observe:place`, `act:select-slot`, `act:inventory-click`, `act:inventory-quick-move`, `act:inventory-hotbar-swap`, `act:inventory-drop-cursor`, and `observe:inventory`. A guest manifest must request every capability it uses; a request alone never changes the policy.
+The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, `observe:place`, `act:select-slot`, `act:inventory-click`, `act:inventory-quick-move`, `act:inventory-hotbar-swap`, `act:inventory-drop-cursor`, `observe:inventory`, `fs:read`, and `fs:write`. A guest manifest must request every capability it uses; a request alone never changes the policy.
 
 ```toml
 capabilities = ["act:movement"]
@@ -71,6 +79,15 @@ capabilities = ["act:inventory-drop-cursor"]
 ```toml
 capabilities = ["observe:inventory"]
 ```
+
+```toml
+capabilities = ["fs:write"]
+```
+
+The write root is host configuration, not guest input. Configure it with
+`PluginHost::with_filesystem_root`; a missing root or a path outside it makes the write return an
+error. Directory creation is intentionally not exposed, so a plugin can only replace or create a
+file in a directory the operator prepared.
 
 For desktop directory discovery, use `PluginGrantPolicy` to add a narrow exception
 to the shell's unchanged fail-closed baseline. `PluginIdentity` contains the path

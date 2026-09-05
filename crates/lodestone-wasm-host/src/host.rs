@@ -45,7 +45,7 @@ use wasmtime::component::{Component, Linker, TypedFunc};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use bevy_ecs::entity::Entity;
 
-use crate::bindings::lodestone::plugin::{filesystem, logging, scheduler, types};
+use crate::bindings::lodestone::plugin::{filesystem, filesystem_write, logging, scheduler, types};
 use crate::capability::{Capability, CapabilitySet};
 
 /// The WIT vocabulary, re-exported from the generated bindings so that nothing
@@ -72,7 +72,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.16.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.17.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
@@ -283,7 +283,7 @@ impl PluginGrantPolicy {
 
 /// Per-guest host state: the `T` in `Store<T>`.
 ///
-/// The three `Vec`s are not debug scaffolding — they are the **recording sink**
+/// The recording fields are not debug scaffolding — they are the **recording sink**
 /// the capability tests assert against. `crates/lodestone-fuzz` established the
 /// shape here: a sink that discards cannot distinguish "the host refused" from
 /// "the host wrongly accepted and the guest happened not to try", so the denial
@@ -298,8 +298,12 @@ pub struct GuestState {
     /// **whether or not it was allowed to succeed**. This is what makes "zero
     /// filesystem access" an observation rather than an absence.
     pub(crate) fs_reads: Vec<String>,
-    /// Reads are additionally confined to this subtree when `fs:read` is granted.
-    /// `None` refuses every read, while still recording it.
+    /// Every `filesystem-write.write-file` call that reached the host, in order,
+    /// with the copied bytes supplied by the guest.
+    pub(crate) fs_writes: Vec<(String, Vec<u8>)>,
+    /// Reads and writes are additionally confined to this subtree when their
+    /// respective capabilities are granted. `None` refuses both, while still
+    /// recording attempts.
     fs_root: Option<PathBuf>,
     current_tick: u64,
     next_task_id: types::TaskId,
@@ -314,6 +318,14 @@ impl fmt::Debug for GuestState {
             .field("name", &self.name)
             .field("log_lines", &self.log_lines.len())
             .field("fs_reads", &self.fs_reads)
+            .field(
+                "fs_writes",
+                &self
+                    .fs_writes
+                    .iter()
+                    .map(|(path, bytes)| (path, bytes.len()))
+                    .collect::<Vec<_>>(),
+            )
             .field("fs_root", &self.fs_root)
             .field("current_tick", &self.current_tick)
             .field("scheduled_tasks", &self.scheduled_tasks.len())
@@ -367,6 +379,52 @@ impl filesystem::Host for GuestState {
             ));
         }
         std::fs::read(&resolved).map_err(|e| format!("{}: {e}", resolved.display()))
+    }
+}
+
+impl filesystem_write::Host for GuestState {
+    /// Record first, decide second. A write is confined to the configured root
+    /// and cannot create a missing parent directory, so a plugin cannot use this
+    /// capability to grow an arbitrary directory tree.
+    fn write_file(&mut self, path: String, contents: Vec<u8>) -> Result<(), String> {
+        self.fs_writes.push((path.clone(), contents.clone()));
+        let Some(root) = self.fs_root.as_ref() else {
+            return Err("no filesystem root is configured for this plugin".to_owned());
+        };
+
+        let root_resolved = root
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", root.display()))?;
+        let candidate = root_resolved.join(path.trim_start_matches('/'));
+        let parent = candidate.parent().ok_or_else(|| {
+            format!(
+                "{} does not name a file inside the filesystem root",
+                candidate.display()
+            )
+        })?;
+        let parent_resolved = parent
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", parent.display()))?;
+        if !parent_resolved.starts_with(&root_resolved) {
+            return Err(format!(
+                "{} is outside this plugin's filesystem root",
+                parent_resolved.display()
+            ));
+        }
+        let file_name = candidate.file_name().ok_or_else(|| {
+            format!(
+                "{} does not name a file inside the filesystem root",
+                candidate.display()
+            )
+        })?;
+        let target = parent_resolved.join(file_name);
+        if std::fs::symlink_metadata(&target)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(format!("{} is a symbolic link", target.display()));
+        }
+        std::fs::write(&target, contents).map_err(|e| format!("{}: {e}", target.display()))
     }
 }
 
@@ -543,6 +601,13 @@ impl LoadedPlugin {
     #[must_use]
     pub fn attempted_file_reads(&self) -> &[String] {
         &self.store.data().fs_reads
+    }
+
+    /// Every `write-file` the guest attempted, including the copied bytes. See
+    /// [`GuestState::fs_writes`].
+    #[must_use]
+    pub fn attempted_file_writes(&self) -> &[(String, Vec<u8>)] {
+        &self.store.data().fs_writes
     }
 
     /// Drive one tick: hand the guest this tick's events, take back its actions.
@@ -779,9 +844,9 @@ impl PluginHost {
         self
     }
 
-    /// Confine granted filesystem reads to `root`. Without this, a plugin holding
-    /// `fs:read` still reads nothing — the capability is necessary and not
-    /// sufficient.
+    /// Confine granted filesystem reads and writes to `root`. Without this, a
+    /// plugin holding `fs:read` or `fs:write` still reads or writes nothing —
+    /// the capability is necessary and not sufficient.
     #[must_use]
     pub fn with_filesystem_root(mut self, root: PathBuf) -> Self {
         self.fs_root = Some(root);
@@ -946,6 +1011,16 @@ impl PluginHost {
                     message: format!("linking filesystem: {e:?}"),
                 })?;
         }
+        if granted.contains(Capability::FsWrite) {
+            filesystem_write::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+                &mut linker,
+                |s| s,
+            )
+            .map_err(|e| HostError::Compile {
+                name: name.to_owned(),
+                message: format!("linking filesystem-write: {e:?}"),
+            })?;
+        }
         if granted.contains(Capability::ScheduleTasks) {
             scheduler::add_to_linker::<_, wasmtime::component::HasSelf<_>>(&mut linker, |s| s)
                 .map_err(|e| HostError::Compile {
@@ -971,7 +1046,10 @@ impl PluginHost {
                 .build(),
             log_lines: Vec::new(),
             fs_reads: Vec::new(),
-            fs_root: if granted.contains(Capability::FsRead) {
+            fs_writes: Vec::new(),
+            fs_root: if granted.contains(Capability::FsRead)
+                || granted.contains(Capability::FsWrite)
+            {
                 self.fs_root.clone()
             } else {
                 None
@@ -1284,6 +1362,7 @@ mod tests {
         let host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
         assert!(host.is_empty());
         assert!(!host.policy().contains(Capability::FsRead));
+        assert!(!host.policy().contains(Capability::FsWrite));
     }
 
     /// The preamble sniffer, against both real shapes.

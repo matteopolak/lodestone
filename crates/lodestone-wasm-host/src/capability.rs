@@ -9,7 +9,7 @@
 //!
 //! | kind | example | enforced by | what a lying manifest gets |
 //! |---|---|---|---|
-//! | **import** | [`Capability::FsRead`] | the wasmtime `Linker` — the interface is simply absent | instantiation fails: *"component imports instance `lodestone:plugin/filesystem@0.2.0`, but a matching implementation was not found in the linker"* |
+//! | **import** | [`Capability::FsRead`] / [`Capability::FsWrite`] | the wasmtime `Linker` — the interface is simply absent | instantiation fails: *"component imports instance `lodestone:plugin/filesystem@0.2.0`, but a matching implementation was not found in the linker"* |
 //! | **data-flow** | [`Capability::ObserveChat`], [`Capability::ActChat`] | the host's own conductor, in Rust | the events are never lifted, or the actions are counted and dropped |
 //!
 //! An **import** capability is structurally unforgeable: the guest cannot call a
@@ -45,7 +45,7 @@ use std::fmt;
 /// One thing a plugin may be permitted to do.
 ///
 /// The wire form (what appears in a `plugin.toml`) is
-/// `family:verb` — `observe:chat`, `act:chat`, `fs:read` — with `log` as the one
+/// `family:verb` — `observe:chat`, `act:chat`, `fs:read`, `fs:write` — with `log` as the one
 /// unqualified name, because it is granted unconditionally and has no siblings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
@@ -156,6 +156,11 @@ pub enum Capability {
     /// **Never in [`CapabilitySet::default_policy`].** This is the import-column
     /// capability the denial gate is built around; see this module's table.
     FsRead,
+    /// Write a file through the `lodestone:plugin/filesystem-write` interface.
+    ///
+    /// **Never in [`CapabilitySet::default_policy`].** The host confines writes
+    /// to its configured plugin filesystem root and records every attempt.
+    FsWrite,
     /// Schedule delayed or repeating guest callbacks through the host tick.
     ///
     /// **Never in [`CapabilitySet::default_policy`].** The scheduler is exposed
@@ -191,6 +196,7 @@ impl Capability {
         Self::VetoActions,
         Self::RegisterCommands,
         Self::FsRead,
+        Self::FsWrite,
         Self::ScheduleTasks,
     ];
 
@@ -220,6 +226,7 @@ impl Capability {
             Self::VetoActions => "veto:actions",
             Self::RegisterCommands => "commands:register",
             Self::FsRead => "fs:read",
+            Self::FsWrite => "fs:write",
             Self::ScheduleTasks => "schedule:tasks",
         }
     }
@@ -242,7 +249,7 @@ impl Capability {
     #[must_use]
     pub const fn is_import(self) -> bool {
         match self {
-            Self::Log | Self::FsRead | Self::ScheduleTasks => true,
+            Self::Log | Self::FsRead | Self::FsWrite | Self::ScheduleTasks => true,
             Self::ObserveChat
             | Self::ObserveHealth
             | Self::ObserveInventory
@@ -416,7 +423,7 @@ mod tests {
     /// An unknown name is `None`, not a silently-dropped grant.
     #[test]
     fn an_unknown_capability_name_is_rejected() {
-        assert_eq!(Capability::parse("fs:write"), None);
+        assert_eq!(Capability::parse("fs:future"), None);
         assert_eq!(Capability::parse("observe:everything"), None);
         assert_eq!(Capability::parse(""), None);
     }
@@ -427,6 +434,7 @@ mod tests {
     fn the_default_policy_withholds_import_capabilities() {
         let policy = CapabilitySet::default_policy();
         assert!(!policy.contains(Capability::FsRead), "fs:read must not be granted by default");
+        assert!(!policy.contains(Capability::FsWrite), "fs:write must not be granted by default");
         assert!(
             !policy.contains(Capability::ScheduleTasks),
             "schedule:tasks must not be granted by default"
@@ -463,6 +471,7 @@ mod tests {
         // grant it, so "absent" above is a decision and not an artefact of
         // `contains` always answering false.
         assert!(CapabilitySet::permissive().contains(Capability::FsRead));
+        assert!(CapabilitySet::permissive().contains(Capability::FsWrite));
         assert!(CapabilitySet::permissive().contains(Capability::ScheduleTasks));
         assert!(CapabilitySet::permissive().contains(Capability::RegisterCommands));
         assert!(CapabilitySet::permissive().contains(Capability::ActSelectSlot));
@@ -487,6 +496,7 @@ mod tests {
     #[test]
     fn dangerous_host_services_are_import_capabilities() {
         assert!(Capability::FsRead.is_import());
+        assert!(Capability::FsWrite.is_import());
         assert!(Capability::ScheduleTasks.is_import());
         assert!(!Capability::ObserveChat.is_import());
         assert!(!Capability::ActChat.is_import());
