@@ -3285,6 +3285,7 @@ impl ItemTickOwner {
 #[derive(Debug, Clone)]
 pub(crate) struct ItemTickOwnerBatch {
     owner: ItemTickOwner,
+    plan: u64,
     expected_batch_count: usize,
     effects: Vec<ItemTickEffect>,
 }
@@ -3299,15 +3300,26 @@ struct ItemTickEffect {
     discard: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ItemTickInput {
+    owner: ItemTickOwner,
+    serial: usize,
+    id: i32,
+    lifecycle: ItemLifecycle,
+    state: ItemState,
+}
+
 fn merge_item_tick_owner_batches(mut batches: Vec<ItemTickOwnerBatch>) -> Vec<ItemTickEffect> {
-    let expected_batch_count = batches
+    let first = batches
         .first()
-        .map(|batch| batch.expected_batch_count)
         .expect("item owner completion must contain every tick-start owner batch");
+    let plan = first.plan;
+    let expected_batch_count = first.expected_batch_count;
     let mut owners = std::collections::HashSet::new();
     for batch in &batches {
         assert_eq!(
-            batch.expected_batch_count, expected_batch_count,
+            (batch.plan, batch.expected_batch_count),
+            (plan, expected_batch_count),
             "item owner completions must originate from one tick-start plan"
         );
         assert!(
@@ -3515,6 +3527,14 @@ pub struct MobSim<'w> {
     falling_blocks: HashMap<i32, TrackedFallingBlock>,
     next_id: i32,
     tick_count: u64,
+    /// The latest dropped-item owner plan issued from this simulation.
+    item_owner_plan: u64,
+    /// The newest dropped-item owner plan accepted by the central writer.
+    applied_item_owner_plan: u64,
+    /// The latest experience-orb owner plan issued from this simulation.
+    orb_owner_plan: u64,
+    /// The newest experience-orb owner plan accepted by the central writer.
+    applied_orb_owner_plan: u64,
     /// The latest leash-owner plan issued from this simulation. A completion
     /// must name this exact generation before the central writer accepts it.
     leash_owner_plan: u64,
@@ -4258,6 +4278,10 @@ impl<'w> MobSim<'w> {
             falling_blocks: HashMap::new(),
             next_id: 1,
             tick_count: 0,
+            item_owner_plan: 0,
+            applied_item_owner_plan: 0,
+            orb_owner_plan: 0,
+            applied_orb_owner_plan: 0,
             leash_owner_plan: 0,
             applied_leash_owner_plan: 0,
             item_probe_count: 0,
@@ -5603,53 +5627,99 @@ impl<'w> MobSim<'w> {
     /// owner writes either live item registry; the central apply step below
     /// validates the complete plan before publishing any result.
     pub(crate) fn tick_item_owner_batches(
-        &self,
-        block_state: &dyn Fn(i32, i32, i32) -> String,
+        &mut self,
+        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
     ) -> (Vec<ItemTickOwnerBatch>, u64) {
-        let view = ItemCollision {
-            block_state,
-            probe_count: std::cell::Cell::new(0),
+        self.item_owner_plan = self
+            .item_owner_plan
+            .checked_add(1)
+            .expect("item owner plan generation must not overflow");
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = if self.items.len() >= 128 {
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1)
+                .min(4)
+        } else {
+            1
         };
-        let mut batches = Vec::<ItemTickOwnerBatch>::new();
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1;
+        self.tick_item_owner_batches_with_workers(block_state, workers)
+    }
+
+    fn tick_item_owner_batches_with_workers(
+        &self,
+        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        worker_count: usize,
+    ) -> (Vec<ItemTickOwnerBatch>, u64) {
+        let mut jobs = Vec::<(ItemTickOwner, Vec<ItemTickInput>)>::new();
         for (serial, tracked) in self.items.iter().enumerate() {
-            let mut lifecycle = tracked.lifecycle;
-            let mut state = self
+            let state = self
                 .item_state
                 .get(&tracked.id)
                 .cloned()
                 .expect("a tracked item lifecycle must have matching motion state");
             let owner = ItemTickOwner::for_position(state.motion.position);
-            lifecycle.tick();
-            let mut discard = lifecycle.should_despawn();
-            if !discard {
-                let before = state.motion.position;
-                state.motion.tick();
-                settle_item(&view, &mut state.motion, before);
-                discard = state.motion.position.y < f64::from(self.world.min_y) - VOID_DESPAWN_DEPTH;
-            }
-            let effect = ItemTickEffect {
+            let input = ItemTickInput {
                 owner,
                 serial,
                 id: tracked.id,
-                lifecycle,
                 state,
-                discard,
+                lifecycle: tracked.lifecycle,
             };
-            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
-                batch.effects.push(effect);
+            if let Some((_, inputs)) = jobs.iter_mut().find(|(candidate, _)| *candidate == owner) {
+                inputs.push(input);
             } else {
-                batches.push(ItemTickOwnerBatch {
-                    owner,
-                    expected_batch_count: 0,
-                    effects: vec![effect],
-                });
+                jobs.push((owner, vec![input]));
             }
         }
+        let min_y = f64::from(self.world.min_y);
+        let plan = self.item_owner_plan;
+        let completed = run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
+            let view = ItemCollision {
+                block_state,
+                probe_count: std::cell::Cell::new(0),
+            };
+            let effects = inputs
+                .into_iter()
+                .map(|input| {
+                    let mut lifecycle = input.lifecycle;
+                    let mut state = input.state;
+                    lifecycle.tick();
+                    let mut discard = lifecycle.should_despawn();
+                    if !discard {
+                        let before = state.motion.position;
+                        state.motion.tick();
+                        settle_item(&view, &mut state.motion, before);
+                        discard = state.motion.position.y < min_y - VOID_DESPAWN_DEPTH;
+                    }
+                    ItemTickEffect {
+                        owner: input.owner,
+                        serial: input.serial,
+                        id: input.id,
+                        lifecycle,
+                        state,
+                        discard,
+                    }
+                })
+                .collect();
+            (
+                ItemTickOwnerBatch {
+                    owner,
+                    plan,
+                    expected_batch_count: 0,
+                    effects,
+                },
+                view.probe_count.get(),
+            )
+        });
+        let (mut batches, probe_count): (Vec<_>, Vec<_>) = completed.into_iter().unzip();
         let batch_count = batches.len();
         for batch in &mut batches {
             batch.expected_batch_count = batch_count;
         }
-        (batches, view.probe_count.get())
+        (batches, probe_count.into_iter().sum())
     }
 
     /// Validates and centrally applies completed dropped-item owner batches.
@@ -5661,6 +5731,15 @@ impl<'w> MobSim<'w> {
             );
             return;
         }
+        let plan = batches[0].plan;
+        assert_eq!(
+            plan, self.item_owner_plan,
+            "item completion must belong to the latest tick-start plan"
+        );
+        assert!(
+            plan > self.applied_item_owner_plan,
+            "item completion must not replay an already applied tick-start plan"
+        );
         let effects = merge_item_tick_owner_batches(batches);
         assert_eq!(
             effects.len(),
@@ -5692,6 +5771,7 @@ impl<'w> MobSim<'w> {
                 self.item_state.insert(effect.id, effect.state);
             }
         }
+        self.applied_item_owner_plan = plan;
     }
 
     /// One tick, settling dropped items against a caller-supplied solidity
@@ -5705,7 +5785,10 @@ impl<'w> MobSim<'w> {
     /// **The oracle is a block-state *name*, not a solid/air boolean.** A name
     /// distinguishes shapes such as a bottom slab, soul sand, and a grass patch
     /// when [`ItemCollision`] computes the resting surface.
-    pub fn tick_with_terrain(&mut self, block_state: &dyn Fn(i32, i32, i32) -> String) {
+    pub fn tick_with_terrain(
+        &mut self,
+        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+    ) {
         // Feed every mob's perception inputs before its goals run. The pass
         // supplies `nearest_player`, `temptation`, `avoid_threat`,
         // `no_action_time`, `partner_candidate`, and `parent_candidate`; the
@@ -6217,11 +6300,7 @@ impl<'w> MobSim<'w> {
         // snapshot would fall through any block the player has placed and rest on any
         // block they have mined. `tick_orbs` reads `tick_count` for its merge phase, so
         // it runs before the increment below.
-        let orb_view = ItemCollision {
-            block_state,
-            probe_count: std::cell::Cell::new(0),
-        };
-        self.tick_orbs(&orb_view);
+        self.tick_orbs(block_state);
         // A fireball's `ignite_seconds` used to reach nothing: computed by
         // `lodestone_entity::projectile::impact_effect` and read by no
         // production caller. `resolve_projectile_impacts` above is what can
@@ -8786,6 +8865,91 @@ impl<'w> MobSim<'w> {
         out
     }
 
+    /// Snapshots the live population into the native typed vocabulary. This
+    /// deliberately reuses [`saved_entities`](Self::saved_entities), the one
+    /// disk view already kept coherent with the simulation, then removes only
+    /// Anvil's opaque passthrough field which live entities never populate.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn native_entities(
+        &self,
+        dimension: lodestone_storage_schema::BuiltinDimension,
+    ) -> Vec<crate::world_storage::NativeEntityRecord> {
+        self.saved_entities()
+            .into_iter()
+            .filter_map(|saved| {
+                let state = if saved.id == item_entity_type() {
+                    let (item, count) = saved.item?;
+                    Some(crate::world_storage::NativeEntityState::Item {
+                        item,
+                        count,
+                        age: saved.age.unwrap_or(0),
+                        pickup_delay: saved.pickup_delay.unwrap_or(0),
+                    })
+                } else {
+                    Some(crate::world_storage::NativeEntityState::Living {
+                        health: saved.health?,
+                    })
+                };
+                Some(crate::world_storage::NativeEntityRecord {
+                    uuid: *saved.uuid.as_bytes(),
+                    entity_type: saved.id,
+                    dimension,
+                    position: saved.pos,
+                    rotation: saved.rotation,
+                    motion: saved.motion,
+                    state,
+                })
+            })
+            .collect()
+    }
+
+    /// Restores records from the native typed vocabulary through the same
+    /// species/item constructors used by Anvil restoration. Pose-only records
+    /// from older writers are skipped because they cannot distinguish a living
+    /// body from a dropped item with enough state to restore safely.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn restore_native(
+        &mut self,
+        entities: &[crate::world_storage::NativeEntityRecord],
+    ) -> usize {
+        let saved: Vec<_> = entities
+            .iter()
+            .filter_map(|entity| {
+                let (health, item, age, pickup_delay) = match &entity.state {
+                    Some(crate::world_storage::NativeEntityState::Living { health }) => {
+                        (Some(*health), None, None, None)
+                    }
+                    Some(crate::world_storage::NativeEntityState::Item {
+                        item,
+                        count,
+                        age,
+                        pickup_delay,
+                    }) => (
+                        None,
+                        Some((item.clone(), *count)),
+                        Some(*age),
+                        Some(*pickup_delay),
+                    ),
+                    None => return None,
+                };
+                Some(crate::entity_storage::SavedEntity {
+                    id: entity.entity_type.clone(),
+                    uuid: Uuid::from_bytes(entity.uuid),
+                    pos: entity.position,
+                    motion: entity.motion,
+                    rotation: entity.rotation,
+                    health,
+                    item,
+                    age,
+                    pickup_delay,
+                    extra: Vec::new(),
+                })
+            })
+            .collect();
+        self.restore_saved(&saved)
+    }
+
     /// Puts saved records back into the sim, returning how many were restored.
     ///
     /// A record whose `id` is `minecraft:item` becomes a tracked dropped item;
@@ -8835,6 +8999,7 @@ impl<'w> MobSim<'w> {
             }
             let mob = self.spawn_species(saved.id.clone(), saved.pos);
             mob.uuid = saved.uuid;
+            mob.mob.set_body_yaw(saved.rotation.yaw);
             if let Some(health) = saved.health {
                 mob.set_health(health);
             }
@@ -10922,11 +11087,35 @@ mod item_owner_tests {
             .collect()
     }
 
+    fn dense_item_owner_fixture(count: usize) -> MobSim<'static> {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -2..=66 {
+            for z in -2..=4 {
+                world.set_block(x, 0, z, "minecraft:stone");
+            }
+        }
+        let world = Box::leak(Box::new(world));
+        let mut sim = MobSim::new(world);
+        let item = ResourceKey::from_str("minecraft:stone").expect("valid key");
+        for serial in 0..count {
+            let x = [-0.5, 16.5, 32.5, 48.5][serial % 4];
+            sim.spawn_item(
+                item.clone(),
+                Vec3::new(x, 3.0, (serial / 4 % 4) as f64 + 0.5),
+                Vec3::new(0.0, 0.0, 0.0),
+                ItemLifecycle::newly_dropped(1, 64),
+            );
+        }
+        sim
+    }
+
     #[test]
     fn item_owner_batches_restore_registration_order_after_reversed_completion() {
         let mut serial = fixture();
-        let (serial_batches, serial_probes) =
-            serial.tick_item_owner_batches(&|x, y, z| serial.world.block_state(x, y, z).to_owned());
+        let serial_world = serial.world;
+        let (serial_batches, serial_probes) = serial.tick_item_owner_batches(&|x, y, z| {
+            serial_world.block_state(x, y, z).to_owned()
+        });
         assert_eq!(
             serial_batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
             [
@@ -10939,8 +11128,10 @@ mod item_owner_tests {
         let expected = item_state(&serial);
 
         let mut completed = fixture();
-        let (mut batches, completed_probes) = completed
-            .tick_item_owner_batches(&|x, y, z| completed.world.block_state(x, y, z).to_owned());
+        let completed_world = completed.world;
+        let (mut batches, completed_probes) = completed.tick_item_owner_batches(&|x, y, z| {
+            completed_world.block_state(x, y, z).to_owned()
+        });
         batches.reverse();
         let raw_slots = batches
             .iter()
@@ -10957,9 +11148,10 @@ mod item_owner_tests {
     #[test]
     #[should_panic(expected = "every tick-start owner batch exactly once")]
     fn item_owner_batch_merge_rejects_a_missing_owner() {
-        let sim = fixture();
+        let mut sim = fixture();
+        let world = sim.world;
         let (mut batches, _) =
-            sim.tick_item_owner_batches(&|x, y, z| sim.world.block_state(x, y, z).to_owned());
+            sim.tick_item_owner_batches(&|x, y, z| world.block_state(x, y, z).to_owned());
         batches.pop();
         let _ = merge_item_tick_owner_batches(batches);
     }
@@ -10967,11 +11159,91 @@ mod item_owner_tests {
     #[test]
     #[should_panic(expected = "may not contain one owner twice")]
     fn item_owner_batch_merge_rejects_a_duplicate_owner() {
-        let sim = fixture();
+        let mut sim = fixture();
+        let world = sim.world;
         let (mut batches, _) =
-            sim.tick_item_owner_batches(&|x, y, z| sim.world.block_state(x, y, z).to_owned());
+            sim.tick_item_owner_batches(&|x, y, z| world.block_state(x, y, z).to_owned());
         batches[1] = batches[0].clone();
         let _ = merge_item_tick_owner_batches(batches);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parallel_item_owner_batches_match_one_lane_with_interleaved_negative_owners() {
+        let mut serial = dense_item_owner_fixture(256);
+        serial.item_owner_plan = 1;
+        let serial_world = serial.world;
+        let serial_state_at = |x, y, z| serial_world.block_state(x, y, z).to_owned();
+        let serial_batches = serial.tick_item_owner_batches_with_workers(&serial_state_at, 1).0;
+        serial.apply_item_tick_owner_batches(serial_batches);
+
+        let mut parallel = dense_item_owner_fixture(256);
+        parallel.item_owner_plan = 1;
+        let parallel_world = parallel.world;
+        let parallel_state_at = |x, y, z| parallel_world.block_state(x, y, z).to_owned();
+        let parallel_batches = parallel.tick_item_owner_batches_with_workers(&parallel_state_at, 4).0;
+        assert_eq!(
+            parallel_batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
+            [
+                ItemTickOwner::Chunk { cx: -1, cz: 0 },
+                ItemTickOwner::Chunk { cx: 1, cz: 0 },
+                ItemTickOwner::Chunk { cx: 2, cz: 0 },
+                ItemTickOwner::Chunk { cx: 3, cz: 0 },
+            ],
+            "the parity scene must span an interleaved negative owner plus three positive owners"
+        );
+        parallel.apply_item_tick_owner_batches(parallel_batches);
+
+        assert_eq!(
+            item_state(&parallel),
+            item_state(&serial),
+            "four terrain-collision owners must preserve the one-lane item result"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "latest tick-start plan")]
+    fn item_owner_batches_reject_stale_plan_completions() {
+        let mut sim = fixture();
+        let world = sim.world;
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let (stale, _) = sim.tick_item_owner_batches(&state_at);
+        let _current = sim.tick_item_owner_batches(&state_at);
+        sim.apply_item_tick_owner_batches(stale);
+    }
+
+    #[test]
+    #[should_panic(expected = "already applied tick-start plan")]
+    fn item_owner_batches_reject_replayed_completions() {
+        let mut sim = fixture();
+        let world = sim.world;
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let (batches, _) = sim.tick_item_owner_batches(&state_at);
+        sim.apply_item_tick_owner_batches(batches.clone());
+        sim.apply_item_tick_owner_batches(batches);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "manual dense-scene throughput measurement"]
+    fn measure_dense_item_owner_workers() {
+        for item_count in [256, 2_048] {
+            let sim = dense_item_owner_fixture(item_count);
+            let world = sim.world;
+            let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+            let started = std::time::Instant::now();
+            let _ = sim.tick_item_owner_batches_with_workers(&state_at, 1);
+            let serial = started.elapsed();
+            let started = std::time::Instant::now();
+            let _ = sim.tick_item_owner_batches_with_workers(&state_at, 4);
+            let parallel = started.elapsed();
+            eprintln!(
+                "dense_items owners=4 items={item_count} serial_ms={:.3} parallel_ms={:.3} speedup={:.3}",
+                serial.as_secs_f64() * 1_000.0,
+                parallel.as_secs_f64() * 1_000.0,
+                serial.as_secs_f64() / parallel.as_secs_f64()
+            );
+        }
     }
 }
 

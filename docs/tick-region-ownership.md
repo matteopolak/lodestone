@@ -140,21 +140,26 @@ death outcome, or projectile identity even though the shared RNG prevents the
 planning phase from becoming a worker yet.
 Experience orbs have a separate motion ownership boundary inside
 `MobSim::tick_orbs`, reached from the live `MobSim::tick_with_terrain` pass.
-`MobSim::tick_orb_owner_batches` clones each tick-start orb under its source
-chunk owner, and `MobSim::apply_orb_tick_owner_batches` rejects incomplete,
-duplicate, or mixed-plan completions before changing the live orb map. The
-central writer restores entity-id slots before applying expiry. Its existing
-global merge scan remains afterwards, so an orb pair crossing an owner edge
-still merges in the same id order rather than the order their owners finish.
+Each source-chunk job clones tick-start orb state and its target snapshot,
+then reads terrain through the immutable block-state oracle. At 128 or more
+orbs on native targets, those jobs use `run_bounded_owner_jobs` with at most
+four lanes; smaller scenes and browser builds retain its serial arm.
+`MobSim::apply_orb_tick_owner_batches` rejects incomplete, duplicate, mixed,
+stale, or replayed completions before changing the live orb map. The central
+writer restores entity-id slots before applying expiry. Its global merge scan
+remains afterwards, so an orb pair crossing an owner edge still merges in the
+same id order rather than the order their owners finish.
 Dropped items now cross an equivalent boundary in that same live pass.
 `MobSim::tick_item_owner_batches` copies each tick-start lifecycle and motion
 state under the chunk containing its original position, advances the counters,
-and settles motion against the live terrain oracle without writing either item
-registry. `MobSim::apply_item_tick_owner_batches` requires the complete unique
-owner set and restores registration-order slots before it publishes motion or
-removes an expired or out-of-world item. The global proximity merge remains a
-central pass afterwards, so two stacks crossing a chunk edge cannot merge in a
-different direction merely because one owner completes first.
+and settles motion against the immutable terrain oracle without writing either
+item registry. Native scenes with 128 or more items use the same bounded
+four-lane executor, while smaller and browser scenes remain serial.
+`MobSim::apply_item_tick_owner_batches` requires the complete unique owner set
+from the newest plan and restores registration-order slots before it publishes
+motion or removes an expired or out-of-world item. The global proximity merge
+remains a central pass afterwards, so two stacks crossing a chunk edge cannot
+merge in a different direction merely because one owner completes first.
 Fishing bobbers use the same tick-start ownership rule inside the live mob
 pass. `MobSim::tick_fishing_owner_batches` clones each bobber under its source
 chunk and consumes the shared fishing RNG in entity-id order; this is a serial
@@ -208,6 +213,16 @@ lanes (2.798×), while 2,048 took 10.951 ms and 4.515 ms respectively (2.425×).
 Those are a named dense, mob-held-leash scene rather than a general tick-time
 claim; they justify the 256-leash dispatch threshold, not a promise that every
 leash distribution benefits from workers.
+
+The ignored terrain-collision controls measured four native owners on this
+host. `measure_dense_item_owner_workers` took 4.474 ms in one lane and 2.251
+ms in four for 256 dropped items (1.987×), then 34.554 ms and 15.093 ms for
+2,048 (2.289×). `measure_dense_orb_owner_workers` took 6.867 ms and 2.032 ms
+for 256 experience orbs (3.379×), then 33.925 ms and 17.306 ms for 2,048
+(1.960×). Both controls use a stone floor, four source chunks including a
+negative coordinate, and immutable collision reads. They justify the
+128-entity threshold for these two collision phases only; they do not predict
+the cost of a mixed full tick or a different owner distribution.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
@@ -471,9 +486,12 @@ existing cache selection rather than a new queue capacity. Native leash-owner
 planning uses the bounded executor at 256 leashes and caps it at four lanes;
 that threshold is deliberately a code constant, not a server setting, because
 it is valid only for the measured dense holder-lookup scene. Browser builds
-always retain the serial arm. A candidate edge remains an explicit measurement
-argument, while any useful multi-chunk worker size depends on profiling a
-populated, named workload and has not been selected.
+always retain the serial arm. The dropped-item and experience-orb terrain
+phases use the same four-lane cap at 128 entities; their threshold is also a
+code constant selected from the named dense collision measurements below, not
+a server setting. A candidate edge remains an explicit measurement argument,
+while any useful multi-chunk worker size depends on profiling a populated,
+named workload and has not been selected.
 The profile entry point accepts an optional tick count; its normal 128-tick run
 is fixed so counter comparisons name the same workload. The `profile-harness`
 feature is required for the fast paused-clock path and is selected by both
