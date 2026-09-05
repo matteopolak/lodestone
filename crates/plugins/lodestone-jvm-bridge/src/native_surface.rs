@@ -164,7 +164,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 14] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 15] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -221,6 +221,10 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 14] = [
         name: "activePlayerCount",
         descriptor: "()I",
     },
+    NativeMethodSpec {
+        name: "playerHandleIsActive",
+        descriptor: "(J)Z",
+    },
 ];
 
 const ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS: [IsolatedDescriptorMemberSpec; 4] = [
@@ -258,7 +262,7 @@ pub enum NativeRegistrationStep {
     Register(NativeMethodSpec),
 }
 
-const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 28] = [
+const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 30] = [
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[2]),
@@ -273,6 +277,7 @@ const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 28] = [
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[11]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[12]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[13]),
+    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[14]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[2]),
@@ -287,6 +292,7 @@ const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 28] = [
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[11]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[12]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[13]),
+    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[14]),
 ];
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -746,6 +752,11 @@ fn method_id(
         ("activePlayerCount", "()I") => {
             env.get_static_method_id(class, jni_str!("activePlayerCount"), jni_sig!("()I"))
         },
+        ("playerHandleIsActive", "(J)Z") => env.get_static_method_id(
+            class,
+            jni_str!("playerHandleIsActive"),
+            jni_sig!("(J)Z"),
+        ),
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -838,7 +849,13 @@ fn register_method(
         },
         ("activePlayerCount", "()I") => {
             adapter::register_active_player_count_query(env, class, method.name, method.descriptor)
-        }
+        },
+        ("playerHandleIsActive", "(J)Z") => adapter::register_player_handle_is_active_query(
+            env,
+            class,
+            method.name,
+            method.descriptor,
+        ),
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -1020,6 +1037,10 @@ mod tests {
                     name: "activePlayerCount",
                     descriptor: "()I",
                 },
+                NativeMethodSpec {
+                    name: "playerHandleIsActive",
+                    descriptor: "(J)Z",
+                },
             ],
         );
         let block_state = isolated_shim_methods()[0];
@@ -1046,6 +1067,7 @@ mod tests {
                 NativeRegistrationStep::Validate(isolated_shim_methods()[11]),
                 NativeRegistrationStep::Validate(isolated_shim_methods()[12]),
                 NativeRegistrationStep::Validate(isolated_shim_methods()[13]),
+                NativeRegistrationStep::Validate(isolated_shim_methods()[14]),
                 NativeRegistrationStep::Register(block_state),
                 NativeRegistrationStep::Register(server_tick),
                 NativeRegistrationStep::Register(block_write),
@@ -1060,6 +1082,7 @@ mod tests {
                 NativeRegistrationStep::Register(isolated_shim_methods()[11]),
                 NativeRegistrationStep::Register(isolated_shim_methods()[12]),
                 NativeRegistrationStep::Register(isolated_shim_methods()[13]),
+                NativeRegistrationStep::Register(isolated_shim_methods()[14]),
             ],
             "a registration must never precede declaration validation",
         );
@@ -1184,7 +1207,8 @@ mod tests {
              public static native long currentPlayerHandle(); \
              public static native String playerHandleName(long handle); \
              public static native String playerHandleUuid(long handle); \
-             public static native int activePlayerCount(); }",
+             public static native int activePlayerCount(); \
+             public static native boolean playerHandleIsActive(long handle); }",
         )
         .expect("shim source");
         let descriptor_source = source_root.join("IsolatedPluginDescriptor.java");
@@ -1267,7 +1291,8 @@ mod tests {
              public static native long currentPlayerHandle(); \
              public static native String playerHandleName(long handle); \
              public static native String playerHandleUuid(long handle); \
-             public static native int activePlayerCount(); }",
+             public static native int activePlayerCount(); \
+             public static native boolean playerHandleIsActive(long handle); }",
         )
         .expect("shim source");
         let descriptor_source = shim_source_root.join("IsolatedPluginDescriptor.java");

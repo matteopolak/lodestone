@@ -789,6 +789,16 @@ JNI read of the server registry; transitions still waiting in the bounded host
 queue are not counted. The count is a copied integer and has no path to an ECS
 value, connection, world, or guard.
 
+`playerHandleIsActive(long)` resolves the supplied player handle before it
+looks up that handle's copied profile in the same reconciled map. It returns a
+copied boolean: `true` means the profile has reached the worker through a
+queued join and has not yet reached its queued disconnect; `false` means a
+live callback-only profile has no matching lifecycle entry. It is intentionally
+not a fresh server-registry read, so a transition waiting in the bounded queue
+is not visible yet. A stale, forged, wrong-kind, or off-worker handle raises a
+named error before the map lookup; no ECS value, connection, world, or guard
+crosses JNI.
+
 To extend this event subset, update the source-of-truth declarations and validation in
 `native_surface`, the JNI registration and worker dispatch in `adapter`, and the lifecycle cleanup
 calls in `paper`. Keep the listener list ordered and bounded; do not turn it into a general event
@@ -1003,6 +1013,12 @@ player handles. Hermetic bridge tests cover its `0 → 1 → 0 → 1 → 0` tran
 around a release and slot reuse, so the count's consumer chain cannot quietly
 stop following the generation-checked lifecycle path. It is not a replacement
 for a future live roster enumeration API.
+
+`playerHandleIsActive(long)` has hermetic controls for both sides of that
+worker snapshot: an active lifecycle handle reports `true`, a live
+callback-only handle reports `false`, and a released handle fails its
+generation check before the snapshot is read. The isolated shim fixture pins
+its `(J)Z` declaration and registration after every declaration validation.
 
 The same composed caller exercises recursive Java-to-Rust-to-Java callbacks below and above the
 budget. Depth `2` returns `REENTRANT:OK:3`; depth `4` attempts one more callback and receives
