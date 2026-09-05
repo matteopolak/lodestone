@@ -284,6 +284,47 @@ async fn a_supplied_server_plugin_runs_on_the_primary_world_tick_task() {
     server.shutdown().await;
 }
 
+/// The async scheduler is only useful if its result crosses the production
+/// extracted-`World` boundary. A hand-built scheduler test cannot prove that
+/// the primary tick task drains this queue after `ServerApp::into_world`.
+#[tokio::test(start_paused = true)]
+async fn completed_async_work_reaches_the_production_primary_world_tick_task() {
+    let observed = Arc::new(AtomicU64::new(0));
+    let hand_back_observed = Arc::clone(&observed);
+    let server_app = ServerApp::bootstrap_with(|app| {
+        app.world_mut()
+            .resource_mut::<crate::ecs::ServerTaskScheduler>()
+            .spawn_with_handback(
+                || 19_u64,
+                move |value, _| {
+                    hand_back_observed.fetch_add(value, Ordering::Relaxed);
+                },
+            )
+            .expect("one async hand-back fits the scheduler's default capacity");
+    });
+    let (server, _client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
+        Silent,
+        AirWorld,
+        (0..=0, 0..=0),
+        (0, 0),
+        0,
+        1,
+        server_app,
+    );
+
+    tokio::task::yield_now().await;
+    for _ in 0..4 {
+        tokio::time::advance(crate::tick::TICK_PERIOD).await;
+    }
+    wait_for_completed_ticks(&server, 4).await;
+    assert_eq!(
+        observed.load(Ordering::Relaxed),
+        19,
+        "a completed worker result must be drained by the production primary world"
+    );
+    server.shutdown().await;
+}
+
 #[derive(bevy_ecs::message::Message)]
 struct PluginNotice(u64);
 

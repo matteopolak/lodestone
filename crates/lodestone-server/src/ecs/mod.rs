@@ -109,7 +109,10 @@ pub use proposals::{
     ServerProposalQueue, ServerProposalResolution, ServerProposalTicket, SpawnProposalRefusal,
 };
 pub use schedules::{GameTick, IngestSet, NetIngest, ServerBoot, TickSet};
-pub use scheduler::{ServerTaskId, ServerTaskScheduler, run_server_tasks};
+pub use scheduler::{
+    DEFAULT_ASYNC_HAND_BACK_CAPACITY, ServerAsyncTaskError, ServerAsyncTaskId, ServerTaskId,
+    ServerTaskScheduler, run_server_tasks,
+};
 
 /// Builder for the server's `World`: install plugins here, then call
 /// [`into_world`](Self::into_world) to hand the tick task what it owns.
