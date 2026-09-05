@@ -153,8 +153,16 @@ claim that a particular edge is the right size for coalescing chunk owners.
 For the owner-boundary workload, run `just bench-chunk-owner-tick` first. It
 constructs the live scene and rejects a missing phase sample, scheduled drain,
 block-entity owner batch, or ambient entity owner batch before Criterion takes
-its short sample. For a local call tree, build an explicit capture path and run
-`just samply-chunk-owner-tick <capture>`. Inspect the scheduled-and-physics
+its short sample. For a local call tree, run `just samply-chunk-owner-tick`.
+The wrapper first saves a direct witness line, then captures the same finite
+128-tick command under Samply. It caps input at 512 ticks, gives the workload
+and profiler separate deadlines, refuses to overwrite artifacts, and requires
+the capture plus its presymbolication sidecar. Its witness requires all eight
+owners and 64 ambient mobs, then rejects missing scheduled-block,
+scheduled-fluid, block-entity, or ambient-entity work from those owners, so a
+profile of an empty or one-owner loop cannot look valid. Pass `--ticks <1..512>`,
+`--wall-deadline-secs <1..60>`, `--output-dir <path>`, or `--run-id <name>`
+after the recipe to select a finite alternative. Inspect the scheduled-and-physics
 phase beside `owner_work.scheduled_block_ticks` and
 `owner_work.scheduled_fluid_ticks`; inspect mobs-and-items beside
 `owner_work.block_entity_batches`, `entity_effect_batches`, and
