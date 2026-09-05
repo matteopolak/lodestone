@@ -703,16 +703,17 @@ fn legacy_effect_key(effect_id: i8) -> Result<ResourceKey, AdapterError> {
 /// first `Resolved` slot is family-only-safe (any meta the table does
 /// populate names the same block).
 fn legacy_block_type_key(block_id: u8) -> ResourceKey {
-    let state = (0u8..16)
+    let block = (0u8..16)
         .find_map(|meta| match canonical::resolve(block_id, meta) {
-            CanonicalBlockState::Resolved(state) => Some(state),
+            CanonicalBlockState::Resolved(state) => block_states::StateId::new(state),
             _ => None,
         })
-        .unwrap_or_else(canonical::air_state_id);
-    block_states::block_name(state)
-        .unwrap_or("minecraft:air")
+        .unwrap_or_else(block_states::air_state)
+        .block();
+    block
+        .name()
         .parse()
-        .unwrap_or_else(|_| "minecraft:air".parse().expect("minecraft:air is valid"))
+        .expect("built-in block names are valid resource keys")
 }
 
 /// Maps a 1.8 team-color byte (a legacy chat formatting colour code,
