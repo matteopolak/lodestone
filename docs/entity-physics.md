@@ -52,9 +52,9 @@ update its committed-dump comparisons when regenerating geometry; physics consum
 their own unknown-state fallback instead of inventing geometry inside the data lookup.
 
 The block-break hardness census follows the same rule: `hardness(StateId)` returns its complete
-`Hardness` record without an `Option`, while `hardness_raw` is the explicit fallible boundary for
-unvalidated ids. Consumers such as tool evaluation, server break validation, and the 26.2 adapter
-validate once and retain the typed id for the table read.
+`Hardness` record without an `Option`. Consumers such as tool evaluation, server break validation,
+and the 26.2 adapter validate once at their input boundary and retain the typed id for the table
+read.
 
 ### Entity-versus-entity pushing and hard collision
 

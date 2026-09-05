@@ -431,19 +431,18 @@ fn count_matches_block_state_table() {
 }
 
 #[test]
-fn ids_are_contiguous_and_out_of_range_is_none() {
+fn state_id_boundary_rejects_out_of_range_ids_and_census_is_total() {
     let count = block_solidity::STATE_COUNT;
     for id in 0..count {
         let state_id = StateId::new(id).expect("generated state id is in range");
-        assert_eq!(
-            block_solidity::legacy_solid(state_id),
-            block_solidity::legacy_solid_raw(id).expect("valid state has a solid flag"),
-            "id {id} legacySolid"
+        let legacy_solid = block_solidity::legacy_solid(state_id);
+        assert!(
+            !block_solidity::blocks_motion(state_id) || legacy_solid,
+            "blocks-motion state {id} must also be legacy solid"
         );
-        let _ = block_solidity::blocks_motion(state_id);
     }
-    assert_eq!(block_solidity::legacy_solid_raw(count), None);
-    assert_eq!(block_solidity::legacy_solid_raw(u32::MAX), None);
+    assert!(StateId::new(count).is_none());
+    assert!(StateId::new(u32::MAX).is_none());
 }
 
 /// "Blocks motion" is "legacy solid" minus exactly two blocks in 26.2. Pinned as a

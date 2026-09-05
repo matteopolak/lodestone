@@ -80,11 +80,3 @@ pub fn hardness(id: StateId) -> Hardness {
         requires_correct_tool,
     }
 }
-
-/// Raw-id compatibility boundary for callers that have not validated a
-/// block-state id. New code should construct [`StateId`] and call [`hardness`]
-/// so this complete table is accessed with a total lookup.
-#[must_use]
-pub fn hardness_raw(id: u32) -> Option<Hardness> {
-    StateId::new(id).map(hardness)
-}
