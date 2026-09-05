@@ -1133,6 +1133,14 @@ pub enum NetUpdate {
         /// Server RNG seed for variant selection.
         seed: i64,
     },
+    /// Stop live sounds created by server sound packets. Both filters are
+    /// optional wildcards: absent `name` and `category` stops every such voice.
+    SoundStopped {
+        /// Sound event key path with its namespace stripped, if restricted.
+        name: Option<String>,
+        /// Source bus restriction, if any.
+        category: Option<SoundCategory>,
+    },
     /// A mob effect (potion effect) was applied to or refreshed on an entity
     /// (`update_mob_effect`). Carries `entity_id` unfiltered — the packet
     /// applies to any entity, not just the local player — so the sim decides
@@ -5031,6 +5039,10 @@ fn forward(
             pitch,
             seed,
         },
+        ClientEvent::SoundStopped { sound, category } => NetUpdate::SoundStopped {
+            name: sound.map(|sound| sound.path().to_owned()),
+            category,
+        },
         // Effects apply to any entity on the wire; the amplifier is a
         // non-negative wire VarInt widened to `i32` by the model, so the
         // narrowing back to `u32` is defensive only (never observed negative).
@@ -6395,6 +6407,31 @@ mod tests {
             }
             other => panic!("expected EffectRemoved, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn forward_translates_stop_sound_filters_and_preserves_wildcards() {
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::SoundStopped {
+                sound: None,
+                category: None,
+            },
+        )
+        .expect("a stop packet must not end forwarding");
+
+        assert!(matches!(
+            rx.try_recv().expect("the wildcard stop reaches the shell"),
+            NetUpdate::SoundStopped {
+                name: None,
+                category: None,
+            }
+        ));
     }
 
     /// The control for [`NET_RELAY_CAPACITY`]'s whole reasoning: a

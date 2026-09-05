@@ -58,7 +58,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**7 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**6 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -69,8 +69,12 @@ exactly `Route::NOWHERE`, excluding the `..Route::NOWHERE` struct-update spread 
 that set other flags) and fails if this line drifts from the real count — update the number and
 the source together whenever a variant is added or wired.
 
-The current terminal routes are `SimulationDistanceChanged`, `ItemCooldown`, `SoundStopped`,
+The current terminal routes are `SimulationDistanceChanged`, `ItemCooldown`,
 `PlayerCombatEntered`, `PlayerCombatEnded`, `MountScreenOpened`, and `ServerDataReceived`.
+`SoundStopped` now crosses the shell route to the same audio boundary that starts server
+sounds. That boundary retains a handle only for packet-created voices, so the packet's optional
+name/category filters cancel the matching audible voices without cancelling locally predicted
+sounds or ambience, which own their separate lifecycles.
 `ProjectilePowerChanged` now crosses the ingest route into an entity component, then the render
 track's locally integrated projectile state. The next tick adds the reported power along the current
 velocity direction, applies inertia, and advances the pose, so a power update changes the

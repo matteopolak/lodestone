@@ -151,6 +151,70 @@ fn caption_now_ms() -> u64 {
     crate::platform::epoch_duration().as_millis() as u64
 }
 
+/// A live voice that originated in a server sound packet.
+///
+/// The stop-sound packet names an event and/or source bus, not a mixer handle.
+/// Keeping this small reverse index at the shell boundary lets that packet stop
+/// the exact voices it created without giving `lodestone-sound` a protocol
+/// dependency or accidentally cancelling locally predicted sounds and ambience.
+#[derive(Debug)]
+struct ServerSound {
+    handle: lodestone_sound::PlayHandle,
+    name: String,
+    category: SoundCategory,
+}
+
+/// The server-created voices which a later `STOP_SOUND` packet may address.
+#[derive(Debug, Default)]
+struct ServerSounds(Vec<ServerSound>);
+
+impl ServerSounds {
+    fn record(
+        &mut self,
+        handle: lodestone_sound::PlayHandle,
+        name: &str,
+        category: SoundCategory,
+    ) {
+        self.0.push(ServerSound {
+            handle,
+            name: name.to_owned(),
+            category,
+        });
+    }
+
+    /// Drop voices the mixer has already finished. Called before recording the
+    /// next packet-created sound so ordinary one-shots do not turn this reverse
+    /// index into session-length history.
+    fn prune_finished(
+        &mut self,
+        mut is_active: impl FnMut(lodestone_sound::PlayHandle) -> bool,
+    ) {
+        self.0.retain(|voice| is_active(voice.handle));
+    }
+
+    /// Stop voices matching both optional packet filters, retaining a voice
+    /// only when it was outside the filter or the mixer had already reaped it.
+    fn stop_matching(
+        &mut self,
+        name: Option<&str>,
+        category: Option<SoundCategory>,
+        mut stop: impl FnMut(lodestone_sound::PlayHandle) -> bool,
+    ) -> usize {
+        let mut stopped = 0;
+        self.0.retain(|voice| {
+            let matches = name.is_none_or(|name| voice.name == name)
+                && category.is_none_or(|category| voice.category == category);
+            if matches && stop(voice.handle) {
+                stopped += 1;
+                false
+            } else {
+                !matches
+            }
+        });
+        stopped
+    }
+}
+
 /// Environment variable naming the Minecraft asset root directly. Re-exported
 /// from [`crate::asset_objects`], which owns the whole resolution order — it is
 /// no longer the *only* way to point audio at a store, just the highest-priority
@@ -166,6 +230,9 @@ pub use crate::asset_objects::ASSET_ROOT_ENV;
 #[derive(Debug)]
 pub struct ShellAudio {
     engine: AudioEngine,
+    /// Reverse index for `STOP_SOUND`: server packets identify a sound by name
+    /// and category, while the mixer stops a voice by handle.
+    server_sounds: ServerSounds,
     /// The sound-subtitle captions. Fed here rather than at each
     /// caller because this struct's two `play_*` methods are the single choke
     /// point every sound in the client passes through — captions cannot drift out
@@ -266,6 +333,7 @@ impl ShellAudio {
             .map_err(|e| format!("opening audio device: {e}"))?;
         Ok(Self {
             engine,
+            server_sounds: ServerSounds::default(),
             reported_failure: false,
             subtitles: subtitles::SubtitleQueue::default(),
         })
@@ -339,6 +407,44 @@ impl ShellAudio {
         {
             self.report_failure(name, &e);
         }
+    }
+
+    /// Plays and records a positioned server sound. Unlike [`Self::play_sound`],
+    /// this retains the returned voice handle so a later `STOP_SOUND` packet can
+    /// cancel this exact packet-created voice by its name/category filters.
+    pub fn play_server_sound(
+        &mut self,
+        name: &str,
+        category: SoundCategory,
+        pos: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) {
+        self.record_caption(name, pos);
+        match self.engine.play_sound(name, category, pos, volume, pitch, seed) {
+            Ok(Some(handle)) => {
+                let engine = &self.engine;
+                self.server_sounds
+                    .prune_finished(|handle| engine.with_mixer(|mixer| mixer.is_active(handle)));
+                self.server_sounds.record(handle, name, category);
+            }
+            Ok(None) => {}
+            Err(e) => self.report_failure(name, &e),
+        }
+    }
+
+    /// Stops every live server-created voice matching the optional packet
+    /// filters. `None` is a wildcard in either position, including both absent
+    /// fields stopping every server-created voice.
+    pub fn stop_server_sounds(
+        &mut self,
+        name: Option<&str>,
+        category: Option<SoundCategory>,
+    ) {
+        let engine = &self.engine;
+        self.server_sounds
+            .stop_matching(name, category, |handle| engine.stop_voice(handle));
     }
 
     /// Record this sound's caption, if its event declares a `subtitles` key.
@@ -498,6 +604,21 @@ impl ShellAudio {
         {
             self.report_failure(name, &e);
         }
+    }
+
+    /// The entity-sound counterpart to [`Self::play_server_sound`]. The entity
+    /// position has already been resolved by the shell; stop matching is the
+    /// same name/category operation as for a positioned server sound.
+    pub fn play_server_entity_sound(
+        &mut self,
+        name: &str,
+        category: SoundCategory,
+        pos: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) {
+        self.play_server_sound(name, category, pos, volume, pitch, seed);
     }
 }
 
@@ -668,6 +789,9 @@ struct AudioState {
     /// own half of the same single-slot contract native's `AudioEngine`
     /// keeps in its `current_music` field.
     current_music: Option<lodestone_audio::PlayHandle>,
+    /// Same server-packet reverse index as native [`ShellAudio`]. The browser
+    /// owns its mixer directly, so this state holds the handles instead.
+    server_sounds: ServerSounds,
     // Kept alive for the state's lifetime (config-scoped, effectively the
     // whole session): dropping either would disconnect the callback, and a
     // `ScriptProcessorNode` whose JS side still holds the closure reference
@@ -723,19 +847,22 @@ impl AudioState {
         volume: f32,
         pitch: f32,
         seed: i64,
-    ) {
+    ) -> Option<lodestone_sound::PlayHandle> {
         self.record_caption(name, pos);
         match self
             .resolver
             .resolve_instance(name, category, pos, volume, pitch, seed)
         {
             Ok(Some(instance)) => {
-                self.mixer.borrow_mut().play(instance);
+                Some(self.mixer.borrow_mut().play(instance))
             }
             // Vanilla's silent "empty sound" (unknown event / zero weight) —
             // not an error, matching `SoundResolver`'s own contract.
-            Ok(None) => {}
-            Err(e) => self.report_failure(name, &e),
+            Ok(None) => None,
+            Err(e) => {
+                self.report_failure(name, &e);
+                None
+            }
         }
     }
 
@@ -750,7 +877,7 @@ impl AudioState {
         volume: f32,
         pitch: f32,
         seed: i64,
-    ) {
+    ) -> Option<lodestone_sound::PlayHandle> {
         self.record_caption(name, Vec3::ZERO);
         match self
             .resolver
@@ -758,10 +885,13 @@ impl AudioState {
         {
             Ok(Some(mut instance)) => {
                 instance.relative = true;
-                self.mixer.borrow_mut().play(instance);
+                Some(self.mixer.borrow_mut().play(instance))
             }
-            Ok(None) => {}
-            Err(e) => self.report_failure(name, &e),
+            Ok(None) => None,
+            Err(e) => {
+                self.report_failure(name, &e);
+                None
+            }
         }
     }
 }
@@ -951,6 +1081,7 @@ impl ShellAudio {
                 reported_failure: false,
                 music_producer,
                 current_music: None,
+                server_sounds: ServerSounds::default(),
                 _node: node,
                 _on_audio_process: on_audio_process,
             });
@@ -1052,7 +1183,48 @@ impl ShellAudio {
     ) {
         AUDIO_STATE.with(|cell| {
             if let Some(state) = cell.borrow_mut().as_mut() {
-                state.play(name, category, pos, volume, pitch, seed);
+                let _ = state.play(name, category, pos, volume, pitch, seed);
+            }
+        });
+    }
+
+    /// Browser counterpart to [`Self::play_sound`], retaining the real mixer
+    /// handle for a later `STOP_SOUND` packet.
+    pub fn play_server_sound(
+        &mut self,
+        name: &str,
+        category: SoundCategory,
+        pos: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) {
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut()
+                && let Some(handle) = state.play(name, category, pos, volume, pitch, seed)
+            {
+                let mixer = Rc::clone(&state.mixer);
+                state
+                    .server_sounds
+                    .prune_finished(|handle| mixer.borrow().is_active(handle));
+                state.server_sounds.record(handle, name, category);
+            }
+        });
+    }
+
+    /// Stop live server-created browser voices by the optional protocol
+    /// filters. Both missing fields deliberately mean "stop all".
+    pub fn stop_server_sounds(
+        &mut self,
+        name: Option<&str>,
+        category: Option<SoundCategory>,
+    ) {
+        AUDIO_STATE.with(|cell| {
+            if let Some(state) = cell.borrow_mut().as_mut() {
+                let mixer = Rc::clone(&state.mixer);
+                state.server_sounds.stop_matching(name, category, |handle| {
+                    mixer.borrow_mut().stop(handle)
+                });
             }
         });
     }
@@ -1070,7 +1242,7 @@ impl ShellAudio {
     ) {
         AUDIO_STATE.with(|cell| {
             if let Some(state) = cell.borrow_mut().as_mut() {
-                state.play_relative(name, category, volume, pitch, seed);
+                let _ = state.play_relative(name, category, volume, pitch, seed);
             }
         });
     }
@@ -1260,8 +1432,95 @@ impl ShellAudio {
     ) {
         AUDIO_STATE.with(|cell| {
             if let Some(state) = cell.borrow_mut().as_mut() {
-                state.play(name, category, pos, volume, pitch, seed);
+                let _ = state.play(name, category, pos, volume, pitch, seed);
             }
         });
+    }
+
+    /// Browser counterpart to [`Self::play_entity_sound`] for packet-created
+    /// entity sounds that a later `STOP_SOUND` can cancel.
+    pub fn play_server_entity_sound(
+        &mut self,
+        name: &str,
+        category: SoundCategory,
+        pos: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) {
+        self.play_server_sound(name, category, pos, volume, pitch, seed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ServerSounds, SoundCategory};
+
+    #[test]
+    fn stop_sound_filters_the_exact_server_voices_and_keeps_nonmatches() {
+        let mut sounds = ServerSounds::default();
+        let block = lodestone_sound::PlayHandle(11);
+        let hostile = lodestone_sound::PlayHandle(12);
+        sounds.record(block, "block.note_block.harp", SoundCategory::Block);
+        sounds.record(hostile, "entity.zombie.ambient", SoundCategory::Hostile);
+
+        let mut stopped = Vec::new();
+        assert_eq!(
+            sounds.stop_matching(
+                Some("block.note_block.harp"),
+                Some(SoundCategory::Block),
+                |handle| {
+                    stopped.push(handle);
+                    true
+                },
+            ),
+            1,
+        );
+        assert_eq!(stopped, vec![block]);
+
+        // Control: a name match on the wrong category must not accidentally
+        // turn either optional filter into a broad match.
+        assert_eq!(
+            sounds.stop_matching(
+                Some("entity.zombie.ambient"),
+                Some(SoundCategory::Block),
+                |handle| {
+                    stopped.push(handle);
+                    true
+                },
+            ),
+            0,
+        );
+        assert_eq!(stopped, vec![block]);
+
+        assert_eq!(
+            sounds.stop_matching(None, None, |handle| {
+                stopped.push(handle);
+                true
+            }),
+            1,
+            "two absent packet fields must stop every tracked server voice"
+        );
+        assert_eq!(stopped, vec![block, hostile]);
+    }
+
+    #[test]
+    fn recording_the_next_server_sound_reaps_finished_handles() {
+        let mut sounds = ServerSounds::default();
+        let finished = lodestone_sound::PlayHandle(21);
+        let live = lodestone_sound::PlayHandle(22);
+        sounds.record(finished, "entity.zombie.ambient", SoundCategory::Hostile);
+        sounds.record(live, "block.note_block.harp", SoundCategory::Block);
+
+        sounds.prune_finished(|handle| handle == live);
+        let mut stopped = Vec::new();
+        assert_eq!(
+            sounds.stop_matching(None, None, |handle| {
+                stopped.push(handle);
+                true
+            }),
+            1,
+        );
+        assert_eq!(stopped, vec![live]);
     }
 }

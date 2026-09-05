@@ -729,7 +729,7 @@ impl Sim {
                     }
                     self.audio_mut(|audio| {
                         if let Some(audio) = audio {
-                            audio.play_sound(&name, category, pos, volume, pitch, seed);
+                            audio.play_server_sound(&name, category, pos, volume, pitch, seed);
                         }
                     });
                 }
@@ -746,7 +746,16 @@ impl Sim {
                     let pos = self.entity_sound_position(entity_id);
                     self.audio_mut(|audio| {
                         if let Some(audio) = audio {
-                            audio.play_entity_sound(&name, category, pos, volume, pitch, seed);
+                            audio.play_server_entity_sound(
+                                &name, category, pos, volume, pitch, seed,
+                            );
+                        }
+                    });
+                }
+                NetUpdate::SoundStopped { name, category } => {
+                    self.audio_mut(|audio| {
+                        if let Some(audio) = audio {
+                            audio.stop_server_sounds(name.as_deref(), category);
                         }
                     });
                 }

@@ -4384,11 +4384,15 @@ pub fn route(event: &ClientEvent) -> Route {
         ClientEvent::ProjectilePowerChanged { .. } => INGEST,
         ClientEvent::SimulationDistanceChanged { .. }
         | ClientEvent::ItemCooldown { .. }
-        | ClientEvent::SoundStopped { .. }
         | ClientEvent::PlayerCombatEntered
         | ClientEvent::PlayerCombatEnded { .. }
         | ClientEvent::MountScreenOpened { .. }
         | ClientEvent::ServerDataReceived { .. } => Route::NOWHERE,
+        // A stop packet names a sound/category filter, while the mixer owns
+        // live voices by opaque handles. `net::forward` carries the filters to
+        // `ShellAudio`, which keeps the packet-created name/category-to-handle
+        // index and cancels every matching audible voice.
+        ClientEvent::SoundStopped { .. } => SHELL,
         // The target is already server-resolved, so the shell can derive the
         // local view direction from the current feet or eye anchor. `PhysicsState`
         // is the existing camera, raycast, audio-listener, and movement-egress
@@ -4710,6 +4714,20 @@ mod route_tests {
         let r = route(&ClientEvent::BlockChangedAck { sequence: 7 });
         assert!(r.shell, "the shell owns the placement prediction ledger");
         assert!(r.must_forward(), "the acknowledgement needs a NetUpdate arm");
+        assert!(!r.is_island());
+    }
+
+    /// A stop packet has no ECS state to fold: only the shell can translate its
+    /// name/category filters back into the opaque mixer handles that are making
+    /// an already audible server sound play.
+    #[test]
+    fn sound_stopped_reaches_the_shell_playback_consumer() {
+        let r = route(&ClientEvent::SoundStopped {
+            sound: None,
+            category: None,
+        });
+        assert!(r.shell, "the shell owns live mixer voices");
+        assert!(r.must_forward(), "the filters need the NetUpdate relay");
         assert!(!r.is_island());
     }
 

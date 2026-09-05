@@ -21,6 +21,15 @@ not gain an arm in `ingest::handles_event` or `session::handles_event`) →
 `lodestone-audio`'s decode/mix/spatialise. Two separate things kept this
 silent even though every stage above existed and worked:
 
+`STOP_SOUND` follows the reverse direction after the same shell boundary has
+started a voice. The mixer can stop only an opaque handle, while the packet
+contains optional sound-name and category filters, so `ShellAudio` records the
+handles of server packet-created voices under those two fields. A later stop
+packet cancels every matching voice; either missing field is a wildcard, and
+both missing fields stop every tracked server voice. Locally predicted sounds
+and ambience are deliberately not in that index: their own producers own their
+lifetime, so a server packet must not cancel them incidentally.
+
 1. **The sample corpus is not in `client.jar`.** `sounds.json` and its 4,871
    `.ogg` files live in the launcher's content-addressed asset-object store
    (`asset-index-<id>.json` maps a logical name to `{hash, size}`; bytes sit
@@ -216,6 +225,11 @@ cannot launder itself through a regenerated table.
 
 - Adding a server sound source needs no client change — any `SOUND`/
   `SOUND_ENTITY` packet already reaches the mixer.
+- A new server sound path that must obey `STOP_SOUND` must call
+  `ShellAudio::play_server_sound` or `ShellAudio::play_server_entity_sound`,
+  not the local-prediction playback methods. The internally retained mixer
+  handle is the only way the name/category packet filters can reach an already
+  audible voice.
 - Adding a predicted sound: the producer (the call site that fires it) is
   the missing half; seed it from `Sim::block_sound_seed` (a `splitmix64` over
   block position and frame tick), never `Instant::now` (panics on wasm) and
