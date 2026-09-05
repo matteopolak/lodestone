@@ -740,7 +740,9 @@ mod tests {
                 surface_biome_ids: vec![],
                 motion_blocking_heights: vec![],
                 block_entity_nbt: vec![],
+                block_scheduled_ticks: vec![],
                 extensions: vec![],
+                fluid_scheduled_ticks: vec![],
             })),
         }
     }

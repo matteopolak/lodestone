@@ -36,7 +36,52 @@ message ChunkRecord {
   // does not simulate; readers must reject malformed roots or roots outside
   // this column rather than silently dropping them.
   repeated bytes block_entity_nbt = 8;
+  // Block and fluid queues stay distinct because they have different drain
+  // phases. The absolute trigger, priority and insertion order reconstruct
+  // the scheduler's complete ordering key.
+  repeated ScheduledTick block_scheduled_ticks = 9;
   repeated ExtensionValue extensions = 10;
+  repeated ScheduledTick fluid_scheduled_ticks = 11;
+}
+
+// Only built-in server actions have a native representation. Custom actions
+// have no lossless decoder in this format and must be rejected by its adapter.
+message ScheduledTick {
+  sint32 x = 1;
+  sint32 y = 2;
+  sint32 z = 3;
+  ScheduledTickKind kind = 4;
+  uint64 trigger_tick = 5;
+  ScheduledTickPriority priority = 6;
+  uint64 insertion_order = 7;
+}
+
+enum ScheduledTickKind {
+  SCHEDULED_TICK_KIND_UNSPECIFIED = 0;
+  SCHEDULED_TICK_KIND_FLUID = 1;
+  SCHEDULED_TICK_KIND_TORCH = 2;
+  SCHEDULED_TICK_KIND_REPEATER = 3;
+  SCHEDULED_TICK_KIND_COMPARATOR = 4;
+  SCHEDULED_TICK_KIND_OBSERVER = 5;
+  SCHEDULED_TICK_KIND_TARGET_DECAY = 6;
+  SCHEDULED_TICK_KIND_TRIPWIRE_RECHECK = 7;
+  SCHEDULED_TICK_KIND_PISTON = 8;
+  SCHEDULED_TICK_KIND_GRAVITY = 9;
+  SCHEDULED_TICK_KIND_FIRE = 10;
+  SCHEDULED_TICK_KIND_TNT_PRIME = 11;
+  SCHEDULED_TICK_KIND_COMMAND_BLOCK = 12;
+  SCHEDULED_TICK_KIND_BUTTON_RELEASE = 13;
+  SCHEDULED_TICK_KIND_DISPENSER_FIRE = 14;
+}
+
+enum ScheduledTickPriority {
+  SCHEDULED_TICK_PRIORITY_NORMAL = 0;
+  SCHEDULED_TICK_PRIORITY_EXTREMELY_HIGH = 1;
+  SCHEDULED_TICK_PRIORITY_VERY_HIGH = 2;
+  SCHEDULED_TICK_PRIORITY_HIGH = 3;
+  SCHEDULED_TICK_PRIORITY_LOW = 4;
+  SCHEDULED_TICK_PRIORITY_VERY_LOW = 5;
+  SCHEDULED_TICK_PRIORITY_EXTREMELY_LOW = 6;
 }
 
 message ChunkSection {

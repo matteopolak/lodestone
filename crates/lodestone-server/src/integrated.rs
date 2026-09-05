@@ -2843,6 +2843,23 @@ impl IntegratedServer {
         storage.write_dirty_chunk(column_x, column_z, column)
     }
 
+    /// Saves one dirty native chunk with the pending block and fluid ticks the
+    /// live scheduler currently owns for that column. This does not replace
+    /// Anvil's persistent-world save path.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_dirty_native_chunk_with_scheduled_ticks(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        column: &crate::chunk::ChunkColumn,
+        scheduled: &crate::scheduled_tick::ScheduledTickHandle,
+    ) -> Result<(), crate::world_storage::Error> {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.write_dirty_chunk_with_scheduled_ticks(column_x, column_z, column, scheduled)
+    }
+
     /// Loads one native typed terrain, biome, and heightmap column from the selected backend.
     ///
     /// The caller provides the active dimension's vertical contract. This is a
@@ -2862,6 +2879,23 @@ impl IntegratedServer {
             return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
         };
         storage.load_chunk(column_x, column_z, min_y, height)
+    }
+
+    /// Reopens one native chunk and stages its pending ticks into the supplied
+    /// live scheduler, retaining their original cross-column tie-breaker.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_native_chunk_with_scheduled_ticks(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        min_y: i32,
+        height: i32,
+        scheduled: &crate::scheduled_tick::ScheduledTickHandle,
+    ) -> Result<Option<crate::chunk::ChunkColumn>, crate::world_storage::Error> {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.load_chunk_with_scheduled_ticks(column_x, column_z, min_y, height, scheduled)
     }
 
     /// The world's shared game rules, difficulty and clock.
@@ -5425,7 +5459,9 @@ mod tests {
                 surface_biome_ids: Vec::new(),
                 motion_blocking_heights: Vec::new(),
                 block_entity_nbt: Vec::new(),
+                block_scheduled_ticks: Vec::new(),
                 extensions: Vec::new(),
+                fluid_scheduled_ticks: Vec::new(),
             })),
         };
 

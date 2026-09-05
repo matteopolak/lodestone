@@ -608,8 +608,8 @@ pub use random_tick::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use rcon::{DEFAULT_RCON_PORT, RconConfig};
 pub use scheduled_tick::{
-    ChunkScheduledTickQueue, ScheduledTick, ScheduledTickQueue, ScheduledTickQueueAccess,
-    ScheduledTickSink, StagedTick, TickPriority,
+    ChunkScheduledTickQueue, PersistedScheduledTick, ScheduledTick, ScheduledTickHandle,
+    ScheduledTickQueue, ScheduledTickQueueAccess, ScheduledTickSink, StagedTick, TickPriority,
 };
 pub use server::{
     // The gate in `tests/view_radius_store_capacity.rs` asserts at compile

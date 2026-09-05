@@ -10,7 +10,7 @@ pub mod generated {
 pub use generated::{
     BiomeSection, BuiltinBiome, BuiltinDimension, ChunkRecord, ChunkSection, EntityRecord,
     ExtensionTable, ExtensionValue, GameMode, GeneralRecord, PlayerRecord, RegisteredExtension,
-    StorageRecord, WorldProperties,
+    ScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord, WorldProperties,
 };
 
 /// The only storage-record format understood by the initial schema.
@@ -142,6 +142,19 @@ fn validate_chunk(chunk: &ChunkRecord) -> Result<(), ValidationError> {
             return Err(ValidationError::MotionBlockingHeightOutOfRange(height));
         }
     }
+    for tick in chunk
+        .block_scheduled_ticks
+        .iter()
+        .chain(chunk.fluid_scheduled_ticks.iter())
+    {
+        let kind = ScheduledTickKind::try_from(tick.kind)
+            .map_err(|_| ValidationError::UnknownScheduledTickKind(tick.kind))?;
+        if kind == ScheduledTickKind::Unspecified {
+            return Err(ValidationError::UnknownScheduledTickKind(tick.kind));
+        }
+        ScheduledTickPriority::try_from(tick.priority)
+            .map_err(|_| ValidationError::UnknownScheduledTickPriority(tick.priority))?;
+    }
     validate_extension_values(&chunk.extensions)
 }
 
@@ -203,6 +216,8 @@ pub enum ValidationError {
     UnknownBuiltinBiome(i32),
     InvalidMotionBlockingHeightCount(usize),
     MotionBlockingHeightOutOfRange(u32),
+    UnknownScheduledTickKind(i32),
+    UnknownScheduledTickPriority(i32),
     InvalidPlayerUuidLength(usize),
     UnknownBuiltinDimension(i32),
     ZeroExtensionId,
@@ -247,6 +262,12 @@ impl std::fmt::Display for ValidationError {
             }
             Self::MotionBlockingHeightOutOfRange(height) => {
                 write!(formatter, "motion-blocking height {height} exceeds u16")
+            }
+            Self::UnknownScheduledTickKind(kind) => {
+                write!(formatter, "unknown scheduled-tick kind {kind}")
+            }
+            Self::UnknownScheduledTickPriority(priority) => {
+                write!(formatter, "unknown scheduled-tick priority {priority}")
             }
             Self::InvalidPlayerUuidLength(actual) => {
                 write!(formatter, "expected a 16-byte player UUID, found {actual} bytes")

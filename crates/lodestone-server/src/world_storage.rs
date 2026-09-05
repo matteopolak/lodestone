@@ -10,6 +10,7 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::collections::HashSet;
 
 use lodestone_core::{Reader, Writer, read_named_nbt, write_named_nbt};
 use lodestone_storage::{
@@ -17,7 +18,8 @@ use lodestone_storage::{
 };
 use lodestone_storage_schema::{
     BiomeSection, BuiltinDimension, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1,
-    GeneralRecord, PlayerRecord, RegisteredExtension, StorageRecord,
+    GeneralRecord, PlayerRecord, RegisteredExtension, ScheduledTick as StoredScheduledTick,
+    ScheduledTickKind, ScheduledTickPriority, StorageRecord,
     generated::{general_record, storage_record},
 };
 
@@ -188,6 +190,16 @@ pub enum ChunkRecordError {
     UnknownBlockStateId(u32),
     /// Packed local palette data is structurally invalid.
     InvalidPackedStates(&'static str),
+    /// A scheduled tick action is not one of this build's typed built-ins.
+    UnsupportedScheduledTickKind(String),
+    /// A stored scheduled-tick enum value has no known meaning.
+    UnknownScheduledTickKind(i32),
+    /// A stored scheduled-tick priority has no known meaning.
+    UnknownScheduledTickPriority(i32),
+    /// A stored scheduled tick belongs to a different column than its record.
+    ScheduledTickOutsideColumn { x: i32, z: i32, expected_x: i32, expected_z: i32 },
+    /// Two stored entries claim the same global insertion position.
+    DuplicateScheduledTickOrder(u64),
     /// A persisted block-entity NBT root is malformed or cannot be interpreted.
     InvalidBlockEntityNbt { index: usize, reason: String },
     /// A block entity belongs to a different horizontal column than its record.
@@ -267,6 +279,22 @@ impl fmt::Display for ChunkRecordError {
             Self::UnknownBuiltinBiome(id) => write!(formatter, "unknown built-in biome ID {id}"),
             Self::UnknownBlockStateId(id) => write!(formatter, "unknown built-in block-state ID {id}"),
             Self::InvalidPackedStates(reason) => write!(formatter, "invalid packed block states: {reason}"),
+            Self::UnsupportedScheduledTickKind(kind) => {
+                write!(formatter, "scheduled tick kind has no typed native representation: {kind}")
+            }
+            Self::UnknownScheduledTickKind(kind) => {
+                write!(formatter, "unknown stored scheduled-tick kind {kind}")
+            }
+            Self::UnknownScheduledTickPriority(priority) => {
+                write!(formatter, "unknown stored scheduled-tick priority {priority}")
+            }
+            Self::ScheduledTickOutsideColumn { x, z, expected_x, expected_z } => write!(
+                formatter,
+                "scheduled tick at ({x}, {z}) is outside chunk ({expected_x}, {expected_z})"
+            ),
+            Self::DuplicateScheduledTickOrder(order) => {
+                write!(formatter, "duplicate scheduled-tick insertion order {order}")
+            }
             Self::InvalidBlockEntityNbt { index, reason } => {
                 write!(formatter, "invalid block entity NBT at index {index}: {reason}")
             }
@@ -544,7 +572,25 @@ impl WorldStorage {
         column_z: i32,
         column: &crate::chunk::ChunkColumn,
     ) -> Result<(), Error> {
-        let record = encode_chunk(column_x, column_z, column)?;
+        let record = encode_chunk(column_x, column_z, column, None)?;
+        self.write_dirty([RecordWrite::new(RecordKey::chunk(column_x, column_z), record)])?;
+        Ok(())
+    }
+
+    /// Saves one dirty chunk and its pending typed scheduled ticks together.
+    ///
+    /// The queue snapshot is non-destructive. Anvil continues to use its
+    /// existing NBT tick writer; this path is only for an explicitly selected
+    /// native backend.
+    pub fn write_dirty_chunk_with_scheduled_ticks(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        column: &crate::chunk::ChunkColumn,
+        scheduled: &crate::scheduled_tick::ScheduledTickHandle,
+    ) -> Result<(), Error> {
+        let ticks = scheduled.snapshot_column(column_x, column_z);
+        let record = encode_chunk(column_x, column_z, column, Some(ticks))?;
         self.write_dirty([RecordWrite::new(RecordKey::chunk(column_x, column_z), record)])?;
         Ok(())
     }
@@ -572,9 +618,36 @@ impl WorldStorage {
             .expect("world storage lock poisoned")
             .get(RecordKey::chunk(column_x, column_z))?;
         record
-            .map(|record| decode_chunk(column_x, column_z, min_y, height, record))
+            .map(|record| decode_chunk(column_x, column_z, min_y, height, record).map(|(column, _)| column))
             .transpose()
             .map_err(Into::into)
+    }
+
+    /// Reopens one typed chunk and stages its pending ticks for the supplied
+    /// live scheduler. The next scheduler access merges them with the stored
+    /// insertion orders intact.
+    pub fn load_chunk_with_scheduled_ticks(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        min_y: i32,
+        height: i32,
+        scheduled: &crate::scheduled_tick::ScheduledTickHandle,
+    ) -> Result<Option<crate::chunk::ChunkColumn>, Error> {
+        validate_extent(min_y, height)?;
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        let record = native
+            .lock()
+            .expect("world storage lock poisoned")
+            .get(RecordKey::chunk(column_x, column_z))?;
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        let (column, (block, fluid)) = decode_chunk(column_x, column_z, min_y, height, record)?;
+        scheduled.stage_persisted(block, fluid);
+        Ok(Some(column))
     }
 }
 
@@ -582,6 +655,7 @@ fn encode_chunk(
     column_x: i32,
     column_z: i32,
     column: &crate::chunk::ChunkColumn,
+    scheduled_ticks: Option<(Vec<crate::scheduled_tick::PersistedScheduledTick>, Vec<crate::scheduled_tick::PersistedScheduledTick>)>,
 ) -> Result<StorageRecord, ChunkRecordError> {
     validate_extent(column.min_y, column.height)?;
     let unsupported = unsupported_fields(column);
@@ -687,6 +761,15 @@ fn encode_chunk(
         .map(|name| builtin_biome_id(name))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let (block_scheduled_ticks, fluid_scheduled_ticks) = scheduled_ticks
+        .map(|(block, fluid)| {
+            Ok((
+                block.into_iter().map(encode_scheduled_tick).collect::<Result<Vec<_>, _>>()?,
+                fluid.into_iter().map(encode_scheduled_tick).collect::<Result<Vec<_>, _>>()?,
+            ))
+        })
+        .transpose()?
+        .unwrap_or_default();
     Ok(StorageRecord {
         format_version: FORMAT_VERSION_V1,
         record: Some(storage_record::Record::Chunk(ChunkRecord {
@@ -701,7 +784,9 @@ fn encode_chunk(
                 .map(|heights| heights.iter().map(|&height| u32::from(height)).collect())
                 .unwrap_or_default(),
             block_entity_nbt,
+            block_scheduled_ticks,
             extensions: Vec::new(),
+            fluid_scheduled_ticks,
         })),
     })
 }
@@ -712,7 +797,7 @@ fn decode_chunk(
     min_y: i32,
     height: i32,
     record: StorageRecord,
-) -> Result<crate::chunk::ChunkColumn, ChunkRecordError> {
+) -> Result<(crate::chunk::ChunkColumn, (Vec<crate::scheduled_tick::PersistedScheduledTick>, Vec<crate::scheduled_tick::PersistedScheduledTick>)), ChunkRecordError> {
     if record.format_version != FORMAT_VERSION_V1 {
         return Err(ChunkRecordError::InvalidPackedStates("unsupported record format version"));
     }
@@ -870,7 +955,146 @@ fn decode_chunk(
         block_entities.push((pos, entity));
     }
     column.set_block_entities(block_entities);
-    Ok(column)
+    let scheduled_ticks = decode_scheduled_ticks(expected_x, expected_z, &chunk)?;
+    Ok((column, scheduled_ticks))
+}
+
+fn encode_scheduled_tick(
+    tick: crate::scheduled_tick::PersistedScheduledTick,
+) -> Result<StoredScheduledTick, ChunkRecordError> {
+    Ok(StoredScheduledTick {
+        x: tick.pos.0,
+        y: tick.pos.1,
+        z: tick.pos.2,
+        kind: scheduled_tick_kind(&tick.kind)? as i32,
+        trigger_tick: tick.trigger_tick,
+        priority: stored_tick_priority(tick.priority) as i32,
+        insertion_order: tick.insertion_order,
+    })
+}
+
+fn decode_scheduled_ticks(
+    column_x: i32,
+    column_z: i32,
+    chunk: &ChunkRecord,
+) -> Result<
+    (
+        Vec<crate::scheduled_tick::PersistedScheduledTick>,
+        Vec<crate::scheduled_tick::PersistedScheduledTick>,
+    ),
+    ChunkRecordError,
+> {
+    let mut block_orders = HashSet::new();
+    let mut block = chunk
+        .block_scheduled_ticks
+        .iter()
+        .map(|stored| decode_scheduled_tick(stored, column_x, column_z, &mut block_orders))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut fluid_orders = HashSet::new();
+    let mut fluid = chunk
+        .fluid_scheduled_ticks
+        .iter()
+        .map(|stored| decode_scheduled_tick(stored, column_x, column_z, &mut fluid_orders))
+        .collect::<Result<Vec<_>, _>>()?;
+    block.sort_by_key(|tick| tick.insertion_order);
+    fluid.sort_by_key(|tick| tick.insertion_order);
+    Ok((block, fluid))
+}
+
+fn decode_scheduled_tick(
+    stored: &StoredScheduledTick,
+    column_x: i32,
+    column_z: i32,
+    insertion_orders: &mut HashSet<u64>,
+) -> Result<crate::scheduled_tick::PersistedScheduledTick, ChunkRecordError> {
+    if (stored.x.div_euclid(16), stored.z.div_euclid(16)) != (column_x, column_z) {
+        return Err(ChunkRecordError::ScheduledTickOutsideColumn {
+            x: stored.x,
+            z: stored.z,
+            expected_x: column_x,
+            expected_z: column_z,
+        });
+    }
+    if !insertion_orders.insert(stored.insertion_order) {
+        return Err(ChunkRecordError::DuplicateScheduledTickOrder(stored.insertion_order));
+    }
+    let kind = ScheduledTickKind::try_from(stored.kind)
+        .map_err(|_| ChunkRecordError::UnknownScheduledTickKind(stored.kind))?;
+    let priority = ScheduledTickPriority::try_from(stored.priority)
+        .map_err(|_| ChunkRecordError::UnknownScheduledTickPriority(stored.priority))?;
+    Ok(crate::scheduled_tick::PersistedScheduledTick {
+        pos: (stored.x, stored.y, stored.z),
+        kind: tick_kind_string(kind)?,
+        trigger_tick: stored.trigger_tick,
+        priority: tick_priority(priority),
+        insertion_order: stored.insertion_order,
+    })
+}
+
+fn scheduled_tick_kind(kind: &str) -> Result<ScheduledTickKind, ChunkRecordError> {
+    let kind = match kind {
+        crate::fluid::TICK_FLUID => ScheduledTickKind::Fluid,
+        crate::redstone::TICK_TORCH => ScheduledTickKind::Torch,
+        crate::redstone::TICK_REPEATER => ScheduledTickKind::Repeater,
+        crate::redstone::TICK_COMPARATOR => ScheduledTickKind::Comparator,
+        crate::redstone::TICK_OBSERVER => ScheduledTickKind::Observer,
+        crate::redstone_target::TICK_TARGET_DECAY => ScheduledTickKind::TargetDecay,
+        crate::redstone_tripwire::TICK_TRIPWIRE_RECHECK => ScheduledTickKind::TripwireRecheck,
+        crate::piston::TICK_PISTON => ScheduledTickKind::Piston,
+        crate::gravity_tick::TICK_GRAVITY => ScheduledTickKind::Gravity,
+        crate::fire::TICK_FIRE => ScheduledTickKind::Fire,
+        crate::mobs::tnt::TICK_TNT_PRIME => ScheduledTickKind::TntPrime,
+        crate::command_block::TICK_COMMAND_BLOCK => ScheduledTickKind::CommandBlock,
+        crate::hand_use::TICK_BUTTON => ScheduledTickKind::ButtonRelease,
+        crate::redstone_dispenser::TICK_DISPENSER_FIRE => ScheduledTickKind::DispenserFire,
+        _ => return Err(ChunkRecordError::UnsupportedScheduledTickKind(kind.to_owned())),
+    };
+    Ok(kind)
+}
+
+fn tick_kind_string(kind: ScheduledTickKind) -> Result<String, ChunkRecordError> {
+    let kind = match kind {
+        ScheduledTickKind::Fluid => crate::fluid::TICK_FLUID,
+        ScheduledTickKind::Torch => crate::redstone::TICK_TORCH,
+        ScheduledTickKind::Repeater => crate::redstone::TICK_REPEATER,
+        ScheduledTickKind::Comparator => crate::redstone::TICK_COMPARATOR,
+        ScheduledTickKind::Observer => crate::redstone::TICK_OBSERVER,
+        ScheduledTickKind::TargetDecay => crate::redstone_target::TICK_TARGET_DECAY,
+        ScheduledTickKind::TripwireRecheck => crate::redstone_tripwire::TICK_TRIPWIRE_RECHECK,
+        ScheduledTickKind::Piston => crate::piston::TICK_PISTON,
+        ScheduledTickKind::Gravity => crate::gravity_tick::TICK_GRAVITY,
+        ScheduledTickKind::Fire => crate::fire::TICK_FIRE,
+        ScheduledTickKind::TntPrime => crate::mobs::tnt::TICK_TNT_PRIME,
+        ScheduledTickKind::CommandBlock => crate::command_block::TICK_COMMAND_BLOCK,
+        ScheduledTickKind::ButtonRelease => crate::hand_use::TICK_BUTTON,
+        ScheduledTickKind::DispenserFire => crate::redstone_dispenser::TICK_DISPENSER_FIRE,
+        ScheduledTickKind::Unspecified => return Err(ChunkRecordError::UnknownScheduledTickKind(0)),
+    };
+    Ok(kind.to_owned())
+}
+
+fn stored_tick_priority(priority: crate::scheduled_tick::TickPriority) -> ScheduledTickPriority {
+    match priority {
+        crate::scheduled_tick::TickPriority::ExtremelyHigh => ScheduledTickPriority::ExtremelyHigh,
+        crate::scheduled_tick::TickPriority::VeryHigh => ScheduledTickPriority::VeryHigh,
+        crate::scheduled_tick::TickPriority::High => ScheduledTickPriority::High,
+        crate::scheduled_tick::TickPriority::Normal => ScheduledTickPriority::Normal,
+        crate::scheduled_tick::TickPriority::Low => ScheduledTickPriority::Low,
+        crate::scheduled_tick::TickPriority::VeryLow => ScheduledTickPriority::VeryLow,
+        crate::scheduled_tick::TickPriority::ExtremelyLow => ScheduledTickPriority::ExtremelyLow,
+    }
+}
+
+fn tick_priority(priority: ScheduledTickPriority) -> crate::scheduled_tick::TickPriority {
+    match priority {
+        ScheduledTickPriority::ExtremelyHigh => crate::scheduled_tick::TickPriority::ExtremelyHigh,
+        ScheduledTickPriority::VeryHigh => crate::scheduled_tick::TickPriority::VeryHigh,
+        ScheduledTickPriority::High => crate::scheduled_tick::TickPriority::High,
+        ScheduledTickPriority::Normal => crate::scheduled_tick::TickPriority::Normal,
+        ScheduledTickPriority::Low => crate::scheduled_tick::TickPriority::Low,
+        ScheduledTickPriority::VeryLow => crate::scheduled_tick::TickPriority::VeryLow,
+        ScheduledTickPriority::ExtremelyLow => crate::scheduled_tick::TickPriority::ExtremelyLow,
+    }
 }
 
 fn player_key(uuid: [u8; 16]) -> RecordKey {
@@ -1168,7 +1392,9 @@ mod tests {
                     surface_biome_ids: Vec::new(),
                     motion_blocking_heights: Vec::new(),
                     block_entity_nbt: Vec::new(),
+                    block_scheduled_ticks: Vec::new(),
                     extensions: Vec::new(),
+                    fluid_scheduled_ticks: Vec::new(),
                 })),
             },
         )
@@ -1460,7 +1686,7 @@ mod tests {
         )]);
 
         assert!(matches!(
-            encode_chunk(0, 0, &source),
+            encode_chunk(0, 0, &source, None),
             Err(ChunkRecordError::BlockEntityNbtPositionMismatch { .. })
         ));
     }
@@ -1468,7 +1694,7 @@ mod tests {
     #[test]
     fn native_chunk_refuses_a_malformed_stored_block_entity_instead_of_dropping_it() {
         let source = crate::chunk::ChunkColumn::new(0, 16);
-        let mut record = encode_chunk(0, 0, &source).expect("empty terrain encodes");
+        let mut record = encode_chunk(0, 0, &source, None).expect("empty terrain encodes");
         let Some(storage_record::Record::Chunk(chunk)) = record.record.as_mut() else {
             panic!("chunk encoder must produce a chunk record");
         };

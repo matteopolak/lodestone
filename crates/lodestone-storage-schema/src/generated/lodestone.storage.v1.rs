@@ -50,8 +50,34 @@ pub struct ChunkRecord {
     /// this column rather than silently dropping them.
     #[prost(bytes = "vec", repeated, tag = "8")]
     pub block_entity_nbt: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    /// Block and fluid queues stay distinct because they have different drain
+    /// phases. The absolute trigger, priority and insertion order reconstruct
+    /// the scheduler's complete ordering key.
+    #[prost(message, repeated, tag = "9")]
+    pub block_scheduled_ticks: ::prost::alloc::vec::Vec<ScheduledTick>,
     #[prost(message, repeated, tag = "10")]
     pub extensions: ::prost::alloc::vec::Vec<ExtensionValue>,
+    #[prost(message, repeated, tag = "11")]
+    pub fluid_scheduled_ticks: ::prost::alloc::vec::Vec<ScheduledTick>,
+}
+/// Only built-in server actions have a native representation. Custom actions
+/// have no lossless decoder in this format and must be rejected by its adapter.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScheduledTick {
+    #[prost(sint32, tag = "1")]
+    pub x: i32,
+    #[prost(sint32, tag = "2")]
+    pub y: i32,
+    #[prost(sint32, tag = "3")]
+    pub z: i32,
+    #[prost(enumeration = "ScheduledTickKind", tag = "4")]
+    pub kind: i32,
+    #[prost(uint64, tag = "5")]
+    pub trigger_tick: u64,
+    #[prost(enumeration = "ScheduledTickPriority", tag = "6")]
+    pub priority: i32,
+    #[prost(uint64, tag = "7")]
+    pub insertion_order: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ChunkSection {
@@ -179,6 +205,112 @@ pub struct ExtensionValue {
     pub local_id: u32,
     #[prost(bytes = "vec", tag = "2")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScheduledTickKind {
+    Unspecified = 0,
+    Fluid = 1,
+    Torch = 2,
+    Repeater = 3,
+    Comparator = 4,
+    Observer = 5,
+    TargetDecay = 6,
+    TripwireRecheck = 7,
+    Piston = 8,
+    Gravity = 9,
+    Fire = 10,
+    TntPrime = 11,
+    CommandBlock = 12,
+    ButtonRelease = 13,
+    DispenserFire = 14,
+}
+impl ScheduledTickKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCHEDULED_TICK_KIND_UNSPECIFIED",
+            Self::Fluid => "SCHEDULED_TICK_KIND_FLUID",
+            Self::Torch => "SCHEDULED_TICK_KIND_TORCH",
+            Self::Repeater => "SCHEDULED_TICK_KIND_REPEATER",
+            Self::Comparator => "SCHEDULED_TICK_KIND_COMPARATOR",
+            Self::Observer => "SCHEDULED_TICK_KIND_OBSERVER",
+            Self::TargetDecay => "SCHEDULED_TICK_KIND_TARGET_DECAY",
+            Self::TripwireRecheck => "SCHEDULED_TICK_KIND_TRIPWIRE_RECHECK",
+            Self::Piston => "SCHEDULED_TICK_KIND_PISTON",
+            Self::Gravity => "SCHEDULED_TICK_KIND_GRAVITY",
+            Self::Fire => "SCHEDULED_TICK_KIND_FIRE",
+            Self::TntPrime => "SCHEDULED_TICK_KIND_TNT_PRIME",
+            Self::CommandBlock => "SCHEDULED_TICK_KIND_COMMAND_BLOCK",
+            Self::ButtonRelease => "SCHEDULED_TICK_KIND_BUTTON_RELEASE",
+            Self::DispenserFire => "SCHEDULED_TICK_KIND_DISPENSER_FIRE",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCHEDULED_TICK_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCHEDULED_TICK_KIND_FLUID" => Some(Self::Fluid),
+            "SCHEDULED_TICK_KIND_TORCH" => Some(Self::Torch),
+            "SCHEDULED_TICK_KIND_REPEATER" => Some(Self::Repeater),
+            "SCHEDULED_TICK_KIND_COMPARATOR" => Some(Self::Comparator),
+            "SCHEDULED_TICK_KIND_OBSERVER" => Some(Self::Observer),
+            "SCHEDULED_TICK_KIND_TARGET_DECAY" => Some(Self::TargetDecay),
+            "SCHEDULED_TICK_KIND_TRIPWIRE_RECHECK" => Some(Self::TripwireRecheck),
+            "SCHEDULED_TICK_KIND_PISTON" => Some(Self::Piston),
+            "SCHEDULED_TICK_KIND_GRAVITY" => Some(Self::Gravity),
+            "SCHEDULED_TICK_KIND_FIRE" => Some(Self::Fire),
+            "SCHEDULED_TICK_KIND_TNT_PRIME" => Some(Self::TntPrime),
+            "SCHEDULED_TICK_KIND_COMMAND_BLOCK" => Some(Self::CommandBlock),
+            "SCHEDULED_TICK_KIND_BUTTON_RELEASE" => Some(Self::ButtonRelease),
+            "SCHEDULED_TICK_KIND_DISPENSER_FIRE" => Some(Self::DispenserFire),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScheduledTickPriority {
+    Normal = 0,
+    ExtremelyHigh = 1,
+    VeryHigh = 2,
+    High = 3,
+    Low = 4,
+    VeryLow = 5,
+    ExtremelyLow = 6,
+}
+impl ScheduledTickPriority {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Normal => "SCHEDULED_TICK_PRIORITY_NORMAL",
+            Self::ExtremelyHigh => "SCHEDULED_TICK_PRIORITY_EXTREMELY_HIGH",
+            Self::VeryHigh => "SCHEDULED_TICK_PRIORITY_VERY_HIGH",
+            Self::High => "SCHEDULED_TICK_PRIORITY_HIGH",
+            Self::Low => "SCHEDULED_TICK_PRIORITY_LOW",
+            Self::VeryLow => "SCHEDULED_TICK_PRIORITY_VERY_LOW",
+            Self::ExtremelyLow => "SCHEDULED_TICK_PRIORITY_EXTREMELY_LOW",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCHEDULED_TICK_PRIORITY_NORMAL" => Some(Self::Normal),
+            "SCHEDULED_TICK_PRIORITY_EXTREMELY_HIGH" => Some(Self::ExtremelyHigh),
+            "SCHEDULED_TICK_PRIORITY_VERY_HIGH" => Some(Self::VeryHigh),
+            "SCHEDULED_TICK_PRIORITY_HIGH" => Some(Self::High),
+            "SCHEDULED_TICK_PRIORITY_LOW" => Some(Self::Low),
+            "SCHEDULED_TICK_PRIORITY_VERY_LOW" => Some(Self::VeryLow),
+            "SCHEDULED_TICK_PRIORITY_EXTREMELY_LOW" => Some(Self::ExtremelyLow),
+            _ => None,
+        }
+    }
 }
 /// Stable built-in biome discriminants for this game-data version. Extension
 /// biomes require an explicit future extension-table representation rather than

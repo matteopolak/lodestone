@@ -643,6 +643,7 @@ impl ScheduledTickHandle {
                 trigger_tick: (now + i64::from(saved.delay)).max(0) as u64,
                 priority: saved.priority,
                 fluid: is_fluid,
+                insertion_order: None,
             })
             .collect();
         self.stage(staged)
