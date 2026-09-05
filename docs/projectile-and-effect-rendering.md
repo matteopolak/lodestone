@@ -102,6 +102,12 @@ loses precision at real in-game coordinates and visibly reverses the frame/map d
 moves. The integrated server currently has no map-data store at all, so a singleplayer world never
 receives map contents — a server-side gap, not a rendering fault.
 
+`lodestone_game::maps::MapId` owns the signed-wire boundary for persisted map identities. The map store
+retains only a validated non-negative id; negative packet or component values do not allocate a map row.
+Renderer-facing methods intentionally still lower it to `i32`, because the item-component and GPU seams
+use that raw representation. Keep validation at the map-store ingress instead of letting those later
+consumers turn a malformed id into cache identity.
+
 ### Display entities (`text_display` / `item_display` / `block_display`)
 
 All three share one placement:
