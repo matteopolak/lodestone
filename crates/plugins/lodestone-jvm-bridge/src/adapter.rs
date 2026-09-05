@@ -467,6 +467,36 @@ fn active_player_handle_for_uuid(uuid: [u8; 16]) -> Result<ObjectRef, AdapterErr
     })
 }
 
+/// Finds one active player by its copied display name.
+///
+/// A display name is not globally unique, so this deliberately rejects more
+/// than one match instead of selecting a hash-map iteration winner. The host
+/// roster remains the source of these values; JNI never reads a connection or
+/// server registry to resolve a name.
+fn active_player_handle_for_name(name: &str) -> Result<ObjectRef, AdapterError> {
+    ACTIVE_PLAYER_HANDLES.with(|slot| {
+        let active = slot.borrow();
+        let active = active.as_ref().ok_or_else(|| {
+            AdapterError::new("playerHandleForName requires the adapter worker thread")
+        })?;
+        let mut matches = active
+            .iter()
+            .filter(|(player, _)| player.name() == name)
+            .map(|(_, handle)| *handle);
+        let Some(handle) = matches.next() else {
+            return Err(AdapterError::new(format!(
+                "playerHandleForName: no active player named {name:?}",
+            )));
+        };
+        if matches.next().is_some() {
+            return Err(AdapterError::new(format!(
+                "playerHandleForName: multiple active players named {name:?}",
+            )));
+        }
+        Ok(handle)
+    })
+}
+
 fn parse_uuid_string(value: &str) -> Result<[u8; 16], AdapterError> {
     let bytes = value.as_bytes();
     if bytes.len() != 36 || ![8, 13, 18, 23].into_iter().all(|index| bytes[index] == b'-') {
@@ -523,6 +553,13 @@ fn canonical_uuid_string(uuid: [u8; 16]) -> String {
 
 fn resolve_active_player_uuid(value: &str) -> Result<ObjectRef, AdapterError> {
     active_player_handle_for_uuid(parse_uuid_string(value)?)
+}
+
+fn resolve_active_player_name(value: Option<&str>) -> Result<ObjectRef, AdapterError> {
+    let name = value.ok_or_else(|| {
+        AdapterError::new("playerHandleForName requires a player name")
+    })?;
+    active_player_handle_for_name(name)
 }
 
 /// Returns the count of players whose lifecycle has reached this worker.
@@ -1639,6 +1676,28 @@ pub(crate) fn register_player_handle_for_uuid_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_player_handle_for_name_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts one Java string and returns
+    // an opaque jlong. It searches only the worker-owned copied roster and
+    // rejects ambiguous names rather than publishing an unstable object.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_player_handle_for_name as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_player_handle_is_active_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -1878,6 +1937,27 @@ extern "system" fn native_player_handle_for_uuid<'local>(
             .map_err(|error| AdapterError::new(format!("playerHandleForUuid: {error}")))?;
         resolve_active_player_uuid(&uuid)
             .map(ObjectRef::to_bits)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_for_name<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    name: JString<'local>,
+) -> jlong {
+    env.with_env(|env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        let name = if name.is_null() {
+            None
+        } else {
+            Some(
+                name.try_to_string(env)
+                    .map_err(|error| AdapterError::new(format!("playerHandleForName: {error}")))?,
+            )
+        };
+        resolve_active_player_name(name.as_deref()).map(ObjectRef::to_bits)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -2411,6 +2491,23 @@ mod tests {
             "the worker reverse resolver must return the generation-matched handle",
         );
         assert_eq!(
+            resolve_active_player_name(Some("Alice")),
+            Ok(first),
+            "the name resolver must return the same worker-owned live handle",
+        );
+        assert_eq!(
+            resolve_active_player_name(None),
+            Err(AdapterError::new("playerHandleForName requires a player name")),
+            "a null Java string must fail before a roster lookup",
+        );
+        assert_eq!(
+            resolve_active_player_name(Some("Bob")),
+            Err(AdapterError::new(
+                "playerHandleForName: no active player named \"Bob\"",
+            )),
+            "an unknown name must not mint a handle",
+        );
+        assert_eq!(
             resolve_active_player_uuid("05050505-0505-0505-0505-05050505050"),
             Err(AdapterError::new(
                 "playerHandleForUuid: invalid UUID \"05050505-0505-0505-0505-05050505050\" (expected 36-character form)",
@@ -2451,8 +2548,20 @@ mod tests {
             )),
             "disconnect removes the UUID reverse mapping rather than leaving a stale handle",
         );
+        assert_eq!(
+            resolve_active_player_name(Some("Alice")),
+            Err(AdapterError::new(
+                "playerHandleForName: no active player named \"Alice\"",
+            )),
+            "disconnect removes the name reverse mapping before a stale slot can be reused",
+        );
         let replacement = active_player_handle(&identity, &player).expect("reusable slot");
         assert_ne!(replacement, first);
+        assert_eq!(
+            resolve_active_player_name(Some("Alice")),
+            Ok(replacement),
+            "a later roster observation resolves its new generation, never the departed handle",
+        );
         assert_eq!(active_player_count(), Ok(1));
         assert_eq!(release_active_player_handle(&identity, &player), Some(replacement));
         assert_eq!(active_player_count(), Ok(0));
@@ -2477,6 +2586,30 @@ mod tests {
                 "playerHandleForUuid: multiple active players with UUID 07070707-0707-0707-0707-070707070707",
             )),
             "a duplicate UUID must fail rather than depend on map iteration order",
+        );
+        assert!(release_active_player_handle(&identity, &first_player).is_some());
+        assert!(release_active_player_handle(&identity, &second_player).is_some());
+        RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn player_name_reverse_resolver_rejects_duplicate_active_display_names() {
+        let identity = lifecycle_identity("adapter", "adapter", "fixture.Adapter");
+        let first_player = PlayerIdentity::new([8; 16], "Alice");
+        let second_player = PlayerIdentity::new([9; 16], "Alice");
+        RESIDENT_OBJECT_HANDLES.with(|slot| {
+            *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(2));
+        });
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
+        active_player_handle(&identity, &first_player).expect("first profile handle");
+        active_player_handle(&identity, &second_player).expect("second profile handle");
+        assert_eq!(
+            resolve_active_player_name(Some("Alice")),
+            Err(AdapterError::new(
+                "playerHandleForName: multiple active players named \"Alice\"",
+            )),
+            "a duplicate display name must fail rather than depend on map iteration order",
         );
         assert!(release_active_player_handle(&identity, &first_player).is_some());
         assert!(release_active_player_handle(&identity, &second_player).is_some());
