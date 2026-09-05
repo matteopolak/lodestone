@@ -218,7 +218,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 36] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 38] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -342,6 +342,8 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 36] = [
     NativeMethodSpec { name: "playerHandlePitch", descriptor: "(J)F" },
     NativeMethodSpec { name: "playerHandleEntityId", descriptor: "(J)I" },
     NativeMethodSpec { name: "playerHandleGameMode", descriptor: "(J)I" },
+    NativeMethodSpec { name: "playerHandleExperienceLevel", descriptor: "(J)I" },
+    NativeMethodSpec { name: "playerHandleExperiencePoints", descriptor: "(J)I" },
 ];
 
 const ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS: [IsolatedDescriptorMemberSpec; 4] = [
@@ -425,6 +427,8 @@ const ISOLATED_SHIM_REGISTRATION: &[NativeRegistrationStep] = registration_steps
     ISOLATED_SHIM_METHODS[33],
     ISOLATED_SHIM_METHODS[34],
     ISOLATED_SHIM_METHODS[35],
+    ISOLATED_SHIM_METHODS[36],
+    ISOLATED_SHIM_METHODS[37],
 );
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -1075,6 +1079,9 @@ fn method_id(
             jni_str!("playerHandleGameMode"),
             jni_sig!("(J)I"),
         ),
+        ("playerHandleExperienceLevel", "(J)I") | ("playerHandleExperiencePoints", "(J)I") => {
+            env.get_static_method_id(class, JNIString::new(method.name), jni_sig!("(J)I"))
+        }
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -1284,6 +1291,9 @@ fn register_method(
             adapter::register_player_handle_position_query(env, class, method.name, method.descriptor)
         }
         ("playerHandleGameMode", "(J)I") => {
+            adapter::register_player_handle_position_query(env, class, method.name, method.descriptor)
+        }
+        ("playerHandleExperienceLevel", "(J)I") | ("playerHandleExperiencePoints", "(J)I") => {
             adapter::register_player_handle_position_query(env, class, method.name, method.descriptor)
         }
         _ => unreachable!("the isolated native surface has only generated method specs"),
@@ -1519,6 +1529,8 @@ mod tests {
                 NativeMethodSpec { name: "playerHandlePitch", descriptor: "(J)F" },
                 NativeMethodSpec { name: "playerHandleEntityId", descriptor: "(J)I" },
                 NativeMethodSpec { name: "playerHandleGameMode", descriptor: "(J)I" },
+                NativeMethodSpec { name: "playerHandleExperienceLevel", descriptor: "(J)I" },
+                NativeMethodSpec { name: "playerHandleExperiencePoints", descriptor: "(J)I" },
             ],
         );
         let methods = isolated_shim_methods();
@@ -1706,7 +1718,9 @@ mod tests {
              public static native float playerHandleYaw(long handle); \
              public static native float playerHandlePitch(long handle); \
              public static native int playerHandleEntityId(long handle); \
-             public static native int playerHandleGameMode(long handle); }",
+             public static native int playerHandleGameMode(long handle); \
+             public static native int playerHandleExperienceLevel(long handle); \
+             public static native int playerHandleExperiencePoints(long handle); }",
         )
         .expect("shim source");
         let descriptor_source = source_root.join("IsolatedPluginDescriptor.java");
@@ -1811,7 +1825,9 @@ mod tests {
              public static native float playerHandleYaw(long handle); \
              public static native float playerHandlePitch(long handle); \
              public static native int playerHandleEntityId(long handle); \
-             public static native int playerHandleGameMode(long handle); }",
+             public static native int playerHandleGameMode(long handle); \
+             public static native int playerHandleExperienceLevel(long handle); \
+             public static native int playerHandleExperiencePoints(long handle); }",
         )
         .expect("shim source");
         let descriptor_source = shim_source_root.join("IsolatedPluginDescriptor.java");

@@ -812,6 +812,9 @@ plausible sentinel.
 The player-handle game-mode method reads the same host snapshot. Rust carries one of four closed
 variants and maps them to Java integers only at the native boundary: survival 0, creative 1,
 adventure 2, and spectator 3. No string spelling or unknown numeric value can enter the snapshot.
+The experience-level and experience-points methods expose the two distinct authoritative integer
+fields from that snapshot. Points means progress within the current level, not lifetime total
+experience; keeping separate methods prevents those compatible-looking values from being swapped.
 The generic registry separately reports wrong-kind use. A live player handle may
 also resolve through `playerHandleName(long)` and `playerHandleUuid(long)`. The
 latter returns a canonical lowercase UUID string from the fixed sixteen profile
