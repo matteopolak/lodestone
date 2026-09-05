@@ -13,4 +13,10 @@ lodestone-storage-schema = { path = "../lodestone-storage-schema" }
 prost = "0.14.3"
 
 [dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+redb = "3.1"
 tempfile.workspace = true
+
+[[bench]]
+name = "incremental"
+harness = false
