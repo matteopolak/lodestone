@@ -535,11 +535,38 @@ fn active_player_handle_for_name_ignoring_case(
     })
 }
 
-fn parse_uuid_string(value: &str) -> Result<[u8; 16], AdapterError> {
+/// Finds a connected player by the complete copied profile value.
+///
+/// This is the disambiguating inverse for a roster that contains duplicate
+/// display names or duplicate UUIDs while a reconnect is being reconciled.
+/// The profile pair is the worker map key, so it cannot depend on hash-map
+/// iteration order and never consults a connection or server registry.
+fn active_player_handle_for_profile(
+    name: &str,
+    uuid: [u8; 16],
+) -> Result<ObjectRef, AdapterError> {
+    ACTIVE_PLAYER_HANDLES.with(|slot| {
+        let active = slot.borrow();
+        let active = active.as_ref().ok_or_else(|| {
+            AdapterError::new("playerHandleForProfile requires the adapter worker thread")
+        })?;
+        active
+            .get(&PlayerIdentity::new(uuid, name))
+            .copied()
+            .ok_or_else(|| {
+                AdapterError::new(format!(
+                    "playerHandleForProfile: no active player named {name:?} with UUID {}",
+                    canonical_uuid_string(uuid),
+                ))
+            })
+    })
+}
+
+fn parse_uuid_string(value: &str, operation: &str) -> Result<[u8; 16], AdapterError> {
     let bytes = value.as_bytes();
     if bytes.len() != 36 || ![8, 13, 18, 23].into_iter().all(|index| bytes[index] == b'-') {
         return Err(AdapterError::new(format!(
-            "playerHandleForUuid: invalid UUID {value:?} (expected 36-character form)",
+            "{operation}: invalid UUID {value:?} (expected 36-character form)",
         )));
     }
     let mut uuid = [0; 16];
@@ -552,12 +579,12 @@ fn parse_uuid_string(value: &str) -> Result<[u8; 16], AdapterError> {
         }
         let high = hex_digit(bytes[index]).ok_or_else(|| {
             AdapterError::new(format!(
-                "playerHandleForUuid: invalid UUID {value:?} (non-hex digit)",
+                "{operation}: invalid UUID {value:?} (non-hex digit)",
             ))
         })?;
         let low = hex_digit(bytes[index + 1]).ok_or_else(|| {
             AdapterError::new(format!(
-                "playerHandleForUuid: invalid UUID {value:?} (non-hex digit)",
+                "{operation}: invalid UUID {value:?} (non-hex digit)",
             ))
         })?;
         uuid[output] = (high << 4) | low;
@@ -590,7 +617,7 @@ fn canonical_uuid_string(uuid: [u8; 16]) -> String {
 }
 
 fn resolve_active_player_uuid(value: &str) -> Result<ObjectRef, AdapterError> {
-    active_player_handle_for_uuid(parse_uuid_string(value)?)
+    active_player_handle_for_uuid(parse_uuid_string(value, "playerHandleForUuid")?)
 }
 
 fn resolve_active_player_name(value: Option<&str>) -> Result<ObjectRef, AdapterError> {
@@ -607,6 +634,22 @@ fn resolve_active_player_name_ignoring_case(
         AdapterError::new("playerHandleForNameIgnoringCase requires a player name")
     })?;
     active_player_handle_for_name_ignoring_case(name)
+}
+
+fn resolve_active_player_profile(
+    name: Option<&str>,
+    uuid: Option<&str>,
+) -> Result<ObjectRef, AdapterError> {
+    let name = name.ok_or_else(|| {
+        AdapterError::new("playerHandleForProfile requires a player name")
+    })?;
+    let uuid = uuid.ok_or_else(|| {
+        AdapterError::new("playerHandleForProfile requires a UUID string")
+    })?;
+    active_player_handle_for_profile(
+        name,
+        parse_uuid_string(uuid, "playerHandleForProfile")?,
+    )
 }
 
 /// Returns the count of players whose lifecycle has reached this worker.
@@ -1767,6 +1810,29 @@ pub(crate) fn register_player_handle_for_name_ignoring_case_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_player_handle_for_profile_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts copied Java name and UUID
+    // strings and returns one opaque jlong. The complete profile is looked up
+    // only in the worker-local lifecycle map; no server object or guard is
+    // reachable from the JNI call.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_player_handle_for_profile as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_player_handle_is_active_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -2047,6 +2113,34 @@ extern "system" fn native_player_handle_for_name_ignoring_case<'local>(
             })?)
         };
         resolve_active_player_name_ignoring_case(name.as_deref()).map(ObjectRef::to_bits)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_for_profile<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    name: JString<'local>,
+    uuid: JString<'local>,
+) -> jlong {
+    env.with_env(|env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        let name = if name.is_null() {
+            None
+        } else {
+            Some(name.try_to_string(env).map_err(|error| {
+                AdapterError::new(format!("playerHandleForProfile: {error}"))
+            })?)
+        };
+        let uuid = if uuid.is_null() {
+            None
+        } else {
+            Some(uuid.try_to_string(env).map_err(|error| {
+                AdapterError::new(format!("playerHandleForProfile: {error}"))
+            })?)
+        };
+        resolve_active_player_profile(name.as_deref(), uuid.as_deref()).map(ObjectRef::to_bits)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -2590,6 +2684,35 @@ mod tests {
             "case-insensitive lookup must still return the live generation",
         );
         assert_eq!(
+            resolve_active_player_profile(
+                Some("Alice"),
+                Some("05050505-0505-0505-0505-050505050505"),
+            ),
+            Ok(first),
+            "the complete-profile resolver must return the same worker-owned live handle",
+        );
+        assert_eq!(
+            resolve_active_player_profile(None, Some("05050505-0505-0505-0505-050505050505")),
+            Err(AdapterError::new(
+                "playerHandleForProfile requires a player name",
+            )),
+            "a null Java name must fail before a roster lookup",
+        );
+        assert_eq!(
+            resolve_active_player_profile(Some("Alice"), None),
+            Err(AdapterError::new(
+                "playerHandleForProfile requires a UUID string",
+            )),
+            "a null Java UUID must fail before a roster lookup",
+        );
+        assert_eq!(
+            resolve_active_player_profile(Some("Alice"), Some("not-a-uuid")),
+            Err(AdapterError::new(
+                "playerHandleForProfile: invalid UUID \"not-a-uuid\" (expected 36-character form)",
+            )),
+            "a malformed profile UUID must fail before a roster lookup",
+        );
+        assert_eq!(
             resolve_active_player_name_ignoring_case(None),
             Err(AdapterError::new(
                 "playerHandleForNameIgnoringCase requires a player name",
@@ -2670,6 +2793,16 @@ mod tests {
             )),
             "disconnect removes the case-insensitive reverse mapping before slot reuse",
         );
+        assert_eq!(
+            resolve_active_player_profile(
+                Some("Alice"),
+                Some("05050505-0505-0505-0505-050505050505"),
+            ),
+            Err(AdapterError::new(
+                "playerHandleForProfile: no active player named \"Alice\" with UUID 05050505-0505-0505-0505-050505050505",
+            )),
+            "disconnect removes the profile reverse mapping before a stale slot can be reused",
+        );
         let replacement = active_player_handle(&identity, &player).expect("reusable slot");
         assert_ne!(replacement, first);
         assert_eq!(
@@ -2728,6 +2861,62 @@ mod tests {
         );
         assert!(release_active_player_handle(&identity, &first_player).is_some());
         assert!(release_active_player_handle(&identity, &second_player).is_some());
+        RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn player_profile_reverse_resolver_disambiguates_the_copied_roster() {
+        let identity = lifecycle_identity("adapter", "adapter", "fixture.Adapter");
+        let first_player = PlayerIdentity::new([9; 16], "Alice");
+        let second_player = PlayerIdentity::new([10; 16], "Alice");
+        let renamed_player = PlayerIdentity::new([9; 16], "AliceRenamed");
+        RESIDENT_OBJECT_HANDLES.with(|slot| {
+            *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(3));
+        });
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
+        let first = active_player_handle(&identity, &first_player).expect("first profile handle");
+        let second = active_player_handle(&identity, &second_player).expect("second profile handle");
+        let renamed = active_player_handle(&identity, &renamed_player).expect("renamed profile handle");
+        assert_eq!(
+            resolve_active_player_name(Some("Alice")),
+            Err(AdapterError::new(
+                "playerHandleForName: multiple active players named \"Alice\"",
+            )),
+            "the unqualified name control must prove the roster is ambiguous",
+        );
+        assert_eq!(
+            resolve_active_player_uuid("09090909-0909-0909-0909-090909090909"),
+            Err(AdapterError::new(
+                "playerHandleForUuid: multiple active players with UUID 09090909-0909-0909-0909-090909090909",
+            )),
+            "the unqualified UUID control must prove the roster is ambiguous",
+        );
+        assert_eq!(
+            resolve_active_player_profile(
+                Some("Alice"),
+                Some("09090909-0909-0909-0909-090909090909"),
+            ),
+            Ok(first),
+        );
+        assert_eq!(
+            resolve_active_player_profile(
+                Some("Alice"),
+                Some("0a0a0a0a-0a0a-0a0a-0a0a-0a0a0a0a0a0a"),
+            ),
+            Ok(second),
+        );
+        assert_eq!(
+            resolve_active_player_profile(
+                Some("AliceRenamed"),
+                Some("09090909-0909-0909-0909-090909090909"),
+            ),
+            Ok(renamed),
+            "the full copied profile, unlike either field alone, has one worker-owned handle",
+        );
+        assert!(release_active_player_handle(&identity, &first_player).is_some());
+        assert!(release_active_player_handle(&identity, &second_player).is_some());
+        assert!(release_active_player_handle(&identity, &renamed_player).is_some());
         RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
         ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
     }
