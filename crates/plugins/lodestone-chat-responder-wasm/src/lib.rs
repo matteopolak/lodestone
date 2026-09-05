@@ -28,7 +28,13 @@ wit_bindgen::generate!({
 });
 
 use lodestone::plugin::logging::{log, LogLevel};
-use lodestone::plugin::types::{CommandAnchor, CommandSpec, LookIntent};
+use lodestone::plugin::types::CommandSpec;
+#[cfg(feature = "commands")]
+use lodestone::plugin::types::CommandAnchor;
+#[cfg(feature = "look")]
+use lodestone::plugin::types::LookIntent;
+#[cfg(feature = "movement")]
+use lodestone::plugin::types::MovementIntent;
 #[cfg(feature = "scheduler")]
 use lodestone::plugin::scheduler::{cancel, schedule_once, schedule_repeating};
 
@@ -37,6 +43,7 @@ use lodestone::plugin::scheduler::{cancel, schedule_once, schedule_repeating};
 /// An `AtomicU64` rather than a `static mut` because the workspace denies
 /// `unsafe_code`; a wasm guest is single-threaded, so the atomicity costs nothing
 /// and buys the borrow checker's approval.
+#[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement")))]
 static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(feature = "scheduler")]
 static REPEATS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -65,12 +72,13 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.6.0".to_string(),
+            abi: "lodestone:plugin@0.7.0".to_string(),
             commands: command_specs(),
         }
     }
 
     fn on_tick(events: Vec<Event>) -> Vec<Action> {
+        let _ = &events;
         #[cfg(feature = "spin")]
         return spin_forever();
 
@@ -86,7 +94,16 @@ impl Guest for ChatResponder {
             pitch: -12.0,
         }))];
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look")))]
+        #[cfg(feature = "movement")]
+        return vec![Action::SetMovement(Some(MovementIntent {
+            forward: 1.0,
+            strafe: -1.0,
+            jump: true,
+            sneak: true,
+            sprint: true,
+        }))];
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement")))]
         return respond(events);
     }
 
@@ -272,7 +289,7 @@ fn attempt_network() -> Vec<Action> {
     ))]
 }
 
-#[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network")))]
+#[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement")))]
 fn respond(events: Vec<Event>) -> Vec<Action> {
     {
         let mut actions = Vec::new();

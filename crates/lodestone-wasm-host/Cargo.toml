@@ -66,6 +66,11 @@ lodestone-model = { workspace = true }
 # therefore invisible to every crate below this one, which is what keeps the tier
 # additive rather than a second API.
 lodestone-ecs = { workspace = true }
+# The movement intent boundary is explicitly ordered after this crate's normal
+# input producer.  It still writes the ECS intent rather than synthesising an
+# outbound packet, so physics and the controller's egress remain the owners of
+# simulation and wire shape.
+lodestone-controller = { path = "../lodestone-controller" }
 lodestone-command = { workspace = true }
 bevy_app = { workspace = true }
 bevy_ecs = { workspace = true }

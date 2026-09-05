@@ -75,6 +75,11 @@ pub enum Capability {
     /// facing changes simulation and movement-packet output, not merely a
     /// cosmetic arm animation.
     ActLook,
+    /// Override this tick's copied local-player movement intent.
+    ///
+    /// The guest cannot construct a position or packet: physics consumes the
+    /// copied intent and the controller remains the sole egress producer.
+    ActMovement,
     /// Decide whether the client may commit one of its typed player actions.
     ///
     /// This is data-flow gated at the synchronous host callback: a guest without
@@ -111,6 +116,7 @@ impl Capability {
         Self::ActChat,
         Self::ActInteract,
         Self::ActLook,
+        Self::ActMovement,
         Self::VetoActions,
         Self::RegisterCommands,
         Self::FsRead,
@@ -128,6 +134,7 @@ impl Capability {
             Self::ActChat => "act:chat",
             Self::ActInteract => "act:interact",
             Self::ActLook => "act:look",
+            Self::ActMovement => "act:movement",
             Self::VetoActions => "veto:actions",
             Self::RegisterCommands => "commands:register",
             Self::FsRead => "fs:read",
@@ -160,6 +167,7 @@ impl Capability {
             | Self::ActChat
             | Self::ActInteract
             | Self::ActLook
+            | Self::ActMovement
             | Self::VetoActions
             | Self::RegisterCommands => false,
         }

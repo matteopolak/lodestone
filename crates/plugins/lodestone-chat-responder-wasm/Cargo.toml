@@ -71,6 +71,10 @@ commands = []
 # The intent-boundary fixture. It owns the copied local-player look target for
 # one tick, which the host must route through the normal physics/send path.
 look = []
+# The movement fixture drives one copied input through the host's controller,
+# physics, and egress path. It is separate from `look` so each gate has one
+# intentional guest action.
+movement = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is

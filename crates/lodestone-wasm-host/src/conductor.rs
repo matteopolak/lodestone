@@ -49,7 +49,7 @@ use bevy_ecs::prelude::{
 use lodestone_command::StringArgument;
 use lodestone_ecs::commands::{CommandOutcome, CommandRegistry, PluginCommand, PluginCommandsPlugin};
 use lodestone_ecs::events::{GameEvent, GameEventBusPlugin};
-use lodestone_ecs::player::{ActionQueue, LocalPlayer, LookIntent};
+use lodestone_ecs::player::{ActionQueue, LocalPlayer, LookIntent, MovementIntent};
 use lodestone_ecs::veto::{ActionVetoPlugin, ActionVetoes, Verdict};
 // `TickSet` via the crate root, not `lodestone_ecs::sets::TickSet`: the `sets` module
 // itself is private and only its re-exports are public.
@@ -82,8 +82,9 @@ pub struct WasmPlugins {
 ///
 /// They are kept out of [`ActionQueue`] because they are not protocol actions:
 /// the local-player systems own validation, simulation, and packet production.
-/// The vector preserves guest/load order, and the final look request wins just as
-/// successive native writes to the same optional component do.
+/// The vector preserves guest/load order. Look and movement are independently
+/// last-wins, so one guest can set both in one output list without one action
+/// accidentally erasing the other.
 #[derive(Resource, Default, Debug)]
 pub struct PendingWasmIntents(Vec<IntentAction>);
 
@@ -290,6 +291,12 @@ impl Plugin for WasmHostPlugin {
                 .in_set(TickSet::Intent)
                 .before(lodestone_ecs::player::apply_look_intent),
         );
+        app.add_systems(
+            GameTick,
+            apply_wasm_movement_intents
+                .in_set(TickSet::Intent)
+                .after(lodestone_controller::ecs::compute_movement_intent),
+        );
     }
 }
 
@@ -345,7 +352,7 @@ pub fn drive_wasm_plugins(
     intents.0.extend(lowered_intents);
 }
 
-/// Apply the guest-owned intent updates before the existing ECS look consumer.
+/// Apply guest-owned look updates before the existing ECS look consumer.
 ///
 /// A `LookIntent` is optional on the local player, so inserting and removing it
 /// is the ownership hand-off. `Commands` remains correct here because the explicit
@@ -353,16 +360,17 @@ pub fn drive_wasm_plugins(
 /// that reader; the integration gate asserts the resulting rotation reaches the
 /// normal outbound movement action in this same `GameTick`.
 fn apply_wasm_intents(
-    mut pending: ResMut<PendingWasmIntents>,
+    pending: bevy_ecs::prelude::Res<PendingWasmIntents>,
     players: Query<Entity, With<LocalPlayer>>,
     mut commands: Commands,
 ) {
-    let Some(last) = pending.0.pop() else {
+    let last = pending.0.iter().rev().find_map(|intent| match intent {
+        IntentAction::Look(look) => Some(*look),
+        IntentAction::Movement(_) => None,
+    });
+    let Some(look) = last else {
         return;
     };
-    pending.0.clear();
-
-    let IntentAction::Look(look) = last;
     for entity in &players {
         match look {
             Some(look) => {
@@ -372,5 +380,30 @@ fn apply_wasm_intents(
                 commands.entity(entity).remove::<LookIntent>();
             }
         };
+    }
+}
+
+/// Override the normal controller's copied input after it writes and before
+/// physics reads it. `using_item` is deliberately retained from that controller
+/// output, because a guest has no authority to forge item-use state.
+fn apply_wasm_movement_intents(
+    mut pending: ResMut<PendingWasmIntents>,
+    mut players: Query<&mut MovementIntent, With<LocalPlayer>>,
+) {
+    let movement = pending.0.iter().rev().find_map(|intent| match intent {
+        IntentAction::Movement(movement) => Some(*movement),
+        IntentAction::Look(_) => None,
+    });
+    pending.0.clear();
+
+    let Some(Some(movement)) = movement else {
+        return;
+    };
+    for mut intent in &mut players {
+        intent.0.forward = movement.forward;
+        intent.0.strafe = movement.strafe;
+        intent.0.jump = movement.jump;
+        intent.0.sneak = movement.sneak;
+        intent.0.sprint = movement.sprint;
     }
 }
