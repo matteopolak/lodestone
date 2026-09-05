@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, Rotation, Vec3};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_20_6::adapter_for;
 
@@ -91,6 +91,41 @@ async fn registry_selected_protocol_766_reaches_play_and_confirms_a_block_break(
         .await
         .expect("block update reaches the protocol-766 client");
 
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn movement_recenters_the_hosted_view_onto_the_next_chunk() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(766).unwrap();
+    let source = Arc::new(FixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, _) = ClientBuilder::new(
+        ServerAddress { host: "memory".to_owned(), port: 0 },
+        LoginProfile { username: "MoveFixture".to_owned(), uuid: uuid::Uuid::new_v4() },
+        Box::new(adapter_for(766)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(client_io);
+    handle.wait_for_spawn(Duration::from_secs(10)).await.unwrap();
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
+        .await
+        .unwrap();
+    handle.send_action(ClientAction::Move {
+        pos: Vec3::new(24.0, 100.0, 8.0),
+        rotation: Rotation::new(90.0, 0.0),
+        on_ground: true,
+        horizontal_collision: false,
+    })
+    .unwrap();
+    let next = lodestone_client::ChunkPos::new(1, 0);
+    handle
+        .wait_for_chunk(next, Duration::from_secs(10))
+        .await
+        .expect("the position packet recenters the hosted view on chunk (1, 0)");
+    let flower = lodestone_data::block_states::state_id("minecraft:dandelion").unwrap();
+    assert_eq!(handle.block_at(BlockPos::new(24, 100, 8)), Some(flower));
     handle.shutdown();
     server.shutdown().await;
 }

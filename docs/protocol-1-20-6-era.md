@@ -249,7 +249,10 @@ The same feature registers `V766ServerProtocol` for hosting protocol 766.
 ## Hosting
 
 `server_protocol::V766ServerProtocol` implements offline login, configuration,
-the Overworld join and teleport, chunk batches, and block breaking updates.
+the Overworld join and teleport, chunk batches, player movement, and block
+breaking updates. All four Play movement shapes preserve the position,
+optional rotation, and grounded status the shared server uses to recenter the
+view and check interactions.
 The configuration fixture in `src/generated/hosting-configuration.txt` contains
 all eight synchronized registries, plus features and tags, recorded directly
 from the headless 1.20.6 server. Every registry entry has its NBT payload, so no
@@ -277,8 +280,9 @@ Omit `LODESTONE_REGEN` to compare the committed fixture against a fresh capture.
 Each capture is bounded to 30 seconds and performs no gameplay actions.
 Its hermetic companion reads an actual registry-selected hosted connection and
 requires every recorded payload to arrive before the finish signal.
-`tests/server_integration.rs` checks the actual
-registry-selected server/client path through Play, chunk receipt and block break.
+`tests/server_integration.rs` checks the actual registry-selected server/client
+path through Play, chunk receipt, movement-driven view recentering, and block
+break.
 Its enclosed-room lighting gate checks sky 0 inside and 15 outside, torch 14,
 adjacent air 13, and extinction after removing the torch. Fixture opacity and
 emission are cross-checked against the protocol-766 block report in the vendored
