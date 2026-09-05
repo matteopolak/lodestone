@@ -26,7 +26,7 @@
 //! `docs/container-cost-screens.md` already documents for the anvil/
 //! enchanting-table costs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lodestone_entity::equipment::EquipmentSlot;
 use lodestone_model::{ItemStack, RecipeBookType};
@@ -109,6 +109,11 @@ pub struct PlayerInventory {
     selected_recipe_index: Option<i32>,
     /// Per-player recipe-book tab settings received from the client.
     recipe_book_settings: RecipeBookSettings,
+    /// Recipe-display ids whose join-time highlight this client has already
+    /// acknowledged. The ids are session-local, like the corresponding
+    /// recipe-book packet, so this belongs to the connection inventory rather
+    /// than persistent player data.
+    recipe_book_seen: HashSet<i32>,
     /// Menu-index → highlighted bundle-content index, from
     /// bundle-selection input (`crate::container_click`'s
     /// `SelectedBundleIndex`). This struct is the per-connection menu
@@ -133,6 +138,7 @@ impl Default for PlayerInventory {
             enchant_seed: 0,
             selected_recipe_index: None,
             recipe_book_settings: RecipeBookSettings::default(),
+            recipe_book_seen: HashSet::new(),
             selected_bundle: HashMap::new(),
         }
     }
@@ -447,6 +453,22 @@ impl PlayerInventory {
         self.recipe_book_settings.reported = true;
     }
 
+    /// Whether the server should mark this recipe-book entry as new in this
+    /// connection's next book snapshot. Callers validate `recipe_index` against
+    /// the book they are about to encode; this state only answers whether a
+    /// valid entry remains unacknowledged.
+    #[must_use]
+    pub fn recipe_book_entry_is_highlighted(&self, recipe_index: i32) -> bool {
+        !self.recipe_book_seen.contains(&recipe_index)
+    }
+
+    /// Folds a validated recipe-book seen acknowledgement into this connection.
+    /// Repeated packets are idempotent because the client can populate the same
+    /// button more than once while its recipe panel remains open.
+    pub fn mark_recipe_book_entry_seen(&mut self, recipe_index: i32) {
+        self.recipe_book_seen.insert(recipe_index);
+    }
+
     /// Closes the open workstation and returns whatever was in it, so the
     /// caller can give it back to the player — same "do not silently delete
     /// items on close" story as [`take_table_crafting`](Self::take_table_crafting).
@@ -734,6 +756,23 @@ mod tests {
         let settings = inv.recipe_book_settings();
         assert!(!settings.blast_furnace.open);
         assert!(settings.blast_furnace.filtering);
+    }
+
+    #[test]
+    fn recipe_book_seen_fold_clears_only_that_entries_highlight() {
+        let mut inv = PlayerInventory::new();
+        assert!(inv.recipe_book_entry_is_highlighted(12));
+        assert!(inv.recipe_book_entry_is_highlighted(13));
+
+        inv.mark_recipe_book_entry_seen(12);
+        assert!(!inv.recipe_book_entry_is_highlighted(12));
+        assert!(inv.recipe_book_entry_is_highlighted(13));
+
+        inv.mark_recipe_book_entry_seen(12);
+        assert!(
+            !inv.recipe_book_entry_is_highlighted(12),
+            "a repeated seen packet must not restore a highlight"
+        );
     }
 
     #[test]

@@ -82,6 +82,7 @@ fn shaped_entry_matches_the_stream_codecs_byte_for_byte() {
         group: Some(11),
         category: "crafting_redstone",
         crafting_requirements: vec![vec![ident("minecraft:stick")], vec![ident("minecraft:stone")]],
+        highlight: true,
     };
 
     let (packet_id, body) = payload(V770ServerProtocol.encode_recipe_book_add(&[entry], true));
@@ -128,7 +129,7 @@ fn shaped_entry_matches_the_stream_codecs_byte_for_byte() {
     want.extend(varint(item("minecraft:stick")));
     want.extend(varint(2));
     want.extend(varint(item("minecraft:stone")));
-    want.push(0); // flags
+    want.push(2); // highlight, without notification
     want.push(1); // replace
 
     assert_eq!(body, want, "recipe_book_add body");
@@ -150,6 +151,7 @@ fn shapeless_entry_and_absent_optionals() {
         group: None,
         category: "crafting_building_blocks",
         crafting_requirements: Vec::new(),
+        highlight: false,
     };
 
     let (_, body) = payload(V770ServerProtocol.encode_recipe_book_add(&[entry], false));

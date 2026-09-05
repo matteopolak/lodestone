@@ -3873,16 +3873,6 @@ where
                 let mut advancements = AdvancementManager::builtin();
                 let initial = advancements.initial_update(player_uuid, true);
                 apply(conn, &mut state, proto.encode_update_advancements(&initial)).await?;
-                // Send the recipe book with `replace: true`. The client uses
-                // the resulting list to resolve `PLACE_RECIPE` selections;
-                // protocols without an encoder treat this as a no-op, just as
-                // they do for the advancement snapshot above.
-                apply(
-                    conn,
-                    &mut state,
-                    proto.encode_recipe_book_add(crate::crafting::recipe_book_entries(), true),
-                )
-                .await?;
                 let total_ms = t_cfg.elapsed().as_millis();
                 // `saturating_sub`, not `- 1`: `as_millis()` is `u128`, and over an
                 // in-memory or loopback transport the welcome phase completes in
@@ -3987,6 +3977,7 @@ where
             | ServerBound::ContainerClicked { .. }
             | ServerBound::RecipePlaced { .. }
             | ServerBound::RecipeBookSettingsChanged { .. }
+            | ServerBound::RecipeBookRecipeSeen { .. }
             | ServerBound::SeenAdvancements { .. }
             | ServerBound::ResourcePackResponse { .. }
             | ServerBound::PlayerLoaded
@@ -9965,6 +9956,38 @@ fn swing_action(hand: u8) -> u8 {
     if hand == 1 { 3 } else { 0 }
 }
 
+/// Folds one recipe-book acknowledgement and returns the one-entry update that
+/// exposes the cleared flag back to the client. The wire id is an opaque
+/// position in the server-owned *advertised* entries, not every recipe in the
+/// corpus: entries without a display must not manufacture acknowledgement
+/// state from a malformed packet.
+fn record_recipe_book_seen(
+    inventory: &mut PlayerInventory,
+    recipe_index: i32,
+) -> Option<crate::crafting::RecipeBookEntry> {
+    let mut entry = crate::crafting::recipe_book_entries()
+        .iter()
+        .find(|entry| entry.id == recipe_index)?
+        .clone();
+    inventory.mark_recipe_book_entry_seen(recipe_index);
+    entry.highlight = false;
+    Some(entry)
+}
+
+/// Makes a connection-specific recipe-book snapshot from the shared immutable
+/// corpus. A fresh display id highlights until this connection acknowledges it;
+/// the clone keeps that mutable flag out of the shared recipe definitions.
+fn recipe_book_snapshot(inventory: &PlayerInventory) -> Vec<crate::crafting::RecipeBookEntry> {
+    crate::crafting::recipe_book_entries()
+        .iter()
+        .cloned()
+        .map(|mut entry| {
+            entry.highlight = inventory.recipe_book_entry_is_highlighted(entry.id);
+            entry
+        })
+        .collect()
+}
+
 /// Decodes and applies one inbound packet once the connection is in
 /// [`State::Play`]: matches a keep-alive echo against the pending challenge
 /// (clearing it, so the next keep-alive tick does not mistake a live client
@@ -11035,6 +11058,11 @@ where
             filtering,
         } => {
             inventory.set_recipe_book_settings(book_type, open, filtering);
+        }
+        ServerBound::RecipeBookRecipeSeen { recipe_index } => {
+            if let Some(entry) = record_recipe_book_seen(inventory, recipe_index) {
+                apply(conn, state, proto.encode_recipe_book_add(&[entry], false)).await?;
+            }
         }
         ServerBound::SeenAdvancements { tab } => {
             let selected = advancements.select_tab(player_uuid, tab);
@@ -12641,6 +12669,15 @@ where
     let mut inventory = saved_player
         .as_ref()
         .map_or_else(PlayerInventory::default, crate::player_data::PlayerData::to_inventory);
+    // Send the book only after this connection's inventory exists: its
+    // highlight flags are a per-connection acknowledgement state, while the
+    // corpus itself is shared. The client uses the ids for `PLACE_RECIPE` too.
+    apply(
+        conn,
+        &mut state,
+        proto.encode_recipe_book_add(&recipe_book_snapshot(&inventory), true),
+    )
+    .await?;
     let mut open_container: Option<OpenContainer> = None;
     let mut open_merchant: Option<OpenMerchant> = None;
     let mut container_sync = ContainerSync::default();
@@ -15180,6 +15217,12 @@ where
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
     let mut inventory = PlayerInventory::default();
+    apply(
+        conn,
+        &mut state,
+        proto.encode_recipe_book_add(&recipe_book_snapshot(&inventory), true),
+    )
+    .await?;
     // Opening and clicking a window are packet-driven here. Background
     // container synchronization requires the native container-sync timer and
     // is not run by the browser loop.
@@ -15494,6 +15537,47 @@ mod tests {
     use crate::protocol::MetadataField;
     use lodestone_model::{Rotation, Vec3};
     use uuid::Uuid;
+
+    #[test]
+    fn recipe_book_seen_accepts_only_advertised_display_ids() {
+        let mut inventory = PlayerInventory::new();
+        let valid = crate::crafting::recipe_book_entries()
+            .first()
+            .expect("the bundled recipe book has an entry")
+            .id;
+        assert!(inventory.recipe_book_entry_is_highlighted(valid));
+        assert!(
+            recipe_book_snapshot(&inventory)
+                .into_iter()
+                .find(|entry| entry.id == valid)
+                .is_some_and(|entry| entry.highlight),
+            "the join snapshot must expose an unacknowledged entry as highlighted"
+        );
+
+        let update = record_recipe_book_seen(&mut inventory, valid)
+            .expect("an advertised display id must fold into a client update");
+        assert!(
+            !inventory.recipe_book_entry_is_highlighted(valid),
+            "the validated packet must fold into the connection state"
+        );
+        assert!(
+            !update.highlight,
+            "the response must expose the cleared flag to the client read-model"
+        );
+        assert!(
+            recipe_book_snapshot(&inventory)
+                .into_iter()
+                .find(|entry| entry.id == valid)
+                .is_some_and(|entry| !entry.highlight),
+            "the next snapshot must expose the acknowledgement to the client"
+        );
+
+        assert!(record_recipe_book_seen(&mut inventory, i32::MAX).is_none());
+        assert!(
+            inventory.recipe_book_entry_is_highlighted(i32::MAX),
+            "an id absent from the advertised corpus must not manufacture seen state"
+        );
+    }
 
     struct RefusingChunkProtocol;
 

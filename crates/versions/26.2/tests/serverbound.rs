@@ -23,6 +23,8 @@ mod serverbound_player_loaded_decode;
 mod serverbound_protocol_hygiene;
 #[path = "serverbound/serverbound_recipe_bundle.rs"]
 mod serverbound_recipe_bundle;
+#[path = "serverbound/serverbound_recipe_seen_decode.rs"]
+mod serverbound_recipe_seen_decode;
 #[path = "serverbound/serverbound_recipe_settings_decode.rs"]
 mod serverbound_recipe_settings_decode;
 #[path = "serverbound/serverbound_resource_pack_decode.rs"]
