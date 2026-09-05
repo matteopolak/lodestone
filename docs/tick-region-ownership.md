@@ -102,6 +102,14 @@ old entity-id slots before it updates motion/fuses or queues a detonation. The
 existing `MobSim::take_detonations` drain remains the production consumer for
 the block-destruction and network effects, so a reversed owner completion
 cannot reorder visible explosions.
+Experience orbs have a separate motion ownership boundary inside
+`MobSim::tick_orbs`, reached from the live `MobSim::tick_with_terrain` pass.
+`MobSim::tick_orb_owner_batches` clones each tick-start orb under its source
+chunk owner, and `MobSim::apply_orb_tick_owner_batches` rejects incomplete,
+duplicate, or mixed-plan completions before changing the live orb map. The
+central writer restores entity-id slots before applying expiry. Its existing
+global merge scan remains afterwards, so an orb pair crossing an owner edge
+still merges in the same id order rather than the order their owners finish.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
@@ -213,6 +221,15 @@ the live map or queue a detonation while selecting an owner. The central
 consumer must reject missing or duplicate owners and restore every serial slot
 before changing motion, fuses, or the detonation queue. The current live tick
 call remains `MobSim::tick_tnt`, so no extra tick-loop wiring is needed.
+
+Keep experience-orb motion behind `MobSim::tick_orb_owner_batches` and
+`MobSim::apply_orb_tick_owner_batches`. The batch plan must retain the
+tick-start chunk owner and entity-id slot for every orb, including an orb that
+expires during its owner pass. Do not merge orbs from a worker: the central
+writer must first validate the complete unique completion set, restore serial
+slots, and only then let `MobSim::tick_orbs` run the existing id-ordered merge
+scan. Preserve the reversed-completion, missing-owner, and duplicate-owner
+controls when changing this boundary.
 
 Do not drain a scheduled queue directly from a future owner worker. Keep the
 world-wide queue comparator as the tick-start selector, return one completion
