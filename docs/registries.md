@@ -123,6 +123,13 @@ uses `StateId::block`. The resulting `Block::name` becomes the event's `Resource
 26.2 state id enters that path. A legacy table miss is static import data, not a dynamic registry
 key, so air is the established packet-family fallback and no plugin or data-pack identifier is
 discarded there.
+
+Portal-overlap detection in `lodestone-shell` is another in-process boundary: the chunk snapshot
+supplies its raw state id, validates it once with `StateId::new`, then passes `StateId` to the
+classifier. The classifier compares `StateId::block` with `Block::NetherPortal`, covering both
+axis states without spelling a block name or admitting an out-of-census snapshot value. This is
+not a dynamic-registry decision: a snapshot value outside the built-in census fails closed, while
+plugin or data-pack identifiers remain in their owning registry paths.
 The raw block-state table keeps its first field as the alphabetical block index required by
 the name-keyed state report, but it does **not** carry a second block-name column: lookup
 resolves that field through `generated_block_enum::REGISTRY_IDS_BY_NAME` into the one
