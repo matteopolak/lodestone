@@ -779,6 +779,15 @@ pub enum ServerBound {
         /// its own clock — so the server must not reinterpret or clamp it.
         time: i64,
     },
+    /// The reply to a server-originated `ping` control packet.
+    ///
+    /// Its fixed-width id is separate from the keep-alive challenge and has
+    /// no matching server-side request state. The connection consumes it to
+    /// preserve the protocol's no-output acknowledgement behaviour.
+    Pong {
+        /// The client-echoed control-ping id.
+        id: i32,
+    },
     /// The client acknowledged login success. This is the server-side signal
     /// to move the connection into [`State::Configuration`] and start sending
     /// configuration-phase directives, mirroring

@@ -126,6 +126,9 @@ const PLAYER_INPUT_C2S: i32 = 60;
 const PING_REQUEST_C2S: i32 = 91;
 /// Stand-in pong response — the `time` value is echoed back unchanged.
 const PONG_RESPONSE_S2C: i32 = 92;
+/// Stand-in reply to a server-originated control ping. Its only observable
+/// server effect is that the Play connection remains usable.
+const PONG_C2S: i32 = 93;
 
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
 /// tests are about packet scheduling, not terrain, so real worldgen would
@@ -364,6 +367,12 @@ impl ServerProtocol for FakeProtocol {
                 let mut r = Reader::new(payload);
                 ServerBound::PingRequest {
                     time: r.i64().expect("ping time"),
+                }
+            }
+            State::Play if packet_id == PONG_C2S => {
+                let mut r = Reader::new(payload);
+                ServerBound::Pong {
+                    id: r.i32().expect("pong id"),
                 }
             }
             _ => ServerBound::Ignored,
@@ -1166,6 +1175,16 @@ async fn send_ping_request(client: &mut Connection<DuplexStream>, time: i64) {
         .expect("send ping request");
 }
 
+/// Sends the stand-in `pong` acknowledgement (one big-endian `i32`).
+async fn send_pong(client: &mut Connection<DuplexStream>, id: i32) {
+    let mut w = Writer::default();
+    w.i32(id);
+    client
+        .write_packet(PONG_C2S, w.as_slice())
+        .await
+        .expect("send pong");
+}
+
 /// Sends the stand-in `set_game_rule` with one `(key, value)` entry.
 async fn send_game_rule(client: &mut Connection<DuplexStream>, key: &str, value: &str) {
     let mut w = Writer::default();
@@ -1937,6 +1956,56 @@ async fn ping_request_gets_a_pong_response_echoing_the_time() {
         pongs,
         vec![0x0102_0304_0506_0708],
         "exactly one pong, echoing the ping's own time unchanged: {reply:?}"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// A valid `pong` has no reply or stored state, but it must be consumed by the
+/// live Play dispatcher rather than merged into the malformed/unmodelled
+/// `Ignored` bucket. The following ping request is the observable control: it
+/// receives its normal reply only if that same connection stayed alive after
+/// the no-op acknowledgement.
+#[tokio::test(start_paused = true)]
+async fn pong_is_consumed_without_ending_the_play_connection() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &source,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "PongWatcher", 1).await;
+
+    send_pong(&mut client, 0x0102_0304).await;
+    let after_pong = drain_available(&mut client).await;
+    assert!(
+        after_pong.is_empty(),
+        "the acknowledgement itself must not emit a packet: {after_pong:?}"
+    );
+
+    send_ping_request(&mut client, 0x1122_3344_5566_7788).await;
+    let reply = drain_available(&mut client).await;
+    let pongs: Vec<i64> = reply
+        .iter()
+        .filter(|(id, _)| *id == PONG_RESPONSE_S2C)
+        .map(|(_, payload)| Reader::new(payload).i64().expect("pong time"))
+        .collect();
+    assert_eq!(
+        pongs,
+        vec![0x1122_3344_5566_7788],
+        "the acknowledgement has no reply, and the next Play packet remains live: {reply:?}"
     );
 
     drop(client);

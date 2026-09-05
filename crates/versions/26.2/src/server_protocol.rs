@@ -4214,15 +4214,14 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // `ServerboundPongPacket`: vanilla's own handler
-            // (vanilla's own server-side common packet listener's own handle pong) is a genuine empty
-            // method — this reply exists as a hook point for server mods, not
-            // for anything vanilla itself consumes, so decoding it and staying
-            // `Ignored` matches vanilla's own no-op rather than stranding a
-            // packet vanilla would otherwise act on.
+            // The `pong` body is a raw big-endian `i32`, distinct from the
+            // `i64` keep-alive echo. A valid reply is an accepted no-op: the
+            // server has no `ping` producer or pending-id state to update.
             State::Play if packet_id == play::serverbound::PONG => {
-                let _ = decode_full::<Pong>(payload);
-                ServerBound::Ignored
+                match decode_full::<Pong>(payload) {
+                    Some(pong) => ServerBound::Pong { id: pong.id },
+                    None => ServerBound::Ignored,
+                }
             }
             // `ServerboundCustomPayloadPacket`: a channel
             // identifier then a channel-specific payload. Where this crate used
@@ -9321,21 +9320,27 @@ mod play_ping_request_tests {
         );
     }
 
-    /// `ServerboundPongPacket`'s vanilla handler
-    /// (vanilla's own server-side common packet listener's own handle pong) is a genuine empty
-    /// method, so producing no `ServerBound` variant here is the
-    /// behaviour-matching outcome, not a stranded packet — pinned so a
-    /// future change does not "fix" this into a variant nothing should
-    /// consume.
+    /// A valid `pong` is an explicit acknowledgement boundary rather than an
+    /// ignored frame. Its raw fixed-width id must survive decoding so the
+    /// connection can deliberately consume it without inventing state.
     #[test]
-    fn decode_play_pong_is_deliberately_ignored() {
+    fn decode_play_pong_lifts_the_big_endian_id() {
         let proto = V770ServerProtocol;
-        // vanilla's own pong-response record's own id: a raw big-endian 32-bit id, distinct from
-        // `KeepAlive`'s 64-bit one (see `packets::common::Pong`'s own doc
-        // comment) — not a VarInt.
-        let body = 42i32.to_be_bytes().to_vec();
+        let body = 0x0102_0304_i32.to_be_bytes().to_vec();
         assert_eq!(
             proto.decode(State::Play, play::serverbound::PONG, &body),
+            ServerBound::Pong { id: 0x0102_0304 },
+        );
+    }
+
+    /// The acknowledgement needs its entire four-byte body. This control
+    /// distinguishes the valid no-op above from an arm that lifted a constant
+    /// id regardless of the received frame.
+    #[test]
+    fn decode_play_pong_rejects_a_short_frame() {
+        let proto = V770ServerProtocol;
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::PONG, &[1, 2, 3]),
             ServerBound::Ignored,
         );
     }

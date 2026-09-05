@@ -4022,6 +4022,7 @@ where
             | ServerBound::PaddleBoat { .. }
             | ServerBound::PickItemFromBlock { .. }
             | ServerBound::PickItemFromEntity { .. }
+            | ServerBound::Pong { .. }
             | ServerBound::TeleportToEntity { .. }
             | ServerBound::Swing { .. }
             | ServerBound::SpectatorAction { .. }
@@ -12291,6 +12292,14 @@ where
         // connection close, since a Play-state ping must not end the session.
         ServerBound::PingRequest { time } => {
             apply(conn, state, proto.encode_pong_response(time)).await?;
+        }
+        // `Pong` is the reply to the server-originated `ping` control packet.
+        // The hosted protocol has no ping producer or pending-id state, so a
+        // valid reply deliberately produces no packet or state mutation.
+        // Keeping it distinct from `Ignored` makes that accepted no-op
+        // boundary explicit without inventing acknowledgement bookkeeping.
+        ServerBound::Pong { id } => {
+            let _ = id;
         }
         // Middle-click selection uses `crate::item_use::try_pick_item` for the
         // inventory destination and slot rules. This arm resolves the clicked
