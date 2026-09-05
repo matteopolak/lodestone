@@ -83,6 +83,8 @@ pub enum InventoryClickMode {
     Pickup(InventoryClickButton),
     /// A shift-click transfer with shell-owned target ordering.
     QuickMove,
+    /// A number-key exchange with one of the nine hotbar positions.
+    HotbarSwap(u8),
 }
 
 /// The two buttons supported by [`InventoryClickMode::Pickup`].
@@ -363,6 +365,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::SelectSlot(_) => Capability::ActSelectSlot,
         Action::InventoryClick(_) => Capability::ActInventoryClick,
         Action::InventoryQuickMove(_) => Capability::ActInventoryQuickMove,
+        Action::InventoryHotbarSwap(_) => Capability::ActInventoryHotbarSwap,
     }
 }
 
@@ -443,6 +446,12 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
             LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent {
                 slot,
                 mode: InventoryClickMode::QuickMove,
+            }))
+        }
+        Action::InventoryHotbarSwap(swap) => {
+            LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent {
+                slot: swap.slot,
+                mode: InventoryClickMode::HotbarSwap(swap.hotbar),
             }))
         }
     })
@@ -652,6 +661,38 @@ mod tests {
         );
     }
 
+    /// A hotbar swap has its own capability and crosses the same copied menu
+    /// handoff; pickup/place and quick-move grants do not imply it.
+    #[test]
+    fn inventory_hotbar_swap_lowers_onto_the_shell_owned_menu_predictor() {
+        assert_eq!(
+            lower_action(
+                Action::InventoryHotbarSwap(crate::host::InventoryHotbarSwap {
+                    slot: 36,
+                    hotbar: 3,
+                }),
+                &CapabilitySet::from_iter([Capability::ActInventoryHotbarSwap]),
+            ),
+            Ok(LoweredAction::Intent(IntentAction::InventoryClick(
+                InventoryClickIntent {
+                    slot: 36,
+                    mode: InventoryClickMode::HotbarSwap(3),
+                }
+            )))
+        );
+        assert_eq!(
+            lower_action(
+                Action::InventoryHotbarSwap(crate::host::InventoryHotbarSwap {
+                    slot: 36,
+                    hotbar: 3,
+                }),
+                &CapabilitySet::from_iter([Capability::ActInventoryClick]),
+            ),
+            Err(Capability::ActInventoryHotbarSwap),
+            "pickup/place authority must not also grant hotbar swaps"
+        );
+    }
+
     /// Look ownership crosses as a copied intent, not a fabricated movement
     /// packet. The existing local-player systems own clamping, physics, and send.
     #[test]
@@ -845,6 +886,16 @@ mod tests {
             lower_action(Action::InventoryQuickMove(6), &CapabilitySet::empty()),
             Err(Capability::ActInventoryQuickMove)
         );
+        assert_eq!(
+            lower_action(
+                Action::InventoryHotbarSwap(crate::host::InventoryHotbarSwap {
+                    slot: 6,
+                    hotbar: 3,
+                }),
+                &CapabilitySet::empty(),
+            ),
+            Err(Capability::ActInventoryHotbarSwap)
+        );
     }
 
     /// Every action variant is gated by something. Trivial-looking, and it is the
@@ -869,6 +920,10 @@ mod tests {
                 button: crate::host::InventoryClickButton::Left,
             }),
             Action::InventoryQuickMove(0),
+            Action::InventoryHotbarSwap(crate::host::InventoryHotbarSwap {
+                slot: 0,
+                hotbar: 0,
+            }),
         ] {
             assert!(
                 lower_action(action.clone(), &CapabilitySet::empty()).is_err(),

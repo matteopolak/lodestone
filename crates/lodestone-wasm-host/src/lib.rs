@@ -125,7 +125,7 @@ pub use host::{
     ChatKind, ChatMessage, CommandAnchor, CommandContext,
     CommandEntity, CommandExecution, CommandOutcome, CommandPosition, CommandRotation, CommandSpec,
     DEFAULT_FUEL_PER_TICK, DEFAULT_FUEL_PER_VERDICT, DEFAULT_MEMORY_LIMIT, Event, Hand, Health,
-    HostError, LoadError, LoadedPlugin, LogLevel, LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,
+    HostError, InventoryHotbarSwap, LoadError, LoadedPlugin, LogLevel, LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,
     PlaceRejection, PlaceStatus, PluginGrantPolicy, PluginHost, PluginIdentity, PluginInfo, SectionBlocksChanged, SectionPos,
     ReloadError, VerdictDispatch,
 };

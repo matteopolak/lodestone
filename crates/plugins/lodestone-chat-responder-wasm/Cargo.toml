@@ -101,6 +101,11 @@ inventory-quick-move = []
 # The maximum ABI slot confirms the shell rejects malformed quick moves before
 # the live menu predictor can enqueue a container action.
 inventory-quick-move-invalid = []
+# A copied number-key hotbar swap through the shell's live menu predictor.
+inventory-hotbar-swap = []
+# The valid menu slot paired with an out-of-range hotbar key must be rejected by
+# the shell before the live predictor can enqueue a container action.
+inventory-hotbar-swap-invalid = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is

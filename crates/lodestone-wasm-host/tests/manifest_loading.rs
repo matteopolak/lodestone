@@ -263,7 +263,7 @@ fn a_directory_with_one_broken_plugin_still_loads_the_good_one() {
     install(
         &root,
         "broken",
-        &base.replace("lodestone:plugin@0.13.0", "lodestone:plugin@9.9.9"),
+        &base.replace("lodestone:plugin@0.14.0", "lodestone:plugin@9.9.9"),
         "chat_responder.wasm",
         &wasm,
     );
@@ -304,7 +304,7 @@ fn a_rejected_reload_keeps_the_previous_working_guest_alive() {
 
     std::fs::write(
         &manifest_path,
-        manifest.replace("lodestone:plugin@0.13.0", "lodestone:plugin@9.9.9"),
+        manifest.replace("lodestone:plugin@0.14.0", "lodestone:plugin@9.9.9"),
     )
     .expect("make the replacement manifest invalid for this host");
     let error = host
