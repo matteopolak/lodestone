@@ -71,6 +71,10 @@ pub mod diagnostics;
 pub mod display_entities;
 pub mod effects;
 pub mod entities;
+/// Account-scoped Friends polling and session ownership. The window driver
+/// feeds it selected-account and activity changes; menu code receives only its
+/// credential-free [`friends_runtime::FriendsView`].
+pub mod friends_runtime;
 pub mod gpu;
 pub mod hud;
 pub mod interact;
