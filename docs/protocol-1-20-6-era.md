@@ -290,8 +290,17 @@ relevant edits supply the shared solver with the loaded 3×3 column
 neighbourhood, so adjacent columns contribute at seams from the first load
 when already resident and throughout later relights. Missing columns retain an
 opaque seam rather than being generated for light. An edit recomputes and sends
-that whole bounded footprint. External-client acceptance and broader Play
-coverage remain unverified.
+that whole bounded footprint. Broader Play coverage remains unverified.
+
+### External-client acceptance
+
+The opt-in release-client gate covers this hosted protocol as row **766**. Run it with
+`just external-client-acceptance --protocol 766 --output /private/tmp/lodestone-v766` and an
+external driver. A passing evidence file records configuration completion, an acknowledged chunk
+batch, world join, at least one movement update, exactly one observed `start_destroy_block` result,
+and a client-initiated clean disconnect, with client-log and capture provenance. This gate was not
+launched while this documentation was updated; protocol 766 therefore remains unverified by a real
+external client until that manual run produces `report.json`.
 
 To extend hosting, change this family's `server_protocol` and add outside wire
 controls to `tests/server_protocol.rs`. `tests/hosting_configuration.rs` records

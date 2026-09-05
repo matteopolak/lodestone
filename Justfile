@@ -511,7 +511,7 @@ oracle-survival:
 # Bounded, opt-in release-client acceptance matrix. The supplied driver must
 # operate an installed release client and write the external evidence contract;
 # this command never substitutes Lodestone's own client for that artifact.
-# Example: just external-client-acceptance --protocol 47 --output /private/tmp/lodestone-v47
+# Example: just external-client-acceptance --protocol 766 --output /private/tmp/lodestone-v766
 external-client-acceptance *args:
     python3 scripts/live-oracles/external-client-acceptance.py {{args}}
 

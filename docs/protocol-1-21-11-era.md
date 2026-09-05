@@ -233,7 +233,17 @@ relevant block edits supply the shared solver with the loaded 3×3 column
 neighbourhood, so adjacent columns contribute at seams from the first load
 when already resident and throughout later relights. Missing columns retain an
 opaque seam rather than being generated for light. An edit recomputes and sends
-that whole bounded footprint. External-client acceptance remains open.
+that whole bounded footprint.
+
+### External-client acceptance
+
+The opt-in release-client gate covers this hosted protocol as row **774**. Run it with
+`just external-client-acceptance --protocol 774 --output /private/tmp/lodestone-v774` and an
+external driver. A passing evidence file records configuration completion, an acknowledged chunk
+batch, world join, at least one movement update, exactly one observed `start_destroy_block` result,
+and a client-initiated clean disconnect, with client-log and capture provenance. This gate was not
+launched while this documentation was updated; protocol 774 therefore remains unverified by a real
+external client until that manual run produces `report.json`.
 
 Extend the family's `server_protocol` and its `tests/server_protocol.rs` wire
 controls together. `tests/hosting_configuration.rs` records every synchronized
