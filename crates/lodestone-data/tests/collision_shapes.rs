@@ -245,24 +245,37 @@ fn count_matches_block_state_table() {
 }
 
 #[test]
-fn ids_are_contiguous_and_out_of_range_is_none() {
+fn validated_collision_lookup_is_total() {
+    let lookup: fn(block_states::StateId) -> &'static [collision_shapes::Aabb] =
+        collision_shapes::collision_boxes;
+    let air = block_states::StateId::new(block_states::air_state_id()).expect("air exists");
+    assert!(lookup(air).is_empty());
+    let stone = block_states::StateId::new(first_id_named("minecraft:stone").expect("stone exists"))
+        .expect("stone validates");
+    assert_eq!(lookup(stone), &[collision_shapes::Aabb { min: [0.0; 3], max: [1.0; 3] }]);
+}
+
+fn validated(id: u32) -> block_states::StateId {
+    block_states::StateId::new(id).expect("known census state")
+}
+
+#[test]
+fn validated_ids_cover_the_table_and_invalid_raw_ids_stop_at_boundary() {
     let count = collision_shapes::STATE_COUNT;
     for id in 0..count {
-        assert!(
-            collision_shapes::collision_boxes(id).is_some(),
-            "id {id} in 0..{count} did not resolve to a shape"
-        );
+        let state = block_states::StateId::new(id).expect("every census id validates");
+        let _ = collision_shapes::collision_boxes(state);
     }
-    assert!(collision_shapes::collision_boxes(count).is_none());
-    assert!(collision_shapes::collision_boxes(u32::MAX).is_none());
+    assert!(block_states::StateId::new(count).is_none());
+    assert!(block_states::StateId::new(u32::MAX).is_none());
 }
 
 #[test]
 fn air_and_stone_have_the_expected_shapes() {
     // Air: no collision at all (empty slice, not a zero box).
-    assert_eq!(collision_shapes::collision_boxes(0), Some(&[][..]));
+    assert_eq!(collision_shapes::collision_boxes(validated(0)), &[][..]);
     // Stone: a single full unit cube.
-    let stone = collision_shapes::collision_boxes(1).expect("stone resolves");
+    let stone = collision_shapes::collision_boxes(validated(1));
     assert_eq!(
         stone,
         &[collision_shapes::Aabb {
@@ -284,8 +297,8 @@ fn no_collision_blocks_are_empty() {
     ] {
         let id = first_id_named(name).unwrap_or_else(|| panic!("{name} present"));
         assert_eq!(
-            collision_shapes::collision_boxes(id),
-            Some(&[][..]),
+            collision_shapes::collision_boxes(validated(id)),
+            &[][..],
             "{name} (id {id}) must have no collision boxes"
         );
     }
@@ -307,7 +320,7 @@ fn fence_and_wall_height_is_1_5_never_1_0() {
     for name in fences_uniform {
         let mut checked = 0usize;
         for id in states_named(name) {
-            let boxes = collision_shapes::collision_boxes(id).unwrap();
+            let boxes = collision_shapes::collision_boxes(validated(id));
             assert!(
                 !boxes.is_empty(),
                 "{name} (id {id}) unexpectedly has no collision"
@@ -326,7 +339,7 @@ fn fence_and_wall_height_is_1_5_never_1_0() {
         let mut reached_1_5 = false;
         let mut checked = 0usize;
         for id in states_named(name) {
-            let boxes = collision_shapes::collision_boxes(id).unwrap();
+            let boxes = collision_shapes::collision_boxes(validated(id));
             let max_y = boxes.iter().map(|b| b.max[1]).fold(0.0f32, f32::max);
             assert!(
                 max_y == 0.0 || max_y == 1.5,
@@ -346,7 +359,7 @@ fn fence_and_wall_height_is_1_5_never_1_0() {
 #[test]
 fn soul_sand_is_0_875_tall() {
     let id = first_id_named("minecraft:soul_sand").expect("soul_sand present");
-    let boxes = collision_shapes::collision_boxes(id).unwrap();
+    let boxes = collision_shapes::collision_boxes(validated(id));
     assert_eq!(
         boxes,
         &[collision_shapes::Aabb {
@@ -361,7 +374,7 @@ fn soul_sand_is_0_875_tall() {
 fn every_shape_index_is_in_range() {
     // A corrupt STATE_SHAPE entry would panic at lookup; prove none does.
     for id in 0..collision_shapes::STATE_COUNT {
-        let _ = collision_shapes::collision_boxes(id).unwrap();
+        let _ = collision_shapes::collision_boxes(validated(id));
     }
 }
 
@@ -459,7 +472,7 @@ fn collision_shapes_distinct_count() -> usize {
         // distinct shape *contents*.
         seen.insert(format!(
             "{:?}",
-            collision_shapes::collision_boxes(id).unwrap()
+            collision_shapes::collision_boxes(validated(id))
         ));
     }
     seen.len()
@@ -469,7 +482,7 @@ fn collision_shapes_distinct_count() -> usize {
 fn distinct_shape_boxes() -> usize {
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     for id in 0..collision_shapes::STATE_COUNT {
-        let boxes = collision_shapes::collision_boxes(id).unwrap();
+        let boxes = collision_shapes::collision_boxes(validated(id));
         seen.entry(format!("{boxes:?}")).or_insert(boxes.len());
     }
     seen.values().sum()

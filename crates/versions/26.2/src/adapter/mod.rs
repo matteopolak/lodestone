@@ -1020,7 +1020,8 @@ impl VersionAdapter for V770Adapter {
         // here so a version-free consumer never names v26-2 or the data crate
         // directly. Zero-copy: `collision_shapes::Aabb` *is* `BlockAabb`, so
         // this hands back the rodata slice itself.
-        lodestone_data::collision_shapes::collision_boxes(state_id)
+        lodestone_data::block_states::StateId::new(state_id)
+            .map(lodestone_data::collision_shapes::collision_boxes)
     }
 
     fn block_name(&self, state_id: u32) -> Option<&'static str> {

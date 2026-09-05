@@ -439,7 +439,9 @@ fn outline_boxes_for(state: &str) -> &'static [lodestone_model::BlockAabb] {
 /// test. Empty for air, a fluid, and every plant.
 fn collision_boxes_for(state: &str) -> &'static [collision_shapes::Aabb] {
     let id = crate::mobs::block_state_id(state).or_else(|| block_states::state_id(state));
-    id.and_then(collision_shapes::collision_boxes).unwrap_or(&[])
+    id.and_then(block_states::StateId::new)
+        .map(collision_shapes::collision_boxes)
+        .unwrap_or(&[])
 }
 
 /// What a right-click with the held item means for this module.

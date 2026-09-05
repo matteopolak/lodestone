@@ -414,9 +414,10 @@ impl VehicleCollision<'_> {
 
 impl CollisionView for VehicleCollision<'_> {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<lodestone_physics::Aabb>) {
-        let Some(shape) = self.state_id(x, y, z).and_then(collision_shapes::collision_boxes) else {
+        let Some(state) = self.state_id(x, y, z).and_then(block_states::StateId::new) else {
             return;
         };
+        let shape = collision_shapes::collision_boxes(state);
         let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
         for b in shape {
             out.push(lodestone_physics::Aabb::new(

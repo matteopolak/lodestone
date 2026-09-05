@@ -336,9 +336,10 @@ impl CollisionView for TntCollision<'_> {
         let Some(id) = block_state_id(&name).or_else(|| block_states::state_id(&name)) else {
             return;
         };
-        let Some(shape) = lodestone_data::collision_shapes::collision_boxes(id) else {
+        let Some(state) = block_states::StateId::new(id) else {
             return;
         };
+        let shape = lodestone_data::collision_shapes::collision_boxes(state);
         let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
         for b in shape {
             out.push(Aabb::new(

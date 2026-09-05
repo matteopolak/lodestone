@@ -366,7 +366,7 @@ impl PathWorld for ChunkWorld {
             return 1.0;
         }
         self.state_id(x, y, z)
-            .and_then(|state| collision_shapes::collision_boxes(state.raw()))
+            .map(collision_shapes::collision_boxes)
             .map_or_else(
                 || if self.is_solid(x, y, z) { 1.0 } else { 0.0 },
                 |boxes| {

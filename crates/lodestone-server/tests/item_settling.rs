@@ -577,7 +577,8 @@ fn the_surface_fixtures_resolve_to_the_shapes_the_gates_assume() {
         );
         let id = lodestone_data::block_states::state_id(name)
             .unwrap_or_else(|| panic!("{name} must be in the 26.2 block-state census"));
-        let boxes = lodestone_data::collision_shapes::collision_boxes(id).unwrap_or(&[]);
+        let state = lodestone_data::block_states::StateId::new(id).expect("fixture state validates");
+        let boxes = lodestone_data::collision_shapes::collision_boxes(state);
         let top = boxes
             .iter()
             .map(|b| f64::from(b.max[1]))

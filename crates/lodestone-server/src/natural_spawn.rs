@@ -1256,7 +1256,8 @@ fn is_lava(state: &str) -> bool {
 /// `spawnCategoryForPosition` opens with.
 fn is_full_solid(state: &str) -> bool {
     block_state_id_or_default(state)
-        .and_then(lodestone_data::collision_shapes::collision_boxes)
+        .and_then(lodestone_data::block_states::StateId::new)
+        .map(lodestone_data::collision_shapes::collision_boxes)
         .is_some_and(|boxes| {
             boxes.len() == 1
                 && boxes[0].min.iter().all(|&v| v <= 0.0)

@@ -555,7 +555,7 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
         let name = block_states::block_name(id).expect("named");
         let old = match name {
             "minecraft:cobweb" | "minecraft:bamboo_sapling" | "minecraft:ladder" => false,
-            _ => shape_is_solid(collision_shapes::collision_boxes(id).expect("resolves")),
+            _ => shape_is_solid(collision_shapes::collision_boxes(StateId::new(id).expect("known state"))),
         };
         let state_id = StateId::new(id).expect("generated state id is in range");
         let truth = block_solidity::blocks_motion(state_id);
@@ -610,7 +610,7 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
             "{name} must block motion"
         );
         assert!(
-            !shape_is_solid(collision_shapes::collision_boxes(id).expect("resolves")),
+            !shape_is_solid(collision_shapes::collision_boxes(StateId::new(id).expect("known state"))),
             "{name}'s collision shape must be too thin for the geometry branch — \
              this is the false negative the census fixes"
         );
@@ -634,7 +634,7 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
             "{name} must not block motion"
         );
         assert!(
-            shape_is_solid(collision_shapes::collision_boxes(id).expect("resolves")),
+            shape_is_solid(collision_shapes::collision_boxes(StateId::new(id).expect("known state"))),
             "{name}'s collision shape must look solid to the geometry branch — \
              this is the false positive the census fixes"
         );
@@ -647,7 +647,7 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
     // what makes vanilla disagree, and the old code hard-coded that one case.
     let ladder = first_id_named("minecraft:ladder");
     let ladder_state = StateId::new(ladder).expect("ladder state is in range");
-    let boxes = collision_shapes::collision_boxes(ladder).expect("resolves");
+    let boxes = collision_shapes::collision_boxes(StateId::new(ladder).expect("known state"));
     assert!(shape_is_solid(boxes), "a ladder lands on the threshold");
     assert!(
         !block_solidity::blocks_motion(ladder_state),
@@ -678,7 +678,7 @@ fn hand_checked_solidity_rows() {
     assert!(!block_solidity::blocks_motion(
         StateId::new(cobweb).expect("cobweb state is in range")
     ));
-    assert!(collision_shapes::collision_boxes(cobweb).expect("resolves").is_empty());
+    assert!(collision_shapes::collision_boxes(StateId::new(cobweb).expect("known state")).is_empty());
     // Air blocks a nothing.
     let air = StateId::new(first_id_named("minecraft:air")).expect("air state is in range");
     assert!(!block_solidity::blocks_motion(air));

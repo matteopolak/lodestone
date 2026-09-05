@@ -6391,9 +6391,10 @@ fn placement_obstructs_placer(target: BlockPos, state: &str, feet: Vec3) -> bool
     let Some(id) = lodestone_data::block_states::state_id(state) else {
         return false;
     };
-    let Some(boxes) = lodestone_data::collision_shapes::collision_boxes(id) else {
+    let Some(state) = lodestone_data::block_states::StateId::new(id) else {
         return false;
     };
+    let boxes = lodestone_data::collision_shapes::collision_boxes(state);
     let (px0, px1) = (feet.x - 0.3, feet.x + 0.3);
     let (py0, py1) = (feet.y, feet.y + 1.8);
     let (pz0, pz1) = (feet.z - 0.3, feet.z + 0.3);
@@ -18338,9 +18339,11 @@ mod tests {
         let feet = Vec3::new(0.5, 64.0, 0.5);
         assert!(
             lodestone_data::collision_shapes::collision_boxes(
-                lodestone_data::block_states::state_id("minecraft:torch").unwrap()
+                lodestone_data::block_states::StateId::new(
+                    lodestone_data::block_states::state_id("minecraft:torch").unwrap(),
+                ).expect("torch validates")
             )
-            .is_some_and(<[_]>::is_empty),
+            .is_empty(),
             "this test's premise: a torch has no collision boxes"
         );
         assert!(!placement_obstructs_placer(target, "minecraft:torch", feet));
@@ -18386,9 +18389,9 @@ mod tests {
         let top_slab = "minecraft:oak_slab[type=top,waterlogged=false]";
         let id = lodestone_data::block_states::state_id(top_slab)
             .expect("minecraft:oak_slab[type=top,waterlogged=false] is a real 26.2 state");
-        let boxes = lodestone_data::collision_shapes::collision_boxes(id)
-            .filter(|b| !b.is_empty())
-            .expect("a top slab has real collision geometry");
+        let state = lodestone_data::block_states::StateId::new(id).expect("top slab validates");
+        let boxes = lodestone_data::collision_shapes::collision_boxes(state);
+        assert!(!boxes.is_empty(), "a top slab has real collision geometry");
         let box_min_y = boxes
             .iter()
             .map(|b| b.min[1])
