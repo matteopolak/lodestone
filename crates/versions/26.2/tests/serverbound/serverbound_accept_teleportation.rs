@@ -41,6 +41,23 @@ fn accept_teleportation_rejects_a_truncated_varint() {
 }
 
 #[test]
+fn accept_teleportation_is_ignored_outside_play() {
+    let mut payload = Writer::default();
+    payload.var_i32(0x1f_2345);
+
+    let decoded = V770ServerProtocol.decode(
+        State::Configuration,
+        play::serverbound::ACCEPT_TELEPORTATION,
+        &payload.into_vec(),
+    );
+
+    assert!(
+        matches!(decoded, ServerBound::Ignored),
+        "a Play-only acknowledgement must not affect an earlier protocol state, got {decoded:?}"
+    );
+}
+
+#[test]
 fn server_selected_id_leads_the_position_correction() {
     let id = 0x1f_2345;
     let directive = V770ServerProtocol.encode_teleport_with_id(id, 1.5, 64.0, -3.25, 90.0, -15.0);
