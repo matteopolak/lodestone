@@ -190,12 +190,17 @@ and deaths. Cross-owner completion order therefore cannot move a burn hit or
 death relative to another mob.
 Leashes make the cross-owner read boundary explicit. The leashed mob's
 tick-start chunk owns the decision, while `MobSim::tick_leash_owner_batches`
-may read a holder snapshot from another chunk, a player, or a fence without
-mutating either side. One completion is retained for every tick-start leash,
-including a leash that stays within its elastic distance. The central
-`MobSim::apply_leash_owner_batches` restores mob-vector order before applying
-pulls and detachments or allocating lead-item ids, so a snapped leash in one
-owner cannot overtake another owner's earlier action.
+copies every mob and player holder position before any worker starts. At 256
+or more leashes on native targets, those source-chunk jobs use the shared
+`run_bounded_owner_jobs` executor with at most four lanes; smaller scenes and
+browser builds use its serial arm. One completion is retained for every
+tick-start leash, including a leash that stays within its elastic distance.
+The central `MobSim::apply_leash_owner_batches` restores mob-vector order
+before applying pulls and detachments or allocating lead-item ids, so a snapped
+leash in one owner cannot overtake another owner's earlier action. Each plan
+also carries a monotonically increasing generation: incomplete, duplicate,
+mixed, stale, and replayed completions fail before the central writer mutates
+either a leash or the item registry.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
@@ -454,10 +459,14 @@ is a fixture/wiring failure, not evidence for parallelization.
 
 ## Configuration
 
-None. Chunk ownership has no tunable size. Lifecycle batches are bounded by the
-existing cache selection rather than a new queue capacity. A candidate edge
-remains an explicit measurement argument, while any useful multi-chunk worker
-size depends on profiling a populated, named workload and has not been selected.
+Chunk ownership has no tunable size. Lifecycle batches are bounded by the
+existing cache selection rather than a new queue capacity. Native leash-owner
+planning uses the bounded executor at 256 leashes and caps it at four lanes;
+that threshold is deliberately a code constant, not a server setting, because
+it is valid only for the measured dense holder-lookup scene. Browser builds
+always retain the serial arm. A candidate edge remains an explicit measurement
+argument, while any useful multi-chunk worker size depends on profiling a
+populated, named workload and has not been selected.
 The profile entry point accepts an optional tick count; its normal 128-tick run
 is fixed so counter comparisons name the same workload. The `profile-harness`
 feature is required for the fast paused-clock path and is selected by both

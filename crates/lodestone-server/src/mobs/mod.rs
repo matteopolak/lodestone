@@ -174,12 +174,13 @@ struct BurnTickEffect {
 #[derive(Debug, Clone)]
 pub(crate) struct LeashTickOwnerBatch {
     owner: EntityTickOwner,
+    plan: u64,
     expected_batch_count: usize,
     expected_effect_count: usize,
     effects: Vec<LeashTickEffect>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum LeashTickAction {
     Keep,
     Orphan,
@@ -193,6 +194,17 @@ struct LeashTickEffect {
     serial: usize,
     id: i32,
     action: LeashTickAction,
+}
+
+/// One immutable leashed-mob input owned by a source chunk for a single
+/// owner-worker pass.
+#[derive(Debug, Clone, Copy)]
+struct LeashTickInput {
+    owner: EntityTickOwner,
+    serial: usize,
+    id: i32,
+    position: Vec3,
+    holder: LeashHolder,
 }
 
 impl EntityTickEffectBatch {
@@ -324,13 +336,14 @@ fn merge_leash_tick_owner_batches(mut batches: Vec<LeashTickOwnerBatch>) -> Vec<
     let first = batches
         .first()
         .expect("leash completion must contain every tick-start owner batch");
+    let plan = first.plan;
     let expected_batch_count = first.expected_batch_count;
     let expected_effect_count = first.expected_effect_count;
     let mut owners = std::collections::HashSet::new();
     for batch in &batches {
         assert_eq!(
-            (batch.expected_batch_count, batch.expected_effect_count),
-            (expected_batch_count, expected_effect_count),
+            (batch.plan, batch.expected_batch_count, batch.expected_effect_count),
+            (plan, expected_batch_count, expected_effect_count),
             "leash completions must originate from one tick-start plan"
         );
         assert!(
@@ -3502,6 +3515,13 @@ pub struct MobSim<'w> {
     falling_blocks: HashMap<i32, TrackedFallingBlock>,
     next_id: i32,
     tick_count: u64,
+    /// The latest leash-owner plan issued from this simulation. A completion
+    /// must name this exact generation before the central writer accepts it.
+    leash_owner_plan: u64,
+    /// The newest leash-owner plan already applied by the central writer.
+    /// Keeping this separate from [`leash_owner_plan`](Self::leash_owner_plan)
+    /// rejects replayed completions even when they contain only `Keep` effects.
+    applied_leash_owner_plan: u64,
     /// Cells the last tick's item-settling pass asked [`ItemCollision`] for —
     /// see [`items_settled_probe_count`](Self::items_settled_probe_count).
     item_probe_count: u64,
@@ -4238,6 +4258,8 @@ impl<'w> MobSim<'w> {
             falling_blocks: HashMap::new(),
             next_id: 1,
             tick_count: 0,
+            leash_owner_plan: 0,
+            applied_leash_owner_plan: 0,
             item_probe_count: 0,
             pending_detonations: Vec::new(),
             pending_grazes: Vec::new(),
@@ -6589,71 +6611,119 @@ impl<'w> MobSim<'w> {
 
     /// Resolves holder positions from a shared tick-start census and groups
     /// the resulting leash decisions by the leashed mob's source chunk.
-    pub(crate) fn tick_leash_owner_batches(&self) -> Vec<LeashTickOwnerBatch> {
-        let mut batches = Vec::<LeashTickOwnerBatch>::new();
-        for i in 0..self.mobs.len() {
-            let Some(holder) = self.mobs[i].leash_holder else {
+    pub(crate) fn tick_leash_owner_batches(&mut self) -> Vec<LeashTickOwnerBatch> {
+        self.leash_owner_plan = self
+            .leash_owner_plan
+            .checked_add(1)
+            .expect("leash owner plan generation must not overflow");
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = if self.mobs.iter().filter(|mob| mob.leash_holder.is_some()).count() >= 256 {
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1)
+                .min(4)
+        } else {
+            1
+        };
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1;
+        self.tick_leash_owner_batches_with_workers(workers)
+    }
+
+    fn tick_leash_owner_batches_with_workers(
+        &self,
+        worker_count: usize,
+    ) -> Vec<LeashTickOwnerBatch> {
+        let mob_positions: Vec<_> = self
+            .mobs
+            .iter()
+            .map(|mob| (mob.id, mob.position()))
+            .collect();
+        let player_positions: Vec<_> = self
+            .players
+            .iter()
+            .filter_map(|player| player.identity.map(|identity| (identity.uuid, player.perception.position)))
+            .collect();
+        let mut jobs = Vec::<(EntityTickOwner, Vec<LeashTickInput>)>::new();
+        for (serial, mob) in self.mobs.iter().enumerate() {
+            let Some(holder) = mob.leash_holder else {
                 continue;
             };
-            let mob_pos = self.mobs[i].position();
-            let holder_pos = match holder {
-                LeashHolder::Player(uuid) => self
-                    .players
-                    .iter()
-                    .find(|p| p.identity.as_ref().map(|i| i.uuid) == Some(uuid))
-                    .map(|p| p.perception.position),
-                LeashHolder::Mob(id) => self.mobs.iter().find(|m| m.id == id).map(SimMob::position),
-                LeashHolder::Fence(pos) => Some(Vec3::new(
-                    f64::from(pos.x) + 0.5,
-                    f64::from(pos.y) + 0.5,
-                    f64::from(pos.z) + 0.5,
-                )),
-            };
-            let action = match holder_pos {
-                None => LeashTickAction::Orphan,
-                Some(holder_pos) => {
-                    let distance = dist_sqr(mob_pos, holder_pos).sqrt();
-                    if distance > LEASH_TOO_FAR_DIST {
-                        LeashTickAction::Snap(mob_pos)
-                    } else if distance > LEASH_ELASTIC_DIST {
-                        let excess = distance - LEASH_ELASTIC_DIST;
-                        let dir = Vec3::new(
-                            (holder_pos.x - mob_pos.x) / distance,
-                            (holder_pos.y - mob_pos.y) / distance,
-                            (holder_pos.z - mob_pos.z) / distance,
-                        );
-                        // Capped, so a mob yanked from far away is pulled steadily
-                        // rather than teleported in one tick — vanilla's own spring
-                        // is likewise bounded (`SPRING_DAMPENING`).
-                        let pull = excess.min(1.0) * 0.3;
-                        LeashTickAction::Pull(Vec3::new(
-                            dir.x * pull,
-                            dir.y * pull,
-                            dir.z * pull,
-                        ))
-                    } else {
-                        LeashTickAction::Keep
-                    }
-                }
-            };
-            let owner = entity_tick_owner(mob_pos);
-            let effect = LeashTickEffect {
+            let position = mob.position();
+            let owner = entity_tick_owner(position);
+            let input = LeashTickInput {
                 owner,
-                serial: i,
-                id: self.mobs[i].id,
-                action,
+                serial,
+                id: mob.id,
+                position,
+                holder,
             };
-            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
-                batch.effects.push(effect);
+            if let Some((_, inputs)) = jobs.iter_mut().find(|(candidate, _)| *candidate == owner) {
+                inputs.push(input);
             } else {
-                batches.push(LeashTickOwnerBatch {
-                    owner,
-                    expected_batch_count: 0,
-                    expected_effect_count: 0,
-                    effects: vec![effect],
-                });
+                jobs.push((owner, vec![input]));
             }
         }
+        let plan = self.leash_owner_plan;
+        let mut batches = run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
+            let effects = inputs
+                .into_iter()
+                .map(|input| {
+                    let holder_pos = match input.holder {
+                        LeashHolder::Player(uuid) => player_positions
+                            .iter()
+                            .find(|(candidate, _)| *candidate == uuid)
+                            .map(|(_, position)| *position),
+                        LeashHolder::Mob(id) => mob_positions
+                            .iter()
+                            .find(|(candidate, _)| *candidate == id)
+                            .map(|(_, position)| *position),
+                        LeashHolder::Fence(pos) => Some(Vec3::new(
+                            f64::from(pos.x) + 0.5,
+                            f64::from(pos.y) + 0.5,
+                            f64::from(pos.z) + 0.5,
+                        )),
+                    };
+                    let action = match holder_pos {
+                        None => LeashTickAction::Orphan,
+                        Some(holder_pos) => {
+                            let distance = dist_sqr(input.position, holder_pos).sqrt();
+                            if distance > LEASH_TOO_FAR_DIST {
+                                LeashTickAction::Snap(input.position)
+                            } else if distance > LEASH_ELASTIC_DIST {
+                                let excess = distance - LEASH_ELASTIC_DIST;
+                                let dir = Vec3::new(
+                                    (holder_pos.x - input.position.x) / distance,
+                                    (holder_pos.y - input.position.y) / distance,
+                                    (holder_pos.z - input.position.z) / distance,
+                                );
+                                let pull = excess.min(1.0) * 0.3;
+                                LeashTickAction::Pull(Vec3::new(
+                                    dir.x * pull,
+                                    dir.y * pull,
+                                    dir.z * pull,
+                                ))
+                            } else {
+                                LeashTickAction::Keep
+                            }
+                        }
+                    };
+                    LeashTickEffect {
+                        owner: input.owner,
+                        serial: input.serial,
+                        id: input.id,
+                        action,
+                    }
+                })
+                .collect();
+            LeashTickOwnerBatch {
+                owner,
+                plan,
+                expected_batch_count: 0,
+                expected_effect_count: 0,
+                effects,
+            }
+        });
         let batch_count = batches.len();
         let effect_count = batches.iter().map(|batch| batch.effects.len()).sum();
         for batch in &mut batches {
@@ -6673,6 +6743,15 @@ impl<'w> MobSim<'w> {
             );
             return;
         }
+        let plan = batches[0].plan;
+        assert_eq!(
+            plan, self.leash_owner_plan,
+            "leash completion must belong to the latest tick-start plan"
+        );
+        assert!(
+            plan > self.applied_leash_owner_plan,
+            "leash completion must not replay an already applied tick-start plan"
+        );
         let effects = merge_leash_tick_owner_batches(batches);
         for effect in &effects {
             assert_eq!(
@@ -6704,6 +6783,7 @@ impl<'w> MobSim<'w> {
                 }
             }
         }
+        self.applied_leash_owner_plan = plan;
     }
 
     /// Populates every mob's [`MobController`] perception inputs from this
@@ -13330,7 +13410,7 @@ mod leash_tests {
     #[test]
     #[should_panic(expected = "every tick-start owner batch exactly once")]
     fn leash_owner_batch_merge_rejects_a_missing_owner() {
-        let sim = leash_owner_fixture();
+        let mut sim = leash_owner_fixture();
         let mut batches = sim.tick_leash_owner_batches();
         batches.pop();
         let _ = merge_leash_tick_owner_batches(batches);
@@ -13339,10 +13419,102 @@ mod leash_tests {
     #[test]
     #[should_panic(expected = "may not contain one owner twice")]
     fn leash_owner_batch_merge_rejects_a_duplicate_owner() {
-        let sim = leash_owner_fixture();
+        let mut sim = leash_owner_fixture();
         let mut batches = sim.tick_leash_owner_batches();
         batches[1] = batches[0].clone();
         let _ = merge_leash_tick_owner_batches(batches);
+    }
+
+    fn dense_leash_owner_fixture(count: usize) -> MobSim<'static> {
+        let world = Box::leak(Box::new(flat_world()));
+        let mut sim = MobSim::new(world);
+        let cow = ResourceKey::from_str("minecraft:cow").expect("valid key");
+        let mut ids = Vec::with_capacity(count);
+        for serial in 0..count {
+            let base = [-0.4, 16.1, 32.1, 48.1][serial % 4];
+            ids.push(
+                sim.spawn_species(cow.clone(), Vec3::new(base, 0.5, (serial / 4) as f64 * 0.01))
+                    .id(),
+            );
+        }
+        for (serial, id) in ids.iter().copied().enumerate() {
+            sim.get_mut(id)
+                .expect("spawned")
+                .set_leash_holder(Some(LeashHolder::Mob(ids[(serial + 1) % ids.len()])));
+        }
+        sim
+    }
+
+    fn leash_effect_observation(batches: &[LeashTickOwnerBatch]) -> Vec<(usize, i32, LeashTickAction)> {
+        let mut effects: Vec<_> = batches
+            .iter()
+            .flat_map(|batch| batch.effects.iter())
+            .map(|effect| (effect.serial, effect.id, effect.action))
+            .collect();
+        effects.sort_unstable_by_key(|(serial, _, _)| *serial);
+        effects
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parallel_leash_owner_batches_match_one_lane_with_interleaved_negative_owners() {
+        let serial = dense_leash_owner_fixture(256);
+        let expected = leash_effect_observation(&serial.tick_leash_owner_batches_with_workers(1));
+
+        let parallel = dense_leash_owner_fixture(256);
+        let completed = parallel.tick_leash_owner_batches_with_workers(4);
+        assert_eq!(
+            leash_effect_observation(&completed),
+            expected,
+            "four source owners must produce the same serial slots and actions as one lane"
+        );
+        assert_eq!(
+            completed.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
+            [
+                EntityTickOwner::Chunk { cx: -1, cz: 0 },
+                EntityTickOwner::Chunk { cx: 1, cz: 0 },
+                EntityTickOwner::Chunk { cx: 2, cz: 0 },
+                EntityTickOwner::Chunk { cx: 3, cz: 0 },
+            ],
+            "the parity scene must span an interleaved negative owner plus three positive owners"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "latest tick-start plan")]
+    fn leash_owner_batches_reject_stale_plan_completions() {
+        let mut sim = leash_owner_fixture();
+        let stale = sim.tick_leash_owner_batches();
+        let _current = sim.tick_leash_owner_batches();
+        sim.apply_leash_owner_batches(stale);
+    }
+
+    #[test]
+    #[should_panic(expected = "already applied tick-start plan")]
+    fn leash_owner_batches_reject_replayed_completions() {
+        let mut sim = leash_owner_fixture();
+        let batches = sim.tick_leash_owner_batches();
+        sim.apply_leash_owner_batches(batches.clone());
+        sim.apply_leash_owner_batches(batches);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "manual dense-scene throughput measurement"]
+    fn measure_dense_leash_owner_workers() {
+        let sim = dense_leash_owner_fixture(2_048);
+        let started = std::time::Instant::now();
+        let _ = sim.tick_leash_owner_batches_with_workers(1);
+        let serial = started.elapsed();
+        let started = std::time::Instant::now();
+        let _ = sim.tick_leash_owner_batches_with_workers(4);
+        let parallel = started.elapsed();
+        eprintln!(
+            "dense_leash owners=4 leashes=2048 serial_ms={:.3} parallel_ms={:.3} speedup={:.3}",
+            serial.as_secs_f64() * 1_000.0,
+            parallel.as_secs_f64() * 1_000.0,
+            serial.as_secs_f64() / parallel.as_secs_f64()
+        );
     }
 }
 
