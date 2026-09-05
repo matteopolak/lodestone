@@ -43,7 +43,7 @@ use crate::host::{
     BreakRejection, BreakStatus, ChatKind, ChatMessage,
     CommandAnchor, CommandContext, CommandEntity, CommandExecution, CommandPosition,
     CommandRotation, EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict,
-    InventorySlotChanged, ItemStack, PlaceOutcome, PlaceRejection, PlaceStatus,
+    InventorySlotChanged, ItemStack, PlaceOutcome, PlaceRejection, PlaceStatus, SelectedItemDropMode,
     PlayerInteractVerdict, PlayerMoveVerdict,
     SectionBlocksChanged, SectionPos, VerdictContext,
 };
@@ -384,6 +384,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::InventoryHotbarSwap(_) => Capability::ActInventoryHotbarSwap,
         Action::InventoryThrow(_) => Capability::ActInventoryThrow,
         Action::InventoryDropCursor => Capability::ActInventoryDropCursor,
+        Action::DropSelectedItem(_) => Capability::ActDropSelectedItem,
     }
 }
 
@@ -484,6 +485,10 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
         Action::InventoryDropCursor => {
             LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent::DropCursor))
         }
+        Action::DropSelectedItem(mode) => LoweredAction::Client(match mode {
+            SelectedItemDropMode::One => ClientAction::DropSelectedItem,
+            SelectedItemDropMode::Stack => ClientAction::DropSelectedItemStack,
+        }),
     })
 }
 
@@ -773,6 +778,35 @@ mod tests {
             ),
             Err(Capability::ActInventoryThrow),
             "pickup/place authority must not also grant slot throws"
+        );
+    }
+
+    /// Selected-item drops are a bounded mode, while the live client retains
+    /// ownership of the selected stack and the protocol action.
+    #[test]
+    fn selected_item_drop_lowers_onto_the_real_client_action() {
+        let granted = CapabilitySet::from_iter([Capability::ActDropSelectedItem]);
+        assert_eq!(
+            lower_action(
+                Action::DropSelectedItem(SelectedItemDropMode::One),
+                &granted,
+            ),
+            Ok(LoweredAction::Client(ClientAction::DropSelectedItem))
+        );
+        assert_eq!(
+            lower_action(
+                Action::DropSelectedItem(SelectedItemDropMode::Stack),
+                &granted,
+            ),
+            Ok(LoweredAction::Client(ClientAction::DropSelectedItemStack))
+        );
+        assert_eq!(
+            lower_action(
+                Action::DropSelectedItem(SelectedItemDropMode::One),
+                &CapabilitySet::default_policy(),
+            ),
+            Err(Capability::ActDropSelectedItem),
+            "selected-item drops need their own explicit capability"
         );
     }
 

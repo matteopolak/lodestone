@@ -156,6 +156,16 @@ fn inventory_throw_host_policy() -> CapabilitySet {
     policy
 }
 
+fn drop_selected_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActDropSelectedItem])
+}
+
+fn drop_selected_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActDropSelectedItem);
+    policy
+}
+
 fn inventory_event() -> GameEvent {
     GameEvent(ClientEvent::InventorySlotChanged {
         slot: 4,
@@ -350,6 +360,68 @@ fn an_action_the_guest_was_not_granted_is_refused_and_counted() {
         "the refusal must be counted — a silent drop is the failure this counter exists to \
          make visible"
     );
+}
+
+/// A separately-built guest chooses the complete selected stack drop mode, and
+/// the host lowers it onto the real client action queue without exposing an
+/// item handle or constructing protocol data itself.
+#[test]
+fn a_wasm_selected_item_drop_reaches_the_real_action_queue() {
+    let wasm = support::build_example_plugin(&["drop-selected-item"]);
+    let mut host = PluginHost::new(drop_selected_host_policy()).expect("engine");
+    host.load_file("drop-selected", &wasm, &drop_selected_capabilities())
+        .expect("the selected-item drop fixture must load");
+
+    let mut app = Sim::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    let sim = Sim::from_app(app, Config::default());
+    let mut world = sim.ecs().write();
+    world.run_schedule(GameTick);
+
+    assert!(
+        world
+            .resource::<ActionQueue>()
+            .0
+            .iter()
+            .any(|action| matches!(action, ClientAction::DropSelectedItemStack)),
+        "the guest selected-item mode must reach the real action queue: {:?}",
+        world.resource::<ActionQueue>().0
+    );
+    assert_eq!(world.resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// The same guest still returns its action when the new capability is withheld;
+/// an empty queue plus the refusal counter proves the data-flow gate.
+#[test]
+fn a_wasm_selected_item_drop_without_its_capability_is_refused() {
+    let wasm = support::build_example_plugin(&["drop-selected-item"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "drop-selected",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log]),
+    )
+    .expect("the guest remains loadable when the action grant is withheld");
+
+    let mut app = Sim::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    let sim = Sim::from_app(app, Config::default());
+    let mut world = sim.ecs().write();
+    world.run_schedule(GameTick);
+
+    assert!(
+        !world
+            .resource::<ActionQueue>()
+            .0
+            .iter()
+            .any(|action| matches!(
+                action,
+                ClientAction::DropSelectedItem | ClientAction::DropSelectedItemStack
+            )),
+        "a refused selected-item drop must not reach the action queue: {:?}",
+        world.resource::<ActionQueue>().0
+    );
+    assert_eq!(world.resource::<WasmPlugins>().refused_actions(), 1);
 }
 
 /// A separately-built guest claims the copied look intent, and the existing

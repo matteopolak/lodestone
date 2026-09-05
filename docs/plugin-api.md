@@ -363,8 +363,11 @@ The ABI includes copied look and movement intent plus one-shot placement and a d
 inventory-click action: the guest supplies only a `u16` menu slot and left/right button. The shell
 checks that slot against the active menu, then calls the existing client predictor; state id, cursor,
 changed-slot list, cancellation, and packet egress never cross the boundary. The guest cannot provide a
-world handle, block state, held item, prediction sequence, or raw packet. Placement returns a finite,
-generation-bounded result only to a guest granted `observe:place`; a multi-tick break claim remains
+world handle, block state, held item, prediction sequence, or raw packet. The same ABI also includes a
+separate `drop-selected-item(one|stack)` action guarded by `act:drop-selected-item`; it carries only
+the mode, while the client resolves the selected stack and owns the corresponding action egress.
+Placement returns a finite, generation-bounded result only to a guest granted `observe:place`; a
+multi-tick break claim remains
 outside the ABI because it needs a separate cancellation and ownership contract. Command
 registration/invocation, async equivalents, `Monitor`-tier enforcement for a guest, and declared
 load-order dependencies are all named gaps. The native windowed client installs the WASM conductor
