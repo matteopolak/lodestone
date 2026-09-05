@@ -107,6 +107,51 @@ pub(super) struct LiveBolt {
     pub(super) ground_pos: BlockPos,
 }
 
+/// The chunk that owns a bolt at the start of its tick.
+///
+/// This is a deterministic hand-off boundary, not a worker assignment. The
+/// central application step remains the only writer to the live bolt map,
+/// fire-attempt queue, and mob-effect path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LightningTickOwner {
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl LightningTickOwner {
+    fn for_position(position: Vec3) -> Self {
+        Self::Chunk {
+            cx: (position.x.floor() as i32).div_euclid(16),
+            cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+}
+
+/// One completed lightning-owner batch.
+#[derive(Debug, Clone)]
+pub(crate) struct LightningTickOwnerBatch {
+    owner: LightningTickOwner,
+    expected_batch_count: usize,
+    effects: Vec<LightningTickEffect>,
+}
+
+impl LightningTickOwnerBatch {
+    #[cfg(test)]
+    fn owner(&self) -> LightningTickOwner {
+        self.owner
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LightningTickEffect {
+    owner: LightningTickOwner,
+    serial: usize,
+    id: i32,
+    bolt: LiveBolt,
+    fire_attempts: Vec<BlockPos>,
+    hit_entities: bool,
+    discard: bool,
+}
+
 /// The wire entity type every lightning bolt streams as. Named rather than
 /// numeric for [`super::item_entity_type`]'s documented reason.
 pub(super) fn lightning_bolt_entity_type() -> ResourceKey {
@@ -154,19 +199,98 @@ impl<'w> MobSim<'w> {
     /// tick even with nothing struck; a bolt spawned this same tick is ticked
     /// too (see the module doc for why that ordering is deliberate).
     pub fn tick_lightning(&mut self, difficulty: Difficulty, rng: &mut SpawnRng) {
-        let mut discarded: Vec<i32> = Vec::new();
-        // Collected first so the entity-effect pass below can borrow
-        // `self.mobs` mutably without also holding `self.lightning_bolts`
-        // borrowed — the same two-pass shape `feed_perception` uses.
-        let mut hits: Vec<(i32, Vec3)> = Vec::new();
-        for (&id, bolt) in &mut self.lightning_bolts {
+        let batches = self.tick_lightning_owner_batches(difficulty, rng);
+        self.apply_lightning_tick_owner_batches(batches, difficulty);
+    }
+
+    /// Produces chunk-owner completions from cloned tick-start bolt state.
+    ///
+    /// The shared bolt RNG remains serial in entity-id order. Each completion
+    /// carries only its changed bolt and deferred visible effects; the central
+    /// apply step restores serial order before it mutates shared state.
+    pub(crate) fn tick_lightning_owner_batches(
+        &self,
+        difficulty: Difficulty,
+        rng: &mut SpawnRng,
+    ) -> Vec<LightningTickOwnerBatch> {
+        let mut ids: Vec<i32> = self.lightning_bolts.keys().copied().collect();
+        ids.sort_unstable();
+        let mut batches = Vec::<LightningTickOwnerBatch>::new();
+        for (serial, id) in ids.into_iter().enumerate() {
+            let mut bolt = *self
+                .lightning_bolts
+                .get(&id)
+                .expect("a tick-start lightning id must remain live while planning");
+            let owner = LightningTickOwner::for_position(bolt.pos);
             let fx = lightning::tick_bolt(&mut bolt.state, bolt.ground_pos, difficulty, rng);
-            self.pending_lightning_fires.extend(fx.fire_attempts);
-            if fx.hit_entities {
-                hits.push((id, bolt.pos));
+            let effect = LightningTickEffect {
+                owner,
+                serial,
+                id,
+                bolt,
+                fire_attempts: fx.fire_attempts,
+                hit_entities: fx.hit_entities,
+                discard: fx.discard,
+            };
+            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
+                batch.effects.push(effect);
+            } else {
+                batches.push(LightningTickOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects: vec![effect],
+                });
             }
-            if fx.discard {
-                discarded.push(id);
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
+
+    /// Validates and centrally applies completed lightning-owner batches.
+    ///
+    /// The central writer restores entity-id serial slots before emitting fire
+    /// attempts, applying mob effects, or discarding a bolt, so owner
+    /// completion order cannot reorder visible lightning consequences.
+    pub(crate) fn apply_lightning_tick_owner_batches(
+        &mut self,
+        batches: Vec<LightningTickOwnerBatch>,
+        difficulty: Difficulty,
+    ) {
+        if batches.is_empty() {
+            assert!(
+                self.lightning_bolts.is_empty(),
+                "lightning owner completion must retain every live tick-start bolt"
+            );
+            return;
+        }
+        let effects = merge_lightning_tick_owner_batches(batches);
+        assert_eq!(
+            effects.len(),
+            self.lightning_bolts.len(),
+            "lightning owner completion must retain every live tick-start bolt"
+        );
+        let mut ids = std::collections::HashSet::new();
+        let mut hits = Vec::new();
+        let mut discarded = Vec::new();
+        for effect in effects {
+            assert!(
+                ids.insert(effect.id),
+                "lightning owner completion may update one live bolt only once"
+            );
+            assert!(
+                self.lightning_bolts.contains_key(&effect.id),
+                "a lightning owner completion may update only a live tick-start bolt"
+            );
+            self.lightning_bolts.insert(effect.id, effect.bolt);
+            self.pending_lightning_fires.extend(effect.fire_attempts);
+            if effect.hit_entities {
+                hits.push((effect.id, effect.bolt.pos));
+            }
+            if effect.discard {
+                discarded.push(effect.id);
             }
         }
         for (bolt_id, bolt_pos) in hits {
@@ -254,6 +378,47 @@ impl<'w> MobSim<'w> {
     }
 }
 
+fn merge_lightning_tick_owner_batches(
+    mut batches: Vec<LightningTickOwnerBatch>,
+) -> Vec<LightningTickEffect> {
+    let expected_batch_count = batches
+        .first()
+        .map(|batch| batch.expected_batch_count)
+        .expect("lightning owner completion must contain every tick-start owner batch");
+    let mut owners = std::collections::HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.expected_batch_count, expected_batch_count,
+            "lightning owner completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "lightning owner completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "a lightning owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "lightning owner completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "lightning owner completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -274,6 +439,97 @@ mod tests {
 
     fn rng() -> SpawnRng {
         SpawnRng::new(0x11DE_7116_5EED_0003)
+    }
+
+    fn owner_batch_fixture() -> MobSim<'static> {
+        let world: &'static ChunkWorld = Box::leak(Box::new(flat_world()));
+        let mut sim = MobSim::new(world);
+        sim.spawn_lightning_bolts(
+            vec![
+                Strike { pos: BlockPos::new(-1, 1, -1), visual_only: true },
+                Strike { pos: BlockPos::new(16, 1, 0), visual_only: true },
+                Strike { pos: BlockPos::new(-1, 1, -1), visual_only: true },
+            ],
+            &mut rng(),
+        );
+        sim
+    }
+
+    fn bolt_states(sim: &MobSim<'_>) -> Vec<(i32, BoltState)> {
+        let mut states: Vec<_> = sim
+            .lightning_bolts
+            .iter()
+            .map(|(&id, bolt)| (id, bolt.state))
+            .collect();
+        states.sort_unstable_by_key(|(id, _)| *id);
+        states
+    }
+
+    #[test]
+    fn lightning_owner_batches_restore_serial_state_after_reversed_completion() {
+        let mut serial = owner_batch_fixture();
+        let mut serial_rng = rng();
+        serial.tick_lightning(Difficulty::Hard, &mut serial_rng);
+        let serial_states = bolt_states(&serial);
+
+        let mut completed = owner_batch_fixture();
+        let mut completed_rng = rng();
+        let mut batches = completed.tick_lightning_owner_batches(Difficulty::Hard, &mut completed_rng);
+        assert_eq!(
+            batches.iter().map(LightningTickOwnerBatch::owner).collect::<Vec<_>>(),
+            [
+                LightningTickOwner::Chunk { cx: -1, cz: -1 },
+                LightningTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "owners enter the tick-start plan at their first serial bolt"
+        );
+        batches.reverse();
+        let raw_completion = batches
+            .iter()
+            .flat_map(|batch| batch.effects.iter())
+            .map(|effect| effect.serial)
+            .collect::<Vec<_>>();
+        assert_ne!(
+            raw_completion,
+            vec![0, 1, 2],
+            "control requires reversed owner completion to move raw serial slots"
+        );
+        let restored = merge_lightning_tick_owner_batches(batches.clone())
+            .into_iter()
+            .map(|effect| effect.serial)
+            .collect::<Vec<_>>();
+        assert_eq!(restored, vec![0, 1, 2], "the central merge must restore serial slots");
+
+        completed.apply_lightning_tick_owner_batches(batches, Difficulty::Hard);
+        assert_eq!(
+            bolt_states(&completed),
+            serial_states,
+            "the live central consumer must preserve the serial bolt state"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "every tick-start owner batch exactly once")]
+    fn lightning_owner_batch_merge_rejects_a_missing_owner() {
+        let mut random = rng();
+        let mut batches = owner_batch_fixture().tick_lightning_owner_batches(Difficulty::Hard, &mut random);
+        batches.pop();
+        let _ = merge_lightning_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not contain one owner twice")]
+    fn lightning_owner_batch_merge_rejects_a_duplicate_owner() {
+        let mut random = rng();
+        let mut batches = owner_batch_fixture().tick_lightning_owner_batches(Difficulty::Hard, &mut random);
+        batches[1] = batches[0].clone();
+        let _ = merge_lightning_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "retain every live tick-start bolt")]
+    fn lightning_owner_apply_rejects_no_completions_for_live_bolts() {
+        owner_batch_fixture().apply_lightning_tick_owner_batches(Vec::new(), Difficulty::Hard);
     }
 
     /// **The production wiring gate.** A strike published

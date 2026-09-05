@@ -70,6 +70,16 @@ Effects carry that original sequence because entities from two chunks may be
 interleaved; the central publisher restores it rather than changing behavior to
 owner-major order. Negative positions use `floor` followed by Euclidean chunk
 division, so an entity at `x = -0.5` belongs to chunk `-1`, not chunk `0`.
+Lightning bolts use the same hand-off without treating their shared random
+stream as parallel work. `MobSim::tick_lightning_owner_batches` clones each
+bolt under the chunk containing its fixed strike position, consumes the bolt
+RNG in entity-id order, and returns deferred state, fire attempts, and
+mob-hit requests. `MobSim::apply_lightning_tick_owner_batches`, called by the
+live tick loop, requires every unique completion and restores those serial
+slots before it writes the bolt map, hands fire candidates to the live-world
+placement gate, applies mob effects, or removes exhausted bolts. A fast owner
+therefore cannot move a later bolt's fire, hit, or removal ahead of an earlier
+one; the shared RNG means this is still a serial planning boundary.
 Spawner blocks are a separate cross-owner hand-off even though their mutable
 delay state remains in the block-entity registry. `SpawnerTickBatchBuilder`
 records each selected resident spawner's chunk owner while retaining the
@@ -245,6 +255,15 @@ the live map or queue a detonation while selecting an owner. The live tick loop
 is the central consumer: it must pass the complete plan to the apply method,
 which rejects missing or duplicate owners and restores every serial slot before
 changing motion, fuses, or the detonation queue.
+
+Keep lightning behind `MobSim::tick_lightning_owner_batches` and
+`MobSim::apply_lightning_tick_owner_batches`. Plan with cloned tick-start bolt
+state and consume the shared RNG in entity-id order; it is not independent
+owner work. A completion may carry deferred fire attempts and mob-hit requests
+but must not write a live bolt, place fire, damage a mob, or discard a bolt.
+The central consumer must validate complete unique owners and restore serial
+slots before it performs those effects. Preserve the reversed-completion,
+missing-owner, and duplicate-owner controls when changing this boundary.
 
 Keep wither simulation behind `MobSim::tick_wither_owner_batches` and
 `MobSim::apply_wither_tick_owner_batches`. A completion carries cloned

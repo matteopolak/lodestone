@@ -3598,7 +3598,12 @@ async fn run_tick_loop_with_weather_impl<W>(
         // moments before the storm ends still finishes its life/flashes
         // countdown, matching `LightningBolt.tick` running from vanilla's own
         // `entityTickList` independently of `tickThunder`'s gate.
-        mobs.with(|sim| sim.tick_lightning(world_state.difficulty().0, &mut lightning_bolt_rng));
+        let lightning_batches = mobs.with(|sim| {
+            sim.tick_lightning_owner_batches(world_state.difficulty().0, &mut lightning_bolt_rng)
+        });
+        mobs.with(|sim| {
+            sim.apply_lightning_tick_owner_batches(lightning_batches, world_state.difficulty().0);
+        });
         // `MobSim::tick_lightning`'s fire-ignition candidates: `MobSim` holds
         // only a frozen pathfinding snapshot (`take_lightning_fires`'s own
         // doc), so the live write happens here, gated exactly like
