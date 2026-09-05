@@ -1359,14 +1359,14 @@ fn entity_population(index: &SourceIndex, oracle: &VanillaOracle) -> Result<Popu
 }
 
 fn particle_population(index: &SourceIndex) -> Result<PopulationReport> {
-    use lodestone_data::particle_types::{PARTICLE_TYPE_COUNT, particle_type_name};
+    use lodestone_data::particle_types::{PARTICLE_TYPE_COUNT, ParticleTypeId, particle_type_name};
 
     let expected = PARTICLE_TYPE_COUNT as usize;
     let mut ids = Vec::with_capacity(expected);
     for id in 0..PARTICLE_TYPE_COUNT {
-        let name = particle_type_name(id as i32).with_context(|| {
-            format!("world-coverage: particle registry id {id} has no name — table truncated")
-        })?;
+        let id = ParticleTypeId::new(id as i32)
+            .expect("the generated particle registry count bounds every census id");
+        let name = particle_type_name(id);
         ids.push(name.strip_prefix("minecraft:").unwrap_or(name).to_owned());
     }
     let population: BTreeSet<String> = ids.iter().cloned().collect();

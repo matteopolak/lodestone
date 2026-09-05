@@ -4906,14 +4906,41 @@ fn find_outside_comments(source: &str, from: usize, needle: &str) -> Option<usiz
 }
 
 /// Whether `ServerBound::{variant}` has at least one **connected** (i.e.
-/// non-empty-bodied) match arm anywhere in `dispatch_source`
+/// non-empty-bodied) consumer anywhere in `dispatch_source`
 /// (`crates/lodestone-server/src/server.rs`) — the cross-crate second hop.
 ///
 /// A variant can legitimately appear more than once (the Play-state
 /// dispatcher has real arms; an earlier handshake/login-state dispatcher
 /// no-ops every Play variant, and vice versa for its own variants) — so this
-/// takes the **best** verdict across all occurrences, not the first.
+/// takes the **best** verdict across all occurrences, not the first. Most
+/// consumers are match arms, but a gate that must run before every ordinary
+/// packet is an `if let` early return; `TeleportationAccepted` clears the
+/// movement gate in exactly that shape. Looking only for `=>` would mistake
+/// its later exhaustiveness no-op for the real consumer.
 fn serverbound_variant_is_connected(dispatch_source: &str, variant: &str) -> Result<bool> {
+    let early_return = format!("if let ServerBound::{variant}");
+    let mut guard_search_from = 0;
+    while let Some(pos) =
+        find_outside_comments(dispatch_source, guard_search_from, &early_return)
+    {
+        let after = pos + early_return.len();
+        let Some(equals) = find_outside_comments(dispatch_source, after, "=") else {
+            bail!("ServerBound::{variant} early-return guard at byte {pos} has no `=`");
+        };
+        let Some(body_open) = find_outside_comments(dispatch_source, equals + 1, "{") else {
+            bail!("ServerBound::{variant} early-return guard at byte {pos} has no body");
+        };
+        let Some(body_close) = matching_brace(dispatch_source, body_open) else {
+            bail!(
+                "ServerBound::{variant} early-return guard at byte {pos} has an unterminated body"
+            );
+        };
+        if !dispatch_source[body_open + 1..body_close].trim().is_empty() {
+            return Ok(true);
+        }
+        guard_search_from = body_close + 1;
+    }
+
     let needle = format!("ServerBound::{variant}");
     let mut search_from = 0;
     let mut found_any = false;
@@ -11678,6 +11705,30 @@ fn handle_play(
             arms.len() >= 5,
             "anti-vacuity: classifier saw {}",
             arms.len()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serverbound_connectedness_recognises_a_pre_dispatch_gate() -> Result<()> {
+        let dispatch = r#"
+fn dispatch(packet: ServerBound) {
+    if let ServerBound::TeleportationAccepted { id } = packet {
+        acknowledgements.accepts(id);
+        return;
+    }
+    match packet {
+        ServerBound::TeleportationAccepted { .. } | ServerBound::Ignored => {}
+    }
+}
+"#;
+        assert!(
+            serverbound_variant_is_connected(dispatch, "TeleportationAccepted")?,
+            "the acknowledgement's early return mutates the movement gate"
+        );
+        assert!(
+            !serverbound_variant_is_connected(dispatch, "Ignored")?,
+            "control: the empty exhaustiveness arm is not a consumer"
         );
         Ok(())
     }

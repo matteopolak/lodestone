@@ -45,6 +45,19 @@ field (`PLAYER_ACTION`, `PLAYER_COMMAND`, `INTERACT`, `CUSTOM_CLICK_ACTION`), ch
 *ordinal* individually — a packet id can read as fully connected while one ordinal inside it
 still falls through to `Ignored`.
 
+### Teleport acknowledgement gate
+
+`ACCEPT_TELEPORTATION` is a Play-only VarInt. `V770ServerProtocol` preserves that literal id in
+`ServerBound::TeleportationAccepted`; `dispatch_play_packet` consumes it before the ordinary
+match table through `TeleportAcknowledgements::accepts`. Only the current correction id clears
+the pending gate, which makes the next movement packet observable; stale or duplicate ids leave
+movement blocked. The later empty match arm is exhaustiveness only, not the consumer.
+
+The serverbound connectedness scan recognizes this guarded early-return form as well as normal
+match arms. If another packet must short-circuit before the main dispatcher, keep its body
+non-empty, add a literal wrong-state and malformed-payload decode control, and add a scanner
+fixture that distinguishes it from an empty exhaustiveness arm.
+
 ### Client tick boundaries and launch momentum
 
 The 26.2 play-only `client_tick_end` frame has an empty body, but it is not a
