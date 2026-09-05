@@ -85,10 +85,10 @@ use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::ecs::message::MessageReader;
 use lodestone_ecs::ecs::resource::Resource;
 use lodestone_ecs::ecs::schedule::IntoScheduleConfigs;
-use lodestone_ecs::ecs::prelude::{Query, Res, ResMut, With};
+use lodestone_ecs::ecs::prelude::{Commands, Query, Res, ResMut, With};
 use lodestone_ecs::player::{LocalPlayer, PhysicsState};
 use lodestone_ecs::{
-    Extract, ExtractSet, GameTick, KeyInterceptMode, LocalPlayerPlugin, PhysicalKey,
+    CameraOverride, Extract, ExtractSet, GameTick, KeyInterceptMode, LocalPlayerPlugin, PhysicalKey,
     PluginBillboard, PluginBillboards, PluginKeyEvent, PluginTexture,
 };
 use lodestone_physics::Vec3d;
@@ -229,10 +229,110 @@ fn toggle_on_claimed_key_press(
     }
 }
 
+/// A shared read handle for [`CameraTogglePlugin`].
+///
+/// It has the same outside-the-`World` use as [`KeyToggleState`]: a caller can
+/// reflect the active director in its own UI without borrowing the simulation.
+#[derive(Clone, Debug)]
+pub struct CameraToggleState(Arc<AtomicBool>);
+
+impl CameraToggleState {
+    /// Whether this plugin currently owns the rendered camera pose.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// The one key, pose, and shared state [`CameraTogglePlugin`] needs at tick
+/// time. Keeping this in the world lets the system run through ordinary Bevy
+/// scheduling rather than asking an input callback to take a world lock.
+#[derive(Resource, Clone, Debug)]
+struct CameraToggleTarget {
+    key: PhysicalKey,
+    pose: CameraOverride,
+    flag: Arc<AtomicBool>,
+}
+
+/// An opt-in, native camera director: a claimed key switches the drawn frame
+/// to `pose`; its next press returns immediately to the shell's normal camera.
+///
+/// This demonstrates the bounded camera-control seam: it changes only
+/// [`CameraOverride`], not [`PhysicsState`], the pick ray, or audio. A plugin
+/// that needs a moving shot can replace the fixed pose from its own
+/// `FrameSet::Camera` system using the same component.
+#[derive(Debug)]
+pub struct CameraTogglePlugin {
+    key: PhysicalKey,
+    pose: CameraOverride,
+    flag: Arc<AtomicBool>,
+}
+
+impl CameraTogglePlugin {
+    /// Build a plugin that toggles the rendered camera between the shell pose
+    /// and `pose` whenever `key` is pressed.
+    #[must_use]
+    pub fn new(key: PhysicalKey, pose: CameraOverride) -> (Self, CameraToggleState) {
+        let flag = Arc::new(AtomicBool::new(false));
+        (
+            Self {
+                key,
+                pose,
+                flag: flag.clone(),
+            },
+            CameraToggleState(flag),
+        )
+    }
+}
+
+impl Plugin for CameraTogglePlugin {
+    fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<LocalPlayerPlugin>() {
+            app.add_plugins(LocalPlayerPlugin);
+        }
+        app.world_mut()
+            .resource_mut::<lodestone_ecs::PluginKeybinds>()
+            .register(self.key.clone(), KeyInterceptMode::Consume);
+        app.insert_resource(CameraToggleTarget {
+            key: self.key.clone(),
+            pose: self.pose,
+            flag: self.flag.clone(),
+        });
+        app.add_systems(
+            GameTick,
+            toggle_camera_on_claimed_key_press.in_set(lodestone_ecs::TickSet::Intent),
+        );
+    }
+}
+
+/// `TickSet::Intent`: give a press edge ownership of the rendered pose, or
+/// release it. No local player means there is nothing to claim, so the press is
+/// intentionally ignored rather than arming a camera for a later session.
+fn toggle_camera_on_claimed_key_press(
+    mut commands: Commands,
+    mut events: MessageReader<PluginKeyEvent>,
+    target: ResMut<CameraToggleTarget>,
+    players: Query<bevy_ecs::entity::Entity, With<LocalPlayer>>,
+) {
+    let Ok(player) = players.single() else {
+        return;
+    };
+    for event in events.read() {
+        if event.pressed && event.key == target.key {
+            if target.flag.fetch_xor(true, Ordering::SeqCst) {
+                commands.entity(player).remove::<CameraOverride>();
+            } else {
+                commands.entity(player).insert(target.pose);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use lodestone_ecs::player::spawn_local_player;
     use lodestone_ecs::{PendingPluginKeyEvents, PluginKeybinds};
+    use lodestone_model::Vec3;
     use lodestone_physics::PlayerState;
 
     use super::*;
@@ -377,5 +477,53 @@ mod tests {
         app.world_mut().run_schedule(GameTick);
 
         assert!(!state.enabled());
+    }
+
+    /// A camera plugin owns only the rendered-pose component. Its requested
+    /// frame must not alter the player's physics pose, and a second press must
+    /// remove the component so the shell can resume its normal camera.
+    #[test]
+    fn camera_toggle_claims_and_releases_only_the_render_pose() {
+        let pose = CameraOverride {
+            position: Vec3::new(14.0, 80.0, -9.0),
+            yaw: 35.0,
+            pitch: -20.0,
+        };
+        let (plugin, state) = CameraTogglePlugin::new(PhysicalKey::named("KeyC"), pose);
+        let mut app = bevy_app::App::new();
+        app.add_plugins(plugin);
+        let player_state = PlayerState::at(Vec3d::new(3.0, 70.0, -5.0), 12.0);
+        let player = spawn_local_player(app.world_mut(), player_state);
+
+        app.world_mut()
+            .resource_mut::<PendingPluginKeyEvents>()
+            .0
+            .push(PluginKeyEvent {
+                key: PhysicalKey::named("KeyC"),
+                pressed: true,
+            });
+        app.world_mut().run_schedule(GameTick);
+        assert!(state.enabled());
+        assert_eq!(app.world().get::<CameraOverride>(player), Some(&pose));
+        let physics = app.world().get::<PhysicsState>(player).expect("local player physics").0;
+        assert_eq!(
+            (physics.position, physics.yaw, physics.pitch),
+            (player_state.position, player_state.yaw, player_state.pitch),
+            "a rendered-camera plugin must not move or rotate the player"
+        );
+
+        app.world_mut()
+            .resource_mut::<PendingPluginKeyEvents>()
+            .0
+            .push(PluginKeyEvent {
+                key: PhysicalKey::named("KeyC"),
+                pressed: true,
+            });
+        app.world_mut().run_schedule(GameTick);
+        assert!(!state.enabled());
+        assert!(
+            app.world().get::<CameraOverride>(player).is_none(),
+            "the second press must hand the rendered camera back to the shell"
+        );
     }
 }

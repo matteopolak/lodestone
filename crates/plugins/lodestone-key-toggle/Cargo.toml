@@ -32,3 +32,13 @@ bevy_app = { workspace = true }
 # `lodestone-ecs`'s re-exports, so a direct dependency, same reasoning as `bevy_ecs`
 # above.
 lodestone-physics = { workspace = true }
+
+[dev-dependencies]
+# The rendered-client control constructs the public `Sim::client_app()` seam and
+# reads the real `Sim::render_camera` consumer. This is intentionally a
+# dev-only edge: the plugin remains a renderer-independent library for normal
+# embedders.
+lodestone = { package = "lodestone-shell", path = "../../lodestone-shell", default-features = false }
+# The camera pose fixtures use the f64 world-space `Vec3` carried by
+# `CameraOverride`; production consumers already choose their own pose value.
+lodestone-model = { workspace = true }

@@ -80,7 +80,10 @@ These are the anchors a plugin orders against — **sets, not system functions**
 be renamed or split freely while the set stays the ABI. `FrameSet::Camera` has no systems in it today;
 a plugin instead overrides the drawn frame with `CameraOverride { position, yaw, pitch }` (insert to
 take the camera, remove to hand it back — no near/far/FOV field, so it cannot open the wrong clip plane,
-and it touches only this frame's pixels, not collision or audio). A fifth anchor type, `EventPriority`,
+and it touches only this frame's pixels, not collision or audio). `lodestone-key-toggle`'s
+`CameraTogglePlugin` is the compiled-in reference consumer: its claimed key inserts/removes one fixed
+pose through `GameTick`, and its rendered-client control proves the pose reaches `Sim::render_camera`.
+A fifth anchor type, `EventPriority`,
 orders two third-party plugins against each other rather than against our systems (see "Events" below).
 
 ### The intent doctrine: five clauses
