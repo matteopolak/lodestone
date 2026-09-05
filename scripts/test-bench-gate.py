@@ -436,7 +436,50 @@ def main() -> int:
             f"exit {got.returncode}\n{got.stdout}{got.stderr}",
         )
 
-        # 12. The structural rule: a duration can never enter a baseline. This
+        # 12. A valid-key null/non-numeric result is the latest observation for
+        #     that metric, not a reason to reuse an older append-only value.
+        #     Otherwise a bench that stopped producing samples can pass from
+        #     stale history while an unrelated metric makes the log look run.
+        work = root / "invalid-result-tombstone"
+        (work / "bench-baselines").mkdir(parents=True)
+        (work / "bench-results").mkdir(parents=True)
+        (work / "bench-baselines" / "widget.json").write_text(
+            json.dumps(baseline_doc([SECTION_ENTRY, BIND_GROUP_ENTRY]), indent=2)
+            + "\n"
+        )
+        (work / "bench-results" / "widget.jsonl").write_text(
+            jsonl(
+                [
+                    record("drawn_sections", 347, "sections"),
+                    record("drawn_sections", None, "sections"),
+                    record("camera_bind_group_switches", 1, "calls"),
+                ]
+            )
+        )
+        got = run_gate(work)
+        check(
+            "a latest null result cannot revive a stale value",
+            got.returncode == 1 and "MISSING  drawn_sections" in got.stdout,
+            f"exit {got.returncode}\n{got.stdout}{got.stderr}",
+        )
+        (work / "bench-results" / "widget.jsonl").write_text(
+            jsonl(
+                [
+                    record("drawn_sections", 347, "sections"),
+                    record("drawn_sections", None, "sections"),
+                    record("drawn_sections", 347, "sections"),
+                    record("camera_bind_group_switches", 1, "calls"),
+                ]
+            )
+        )
+        got = run_gate(work)
+        check(
+            "a later numeric result revives a tombstoned metric",
+            got.returncode == 0,
+            f"exit {got.returncode}\n{got.stdout}{got.stderr}",
+        )
+
+        # 13. The structural rule: a duration can never enter a baseline. This
         #    is the wall-clock-ceiling trap made unreachable rather than
         #    documented.
         work = make_case(

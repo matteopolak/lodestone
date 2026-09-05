@@ -132,13 +132,16 @@ def load_results(path: Path) -> dict[tuple[str, str], dict]:
     """Newest recorded object per `(scene, metric)` in one JSONL file.
 
     Later lines win: the file is append-only, so the last line for a key is the
-    most recent run that recorded it. Lines that do not parse, or that carry a
-    null/non-numeric value, are skipped rather than crashing the gate -- a
-    recorder that wrote `null` for a metric with no samples should not make an
-    unrelated metric's comparison impossible. A numeric non-finite value is
-    different: JSON parsers commonly accept `NaN` and `Infinity` extensions,
-    but either makes a comparison meaningless, so it rejects the whole gate
-    input instead of falling back to an older value for that metric.
+    most recent run that recorded it. Lines that do not parse, or that do not
+    carry a usable scene/metric key, are ignored because they cannot be tied to
+    one baseline entry. A valid-key line with a null/non-numeric value is a
+    tombstone for that key: it removes an older value rather than letting a
+    metric that stopped producing samples pass from stale history, while still
+    leaving unrelated metrics usable. A later numeric line can revive the key.
+    A numeric non-finite value is different: JSON parsers commonly accept `NaN`
+    and `Infinity` extensions, but either makes a comparison meaningless, so it
+    rejects the whole gate input instead of falling back to an older value for
+    that metric.
     """
     newest: dict[tuple[str, str], dict] = {}
     if not path.exists():
@@ -158,14 +161,20 @@ def load_results(path: Path) -> dict[tuple[str, str], dict]:
         value = obj.get("value")
         if not isinstance(scene, str) or not isinstance(metric, str):
             continue
+        key = (scene, metric)
         if not isinstance(value, (int, float)) or isinstance(value, bool):
+            # The recorder can legitimately emit null when a metric had no
+            # samples. Treat that latest observation as missing for this key;
+            # otherwise append-only history would turn a stopped instrument
+            # into a false green by reusing its previous numeric line.
+            newest.pop(key, None)
             continue
         if not is_finite_number(value):
             raise GateError(
                 f"{path}:{line_number}: metric {metric!r} has a non-finite "
                 f"value {value!r}; a gate cannot compare NaN or infinity"
             )
-        newest[(scene, metric)] = obj
+        newest[key] = obj
     return newest
 
 
