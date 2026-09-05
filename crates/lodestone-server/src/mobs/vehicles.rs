@@ -12,6 +12,52 @@ use uuid::Uuid;
 
 use super::{MobSim, TrackedVehicle, block_state_id};
 
+/// The tick-start chunk owner of one un-ridden vehicle.
+///
+/// This is only a deterministic hand-off boundary. Vehicles still complete on
+/// the server tick task, and [`MobSim::apply_vehicle_tick_owner_batches`] is
+/// the one writer back into the live vehicle map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum VehicleTickOwner {
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl VehicleTickOwner {
+    fn for_position(position: Vec3d) -> Self {
+        Self::Chunk {
+            cx: (position.x.floor() as i32).div_euclid(16),
+            cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+}
+
+/// One completed vehicle-owner batch.
+///
+/// `expected_batch_count` and the serial values are copied from the tick-start
+/// plan. The central consumer uses them to reject a missing, duplicated, or
+/// substituted completion before it changes any live vehicle state.
+#[derive(Debug, Clone)]
+pub(crate) struct VehicleTickOwnerBatch {
+    owner: VehicleTickOwner,
+    expected_batch_count: usize,
+    effects: Vec<VehicleTickEffect>,
+}
+
+impl VehicleTickOwnerBatch {
+    #[cfg(test)]
+    fn owner(&self) -> VehicleTickOwner {
+        self.owner
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VehicleTickEffect {
+    owner: VehicleTickOwner,
+    serial: usize,
+    id: i32,
+    vehicle: TrackedVehicle,
+}
+
 /// `VehicleEntity.hurtServer`'s `setHurtTime(10)` — how long the hull rocks
 /// after a hit, in ticks. The client's roll formula reads the same counter
 /// *twice* (inside its sine and as a linear falloff), so this number sets both
@@ -302,9 +348,84 @@ impl<'w> MobSim<'w> {
     /// literally the same functions the client's `tick_controlled_vehicle` calls,
     /// so a boat cannot behave one way while watched and another while ridden.
     pub fn tick_vehicles(&mut self, block_state: &dyn Fn(i32, i32, i32) -> String) {
-        use lodestone_physics::vehicle::{BOAT_STEP_HEIGHT, boat_status, float_boat};
-        use lodestone_physics::{MoveContext, PhysicsProfile, move_entity};
+        self.clear_disconnected_vehicle_riders();
+        let mut ids: Vec<i32> = self.vehicles.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            let Some(vehicle) = self.vehicles.get_mut(&id) else {
+                continue;
+            };
+            tick_one_vehicle(vehicle, block_state);
+        }
+    }
 
+    /// Executes vehicle physics as independent chunk-owner completions.
+    ///
+    /// This takes the owner snapshot after the connection-roster repair, so a
+    /// disappeared rider is treated exactly as in the serial pass. Each effect
+    /// owns a cloned tick-start vehicle; no completion writes the live map.
+    pub(crate) fn tick_vehicle_owner_batches(
+        &mut self,
+        block_state: &dyn Fn(i32, i32, i32) -> String,
+    ) -> Vec<VehicleTickOwnerBatch> {
+        self.clear_disconnected_vehicle_riders();
+        let mut ids: Vec<i32> = self.vehicles.keys().copied().collect();
+        ids.sort_unstable();
+        let mut batches = Vec::<VehicleTickOwnerBatch>::new();
+
+        for (serial, id) in ids.into_iter().enumerate() {
+            let vehicle = self
+                .vehicles
+                .get(&id)
+                .cloned()
+                .expect("a tick-start vehicle id must remain live while planning");
+            let owner = VehicleTickOwner::for_position(vehicle.motion.position);
+            let effect = VehicleTickEffect {
+                owner,
+                serial,
+                id,
+                vehicle: ticked_vehicle(vehicle, block_state),
+            };
+            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
+                batch.effects.push(effect);
+            } else {
+                batches.push(VehicleTickOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects: vec![effect],
+                });
+            }
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
+
+    /// Validates and centrally applies completed vehicle-owner batches.
+    ///
+    /// Completion order is deliberately irrelevant: the tick-start serial
+    /// token restores the previous entity-id order before any live state is
+    /// updated. This is the only owner-batch path that writes `vehicles`.
+    pub(crate) fn apply_vehicle_tick_owner_batches(
+        &mut self,
+        batches: Vec<VehicleTickOwnerBatch>,
+    ) {
+        if batches.is_empty() {
+            return;
+        }
+        let effects = merge_vehicle_tick_owner_batches(batches);
+        for effect in effects {
+            assert!(
+                self.vehicles.contains_key(&effect.id),
+                "a vehicle owner completion may update only a live tick-start vehicle"
+            );
+            self.vehicles.insert(effect.id, effect.vehicle);
+        }
+    }
+
+    fn clear_disconnected_vehicle_riders(&mut self) {
         // **The disconnect self-heal.** A rider is cleared by an explicit
         // dismount, and a client that simply *vanishes* sends none — so without
         // this a boat whose rider crashed or quit stays `Some(id)` forever and is
@@ -329,61 +450,114 @@ impl<'w> MobSim<'w> {
                 }
             }
         }
-
-        let view = VehicleCollision { block_state };
-        let profile = PhysicsProfile::default();
-        let mut ids: Vec<i32> = self.vehicles.keys().copied().collect();
-        ids.sort_unstable();
-        for id in ids {
-            let Some(vehicle) = self.vehicles.get_mut(&id) else {
-                continue;
-            };
-            // `AbstractBoat.tick`'s first two clauses, and they run **before** the
-            // ridden-boat bail below rather than after it: a rider's client owns
-            // the boat's *motion*, not its damage state, so a boat punched while
-            // someone is aboard must still count its rock down or it stays tipped
-            // over for as long as that player keeps sitting in it.
-            if vehicle.hurt_time > 0 {
-                vehicle.hurt_time -= 1;
-            }
-            if vehicle.damage > 0.0 {
-                vehicle.damage -= 1.0;
-            }
-            if vehicle.rider.is_some() {
-                continue;
-            }
-            let dims =
-                EntityDimensions::new(crate::boat::BOAT_WIDTH as f32, crate::boat::BOAT_HEIGHT as f32, 0.0);
-            let bb = dims.bounding_box(vehicle.motion.position);
-            vehicle.boat.old_status = vehicle.boat.status;
-            vehicle.boat.status = Some(boat_status(&mut vehicle.boat, &view, bb));
-            if matches!(
-                vehicle.boat.status,
-                Some(
-                    lodestone_physics::vehicle::BoatStatus::UnderWater
-                        | lodestone_physics::vehicle::BoatStatus::UnderFlowingWater
-                )
-            ) {
-                vehicle.boat.out_of_control_ticks += 1.0;
-            } else {
-                vehicle.boat.out_of_control_ticks = 0.0;
-            }
-            // `player_aboard = false`: the per-tick halving of `landFriction` is
-            // gated on `getControllingPassenger() instanceof Player`, and there is
-            // nobody aboard here by construction. Passing `true` would let a
-            // beached empty boat slide off on its own.
-            float_boat(&mut vehicle.motion, &mut vehicle.boat, dims, &view, false);
-            let hull = EntityDimensions::new(dims.width, dims.height, BOAT_STEP_HEIGHT);
-            move_entity(
-                &mut vehicle.motion,
-                hull,
-                &view,
-                &profile,
-                MoveContext::default(),
-            );
-            vehicle.boat.last_yd = vehicle.motion.velocity.y;
-        }
     }
+}
+
+fn merge_vehicle_tick_owner_batches(
+    mut batches: Vec<VehicleTickOwnerBatch>,
+) -> Vec<VehicleTickEffect> {
+    let expected_batch_count = batches
+        .first()
+        .map(|batch| batch.expected_batch_count)
+        .expect("vehicle owner completion must contain every tick-start owner batch");
+    let mut owners = std::collections::HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.expected_batch_count, expected_batch_count,
+            "vehicle owner completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "vehicle owner completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "a vehicle owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "vehicle owner completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "vehicle owner completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
+}
+
+fn tick_one_vehicle(
+    vehicle: &mut TrackedVehicle,
+    block_state: &dyn Fn(i32, i32, i32) -> String,
+) {
+    use lodestone_physics::vehicle::{BOAT_STEP_HEIGHT, boat_status, float_boat};
+    use lodestone_physics::{MoveContext, PhysicsProfile, move_entity};
+
+    // `AbstractBoat.tick`'s first two clauses, and they run **before** the
+    // ridden-boat bail below rather than after it: a rider's client owns the
+    // boat's *motion*, not its damage state, so a boat punched while someone is
+    // aboard must still count its rock down or it stays tipped over for as long
+    // as that player keeps sitting in it.
+    if vehicle.hurt_time > 0 {
+        vehicle.hurt_time -= 1;
+    }
+    if vehicle.damage > 0.0 {
+        vehicle.damage -= 1.0;
+    }
+    if vehicle.rider.is_some() {
+        return;
+    }
+    let view = VehicleCollision { block_state };
+    let profile = PhysicsProfile::default();
+    let dims = EntityDimensions::new(
+        crate::boat::BOAT_WIDTH as f32,
+        crate::boat::BOAT_HEIGHT as f32,
+        0.0,
+    );
+    let bb = dims.bounding_box(vehicle.motion.position);
+    vehicle.boat.old_status = vehicle.boat.status;
+    vehicle.boat.status = Some(boat_status(&mut vehicle.boat, &view, bb));
+    if matches!(
+        vehicle.boat.status,
+        Some(
+            lodestone_physics::vehicle::BoatStatus::UnderWater
+                | lodestone_physics::vehicle::BoatStatus::UnderFlowingWater
+        )
+    ) {
+        vehicle.boat.out_of_control_ticks += 1.0;
+    } else {
+        vehicle.boat.out_of_control_ticks = 0.0;
+    }
+    // `player_aboard = false`: the per-tick halving of `landFriction` is
+    // gated on `getControllingPassenger() instanceof Player`, and there is
+    // nobody aboard here by construction. Passing `true` would let a beached
+    // empty boat slide off on its own.
+    float_boat(&mut vehicle.motion, &mut vehicle.boat, dims, &view, false);
+    let hull = EntityDimensions::new(dims.width, dims.height, BOAT_STEP_HEIGHT);
+    move_entity(
+        &mut vehicle.motion,
+        hull,
+        &view,
+        &profile,
+        MoveContext::default(),
+    );
+    vehicle.boat.last_yd = vehicle.motion.velocity.y;
+}
+
+fn ticked_vehicle(
+    mut vehicle: TrackedVehicle,
+    block_state: &dyn Fn(i32, i32, i32) -> String,
+) -> TrackedVehicle {
+    tick_one_vehicle(&mut vehicle, block_state);
+    vehicle
 }
 
 /// A [`CollisionView`] for the vehicle tick: [`ItemCollision`]'s shapes plus the
@@ -584,6 +758,85 @@ mod vehicle_tests {
     /// one.
     fn world() -> ChunkWorld {
         ChunkWorld::new(-64, 384)
+    }
+
+    fn owner_batch_fixture<'w>(world: &'w ChunkWorld) -> MobSim<'w> {
+        let mut sim = MobSim::new(world);
+        for position in [
+            Vec3::new(-7.5, 70.0, 0.5),
+            Vec3::new(24.5, 70.0, 0.5),
+            Vec3::new(-6.5, 70.0, 2.5),
+        ] {
+            sim.spawn_vehicle(
+                "minecraft:oak_boat".parse().expect("a valid key"),
+                position,
+                0.0,
+            );
+        }
+        sim
+    }
+
+    #[test]
+    fn vehicle_owner_batches_restore_serial_state_after_reversed_completion() {
+        let world = world();
+        let mut serial = owner_batch_fixture(&world);
+        let mut completed = owner_batch_fixture(&world);
+
+        // This remains an independent serial reference: it neither constructs
+        // owner batches nor calls their merge path.
+        serial.tick_vehicles(&lake());
+        let public_state = |sim: &MobSim<'_>| {
+            sim.snapshots()
+                .into_iter()
+                .map(|snapshot| {
+                    (
+                        snapshot.id,
+                        snapshot.position,
+                        snapshot.velocity,
+                        snapshot.metadata,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let serial_state = public_state(&serial);
+
+        let mut batches = completed.tick_vehicle_owner_batches(&lake());
+        assert_eq!(
+            batches.iter().map(VehicleTickOwnerBatch::owner).collect::<Vec<_>>(),
+            vec![
+                VehicleTickOwner::Chunk { cx: -1, cz: 0 },
+                VehicleTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "the fixture must interleave serial vehicles across two owners"
+        );
+        batches.reverse();
+        completed.apply_vehicle_tick_owner_batches(batches);
+
+        assert_eq!(
+            public_state(&completed),
+            serial_state,
+            "the central consumer must restore entity-id order after reversed owner completion"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "every tick-start owner batch exactly once")]
+    fn vehicle_owner_batch_merge_rejects_a_missing_owner() {
+        let world = world();
+        let mut sim = owner_batch_fixture(&world);
+        let mut batches = sim.tick_vehicle_owner_batches(&lake());
+        batches.pop();
+        sim.apply_vehicle_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "one owner twice")]
+    fn vehicle_owner_batch_merge_rejects_a_duplicate_owner() {
+        let world = world();
+        let mut sim = owner_batch_fixture(&world);
+        let mut batches = sim.tick_vehicle_owner_batches(&lake());
+        batches.push(batches[0].clone());
+        sim.apply_vehicle_tick_owner_batches(batches);
     }
 
     #[test]

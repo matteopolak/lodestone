@@ -3690,9 +3690,14 @@ async fn run_tick_loop_with_weather_impl<W>(
         // `waterLevel` is computed from each cell's fluid **amount**, so a
         // boolean would put every surface `1/9` of a block off.
         //
-        // No effects to forward: a boat's new position rides the ordinary
-        // `snapshots()` diff exactly as an airborne falling block's does.
-        mobs.with(|sim| sim.tick_vehicles(&|x, y, z| world.block_state(x, y, z)));
+        // No wire effect is forwarded: a boat's new position rides the ordinary
+        // `snapshots()` diff exactly as an airborne falling block's does. The
+        // owner completions are nevertheless returned here so this tick task is
+        // the one central writer to the live vehicle registry.
+        let vehicle_batches = mobs.with(|sim| {
+            sim.tick_vehicle_owner_batches(&|x, y, z| world.block_state(x, y, z))
+        });
+        mobs.with(|sim| sim.apply_vehicle_tick_owner_batches(vehicle_batches));
 
         // Every live primed TNT, one tick — gravity, collision/bounce and the
         // fuse countdown (`crate::mobs::tnt`'s own module doc). Beside
