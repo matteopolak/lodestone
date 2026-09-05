@@ -5,9 +5,12 @@ use std::io::Read as _;
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Hand, Vec3f,
+    VersionAdapter,
+};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
-use lodestone_v1_7::V5ServerProtocol;
+use lodestone_v1_7::{V5Adapter, V5ServerProtocol};
 use lodestone_v1_7::packet_ids::{handshaking, play};
 use lodestone_v1_7::packets::handshake::SetProtocol;
 
@@ -125,6 +128,82 @@ fn projects_the_legacy_window_and_decodes_break_actions() {
             face: BlockFace::Up,
             sequence: 0,
         }
+    );
+}
+
+#[test]
+fn block_place_lifts_the_protocol_5_body_to_the_shared_placement_consumer() {
+    let protocol = V5ServerProtocol;
+    // x=258, y=64, z=-3, East face, empty inline stack, and cursor quarters.
+    // This is the complete protocol-5 body: unlike later eras it has no hand
+    // or prediction sequence, and the empty stack is still present.
+    let body = [
+        0, 0, 1, 2, 64, 0xFF, 0xFF, 0xFF, 0xFD, 5, 0xFF, 0xFF, 4, 8, 12,
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::BLOCK_PLACE, &body),
+        ServerBound::UseItemOn {
+            pos: BlockPos::new(258, 64, -3),
+            face: BlockFace::East,
+            cursor: Vec3f::new(0.25, 0.5, 0.75),
+            hand: 0,
+            sequence: 0,
+        }
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::BLOCK_PLACE,
+            &[0, 0, 1, 2, 64, 0xFF, 0xFF, 0xFF, 0xFD, 6, 0xFF, 0xFF, 4, 8, 12],
+        ),
+        ServerBound::Ignored,
+        "an unknown face must not become a placement against an arbitrary side"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::BLOCK_PLACE,
+            &[0, 0, 1, 2, 64, 0xFF, 0xFF, 0xFF, 0xFD, 5, 0xFF, 0xFF, 16, 8, 12],
+        ),
+        ServerBound::Ignored,
+        "a cursor outside the protocol-5 sixteenth range must not be clamped"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::BLOCK_PLACE,
+            &[0, 0, 1, 2, 64, 0xFF, 0xFF, 0xFF, 0xFD, 5, 0xFF, 0xFF, 4, 8, 12, 0],
+        ),
+        ServerBound::Ignored,
+        "a trailing byte must not be reinterpreted as another frame"
+    );
+}
+
+#[test]
+fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
+    let action = ClientAction::UseItemOn {
+        hand: Hand::Main,
+        pos: BlockPos::new(7, 80, -9),
+        face: BlockFace::North,
+        cursor: Vec3f::new(0.5, 0.25, 0.75),
+        inside_block: false,
+        sequence: 123,
+    };
+    let (packet_id, body) = V5Adapter::new()
+        .encode_action(ConnectionState::Play, &action)
+        .expect("main-hand block use is representable in protocol 5")
+        .expect("block use emits one placement frame");
+    assert_eq!(packet_id, play::serverbound::BLOCK_PLACE);
+    assert_eq!(
+        V5ServerProtocol.decode(State::Play, packet_id, &body),
+        ServerBound::UseItemOn {
+            pos: BlockPos::new(7, 80, -9),
+            face: BlockFace::North,
+            cursor: Vec3f::new(0.5, 0.25, 0.75),
+            hand: 0,
+            sequence: 0,
+        },
+        "the adapter frame must reach the shared server variant consumed by placement"
     );
 }
 
