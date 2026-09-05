@@ -378,7 +378,10 @@ profile-distant-horizon:
 
 samply-distant-horizon capture:
     cargo build --release {{jflag}} --target-dir {{tdir}} -p lodestone-shell --bin horizon-profile
-    samply record --save-only --unstable-presymbolicate -o {{capture}} -- {{tdir}}/release/horizon-profile
+    python3 scripts/samply-distant-horizon.py --binary {{tdir}}/release/horizon-profile --capture {{capture}}
+
+test-samply-distant-horizon:
+    python3 scripts/test-samply-distant-horizon.py
 
 # --- Benchmark baselines and regression detection -------------------------
 #
