@@ -367,6 +367,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   serverbound (hosting) and clientbound (joining) sides, and the two plugin-facing
   hooks — `EgressFilters` and `ActionVetoes` — that let a plugin inspect, replace,
   suppress, or veto an action before it takes effect or reaches the wire.
+- [Paper inventory bridge](./paper-inventory-bridge.md) — The inventory substrate
+  for the optional Java compatibility host. It gives a host an owned, authoritative
+  snapshot of a connected player's native inventory without exposing a connection
+  task, mutable menu state, or a second inventory simulation.
 - [Paper world bridge](./paper-world-bridge.md) — `lodestone-jvm-bridge` exposes a
   deliberately small, loader-local world/block surface to an operator-built
   `lodestone.bridge.IsolatedPaperShim`. It supplies resident block-state reads and
@@ -692,10 +696,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   ordinary clicks, bulk transfers, pickup-all double clicks, hotbar swaps, drops,
   held-item actions, or respawn while native systems retain menu, simulation, and
   network ownership.
-- [WASM world snapshots](./wasm-world-snapshots.md) — The `world:read` WASM
-  capability gives a runtime-loaded plugin a bounded, copied view of block-state ids
-  in the current client chunk store. It is observation only; a missing value means no
-  loaded cell exists at that position, while state `0` remains a loaded air cell.
+- [WASM world snapshots and authoritative mutations](./wasm-world-snapshots.md) —
+  The `world:read` WASM capability gives a runtime-loaded plugin a bounded, copied
+  view of block-state ids in the current client chunk store. `world:write` adds a
+  separate, finite singleplayer mutation request that reaches the integrated server;
+  it never writes the client replica.
 - [World events](./world-events.md) — Server-driven world state that is not tied to
   any one player: rain/thunder weather and lightning strikes, the regional-difficulty
   scalar that scales spawns and damage over time, Bad-Omen-triggered raids and
