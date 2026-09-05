@@ -615,6 +615,22 @@ impl CommandRegistry {
         Ok(())
     }
 
+    /// Remove one registered command by its canonical name or an alias.
+    ///
+    /// This is the inverse of [`Self::register`] for a dynamically owned
+    /// command: it removes the canonical root, every alias, and its stable-list
+    /// entry together. It deliberately returns the frozen command so an
+    /// embedding that has to make a larger registration change can retain a
+    /// recoverable snapshot until that change commits.
+    pub fn unregister(&mut self, name: &str) -> Option<Arc<RegisteredCommand>> {
+        let name = name.to_lowercase();
+        let canonical = self.aliases.get(&name).cloned().unwrap_or(name);
+        let command = self.commands.remove(&canonical)?;
+        self.aliases.retain(|_, target| target != &canonical);
+        self.order.retain(|registered| registered != &canonical);
+        Some(command)
+    }
+
     fn is_taken(&self, name: &str) -> bool {
         self.commands.contains_key(name) || self.aliases.contains_key(name)
     }
@@ -985,6 +1001,31 @@ mod tests {
                 name: "w".to_string()
             })
         );
+    }
+
+    #[test]
+    fn unregistering_by_an_alias_releases_the_whole_command_claim() {
+        let mut registry = CommandRegistry::new();
+        let mut command = PluginCommand::new("wasm-test");
+        let root = command.root();
+        command.alias("wt");
+        command.on_execute(root, |_| CommandOutcome::ok());
+        registry.register(command).unwrap();
+
+        let removed = registry
+            .unregister("wt")
+            .expect("the alias must resolve to its canonical command");
+        assert_eq!(removed.name, "wasm-test");
+        assert!(registry.get("wasm-test").is_none());
+        assert!(registry.get("wt").is_none());
+        assert!(registry.names().is_empty());
+
+        let mut replacement = PluginCommand::new("wt");
+        let root = replacement.root();
+        replacement.on_execute(root, |_| CommandOutcome::ok());
+        registry
+            .register(replacement)
+            .expect("removing a command must release both its root and alias");
     }
 
     #[test]

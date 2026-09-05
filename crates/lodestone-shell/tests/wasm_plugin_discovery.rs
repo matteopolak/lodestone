@@ -264,6 +264,50 @@ fn persisted_grants_file_allows_only_the_exact_discovered_plugin() {
     );
 }
 
+/// A reload reads its persisted authority again before it asks the host to stage
+/// a replacement. The loaded guest is the control: if parsing a bad replacement
+/// policy had first unloaded it, merely reporting the parse error would hide a
+/// privilege-breaking availability failure.
+#[test]
+fn a_malformed_persisted_policy_rejects_reload_without_unloading_the_active_guest() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("shipped-plugin-reload-policy-{}", std::process::id()));
+    let wasm = build_example_plugin(&[]);
+    install_fixture(
+        &root,
+        &wasm,
+        "\"log\", \"observe:chat\", \"act:chat\"",
+    );
+
+    let mut app = Sim::client_app();
+    lodestone::wasm_plugins::install_from_directory(&mut app, &root)
+        .expect("the initial WASM host must install");
+    assert_eq!(
+        app.world().resource::<WasmPlugins>().with_host(|host| host.plugins().len()),
+        1,
+        "the initial guest is the rollback control"
+    );
+
+    let grants_file = root.join("grants.json");
+    std::fs::write(&grants_file, r#"{"grants":[{"manifest_path":"../plugin.toml"}]}"#)
+        .expect("write malformed grant policy");
+    let error = lodestone::wasm_plugins::reload_from_directory_with_grant_file(
+        &mut app,
+        &root,
+        &grants_file,
+    )
+    .expect_err("a malformed persisted policy must fail before staging guests");
+    assert!(
+        matches!(error, lodestone::wasm_plugins::PluginReloadError::Grants(_)),
+        "the policy parse must be the reported boundary: {error}"
+    );
+    assert_eq!(
+        app.world().resource::<WasmPlugins>().with_host(|host| host.plugins().len()),
+        1,
+        "a rejected policy reload must retain the active guest"
+    );
+}
+
 /// A separately-built guest reaches the shell's real placement system without a
 /// world handle or packet constructor. Its target is intentionally outside the
 /// live placement context, so the established production rejection path produces

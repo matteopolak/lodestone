@@ -114,7 +114,9 @@ pub use abi::{
     lift_command_context, lift_event, lift_place_outcome, lift_verdict_context, lower_action,
 };
 pub use capability::{Capability, CapabilitySet};
-pub use conductor::{WasmHostPlugin, WasmPlugins, drive_wasm_plugins};
+pub use conductor::{
+    WasmHostPlugin, WasmPlugins, WasmReloadError, drive_wasm_plugins, reload_wasm_plugins,
+};
 pub use host::{
     ABI_WORLD, Action, BlockFace, BlockOffset, BreakIntent, BreakOutcome, BreakRejection, BreakStatus,
     ChatKind, ChatMessage, CommandAnchor, CommandContext,
@@ -122,7 +124,7 @@ pub use host::{
     DEFAULT_FUEL_PER_TICK, DEFAULT_FUEL_PER_VERDICT, DEFAULT_MEMORY_LIMIT, Event, Hand, Health,
     HostError, LoadError, LoadedPlugin, LogLevel, LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,
     PlaceRejection, PlaceStatus, PluginGrantPolicy, PluginHost, PluginIdentity, PluginInfo, SectionBlocksChanged, SectionPos,
-    VerdictDispatch,
+    ReloadError, VerdictDispatch,
 };
 pub use manifest::{Manifest, ManifestError, Priority, scan_directory};
 

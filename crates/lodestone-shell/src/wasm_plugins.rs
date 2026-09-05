@@ -12,7 +12,7 @@ use std::path::{Component, Path};
 
 use lodestone_wasm_host::{
     Capability, CapabilitySet, HostError, PluginGrantPolicy, PluginHost, PluginIdentity,
-    WasmHostPlugin,
+    WasmHostPlugin, WasmReloadError,
 };
 
 /// An invalid persisted WASM grant configuration.
@@ -31,6 +31,36 @@ impl fmt::Display for PluginGrantsError {
 }
 
 impl std::error::Error for PluginGrantsError {}
+
+/// A persisted-policy reload that could not commit.
+///
+/// Policy parsing happens before any guest is staged, so a malformed file
+/// leaves the old stores and their authority intact. The host-side variant is
+/// likewise transactional: it retains the old stores when a candidate manifest
+/// or module is refused.
+#[derive(Debug)]
+pub enum PluginReloadError {
+    Grants(PluginGrantsError),
+    Host(WasmReloadError),
+}
+
+impl fmt::Display for PluginReloadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Grants(error) => write!(f, "could not reload persisted plugin grants: {error}"),
+            Self::Host(error) => write!(f, "could not reload WASM plugins: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for PluginReloadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Grants(error) => Some(error),
+            Self::Host(error) => Some(error),
+        }
+    }
+}
 
 /// Load explicit per-instance grants from a JSON file selected by the operator.
 ///
@@ -286,4 +316,44 @@ pub fn install_from_directory_with_grants(
     }
     app.add_plugins(WasmHostPlugin::new(host));
     Ok(())
+}
+
+/// Revalidate `grants_file`, stage a fresh directory snapshot, and atomically
+/// replace the installed guest stores.
+///
+/// This is the explicit reload boundary for an embedding that owns an installed
+/// [`WasmHostPlugin`]. It does not watch either path. A caller chooses when to
+/// invoke it, and a changed grants file is parsed from disk again on every call
+/// before its contents can influence a replacement host.
+///
+/// The shipped desktop launcher currently invokes discovery only at startup;
+/// this public function is for a native embedding's deliberate reload action.
+/// It is absent from browser builds with the rest of this module, and it does
+/// not install a host for headless or connect-only shell modes.
+///
+/// # Errors
+/// Returns an error without replacing active guests if the policy file is
+/// unreadable or malformed, a candidate plugin is rejected, or its command
+/// roots would shadow a non-WASM command.
+pub fn reload_from_directory_with_grant_file(
+    app: &mut lodestone_app::App,
+    directory: &Path,
+    grants_file: &Path,
+) -> Result<(), PluginReloadError> {
+    let grants = load_grants_from_file(grants_file).map_err(PluginReloadError::Grants)?;
+    lodestone_wasm_host::reload_wasm_plugins(app, directory, &grants)
+        .map_err(PluginReloadError::Host)
+}
+
+/// Replace the installed guest stores using an already validated grant policy.
+///
+/// Use [`reload_from_directory_with_grant_file`] for a persisted policy. This
+/// lower-level form exists for embeddings that keep their reviewed policy in a
+/// different configuration backend.
+pub fn reload_from_directory_with_grants(
+    app: &mut lodestone_app::App,
+    directory: &Path,
+    grants: &PluginGrantPolicy,
+) -> Result<(), WasmReloadError> {
+    lodestone_wasm_host::reload_wasm_plugins(app, directory, grants)
 }

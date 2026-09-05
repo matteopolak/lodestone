@@ -185,6 +185,22 @@ pub enum LoadError {
     Host(#[from] HostError),
 }
 
+/// A directory reload that was rejected before it could replace active guests.
+///
+/// A reload is intentionally stricter than startup discovery. Startup reports
+/// every broken sibling and continues with the usable ones, because there is no
+/// previous service to preserve. Reload has a working set already: accepting a
+/// partial replacement would turn one typo into an unreviewed unload. The
+/// candidate is therefore discarded when any discovered manifest or module is
+/// refused, leaving the current host untouched.
+#[derive(Debug, thiserror::Error)]
+pub enum ReloadError {
+    #[error("could not create a replacement plugin host: {0}")]
+    Host(#[from] HostError),
+    #[error("plugin reload was rejected; retaining the active plugins: {errors:?}")]
+    Rejected { errors: Vec<LoadError> },
+}
+
 /// One configured identity in a discovered plugin directory.
 ///
 /// The path is relative to the directory passed to
@@ -1134,6 +1150,43 @@ impl PluginHost {
                 self.load_manifest_with_policy(&path, manifest, &effective)
             })
             .collect()
+    }
+
+    /// Build a complete replacement for this host from `dir` and `grants`.
+    ///
+    /// The returned host has the same baseline policy and resource limits as
+    /// `self`, but fresh guest stores. Every manifest is re-read and every
+    /// module is recompiled and instantiated before this method returns it.
+    /// That revalidation is what prevents a persisted grant from becoming
+    /// authority for a changed plugin file. Any malformed, denied, or trapped
+    /// candidate rejects the whole replacement and leaves `self` unchanged.
+    ///
+    /// The embedding commits the candidate only after it has also refreshed
+    /// its own registrations. In particular, an ECS command registry must not
+    /// retain handlers that point at the stores this replacement will drop.
+    pub fn stage_directory_reload(
+        &self,
+        dir: &Path,
+        grants: &PluginGrantPolicy,
+    ) -> Result<Self, ReloadError> {
+        let mut candidate = Self::new(self.policy.clone())
+            .map_err(ReloadError::Host)?
+            .with_fuel(self.fuel_per_tick)
+            .with_verdict_fuel(self.verdict_fuel)
+            .with_memory_limit(self.memory_limit);
+        if let Some(root) = &self.fs_root {
+            candidate = candidate.with_filesystem_root(root.clone());
+        }
+
+        let errors = candidate
+            .load_directory_with_grants(dir, grants)
+            .into_iter()
+            .filter_map(Result::err)
+            .collect::<Vec<_>>();
+        if !errors.is_empty() {
+            return Err(ReloadError::Rejected { errors });
+        }
+        Ok(candidate)
     }
 
     /// Drive every loaded guest once, in load order, concatenating their actions.
