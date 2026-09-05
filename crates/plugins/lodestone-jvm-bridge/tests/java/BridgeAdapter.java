@@ -49,4 +49,10 @@ public final class BridgeAdapter {
             throw new IllegalArgumentException("unexpected tick " + tick);
         }
     }
+
+    public static void onBlockStateChanged(int x, int y, int z, int stateId) {
+        if (x != -17 || y != 64 || z != 33 || stateId != 1234) {
+            throw new AssertionError("unexpected host block-change callback");
+        }
+    }
 }

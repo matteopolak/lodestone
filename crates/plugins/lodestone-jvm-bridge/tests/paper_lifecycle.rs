@@ -70,7 +70,8 @@ fn lifecycle_entries_load_without_initialization() {
         &adapter_source,
         "package fixture.adapter; public final class LifecycleAdapter { \
          private static native int blockStateId(int x, int y, int z); \
-         public static void onTick(long tick) {} }",
+         public static void onTick(long tick) {} \
+         public static void onBlockStateChanged(int x, int y, int z, int stateId) {} }",
     )
     .expect("adapter source");
     compile(&jdk, &paper_classes, &bootstrap_source);
@@ -130,6 +131,9 @@ fn lifecycle_entries_load_without_initialization() {
         match host.poll().expect("lifecycle adapter readiness") {
             Some(AdapterEvent::Ready) => break,
             Some(AdapterEvent::TickCompleted(tick)) => panic!("unexpected adapter tick {tick}"),
+            Some(AdapterEvent::BlockStateChangedCompleted(change)) => {
+                panic!("unexpected adapter block-change callback {change:?}")
+            }
             None => assert!(Instant::now() < limit, "lifecycle adapter did not become ready"),
         }
         std::thread::yield_now();

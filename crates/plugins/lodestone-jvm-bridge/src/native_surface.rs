@@ -334,7 +334,8 @@ mod tests {
             &adapter_source,
             "package fixture.adapter; public final class SurfaceAdapter { \
              private static native int blockStateId(int x, int y, int z); \
-             public static void onTick(long tick) {} }",
+             public static void onTick(long tick) {} \
+             public static void onBlockStateChanged(int x, int y, int z, int stateId) {} }",
         )
         .expect("adapter source");
         for (output, source) in [(&shim_root, &shim_source), (&adapter_root, &adapter_source)] {
@@ -415,6 +416,9 @@ mod tests {
                 Some(AdapterEvent::Ready) => break,
                 Some(AdapterEvent::TickCompleted(tick)) => {
                     panic!("unexpected adapter tick {tick}");
+                }
+                Some(AdapterEvent::BlockStateChangedCompleted(change)) => {
+                    panic!("unexpected adapter block-change callback {change:?}");
                 }
                 None => assert!(Instant::now() < limit, "server tick surface did not become ready"),
             }
