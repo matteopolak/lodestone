@@ -373,6 +373,13 @@ impl Particles {
     /// [`state_tint_of`](Self::state_tint_of). Callers that have nothing special
     /// to say pass `[1.0; 3]`.
     pub fn destroy_block(&mut self, block: [i32; 3], state: u32, tint: [f32; 3]) {
+        let Some(state) = lodestone_data::block_states::StateId::new(state) else {
+            tracing::debug!(
+                target: "particles",
+                "unknown block state for destroy debris; dropped"
+            );
+            return;
+        };
         let tint = self.state_tint_of(state, tint);
         emit::destroy_block_effect(
             &mut self.engine,
@@ -391,6 +398,13 @@ impl Particles {
     /// both construct vanilla's own terrain particle, so they must tint identically or a
     /// block's mining flecks and its final burst come out different colours.
     pub fn breaking_block(&mut self, block: [i32; 3], state: u32, tint: [f32; 3], face: emit::Face) {
+        let Some(state) = lodestone_data::block_states::StateId::new(state) else {
+            tracing::debug!(
+                target: "particles",
+                "unknown block state for mining debris; dropped"
+            );
+            return;
+        };
         let tint = self.state_tint_of(state, tint);
         emit::breaking_block_effect(
             &mut self.engine,
@@ -416,12 +430,15 @@ impl Particles {
     /// **white**. Deriving it from the state id means a new emit site cannot
     /// reintroduce the constant by omission.
     ///
-    /// An out-of-range `state` returns `extra` unchanged rather than panicking:
-    /// the same id is about to resolve to no sprite at all and be counted into
-    /// [`ParticleFrame::unresolved`], which is the report that already covers
-    /// it. Duplicating that as a second failure mode here would just be noise.
-    fn state_tint_of(&self, state: u32, extra: [f32; 3]) -> [f32; 3] {
-        let Some(t) = self.state_tint.get(state as usize) else {
+    /// `StateId` has already made the state-census range invariant true at the
+    /// ingress. A partial tint table is still legitimate (the demo palette is
+    /// empty), so its miss leaves the caller's multiplier alone.
+    fn state_tint_of(
+        &self,
+        state: lodestone_data::block_states::StateId,
+        extra: [f32; 3],
+    ) -> [f32; 3] {
+        let Some(t) = self.state_tint.get(state.raw() as usize) else {
             return extra;
         };
         [extra[0] * t[0], extra[1] * t[1], extra[2] * t[2]]
@@ -1143,7 +1160,11 @@ impl Particles {
     /// table and the states it would catch (barriers, structure voids, light
     /// blocks) have no particle sprite either, so they are already refused one
     /// layer down.
-    fn block_state_payload(&self, kind: &str, options: ParticleOptions) -> Option<u32> {
+    fn block_state_payload(
+        &self,
+        kind: &str,
+        options: ParticleOptions,
+    ) -> Option<lodestone_data::block_states::StateId> {
         let ParticleOptions::BlockState { state } = options else {
             tracing::debug!(
                 target: "particles",
@@ -1151,14 +1172,19 @@ impl Particles {
             );
             return None;
         };
+        let Some(state) = lodestone_data::block_states::StateId::new(state) else {
+            tracing::debug!(
+                target: "particles",
+                "{kind} particle with an unknown or custom BlockParticleOption state; dropped"
+            );
+            return None;
+        };
         if matches!(
-            lodestone_data::block_states::block_name(state),
-            Some(
-                "minecraft:air"
-                    | "minecraft:cave_air"
-                    | "minecraft:void_air"
-                    | "minecraft:moving_piston"
-            )
+            state.block(),
+            lodestone_data::block::Block::Air
+                | lodestone_data::block::Block::CaveAir
+                | lodestone_data::block::Block::VoidAir
+                | lodestone_data::block::Block::MovingPiston
         ) {
             return None;
         }
@@ -3599,11 +3625,12 @@ mod tests {
         );
     }
 
-    /// The two refusals, each with a control proving the detector fires.
+    /// The three refusals, each with a control proving the detector fires.
     ///
-    /// Air is vanilla's own (its own create-terrain-particle returns `null` for it), and
-    /// a missing payload is ours. Both are silent drops, so without the control
-    /// arm below an emitter that spawned *nothing at all* would satisfy them.
+    /// Air is vanilla's own (its own create-terrain-particle returns `null` for it), a missing
+    /// payload is ours, and an out-of-census payload is the registry boundary.
+    /// All three are silent drops, so without the control arm below an emitter
+    /// that spawned *nothing at all* would satisfy them.
     #[test]
     fn the_block_particle_family_refuses_air_and_a_missing_payload() {
         let air = lodestone_data::block_states::air_state_id();
@@ -3629,6 +3656,23 @@ mod tests {
                 p.engine.particles().len(),
                 0,
                 "{kind:?} must drop rather than guess when the payload is absent"
+            );
+
+            let mut p = resolvable();
+            p.spawn_particles(
+                kind,
+                [0.5, 65.0, 0.5],
+                [0.0, 0.0, 0.0],
+                0.0,
+                1,
+                ParticleOptions::BlockState {
+                    state: lodestone_data::block_states::STATE_COUNT,
+                },
+            );
+            assert_eq!(
+                p.engine.particles().len(),
+                0,
+                "{kind:?} must reject an out-of-census state before emitter lookup"
             );
 
             // The control: the same call with a real state must spawn.
@@ -3815,21 +3859,31 @@ mod tests {
         );
     }
 
-    /// A state id past the end of the tint table must not panic — it is the same
-    /// id that is about to be counted into [`ParticleFrame::unresolved`], and one
-    /// report of a bad id is enough.
+    /// Direct local destroy effects share the same state ingress as the packet
+    /// family: an out-of-census state is dropped before it can become a sprite
+    /// lookup. The valid-state control prevents a no-op emitter from passing.
     #[test]
-    fn an_out_of_range_state_id_falls_back_to_the_callers_tint() {
+    fn direct_destroy_effects_reject_out_of_census_states() {
         let mut p = Particles::new(None);
-        p.state_tint = Arc::new(vec![[1.0; 3]]);
-        p.destroy_block([0, 64, 0], 9_999, [1.0; 3]);
-        let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
-            Some(lodestone_particle::FULL_BRIGHT)
-        });
-        assert!(frame.alive > 0, "the burst must still be emitted");
+        p.destroy_block(
+            [0, 64, 0],
+            lodestone_data::block::Block::Stone.default_state().raw(),
+            [1.0; 3],
+        );
         assert_eq!(
-            frame.unresolved, frame.alive,
-            "an unknown state resolves to no sprite and must be reported, not drawn"
+            p.engine.particles().len(),
+            64,
+            "a valid built-in state must still produce the full-cube burst"
+        );
+        p.engine.clear();
+        p.destroy_block(
+            [0, 64, 0],
+            lodestone_data::block_states::STATE_COUNT,
+            [1.0; 3],
+        );
+        assert!(
+            p.engine.is_empty(),
+            "an out-of-census state must be dropped before sprite resolution"
         );
     }
 

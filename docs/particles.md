@@ -49,6 +49,12 @@ opaque `SpriteSource::BlockState(id)` with no atlas and no tint opinion; `lodest
 `block_models.rs` bakes each state's particle UV rect and tint once from the jar; `lodestone-shell`'s
 `particles.rs` joins the two and builds GPU instances.
 
+The shell is the raw state-id ingress for both decoded block-particle options and local break effects.
+It validates once into `lodestone_data::block_states::StateId`; particle emitters accept only that
+validated type and lower it to the raw atlas index only when constructing `SpriteSource::BlockState`.
+An out-of-census or custom state fails closed before spawning debris, while names introduced by a plugin
+or data pack remain in their registry/import owners rather than being coerced into a built-in state.
+
 The tint is **not** the same lookup as a block's face tint — vanilla's `TerrainParticle` constructor
 calls a separate virtual method (`colorAsTerrainParticle`), and a couple of blocks deliberately disagree
 with their own face tint (`grass_block`'s particle samples untinted dirt, since its `#particle` texture

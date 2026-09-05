@@ -23,6 +23,7 @@ use crate::rng::JavaRandom;
 use crate::{
     Behaviour, DripKind, DripPhase, Layer, Particle, ParticleEngine, Sheet, SpriteSource,
 };
+use lodestone_data::block_states::StateId;
 use lodestone_physics::Aabb;
 
 /// A face of a block, for the mining-hit emitter.
@@ -71,11 +72,20 @@ pub fn terrain_particle(
     xa: f64,
     ya: f64,
     za: f64,
-    state: u32,
+    state: StateId,
     tint: [f32; 3],
     rng: &mut JavaRandom,
 ) -> Particle {
-    let mut p = Particle::with_velocity(x, y, z, xa, ya, za, SpriteSource::BlockState(state), rng);
+    let mut p = Particle::with_velocity(
+        x,
+        y,
+        z,
+        xa,
+        ya,
+        za,
+        SpriteSource::BlockState(state.raw()),
+        rng,
+    );
     p.gravity = 1.0;
     p.colour = [0.6 * tint[0], 0.6 * tint[1], 0.6 * tint[2]];
     p.quad_size /= 2.0;
@@ -101,7 +111,7 @@ pub fn terrain_particle(
 pub fn destroy_block_effect(
     engine: &mut ParticleEngine,
     block: (i32, i32, i32),
-    state: u32,
+    state: StateId,
     tint: [f32; 3],
     shape: &[Aabb],
 ) {
@@ -169,7 +179,7 @@ fn midpoint(i: i32, count: i32) -> f64 {
 pub fn breaking_block_effect(
     engine: &mut ParticleEngine,
     block: (i32, i32, i32),
-    state: u32,
+    state: StateId,
     tint: [f32; 3],
     face: Face,
     shape: Aabb,
@@ -224,7 +234,7 @@ pub fn block_fragment(
     engine: &mut ParticleEngine,
     pos: [f64; 3],
     vel: [f64; 3],
-    state: u32,
+    state: StateId,
     tint: [f32; 3],
 ) {
     let p = terrain_particle(
@@ -246,7 +256,7 @@ pub fn block_crumble(
     engine: &mut ParticleEngine,
     pos: [f64; 3],
     vel: [f64; 3],
-    state: u32,
+    state: StateId,
     tint: [f32; 3],
 ) {
     let mut p = terrain_particle(
@@ -272,7 +282,7 @@ pub fn dust_pillar(
     engine: &mut ParticleEngine,
     pos: [f64; 3],
     vel: [f64; 3],
-    state: u32,
+    state: StateId,
     tint: [f32; 3],
 ) {
     let mut p = terrain_particle(
@@ -299,12 +309,12 @@ pub fn dust_pillar(
 /// of its own: `Plain`'s size is `quad_size` unchanged, so setting the field to
 /// `0.5` *is* the override. The constructed random size is drawn and discarded,
 /// as in vanilla, since the draw happens in the superclass constructor.
-pub fn block_marker(engine: &mut ParticleEngine, pos: [f64; 3], state: u32) {
+pub fn block_marker(engine: &mut ParticleEngine, pos: [f64; 3], state: StateId) {
     let mut p = Particle::new(
         pos[0],
         pos[1],
         pos[2],
-        SpriteSource::BlockState(state),
+        SpriteSource::BlockState(state.raw()),
         engine.rng(),
     );
     p.gravity = 0.0;
@@ -2398,10 +2408,14 @@ mod tests {
         spore_blossom_air, sweep_attack, totem_of_undying, white_smoke, witch,
     };
     use crate::{Behaviour, DripKind, DripPhase, ParticleEngine, Sheet, SpriteSource};
+    use lodestone_data::block_states::StateId;
     use lodestone_physics::{Aabb, CollisionView};
 
-    const STONE: u32 = 1;
     const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
+
+    fn state(raw: u32) -> StateId {
+        StateId::new(raw).expect("test state must be in the generated census")
+    }
 
     /// The counts here come from the **formula in vanilla's own "add destroy block effect" step**
     /// (`max(2, ceil(width / 0.25))` per axis), not from running this code: a
@@ -2409,7 +2423,7 @@ mod tests {
     #[test]
     fn a_full_cube_throws_sixty_four_fragments() {
         let mut engine = ParticleEngine::seeded(1);
-        destroy_block_effect(&mut engine, (0, 64, 0), STONE, WHITE, &[FULL_CUBE]);
+        destroy_block_effect(&mut engine, (0, 64, 0), state(1), WHITE, &[FULL_CUBE]);
         assert_eq!(engine.len(), 64);
     }
 
@@ -2417,7 +2431,7 @@ mod tests {
     fn a_thinner_block_throws_proportionally_less_debris() {
         let slab = Aabb::new(0.0, 0.0, 0.0, 1.0, 0.5, 1.0);
         let mut engine = ParticleEngine::seeded(1);
-        destroy_block_effect(&mut engine, (0, 64, 0), STONE, WHITE, &[slab]);
+        destroy_block_effect(&mut engine, (0, 64, 0), state(1), WHITE, &[slab]);
         assert_eq!(engine.len(), 32, "a half-height slab should emit 4 x 2 x 4");
     }
 
@@ -2428,14 +2442,14 @@ mod tests {
     fn a_very_thin_shape_still_emits_two_samples_on_that_axis() {
         let carpet = Aabb::new(0.0, 0.0, 0.0, 1.0, 0.0625, 1.0);
         let mut engine = ParticleEngine::seeded(1);
-        destroy_block_effect(&mut engine, (0, 64, 0), STONE, WHITE, &[carpet]);
+        destroy_block_effect(&mut engine, (0, 64, 0), state(1), WHITE, &[carpet]);
         assert_eq!(engine.len(), 32, "expected 4 x 2 x 4 from the minimum floor");
     }
 
     #[test]
     fn an_empty_shape_emits_nothing() {
         let mut engine = ParticleEngine::seeded(1);
-        destroy_block_effect(&mut engine, (0, 64, 0), STONE, WHITE, &[]);
+        destroy_block_effect(&mut engine, (0, 64, 0), state(1), WHITE, &[]);
         assert!(engine.is_empty());
     }
 
@@ -2444,14 +2458,14 @@ mod tests {
         let lower = Aabb::new(0.0, 0.0, 0.0, 1.0, 0.5, 1.0);
         let upper = Aabb::new(0.0, 0.5, 0.0, 1.0, 1.0, 1.0);
         let mut engine = ParticleEngine::seeded(1);
-        destroy_block_effect(&mut engine, (0, 64, 0), STONE, WHITE, &[lower, upper]);
+        destroy_block_effect(&mut engine, (0, 64, 0), state(1), WHITE, &[lower, upper]);
         assert_eq!(engine.len(), 64, "two half-boxes should match one full cube");
     }
 
     #[test]
     fn every_fragment_lands_inside_the_block_it_came_from() {
         let mut engine = ParticleEngine::seeded(2);
-        destroy_block_effect(&mut engine, (3, 64, -7), STONE, WHITE, &[FULL_CUBE]);
+        destroy_block_effect(&mut engine, (3, 64, -7), state(1), WHITE, &[FULL_CUBE]);
         for p in engine.particles() {
             assert!(
                 (3.0..4.0).contains(&p.x) && (64.0..65.0).contains(&p.y) && (-7.0..-6.0).contains(&p.z),
@@ -2468,7 +2482,7 @@ mod tests {
     #[test]
     fn fragments_carry_the_block_state_and_the_vanilla_grey() {
         let mut engine = ParticleEngine::seeded(3);
-        destroy_block_effect(&mut engine, (0, 64, 0), 42, WHITE, &[FULL_CUBE]);
+        destroy_block_effect(&mut engine, (0, 64, 0), state(42), WHITE, &[FULL_CUBE]);
         let p = &engine.particles()[0];
         assert_eq!(p.sprite, SpriteSource::BlockState(42));
         assert!(matches!(p.behaviour, Behaviour::Terrain { .. }));
@@ -2481,7 +2495,13 @@ mod tests {
     #[test]
     fn a_biome_tint_multiplies_into_the_fragment_colour() {
         let mut engine = ParticleEngine::seeded(3);
-        destroy_block_effect(&mut engine, (0, 64, 0), 42, [0.5, 1.0, 0.25], &[FULL_CUBE]);
+        destroy_block_effect(
+            &mut engine,
+            (0, 64, 0),
+            state(42),
+            [0.5, 1.0, 0.25],
+            &[FULL_CUBE],
+        );
         let c = engine.particles()[0].colour;
         assert!((c[0] - 0.3).abs() < 1e-6, "r was {}", c[0]);
         assert!((c[1] - 0.6).abs() < 1e-6, "g was {}", c[1]);
@@ -2500,7 +2520,14 @@ mod tests {
         ];
         for (face, expected) in cases {
             let mut engine = ParticleEngine::seeded(4);
-            breaking_block_effect(&mut engine, (0, 64, 0), STONE, WHITE, face, FULL_CUBE);
+            breaking_block_effect(
+                &mut engine,
+                (0, 64, 0),
+                state(1),
+                WHITE,
+                face,
+                FULL_CUBE,
+            );
             assert_eq!(engine.len(), 1, "{face:?} emitted the wrong count");
             let p = &engine.particles()[0];
             let got = match face {
@@ -2518,11 +2545,18 @@ mod tests {
     #[test]
     fn a_mining_chip_is_smaller_and_slower_than_a_destruction_fragment() {
         let mut chip_engine = ParticleEngine::seeded(5);
-        breaking_block_effect(&mut chip_engine, (0, 64, 0), STONE, WHITE, Face::Up, FULL_CUBE);
+        breaking_block_effect(
+            &mut chip_engine,
+            (0, 64, 0),
+            state(1),
+            WHITE,
+            Face::Up,
+            FULL_CUBE,
+        );
         let chip = &chip_engine.particles()[0];
 
         let mut burst_engine = ParticleEngine::seeded(5);
-        destroy_block_effect(&mut burst_engine, (0, 64, 0), STONE, WHITE, &[FULL_CUBE]);
+        destroy_block_effect(&mut burst_engine, (0, 64, 0), state(1), WHITE, &[FULL_CUBE]);
         let fragment = &burst_engine.particles()[0];
 
         assert!(
@@ -2580,7 +2614,7 @@ mod tests {
     fn a_seeded_burst_replays_exactly() {
         let burst = |seed| {
             let mut e = ParticleEngine::seeded(seed);
-            destroy_block_effect(&mut e, (0, 64, 0), STONE, WHITE, &[FULL_CUBE]);
+            destroy_block_effect(&mut e, (0, 64, 0), state(1), WHITE, &[FULL_CUBE]);
             e.particles()
                 .iter()
                 .map(|p| (p.x, p.y, p.z, p.xd, p.yd, p.zd, p.lifetime))
