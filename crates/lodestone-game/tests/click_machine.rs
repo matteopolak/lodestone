@@ -1,7 +1,10 @@
 //! Behavioural tests for the container click state machine, hand-computed
 //! against vanilla `AbstractContainerMenu.doClick` semantics.
 
-use lodestone_game::click::{Click, PlayerCtx, drag_type};
+use lodestone_game::click::{
+    Click, ContainerInput, PlayerCtx, QuickCraftType, drag_header, drag_type, quick_craft_mask,
+    quick_craft_place_count,
+};
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::Menu;
 
@@ -334,6 +337,43 @@ fn clone_drag_rejected_in_survival() {
     menu.perform_drag(drag_type::CLONE, &[0, 1], survival());
     assert!(menu.slot_item(0).is_none());
     assert_eq!(menu.carried().map(ItemStack::count), Some(64));
+}
+
+#[test]
+fn invalid_quick_craft_type_is_rejected_at_the_drag_boundary() {
+    assert_eq!(QuickCraftType::from_raw(3), None);
+    assert_eq!(
+        QuickCraftType::from_raw(drag_type::ONE).map(QuickCraftType::raw),
+        Some(1)
+    );
+
+    let mut menu = Menu::generic(27);
+    let source = stack("minecraft:stone", 9);
+    menu.set_carried(Some(source.clone()));
+    assert!(menu.quick_craft_plan(&[0], 3, &source).is_empty());
+    assert_eq!(menu.quick_craft_remainder(&[0], 3, &source), 0);
+    assert_eq!(quick_craft_place_count(1, 3, &source), 0);
+
+    // `3` is the unused value in the two-bit distribution field. It must not
+    // arm the drag or let a later ADD packet paint a slot.
+    menu.do_click(
+        -999,
+        quick_craft_mask(drag_header::START, 3),
+        ContainerInput::QuickCraft,
+        survival(),
+    );
+    menu.do_click(
+        0,
+        quick_craft_mask(drag_header::ADD, drag_type::EVEN),
+        ContainerInput::QuickCraft,
+        survival(),
+    );
+    assert!(menu.quick_craft_slots().is_empty());
+    assert!(menu.slot_item(0).is_none());
+
+    // Control: the adjacent valid value arms and paints normally.
+    menu.perform_drag(drag_type::EVEN, &[0], survival());
+    assert_eq!(menu.slot_item(0).map(ItemStack::count), Some(9));
 }
 
 // --- Middle-click clone ---
