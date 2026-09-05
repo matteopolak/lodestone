@@ -34,6 +34,33 @@ use lodestone_model::event::{ClientEvent, MapDecoration, MapPatch};
 /// Side length of a map's colour grid, vanilla's `MapItemSavedData` 128×128.
 pub const MAP_SIZE: usize = 128;
 
+/// A persisted filled-map identity.
+///
+/// Map ids are allocated from the saved-map data store, so negative protocol
+/// `VarInt` values cannot name a map. Validate a wire or component value with
+/// [`Self::new`] before retaining it in a [`MapStore`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MapId(u32);
+
+impl MapId {
+    /// Validates a map id received from a signed wire or component field.
+    #[must_use]
+    pub const fn new(raw: i32) -> Option<Self> {
+        if raw >= 0 {
+            Some(Self(raw as u32))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the signed representation used by packet and item-component
+    /// boundaries.
+    #[must_use]
+    pub const fn raw(self) -> i32 {
+        self.0 as i32
+    }
+}
+
 /// One map's contents.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapState {
@@ -109,7 +136,7 @@ impl MapState {
 /// Every map the server has sent contents for, by map id.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MapStore {
-    maps: Arc<BTreeMap<i32, MapState>>,
+    maps: Arc<BTreeMap<MapId, MapState>>,
 }
 
 impl MapStore {
@@ -125,7 +152,10 @@ impl MapStore {
         else {
             return false;
         };
-        let state = Arc::make_mut(&mut self.maps).entry(*map_id).or_default();
+        let Some(map_id) = MapId::new(*map_id) else {
+            return false;
+        };
+        let state = Arc::make_mut(&mut self.maps).entry(map_id).or_default();
         state.scale = *scale;
         state.locked = *locked;
         if let Some(decorations) = decorations {
@@ -141,6 +171,13 @@ impl MapStore {
     /// One map's contents, if the server has sent any.
     #[must_use]
     pub fn get(&self, map_id: i32) -> Option<&MapState> {
+        self.get_by_id(MapId::new(map_id)?)
+    }
+
+    /// The contents for an already validated saved-map id, if the server has
+    /// sent any.
+    #[must_use]
+    pub fn get_by_id(&self, map_id: MapId) -> Option<&MapState> {
         self.maps.get(&map_id)
     }
 
@@ -158,7 +195,7 @@ impl MapStore {
 
     /// Every known map id, ascending.
     pub fn ids(&self) -> impl Iterator<Item = i32> + '_ {
-        self.maps.keys().copied()
+        self.maps.keys().map(|id| id.raw())
     }
 }
 
@@ -242,6 +279,21 @@ mod tests {
             &store.get(7).unwrap().colors,
             &snapshot.get(7).unwrap().colors,
         ));
+    }
+
+    #[test]
+    fn map_ids_validate_at_the_store_boundary() {
+        assert_eq!(MapId::new(-1), None, "negative values are not saved-map ids");
+        let id = MapId::new(17).expect("non-negative map ids validate");
+        assert_eq!(id.raw(), 17);
+
+        let mut store = MapStore::default();
+        assert!(!store.apply(&event(-1, None, Some(patch(0, 0, 1, 1, 99)))));
+        assert!(store.is_empty(), "an invalid id must not allocate map state");
+
+        assert!(store.apply(&event(17, None, Some(patch(0, 0, 1, 1, 99)))));
+        assert_eq!(store.get_by_id(id).unwrap().color_at(0, 0), 99);
+        assert_eq!(store.get(-1), None, "raw readers retain the same boundary");
     }
 
     #[test]
