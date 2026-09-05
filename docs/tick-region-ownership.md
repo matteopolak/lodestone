@@ -86,6 +86,14 @@ owners whose blocks remain airborne. The tick loop is the only central consumer
 and validates the complete, unique batch set before restoring the prior
 entity-id effect sequence. A landing's placement and discard therefore cannot
 move relative to another landing merely because its chunk owner completes first.
+Unridden boat physics follows the same tick-start rule:
+`MobSim::tick_vehicle_owner_batches` groups cloned hull state by its source
+chunk and carries the original entity-id slot with every completion.
+`MobSim::apply_vehicle_tick_owner_batches`, called only by the live tick loop,
+rejects incomplete or duplicate owners and restores those slots before replacing
+the live hull states. Boat collision reads remain independent of other boats;
+the serial central writer is retained so completion order cannot change a
+client-visible transform.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
