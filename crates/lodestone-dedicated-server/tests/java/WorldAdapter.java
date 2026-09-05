@@ -19,4 +19,8 @@ public final class WorldAdapter {
         // This world-read fixture does not request a mutation. The required
         // host callback remains a no-op so the adapter contract is complete.
     }
+
+    public static void onPlayerJoined(long handle) {}
+
+    public static void onPlayerDisconnected(long handle) {}
 }

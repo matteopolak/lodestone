@@ -96,6 +96,12 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
                 })
                 .expect("dispatch host block-change callback");
             }
+            Ok(Some(AdapterEvent::PlayerJoinedCompleted { player, .. })) => {
+                panic!("unexpected adapter player join callback {player:?}");
+            }
+            Ok(Some(AdapterEvent::PlayerDisconnectedCompleted { player, .. })) => {
+                panic!("unexpected adapter player disconnect callback {player:?}");
+            }
             Ok(Some(AdapterEvent::BlockStateChangedCompleted { change, .. })) => {
                 assert_eq!(
                     change,

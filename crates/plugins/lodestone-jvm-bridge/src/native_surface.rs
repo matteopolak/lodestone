@@ -843,7 +843,9 @@ mod tests {
             "package fixture.adapter; public final class SurfaceAdapter { \
              private static native int blockStateId(int x, int y, int z); \
              public static void onTick(long tick) {} \
-             public static void onBlockStateChanged(int x, int y, int z, int stateId) {} }",
+             public static void onBlockStateChanged(int x, int y, int z, int stateId) {} \
+             public static void onPlayerJoined(long handle) {} \
+             public static void onPlayerDisconnected(long handle) {} }",
         )
         .expect("adapter source");
         for (output, sources) in [
@@ -928,7 +930,13 @@ mod tests {
                 Some(AdapterEvent::TickCompleted(tick)) => {
                     panic!("unexpected adapter tick {tick}");
                 }
-            Some(AdapterEvent::BlockStateChangedCompleted { change, .. }) => {
+                Some(AdapterEvent::PlayerJoinedCompleted { player, .. }) => {
+                    panic!("unexpected adapter player join callback {player:?}");
+                }
+                Some(AdapterEvent::PlayerDisconnectedCompleted { player, .. }) => {
+                    panic!("unexpected adapter player disconnect callback {player:?}");
+                }
+                Some(AdapterEvent::BlockStateChangedCompleted { change, .. }) => {
                     panic!("unexpected adapter block-change callback {change:?}");
                 }
                 None => assert!(Instant::now() < limit, "server tick surface did not become ready"),

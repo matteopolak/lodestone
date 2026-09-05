@@ -55,4 +55,8 @@ public final class BridgeAdapter {
             throw new AssertionError("unexpected host block-change callback");
         }
     }
+
+    public static void onPlayerJoined(long handle) {}
+
+    public static void onPlayerDisconnected(long handle) {}
 }
