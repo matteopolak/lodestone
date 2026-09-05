@@ -775,10 +775,13 @@ latter returns a canonical lowercase UUID string from the fixed sixteen profile
 bytes the dedicated roster already copied into `PlayerIdentity`; it does not
 read a world, retain a connection, or cross a server-world guard. Both resolvers
 generation-check before returning their bounded copied value, so a disconnect
-or replacement fails loudly instead of resolving a later player. There is no
-additional environment variable or runtime toggle: the `jvm` feature and an
-operator-built shim containing the exact isolated declarations are the only
-prerequisites.
+or replacement fails loudly instead of resolving a later player. The inverse
+`playerHandleForName(String)` searches the same copied worker roster and returns
+that generation-checked handle only when exactly one active copied display name
+matches. A null, unknown, or ambiguous name fails loudly rather than selecting
+a hash-map iteration winner. There is no additional environment variable or
+runtime toggle: the `jvm` feature and an operator-built shim containing the
+exact isolated declarations are the only prerequisites.
 
 `activePlayerCount()` returns the count of live player handles in that same
 worker-owned lifecycle map. Its producer is the dedicated host's existing
@@ -829,8 +832,8 @@ With it, the dedicated host supplies one Java-facing, loader-local native state 
 block-state reads, validated resident block-state replacement, the current server tick, and the
 active retained entry's validated descriptor name and version. It also reconciles the server's
 value-only player roster into generation-checked handles: `playerHandleName(long)`,
-`playerHandleUuid(long)`, `playerHandleForUuid(String)`, `activePlayerCount()`, and
-`playerHandleIsActive(long)` read that worker snapshot only. The dedicated host never hands a
+`playerHandleUuid(long)`, `playerHandleForUuid(String)`, `playerHandleForName(String)`,
+`activePlayerCount()`, and `playerHandleIsActive(long)` read that worker snapshot only. The dedicated host never hands a
 server object, connection, ECS entity, or world guard to Java.
 `AdapterHost::start_with_setup` mints the corresponding capability token only
 from its worker's request ports; consuming it keeps that token with the retained loader state, and the
@@ -1010,6 +1013,12 @@ ambiguous UUIDs fail with a named Java error; the resolver never creates a handl
 lookup. A disconnect removes the reverse mapping before the slot can be reused, so a lookup after
 departure cannot recover an old `long` or accidentally select a replacement player.
 
+`playerHandleForName(String)` has the same worker-local lifecycle boundary but
+uses copied display names rather than profile bytes. Because display names need
+not be unique in a malformed or transitional roster snapshot, it refuses an
+ambiguous name rather than choosing an arbitrary handle. A disconnected name
+has no reverse entry, and a later reconnect resolves only to the new generation.
+
 Hermetic registry tests force slot reuse after release, exercise kind mismatch and capacity
 exhaustion, and verify that `clear` advances every live generation before reuse. The adapter's
 worker-local callback tests obtain both block and player handles, check that the player is available
@@ -1035,6 +1044,11 @@ its `(J)Z` declaration and registration after every declaration validation.
 fixture. Its controls cover malformed input before map lookup, an unknown UUID after disconnect,
 and slot reuse: the old handle is not returned for the departed profile. This is a value resolver
 over the copied roster, not a server or world object lookup.
+
+`playerHandleForName(String)` uses that same `(Ljava/lang/String;)J` ABI, pinned
+by the generated shim fixture. Hermetic controls reject null, unknown, and
+ambiguous inputs, then force a disconnect and slot reuse to prove a lookup
+cannot return the departed generation.
 
 The same composed caller exercises recursive Java-to-Rust-to-Java callbacks below and above the
 budget. Depth `2` returns `REENTRANT:OK:3`; depth `4` attempts one more callback and receives
