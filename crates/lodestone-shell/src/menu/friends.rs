@@ -5,7 +5,7 @@
 //! and relationship changes leave as [`FriendsIntent`] values for the app to
 //! hand back to its Friends worker.
 
-use lodestone_auth::friends::{FriendMutation, FriendProfile, FriendsSnapshot};
+use lodestone_auth::friends::{FriendMutation, FriendProfile, FriendsPreferences, FriendsSnapshot};
 
 use crate::friends_runtime::{FriendsError, FriendsView, FriendsViewState};
 
@@ -14,7 +14,7 @@ use super::render::{Align, MenuFrame, MenuLabel, MenuNotice, MenuRow, Origin, Sl
 use super::widget;
 
 pub const TITLE: &str = "Friends";
-pub const TAB_LABELS: [&str; 2] = ["Friends", "Pending"];
+pub const TAB_LABELS: [&str; 3] = ["Friends", "Pending", "Settings"];
 pub const ROW_H: f32 = options::WIDGET_H;
 const HEADER_H: f32 = 62.0;
 const FOOTER_H: f32 = options::FOOTER_HEIGHT;
@@ -24,6 +24,7 @@ const ROW_W: f32 = options::BIG_BUTTON_WIDTH;
 pub enum FriendsTab {
     Friends,
     Pending,
+    Settings,
 }
 
 impl FriendsTab {
@@ -31,6 +32,7 @@ impl FriendsTab {
         match self {
             Self::Friends => 0,
             Self::Pending => 1,
+            Self::Settings => 2,
         }
     }
 }
@@ -39,11 +41,17 @@ impl FriendsTab {
 pub enum FriendsIntent {
     Refresh,
     Mutate(FriendMutation),
+    /// Replace the service-backed preferences for the currently selected account.
+    /// The app forwards this value to its private Friends worker; it never
+    /// exposes a session to the menu.
+    SetPreferences(FriendsPreferences),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Control {
     Tab(FriendsTab),
+    ToggleFriends,
+    ToggleRequests,
     Entry(usize),
     Refresh,
     Primary,
@@ -59,6 +67,10 @@ pub struct FriendsNav {
     selected: usize,
     scroll: f32,
     intents: Vec<FriendsIntent>,
+    /// A second click must not replace the first desired value before the worker
+    /// has accepted it. The confirmed value still comes only from `FriendsView`.
+    preferences_pending: bool,
+    preferences_save_started: bool,
 }
 
 impl Default for FriendsTab {
@@ -69,6 +81,19 @@ impl Default for FriendsTab {
 
 impl FriendsNav {
     pub fn refresh(&mut self, view: FriendsView) {
+        let changed_account = self.view.account.as_ref().map(|account| account.profile_id)
+            != view.account.as_ref().map(|account| account.profile_id);
+        if changed_account {
+            self.preferences_pending = false;
+            self.preferences_save_started = false;
+        } else if self.preferences_pending {
+            if view.state == FriendsViewState::SavingPreferences {
+                self.preferences_save_started = true;
+            } else if self.preferences_save_started || view.error.is_some() {
+                self.preferences_pending = false;
+                self.preferences_save_started = false;
+            }
+        }
         self.view = view;
         self.clamp();
     }
@@ -159,11 +184,14 @@ impl FriendsNav {
                 .map(Entry::Incoming)
                 .chain(snapshot.outgoing.iter().map(Entry::Outgoing))
                 .collect(),
+            FriendsTab::Settings => Vec::new(),
         }
     }
 
     fn controls(&self) -> Vec<Control> {
         let mut controls = vec![Control::Tab(FriendsTab::Friends), Control::Tab(FriendsTab::Pending)];
+        controls.push(Control::Tab(FriendsTab::Settings));
+        controls.extend(self.preference_controls());
         controls.extend((0..self.entries().len()).map(Control::Entry));
         if self.view.account.is_some() {
             controls.push(Control::Refresh);
@@ -180,6 +208,8 @@ impl FriendsNav {
 
     fn visible_controls(&self) -> Vec<Control> {
         let mut controls = vec![Control::Tab(FriendsTab::Friends), Control::Tab(FriendsTab::Pending)];
+        controls.push(Control::Tab(FriendsTab::Settings));
+        controls.extend(self.preference_controls());
         let entries = self.entries();
         if let Some(list) = list_spec(entries.len(), self.scroll)
             .model(crate::config::MIN_SCALED_HEIGHT as f32)
@@ -200,11 +230,27 @@ impl FriendsNav {
     }
 
     fn selected_entry(&self) -> Option<Entry<'_>> {
-        // The two tabs always precede the list entries. Decode the selected
-        // entry directly rather than asking `controls`: controls itself asks
-        // whether an entry has actions, so routing back through it recurses.
-        let index = self.selected.checked_sub(TAB_LABELS.len())?;
+        // Preference controls sit between the tabs and list when Settings is
+        // selected, so use their fixed count rather than re-entering `controls`.
+        let index = self
+            .selected
+            .checked_sub(TAB_LABELS.len() + self.preference_controls().len())?;
         self.entries().into_iter().nth(index)
+    }
+
+    fn preference_controls(&self) -> Vec<Control> {
+        if self.tab == FriendsTab::Settings && self.view.preferences.is_some() {
+            vec![Control::ToggleFriends, Control::ToggleRequests]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn preferences_editable(&self) -> bool {
+        self.view.account.is_some()
+            && self.view.preferences.is_some()
+            && !self.preferences_pending
+            && matches!(self.view.state, FriendsViewState::Disabled | FriendsViewState::Ready)
     }
 
     fn primary_label(&self) -> Option<&'static str> {
@@ -227,6 +273,14 @@ impl FriendsNav {
                 self.scroll = 0.0;
                 false
             }
+            Control::ToggleFriends => self.queue_preferences(|preferences| {
+                preferences.enabled = !preferences.enabled;
+            }),
+            Control::ToggleRequests if self.view.preferences.is_some_and(|preferences| preferences.enabled) => {
+                self.queue_preferences(|preferences| {
+                    preferences.allow_requests = !preferences.allow_requests;
+                })
+            }
             Control::Entry(_) => false,
             Control::Refresh if self.view.account.is_some() => {
                 self.intents.push(FriendsIntent::Refresh);
@@ -248,6 +302,20 @@ impl FriendsNav {
             _ => return false,
         };
         self.intents.push(FriendsIntent::Mutate(mutation));
+        false
+    }
+
+    fn queue_preferences(&mut self, change: impl FnOnce(&mut FriendsPreferences)) -> bool {
+        if !self.preferences_editable() {
+            return false;
+        }
+        let Some(mut preferences) = self.view.preferences else {
+            return false;
+        };
+        change(&mut preferences);
+        self.preferences_pending = true;
+        self.preferences_save_started = false;
+        self.intents.push(FriendsIntent::SetPreferences(preferences));
         false
     }
 
@@ -303,7 +371,7 @@ pub fn list_spec(len: usize, scroll: f32) -> widget::ListSpec {
 pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
     let entries = nav.entries();
     let mut rows = Vec::new();
-    for tab in [FriendsTab::Friends, FriendsTab::Pending] {
+    for tab in [FriendsTab::Friends, FriendsTab::Pending, FriendsTab::Settings] {
         rows.push(MenuRow {
             label: TAB_LABELS[tab.index()].to_owned(),
             enabled: true,
@@ -314,6 +382,21 @@ pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
             }),
             ..Default::default()
         });
+    }
+
+    if nav.tab == FriendsTab::Settings {
+        if let Some(preferences) = nav.view.preferences {
+            rows.push(preference_row(
+                format!("Friends: {}", on_off(preferences.enabled)),
+                HEADER_H + 16.0,
+                nav.preferences_editable(),
+            ));
+            rows.push(preference_row(
+                format!("Allow Friend Requests: {}", on_off(preferences.allow_requests)),
+                HEADER_H + 16.0 + ROW_H + 4.0,
+                nav.preferences_editable() && preferences.enabled,
+            ));
+        }
     }
 
     let visible = list_spec(entries.len(), nav.scroll)
@@ -370,8 +453,23 @@ pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
             scale: 1.0,
         });
     }
+    if nav.tab == FriendsTab::Settings && nav.view.preferences.is_some() {
+        labels.push(MenuLabel {
+            text: if nav.view.preferences.is_some_and(|preferences| preferences.enabled) {
+                "Presence is shared while Friends is enabled.".to_owned()
+            } else {
+                "Presence is not shared while Friends is disabled.".to_owned()
+            },
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: HEADER_H + 16.0 + (ROW_H + 4.0) * 2.0 + 12.0,
+            align: Align::Centre,
+            colour: widget::ACTIVE_LABEL,
+            scale: 1.0,
+        });
+    }
     let notice = notice(nav.view());
-    if entries.is_empty() && notice.is_none() {
+    if nav.tab != FriendsTab::Settings && entries.is_empty() && notice.is_none() {
         labels.push(MenuLabel {
             text: if nav.tab == FriendsTab::Friends {
                 "No friends yet.".to_owned()
@@ -402,6 +500,25 @@ pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
     }
 }
 
+fn on_off(value: bool) -> &'static str {
+    if value { "On" } else { "Off" }
+}
+
+fn preference_row(label: String, dy: f32, enabled: bool) -> MenuRow {
+    MenuRow {
+        label,
+        enabled,
+        slot: Some(Slot {
+            origin: Origin::ScreenTop,
+            dx: -ROW_W * 0.5,
+            dy,
+            w: ROW_W,
+            h: ROW_H,
+        }),
+        ..Default::default()
+    }
+}
+
 fn footer_row(label: &str, index: u8, count: u8) -> MenuRow {
     MenuRow {
         label: label.to_owned(),
@@ -428,6 +545,7 @@ fn notice(view: &FriendsView) -> Option<MenuNotice> {
             FriendsViewState::Resolving | FriendsViewState::FetchingAttributes | FriendsViewState::FetchingFriends => {
                 "Loading Friends..."
             }
+            FriendsViewState::SavingPreferences => "Saving Friends settings...",
             FriendsViewState::Backoff => "Friends will retry automatically.",
             _ => return None,
         },
@@ -460,6 +578,7 @@ mod tests {
                 display_name: "Owner".to_owned(),
             }),
             state: FriendsViewState::Ready,
+            preferences: Some(FriendsPreferences { enabled: true, allow_requests: true }),
             snapshot: Some(snapshot),
             ..FriendsView::default()
         }
@@ -501,5 +620,66 @@ mod tests {
         nav.selected = nav.controls().iter().position(|control| *control == Control::Entry(15)).unwrap();
         nav.scroll_to_selected();
         assert!(nav.scroll() > 0.0);
+    }
+
+    #[test]
+    fn settings_toggles_emit_one_complete_preference_value_and_gate_request_permission() {
+        let mut nav = FriendsNav::default();
+        nav.refresh(ready(FriendsSnapshot::default()));
+        nav.activate(Control::Tab(FriendsTab::Settings));
+        assert!(frame(&nav).rows.iter().any(|row| row.label == "Friends: On" && row.enabled));
+        assert!(frame(&nav)
+            .rows
+            .iter()
+            .any(|row| row.label == "Allow Friend Requests: On" && row.enabled));
+
+        assert!(!nav.click_row(3), "the first settings row is the Friends toggle");
+        assert_eq!(
+            nav.take_intents(),
+            vec![FriendsIntent::SetPreferences(FriendsPreferences {
+                enabled: false,
+                allow_requests: true,
+            })]
+        );
+        assert!(frame(&nav)
+            .rows
+            .iter()
+            .any(|row| row.label == "Friends: On" && !row.enabled));
+    }
+
+    #[test]
+    fn settings_wait_for_attributes_and_keep_controls_disabled_while_saving() {
+        let mut nav = FriendsNav::default();
+        nav.refresh(FriendsView {
+            account: Some(crate::friends_runtime::FriendsAccount {
+                profile_id: Uuid::from_u128(99),
+                display_name: "Owner".to_owned(),
+            }),
+            state: FriendsViewState::FetchingAttributes,
+            ..FriendsView::default()
+        });
+        nav.activate(Control::Tab(FriendsTab::Settings));
+        assert!(frame(&nav).rows.iter().all(|row| !row.label.starts_with("Friends:")));
+
+        nav.refresh(FriendsView {
+            state: FriendsViewState::SavingPreferences,
+            preferences: Some(FriendsPreferences { enabled: true, allow_requests: true }),
+            ..nav.view().clone()
+        });
+        let frame = frame(&nav);
+        assert!(frame.rows.iter().any(|row| row.label == "Friends: On" && !row.enabled));
+        assert_eq!(frame.notice.as_ref().map(|notice| notice.text.as_str()), Some("Saving Friends settings..."));
+    }
+
+    #[test]
+    fn account_switch_drops_an_unconfirmed_preference_intent() {
+        let mut nav = FriendsNav::default();
+        nav.refresh(ready(FriendsSnapshot::default()));
+        nav.activate(Control::Tab(FriendsTab::Settings));
+        nav.activate(Control::ToggleFriends);
+        let mut replacement = ready(FriendsSnapshot::default());
+        replacement.account.as_mut().expect("account").profile_id = Uuid::from_u128(100);
+        nav.refresh(replacement);
+        assert!(frame(&nav).rows.iter().any(|row| row.label == "Friends: On" && row.enabled));
     }
 }
