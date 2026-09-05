@@ -229,6 +229,14 @@ pub struct PhaseStats {
 /// sample without treating a machine-dependent duration as an invariant.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OwnerTickStats {
+    /// Selected chunk owners that completed the random-tick pass. This counts
+    /// ownership visits, not block changes: an empty column still consumed the
+    /// owner's deterministic random-number draws.
+    pub random_tick_owned_chunks: u64,
+    /// Selected chunk owners that completed the thunder-decision pass. This
+    /// counts ownership visits, not lightning bolts: most visits make no
+    /// strike decision visible to a client.
+    pub thunder_owned_chunks: u64,
     /// Due scheduled block ticks handed to the central drain.
     pub scheduled_block_ticks: u64,
     /// Due scheduled fluid ticks handed to the central drain.
@@ -882,7 +890,7 @@ pub struct TickClock {
     /// duration, so it stays cheap and load-invariant to read even after
     /// millions of ticks, unlike re-deriving it from the (bounded) record.
     phase_over_budget: [AtomicU64; TICK_PHASE_COUNT],
-    owner_stats: [AtomicU64; 6],
+    owner_stats: [AtomicU64; 8],
     /// The largest single phase duration ever recorded, and which phase.
     worst_phase: Mutex<Option<WorstPhaseWindow>>,
 }
@@ -905,7 +913,7 @@ impl TickClock {
             phase_history: std::array::from_fn(|_| Mutex::new(VecDeque::with_capacity(TICK_HISTORY_LEN))),
             phase_sample_count: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
             phase_over_budget: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
-            owner_stats: [const { AtomicU64::new(0) }; 6],
+            owner_stats: [const { AtomicU64::new(0) }; 8],
             worst_phase: Mutex::new(None),
         }
     }
@@ -972,6 +980,8 @@ impl TickClock {
     /// Adds work performed at the tick loop's owner hand-off boundaries.
     pub(crate) fn record_owner_work(&self, stats: OwnerTickStats) {
         for (counter, value) in self.owner_stats.iter().zip([
+            stats.random_tick_owned_chunks,
+            stats.thunder_owned_chunks,
             stats.scheduled_block_ticks,
             stats.scheduled_fluid_ticks,
             stats.block_entity_batches,
@@ -988,12 +998,14 @@ impl TickClock {
     pub fn owner_stats(&self) -> OwnerTickStats {
         let read = |index: usize| self.owner_stats[index].load(Ordering::Relaxed);
         OwnerTickStats {
-            scheduled_block_ticks: read(0),
-            scheduled_fluid_ticks: read(1),
-            block_entity_batches: read(2),
-            block_entity_effects: read(3),
-            entity_effect_batches: read(4),
-            entity_effects: read(5),
+            random_tick_owned_chunks: read(0),
+            thunder_owned_chunks: read(1),
+            scheduled_block_ticks: read(2),
+            scheduled_fluid_ticks: read(3),
+            block_entity_batches: read(4),
+            block_entity_effects: read(5),
+            entity_effect_batches: read(6),
+            entity_effects: read(7),
         }
     }
 
@@ -3460,6 +3472,10 @@ async fn run_tick_loop_with_weather_impl<W>(
         // [`INITIAL_RANDOM_TICK_DEFERRAL_TICKS`] for the arithmetic.
         let tick_speed = world_state.random_tick_speed();
         if game_tick > INITIAL_RANDOM_TICK_DEFERRAL_TICKS && tick_speed > 0 {
+            clock.record_owner_work(OwnerTickStats {
+                random_tick_owned_chunks: area.owned_chunks().len() as u64,
+                ..OwnerTickStats::default()
+            });
             // The follow area rather than the two fixed ranges: crops, grass, fire,
             // leaf decay and every other randomly-ticking block now grow where the
             // player is standing instead of only around chunk (0, 0).
@@ -3501,6 +3517,10 @@ async fn run_tick_loop_with_weather_impl<W>(
         // `tick_thunder_for_chunk` nor `MobSim::tick_lightning` had a single
         // production caller, so a thunderstorm never struck anything.
         if game_tick > INITIAL_RANDOM_TICK_DEFERRAL_TICKS && weather.thundering {
+            clock.record_owner_work(OwnerTickStats {
+                thunder_owned_chunks: area.owned_chunks().len() as u64,
+                ..OwnerTickStats::default()
+            });
             // `min_y`/`height` are uniform for the whole dimension, so the
             // fire-tick arm's own cache is reused rather than paying a second
             // `world.column` fetch for the same two integers.
@@ -4617,11 +4637,12 @@ mod tests {
             anchors,
         };
 
+        let clock = Arc::new(TickClock::new());
         tokio::spawn(run_tick_loop(
             mobs,
             out,
             block_entities,
-            Arc::new(TickClock::new()),
+            Arc::clone(&clock),
             source,
             BlockTickFeed::default(),
             // The fallback: a single column at (64, 64), nowhere near the player.
@@ -4672,6 +4693,11 @@ mod tests {
         assert!(
             !seen.contains(&(-37, 100)),
             "the axes must not be transposed"
+        );
+        assert_eq!(
+            clock.owner_stats().random_tick_owned_chunks,
+            45,
+            "five eligible ticks must visit the moved 3x3 area exactly once per owned chunk"
         );
     }
 
@@ -5050,12 +5076,13 @@ mod tests {
 
         let vote = SleepVote::new();
         let feed = SleepFeed::default();
+        let loop_clock = Arc::clone(&clock);
         tokio::spawn(async move {
             run_tick_loop_with_weather(
                 mobs,
                 out,
                 block_entities,
-                Arc::clone(&clock),
+                loop_clock,
                 world,
                 block_tick_out,
                 tick_area,
@@ -5095,6 +5122,11 @@ mod tests {
             .filter(|s| s.entity_type.to_string() == crate::lightning::LIGHTNING_BOLT)
             .collect();
         assert_eq!(bolts.len(), 1, "the bolt must reach the same snapshot stream every other entity does");
+        assert_eq!(
+            clock.owner_stats().thunder_owned_chunks,
+            draws_to_first_strike,
+            "the one-owner fixture must make one thunder visit for every eligible deterministic draw"
+        );
     }
 
     /// Gate for wiring through the **production** loop, not at

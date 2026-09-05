@@ -25,6 +25,13 @@ consume chunks in that order; a duplicate would advance one chunk twice in a
 tick. This check makes the one-owner-per-chunk invariant testable now and
 provides the input contract a future partitioner must preserve.
 
+`TickStats::owner_work` records `random_tick_owned_chunks` and
+`thunder_owned_chunks` from those same live passes. They count completed
+ownership visits rather than block changes or bolts, so an empty chunk and a
+non-striking thunder roll remain visible in a named workload. This makes the
+spatial plan a production-observed boundary without treating either counter as
+a timing result or a concurrency claim.
+
 `TickRegionPlan::owner_workloads` reports the current real ownership (one
 single-chunk workload per selected column). `FollowArea::spawnable_chunks`
 consumes that report on the live tick path, so the count cannot become an
@@ -176,7 +183,8 @@ scheduled-fluid, block-entity, or ambient-entity work from those owners, so a
 profile of an empty or one-owner loop cannot look valid. Pass `--ticks <1..512>`,
 `--wall-deadline-secs <1..60>`, `--output-dir <path>`, or `--run-id <name>`
 after the recipe to select a finite alternative. Inspect the scheduled-and-physics
-phase beside `owner_work.scheduled_block_ticks` and
+phase beside `owner_work.random_tick_owned_chunks`,
+`owner_work.thunder_owned_chunks`, `owner_work.scheduled_block_ticks`, and
 `owner_work.scheduled_fluid_ticks`; inspect mobs-and-items beside
 `owner_work.block_entity_batches`, `entity_effect_batches`, and
 `entity_effects`. A high phase cost with a missing or unexpectedly small count
