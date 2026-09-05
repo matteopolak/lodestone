@@ -726,10 +726,48 @@ light, biome, heightmap or block-entity contents against an independently read
 world snapshot, nor does it cover a broader range of chunk positions or
 transitions.
 
+### Captured initial chunk content
+
+`differential_captured_chunk_content.rs` replays one unmodified
+`level_chunk_with_light` payload from a bounded protocol-776 creative-oracle
+session. Before the capture client joins, RCON force-loads chunk `(0, 0)` and
+places two differently oriented logs and glowstone at `y = 300`. The fixture
+records those source-command state names and their three `MOTION_BLOCKING` tops;
+they are external expectations, not bytes or decoded values produced by our
+encoder.
+
+The ordinary replay sends the exact fixture payload through `V770Adapter` and
+the normal `ClientBuilder` driver. It then reads each named state through both
+`ClientHandle::block_at` and its public palette-backed `section_at` snapshot,
+and reads the public `ClientHandle::column_heightmap` value after translating
+the stored height above `min_y` back to an absolute top. The corruption control
+changes one expected state annotation in memory and requires the public block
+comparison to report its named mismatch; a comparison that never reads the
+decoded chunk state cannot pass that control.
+
+To refresh the fixture, start the local headless creative oracle and run:
+
+```bash
+LODESTONE_CHUNK_CONTENT_CAPTURE_OUT=/absolute/path/to/lodestone/crates/lodestone-fuzz/tests/fixtures/chunk_content_26_2.json \\
+CARGO_TARGET_DIR=/private/tmp/lodestone-batch-549 cargo test -p lodestone-fuzz \\
+  --no-default-features --features v26-2,rcon-oracle \\
+  --test differential_captured_chunk_content acquire_chunk_content_from_external_server \\
+  -j 2 --no-fail-fast -- --ignored --nocapture
+```
+
+The capture path is explicit because test binaries do not run from the
+repository root. Acquisition clears its three blocks and releases the forced
+chunk after it records the packet. This lane covers palette-backed block states
+and the motion-blocking heightmap from initial chunk content. The public client
+surface still has no narrow biome or initial block-entity query, so those
+remain coverage gaps rather than reasons to read protocol-private state in the
+test.
+
 ### What Track B still does not do
 - **The client-state packet corpus is still small.** The captured lane covers
-  three inventory slot payloads, one block-update sequence, and one full
-  chunk load/update/unload lifecycle, but no broader inventory or chunk packet
+  three inventory slot payloads, one block-update sequence, one full chunk
+  load/update/unload lifecycle, and palette-backed block states plus one
+  heightmap from an initial chunk, but no broader inventory or chunk packet
   sequence. The captured armor-stand lane covers spawn, movement and removal,
   but not metadata. The two committed item-entity
   metadata fixtures remain unpaired with their own session's spawn, so they
