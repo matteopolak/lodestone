@@ -248,7 +248,7 @@ fn write_optional_mob_effect(
             w.bool(true);
             let id = mob_effect_id(&key.to_string())
                 .ok_or_else(|| AdapterError::Encode(format!("unknown mob effect {key}")))?;
-            w.var_i32(id);
+            w.var_i32(id.registry_id());
         }
     }
     Ok(())

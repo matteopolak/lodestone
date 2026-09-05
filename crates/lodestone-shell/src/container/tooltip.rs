@@ -387,8 +387,8 @@ fn potion_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
         })
         .collect();
     entries.extend(custom_effects.iter().filter_map(|effect| {
-        let (name, harmful) =
-            lodestone_data::potion::mob_effect_tooltip(effect.effect_id)?;
+        let id = lodestone_data::mob_effects::MobEffectId::from_registry_id(effect.effect_id)?;
+        let (name, harmful) = lodestone_data::potion::mob_effect_tooltip_for(id);
         Some((name, effect.amplifier, effect.duration_ticks, harmful))
     }));
     let mut lines = Vec::new();
@@ -421,10 +421,9 @@ fn potion_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
         .map(lodestone_data::potion::potion_attribute_modifiers)
         .unwrap_or_default();
     modifiers.extend(custom_effects.iter().flat_map(|effect| {
-        lodestone_data::potion::mob_effect_attribute_modifiers(
-            effect.effect_id,
-            effect.amplifier,
-        )
+        lodestone_data::mob_effects::MobEffectId::from_registry_id(effect.effect_id)
+            .map(|id| lodestone_data::potion::mob_effect_attribute_modifiers_for(id, effect.amplifier))
+            .unwrap_or_default()
     }));
     if !modifiers.is_empty() {
         lines.push(TooltipLine {

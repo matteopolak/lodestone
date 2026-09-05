@@ -302,7 +302,8 @@ fn decode_effect(id: i32) -> Option<ResourceKey> {
     if id == 0 {
         return None;
     }
-    lodestone_data::mob_effects::mob_effect_name(id - 1).and_then(|name| name.parse().ok())
+    let id = lodestone_data::mob_effects::MobEffectId::from_registry_id(id - 1)?;
+    lodestone_data::mob_effects::mob_effect_name_for(id).parse().ok()
 }
 
 impl BeaconSelection {

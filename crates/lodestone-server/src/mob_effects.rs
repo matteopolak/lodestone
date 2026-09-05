@@ -348,7 +348,10 @@ pub fn potion_splash_effects(potion_registry_id: i32, scale: f64, duration_scale
     built_in
         .iter()
         .filter_map(|&(effect_index, amplifier, base_duration)| {
-            let effect_id = lodestone_data::mob_effects::mob_effect_name(i32::try_from(effect_index).ok()?)?;
+            let effect_id = lodestone_data::mob_effects::MobEffectId::from_registry_id(
+                i32::try_from(effect_index).ok()?,
+            )?;
+            let effect_id = lodestone_data::mob_effects::mob_effect_name_for(effect_id);
             let amplifier = u32::from(amplifier);
             if effect_is_instantaneous(effect_id) {
                 let base_amount = match effect_id.strip_prefix("minecraft:").unwrap_or(effect_id) {

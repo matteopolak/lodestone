@@ -413,7 +413,7 @@ fn format_duration(effect: &StatusEffect, translate: &dyn Fn(&str) -> Option<Str
 /// not know, which sorts last rather than panicking.
 fn effect_color(path: &str) -> Option<u32> {
     let id = lodestone_data::mob_effects::mob_effect_id(&format!("minecraft:{path}"))?;
-    lodestone_data::mob_effects::mob_effect_color(id)
+    Some(lodestone_data::mob_effects::mob_effect_color_for(id))
 }
 
 /// vanilla's own effect-instance comparator — the order
@@ -621,10 +621,10 @@ mod tests {
     #[test]
     fn every_registry_effect_has_a_category() {
         let mut missing = Vec::new();
-        for id in 0..lodestone_data::mob_effects::MOB_EFFECT_COUNT {
-            let Some(name) = lodestone_data::mob_effects::mob_effect_name(id as i32) else {
-                continue;
-            };
+        for raw in 0..lodestone_data::mob_effects::MOB_EFFECT_COUNT {
+            let id = lodestone_data::mob_effects::MobEffectId::from_registry_id(raw as i32)
+                .expect("generated mob-effect id validates");
+            let name = lodestone_data::mob_effects::mob_effect_name_for(id);
             let path = name.strip_prefix("minecraft:").unwrap_or(name);
             if !MOB_EFFECT_BENEFICIAL.iter().any(|(n, _)| *n == path) {
                 missing.push(path.to_string());
@@ -665,10 +665,11 @@ mod tests {
             let entries = lodestone_data::potion::potion_effect_entries(potion);
             let raw = lodestone_data::potion::potion_built_in_effects(potion);
             for (entry, (effect_index, _, _)) in entries.iter().zip(raw.iter()) {
-                let Some(name) = lodestone_data::mob_effects::mob_effect_name(*effect_index as i32)
-                else {
-                    continue;
-                };
+                let effect_id = lodestone_data::mob_effects::MobEffectId::from_registry_id(
+                    *effect_index as i32,
+                )
+                .expect("generated potion effect id validates");
+                let name = lodestone_data::mob_effects::mob_effect_name_for(effect_id);
                 let path = name.strip_prefix("minecraft:").unwrap_or(name);
                 // `harmful` is `category == HARMFUL`; `is_beneficial` is
                 // `category == BENEFICIAL`. NEUTRAL makes both false, so the
