@@ -1297,6 +1297,15 @@ pub trait ChunkSource: Send + Sync {
         None
     }
 
+    /// Clones an already-resident column without generating a cache miss.
+    ///
+    /// This is intentionally narrower than [`column`](Self::column): a caller
+    /// enriching an answer with loaded neighbours must preserve the unloaded
+    /// result rather than turning one request into eight loads.
+    fn resident_column(&self, _cx: i32, _cz: i32) -> Option<ChunkColumn> {
+        None
+    }
+
     /// Reads the biome id at world coordinates `(x, y, z)` — `/execute if
     /// biome`'s own read, through the same data
     /// [`column`](Self::column) would return.
@@ -1552,6 +1561,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).resident_block_state_id(x, y, z)
     }
 
+    fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        (**self).resident_column(cx, cz)
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         (**self).column(cx, cz)
     }
@@ -1628,6 +1641,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
 impl<S: ChunkSource + ?Sized> ChunkSource for &S {
     fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
         (**self).resident_block_state_id(x, y, z)
+    }
+
+    fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        (**self).resident_column(cx, cz)
     }
 
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {

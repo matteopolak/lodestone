@@ -480,6 +480,10 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.resident_block_state_id(x, y, z)
     }
 
+    fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        self.primary.resident_column(cx, cz)
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         self.primary.column(cx, cz)
     }

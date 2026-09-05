@@ -265,13 +265,13 @@ long arrays, and inline light framing without a trust-edges byte. The outbound
 block-state inverse accepts only unique canonical mappings. Unsupported states,
 non-plains biomes and block entities return explicit chunk-encoding errors.
 Sky and block light are computed over canonical states with the shared light
-solver and the canonical per-state opacity/emission table. Initial chunks carry
-the result inline; edits use the server's relight path and this family's
-light-update packet. A relevant edit supplies the shared solver with the loaded
-3×3 column neighbourhood, so adjacent columns contribute at seams; it
-recomputes and sends that whole bounded footprint. Initial chunk batches still
-use their single-column encoder input, so cross-column light at first load,
-external-client acceptance, and broader Play coverage remain unverified.
+solver and the canonical per-state opacity/emission table. Initial chunks and
+relevant edits supply the shared solver with the loaded 3×3 column
+neighbourhood, so adjacent columns contribute at seams from the first load
+when already resident and throughout later relights. Missing columns retain an
+opaque seam rather than being generated for light. An edit recomputes and sends
+that whole bounded footprint. External-client acceptance and broader Play
+coverage remain unverified.
 
 To extend hosting, change this family's `server_protocol` and add outside wire
 controls to `tests/server_protocol.rs`. `tests/hosting_configuration.rs` records

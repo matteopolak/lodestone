@@ -964,6 +964,10 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         }).flatten()
     }
 
+    fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        self.read(cx, cz, ChunkColumn::clone)
+    }
+
     /// Forwarded, not answered: a cache owns no registries of its own, and a
     /// constructor that wraps before asking would otherwise see `None` and build
     /// a private pair the save path cannot read.
