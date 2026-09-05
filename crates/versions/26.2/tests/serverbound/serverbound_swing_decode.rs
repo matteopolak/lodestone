@@ -14,7 +14,7 @@ fn swing_decodes_main_hand() {
     let proto = V770ServerProtocol;
     let decoded = proto.decode(lodestone_core::State::Play, play::serverbound::SWING, &[0]);
     assert!(
-        matches!(decoded, ServerBound::Swing { hand: 0 }),
+        matches!(decoded, ServerBound::Swing { hand: lodestone_model::Hand::Main }),
         "expected Swing{{ hand: 0 }}, got {decoded:?}"
     );
 }
@@ -24,7 +24,7 @@ fn swing_decodes_off_hand() {
     let proto = V770ServerProtocol;
     let decoded = proto.decode(lodestone_core::State::Play, play::serverbound::SWING, &[1]);
     assert!(
-        matches!(decoded, ServerBound::Swing { hand: 1 }),
+        matches!(decoded, ServerBound::Swing { hand: lodestone_model::Hand::Off }),
         "expected Swing{{ hand: 1 }}, got {decoded:?}"
     );
 }

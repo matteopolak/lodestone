@@ -3,7 +3,7 @@ use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
 use lodestone_model::{
     AnimationAction, BlockFace, BlockPos, ClientAction, ClientEvent, ConnectionState, Directive,
-    Vec3f, VersionAdapter,
+    Hand, Vec3f, VersionAdapter,
 };
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_9::{
@@ -715,7 +715,7 @@ fn registry_selected_protocol_340_lifts_literal_arm_swings_to_the_shared_broadca
             .expect("every hosted 1.9-era protocol must select a server adapter");
         assert_eq!(
             protocol.decode(State::Play, packet_id, &[0]),
-            ServerBound::Swing { hand: 0 },
+            ServerBound::Swing { hand: Hand::Main },
             "protocol {protocol_version} must use its own arm-animation id"
         );
     }
@@ -725,8 +725,8 @@ fn registry_selected_protocol_340_lifts_literal_arm_swings_to_the_shared_broadca
     let adapter = V340Adapter::new();
 
     for (body, hand, animation, expected_action) in [
-        (&[0][..], 0, 0, AnimationAction::SwingMainHand),
-        (&[1][..], 1, 3, AnimationAction::SwingOffHand),
+        (&[0][..], Hand::Main, 0, AnimationAction::SwingMainHand),
+        (&[1][..], Hand::Off, 3, AnimationAction::SwingOffHand),
     ] {
         assert_eq!(
             protocol.decode(State::Play, 29, body),

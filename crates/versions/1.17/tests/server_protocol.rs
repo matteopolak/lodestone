@@ -244,7 +244,9 @@ fn registry_selected_1_17_era_arm_animation_reaches_the_shared_swing_consumer() 
             let body = [wire_hand];
             assert_eq!(
                 protocol.decode(State::Play, server_arm, &body),
-                ServerBound::Swing { hand: wire_hand },
+                ServerBound::Swing {
+                    hand: Hand::from_wire_ordinal(i32::from(wire_hand)).expect("fixture hand"),
+                },
                 "protocol {protocol_version} must lift its literal swing body"
             );
 

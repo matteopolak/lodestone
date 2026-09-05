@@ -391,7 +391,7 @@ fn registry_selected_arm_animation_connects_protocol_5_to_the_shared_swing_broad
         assert_eq!(payload, &[0, 0, 0, 0, 1], "entity id 0 and swing ordinal 1");
         assert_eq!(
             protocol.decode(State::Play, packet_id, &[0, 0, 1, 65, 1]),
-            ServerBound::Swing { hand: 0 },
+            ServerBound::Swing { hand: lodestone_model::Hand::Main },
             "a literal request with an unrelated sender id must reach the shared swing consumer"
         );
     }

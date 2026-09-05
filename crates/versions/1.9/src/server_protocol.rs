@@ -628,8 +628,7 @@ fn decode_packet(
             }
             State::Play if packet_id == ids.arm_animation => {
                 let Some(hand) = decode_full::<ServerboundArmAnimation>(payload, ctx)
-                    .and_then(|packet| u8::try_from(packet.hand).ok())
-                    .filter(|&hand| hand <= 1)
+                    .and_then(|packet| lodestone_model::Hand::from_wire_ordinal(packet.hand))
                 else {
                     return ServerBound::Ignored;
                 };

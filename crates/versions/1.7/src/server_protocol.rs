@@ -429,7 +429,7 @@ impl ServerProtocol for V5ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 if animation == 1 {
-                    ServerBound::Swing { hand: 0 }
+                    ServerBound::Swing { hand: lodestone_model::Hand::Main }
                 } else {
                     ServerBound::Ignored
                 }

@@ -11,7 +11,7 @@
 use lodestone_core::State;
 use lodestone_model::command_tree::{CommandSuggestionsResponse, CommandTree};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
+    BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode, Hand,
     ItemStack, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation, SoundCategory,
     Text, Vec3, Vec3f,
 };
@@ -1309,8 +1309,8 @@ pub enum ServerBound {
     /// so it is silently a no-op there, matching the `Chat` variant's own
     /// documented posture.
     Swing {
-        /// `0` main hand, `1` off hand.
-        hand: u8,
+        /// Hand whose swing the server should broadcast.
+        hand: Hand,
     },
     /// A spectator clicking a nearby entity to attach their camera to it
     /// (`ServerboundSpectatorActionPacket`). Vanilla's `handleSpectatorAction`

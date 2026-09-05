@@ -280,8 +280,8 @@ const CHAT_LOG_CAPACITY: usize = 256;
 pub struct SwingEvent {
     /// The swinging entity's network id.
     pub entity_id: i32,
-    /// `0` main hand, `1` off hand.
-    pub hand: u8,
+    /// Hand whose swing should be broadcast.
+    pub hand: lodestone_model::Hand,
 }
 
 /// How many swing events the shared log retains. A swing is far more
@@ -382,7 +382,7 @@ impl PlayerRegistry {
     /// which already animates locally the instant it sent the packet. The
     /// log itself carries the sender so each reader can make that
     /// per-connection decision; it does not decide for them.
-    pub fn swing(&self, entity_id: i32, hand: u8) {
+    pub fn swing(&self, entity_id: i32, hand: lodestone_model::Hand) {
         let mut inner = self.lock();
         inner.swings.push_back(SwingEvent { entity_id, hand });
         while inner.swings.len() > SWING_LOG_CAPACITY {
@@ -1027,8 +1027,8 @@ mod tests {
     #[test]
     fn swing_cursor_starts_at_the_current_end() {
         let registry = PlayerRegistry::new();
-        registry.swing(1, 0);
-        registry.swing(1, 0);
+        registry.swing(1, lodestone_model::Hand::Main);
+        registry.swing(1, lodestone_model::Hand::Main);
         let mut cursor = registry.swing_cursor();
         assert_eq!(
             registry.swings_since(&mut cursor),
@@ -1044,19 +1044,19 @@ mod tests {
     fn swings_since_returns_every_entry_in_order() {
         let registry = PlayerRegistry::new();
         let mut cursor = registry.swing_cursor();
-        registry.swing(11, 0);
-        registry.swing(22, 1);
+        registry.swing(11, lodestone_model::Hand::Main);
+        registry.swing(22, lodestone_model::Hand::Off);
         let events = registry.swings_since(&mut cursor);
         assert_eq!(
             events,
             vec![
                 SwingEvent {
                     entity_id: 11,
-                    hand: 0
+                    hand: lodestone_model::Hand::Main
                 },
                 SwingEvent {
                     entity_id: 22,
-                    hand: 1
+                    hand: lodestone_model::Hand::Off
                 },
             ]
         );
@@ -1074,19 +1074,19 @@ mod tests {
         let registry = PlayerRegistry::new();
         let mut alice_cursor = registry.swing_cursor();
         let mut bob_cursor = registry.swing_cursor();
-        registry.swing(7, 1);
+        registry.swing(7, lodestone_model::Hand::Off);
         assert_eq!(
             registry.swings_since(&mut alice_cursor),
             vec![SwingEvent {
                 entity_id: 7,
-                hand: 1
+                hand: lodestone_model::Hand::Off
             }]
         );
         assert_eq!(
             registry.swings_since(&mut bob_cursor),
             vec![SwingEvent {
                 entity_id: 7,
-                hand: 1
+                hand: lodestone_model::Hand::Off
             }],
             "a second, independent cursor must still see the same entry"
         );
@@ -1101,7 +1101,7 @@ mod tests {
         let registry = PlayerRegistry::new();
         let mut cursor = registry.swing_cursor();
         for i in 0..(SWING_LOG_CAPACITY as i32 + 5) {
-            registry.swing(i, 0);
+            registry.swing(i, lodestone_model::Hand::Main);
         }
         let events = registry.swings_since(&mut cursor);
         assert_eq!(

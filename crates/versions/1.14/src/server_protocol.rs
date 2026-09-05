@@ -596,8 +596,7 @@ impl ServerProtocol for V578ServerProtocol {
             }
             State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
                 let Some(hand) = decode_full::<ServerboundArmAnimation>(payload)
-                    .and_then(|packet| u8::try_from(packet.hand).ok())
-                    .filter(|&hand| hand <= 1)
+                    .and_then(|packet| lodestone_model::Hand::from_wire_ordinal(packet.hand))
                 else {
                     return ServerBound::Ignored;
                 };
@@ -804,8 +803,7 @@ impl ServerProtocol for V754ServerProtocol {
             }
             State::Play if packet_id == play_754::serverbound::ARM_ANIMATION => {
                 let Some(hand) = decode_full_754::<ServerboundArmAnimation>(payload)
-                    .and_then(|packet| u8::try_from(packet.hand).ok())
-                    .filter(|&hand| hand <= 1)
+                    .and_then(|packet| lodestone_model::Hand::from_wire_ordinal(packet.hand))
                 else {
                     return ServerBound::Ignored;
                 };
@@ -1015,8 +1013,7 @@ impl ServerProtocol for V498ServerProtocol {
             }
             State::Play if packet_id == play_498::serverbound::ARM_ANIMATION => {
                 let Some(hand) = decode_full_498::<ServerboundArmAnimation>(payload)
-                    .and_then(|packet| u8::try_from(packet.hand).ok())
-                    .filter(|&hand| hand <= 1)
+                    .and_then(|packet| lodestone_model::Hand::from_wire_ordinal(packet.hand))
                 else {
                     return ServerBound::Ignored;
                 };

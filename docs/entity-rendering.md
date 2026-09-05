@@ -29,6 +29,12 @@ re-exports the model type for callers that already use
 
 ### Pose
 
+Arm-swing requests are decoded into `lodestone_model::Hand` at every hosted
+protocol boundary. The integrated server's broadcast log retains that type
+until its final animation-byte encoding, so an arbitrary integer cannot become
+an arm selection inside gameplay code; protocols that predate the off hand
+produce `Hand::Main` directly.
+
 `AnimFamily::classify` picks a `setupAnim` from a model's **part names**, not its type name — a quadruped is whatever has `right_hind_leg`/`left_front_leg` — keeping a version-specific mob list out of a version-free crate. It cannot express a vanilla **subclass override** on an identical skeleton (a zombie's arms on a player's rig); `HumanoidArms` is a second table keyed on model name for that, never a branch inside the classifier.
 
 **Creeper swell is a scale about the root part, not a pose** — vanilla wraps it around the whole model *before* the ground-lift translate, so it must be conjugated as `T(+1.501) ∘ S ∘ T(-1.501)` or the creeper sinks into the floor as it grows:

@@ -183,8 +183,8 @@ fn registry_selected_14_era_arm_animation_connects_to_the_client_event() {
         let adapter = adapter_for(protocol_version);
 
         for (wire_hand, expected_hand, expected_action) in [
-            (0_u8, 0_u8, AnimationAction::SwingMainHand),
-            (1_u8, 1_u8, AnimationAction::SwingOffHand),
+            (0_u8, Hand::Main, AnimationAction::SwingMainHand),
+            (1_u8, Hand::Off, AnimationAction::SwingOffHand),
         ] {
             // The one-byte fixtures are assembled from the packet's literal
             // VarInt hand field, not produced by the adapter's encoder.

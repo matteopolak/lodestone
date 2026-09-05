@@ -366,15 +366,11 @@ impl ServerProtocol for V756ServerProtocol {
                 })
             }
             State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
-                let Some(ServerboundArmAnimation { hand }) = decode_full(payload) else {
+                let Some(hand) = decode_full::<ServerboundArmAnimation>(payload)
+                    .and_then(|packet| lodestone_model::Hand::from_wire_ordinal(packet.hand))
+                else {
                     return ServerBound::Ignored;
                 };
-                let Ok(hand) = u8::try_from(hand) else {
-                    return ServerBound::Ignored;
-                };
-                if hand > 1 {
-                    return ServerBound::Ignored;
-                }
                 ServerBound::Swing { hand }
             }
             State::Play if packet_id == play::serverbound::HELD_ITEM_SLOT => {
@@ -779,15 +775,11 @@ impl ServerProtocol for V758ServerProtocol {
                 )
             }
             State::Play if packet_id == play_758::serverbound::ARM_ANIMATION => {
-                let Some(ServerboundArmAnimation { hand }) = decode_full_758(payload) else {
+                let Some(hand) = decode_full_758::<ServerboundArmAnimation>(payload)
+                    .and_then(|packet| lodestone_model::Hand::from_wire_ordinal(packet.hand))
+                else {
                     return ServerBound::Ignored;
                 };
-                let Ok(hand) = u8::try_from(hand) else {
-                    return ServerBound::Ignored;
-                };
-                if hand > 1 {
-                    return ServerBound::Ignored;
-                }
                 ServerBound::Swing { hand }
             }
             State::Play if packet_id == play_758::serverbound::HELD_ITEM_SLOT => {

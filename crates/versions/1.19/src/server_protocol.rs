@@ -325,8 +325,7 @@ impl ServerProtocol for V762ServerProtocol {
             }
             State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
                 let Some(hand) = decode_full::<ServerboundArmAnimation>(payload)
-                    .and_then(|packet| u8::try_from(packet.hand).ok())
-                    .filter(|&hand| hand <= 1)
+                    .and_then(|packet| lodestone_model::Hand::from_wire_ordinal(packet.hand))
                 else {
                     return ServerBound::Ignored;
                 };

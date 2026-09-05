@@ -350,9 +350,8 @@ impl ServerProtocol for V404ServerProtocol {
             // cannot become an arbitrary animation action downstream.
             State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
                 match decode_full::<ServerboundArmAnimation>(payload) {
-                    Some(ServerboundArmAnimation { hand }) if (0..=1).contains(&hand) => {
-                        ServerBound::Swing { hand: hand as u8 }
-                    }
+                    Some(ServerboundArmAnimation { hand }) => lodestone_model::Hand::from_wire_ordinal(hand)
+                        .map_or(ServerBound::Ignored, |hand| ServerBound::Swing { hand }),
                     _ => ServerBound::Ignored,
                 }
             }
