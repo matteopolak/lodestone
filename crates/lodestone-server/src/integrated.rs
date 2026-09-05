@@ -727,8 +727,8 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
             for dz in -1..=1 {
                 for dx in -1..=1 {
                     neighbours.push((
-                        snapshot.column_x + dx,
-                        snapshot.column_z + dz,
+                        dx,
+                        dz,
                         source.column(snapshot.column_x + dx, snapshot.column_z + dz),
                     ));
                 }
