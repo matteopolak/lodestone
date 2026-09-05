@@ -163,6 +163,18 @@ real-client validation; a separately run 1.19.4 client remains the proof that
 the complete join registry and empty-light handling are accepted outside the
 in-process adapter.
 
+### External-client acceptance
+
+The opt-in release-client gate covers this hosted protocol as row **762**. Run it with
+`just external-client-acceptance --protocol 762 --output /private/tmp/lodestone-v762` and an
+external driver. Its six-stage evidence uses `configuration.mode: "login_to_play"` because this
+era has no Configuration phase, and `chunk_batch_acknowledgement.mode: "unbatched"` with
+`batch_count: 0` because its host sends columns without chunk-batch framing. The remaining stages
+are unchanged: join, deliberate movement, one observed `start_destroy_block` result, and a
+client-initiated clean disconnect, all with exact 1.19.4 client-build provenance. This gate was not
+launched while this documentation was updated; protocol 762 therefore remains unverified by a
+real external client until that manual run produces `report.json`.
+
 ### The nine shape deltas, and which mechanism carries each
 
 | packet | delta | carried by |

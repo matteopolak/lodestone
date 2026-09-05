@@ -28,7 +28,21 @@ class EvidenceContractTests(unittest.TestCase):
         self.assertIn(766, protocols)
         self.assertIn(774, protocols)
         self.assertIn(776, protocols)
-        self.assertEqual(RUNNER.GATE_PROTOCOLS, (766, 774))
+        self.assertEqual(RUNNER.GATE_PROTOCOLS, (762, 766, 774, 776))
+        gated = {
+            row.protocol: (row.release, row.configuration_mode, row.chunk_batch_mode)
+            for row in RUNNER.ROWS
+            if row.protocol in RUNNER.GATE_PROTOCOLS
+        }
+        self.assertEqual(
+            gated,
+            {
+                762: ("1.19.4", "login_to_play", "unbatched"),
+                766: ("1.20.6", "configuration", "acknowledged"),
+                774: ("1.21.11", "configuration", "acknowledged"),
+                776: ("26.2", "configuration", "acknowledged"),
+            },
+        )
         self.assertEqual(
             RUNNER.STAGES,
             (
@@ -56,11 +70,17 @@ class EvidenceContractTests(unittest.TestCase):
                     "protocol": row.protocol,
                     "release": row.release,
                     "stages": [
-                        {"name": "configuration", "observed": True, "observation": "finish accepted"},
+                        {
+                            "name": "configuration",
+                            "observed": True,
+                            "observation": "finish accepted",
+                            "mode": "configuration",
+                        },
                         {
                             "name": "chunk_batch_acknowledgement",
                             "observed": True,
                             "observation": "initial batch acknowledged",
+                            "mode": "acknowledged",
                             "batch_count": 1,
                         },
                         {"name": "join", "observed": True, "observation": "world entered"},
@@ -98,8 +118,90 @@ class EvidenceContractTests(unittest.TestCase):
             result = RUNNER.validate_evidence(evidence, row, time.time() - 1)
             self.assertEqual(result["client_build"], row.release)
             self.assertEqual([stage["name"] for stage in result["stages"]], list(RUNNER.STAGES))
+            self.assertEqual(result["stages"][0]["mode"], "configuration")
+            self.assertEqual(result["stages"][1]["mode"], "acknowledged")
             with self.assertRaisesRegex(RuntimeError, "no fresh evidence"):
                 RUNNER.validate_evidence(evidence, row, time.time() + 1)
+            evidence_value = json.loads(evidence.read_text(encoding="utf-8"))
+            evidence_value["provenance"]["client_build"] = "26.2"
+            evidence.write_text(json.dumps(evidence_value), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "client_build must be '1.20.6'"):
+                RUNNER.validate_evidence(evidence, row, time.time() - 1)
+
+    def test_legacy_row_records_direct_play_and_unbatched_chunks(self) -> None:
+        row = next(row for row in RUNNER.ROWS if row.protocol == 762)
+        stages = [
+            {
+                "name": "configuration",
+                "observed": True,
+                "observation": "login transitioned directly to play",
+                "mode": "login_to_play",
+            },
+            {
+                "name": "chunk_batch_acknowledgement",
+                "observed": True,
+                "observation": "initial chunks arrived without batch framing",
+                "mode": "unbatched",
+                "batch_count": 0,
+            },
+            {"name": "join", "observed": True, "observation": "world entered"},
+            {
+                "name": "movement",
+                "observed": True,
+                "observation": "one deliberate position update",
+                "movement_count": 1,
+            },
+            {
+                "name": "play_action",
+                "observed": True,
+                "observation": "block break result captured",
+                "kind": RUNNER.ACTION,
+                "action_count": 1,
+                "result_observed": True,
+            },
+            {
+                "name": "disconnect",
+                "observed": True,
+                "observation": "client closed the session and saw EOF",
+                "clean": True,
+                "initiated_by": "client",
+            },
+        ]
+        result = RUNNER.validate_stages(stages, row)
+        self.assertEqual(result[0]["mode"], "login_to_play")
+        self.assertEqual(result[1]["batch_count"], 0)
+
+    def test_configuration_and_batch_modes_are_row_specific(self) -> None:
+        row = next(row for row in RUNNER.ROWS if row.protocol == 762)
+        stages = [
+            {"name": "configuration", "observed": True, "observation": "direct play", "mode": "configuration"},
+            {
+                "name": "chunk_batch_acknowledgement",
+                "observed": True,
+                "observation": "chunks",
+                "mode": "unbatched",
+                "batch_count": 0,
+            },
+            {"name": "join", "observed": True, "observation": "world"},
+            {"name": "movement", "observed": True, "observation": "moved", "movement_count": 1},
+            {
+                "name": "play_action",
+                "observed": True,
+                "observation": "result",
+                "kind": RUNNER.ACTION,
+                "action_count": 1,
+                "result_observed": True,
+            },
+            {
+                "name": "disconnect",
+                "observed": True,
+                "observation": "client EOF",
+                "clean": True,
+                "initiated_by": "client",
+            },
+        ]
+        with self.assertRaisesRegex(RuntimeError, "configuration.mode must be 'login_to_play'"):
+            RUNNER.validate_stages(stages, row)
 
     def test_evidence_rejects_missing_session_stage(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -120,6 +222,7 @@ class EvidenceContractTests(unittest.TestCase):
                 "name": "chunk_batch_acknowledgement",
                 "observed": True,
                 "observation": "batch acknowledged",
+                "mode": "acknowledged",
                 "batch_count": 1,
             },
             {"name": "join", "observed": True, "observation": "world entered"},
@@ -140,8 +243,10 @@ class EvidenceContractTests(unittest.TestCase):
                 "initiated_by": "runner",
             },
         ]
+        row = next(row for row in RUNNER.ROWS if row.protocol == 766)
+        stages[0]["mode"] = row.configuration_mode
         with self.assertRaisesRegex(RuntimeError, "initiated_by must be 'client'"):
-            RUNNER.validate_stages(stages)
+            RUNNER.validate_stages(stages, row)
 
 
 if __name__ == "__main__":
