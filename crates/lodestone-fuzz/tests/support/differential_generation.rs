@@ -215,6 +215,18 @@ fn same_divergence_class(first: &Divergence, candidate: &Divergence) -> bool {
         && first.right == candidate.right
 }
 
+fn validate_probe_region(region: &[((i32, i32, i32), Vec<String>)]) -> Result<(), String> {
+    if region.is_empty() {
+        return Err("a differential comparison needs at least one probe".to_owned());
+    }
+    for (index, (_, candidates)) in region.iter().enumerate() {
+        if candidates.is_empty() {
+            return Err(format!("differential probe {index} needs at least one candidate state"));
+        }
+    }
+    Ok(())
+}
+
 fn evaluate_fresh<L, R, F>(
     fresh_oracles: &mut F,
     script: &Script,
@@ -264,6 +276,14 @@ pub fn search_and_shrink_with<E>(
 where
     E: FnMut(&Script, &[((i32, i32, i32), Vec<String>)], u64) -> DifferentialOutcome,
 {
+    if budget.cases == 0 {
+        return SearchOutcome::InvalidConfiguration {
+            message: "a differential search needs at least one case".to_owned(),
+        };
+    }
+    if let Err(message) = validate_probe_region(region) {
+        return SearchOutcome::InvalidConfiguration { message };
+    }
     if let Err(message) = generated_oracle_ticks(domain, settle_ticks) {
         return SearchOutcome::InvalidConfiguration { message };
     }
@@ -475,6 +495,7 @@ impl ReplayCase {
             .iter()
             .map(|probe| (probe.pos, probe.candidates.clone()))
             .collect::<Vec<_>>();
+        validate_probe_region(&region)?;
         Ok(evaluate(&script, &region, self.settle_ticks))
     }
 

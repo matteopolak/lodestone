@@ -45,6 +45,82 @@ fn search_budget() -> SearchBudget {
     }
 }
 
+#[test]
+fn empty_search_work_is_rejected_before_evaluation() {
+    let valid_region = region();
+    for (cases, probes, expected) in [
+        (0, valid_region.clone(), "a differential search needs at least one case"),
+        (1, vec![], "a differential comparison needs at least one probe"),
+        (
+            1,
+            vec![(TARGET, vec![])],
+            "differential probe 0 needs at least one candidate state",
+        ),
+    ] {
+        let mut evaluations = 0;
+        let outcome = search_and_shrink_with(
+            &domain(),
+            SearchBudget { cases, ..search_budget() },
+            &probes,
+            0,
+            |_, _, _| {
+                evaluations += 1;
+                DifferentialOutcome::Agreed
+            },
+        );
+        match outcome {
+            SearchOutcome::InvalidConfiguration { message } => assert_eq!(message, expected),
+            other => panic!("empty search work must not report agreement: {other:?}"),
+        }
+        assert_eq!(evaluations, 0, "invalid coverage must be rejected before oracle setup");
+    }
+
+    let mut evaluations = 0;
+    let outcome = search_and_shrink_with(
+        &domain(),
+        SearchBudget { cases: 1, ..search_budget() },
+        &valid_region,
+        0,
+        |_, _, _| {
+            evaluations += 1;
+            DifferentialOutcome::Agreed
+        },
+    );
+    assert!(matches!(outcome, SearchOutcome::NoDivergence { cases_run: 1 }));
+    assert_eq!(evaluations, 1, "the valid control must execute its evaluator");
+}
+
+#[test]
+fn empty_replay_probes_are_rejected_before_evaluation() {
+    for (probes, expected) in [
+        (serde_json::json!([]), "a differential comparison needs at least one probe"),
+        (
+            serde_json::json!([{ "pos": [0, 0, 0], "candidates": [] }]),
+            "differential probe 0 needs at least one candidate state",
+        ),
+    ] {
+        let replay = ReplayCase::from_json(&serde_json::json!({
+            "format_version": 1,
+            "scenario": "empty-probe-control",
+            "seed": 1,
+            "case_index": 0,
+            "settle_ticks": 0,
+            "region": probes,
+            "steps": [{ "tick": 0, "action": {
+                "kind": "set_block", "pos": [0, 0, 0], "state": STONE
+            }}],
+            "divergence": { "tick": 0, "pos": [0, 0, 0], "left": AIR, "right": STONE }
+        }).to_string()).expect("valid replay format");
+        let mut evaluations = 0;
+        let error = replay.replay_with(|_, _, _| {
+            evaluations += 1;
+            DifferentialOutcome::Agreed
+        }).expect_err("empty replay coverage must fail before oracle setup");
+        assert_eq!(error, expected);
+        assert_eq!(evaluations, 0);
+    }
+}
+
 fn region() -> Vec<((i32, i32, i32), Vec<String>)> {
     vec![(TARGET, vec![AIR.to_owned(), STONE.to_owned(), WATER.to_owned()])]
 }
