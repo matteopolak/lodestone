@@ -86,6 +86,53 @@ use crate::mob_spawn::SpawnRng;
 
 use super::{Detonation, MobSim, TrackedTnt, block_state_id};
 
+/// The tick-start chunk owner of one primed explosive.
+///
+/// This is a deterministic hand-off boundary, not a worker assignment. The
+/// central application step remains the only writer to the live explosive map
+/// and the detonation queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum TntTickOwner {
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl TntTickOwner {
+    fn for_position(position: Vec3d) -> Self {
+        Self::Chunk {
+            cx: (position.x.floor() as i32).div_euclid(16),
+            cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+}
+
+/// One completed primed-explosive owner batch.
+///
+/// The count and serial slots originate at tick start. The central consumer
+/// checks them before changing live motion, fuse, or detonation state, so an
+/// incomplete or duplicate completion fails before it can reorder a blast.
+#[derive(Debug, Clone)]
+pub(crate) struct TntTickOwnerBatch {
+    owner: TntTickOwner,
+    expected_batch_count: usize,
+    effects: Vec<TntTickEffect>,
+}
+
+impl TntTickOwnerBatch {
+    #[cfg(test)]
+    fn owner(&self) -> TntTickOwner {
+        self.owner
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TntTickEffect {
+    owner: TntTickOwner,
+    serial: usize,
+    id: i32,
+    tnt: TrackedTnt,
+    detonation: Option<Vec3>,
+}
+
 /// `PrimedTnt.DEFAULT_FUSE_TIME` — the fuse a fresh ignition starts at, in
 /// ticks (`80` = 4 real-time seconds).
 pub const DEFAULT_FUSE_TIME: i32 = 80;
@@ -263,54 +310,95 @@ impl<'w> MobSim<'w> {
     /// into destroyed blocks, drops and an `EXPLODE` packet — see this
     /// module's own doc comment for why that needs no TNT-specific call site.
     pub fn tick_tnt(&mut self, block_state: &dyn Fn(i32, i32, i32) -> String) {
+        let batches = self.tick_tnt_owner_batches(block_state);
+        self.apply_tnt_tick_owner_batches(batches);
+    }
+
+    /// Produces independent chunk-owner completions for primed-explosive
+    /// motion and fuse simulation.
+    ///
+    /// Each completion receives a clone of its tick-start entity and cannot
+    /// write the live map. [`Self::apply_tnt_tick_owner_batches`] restores the
+    /// old entity-id sequence before it publishes changed state or starts a
+    /// detonation. This preserves the existing serial behavior while making the
+    /// ownership boundary explicit.
+    pub(crate) fn tick_tnt_owner_batches(
+        &self,
+        block_state: &dyn Fn(i32, i32, i32) -> String,
+    ) -> Vec<TntTickOwnerBatch> {
         let view = TntCollision { block_state };
         let profile = PhysicsProfile::default();
         let mut ids: Vec<i32> = self.tnt.keys().copied().collect();
         ids.sort_unstable();
-        // Collected rather than exploded inline: `explode` needs `&mut self`
-        // while this loop borrows `self.tnt` mutably, exactly the shape
-        // `MobSim::tick`'s own creeper-detonation loop already uses.
-        let mut detonated: Vec<(i32, Vec3)> = Vec::new();
-        for id in ids {
-            let Some(t) = self.tnt.get_mut(&id) else {
-                continue;
+        let mut batches = Vec::<TntTickOwnerBatch>::new();
+        for (serial, id) in ids.into_iter().enumerate() {
+            let tnt = self
+                .tnt
+                .get(&id)
+                .cloned()
+                .expect("a tick-start TNT id must remain live while planning");
+            let owner = TntTickOwner::for_position(tnt.motion.position);
+            let (tnt, detonation) = ticked_tnt(tnt, &view, &profile);
+            let effect = TntTickEffect {
+                owner,
+                serial,
+                id,
+                tnt,
+                detonation,
             };
-            // `applyGravity()`.
-            t.motion.velocity.y -= GRAVITY;
-            // `this.move(MoverType.SELF, this.getDeltaMovement());`
-            move_entity(
-                &mut t.motion,
-                TNT_DIMENSIONS,
-                &view,
-                &profile,
-                MoveContext::default(),
-            );
-            // `setDeltaMovement(this.getDeltaMovement().scale(this.getAirDrag()))`.
-            t.motion.velocity = t.motion.velocity.scale(AIR_DRAG);
-            // `if (this.onGround()) setDeltaMovement(delta.multiply(0.7, -0.5, 0.7));`
-            if t.motion.on_ground {
-                t.motion.velocity = t.motion.velocity.multiply_each(
-                    GROUND_BOUNCE.0,
-                    GROUND_BOUNCE.1,
-                    GROUND_BOUNCE.2,
-                );
-            }
-            t.fuse -= 1;
-            if t.fuse <= 0 {
-                // `this.getY(0.0625)` — `Entity.getY(double)` is
-                // `position.y + getBbHeight() * progress`, so the blast centre
-                // sits a fraction of the entity's own height above its feet.
-                let centre = Vec3::new(
-                    t.motion.position.x,
-                    t.motion.position.y + f64::from(TNT_DIMENSIONS.height) * 0.0625,
-                    t.motion.position.z,
-                );
-                detonated.push((id, centre));
+            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
+                batch.effects.push(effect);
+            } else {
+                batches.push(TntTickOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects: vec![effect],
+                });
             }
         }
-        for (id, centre) in detonated {
-            // `this.discard()` precedes `this.explode()` in vanilla too.
-            self.tnt.remove(&id);
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
+
+    /// Validates and centrally applies completed primed-explosive owner
+    /// batches.
+    ///
+    /// The serial slots restore the prior entity-id order before a changed fuse
+    /// or detonation becomes live. This is the only owner-batch path that writes
+    /// the live TNT map or queues its blast effects.
+    pub(crate) fn apply_tnt_tick_owner_batches(&mut self, batches: Vec<TntTickOwnerBatch>) {
+        if batches.is_empty() {
+            return;
+        }
+        let effects = merge_tnt_tick_owner_batches(batches);
+        assert_eq!(
+            effects.len(),
+            self.tnt.len(),
+            "TNT owner completion must retain every live tick-start entity"
+        );
+        let mut ids = std::collections::HashSet::new();
+        let mut detonated = Vec::new();
+        for effect in effects {
+            assert!(
+                ids.insert(effect.id),
+                "TNT owner completion may update one live entity only once"
+            );
+            assert!(
+                self.tnt.contains_key(&effect.id),
+                "a TNT owner completion may update only a live tick-start entity"
+            );
+            if let Some(centre) = effect.detonation {
+                self.tnt.remove(&effect.id);
+                detonated.push(centre);
+            } else {
+                self.tnt.insert(effect.id, effect.tnt);
+            }
+        }
+        for centre in detonated {
+            // Discard precedes the blast, preserving the former direct path.
             self.explode(centre, EXPLOSION_POWER, DamageFlags::default());
             self.pending_detonations.push(Detonation {
                 centre,
@@ -318,6 +406,77 @@ impl<'w> MobSim<'w> {
             });
         }
     }
+}
+
+fn merge_tnt_tick_owner_batches(mut batches: Vec<TntTickOwnerBatch>) -> Vec<TntTickEffect> {
+    let expected_batch_count = batches
+        .first()
+        .map(|batch| batch.expected_batch_count)
+        .expect("TNT owner completion must contain every tick-start owner batch");
+    let mut owners = std::collections::HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.expected_batch_count, expected_batch_count,
+            "TNT owner completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "TNT owner completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "a TNT owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "TNT owner completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "TNT owner completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
+}
+
+fn ticked_tnt(
+    mut tnt: TrackedTnt,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+) -> (TrackedTnt, Option<Vec3>) {
+    tnt.motion.velocity.y -= GRAVITY;
+    move_entity(
+        &mut tnt.motion,
+        TNT_DIMENSIONS,
+        view,
+        profile,
+        MoveContext::default(),
+    );
+    tnt.motion.velocity = tnt.motion.velocity.scale(AIR_DRAG);
+    if tnt.motion.on_ground {
+        tnt.motion.velocity = tnt.motion.velocity.multiply_each(
+            GROUND_BOUNCE.0,
+            GROUND_BOUNCE.1,
+            GROUND_BOUNCE.2,
+        );
+    }
+    tnt.fuse -= 1;
+    let detonation = (tnt.fuse <= 0).then(|| {
+        Vec3::new(
+            tnt.motion.position.x,
+            tnt.motion.position.y + f64::from(TNT_DIMENSIONS.height) * 0.0625,
+            tnt.motion.position.z,
+        )
+    });
+    (tnt, detonation)
 }
 
 /// A [`CollisionView`] over a caller-supplied block-state oracle — the TNT
@@ -370,6 +529,77 @@ mod tests {
     fn sim() -> MobSim<'static> {
         let world: &'static ChunkWorld = Box::leak(Box::new(ChunkWorld::new(-64, 384)));
         MobSim::new(world)
+    }
+
+    fn owner_batch_fixture() -> MobSim<'static> {
+        let mut sim = sim();
+        // Entity ids produce the old serial sequence west, east, west. The
+        // reversed completion control below can therefore differ from it.
+        sim.spawn_tnt(Vec3::new(-0.5, 64.0, -0.5), 1);
+        sim.spawn_tnt(Vec3::new(16.5, 64.0, 0.5), 1);
+        sim.spawn_tnt(Vec3::new(-0.25, 64.0, -0.25), 1);
+        sim
+    }
+
+    #[test]
+    fn tnt_owner_batches_restore_detonation_order_after_reversed_completion() {
+        let mut serial_sim = owner_batch_fixture();
+        serial_sim.tick_tnt(&floor());
+        let serial = serial_sim.take_detonations();
+
+        let mut completed = owner_batch_fixture();
+        let mut batches = completed.tick_tnt_owner_batches(&floor());
+        assert_eq!(
+            batches.iter().map(TntTickOwnerBatch::owner).collect::<Vec<_>>(),
+            [
+                TntTickOwner::Chunk { cx: -1, cz: -1 },
+                TntTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "owners enter the tick-start plan at their first serial explosive"
+        );
+        batches.reverse();
+        let raw_completion = batches
+            .iter()
+            .flat_map(|batch| batch.effects.iter())
+            .map(|effect| effect.detonation.expect("one-tick fuse must detonate"))
+            .collect::<Vec<_>>();
+        let serial_centres = serial.iter().map(|detonation| detonation.centre).collect::<Vec<_>>();
+        assert_ne!(
+            raw_completion, serial_centres,
+            "control requires reversed owner completion to change raw blast order"
+        );
+        let restored = merge_tnt_tick_owner_batches(batches.clone())
+            .into_iter()
+            .map(|effect| effect.detonation.expect("one-tick fuse must detonate"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            restored, serial_centres,
+            "the central merge must restore the old entity-id blast order"
+        );
+
+        completed.apply_tnt_tick_owner_batches(batches);
+        assert_eq!(
+            completed.take_detonations(),
+            serial,
+            "the live consumer must queue detonations in restored serial order"
+        );
+        assert_eq!(completed.tnt_count(), 0, "every one-tick fuse must discard after its blast");
+    }
+
+    #[test]
+    #[should_panic(expected = "every tick-start owner batch exactly once")]
+    fn tnt_owner_batch_merge_rejects_a_missing_owner() {
+        let mut batches = owner_batch_fixture().tick_tnt_owner_batches(&floor());
+        batches.pop();
+        let _ = merge_tnt_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not contain one owner twice")]
+    fn tnt_owner_batch_merge_rejects_a_duplicate_owner() {
+        let mut batches = owner_batch_fixture().tick_tnt_owner_batches(&floor());
+        batches[1] = batches[0].clone();
+        let _ = merge_tnt_tick_owner_batches(batches);
     }
 
     /// The fuse and launch velocity, taken from the record rather than
