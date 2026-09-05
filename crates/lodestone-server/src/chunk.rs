@@ -734,6 +734,17 @@ impl ChunkColumn {
         std::mem::take(&mut self.generation_spawns)
     }
 
+    /// Whether this freshly generated column still owns one-shot spawn candidates.
+    ///
+    /// A persistence adapter must not serialize the block grid and quietly drop
+    /// these candidates: doing so changes the first-load population decision.
+    /// The native record adapter uses this read-only check to decline such a
+    /// column until its schema has a representation for the candidates.
+    #[must_use]
+    pub(crate) fn has_pending_generation_spawns(&self) -> bool {
+        !self.generation_spawns.is_empty()
+    }
+
     /// This column's `MOTION_BLOCKING` heightmap in vanilla's stored form, or
     /// `None` if it did not come from the generator — see
     /// [`motion_blocking`](Self::motion_blocking) for the whole contract and
