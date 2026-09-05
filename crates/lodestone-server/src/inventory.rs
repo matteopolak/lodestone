@@ -57,6 +57,20 @@ pub const CHEST_NATIVE: usize = 38;
 /// Native index of the helmet slot.
 pub const HEAD_NATIVE: usize = 39;
 
+/// Why a host-requested native count change was refused before it could mutate
+/// the authoritative inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryMutationError {
+    /// The request did not name one of the player's native slots.
+    InvalidNativeSlot { index: usize },
+    /// The request named a valid but empty native slot.
+    EmptyNativeSlot { index: usize },
+    /// An occupied item stack cannot be rewritten to an absent count.
+    ZeroCount { index: usize },
+    /// The stack has components this build cannot preserve across a rewrite.
+    UnmodeledComponents { index: usize },
+}
+
 /// A player's server-authoritative inventory: [`PLAYER_NATIVE_SIZE`] native
 /// slots plus the selected hotbar index (vanilla's own selected-slot field).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +181,34 @@ impl PlayerInventory {
         if let Some(slot) = self.slots.get_mut(index) {
             *slot = item;
         }
+    }
+
+    /// Changes the count of one occupied native stack without discarding any
+    /// modeled component data.
+    ///
+    /// A component-aware serialization boundary must refuse a stack marked by
+    /// [`lodestone_model::ItemComponents::has_unmodeled`] before it changes
+    /// anything. Reconstructing an item from its key and count would otherwise
+    /// silently erase data this process cannot reproduce.
+    pub fn set_native_count(
+        &mut self,
+        index: usize,
+        count: u32,
+    ) -> Result<(), InventoryMutationError> {
+        if count == 0 {
+            return Err(InventoryMutationError::ZeroCount { index });
+        }
+        let Some(slot) = self.slots.get_mut(index) else {
+            return Err(InventoryMutationError::InvalidNativeSlot { index });
+        };
+        let Some(stack) = slot.as_mut() else {
+            return Err(InventoryMutationError::EmptyNativeSlot { index });
+        };
+        if stack.components.has_unmodeled {
+            return Err(InventoryMutationError::UnmodeledComponents { index });
+        }
+        stack.count = count;
+        Ok(())
     }
 
     /// The currently selected hotbar slot, `0..HOTBAR_SIZE`.
@@ -828,6 +870,34 @@ mod tests {
         inv.set_native(3, Some(stack("minecraft:diamond", 1)));
         assert!(inv.set_selected_hotbar_slot(3));
         assert_eq!(inv.selected_item(), Some(&stack("minecraft:diamond", 1)));
+    }
+
+    #[test]
+    fn count_mutation_preserves_modeled_components_and_refuses_unmodeled_ones() {
+        let mut inv = PlayerInventory::new();
+        let mut modeled = stack("minecraft:diamond_pickaxe", 1);
+        modeled.components.damage = Some(17);
+        inv.set_native(4, Some(modeled));
+
+        assert_eq!(inv.set_native_count(4, 3), Ok(()));
+        let updated = inv.native(4).expect("modeled stack remains present");
+        assert_eq!(updated.count, 3);
+        assert_eq!(updated.components.damage, Some(17));
+
+        let mut partial = stack("minecraft:written_book", 1);
+        partial.components.has_unmodeled = true;
+        inv.set_native(5, Some(partial));
+        assert_eq!(
+            inv.set_native_count(5, 2),
+            Err(InventoryMutationError::UnmodeledComponents { index: 5 })
+        );
+        assert_eq!(inv.native(5).expect("partial stack remains").count, 1);
+        assert_eq!(
+            inv.set_native_count(PLAYER_NATIVE_SIZE, 2),
+            Err(InventoryMutationError::InvalidNativeSlot {
+                index: PLAYER_NATIVE_SIZE
+            })
+        );
     }
 
     /// Pins every entry of the menu→native table against the documented player

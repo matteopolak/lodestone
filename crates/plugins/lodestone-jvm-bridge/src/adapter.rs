@@ -203,12 +203,40 @@ pub enum PlayerGameMode {
 /// A disconnected player must remain distinct from a valid origin position.
 pub type PlayerSnapshotAnswer = Result<PlayerSnapshot, String>;
 
+/// One native-inventory slot requested for a generation-checked player.
+///
+/// The worker carries only copied profile bytes and a native slot number. The
+/// dedicated host resolves both against its authoritative registry; neither a
+/// connection nor a mutable menu crosses this port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayerInventorySlotQuery {
+    pub uuid: [u8; 16],
+    pub native_slot: i32,
+}
+
+/// The deliberately narrow read-only item projection returned by the host.
+///
+/// This is not a Java item stack or a component serializer. `unmodeled` makes
+/// the decoder's incompleteness explicit so the JNI surface can refuse before
+/// a caller mistakes this item key/count projection for a lossless stack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayerInventorySlot {
+    pub item_key: String,
+    pub count: u32,
+    pub unmodeled: bool,
+}
+
+/// Empty and unavailable slots remain different: `Ok(None)` is a real empty
+/// slot, while `Err` names a disconnected player or invalid native slot.
+pub type PlayerInventorySlotAnswer = Result<Option<PlayerInventorySlot>, String>;
+
 type BlockPort = WorldPort<BlockStateQuery, BlockStateAnswer>;
 type BlockBatchPort = WorldPort<BlockStateBatchQuery, BlockStateBatchAnswer>;
 type BlockWritePort = WorldPort<BlockStateWrite, BlockStateWriteAnswer>;
 type BlockBatchWritePort = WorldPort<BlockStateBatchWrite, BlockStateBatchWriteAnswer>;
 type TickPort = WorldPort<(), ServerTickAnswer>;
 type PlayerSnapshotPort = WorldPort<PlayerSnapshotQuery, PlayerSnapshotAnswer>;
+type PlayerInventoryPort = WorldPort<PlayerInventorySlotQuery, PlayerInventorySlotAnswer>;
 type Events = SyncSender<Result<AdapterEvent, AdapterError>>;
 
 /// A host must distinguish an inactive game tick from a valid count.
@@ -230,6 +258,7 @@ pub struct NativeServerSurface {
     _block_batch_write_port: BlockBatchWritePort,
     _tick_port: TickPort,
     _player_position_port: PlayerSnapshotPort,
+    _player_inventory_port: PlayerInventoryPort,
 }
 
 impl NativeServerSurface {
@@ -240,6 +269,7 @@ impl NativeServerSurface {
         block_batch_write_port: BlockBatchWritePort,
         tick_port: TickPort,
         player_position_port: PlayerSnapshotPort,
+        player_inventory_port: PlayerInventoryPort,
     ) -> Self {
         Self {
             _block_port: block_port,
@@ -248,6 +278,7 @@ impl NativeServerSurface {
             _block_batch_write_port: block_batch_write_port,
             _tick_port: tick_port,
             _player_position_port: player_position_port,
+            _player_inventory_port: player_inventory_port,
         }
     }
 }
@@ -259,6 +290,7 @@ thread_local! {
     static BLOCK_BATCH_WRITE_PORT: RefCell<Option<BlockBatchWritePort>> = const { RefCell::new(None) };
     static SERVER_TICK_PORT: RefCell<Option<TickPort>> = const { RefCell::new(None) };
     static PLAYER_POSITION_PORT: RefCell<Option<PlayerSnapshotPort>> = const { RefCell::new(None) };
+    static PLAYER_INVENTORY_PORT: RefCell<Option<PlayerInventoryPort>> = const { RefCell::new(None) };
     static RESIDENT_OBJECT_HANDLES: RefCell<Option<ObjectRegistry<ResidentObject>>> = const {
         RefCell::new(None)
     };
@@ -1164,6 +1196,42 @@ fn resolve_resident_player_experience(
     })
 }
 
+/// Resolves a read-only native-inventory item key through the bounded host
+/// port. This is deliberately a key projection, not an item serializer: an
+/// empty slot returns `None`, and a partial component patch fails loudly.
+fn resolve_resident_player_inventory_item_key(
+    bits: i64,
+    native_slot: jint,
+) -> Result<Option<String>, AdapterError> {
+    let operation = "playerHandleNativeItemKey";
+    if native_slot < 0 {
+        return Err(AdapterError::new(format!(
+            "{operation}: native slot {native_slot} is negative"
+        )));
+    }
+    let player = resolve_resident_player_handle(bits, operation)?;
+    let port = PLAYER_INVENTORY_PORT.with(|slot| slot.borrow().clone()).ok_or_else(|| {
+        AdapterError::new(format!("{operation} requires the adapter worker thread"))
+    })?;
+    let slot = port
+        .request(PlayerInventorySlotQuery {
+            uuid: player.uuid(),
+            native_slot,
+        })
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?;
+    match slot {
+        Some(slot) if slot.unmodeled => Err(AdapterError::new(format!(
+            "{operation}: native slot {native_slot} has unmodeled item components; refusing a lossy item projection"
+        ))),
+        Some(slot) if slot.count == 0 => Err(AdapterError::new(format!(
+            "{operation}: host returned zero count for occupied native slot {native_slot}"
+        ))),
+        Some(slot) => Ok(Some(slot.item_key)),
+        None => Ok(None),
+    }
+}
+
 /// Reports whether a live player handle's copied profile is in the worker's
 /// reconciled lifecycle map.
 ///
@@ -1344,6 +1412,7 @@ pub struct AdapterHost {
     block_batch_write_servicer: PortServicer<BlockStateBatchWrite, BlockStateBatchWriteAnswer>,
     server_tick_servicer: PortServicer<(), ServerTickAnswer>,
     player_position_servicer: PortServicer<PlayerSnapshotQuery, PlayerSnapshotAnswer>,
+    player_inventory_servicer: PortServicer<PlayerInventorySlotQuery, PlayerInventorySlotAnswer>,
     deadline: Duration,
     state: State,
 }
@@ -1386,7 +1455,7 @@ impl AdapterHost {
             return Err(AdapterError::new("adapter deadline must be positive"));
         }
         let class = class.to_owned();
-        Self::spawn(deadline, move |commands, events, port, block_batch_port, block_write_port, block_batch_write_port, server_tick_port, player_position_port| {
+        Self::spawn(deadline, move |commands, events, port, block_batch_port, block_write_port, block_batch_write_port, server_tick_port, player_position_port, player_inventory_port| {
             let result = run_java(
                 config,
                 &class,
@@ -1398,6 +1467,7 @@ impl AdapterHost {
                 block_batch_write_port,
                 server_tick_port,
                 player_position_port,
+                player_inventory_port,
                 setup,
             );
             if let Err(error) = result {
@@ -1408,7 +1478,7 @@ impl AdapterHost {
 
     fn spawn(
         deadline: Duration,
-        run: impl FnOnce(Receiver<AdapterCommand>, Events, BlockPort, BlockBatchPort, BlockWritePort, BlockBatchWritePort, TickPort, PlayerSnapshotPort)
+        run: impl FnOnce(Receiver<AdapterCommand>, Events, BlockPort, BlockBatchPort, BlockWritePort, BlockBatchWritePort, TickPort, PlayerSnapshotPort, PlayerInventoryPort)
             + Send
             + 'static,
     ) -> Result<Self, AdapterError> {
@@ -1420,9 +1490,10 @@ impl AdapterHost {
         let (block_batch_write_port, block_batch_write_servicer) = channel(deadline);
         let (server_tick_port, server_tick_servicer) = channel(deadline);
         let (player_position_port, player_position_servicer) = channel(deadline);
+        let (player_inventory_port, player_inventory_servicer) = channel(deadline);
         std::thread::Builder::new()
             .name("lodestone-java-adapter".to_owned())
-            .spawn(move || run(receiver, sender, port, block_batch_port, block_write_port, block_batch_write_port, server_tick_port, player_position_port))
+            .spawn(move || run(receiver, sender, port, block_batch_port, block_write_port, block_batch_write_port, server_tick_port, player_position_port, player_inventory_port))
             .map_err(|error| AdapterError::new(format!("adapter worker startup: {error}")))?;
         Ok(Self {
             commands,
@@ -1433,6 +1504,7 @@ impl AdapterHost {
             block_batch_write_servicer,
             server_tick_servicer,
             player_position_servicer,
+            player_inventory_servicer,
             deadline,
             state: State::Loading(Instant::now()),
         })
@@ -1629,6 +1701,22 @@ impl AdapterHost {
         self.player_position_servicer.service_all_pending(max, answer)
     }
 
+    /// Answers copied player inventory slots on the caller's host thread.
+    ///
+    /// This is read-only. The answer projects only an item key and count, and
+    /// the host must retain the `unmodeled` marker so JNI can refuse a partial
+    /// stack instead of treating it as a serializable Java item object.
+    pub fn service_pending_player_inventory_slots(
+        &self,
+        max: usize,
+        answer: impl FnMut(PlayerInventorySlotQuery) -> PlayerInventorySlotAnswer,
+    ) -> usize {
+        if matches!(self.state, State::Failed(_)) {
+            return 0;
+        }
+        self.player_inventory_servicer.service_all_pending(max, answer)
+    }
+
     /// Polls completion without waiting. Startup/callback deadlines are terminal;
     /// poll regularly even when no world query is pending. Java exceptions name
     /// the failing class/method and preserve the Java exception's description.
@@ -1741,6 +1829,7 @@ fn run_java<S>(
     block_batch_write_port: BlockBatchWritePort,
     server_tick_port: TickPort,
     player_position_port: PlayerSnapshotPort,
+    player_inventory_port: PlayerInventoryPort,
     setup: impl for<'local> FnOnce(&JvmRuntime, &mut Env<'local>, NativeServerSurface)
         -> Result<S, String>,
 ) -> Result<(), AdapterError> {
@@ -1757,6 +1846,7 @@ fn run_java<S>(
             BLOCK_BATCH_WRITE_PORT.with(|slot| *slot.borrow_mut() = Some(block_batch_write_port.clone()));
             SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = Some(server_tick_port.clone()));
             PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = Some(player_position_port.clone()));
+            PLAYER_INVENTORY_PORT.with(|slot| *slot.borrow_mut() = Some(player_inventory_port.clone()));
             RESIDENT_OBJECT_HANDLES.with(|slot| {
                 *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(
                     MAX_RESIDENT_OBJECT_HANDLES,
@@ -1774,6 +1864,7 @@ fn run_java<S>(
                 block_batch_write_port.clone(),
                 server_tick_port.clone(),
                 player_position_port.clone(),
+                player_inventory_port.clone(),
             );
             let setup_state = setup(&runtime, env, surface).map_err(|error| {
                 AdapterError::new(format!("adapter {class_name} setup: {error}"))
@@ -1930,6 +2021,7 @@ fn run_java<S>(
         BLOCK_BATCH_WRITE_PORT.with(|slot| *slot.borrow_mut() = None);
         SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = None);
         PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = None);
+        PLAYER_INVENTORY_PORT.with(|slot| *slot.borrow_mut() = None);
         RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS.with(|slot| *slot.borrow_mut() = None);
         Ok(result)
     }).map_err(|error| AdapterError::new(error.to_string()))?
@@ -2656,6 +2748,28 @@ pub(crate) fn register_player_handle_position_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_player_handle_native_item_key_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts a generation-checked player
+    // handle and native slot, then returns either a newly allocated Java string
+    // or null for an empty slot. It never exposes a connection or item object.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_player_handle_native_item_key as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_active_player_count_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -3169,6 +3283,26 @@ extern "system" fn native_player_handle_experience_points<'local>(
         let _depth = CallbackDepthGuard::enter()
             .map_err(|error| AdapterError::new(error.to_string()))?;
         resolve_resident_player_experience(bits, true, "playerHandleExperiencePoints")
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_native_item_key<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+    native_slot: jint,
+) -> jstring {
+    env.with_env(|env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        match resolve_resident_player_inventory_item_key(bits, native_slot)? {
+            Some(item_key) => env
+                .new_string(item_key)
+                .map(|value| value.into_raw())
+                .map_err(|error| AdapterError::new(format!("playerHandleNativeItemKey: {error}"))),
+            None => Ok(std::ptr::null_mut()),
+        }
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -3770,7 +3904,7 @@ mod tests {
     #[test]
     fn callback_queries_run_on_host_and_ticks_do_not_overlap() {
         let host_thread = std::thread::current().id();
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, port, _, _, _, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, port, _, _, _, _, _, _| {
             assert_ne!(std::thread::current().id(), host_thread);
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             for command in commands {
@@ -3805,7 +3939,7 @@ mod tests {
         let host_thread = std::thread::current().id();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |_commands, events, _port, batch_port, _write_port, _batch_write_port, _tick_port, _player_port| {
+            move |_commands, events, _port, batch_port, _write_port, _batch_write_port, _tick_port, _player_port, _inventory_port| {
                 assert_ne!(std::thread::current().id(), host_thread);
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 let result = batch_port.request(BlockStateBatchQuery {
@@ -3850,7 +3984,7 @@ mod tests {
             z: 33,
             state_id: 1234,
         };
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, _, _, _, _, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, _, _, _, _, _, _, _| {
             assert_ne!(std::thread::current().id(), host_thread);
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             let command = commands.recv().expect("one host callback");
@@ -3898,7 +4032,7 @@ mod tests {
         let player_for_worker = player.clone();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |commands, events, _, _, _, _, _, _| {
+            move |commands, events, _, _, _, _, _, _, _| {
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(
                     commands.recv().expect("one player callback"),
@@ -3937,7 +4071,7 @@ mod tests {
         let disconnected = player.clone();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |commands, events, _, _, _, _, _, _| {
+            move |commands, events, _, _, _, _, _, _, _| {
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(
                     commands.recv().expect("join transition"),
@@ -4429,7 +4563,7 @@ mod tests {
 
     #[test]
     fn deadline_rejects_a_late_completion_and_remains_terminal() {
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _, _, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _, _, _, _, _| {
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             let _ = commands.recv();
         }).unwrap();
@@ -4453,7 +4587,7 @@ mod tests {
 
     #[test]
     fn worker_errors_preserve_the_named_failure() {
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _, _, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _, _, _, _, _| {
             events.send(Err(AdapterError::new("example.Adapter.onTick: missing member"))).unwrap();
             let _ = commands.recv();
         }).unwrap();
@@ -4475,7 +4609,7 @@ mod tests {
         let host_thread = std::thread::current().id();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |_commands, events, _port, _batch_port, _write_port, _batch_write_port, tick_port, _| {
+            move |_commands, events, _port, _batch_port, _write_port, _batch_write_port, tick_port, _, _| {
                 assert_ne!(std::thread::current().id(), host_thread);
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(tick_port.request(()).unwrap(), Ok(0));
@@ -4495,7 +4629,7 @@ mod tests {
         let host_thread = std::thread::current().id();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |_commands, events, _port, _batch_port, write_port, _batch_write_port, _tick_port, _| {
+            move |_commands, events, _port, _batch_port, write_port, _batch_write_port, _tick_port, _, _| {
                 assert_ne!(std::thread::current().id(), host_thread);
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(
@@ -4534,7 +4668,7 @@ mod tests {
         let expected = writes.clone();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |_commands, events, _port, _batch_port, _write_port, batch_write_port, _tick_port, _player_port| {
+            move |_commands, events, _port, _batch_port, _write_port, batch_write_port, _tick_port, _player_port, _inventory_port| {
                 assert_ne!(std::thread::current().id(), host_thread);
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(
@@ -4985,6 +5119,79 @@ mod tests {
             Err(AdapterError::new(
                 "playerHandleZ: the referenced object no longer exists",
             )),
+        );
+        worker.join().expect("worker joins");
+    }
+
+    #[test]
+    fn player_inventory_key_projection_refuses_partial_components_before_returning() {
+        let identity = lifecycle_identity("alpha", "one", "alpha.Main");
+        let player = PlayerIdentity::new([7; 16], "Alice");
+        let (port, servicer) = channel(Duration::from_secs(1));
+        let (sender, receiver) = sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            RESIDENT_OBJECT_HANDLES.with(|slot| {
+                *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(1));
+            });
+            PLAYER_INVENTORY_PORT.with(|slot| *slot.borrow_mut() = Some(port));
+            let handle = resident_player_handle(&identity, &player).expect("player handle");
+            let key = resolve_resident_player_inventory_item_key(handle.to_bits(), 7);
+            let empty = resolve_resident_player_inventory_item_key(handle.to_bits(), 8);
+            let partial = resolve_resident_player_inventory_item_key(handle.to_bits(), 9);
+            let negative = resolve_resident_player_inventory_item_key(handle.to_bits(), -1);
+            assert_eq!(release_resident_handles(&identity), 1);
+            let stale = resolve_resident_player_inventory_item_key(handle.to_bits(), 7);
+            PLAYER_INVENTORY_PORT.with(|slot| *slot.borrow_mut() = None);
+            RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+            sender
+                .send((key, empty, partial, negative, stale))
+                .expect("inventory results");
+        });
+        let limit = Instant::now() + Duration::from_secs(1);
+        let mut requests = 0;
+        while requests < 3 {
+            requests += servicer.service_all_pending(1, |query| {
+                assert_eq!(query.uuid, [7; 16]);
+                match query.native_slot {
+                    7 => Ok(Some(PlayerInventorySlot {
+                        item_key: "minecraft:diamond".to_owned(),
+                        count: 13,
+                        unmodeled: false,
+                    })),
+                    8 => Ok(None),
+                    9 => Ok(Some(PlayerInventorySlot {
+                        item_key: "minecraft:nether_star".to_owned(),
+                        count: 1,
+                        unmodeled: true,
+                    })),
+                    slot => Err(format!("unexpected native slot {slot}")),
+                }
+            });
+            if requests < 3 {
+                assert!(Instant::now() < limit, "worker did not request an inventory slot");
+                std::thread::yield_now();
+            }
+        }
+        let (key, empty, partial, negative, stale) = receiver.recv().expect("inventory results");
+        assert_eq!(key, Ok(Some("minecraft:diamond".to_owned())));
+        assert_eq!(empty, Ok(None));
+        assert_eq!(
+            partial,
+            Err(AdapterError::new(
+                "playerHandleNativeItemKey: native slot 9 has unmodeled item components; refusing a lossy item projection",
+            )),
+        );
+        assert_eq!(
+            negative,
+            Err(AdapterError::new("playerHandleNativeItemKey: native slot -1 is negative")),
+            "an invalid slot must fail before it reaches the host",
+        );
+        assert_eq!(
+            stale,
+            Err(AdapterError::new(
+                "playerHandleNativeItemKey: the referenced object no longer exists",
+            )),
+            "a stale handle must fail before it reaches the inventory host port",
         );
         worker.join().expect("worker joins");
     }

@@ -8302,6 +8302,14 @@ fn republish_experience(players: Option<&PlayerRegistry>, uuid: uuid::Uuid, expe
     }
 }
 
+/// Publishes the connection-owned inventory as an owned host-observation
+/// snapshot. The registry never becomes an inventory writer.
+fn republish_inventory(players: Option<&PlayerRegistry>, uuid: uuid::Uuid, inventory: &PlayerInventory) {
+    if let Some(registry) = players {
+        registry.set_inventory(uuid, inventory);
+    }
+}
+
 /// The local player's combat-relevant attributes as wire-shaped snapshots —
 /// [`PlayerInventory::combat_stats`]'s already-folded `AttributeMap`, one
 /// snapshot per **named** attribute below, each carrying its final value as
@@ -13154,6 +13162,7 @@ where
         .map(crate::player_data::PlayerData::to_inventory)
         .or_else(|| native_player.and_then(NativePlayerSession::inventory))
         .unwrap_or_default();
+    republish_inventory(entities.players(), player_uuid, &inventory);
     // Send the book only after this connection's inventory exists: its
     // highlight flags are a per-connection acknowledgement state, while the
     // corpus itself is shared. The client uses the ids for `PLACE_RECIPE` too.
@@ -13536,6 +13545,7 @@ where
                     &payload,
                 )
                 .await?;
+                republish_inventory(entities.players(), player_uuid, &inventory);
                 // A death respawn that just sent the player home from a portal
                 // trip — see `apply_client_command`'s `dimension_reset` parameter
                 // comment for why the client's own dimension label is not
@@ -14853,6 +14863,7 @@ where
                         }
                     }
                 }
+                republish_inventory(entities.players(), player_uuid, &inventory);
                 watch.pass("vitals_tick");
             }
 
@@ -15749,6 +15760,7 @@ where
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
     let mut inventory = PlayerInventory::default();
+    republish_inventory(entities.players(), player_uuid, &inventory);
     apply(
         conn,
         &mut state,
@@ -15887,6 +15899,7 @@ where
                     block_entities,
                 )
                 .await?;
+                republish_inventory(entities.players(), player_uuid, &inventory);
                 continue;
             }
         };
@@ -15958,6 +15971,7 @@ where
             &payload,
         )
         .await?;
+        republish_inventory(entities.players(), player_uuid, &inventory);
         // Flush advancement changes caused by the packet just dispatched.
         if let Some(update) = advancements.flush_dirty(player_uuid, true) {
             apply(conn, &mut state, proto.encode_update_advancements(&update)).await?;

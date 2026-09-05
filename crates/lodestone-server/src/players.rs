@@ -167,6 +167,14 @@ struct TrackedPlayer {
     /// [`PlayerRegistry::set_experience`] and
     /// [`crate::commands::PlayerCandidate::xp_points`]'s own docs.
     xp_points: i32,
+    /// A copied view of the owning connection's authoritative inventory.
+    ///
+    /// The connection task remains the only inventory writer. The registry
+    /// retains this clone so an external host can observe a connected player's
+    /// inventory without reaching into a connection task or borrowing its
+    /// mutable menu state. It is deliberately absent from [`PlayerView`]:
+    /// another network client must never receive another player's inventory.
+    inventory: crate::inventory::PlayerInventory,
 }
 
 /// A consistent single-lock read of the registry, from one viewer's point of
@@ -454,6 +462,7 @@ impl PlayerRegistry {
                 // immediately after.
                 xp_level: 0,
                 xp_points: 0,
+                inventory: crate::inventory::PlayerInventory::default(),
             });
             entity_id
         };
@@ -612,6 +621,36 @@ impl PlayerRegistry {
             player.xp_level = level;
             player.xp_points = points;
         }
+    }
+
+    /// Republishes one connection's authoritative inventory for host-side
+    /// observation.
+    ///
+    /// This is a copy boundary, not a second inventory implementation: the
+    /// connection task still owns every mutation and calls this after it has
+    /// finished applying an inbound packet or timer-driven item use. A host
+    /// receives an owned snapshot, so it cannot hold the registry lock or a
+    /// mutable connection borrow across a foreign callback. An unknown UUID
+    /// is a no-op for the same disconnect race as [`set_experience`](Self::set_experience).
+    pub fn set_inventory(&self, uuid: Uuid, inventory: &crate::inventory::PlayerInventory) {
+        if let Some(player) = self.lock().players.iter_mut().find(|p| p.uuid == uuid) {
+            player.inventory.clone_from(inventory);
+        }
+    }
+
+    /// Returns the latest copied inventory for a connected player.
+    ///
+    /// `None` means the player is no longer registered. It is intentionally
+    /// distinct from an empty inventory, which is a valid connected-player
+    /// state. Callers receive a clone and therefore cannot mutate the
+    /// connection-owned inventory through this registry.
+    #[must_use]
+    pub fn inventory(&self, uuid: Uuid) -> Option<crate::inventory::PlayerInventory> {
+        self.lock()
+            .players
+            .iter()
+            .find(|player| player.uuid == uuid)
+            .map(|player| player.inventory.clone())
     }
 
     /// Every connected player as a command-resolution candidate, from one lock
@@ -937,6 +976,34 @@ mod tests {
         assert_eq!(registry.candidates().len(), 1);
 
         drop(alice);
+    }
+
+    #[test]
+    fn inventory_snapshot_is_copied_and_dies_with_the_player_ticket() {
+        let registry = PlayerRegistry::new();
+        let alice = registry.join("Alice", uuid(1), Vec3::new(0.0, 64.0, 0.0));
+        let mut inventory = crate::inventory::PlayerInventory::new();
+        inventory.set_native(
+            7,
+            Some(lodestone_model::ItemStack::new(
+                "minecraft:diamond".parse().expect("item key"),
+                13,
+            )),
+        );
+
+        registry.set_inventory(uuid(1), &inventory);
+        inventory.set_native(7, None);
+
+        let snapshot = registry.inventory(uuid(1)).expect("registered player snapshot");
+        assert_eq!(
+            snapshot.native(7).map(|item| (item.item.to_string(), item.count)),
+            Some(("minecraft:diamond".to_owned(), 13)),
+            "the registry must copy the connection-owned inventory rather than retain its mutable value",
+        );
+        assert!(registry.inventory(uuid(99)).is_none(), "unknown UUID must not fabricate an empty inventory");
+
+        drop(alice);
+        assert!(registry.inventory(uuid(1)).is_none(), "disconnect must remove the host-observable snapshot");
     }
 
     /// The entity type must be the *player* key, not whatever
