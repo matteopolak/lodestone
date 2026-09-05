@@ -69,6 +69,7 @@
 
 use lodestone::gpu::{CrackTarget, RenderState, gather_crack_targets};
 use lodestone::resources::BlockResources;
+use lodestone_data::block_states::StateId;
 use lodestone_game::mining::BlockDestructionOverlays;
 use lodestone_model::ClientEvent;
 use lodestone_model::math::BlockPos;
@@ -104,9 +105,10 @@ fn camera() -> Camera {
 /// taking the block's first state. Scanned rather than hardcoded so a census
 /// regeneration cannot silently start naming an unrelated block — same
 /// convention as `crack_multi_target_pixels.rs`'s `state_id_of`.
-fn state_id_of(name: &str) -> u32 {
+fn state_id_of(name: &str) -> StateId {
     (0..lodestone_data::block_states::STATE_COUNT)
         .find(|&id| lodestone_data::block_states::block_name(id) == Some(name))
+        .and_then(StateId::new)
         .unwrap_or_else(|| panic!("{name} is not in the protocol-776 block-state census"))
 }
 
@@ -185,8 +187,8 @@ fn two_other_players_overlays_reach_pixels_through_the_live_gather() {
             .models()
             .expect("the vanilla load must attach baked block models");
         assert!(
-            !models.quads(state_id).is_empty(),
-            "{BLOCK} (state {state_id}) must have baked model quads, or this gate would be \
+            !models.quads(state_id.raw()).is_empty(),
+            "{BLOCK} (state {state_id:?}) must have baked model quads, or this gate would be \
              measuring the absence of geometry rather than the absence of a second draw"
         );
     }

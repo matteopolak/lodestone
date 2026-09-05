@@ -121,12 +121,13 @@ impl CrackResolver {
             .map_or(&[], Vec::as_slice)
     }
 
-    /// Build crack geometry for `state_id` at destroy `stage`, translated to the
-    /// block's world `origin`. Returns `None` when the stage is out of range, the
-    /// state has no geometry, or the stage sprite is absent (an empty rect).
+    /// Build crack geometry for the validated `state_id` at destroy `stage`,
+    /// translated to the block's world `origin`. Returns `None` when the stage
+    /// is out of range, the state has no geometry, or the stage sprite is absent
+    /// (an empty rect).
     #[must_use]
-    pub fn mesh_for(&self, state_id: u32, stage: u8, origin: [f32; 3]) -> Option<CrackMesh> {
-        let quads = self.quads.get(state_id as usize)?;
+    pub fn mesh_for(&self, state_id: StateId, stage: u8, origin: [f32; 3]) -> Option<CrackMesh> {
+        let quads = self.quads.get(state_id.raw() as usize)?;
         if quads.is_empty() {
             return None;
         }
@@ -177,8 +178,9 @@ mod tests {
     #[test]
     fn resolves_a_target_state_to_a_crack_mesh() {
         let resolver = CrackResolver::new(vec![vec![], vec![cube_top()]], rects());
+        let state_id = StateId::new(1).expect("state one is in the built-in census");
         let mesh = resolver
-            .mesh_for(1, 3, [10.0, 64.0, -5.0])
+            .mesh_for(state_id, 3, [10.0, 64.0, -5.0])
             .expect("state 1 has geometry and stage 3 has a sprite");
         assert_eq!(mesh.vertices.len(), 4);
         // Translated to the block origin.
@@ -196,21 +198,23 @@ mod tests {
     #[test]
     fn air_state_has_no_crack() {
         let resolver = CrackResolver::new(vec![vec![], vec![cube_top()]], rects());
-        assert!(resolver.mesh_for(0, 3, [0.0; 3]).is_none());
+        let air = StateId::new(0).expect("state zero is in the built-in census");
+        assert!(resolver.mesh_for(air, 3, [0.0; 3]).is_none());
     }
 
     #[test]
-    fn out_of_range_state_or_stage_has_no_crack() {
+    fn out_of_range_stage_has_no_crack() {
         let resolver = CrackResolver::new(vec![vec![cube_top()]], rects());
-        assert!(resolver.mesh_for(99, 3, [0.0; 3]).is_none());
-        assert!(resolver.mesh_for(0, 200, [0.0; 3]).is_none());
+        let state_id = StateId::new(0).expect("state zero is in the built-in census");
+        assert!(resolver.mesh_for(state_id, 200, [0.0; 3]).is_none());
     }
 
     #[test]
     fn distinct_stages_pick_distinct_rects() {
         let resolver = CrackResolver::new(vec![vec![cube_top()]], rects());
-        let s0 = resolver.mesh_for(0, 0, [0.0; 3]).unwrap();
-        let s9 = resolver.mesh_for(0, 9, [0.0; 3]).unwrap();
+        let state_id = StateId::new(0).expect("state zero is in the built-in census");
+        let s0 = resolver.mesh_for(state_id, 0, [0.0; 3]).unwrap();
+        let s9 = resolver.mesh_for(state_id, 9, [0.0; 3]).unwrap();
         assert_ne!(s0.vertices[0].uv, s9.vertices[0].uv);
     }
 
@@ -220,16 +224,19 @@ mod tests {
         let mut r = rects();
         r[5] = [0.0; 4];
         let resolver = CrackResolver::new(vec![vec![cube_top()]], r);
-        assert!(resolver.mesh_for(0, 5, [0.0; 3]).is_none());
-        assert!(resolver.mesh_for(0, 4, [0.0; 3]).is_some());
+        let state_id = StateId::new(0).expect("state zero is in the built-in census");
+        assert!(resolver.mesh_for(state_id, 5, [0.0; 3]).is_none());
+        assert!(resolver.mesh_for(state_id, 4, [0.0; 3]).is_some());
     }
 
-    /// The function pointer records the public moving-block geometry signature at
-    /// compile time. The runtime control proves a census-valid state retrieves its
+    /// Function pointers record the public typed geometry signatures at compile
+    /// time. The runtime control proves a census-valid state retrieves its
     /// snapshot.
     #[test]
-    fn state_quads_requires_a_validated_census_state() {
+    fn state_geometry_requires_a_validated_census_state() {
         let _: fn(&CrackResolver, StateId) -> &[BakedQuad] = CrackResolver::state_quads;
+        let _: fn(&CrackResolver, StateId, u8, [f32; 3]) -> Option<CrackMesh> =
+            CrackResolver::mesh_for;
         let resolver = CrackResolver::new(vec![vec![cube_top()]], rects());
         let first_state = StateId::new(0).expect("state zero is in the built-in census");
         assert_eq!(resolver.state_quads(first_state).len(), 1);
