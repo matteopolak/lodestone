@@ -22,6 +22,11 @@ remove packets as well. The 1.20.6 and 1.21.11 families carry the zero-based
 wire id directly; both validate it before producing an event. Thus a legacy
 packet cannot shift the name by one, while an unknown modern or legacy value
 still fails at packet ingress.
+The 1.7, 1.8, 1.9, 1.13 and 1.14 families use the same boundary for their
+signed-byte legacy ids, widening the wire value before the checked offset.
+Their packet handlers apply it across every protocol revision each family
+serves, so negative values and extension ids remain explicit misses rather
+than table indices.
 
 `MobEffectInstance` intentionally retains its raw `i32` id. It can arrive in
 an item component where the owning session or an extension has supplied a
