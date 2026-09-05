@@ -113,6 +113,13 @@ pub enum Capability {
     /// operation. The guest supplies only a bounded menu slot; the shell owns
     /// the transfer order, validation, prediction, vetoes, and egress.
     ActInventoryQuickMove,
+    /// Request one number-key swap through the shell-owned menu predictor.
+    ///
+    /// This is intentionally separate from [`Self::ActInventoryClick`] and
+    /// [`Self::ActInventoryQuickMove`]: it can exchange a live menu slot with a
+    /// selected hotbar position, while the shell still owns slot validation,
+    /// prediction, vetoes, and protocol egress.
+    ActInventoryHotbarSwap,
     /// Receive a generation-bounded outcome after a WASM or native placement
     /// attempt resolves.
     ///
@@ -164,6 +171,7 @@ impl Capability {
         Self::ActSelectSlot,
         Self::ActInventoryClick,
         Self::ActInventoryQuickMove,
+        Self::ActInventoryHotbarSwap,
         Self::ObservePlace,
         Self::ObserveBreak,
         Self::VetoActions,
@@ -190,6 +198,7 @@ impl Capability {
             Self::ActSelectSlot => "act:select-slot",
             Self::ActInventoryClick => "act:inventory-click",
             Self::ActInventoryQuickMove => "act:inventory-quick-move",
+            Self::ActInventoryHotbarSwap => "act:inventory-hotbar-swap",
             Self::ObservePlace => "observe:place",
             Self::ObserveBreak => "observe:break",
             Self::VetoActions => "veto:actions",
@@ -231,6 +240,7 @@ impl Capability {
             | Self::ActSelectSlot
             | Self::ActInventoryClick
             | Self::ActInventoryQuickMove
+            | Self::ActInventoryHotbarSwap
             | Self::ObservePlace
             | Self::ObserveBreak
             | Self::VetoActions
@@ -260,8 +270,8 @@ impl CapabilitySet {
     }
 
     /// What the host grants unless an operator says otherwise: the ordinary
-    /// observe/act vocabulary, but not filesystem access, task scheduling, or
-    /// [`Capability::RegisterCommands`].
+    /// observe/act vocabulary, but not filesystem access, task scheduling,
+    /// command registration, or the opt-in inventory mutations.
     ///
     /// The asymmetry is the whole policy, stated in one place. Observing chat and
     /// pushing a chat action are things a plugin is *for*; reading the user's
@@ -414,6 +424,10 @@ mod tests {
         assert!(
             !policy.contains(Capability::ActInventoryClick),
             "act:inventory-click must not be granted by default"
+        );
+        assert!(
+            !policy.contains(Capability::ActInventoryHotbarSwap),
+            "act:inventory-hotbar-swap must not be granted by default"
         );
         assert!(policy.contains(Capability::ObserveChat));
         assert!(policy.contains(Capability::ActChat));

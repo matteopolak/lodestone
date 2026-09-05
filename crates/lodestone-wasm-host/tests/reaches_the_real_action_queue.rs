@@ -126,6 +126,16 @@ fn inventory_quick_move_host_policy() -> CapabilitySet {
     policy
 }
 
+fn inventory_hotbar_swap_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActInventoryHotbarSwap])
+}
+
+fn inventory_hotbar_swap_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActInventoryHotbarSwap);
+    policy
+}
+
 fn inventory_event() -> GameEvent {
     GameEvent(ClientEvent::InventorySlotChanged {
         slot: 4,
@@ -840,6 +850,92 @@ fn a_wasm_inventory_quick_move_is_default_denied_before_the_shell_handoff() {
             .take()
             .is_empty(),
         "an ungranted quick move must not reach the shell handoff"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+/// A separately compiled guest reaches the same bounded copied queue with a
+/// number-key swap. Its dedicated grant does not widen pickup/place or quick
+/// move authority.
+#[test]
+fn a_wasm_inventory_hotbar_swap_reaches_the_bounded_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-hotbar-swap"]);
+    let mut host = PluginHost::new(inventory_hotbar_swap_host_policy()).expect("engine");
+    host.load_file(
+        "inventory-hotbar-swap",
+        &wasm,
+        &inventory_hotbar_swap_capabilities(),
+    )
+    .expect("the explicitly granted hotbar-swap fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take(),
+        vec![InventoryClickIntent {
+            slot: 36,
+            mode: InventoryClickMode::HotbarSwap(3),
+        }],
+        "the guest must hand off only copied swap data, never menu state or a packet"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// The maximal hotbar key stays copied until the shell's live validation gate;
+/// the host must not narrow or reinterpret it as a different menu operation.
+#[test]
+fn a_wasm_inventory_hotbar_swap_keeps_an_invalid_key_bounded_until_shell_validation() {
+    let wasm = support::build_example_plugin(&["inventory-hotbar-swap-invalid"]);
+    let mut host = PluginHost::new(inventory_hotbar_swap_host_policy()).expect("engine");
+    host.load_file(
+        "inventory-hotbar-swap-invalid",
+        &wasm,
+        &inventory_hotbar_swap_capabilities(),
+    )
+    .expect("the explicitly granted invalid hotbar-swap fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take(),
+        vec![InventoryClickIntent {
+            slot: 36,
+            mode: InventoryClickMode::HotbarSwap(9),
+        }]
+    );
+}
+
+/// The same guest action under the fail-closed policy is counted and never
+/// reaches the bounded shell queue; the granted test above is its control.
+#[test]
+fn a_wasm_inventory_hotbar_swap_is_default_denied_before_the_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-hotbar-swap"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "inventory-hotbar-swap",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log]),
+    )
+    .expect("a data-flow action may be withheld after the guest loads");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take()
+            .is_empty(),
+        "an ungranted hotbar swap must not reach the shell handoff"
     );
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
 }

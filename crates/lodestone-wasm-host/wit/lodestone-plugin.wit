@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.13.0;
+package lodestone:plugin@0.14.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -294,9 +294,9 @@ interface types {
     type hotbar-slot = u8;
 
     /// The deliberately narrow pickup/place inventory-click surface. Complex
-    /// modes (dragging, hotbar swaps, and cursor drops) need their own ownership
-    /// and validation contracts; this action can only pick up or place with the
-    /// normal primary/secondary buttons.
+    /// modes (dragging and cursor drops) need their own ownership and validation
+    /// contracts; this action can only pick up or place with the normal
+    /// primary/secondary buttons.
     enum inventory-click-button {
         left,
         right,
@@ -308,6 +308,14 @@ interface types {
     record inventory-click {
         slot: u16,
         button: inventory-click-button,
+    }
+
+    /// A copied number-key swap request. `hotbar` is bounded to one byte at the
+    /// ABI boundary; the shell still rejects values outside the nine selectable
+    /// hotbar positions before it asks the live menu predictor to act.
+    record inventory-hotbar-swap {
+        slot: u16,
+        hotbar: u8,
     }
 
     /// One thing a guest wants done. Protocol actions lower onto `ClientAction`
@@ -346,6 +354,13 @@ interface types {
         /// quick-move button, validates the live menu, predicts, asks the veto,
         /// and owns state ids, changed slots, and packet egress.
         inventory-quick-move(u16),
+        /// Request one bounded number-key swap through the shell's live menu
+        /// predictor — capability `act:inventory-hotbar-swap`.
+        ///
+        /// The guest supplies only the menu slot and hotbar index. The shell
+        /// validates both against its live menu and owns prediction, vetoes,
+        /// state ids, changed slots, and packet egress.
+        inventory-hotbar-swap(inventory-hotbar-swap),
     }
 
     /// A root command a guest wants the host to register. The host supplies one
@@ -415,7 +430,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.13.0"`.
+        /// `"lodestone:plugin@0.14.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.

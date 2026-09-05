@@ -1061,6 +1061,13 @@ fn submit_wasm_menu_clicks(
                 lodestone_wasm_host::InventoryClickButton::Right,
             ) => Click::right(slot),
             lodestone_wasm_host::InventoryClickMode::QuickMove => Click::shift(slot),
+            lodestone_wasm_host::InventoryClickMode::HotbarSwap(hotbar) if hotbar < 9 => {
+                Click::hotbar_swap(slot, hotbar)
+            }
+            lodestone_wasm_host::InventoryClickMode::HotbarSwap(hotbar) => {
+                tracing::warn!(hotbar, "refused a WASM inventory swap outside the hotbar");
+                continue;
+            }
         };
         let _ = handle.menu_click(click, PlayerCtx::survival());
     }
@@ -1087,7 +1094,9 @@ mod wasm_menu_click_tests {
 
     /// A protocol-free encoder that makes the client action queue observable.
     #[derive(Debug)]
-    struct ClickAdapter;
+    struct ClickAdapter {
+        expected: ContainerClickType,
+    }
 
     impl VersionAdapter for ClickAdapter {
         fn protocol_version(&self) -> i32 {
@@ -1136,8 +1145,8 @@ mod wasm_menu_click_tests {
                 } => {
                     assert_eq!(
                         *click_type,
-                        ContainerClickType::QuickMove,
-                        "the shell must choose the quick-move mode rather than a pickup"
+                        self.expected,
+                        "the shell must choose the requested menu mode rather than a pickup"
                     );
                     Ok(Some((
                         CONTAINER_CLICK_PACKET,
@@ -1167,7 +1176,9 @@ mod wasm_menu_click_tests {
                 username: "PluginTest".into(),
                 uuid: Uuid::nil(),
             },
-            Box::new(ClickAdapter),
+            Box::new(ClickAdapter {
+                expected: ContainerClickType::QuickMove,
+            }),
         )
         .connect_with(client_io);
         let mut peer = Connection::new(server_io);
@@ -1213,6 +1224,70 @@ mod wasm_menu_click_tests {
             second,
             (BARRIER_PACKET, 77_i64.to_be_bytes().to_vec()),
             "if the invalid slot reached ClientHandle::menu_click, it would precede this barrier"
+        );
+        drop(events);
+    }
+
+    #[tokio::test]
+    async fn bounded_hotbar_swaps_reach_the_live_menu_predictor_and_invalid_keys_do_not() {
+        let (client_io, server_io) = memory_pair();
+        let (handle, events) = ClientBuilder::new(
+            ServerAddress {
+                host: "memory".into(),
+                port: 0,
+            },
+            LoginProfile {
+                username: "PluginTest".into(),
+                uuid: Uuid::nil(),
+            },
+            Box::new(ClickAdapter {
+                expected: ContainerClickType::Swap,
+            }),
+        )
+        .connect_with(client_io);
+        let mut peer = Connection::new(server_io);
+
+        submit_wasm_menu_clicks(
+            &handle,
+            vec![
+                InventoryClickIntent {
+                    slot: 36,
+                    mode: InventoryClickMode::HotbarSwap(3),
+                },
+                InventoryClickIntent {
+                    slot: 36,
+                    mode: InventoryClickMode::HotbarSwap(9),
+                },
+            ],
+        );
+        handle
+            .send_action(ClientAction::KeepAliveResponse { id: 78 })
+            .expect("the barrier action must enter the same live queue");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the valid swap must reach the client action queue")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the valid swap");
+        assert_eq!(first.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            first.1,
+            [0_i32, 0, 36, 3]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the real predictor supplies the player window and live state while the shell preserves the hotbar key"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the queue barrier must arrive")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the barrier");
+        assert_eq!(
+            second,
+            (BARRIER_PACKET, 78_i64.to_be_bytes().to_vec()),
+            "the invalid hotbar key must not precede the barrier"
         );
         drop(events);
     }
