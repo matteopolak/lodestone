@@ -166,6 +166,16 @@ fn drop_selected_host_policy() -> CapabilitySet {
     policy
 }
 
+fn swap_offhand_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActSwapOffhand])
+}
+
+fn swap_offhand_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActSwapOffhand);
+    policy
+}
+
 fn inventory_event() -> GameEvent {
     GameEvent(ClientEvent::InventorySlotChanged {
         slot: 4,
@@ -422,6 +432,65 @@ fn a_wasm_selected_item_drop_without_its_capability_is_refused() {
         world.resource::<ActionQueue>().0
     );
     assert_eq!(world.resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+/// The offhand swap is a direct protocol action: the guest supplies no stack
+/// or slot data, and the production client owns both inventory stacks and wire
+/// encoding while the request reaches the real queue.
+#[test]
+fn a_wasm_offhand_swap_reaches_the_real_action_queue() {
+    let wasm = support::build_example_plugin(&["swap-offhand"]);
+    let mut host = PluginHost::new(swap_offhand_host_policy()).expect("engine");
+    host.load_file("swap-offhand", &wasm, &swap_offhand_capabilities())
+        .expect("the explicitly granted offhand-swap fixture must load");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(
+        &mut app,
+        PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0),
+    );
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        action_queue(&app)
+            .iter()
+            .any(|action| matches!(action, ClientAction::SwapItemWithOffhand)),
+        "the guest offhand swap must reach the real action queue: {:?}",
+        action_queue(&app)
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// The same separately built guest still emits its action without the grant;
+/// the empty queue plus refusal count proves the data-flow capability gate.
+#[test]
+fn a_wasm_offhand_swap_without_its_capability_is_refused() {
+    let wasm = support::build_example_plugin(&["swap-offhand"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "swap-offhand",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log]),
+    )
+    .expect("the guest remains loadable when the action grant is withheld");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(
+        &mut app,
+        PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0),
+    );
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        !action_queue(&app)
+            .iter()
+            .any(|action| matches!(action, ClientAction::SwapItemWithOffhand)),
+        "a refused offhand swap must not reach the action queue: {:?}",
+        action_queue(&app)
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
 }
 
 /// A separately-built guest claims the copied look intent, and the existing

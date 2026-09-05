@@ -366,6 +366,8 @@ changed-slot list, cancellation, and packet egress never cross the boundary. The
 world handle, block state, held item, prediction sequence, or raw packet. The same ABI also includes a
 separate `drop-selected-item(one|stack)` action guarded by `act:drop-selected-item`; it carries only
 the mode, while the client resolves the selected stack and owns the corresponding action egress.
+It also includes the no-argument `swap-item-with-offhand` action guarded by `act:swap-offhand`; the
+live client retains ownership of both held stacks and its protocol encoding.
 Placement returns a finite, generation-bounded result only to a guest granted `observe:place`; a
 multi-tick break claim remains
 outside the ABI because it needs a separate cancellation and ownership contract. Command

@@ -374,6 +374,7 @@ pub fn capability_for(action: &Action) -> Capability {
     match action {
         Action::SendChat(_) | Action::SendCommand(_) => Capability::ActChat,
         Action::SwingArm(_) => Capability::ActInteract,
+        Action::SwapItemWithOffhand => Capability::ActSwapOffhand,
         Action::SetLook(_) => Capability::ActLook,
         Action::SetMovement(_) => Capability::ActMovement,
         Action::SetBreak(_) => Capability::ActBreak,
@@ -408,6 +409,9 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
                 Hand::Off => lodestone_model::common::Hand::Off,
             },
         }),
+        Action::SwapItemWithOffhand => {
+            LoweredAction::Client(ClientAction::SwapItemWithOffhand)
+        }
         Action::SetLook(look) => LoweredAction::Intent(IntentAction::Look(look.map(|look| {
             lodestone_ecs::player::LookIntent {
                 yaw: look.yaw,
@@ -628,6 +632,18 @@ mod tests {
             Ok(LoweredAction::Client(ClientAction::SwingArm {
                 hand: lodestone_model::common::Hand::Off
             }))
+        );
+        assert_eq!(
+            lower_action(
+                Action::SwapItemWithOffhand,
+                &CapabilitySet::from_iter([Capability::ActSwapOffhand]),
+            ),
+            Ok(LoweredAction::Client(ClientAction::SwapItemWithOffhand))
+        );
+        assert_eq!(
+            lower_action(Action::SwapItemWithOffhand, &CapabilitySet::default_policy()),
+            Err(Capability::ActSwapOffhand),
+            "offhand swaps need their own explicit capability"
         );
     }
 
