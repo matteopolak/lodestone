@@ -44,9 +44,15 @@ LODESTONE_TARGET_DIR=/private/tmp/lodestone-horizon-target LODESTONE_JOBS=2 \
 ```
 
 The capture location is caller-selected and is not tracked. The command requires a local Samply
-installation; the workload itself does not require a GPU adapter. Counters prove path coverage and
-the bound; CPU samples and elapsed time are machine-load-sensitive observations and must not be
-treated as run-to-run comparable results.
+installation; the workload itself does not require a GPU adapter. The wrapper first runs the same
+release binary without a profiler and rejects a missing phase, a full far column, empty reduced
+terrain/store work, no tile updates or skipped candidates, an incoherent cell total, or wrong fixed
+atlas size. Only then does it profile that identical finite command. It refuses to overwrite an
+artifact and removes its own partial witness/capture/sidecar if capture fails. Run
+`just test-samply-distant-horizon` for the no-GPU controls, including a planted full-column fallback
+that the detector must reject. Counters prove path coverage and the bound; CPU samples and elapsed
+time are machine-load-sensitive observations and must not be treated as run-to-run comparable
+results.
 
 ## Dependencies
 
