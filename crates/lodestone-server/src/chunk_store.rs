@@ -221,6 +221,7 @@ use std::collections::hash_map::Entry as MapEntry;
 use std::sync::Mutex;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::chunk_lifecycle::ChunkLifecyclePlan;
 use crate::ticket::{TicketDelta, TicketKind, TicketOwner, TicketStoreHandle};
 
 /// The floor under [`capacity_for_view_radius`], and the capacity a radius-less
@@ -777,9 +778,21 @@ impl<S: ChunkSource> ChunkStore<S> {
             }
         }
 
+        let load = ChunkLifecyclePlan::load((cx, cz));
+        let assignment = load
+            .assignments()
+            .first()
+            .expect("an on-demand chunk load has one owner assignment");
+        debug_assert_eq!(assignment.chunk, (cx, cz));
+        debug_assert_eq!(
+            assignment.owner,
+            crate::chunk_lifecycle::ChunkLifecycleOwner::Chunk { cx, cz }
+        );
         // Lock released: a ~909 ms generation must not serialise
         // `generate_columns_parallel`'s scoped fan-out.
-        let fresh = self.source.column_at(cx, cz, stage);
+        let fresh = self
+            .source
+            .column_at(assignment.chunk.0, assignment.chunk.1, stage);
 
         let mut guard = self.lock();
         let cache = &mut *guard;
@@ -812,8 +825,15 @@ impl<S: ChunkSource> ChunkStore<S> {
         // lets the layer beneath release a column it has already written, so
         // the edit map is not the process's real memory bound for a
         // heavily-built world.
-        for (vx, vz) in evicted {
-            self.source.unload(vx, vz);
+        for assignment in ChunkLifecyclePlan::unload(evicted).assignments() {
+            debug_assert_eq!(
+                assignment.owner,
+                crate::chunk_lifecycle::ChunkLifecycleOwner::Chunk {
+                    cx: assignment.chunk.0,
+                    cz: assignment.chunk.1,
+                }
+            );
+            self.source.unload(assignment.chunk.0, assignment.chunk.1);
         }
         None
     }
@@ -961,8 +981,15 @@ impl<S: ChunkSource> ChunkStore<S> {
         };
         // Outside the lock, deliberately — same reasoning as
         // `evict_down_to_capacity`'s call site in `ensure`.
-        for (vx, vz) in evicted {
-            self.source.unload(vx, vz);
+        for assignment in ChunkLifecyclePlan::unload(evicted).assignments() {
+            debug_assert_eq!(
+                assignment.owner,
+                crate::chunk_lifecycle::ChunkLifecycleOwner::Chunk {
+                    cx: assignment.chunk.0,
+                    cz: assignment.chunk.1,
+                }
+            );
+            self.source.unload(assignment.chunk.0, assignment.chunk.1);
         }
     }
 }

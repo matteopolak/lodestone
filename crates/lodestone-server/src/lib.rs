@@ -142,6 +142,7 @@ mod brewing;
 pub mod chat_session;
 pub mod heavy_scene;
 mod chunk;
+mod chunk_lifecycle;
 /// Bit-packed per-section block storage for [`chunk::ChunkColumn`] — unit U8 of
 /// `docs/plans/chunk-lifecycle.md`. Private: the representation is an
 /// implementation detail of `ChunkColumn`, which exposes it only as
