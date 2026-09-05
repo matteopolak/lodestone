@@ -69,6 +69,21 @@ pub struct RecordKey {
     pub kind: RecordKind,
 }
 
+/// One committed native chunk coordinate.
+///
+/// Version-1 native chunk keys contain only the horizontal column pair; the
+/// format does not persist a dimension discriminator. Values from
+/// [`NativeStore::committed_chunk_coordinates`] are copied from the recovered
+/// latest-record index, so reading this type never seeks to or decodes a
+/// chunk payload.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct NativeChunkCoordinate {
+    /// Chunk X coordinate.
+    pub column_x: i32,
+    /// Chunk Z coordinate.
+    pub column_z: i32,
+}
+
 impl RecordKey {
     /// The key for a whole-column chunk envelope.
     pub const fn chunk(column_x: i32, column_z: i32) -> Self {
@@ -450,6 +465,26 @@ impl NativeStore {
     /// Returns the recovery result captured during [`Self::open`].
     pub const fn recovery(&self) -> Recovery {
         self.recovery
+    }
+
+    /// Snapshots every latest committed native chunk key in canonical order.
+    ///
+    /// The returned vector is sorted by `(column_x, column_z)` because the
+    /// latest-record index is a [`BTreeMap`]. It is a point-in-time copy of
+    /// that index: later writes cannot alter it. Opening has already applied
+    /// the segment's crash-tail recovery before the index exists, so an
+    /// incomplete final transaction contributes no coordinates. This method
+    /// neither reads record frames nor deserializes chunk payloads.
+    #[must_use]
+    pub fn committed_chunk_coordinates(&self) -> Vec<NativeChunkCoordinate> {
+        self.index
+            .keys()
+            .filter(|key| key.kind == RecordKind::Chunk)
+            .map(|key| NativeChunkCoordinate {
+                column_x: key.column_x,
+                column_z: key.column_z,
+            })
+            .collect()
     }
 
     /// Replaces the append history with one transaction containing every latest record.
@@ -1087,6 +1122,107 @@ mod tests {
             22 + body.len() as u64 + 2
         );
         assert_eq!(path.metadata().unwrap().len(), before);
+    }
+
+    #[test]
+    fn chunk_enumeration_is_sorted_unique_and_excludes_recovered_tail() {
+        let directory = tempdir().unwrap();
+        let path;
+        {
+            let mut store = NativeStore::open(directory.path()).unwrap();
+            store
+                .write_transaction([
+                    RecordWrite::new(RecordKey::chunk(4, -3), chunk(4, -3, 1)),
+                    RecordWrite::new(RecordKey::general(0, 0, 7), world_properties(1)),
+                    RecordWrite::new(RecordKey::chunk(-2, 9), chunk(-2, 9, 2)),
+                    RecordWrite::new(RecordKey::chunk(4, 8), chunk(4, 8, 3)),
+                ])
+                .unwrap();
+            store
+                .write_transaction([RecordWrite::new(
+                    RecordKey::chunk(4, -3),
+                    chunk(4, -3, 4),
+                )])
+                .unwrap();
+            path = store.segment_path().to_owned();
+            assert_eq!(
+                store.committed_chunk_coordinates(),
+                [
+                    NativeChunkCoordinate {
+                        column_x: -2,
+                        column_z: 9,
+                    },
+                    NativeChunkCoordinate {
+                        column_x: 4,
+                        column_z: -3,
+                    },
+                    NativeChunkCoordinate {
+                        column_x: 4,
+                        column_z: 8,
+                    },
+                ]
+            );
+        }
+
+        let body = encode_body_for_test(&[RecordWrite::new(
+            RecordKey::chunk(-99, -99),
+            chunk(-99, -99, 5),
+        )]);
+        let header = encode_transaction_header(
+            TRANSACTION_START_MAGIC,
+            1,
+            body.len() as u64,
+            crc32(&body),
+        );
+        let mut interrupted = OpenOptions::new().append(true).open(&path).unwrap();
+        interrupted.write_all(&header).unwrap();
+        interrupted.write_all(&body).unwrap();
+        drop(interrupted);
+
+        let recovered = NativeStore::open(directory.path()).unwrap();
+        assert_eq!(
+            recovered.committed_chunk_coordinates(),
+            [
+                NativeChunkCoordinate {
+                    column_x: -2,
+                    column_z: 9,
+                },
+                NativeChunkCoordinate {
+                    column_x: 4,
+                    column_z: -3,
+                },
+                NativeChunkCoordinate {
+                    column_x: 4,
+                    column_z: 8,
+                },
+            ],
+            "a recovered uncommitted tail must not become part of enumeration"
+        );
+    }
+
+    #[test]
+    fn duplicate_chunk_write_does_not_change_enumeration() {
+        let directory = tempdir().unwrap();
+        let mut store = NativeStore::open(directory.path()).unwrap();
+        let coordinate = RecordKey::chunk(7, -4);
+        store
+            .write_transaction([RecordWrite::new(coordinate, chunk(7, -4, 1))])
+            .unwrap();
+        assert!(matches!(
+            store.write_transaction([
+                RecordWrite::new(coordinate, chunk(7, -4, 2)),
+                RecordWrite::new(coordinate, chunk(7, -4, 3)),
+            ]),
+            Err(StoreError::DuplicateKey(key)) if key == coordinate
+        ));
+        assert_eq!(
+            store.committed_chunk_coordinates(),
+            [NativeChunkCoordinate {
+                column_x: 7,
+                column_z: -4,
+            }]
+        );
+        assert_eq!(store.get(coordinate).unwrap(), Some(chunk(7, -4, 1)));
     }
 
     #[test]
