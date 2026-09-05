@@ -190,7 +190,7 @@ fn emit_track(slot: &str, track: &Option<Track>) -> String {
     match track {
         None => format!("                {slot}: None,\n"),
         Some(t) => format!(
-            "                {slot}: Some(Music::of(\"{}\", {}, {}, {})),\n",
+            "                {slot}: Some(Music::of(\"{}\", MusicDelay::from_ticks({}), MusicDelay::from_ticks({}), {})),\n",
             t.sound, t.min_delay, t.max_delay, t.replace
         ),
     }
@@ -212,7 +212,7 @@ fn emit(parsed: &BTreeMap<String, Parsed>) -> String {
          //! Sorted by biome id; `biome_audio` binary-searches it.\n\n",
     );
     s.push_str("use super::BiomeMusic;\n");
-    s.push_str("use crate::music::{BackgroundMusic, Music};\n\n");
+    s.push_str("use crate::music::{BackgroundMusic, Music, MusicDelay};\n\n");
     s.push_str("/// Every biome that declares `minecraft:audio/background_music` or\n");
     s.push_str("/// `minecraft:audio/music_volume`, namespace-stripped and sorted by id.\n");
     s.push_str("pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[\n");

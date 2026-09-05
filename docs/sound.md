@@ -207,6 +207,12 @@ clear the "track playing" flag first), and the countdown while a track plays
 parks at `max_delay`, not `i32::MAX` — the sentinel is set once and then
 immediately reclamped on the very next tick.
 
+`MusicDelay` is the explicit boundary for the per-track minimum and maximum:
+it validates only non-negative **ticks**. Keep the `MusicFrequency` option in
+minutes and the manager's signed countdown internal; convert through
+`MusicDelay::ticks` only where the scheduler needs its arithmetic. This keeps
+a frequency value or a negative interval from being accepted as track data.
+
 Music must be **streamed, never eagerly decoded** — one track decoded
 eagerly is over 300 MiB resident against an 80 MB compressed corpus, and all
 316 real music entries in `sounds.json` declare `"stream": true`. A missing

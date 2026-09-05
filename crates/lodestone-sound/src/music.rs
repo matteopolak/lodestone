@@ -106,6 +106,44 @@ pub const GAME_MUSIC_MAX_DELAY: i32 = 24_000;
 /// applies to its minutes-valued setting. 20 ticks/s * 60 s.
 pub const TICKS_PER_MINUTE: i32 = 1_200;
 
+/// A non-negative delay expressed in client ticks for one music track.
+///
+/// Track timing is deliberately distinct from the music-frequency option's
+/// minutes and from the manager's signed countdown sentinel. Construct it at
+/// a track-data boundary with [`Self::try_from_ticks`] or
+/// [`Self::from_ticks`]; the scheduler converts it
+/// to its signed arithmetic representation only when it needs to draw or
+/// clamp a countdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MusicDelay(i32);
+
+impl MusicDelay {
+    /// Validates a track delay from a non-negative tick count.
+    #[must_use]
+    pub const fn try_from_ticks(ticks: i32) -> Option<Self> {
+        if ticks >= 0 { Some(Self(ticks)) } else { None }
+    }
+
+    /// Creates a track delay from a non-negative tick count.
+    ///
+    /// Panics when `ticks` is negative because a negative interval has no
+    /// scheduling meaning and would otherwise make an invalid range look like
+    /// an immediate replay.
+    #[must_use]
+    pub const fn from_ticks(ticks: i32) -> Self {
+        match Self::try_from_ticks(ticks) {
+            Some(delay) => delay,
+            None => panic!("music delay must be non-negative"),
+        }
+    }
+
+    /// The tick count at the boundary to the scheduler's signed arithmetic.
+    #[must_use]
+    pub const fn ticks(self) -> i32 {
+        self.0
+    }
+}
+
 /// One music track and its scheduling parameters — vanilla's own music record.
 ///
 /// `sound` is the **event key path with the namespace stripped** (`music.menu`,
@@ -121,9 +159,9 @@ pub struct Music {
     /// Namespace-stripped sound event key, e.g. `music.overworld.jungle`.
     pub sound: Cow<'static, str>,
     /// Minimum ticks between plays.
-    pub min_delay: i32,
+    pub min_delay: MusicDelay,
     /// Maximum ticks between plays.
-    pub max_delay: i32,
+    pub max_delay: MusicDelay,
     /// Whether selecting this track interrupts a *different* track already
     /// playing, rather than waiting for it to finish. See [`Music::can_replace`].
     pub replace_current_music: bool,
@@ -133,8 +171,8 @@ impl Music {
     /// A track with a `'static` name, usable in a `const`.
     pub const fn of(
         sound: &'static str,
-        min_delay: i32,
-        max_delay: i32,
+        min_delay: MusicDelay,
+        max_delay: MusicDelay,
         replace_current_music: bool,
     ) -> Self {
         Self {
@@ -148,8 +186,8 @@ impl Music {
     /// A track whose name is owned (parsed from data).
     pub fn owned(
         sound: impl Into<String>,
-        min_delay: i32,
-        max_delay: i32,
+        min_delay: MusicDelay,
+        max_delay: MusicDelay,
         replace_current_music: bool,
     ) -> Self {
         Self {
@@ -164,7 +202,12 @@ impl Music {
     /// non-replacing. Every biome's `default` slot is one of these, which is why
     /// the generated table's delays are all identical.
     pub const fn game(sound: &'static str) -> Self {
-        Self::of(sound, GAME_MUSIC_MIN_DELAY, GAME_MUSIC_MAX_DELAY, false)
+        Self::of(
+            sound,
+            MusicDelay::from_ticks(GAME_MUSIC_MIN_DELAY),
+            MusicDelay::from_ticks(GAME_MUSIC_MAX_DELAY),
+            false,
+        )
     }
 
     /// The namespace-stripped event key.
@@ -184,20 +227,45 @@ impl Music {
 /// Vanilla's own music table. Every value is transcribed with
 /// its source constant cited alongside it.
 pub mod musics {
-    use super::Music;
+    use super::{Music, MusicDelay};
 
     /// vanilla's own MENU music constant. `20..=600`, replacing.
-    pub const MENU: Music = Music::of("music.menu", 20, 600, true);
+    pub const MENU: Music = Music::of(
+        "music.menu",
+        MusicDelay::from_ticks(20),
+        MusicDelay::from_ticks(600),
+        true,
+    );
     /// vanilla's own CREATIVE music constant. `12000..=24000`, non-replacing.
-    pub const CREATIVE: Music = Music::of("music.creative", 12_000, 24_000, false);
+    pub const CREATIVE: Music = Music::of(
+        "music.creative",
+        MusicDelay::from_ticks(12_000),
+        MusicDelay::from_ticks(24_000),
+        false,
+    );
     /// vanilla's own CREDITS music constant. `0..=0`, replacing.
-    pub const CREDITS: Music = Music::of("music.credits", 0, 0, true);
+    pub const CREDITS: Music = Music::of(
+        "music.credits",
+        MusicDelay::from_ticks(0),
+        MusicDelay::from_ticks(0),
+        true,
+    );
     /// vanilla's own END_BOSS music constant. `0..=0`, replacing. The event is
     /// `music.dragon` (vanilla's own dragon-music sound event), not `music.end_boss`.
-    pub const END_BOSS: Music = Music::of("music.dragon", 0, 0, true);
+    pub const END_BOSS: Music = Music::of(
+        "music.dragon",
+        MusicDelay::from_ticks(0),
+        MusicDelay::from_ticks(0),
+        true,
+    );
     /// vanilla's own END music constant. `6000..=24000`, replacing. Note the min
     /// is `FIVE_MINUTES`, not the game tracks' `TEN_MINUTES`.
-    pub const END: Music = Music::of("music.end", 6_000, 24_000, true);
+    pub const END: Music = Music::of(
+        "music.end",
+        MusicDelay::from_ticks(6_000),
+        MusicDelay::from_ticks(24_000),
+        true,
+    );
     /// vanilla's own UNDER_WATER music constant, via vanilla's own game-music helper.
     pub const UNDER_WATER: Music = Music::game("music.under_water");
     /// vanilla's own GAME music constant, via vanilla's own game-music helper.
@@ -320,7 +388,11 @@ impl MusicFrequency {
             return STARTING_DELAY;
         }
         let cap = self.max_frequency();
-        next_int(rng, music.min_delay.min(cap), music.max_delay.min(cap))
+        next_int(
+            rng,
+            music.min_delay.ticks().min(cap),
+            music.max_delay.ticks().min(cap),
+        )
     }
 }
 
@@ -560,7 +632,7 @@ impl MusicManager {
             // vanilla's own tick routine's replace-check branch.
             if music.can_replace(&current) {
                 sink.stop();
-                self.next_song_delay = next_int(rng, 0, music.min_delay / 2);
+                self.next_song_delay = next_int(rng, 0, music.min_delay.ticks() / 2);
             }
             // vanilla's own tick routine's `!isActive` branch — reached in the same tick as
             // the branch above, by design.
@@ -574,7 +646,7 @@ impl MusicManager {
 
         // vanilla's own tick routine takes the min of the next-song delay and the
         // current music's own max-delay query.
-        self.next_song_delay = self.next_song_delay.min(music.max_delay);
+        self.next_song_delay = self.next_song_delay.min(music.max_delay.ticks());
 
         // vanilla's own tick routine's trailing `if` — the decrement happens *only* when we
         // are otherwise ready to start, so a playing track does not burn the countdown.

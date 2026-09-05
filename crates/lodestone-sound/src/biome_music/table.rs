@@ -11,7 +11,7 @@
 //! Sorted by biome id; `biome_audio` binary-searches it.
 
 use super::BiomeMusic;
-use crate::music::{BackgroundMusic, Music};
+use crate::music::{BackgroundMusic, Music, MusicDelay};
 
 /// Every biome that declares `minecraft:audio/background_music` or
 /// `minecraft:audio/music_volume`, namespace-stripped and sorted by id.
@@ -20,7 +20,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "badlands",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.badlands", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.badlands", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -31,7 +31,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "bamboo_jungle",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.bamboo_jungle", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.bamboo_jungle", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -42,7 +42,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "basalt_deltas",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.nether.basalt_deltas", 12000, 24000, false)),
+                default: Some(Music::of("music.nether.basalt_deltas", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -53,7 +53,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "birch_forest",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.forest", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.forest", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -64,7 +64,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "cherry_grove",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.cherry_grove", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.cherry_grove", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -75,9 +75,9 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "cold_ocean",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.game", 12000, 24000, false)),
-                creative: Some(Music::of("music.creative", 12000, 24000, false)),
-                underwater: Some(Music::of("music.under_water", 12000, 24000, false)),
+                default: Some(Music::of("music.game", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                creative: Some(Music::of("music.creative", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                underwater: Some(Music::of("music.under_water", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
             },
             music_volume: None,
         },
@@ -86,7 +86,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "crimson_forest",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.nether.crimson_forest", 12000, 24000, false)),
+                default: Some(Music::of("music.nether.crimson_forest", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -97,7 +97,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "dark_forest",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.forest", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.forest", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -108,9 +108,9 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "deep_cold_ocean",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.game", 12000, 24000, false)),
-                creative: Some(Music::of("music.creative", 12000, 24000, false)),
-                underwater: Some(Music::of("music.under_water", 12000, 24000, false)),
+                default: Some(Music::of("music.game", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                creative: Some(Music::of("music.creative", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                underwater: Some(Music::of("music.under_water", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
             },
             music_volume: None,
         },
@@ -119,7 +119,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "deep_dark",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.deep_dark", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.deep_dark", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -130,9 +130,9 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "deep_lukewarm_ocean",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.game", 12000, 24000, false)),
-                creative: Some(Music::of("music.creative", 12000, 24000, false)),
-                underwater: Some(Music::of("music.under_water", 12000, 24000, false)),
+                default: Some(Music::of("music.game", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                creative: Some(Music::of("music.creative", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                underwater: Some(Music::of("music.under_water", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
             },
             music_volume: None,
         },
@@ -141,9 +141,9 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "deep_ocean",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.game", 12000, 24000, false)),
-                creative: Some(Music::of("music.creative", 12000, 24000, false)),
-                underwater: Some(Music::of("music.under_water", 12000, 24000, false)),
+                default: Some(Music::of("music.game", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                creative: Some(Music::of("music.creative", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                underwater: Some(Music::of("music.under_water", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
             },
             music_volume: None,
         },
@@ -152,7 +152,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "desert",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.desert", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.desert", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -163,7 +163,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "dripstone_caves",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.dripstone_caves", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.dripstone_caves", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -174,7 +174,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "eroded_badlands",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.badlands", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.badlands", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -185,7 +185,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "flower_forest",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.flower_forest", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.flower_forest", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -196,7 +196,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "forest",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.forest", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.forest", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -207,7 +207,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "frozen_peaks",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.frozen_peaks", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.frozen_peaks", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -218,9 +218,9 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "frozen_river",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.game", 12000, 24000, false)),
-                creative: Some(Music::of("music.creative", 12000, 24000, false)),
-                underwater: Some(Music::of("music.under_water", 12000, 24000, false)),
+                default: Some(Music::of("music.game", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                creative: Some(Music::of("music.creative", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                underwater: Some(Music::of("music.under_water", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
             },
             music_volume: None,
         },
@@ -229,7 +229,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "grove",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.grove", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.grove", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -240,7 +240,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "jagged_peaks",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.jagged_peaks", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.jagged_peaks", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -251,7 +251,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "jungle",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.jungle", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.jungle", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -262,9 +262,9 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "lukewarm_ocean",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.game", 12000, 24000, false)),
-                creative: Some(Music::of("music.creative", 12000, 24000, false)),
-                underwater: Some(Music::of("music.under_water", 12000, 24000, false)),
+                default: Some(Music::of("music.game", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                creative: Some(Music::of("music.creative", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                underwater: Some(Music::of("music.under_water", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
             },
             music_volume: None,
         },
@@ -273,7 +273,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "lush_caves",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.lush_caves", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.lush_caves", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -284,7 +284,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "mangrove_swamp",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.swamp", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.swamp", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -295,7 +295,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "meadow",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.meadow", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.meadow", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -306,7 +306,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "nether_wastes",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.nether.nether_wastes", 12000, 24000, false)),
+                default: Some(Music::of("music.nether.nether_wastes", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -317,9 +317,9 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "ocean",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.game", 12000, 24000, false)),
-                creative: Some(Music::of("music.creative", 12000, 24000, false)),
-                underwater: Some(Music::of("music.under_water", 12000, 24000, false)),
+                default: Some(Music::of("music.game", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                creative: Some(Music::of("music.creative", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                underwater: Some(Music::of("music.under_water", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
             },
             music_volume: None,
         },
@@ -328,7 +328,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "old_growth_birch_forest",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.forest", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.forest", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -339,7 +339,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "old_growth_pine_taiga",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.old_growth_taiga", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.old_growth_taiga", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -350,7 +350,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "old_growth_spruce_taiga",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.old_growth_taiga", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.old_growth_taiga", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -372,9 +372,9 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "river",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.game", 12000, 24000, false)),
-                creative: Some(Music::of("music.creative", 12000, 24000, false)),
-                underwater: Some(Music::of("music.under_water", 12000, 24000, false)),
+                default: Some(Music::of("music.game", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                creative: Some(Music::of("music.creative", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                underwater: Some(Music::of("music.under_water", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
             },
             music_volume: None,
         },
@@ -383,7 +383,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "snowy_slopes",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.snowy_slopes", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.snowy_slopes", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -394,7 +394,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "soul_sand_valley",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.nether.soul_sand_valley", 12000, 24000, false)),
+                default: Some(Music::of("music.nether.soul_sand_valley", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -405,7 +405,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "sparse_jungle",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.sparse_jungle", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.sparse_jungle", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -416,7 +416,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "stony_peaks",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.stony_peaks", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.stony_peaks", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -427,7 +427,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "sulfur_caves",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.sulfur_caves", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.sulfur_caves", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -438,7 +438,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "swamp",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.swamp", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.swamp", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -449,9 +449,9 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "warm_ocean",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.game", 12000, 24000, false)),
-                creative: Some(Music::of("music.creative", 12000, 24000, false)),
-                underwater: Some(Music::of("music.under_water", 12000, 24000, false)),
+                default: Some(Music::of("music.game", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                creative: Some(Music::of("music.creative", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
+                underwater: Some(Music::of("music.under_water", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
             },
             music_volume: None,
         },
@@ -460,7 +460,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "warped_forest",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.nether.warped_forest", 12000, 24000, false)),
+                default: Some(Music::of("music.nether.warped_forest", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
@@ -471,7 +471,7 @@ pub static BIOME_MUSIC: &[(&str, BiomeMusic)] = &[
         "wooded_badlands",
         BiomeMusic {
             music: BackgroundMusic {
-                default: Some(Music::of("music.overworld.badlands", 12000, 24000, false)),
+                default: Some(Music::of("music.overworld.badlands", MusicDelay::from_ticks(12000), MusicDelay::from_ticks(24000), false)),
                 creative: None,
                 underwater: None,
             },
