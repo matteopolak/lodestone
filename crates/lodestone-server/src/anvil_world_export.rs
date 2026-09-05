@@ -1,9 +1,8 @@
-//! Deterministic, authorization-gated export of selected native terrain chunks.
+//! Deterministic, authorization-gated export of complete native terrain chunks.
 //!
-//! The native store has no whole-world enumeration surface. This coordinator
-//! therefore requires the caller to name every selected chunk and all output
-//! parameters explicitly. It prepares the complete selected batch before it
-//! creates a staging directory, then publishes that directory with one rename.
+//! An explicit caller selection and an all-native point-in-time snapshot both
+//! prepare the complete source batch before this module creates a staging
+//! directory. Publication is one directory rename.
 
 use std::{
     collections::BTreeMap,
@@ -83,6 +82,27 @@ impl WorldExportInput {
     #[must_use]
     pub fn chunks(&self) -> &[ChunkCoordinate] {
         &self.chunks
+    }
+}
+
+/// One complete all-native terrain selection captured for reviewed export.
+///
+/// The snapshot owns decoded records rather than just their keys. A later
+/// native write therefore cannot replace a reviewed column between preflight
+/// and [`export_native_world_snapshot`]. It covers every committed native
+/// terrain record at capture time; a caller needing a narrower export should
+/// continue to use [`WorldExportInput`] with [`export_world_directory`].
+#[derive(Debug)]
+pub struct NativeWorldExportSnapshot {
+    input: WorldExportInput,
+    selected: Vec<(ChunkCoordinate, NativeChunkRecord)>,
+}
+
+impl NativeWorldExportSnapshot {
+    /// The canonical coordinates captured in this point-in-time selection.
+    #[must_use]
+    pub fn chunks(&self) -> &[ChunkCoordinate] {
+        self.input.chunks()
     }
 }
 
@@ -180,9 +200,8 @@ pub struct WorldExportResult {
 /// A failure while selecting, converting, staging, or publishing terrain.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The native store cannot infer a safe world scope, so an empty selection
-    /// is not a synonym for "all chunks".
-    #[error("Anvil world export requires at least one explicit chunk coordinate")]
+    /// Native terrain export refuses an empty selected or captured source.
+    #[error("Anvil world export requires at least one native terrain record")]
     EmptySelection,
     /// The native record decoder requires a positive, section-aligned extent.
     #[error("native chunk extent min_y={min_y}, height={height} is invalid")]
@@ -269,6 +288,51 @@ pub fn preflight_world_export(
     Ok(report_for(&load_selected(storage, input)?))
 }
 
+/// Captures every complete committed native terrain record for a reviewed export.
+///
+/// The storage boundary holds its native lock from recovered-index discovery
+/// through every typed decode. This function then owns those records, so a
+/// later preflight and export operate on precisely the same terrain values.
+/// Empty native storage is rejected rather than producing an empty Anvil world.
+pub fn snapshot_native_world_export(
+    storage: &WorldStorage,
+    min_y: i32,
+    height: i32,
+    game_time: u64,
+    compression: CompressionScheme,
+    timestamp: u32,
+) -> Result<NativeWorldExportSnapshot, Error> {
+    let selected = storage
+        .native_chunk_records(min_y, height)
+        .map_err(Error::Storage)?
+        .into_iter()
+        .map(|snapshot| {
+            (
+                ChunkCoordinate {
+                    x: snapshot.coordinate.column_x,
+                    z: snapshot.coordinate.column_z,
+                },
+                snapshot.record,
+            )
+        })
+        .collect::<Vec<_>>();
+    let input = WorldExportInput::new(
+        selected.iter().map(|(coordinate, _)| *coordinate).collect(),
+        min_y,
+        height,
+        game_time,
+        compression,
+        timestamp,
+    )?;
+    Ok(NativeWorldExportSnapshot { input, selected })
+}
+
+/// Preflights an all-native point-in-time terrain snapshot without filesystem mutation.
+#[must_use]
+pub fn preflight_native_world_export(snapshot: &NativeWorldExportSnapshot) -> WorldExportReport {
+    report_for(&snapshot.selected)
+}
+
 /// Exports an explicit native terrain selection into a new Anvil world directory.
 ///
 /// The output directory must not exist. The complete native batch is loaded,
@@ -283,6 +347,35 @@ pub fn export_world_directory(
     destination: impl AsRef<Path>,
     authorization: Option<WorldExportAuthorization>,
 ) -> Result<WorldExportResult, Error> {
+    let selected = load_selected(storage, input)?;
+    export_selected(&selected, input, destination.as_ref(), authorization)
+}
+
+/// Publishes the exact all-native terrain values previously captured in `snapshot`.
+///
+/// Unlike [`export_world_directory`], this function never reads the native
+/// store. The report used to authorize it and the converted terrain both come
+/// from `snapshot`, making a reviewed point-in-time export independent of
+/// subsequent incremental native writes.
+pub fn export_native_world_snapshot(
+    snapshot: &NativeWorldExportSnapshot,
+    destination: impl AsRef<Path>,
+    authorization: Option<WorldExportAuthorization>,
+) -> Result<WorldExportResult, Error> {
+    export_selected(
+        &snapshot.selected,
+        &snapshot.input,
+        destination.as_ref(),
+        authorization,
+    )
+}
+
+fn export_selected(
+    selected: &[(ChunkCoordinate, NativeChunkRecord)],
+    input: &WorldExportInput,
+    destination: &Path,
+    authorization: Option<WorldExportAuthorization>,
+) -> Result<WorldExportResult, Error> {
     let Some(authorization) = authorization else {
         return Err(Error::MissingAuthorization);
     };
@@ -290,8 +383,7 @@ pub fn export_world_directory(
         return Err(Error::AuthorizationDenied { authorization });
     }
 
-    let selected = load_selected(storage, input)?;
-    let report = report_for(&selected);
+    let report = report_for(selected);
     let required = report.decide(WorldExportLossDecision::ProceedAndDiscardUnsupported);
     if authorization != required {
         return Err(Error::AuthorizationMismatch {
@@ -300,9 +392,9 @@ pub fn export_world_directory(
         });
     }
 
-    let regions = convert_selected(&selected, input)?;
+    let regions = convert_selected(selected, input)?;
     let regions_published = regions.len();
-    publish_regions(destination.as_ref(), &regions, input.compression, input.timestamp)?;
+    publish_regions(destination, &regions, input.compression, input.timestamp)?;
     Ok(WorldExportResult {
         report,
         chunks_exported: selected.len(),
