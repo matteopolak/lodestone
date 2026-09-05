@@ -811,6 +811,7 @@ async fn travel_through_portal<T, P, S>(
     state: &mut State,
     view: &mut ViewTracker,
     join_stream: &mut crate::join_scheduler::JoinChunkStream<S>,
+    teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
     entry: BlockPos,
     player_pos: (f64, f64, f64),
     game_mode: GameMode,
@@ -919,7 +920,12 @@ where
     // Built *before* anything is sent, so a protocol that cannot encode a dimension
     // change costs the client nothing at all — rather than emptying its chunk store
     // and then discovering there is no way to tell it where it now is.
-    let change = proto.encode_dimension_change(to.key(), arrival, game_mode);
+    let change = proto.encode_dimension_change_with_teleport_id(
+        issue_teleport_id(teleport_acknowledgements),
+        to.key(),
+        arrival,
+        game_mode,
+    );
     if change.is_empty() {
         return Ok(None);
     }
@@ -998,6 +1004,7 @@ async fn travel_through_end_portal<T, P, S>(
     state: &mut State,
     view: &mut ViewTracker,
     join_stream: &mut crate::join_scheduler::JoinChunkStream<S>,
+    teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
     game_mode: GameMode,
     mobs: &MobHandle,
 ) -> Result<Option<PortalTrip>, ServerError>
@@ -1042,7 +1049,12 @@ where
         }
     }
 
-    let change = proto.encode_dimension_change(to.key(), arrival, game_mode);
+    let change = proto.encode_dimension_change_with_teleport_id(
+        issue_teleport_id(teleport_acknowledgements),
+        to.key(),
+        arrival,
+        game_mode,
+    );
     if change.is_empty() {
         return Ok(None);
     }
@@ -3437,7 +3449,13 @@ where
                     .unwrap_or(game_mode);
 
                 state = State::Play;
-                for directive in proto.begin_play_at(view_radius, join_pos, game_mode) {
+                let initial_teleport_id = proto.uses_teleport_acknowledgements().then_some(0);
+                for directive in proto.begin_play_at_with_teleport_id(
+                    view_radius,
+                    join_pos,
+                    game_mode,
+                    initial_teleport_id.unwrap_or(0),
+                ) {
                     apply(conn, &mut state, directive).await?;
                 }
                 // Vanilla's own "place new player" step sends the abilities
@@ -3791,7 +3809,11 @@ where
                 let commands = CommandSession {
                     builtins,
                     dispatch: commands.clone(),
-                    caller: CommandCaller::new(player_uuid, username.clone()),
+                    caller: CommandCaller::with_permission_level(
+                        player_uuid,
+                        username.clone(),
+                        permission_level,
+                    ),
                     permission_level,
                 };
                 // The server-authoritative advancement/statistics
@@ -3862,6 +3884,7 @@ where
                     entities,
                     view_radius,
                     state,
+                    initial_teleport_id,
                     streamer,
                     player_list,
                     player_ticket,
@@ -3925,6 +3948,7 @@ where
             | ServerBound::RecipeBookSettingsChanged { .. }
             | ServerBound::ResourcePackResponse { .. }
             | ServerBound::PlayerLoaded
+            | ServerBound::TeleportationAccepted { .. }
             | ServerBound::PlayerAbilitiesChanged { .. }
             | ServerBound::BlockEntityTagQuery { .. }
             | ServerBound::EntityTagQuery { .. }
@@ -5650,6 +5674,7 @@ async fn apply_own_effect<T, P>(
     // position rather than a stale pre-teleport one.
     player_pos: &mut Option<(f64, f64, f64)>,
     player_rot: &mut Option<Rotation>,
+    teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -5900,7 +5925,13 @@ where
             let pitch = pitch.unwrap_or(current.pitch);
             *player_pos = Some((x, y, z));
             *player_rot = Some(Rotation { yaw, pitch });
-            apply(conn, state, proto.encode_teleport(x, y, z, yaw, pitch)).await?;
+            let teleport_id = issue_teleport_id(teleport_acknowledgements);
+            apply(
+                conn,
+                state,
+                proto.encode_teleport_with_id(teleport_id, x, y, z, yaw, pitch),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -7629,6 +7660,7 @@ async fn apply_client_command<T, P, S>(
     // The fall accumulator, reset whenever respawn changes the player's
     // position.
     fall: &mut FallTracker,
+    teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
     // The world spawn resolved during the join sequence. It is the fallback
     // when no usable per-player bed position exists.
     //
@@ -7672,7 +7704,8 @@ where
                 .unwrap_or(world_spawn);
             // Send the respawn position before health and air so the client
             // refreshes the HUD for the updated player state.
-            for directive in proto.encode_respawn(target) {
+            let teleport_id = issue_teleport_id(teleport_acknowledgements);
+            for directive in proto.encode_respawn_with_teleport_id(teleport_id, target) {
                 apply(conn, state, directive).await?;
             }
             apply(
@@ -10153,6 +10186,48 @@ where
 /// going through a slash command.
 const COMMANDS_GAMEMASTER_LEVEL: u8 = 2;
 
+/// The one outstanding player-position correction for an acknowledgement-aware
+/// connection. A newer correction supersedes an older one, so an overdue reply
+/// cannot reopen movement after the server has already moved the player again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TeleportAcknowledgements {
+    next_id: i32,
+    pending_id: Option<i32>,
+}
+
+impl TeleportAcknowledgements {
+    fn after_initial(initial_id: i32) -> Self {
+        Self {
+            next_id: initial_id.wrapping_add(1),
+            pending_id: Some(initial_id),
+        }
+    }
+
+    fn issue(&mut self) -> i32 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.pending_id = Some(id);
+        id
+    }
+
+    fn accepts(&mut self, id: i32) -> bool {
+        if self.pending_id == Some(id) {
+            self.pending_id = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_pending(&self) -> bool {
+        self.pending_id.is_some()
+    }
+}
+
+fn issue_teleport_id(teleports: &mut Option<TeleportAcknowledgements>) -> i32 {
+    teleports.as_mut().map_or(0, TeleportAcknowledgements::issue)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_play_packet<T, P, S>(
     conn: &mut Connection<T>,
@@ -10169,6 +10244,9 @@ async fn dispatch_play_packet<T, P, S>(
     player_ticket_guard: &PlayerTicketGuard,
     pending_keep_alive: &mut Option<i64>,
     pending_break: &mut Option<PendingBreak>,
+    // The latest server-issued position correction. A matching
+    // `TeleportationAccepted` clears it; movement stays inert while it remains.
+    teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
     player_pos: &mut Option<(f64, f64, f64)>,
     // Mirrors `player_pos` exactly — updated here, read back by
     // the caller, republished to the `PlayerRegistry` so *other* connections
@@ -10351,7 +10429,28 @@ where
     P: ServerProtocol,
     S: ChunkSource + 'static,
 {
-    match proto.decode(*state, packet_id, payload) {
+    let packet = proto.decode(*state, packet_id, payload);
+    if let ServerBound::TeleportationAccepted { id } = packet {
+        if let Some(teleports) = teleport_acknowledgements {
+            teleports.accepts(id);
+        }
+        return Ok(());
+    }
+    if teleport_acknowledgements
+        .as_ref()
+        .is_some_and(TeleportAcknowledgements::is_pending)
+        && matches!(
+            &packet,
+            ServerBound::PlayerMoved { .. }
+                | ServerBound::PlayerRotated { .. }
+                | ServerBound::PlayerStatusOnly { .. }
+                | ServerBound::VehicleMoved { .. }
+        )
+    {
+        return Ok(());
+    }
+
+    match packet {
         ServerBound::KeepAlive { id } => {
             if *pending_keep_alive == Some(id) {
                 *pending_keep_alive = None;
@@ -11629,7 +11728,8 @@ where
                         apply(
                             conn,
                             state,
-                            proto.encode_teleport(
+                            proto.encode_teleport_with_id(
+                                issue_teleport_id(teleport_acknowledgements),
                                 position.x,
                                 position.y,
                                 position.z,
@@ -11656,6 +11756,7 @@ where
                 state,
                 vitals,
                 fall,
+                teleport_acknowledgements,
                 world_spawn,
                 *respawn,
                 source.get(),
@@ -11858,6 +11959,7 @@ where
                                     username,
                                     player_pos,
                                     player_rot,
+                                    teleport_acknowledgements,
                                 )
                                 .await?;
                             }
@@ -11913,7 +12015,8 @@ where
                 let current = player_rot.unwrap_or(Rotation { yaw: 0.0, pitch: 0.0 });
                 *player_pos = Some((target.position.x, target.position.y, target.position.z));
                 *player_rot = Some(current);
-                let directive = proto.encode_teleport(
+                let directive = proto.encode_teleport_with_id(
+                    issue_teleport_id(teleport_acknowledgements),
                     target.position.x,
                     target.position.y,
                     target.position.z,
@@ -12136,6 +12239,7 @@ where
         | ServerBound::LoginAcknowledged
         | ServerBound::ConfigurationFinished
         | ServerBound::StatusRequest
+        | ServerBound::TeleportationAccepted { .. }
         | ServerBound::Ignored => {}
     }
     Ok(())
@@ -12318,6 +12422,7 @@ async fn serve_play<T, P, S, E>(
     entities: &E,
     view_radius: i32,
     mut state: State,
+    initial_teleport_id: Option<i32>,
     mut streamer: EntityStreamer,
     mut player_list: PlayerListStreamer,
     // Keep the ticket guard owned by the connection task. Its `Drop` performs
@@ -12417,6 +12522,7 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
+    let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_loaded = false;
     let mut abilities = Abilities::for_mode(game_mode);
@@ -12742,6 +12848,7 @@ where
                     &player_ticket_guard,
                     &mut pending_keep_alive,
                     &mut pending_break,
+                    &mut teleport_acknowledgements,
                     &mut player_pos,
                     &mut player_rot,
                     &mut fall,
@@ -14057,6 +14164,7 @@ where
                                     &mut state,
                                     &mut view,
                                     &mut join_stream,
+                                    &mut teleport_acknowledgements,
                                     game_mode,
                                     mobs,
                                 )
@@ -14077,6 +14185,7 @@ where
                                 &mut state,
                                 &mut view,
                                 &mut join_stream,
+                                &mut teleport_acknowledgements,
                                 entry,
                                 (x, y, z),
                                 game_mode,
@@ -14177,7 +14286,14 @@ where
                             apply(
                                 conn,
                                 &mut state,
-                                proto.encode_teleport(nx, ny, nz, current.yaw, current.pitch),
+                                proto.encode_teleport_with_id(
+                                    issue_teleport_id(&mut teleport_acknowledgements),
+                                    nx,
+                                    ny,
+                                    nz,
+                                    current.yaw,
+                                    current.pitch,
+                                ),
                             )
                             .await?;
                         }
@@ -14324,6 +14440,7 @@ where
                             &username,
                             &mut player_pos,
                             &mut player_rot,
+                            &mut teleport_acknowledgements,
                         )
                         .await?;
                     }
@@ -14878,6 +14995,7 @@ async fn serve_play<T, P, S, E>(
     entities: &E,
     view_radius: i32,
     mut state: State,
+    initial_teleport_id: Option<i32>,
     mut streamer: EntityStreamer,
     mut player_list: PlayerListStreamer,
     // Keep the ticket guard alive for the entire connection. Player streaming
@@ -14952,6 +15070,7 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
+    let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut sprinting = false;
     let mut bow_draw: Option<BowDraw> = None;
     // `wasm_vitals_tick` applies item-use completion rules from its browser
@@ -15114,6 +15233,7 @@ where
             &player_ticket_guard,
             &mut pending_keep_alive,
             &mut pending_break,
+            &mut teleport_acknowledgements,
             &mut player_pos,
             &mut player_rot,
             &mut fall,
@@ -18812,6 +18932,7 @@ mod tests {
         // air, matching `PlayerVitals::respawn`'s own before-state.
         vitals.kill();
         let mut fall = FallTracker::default();
+        let mut teleport_acknowledgements = None;
         let world_spawn = Vec3::new(11.0, 71.0, -4.0);
         let source = DimensionOnly(if away_from_home {
             crate::dimension::Dimension::Nether
@@ -18830,6 +18951,7 @@ mod tests {
             &mut state,
             &mut vitals,
             &mut fall,
+            &mut teleport_acknowledgements,
             world_spawn,
             None,
             &source,
@@ -19193,6 +19315,31 @@ mod tests {
         assert!(
             !player_overlaps_piston_sweep(10.5, 0.0, 0.5, source, dest),
             "control: a player well clear of both cells must not overlap"
+        );
+    }
+
+    #[test]
+    fn only_the_latest_teleport_acknowledgement_releases_movement() {
+        let mut acknowledgements = TeleportAcknowledgements::after_initial(41);
+        let replacement = acknowledgements.issue();
+
+        assert_eq!(replacement, 42);
+        assert!(
+            !acknowledgements.accepts(41),
+            "a late acknowledgement for the superseded join correction must stay pending"
+        );
+        assert!(
+            acknowledgements.is_pending(),
+            "a stale acknowledgement must not clear the newer correction"
+        );
+        assert!(acknowledgements.accepts(42));
+        assert!(
+            !acknowledgements.is_pending(),
+            "the current acknowledgement must release the movement gate"
+        );
+        assert!(
+            !acknowledgements.accepts(42),
+            "a duplicate acknowledgement must not recreate an accepted state"
         );
     }
 }

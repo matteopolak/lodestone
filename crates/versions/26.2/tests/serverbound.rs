@@ -5,6 +5,8 @@
 
 #[path = "serverbound/serverbound_actions.rs"]
 mod serverbound_actions;
+#[path = "serverbound/serverbound_accept_teleportation.rs"]
+mod serverbound_accept_teleportation;
 #[path = "serverbound/serverbound_block_entity_query.rs"]
 mod serverbound_block_entity_query;
 #[path = "serverbound/serverbound_backlog.rs"]

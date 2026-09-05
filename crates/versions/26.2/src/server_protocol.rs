@@ -2867,11 +2867,13 @@ struct V770LightProps;
 
 impl LightProperties for V770LightProps {
     fn opacity(&self, state: u32) -> u8 {
-        lodestone_data::light_props::dampening(state)
+        lodestone_data::block_states::StateId::new(state)
+            .map_or(0, lodestone_data::light_props::dampening)
     }
 
     fn emission(&self, state: u32) -> u8 {
-        lodestone_data::light_props::emission(state)
+        lodestone_data::block_states::StateId::new(state)
+            .map_or(0, lodestone_data::light_props::emission)
     }
 }
 
@@ -3717,8 +3719,10 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::ACCEPT_TELEPORTATION => {
-                let _ = decode_full::<AcceptTeleportation>(payload);
-                ServerBound::Ignored
+                match decode_full::<AcceptTeleportation>(payload) {
+                    Some(teleport) => ServerBound::TeleportationAccepted { id: teleport.id },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::CLIENT_TICK_END => {
                 let _ = decode_full::<ClientTickEnd>(payload);
@@ -4667,6 +4671,20 @@ impl ServerProtocol for V770ServerProtocol {
     }
 
     fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
+        self.begin_play_at_with_teleport_id(view_radius, spawn, mode, 0)
+    }
+
+    fn uses_teleport_acknowledgements(&self) -> bool {
+        true
+    }
+
+    fn begin_play_at_with_teleport_id(
+        &self,
+        view_radius: i32,
+        spawn: Vec3,
+        mode: GameMode,
+        teleport_id: i32,
+    ) -> Vec<ServerDirective> {
         let login = GameLogin {
             entity_id: LOCAL_PLAYER_ENTITY_ID,
             hardcore: false,
@@ -4706,7 +4724,7 @@ impl ServerProtocol for V770ServerProtocol {
         };
 
         let teleport_payload = encode_player_position_teleport(
-            0,
+            teleport_id,
             spawn.x,
             spawn.y,
             spawn.z,
@@ -5955,6 +5973,10 @@ impl ServerProtocol for V770ServerProtocol {
     /// same `game_type` survival, same `sea_level`. `previous_game_type` is `-1`
     /// ("there was none"), which is what this crate's decoder maps to `None`.
     fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
+        self.encode_respawn_with_teleport_id(0, spawn)
+    }
+
+    fn encode_respawn_with_teleport_id(&self, teleport_id: i32, spawn: Vec3) -> Vec<ServerDirective> {
         let respawn = Respawn {
             dimension_type: 0,
             dimension: "minecraft:overworld".to_string(),
@@ -5976,7 +5998,14 @@ impl ServerProtocol for V770ServerProtocol {
             // paths agree by construction rather than by coincidence.
             ServerDirective::Send {
                 packet_id: play::clientbound::PLAYER_POSITION,
-                payload: encode_player_position_teleport(0, spawn.x, spawn.y, spawn.z, 0.0, 0.0),
+                payload: encode_player_position_teleport(
+                    teleport_id,
+                    spawn.x,
+                    spawn.y,
+                    spawn.z,
+                    0.0,
+                    0.0,
+                ),
             },
             // Vanilla's vanilla's own server-side player-list class's own respawn also re-sends the player's health,
             // and the client's `Vitals` component is fed by `set_health` alone —
@@ -5991,14 +6020,27 @@ impl ServerProtocol for V770ServerProtocol {
     /// for why this method exists at all. The wire body is the exact same
     /// `encode_player_position_teleport` free function the join sequence and
     /// [`encode_respawn`](Self::encode_respawn) already use, so all three stay
-    /// byte-identical for the same inputs by construction, not by convention —
-    /// teleport id `0`, matching every other caller here: this crate tracks no
-    /// `ACCEPT_TELEPORTATION` id and never has (see that decode arm's own
-    /// comment), so a distinct id would buy nothing.
+    /// byte-identical for the same inputs by construction, not by convention.
+    /// The server calls [`encode_teleport_with_id`](Self::encode_teleport_with_id)
+    /// for a live connection so its correction id and the following
+    /// `ACCEPT_TELEPORTATION` reply are one state transition rather than two
+    /// unrelated packets.
     fn encode_teleport(&self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> ServerDirective {
+        self.encode_teleport_with_id(0, x, y, z, yaw, pitch)
+    }
+
+    fn encode_teleport_with_id(
+        &self,
+        teleport_id: i32,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+    ) -> ServerDirective {
         ServerDirective::Send {
             packet_id: play::clientbound::PLAYER_POSITION,
-            payload: encode_player_position_teleport(0, x, y, z, yaw, pitch),
+            payload: encode_player_position_teleport(teleport_id, x, y, z, yaw, pitch),
         }
     }
 
@@ -6071,6 +6113,16 @@ impl ServerProtocol for V770ServerProtocol {
         spawn: Vec3,
         mode: GameMode,
     ) -> Vec<ServerDirective> {
+        self.encode_dimension_change_with_teleport_id(0, dimension, spawn, mode)
+    }
+
+    fn encode_dimension_change_with_teleport_id(
+        &self,
+        teleport_id: i32,
+        dimension: &str,
+        spawn: Vec3,
+        mode: GameMode,
+    ) -> Vec<ServerDirective> {
         let Some(holder_id) = dimension_type_holder_id(dimension) else {
             return Vec::new();
         };
@@ -6092,7 +6144,14 @@ impl ServerProtocol for V770ServerProtocol {
             send(play::clientbound::RESPAWN, &respawn),
             ServerDirective::Send {
                 packet_id: play::clientbound::PLAYER_POSITION,
-                payload: encode_player_position_teleport(0, spawn.x, spawn.y, spawn.z, 0.0, 0.0),
+                payload: encode_player_position_teleport(
+                    teleport_id,
+                    spawn.x,
+                    spawn.y,
+                    spawn.z,
+                    0.0,
+                    0.0,
+                ),
             },
         ]
     }
