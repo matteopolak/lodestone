@@ -110,3 +110,56 @@ pub fn block_entity_type(id: StateId) -> Option<BlockEntityType> {
 pub fn block_entity_type_name(id: BlockEntityType) -> &'static str {
     table::TYPE_NAMES[id.raw() as usize]
 }
+
+/// Resolves a canonical `minecraft:block_entity_type` registry key to its
+/// validated protocol-776 id.
+///
+/// This is the only reverse boundary for built-in block-entity records. A
+/// custom key remains `None`: callers must keep such a key in the dynamic
+/// registry that supplied it instead of borrowing an unrelated built-in id.
+/// The fixed table has only 49 entries and block-entity records are sparse, so
+/// a linear scan avoids allocating a second copy of the names or a hash map.
+#[must_use]
+pub fn block_entity_type_id(name: &str) -> Option<BlockEntityType> {
+    table::TYPE_NAMES
+        .iter()
+        .position(|candidate| *candidate == name)
+        .and_then(|index| u32::try_from(index).ok())
+        .and_then(BlockEntityType::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reverse_lookup_round_trips_each_validated_type() {
+        for raw in 0..TYPE_COUNT {
+            let id = BlockEntityType::new(raw).expect("table id validates");
+            assert_eq!(block_entity_type_id(block_entity_type_name(id)), Some(id));
+        }
+    }
+
+    /// Literal controls from the pinned 26.2 registry order. These do not
+    /// derive their expected names from `TYPE_NAMES`, so an accidental
+    /// permutation cannot pass merely by making both lookup directions agree.
+    #[test]
+    fn reverse_lookup_keeps_known_registry_slots() {
+        assert_eq!(
+            block_entity_type_id("minecraft:furnace").map(BlockEntityType::raw),
+            Some(0)
+        );
+        assert_eq!(
+            block_entity_type_id("minecraft:chest").map(BlockEntityType::raw),
+            Some(1)
+        );
+        assert_eq!(
+            block_entity_type_id("minecraft:piston").map(BlockEntityType::raw),
+            Some(11)
+        );
+        assert_eq!(
+            block_entity_type_id("minecraft:not_a_real_block_entity"),
+            None
+        );
+    }
+}
