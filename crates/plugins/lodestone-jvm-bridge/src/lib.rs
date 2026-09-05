@@ -27,8 +27,8 @@
 //! - [`adapter`] (with `jvm`) — a dedicated worker that loads an explicit
 //!   adapter class, registers its native block query, and dispatches ticks.
 //! - [`native_surface`] (with `jvm`) — the generated and validated narrow
-//!   server-state declarations an operator-built isolated shim may request
-//!   before lifecycle entry loading.
+//!   server-state and value-only player declarations an operator-built isolated
+//!   shim may request before lifecycle entry loading.
 //! - [`paper`] (with `paper-preflight`) — validates an operator-supplied Paper
 //!   jar and discovers sorted plugin entry surfaces without extracting either
 //!   archive or starting a JVM.

@@ -631,6 +631,28 @@ mod tests {
     }
 
     #[test]
+    fn player_lifecycle_tracker_serializes_same_uuid_rename_before_rejoin() {
+        let old = PlayerIdentity::new([8; 16], "Alice");
+        let renamed = PlayerIdentity::new([8; 16], "AliceRenamed");
+        let mut tracker = PlayerLifecycleTracker::default();
+        tracker.observe([old.clone()]).expect("initial profile fits");
+        assert_eq!(tracker.pop(), Some(PlayerLifecycleEvent::Joined(old)));
+        tracker
+            .observe([renamed.clone()])
+            .expect("renamed profile fits");
+        assert_eq!(
+            tracker.pop(),
+            Some(PlayerLifecycleEvent::Disconnected(PlayerIdentity::new(
+                [8; 16],
+                "Alice",
+            ))),
+            "the old generation must be released before the replacement is joined",
+        );
+        assert_eq!(tracker.pop(), Some(PlayerLifecycleEvent::Joined(renamed)));
+        assert_eq!(tracker.pop(), None);
+    }
+
+    #[test]
     fn player_lifecycle_tracker_rejects_an_unbounded_pending_burst() {
         let players = (0..=MAX_PENDING_PLAYER_LIFECYCLE_EVENTS)
             .map(|index| PlayerIdentity::new([index as u8; 16], format!("p{index}")))

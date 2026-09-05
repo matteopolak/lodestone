@@ -436,6 +436,95 @@ fn active_player_handle_for(player: &PlayerIdentity) -> Option<ObjectRef> {
     })
 }
 
+/// Finds the one active player whose copied profile UUID matches a Java
+/// lookup. The map remains keyed by the complete value identity so a reconnect
+/// with a changed display name still gets a fresh generation; this reverse
+/// lookup deliberately refuses an impossible duplicate UUID instead of
+/// selecting whichever hash-map entry happens to be visited first.
+fn active_player_handle_for_uuid(uuid: [u8; 16]) -> Result<ObjectRef, AdapterError> {
+    ACTIVE_PLAYER_HANDLES.with(|slot| {
+        let active = slot.borrow();
+        let active = active.as_ref().ok_or_else(|| {
+            AdapterError::new("playerHandleForUuid requires the adapter worker thread")
+        })?;
+        let mut matches = active
+            .iter()
+            .filter(|(player, _)| player.uuid() == uuid)
+            .map(|(_, handle)| *handle);
+        let Some(handle) = matches.next() else {
+            return Err(AdapterError::new(format!(
+                "playerHandleForUuid: no active player with UUID {}",
+                canonical_uuid_string(uuid),
+            )));
+        };
+        if matches.next().is_some() {
+            return Err(AdapterError::new(format!(
+                "playerHandleForUuid: multiple active players with UUID {}",
+                canonical_uuid_string(uuid),
+            )));
+        }
+        Ok(handle)
+    })
+}
+
+fn parse_uuid_string(value: &str) -> Result<[u8; 16], AdapterError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36 || ![8, 13, 18, 23].into_iter().all(|index| bytes[index] == b'-') {
+        return Err(AdapterError::new(format!(
+            "playerHandleForUuid: invalid UUID {value:?} (expected 36-character form)",
+        )));
+    }
+    let mut uuid = [0; 16];
+    let mut output = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if matches!(index, 8 | 13 | 18 | 23) {
+            index += 1;
+            continue;
+        }
+        let high = hex_digit(bytes[index]).ok_or_else(|| {
+            AdapterError::new(format!(
+                "playerHandleForUuid: invalid UUID {value:?} (non-hex digit)",
+            ))
+        })?;
+        let low = hex_digit(bytes[index + 1]).ok_or_else(|| {
+            AdapterError::new(format!(
+                "playerHandleForUuid: invalid UUID {value:?} (non-hex digit)",
+            ))
+        })?;
+        uuid[output] = (high << 4) | low;
+        output += 1;
+        index += 2;
+    }
+    Ok(uuid)
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn canonical_uuid_string(uuid: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(36);
+    for (index, byte) in uuid.into_iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            text.push('-');
+        }
+        text.push(HEX[usize::from(byte >> 4)] as char);
+        text.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    text
+}
+
+fn resolve_active_player_uuid(value: &str) -> Result<ObjectRef, AdapterError> {
+    active_player_handle_for_uuid(parse_uuid_string(value)?)
+}
+
 /// Returns the count of players whose lifecycle has reached this worker.
 ///
 /// The dedicated host is the sole producer: it copies its connected roster,
@@ -556,17 +645,9 @@ fn resolve_resident_player_handle_name(bits: i64) -> Result<String, AdapterError
 /// The UUID never crosses the bridge as a server object: it is the sixteen
 /// profile bytes copied by the dedicated host when it observes its roster.
 fn resolve_resident_player_handle_uuid(bits: i64) -> Result<String, AdapterError> {
-    let uuid = resolve_resident_player_handle(bits, "playerHandleUuid")?.uuid();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut text = String::with_capacity(36);
-    for (index, byte) in uuid.into_iter().enumerate() {
-        if matches!(index, 4 | 6 | 8 | 10) {
-            text.push('-');
-        }
-        text.push(HEX[usize::from(byte >> 4)] as char);
-        text.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    Ok(text)
+    Ok(canonical_uuid_string(
+        resolve_resident_player_handle(bits, "playerHandleUuid")?.uuid(),
+    ))
 }
 
 /// Reports whether a live player handle's copied profile is in the worker's
@@ -1536,6 +1617,28 @@ pub(crate) fn register_player_handle_uuid_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_player_handle_for_uuid_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts one Java string and returns
+    // an opaque jlong. Resolution reads only the worker-owned copied roster;
+    // it never publishes a player pointer, connection, or ECS guard.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_player_handle_for_uuid as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_player_handle_is_active_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -1753,6 +1856,28 @@ extern "system" fn native_player_handle_uuid<'local>(
         env.new_string(uuid)
             .map(|value| value.into_raw())
             .map_err(|error| AdapterError::new(format!("playerHandleUuid: {error}")))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_for_uuid<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    uuid: JString<'local>,
+) -> jlong {
+    env.with_env(|env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        if uuid.is_null() {
+            return Err(AdapterError::new(
+                "playerHandleForUuid requires a UUID string",
+            ));
+        }
+        let uuid = uuid
+            .try_to_string(env)
+            .map_err(|error| AdapterError::new(format!("playerHandleForUuid: {error}")))?;
+        resolve_active_player_uuid(&uuid)
+            .map(ObjectRef::to_bits)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -2280,6 +2405,18 @@ mod tests {
         ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
         let first = active_player_handle(&identity, &player).expect("active player handle");
         assert_eq!(active_player_handle_for(&player), Some(first));
+        assert_eq!(
+            resolve_active_player_uuid("05050505-0505-0505-0505-050505050505"),
+            Ok(first),
+            "the worker reverse resolver must return the generation-matched handle",
+        );
+        assert_eq!(
+            resolve_active_player_uuid("05050505-0505-0505-0505-05050505050"),
+            Err(AdapterError::new(
+                "playerHandleForUuid: invalid UUID \"05050505-0505-0505-0505-05050505050\" (expected 36-character form)",
+            )),
+            "truncated UUIDs must fail before map lookup",
+        );
         assert_eq!(active_player_count(), Ok(1));
         assert_eq!(
             resolve_resident_player_handle_is_active(first.to_bits()),
@@ -2307,11 +2444,42 @@ mod tests {
                 "playerHandleName: the referenced object no longer exists",
             )),
         );
+        assert_eq!(
+            resolve_active_player_uuid("05050505-0505-0505-0505-050505050505"),
+            Err(AdapterError::new(
+                "playerHandleForUuid: no active player with UUID 05050505-0505-0505-0505-050505050505",
+            )),
+            "disconnect removes the UUID reverse mapping rather than leaving a stale handle",
+        );
         let replacement = active_player_handle(&identity, &player).expect("reusable slot");
         assert_ne!(replacement, first);
         assert_eq!(active_player_count(), Ok(1));
         assert_eq!(release_active_player_handle(&identity, &player), Some(replacement));
         assert_eq!(active_player_count(), Ok(0));
+        RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn player_uuid_reverse_resolver_rejects_duplicate_active_profiles() {
+        let identity = lifecycle_identity("adapter", "adapter", "fixture.Adapter");
+        let first_player = PlayerIdentity::new([7; 16], "Alice");
+        let second_player = PlayerIdentity::new([7; 16], "AliceRenamed");
+        RESIDENT_OBJECT_HANDLES.with(|slot| {
+            *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(2));
+        });
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
+        active_player_handle(&identity, &first_player).expect("first profile handle");
+        active_player_handle(&identity, &second_player).expect("second profile handle");
+        assert_eq!(
+            resolve_active_player_uuid("07070707-0707-0707-0707-070707070707"),
+            Err(AdapterError::new(
+                "playerHandleForUuid: multiple active players with UUID 07070707-0707-0707-0707-070707070707",
+            )),
+            "a duplicate UUID must fail rather than depend on map iteration order",
+        );
+        assert!(release_active_player_handle(&identity, &first_player).is_some());
+        assert!(release_active_player_handle(&identity, &second_player).is_some());
         RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
         ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
     }
