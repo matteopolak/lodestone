@@ -2,6 +2,8 @@
 //! and the orb query/pickup API. Moved out of `mobs/mod.rs` verbatim as part
 //! of the `mobs.rs` file split (see `docs/plans/crate-and-file-splits.md`).
 
+use std::collections::HashSet;
+
 use lodestone_entity::item_entity::ItemMotion;
 use lodestone_physics::{CollisionView, EntityDimensions};
 use lodestone_model::Vec3;
@@ -76,6 +78,57 @@ const ORB_SPAWN_MERGE_REACH: f64 = 0.5 + 0.25;
 /// [`crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED`] and its siblings: an arbitrary
 /// fixed constant, so a replay of the same awards produces the same merges.
 pub(super) const ORB_BEHAVIOR_SEED: u64 = 0x584f_5242_5f53_4545;
+
+/// The chunk responsible for an experience orb at tick start.
+///
+/// This is a deterministic completion boundary, not a worker assignment. The
+/// central application step remains the only writer to the live orb map, where
+/// expiry and the later cross-chunk merge scan stay ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum OrbTickOwner {
+    /// The chunk containing the orb at the start of this tick.
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl OrbTickOwner {
+    fn for_position(position: Vec3) -> Self {
+        Self::Chunk {
+            cx: (position.x.floor() as i32).div_euclid(16),
+            cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+}
+
+/// One completed chunk-owner pass for experience-orb motion.
+///
+/// `expected_batch_count` and every effect's serial slot come from the
+/// tick-start plan. The central consumer uses them to reject incomplete,
+/// duplicate, or mixed-plan completions before it changes the live orb map.
+#[derive(Debug, Clone)]
+pub(crate) struct OrbTickOwnerBatch {
+    owner: OrbTickOwner,
+    expected_batch_count: usize,
+    effects: Vec<OrbTickEffect>,
+}
+
+impl OrbTickOwnerBatch {
+    #[cfg(test)]
+    fn owner(&self) -> OrbTickOwner {
+        self.owner
+    }
+}
+
+/// One orb's motion completion, retained until the central orb-map writer
+/// accepts every owner batch.
+#[derive(Debug, Clone)]
+struct OrbTickEffect {
+    owner: OrbTickOwner,
+    serial: usize,
+    id: i32,
+    /// `None` means this orb expired or crossed the void boundary during its
+    /// owner pass and the central writer must remove it.
+    orb: Option<OrbState>,
+}
 
 impl<'w> MobSim<'w> {
     // -----------------------------------------------------------------------
@@ -216,69 +269,91 @@ impl<'w> MobSim<'w> {
     // *parent* module) calls this every tick.
     pub(super) fn tick_orbs(&mut self, view: &dyn CollisionView) {
         let scanning = self.tick_count % ORB_MERGE_SCAN_PERIOD == 1;
-        // The follow target per orb, resolved under a shared borrow of `players`
-        // before the mutable pass — `feed_perception`'s two-pass shape.
-        let follow: Vec<(i32, Option<Vec3>)> = self
-            .orbs
-            .iter()
-            .map(|(&id, orb)| (id, self.nearest_follow_target(orb.motion.position)))
-            .collect();
-        let min_y = f64::from(self.world.min_y);
-        let mut expired: Vec<i32> = Vec::new();
-        for (id, target) in follow {
-            let Some(orb) = self.orbs.get_mut(&id) else {
-                continue;
-            };
-            let before = orb.motion.position;
-            orb.motion.velocity.y -= ORB_GRAVITY;
-            if let Some(target) = target {
-                // `followNearbyPlayer`'s pull: toward the player's *half eye height*,
-                // scaled by `(1 - dist/8)^2 * 0.1`. Squaring the falloff is what makes
-                // the pull negligible at the edge of the range and sharp up close; a
-                // linear falloff yanks orbs from 8 blocks away.
-                let delta = Vec3::new(
-                    target.x - orb.motion.position.x,
-                    target.y - orb.motion.position.y,
-                    target.z - orb.motion.position.z,
-                );
-                let dist = (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z).sqrt();
-                if dist > f64::EPSILON {
-                    let power = 1.0 - dist / ORB_MAX_FOLLOW_DIST;
-                    let pull = power * power * ORB_FOLLOW_PULL;
-                    orb.motion.velocity.x += delta.x / dist * pull;
-                    orb.motion.velocity.y += delta.y / dist * pull;
-                    orb.motion.velocity.z += delta.z / dist * pull;
-                }
-            }
-            let fall_speed = orb.motion.velocity.y;
-            orb.motion.position = Vec3::new(
-                before.x + orb.motion.velocity.x,
-                before.y + orb.motion.velocity.y,
-                before.z + orb.motion.velocity.z,
-            );
-            settle_entity(view, ORB_DIMENSIONS, &mut orb.motion, before);
-            let mut drag = ORB_AIR_DRAG;
-            if orb.motion.on_ground {
-                drag *= orb.motion.block_friction;
-            }
-            orb.motion.velocity.x *= drag;
-            orb.motion.velocity.y *= drag;
-            orb.motion.velocity.z *= drag;
-            if orb.motion.on_ground && fall_speed < -ORB_GRAVITY {
-                orb.motion.velocity.y = -fall_speed * ORB_LANDING_BOUNCE;
-            }
-            orb.age += 1;
-            if orb.age >= ORB_LIFETIME
-                || orb.motion.position.y < min_y - VOID_DESPAWN_DEPTH
-            {
-                expired.push(id);
-            }
-        }
-        for id in expired {
-            self.orbs.remove(&id);
-        }
+        let batches = self.tick_orb_owner_batches(view);
+        self.apply_orb_tick_owner_batches(batches);
         if scanning {
             self.scan_for_orb_merges();
+        }
+    }
+
+    /// Produces independent chunk-owner completions for orb motion and age.
+    ///
+    /// Each completion starts from a cloned tick-start orb and cannot mutate
+    /// the live map. The central application below restores the old entity-id
+    /// sequence before expiry or any later merge becomes visible.
+    pub(crate) fn tick_orb_owner_batches(
+        &self,
+        view: &dyn CollisionView,
+    ) -> Vec<OrbTickOwnerBatch> {
+        let mut ids: Vec<i32> = self.orbs.keys().copied().collect();
+        ids.sort_unstable();
+        let min_y = f64::from(self.world.min_y);
+        let mut batches = Vec::<OrbTickOwnerBatch>::new();
+
+        for (serial, id) in ids.into_iter().enumerate() {
+            let orb = self
+                .orbs
+                .get(&id)
+                .cloned()
+                .expect("a tick-start orb id must remain live while planning");
+            let owner = OrbTickOwner::for_position(orb.motion.position);
+            let target = self.nearest_follow_target(orb.motion.position);
+            let effect = OrbTickEffect {
+                owner,
+                serial,
+                id,
+                orb: ticked_orb(orb, target, view, min_y),
+            };
+            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
+                batch.effects.push(effect);
+            } else {
+                batches.push(OrbTickOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects: vec![effect],
+                });
+            }
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
+
+    /// Validates and centrally applies every completed orb-owner batch.
+    ///
+    /// This is the sole owner-batch path that writes the live orb map. The
+    /// merge scan remains after this method in [`Self::tick_orbs`], retaining
+    /// its current global id order when two completed owners are adjacent.
+    pub(crate) fn apply_orb_tick_owner_batches(&mut self, batches: Vec<OrbTickOwnerBatch>) {
+        if batches.is_empty() {
+            return;
+        }
+        let effects = merge_orb_tick_owner_batches(batches);
+        assert_eq!(
+            effects.len(),
+            self.orbs.len(),
+            "orb owner completion must retain every live tick-start entity"
+        );
+        let mut ids = HashSet::new();
+        for effect in effects {
+            assert!(
+                ids.insert(effect.id),
+                "orb owner completion may update one live entity only once"
+            );
+            assert!(
+                self.orbs.contains_key(&effect.id),
+                "orb owner completion may update only a live tick-start entity"
+            );
+            match effect.orb {
+                Some(orb) => {
+                    self.orbs.insert(effect.id, orb);
+                }
+                None => {
+                    self.orbs.remove(&effect.id);
+                }
+            }
         }
     }
 
@@ -427,6 +502,100 @@ impl<'w> MobSim<'w> {
     }
 }
 
+/// Simulates one cloned orb through its independent motion and lifetime pass.
+///
+/// The target was read before the owner completion began, so this function has
+/// no access to the live orb map and cannot observe another owner's completion.
+fn ticked_orb(
+    mut orb: OrbState,
+    target: Option<Vec3>,
+    view: &dyn CollisionView,
+    min_y: f64,
+) -> Option<OrbState> {
+    let before = orb.motion.position;
+    orb.motion.velocity.y -= ORB_GRAVITY;
+    if let Some(target) = target {
+        // The pull aims toward the player's half eye height and scales by
+        // `(1 - distance / 8)^2 * 0.1`, keeping it negligible at the edge of
+        // its range and sharp nearby.
+        let delta = Vec3::new(
+            target.x - orb.motion.position.x,
+            target.y - orb.motion.position.y,
+            target.z - orb.motion.position.z,
+        );
+        let dist = (delta.x * delta.x + delta.y * delta.y + delta.z * delta.z).sqrt();
+        if dist > f64::EPSILON {
+            let power = 1.0 - dist / ORB_MAX_FOLLOW_DIST;
+            let pull = power * power * ORB_FOLLOW_PULL;
+            orb.motion.velocity.x += delta.x / dist * pull;
+            orb.motion.velocity.y += delta.y / dist * pull;
+            orb.motion.velocity.z += delta.z / dist * pull;
+        }
+    }
+    let fall_speed = orb.motion.velocity.y;
+    orb.motion.position = Vec3::new(
+        before.x + orb.motion.velocity.x,
+        before.y + orb.motion.velocity.y,
+        before.z + orb.motion.velocity.z,
+    );
+    settle_entity(view, ORB_DIMENSIONS, &mut orb.motion, before);
+    let mut drag = ORB_AIR_DRAG;
+    if orb.motion.on_ground {
+        drag *= orb.motion.block_friction;
+    }
+    orb.motion.velocity.x *= drag;
+    orb.motion.velocity.y *= drag;
+    orb.motion.velocity.z *= drag;
+    if orb.motion.on_ground && fall_speed < -ORB_GRAVITY {
+        orb.motion.velocity.y = -fall_speed * ORB_LANDING_BOUNCE;
+    }
+    orb.age += 1;
+    (orb.age < ORB_LIFETIME && orb.motion.position.y >= min_y - VOID_DESPAWN_DEPTH)
+        .then_some(orb)
+}
+
+/// Restores the tick-start orb order after every owner reports completion.
+fn merge_orb_tick_owner_batches(
+    mut batches: Vec<OrbTickOwnerBatch>,
+) -> Vec<OrbTickEffect> {
+    let expected_batch_count = batches
+        .first()
+        .map(|batch| batch.expected_batch_count)
+        .expect("orb owner completion must contain every tick-start owner batch");
+    let mut owners = HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.expected_batch_count, expected_batch_count,
+            "orb owner completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "orb owner completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "an orb owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "orb owner completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "orb owner completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
+}
+
 #[cfg(test)]
 mod experience_orb_tests {
     use super::*;
@@ -448,6 +617,116 @@ mod experience_orb_tests {
     /// A point above the floor, well inside the column the world covers.
     fn above_floor() -> Vec3 {
         Vec3::new(8.0, 1.0, 8.0)
+    }
+
+    fn two_owner_orb_fixture<'w>(world: &'w ChunkWorld) -> (MobSim<'w>, [i32; 2]) {
+        let mut sim = MobSim::new(world);
+        let still = Vec3::new(0.0, 0.0, 0.0);
+        let negative = sim.spawn_orb(3, Vec3::new(-0.5, 3.0, 0.5), still);
+        let positive = sim.spawn_orb(7, Vec3::new(16.5, 3.0, 0.5), still);
+        (sim, [negative, positive])
+    }
+
+    /// The independent serial reference for one non-scanning orb pass. It
+    /// deliberately does not construct, reverse, or merge owner batches.
+    fn serial_orb_tick_reference(sim: &mut MobSim<'_>, view: &dyn CollisionView) {
+        let mut ids = sim.orb_ids();
+        ids.sort_unstable();
+        let min_y = f64::from(sim.world.min_y);
+        for id in ids {
+            let orb = sim.orbs.get(&id).cloned().expect("tick-start orb remains live");
+            let target = sim.nearest_follow_target(orb.motion.position);
+            match ticked_orb(orb, target, view, min_y) {
+                Some(orb) => {
+                    sim.orbs.insert(id, orb);
+                }
+                None => {
+                    sim.orbs.remove(&id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn orb_owner_batches_restore_serial_state_after_reversed_completion() {
+        let world = flat_world();
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let view = super::super::ItemCollision {
+            block_state: &state_at,
+            probe_count: std::cell::Cell::new(0),
+        };
+        let (mut serial, ids) = two_owner_orb_fixture(&world);
+        serial_orb_tick_reference(&mut serial, &view);
+
+        let (mut completed, completed_ids) = two_owner_orb_fixture(&world);
+        assert_eq!(completed_ids, ids, "fixtures must use matching entity slots");
+        let mut batches = completed.tick_orb_owner_batches(&view);
+        assert_eq!(
+            batches
+                .iter()
+                .map(OrbTickOwnerBatch::owner)
+                .collect::<Vec<_>>(),
+            vec![
+                OrbTickOwner::Chunk { cx: -1, cz: 0 },
+                OrbTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "the negative and positive controls must begin in separate owners"
+        );
+        batches.reverse();
+        completed.apply_orb_tick_owner_batches(batches);
+
+        let (mut live, live_ids) = two_owner_orb_fixture(&world);
+        assert_eq!(live_ids, ids, "the live consumer uses the same tick-start ids");
+        live.tick_with_terrain(&state_at);
+
+        for id in ids {
+            assert_eq!(
+                completed.orb_state(id),
+                serial.orb_state(id),
+                "reversed owner completion changed orb {id}'s persistent state"
+            );
+            assert_eq!(
+                completed.orb_position(id),
+                serial.orb_position(id),
+                "reversed owner completion changed orb {id}'s position"
+            );
+            assert_eq!(
+                live.orb_state(id),
+                serial.orb_state(id),
+                "the tick_with_terrain consumer must apply the central owner merge"
+            );
+            assert_eq!(live.orb_position(id), serial.orb_position(id));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "every tick-start owner batch exactly once")]
+    fn orb_owner_batch_merge_rejects_a_missing_owner() {
+        let world = flat_world();
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let view = super::super::ItemCollision {
+            block_state: &state_at,
+            probe_count: std::cell::Cell::new(0),
+        };
+        let (mut sim, _) = two_owner_orb_fixture(&world);
+        let mut batches = sim.tick_orb_owner_batches(&view);
+        batches.pop();
+        sim.apply_orb_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not contain one owner twice")]
+    fn orb_owner_batch_merge_rejects_a_duplicate_owner() {
+        let world = flat_world();
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let view = super::super::ItemCollision {
+            block_state: &state_at,
+            probe_count: std::cell::Cell::new(0),
+        };
+        let (mut sim, _) = two_owner_orb_fixture(&world);
+        let mut batches = sim.tick_orb_owner_batches(&view);
+        batches.push(batches.first().expect("two owners exist").clone());
+        sim.apply_orb_tick_owner_batches(batches);
     }
 
     /// **The denomination ladder reaches real entities.**
