@@ -2,7 +2,7 @@
 
 ## What it is
 
-`lodestone-storage-prototype` is an isolated, non-production comparison between a purpose-built append/index segment and redb. It supplies a small, reproducible workload for the storage-engine choice without selecting a production engine or connecting to server save/load code. `lodestone-storage-schema` is the separate version-1 Protobuf vocabulary for a future native backend: it commits generated Rust types, a descriptor, and byte fixtures, but performs no I/O itself. `lodestone-storage` is the native append/index layer that persists those validated envelopes as atomically committed replacement batches; it is ready for a future dirty-record producer but is not yet connected to `IntegratedServer`.
+`lodestone-storage-prototype` is an isolated, non-production comparison between a purpose-built append/index segment and redb. It supplies a small, reproducible workload for the storage-engine choice without selecting a production engine. `lodestone-storage-schema` is the separate version-1 Protobuf vocabulary for the native backend: it commits generated Rust types, a descriptor, and byte fixtures, but performs no I/O itself. `lodestone-storage` is the native append/index layer that persists validated envelopes as atomically committed replacement batches. `lodestone_server::world_storage` is the integrated-server seam: a host explicitly selects `Anvil` or `LodestoneNative`, then an attached server accepts only the producer's dirty `RecordWrite` values through `IntegratedServer::write_dirty_records`.
 
 ## How it works
 
@@ -51,7 +51,7 @@ LODESTONE_STORAGE_SCHEMA_REGENERATE=1 cargo check -p lodestone-storage-schema
 
 The build script always recompiles the schema with a vendored Protobuf compiler and compares the result with `src/generated/lodestone.storage.v1.rs` and `storage.fds.bin`. Normal `cargo check` and `cargo test` therefore fail on an unregenerated schema or generator drift. Update the independent fixture only after explicitly specifying its new bytes and field meanings; never rewrite it from `encode_to_vec`.
 
-`NativeStore::write_transaction` is the boundary a dirty-record producer will call. Keep writes small and group only state that must become visible together; a batch is durable only once its commit marker is synced. Do not change the transaction-header constants or key byte representation in place: a format change requires a new storage version and an explicit reader/migration policy. The crate currently has one mutable file handle, so it is a single-writer/single-handle layer rather than the concurrent snapshot interface requested for the final engine. Compaction, extension-table lifecycle, schema negotiation, migration, Anvil loss preflight, backend selection, and the integrated-server producer remain integration work. It intentionally provides no rollback guarantee.
+`NativeStore::write_transaction` is the boundary a dirty-record producer calls through `WorldStorage::write_dirty`. Keep writes small and group only state that must become visible together; a batch is durable only once its commit marker is synced. `WorldStorageBackend::Anvil` deliberately refuses typed-record writes instead of dropping them: the established `RegionChunkSource`/`WorldSaveHandle` path remains first-class and keeps its dirty-column behaviour. `IntegratedServer::open_persistent_with_mobs_and_storage` attaches a selected record backend while retaining that Anvil terrain/entity/metadata path; native records therefore cover exactly the submitted producer records, not a complete world save or load. Do not change the transaction-header constants or key byte representation in place: a format change requires a new storage version and an explicit reader/migration policy. The crate currently has one mutable file handle, so it is a single-writer/single-handle layer rather than the concurrent snapshot interface requested for the final engine. Compaction, extension-table lifecycle, schema negotiation, migration, Anvil loss preflight, native chunk loading, and remaining integrated-server producers are follow-up work. It intentionally provides no rollback guarantee.
 
 Run the comparison explicitly on an otherwise idle machine; it is not an ordinary CI command and no duration threshold is committed:
 
@@ -63,7 +63,7 @@ Record both durations, on-disk growth after the replacement loop, compaction cos
 
 ## Configuration
 
-There are no runtime flags. `NativeStore::open(directory)` uses `world.ls` within that directory. The benchmark constants are `COLUMNS = 128`, `CHUNK_BYTES = 24 KiB`, and a 192-byte block-entity mutation in `benches/incremental.rs`. They are deliberately visible and fixed so a result reports a known workload.
+There are no runtime flags. A host constructs `WorldStorage::open(WorldStorageBackend::Anvil)` to select the existing compatibility backend, or `WorldStorage::open(WorldStorageBackend::LodestoneNative { directory })` before calling `IntegratedServer::open_persistent_with_mobs_and_storage`. `NativeStore::open(directory)` uses `world.ls` within that directory. The benchmark constants are `COLUMNS = 128`, `CHUNK_BYTES = 24 KiB`, and a 192-byte block-entity mutation in `benches/incremental.rs`. They are deliberately visible and fixed so a result reports a known workload.
 
 ## Dependencies
 

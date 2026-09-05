@@ -829,6 +829,11 @@ pub struct IntegratedServer {
     /// an entry in [`Dimension::ALL`](crate::dimension::Dimension::ALL).
     #[cfg(not(target_arch = "wasm32"))]
     poi_storage: Option<HashMap<Dimension, crate::poi_storage::PoiStorage>>,
+    /// Explicit typed-record storage selected by the constructor that accepts
+    /// one. It is separate from `save`: Anvil remains the live world's current
+    /// chunk/entity/metadata backend until native readers and producers exist.
+    #[cfg(not(target_arch = "wasm32"))]
+    world_storage: Option<std::sync::Arc<crate::world_storage::WorldStorage>>,
     /// The world's shared game rules, difficulty and clock.
     /// The **same** handle the tick loop advances and every connection reads; kept
     /// here so the persistence path can load it at open and stamp it on save.
@@ -1229,6 +1234,8 @@ impl IntegratedServer {
                 portals: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 poi_storage: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                world_storage: None,
                 // No tick loop and no RCON pairing here — same reasoning as `mobs`
                 // just above.
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1391,6 +1398,8 @@ impl IntegratedServer {
                 portals: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 poi_storage: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                world_storage: None,
                 // No tick loop and no RCON pairing here — same reasoning as `mobs`
                 // just above.
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2242,6 +2251,8 @@ impl IntegratedServer {
                 #[cfg(not(target_arch = "wasm32"))]
                 poi_storage: None,
                 #[cfg(not(target_arch = "wasm32"))]
+                world_storage: None,
+                #[cfg(not(target_arch = "wasm32"))]
                 world_source: Some(host_world_source),
                 #[cfg(not(target_arch = "wasm32"))]
                 block_ticks: Some(host_block_ticks),
@@ -2671,6 +2682,75 @@ impl IntegratedServer {
             autosave,
             CommandDispatch::none(),
         )
+    }
+
+    /// Opens the established Anvil-backed persistent world and attaches an
+    /// explicit typed-record backend for producers that can emit dirty
+    /// [`lodestone_storage::RecordWrite`] values.
+    ///
+    /// This does not make `LodestoneNative` a full world loader yet. The
+    /// returned terrain source and existing autosave stay Anvil-backed; only
+    /// [`write_dirty_records`](Self::write_dirty_records) reaches the selected
+    /// typed-record backend. Keeping those paths distinct makes an incomplete
+    /// native producer fail visibly instead of silently replacing a readable
+    /// Anvil world with a partial save.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_persistent_with_mobs_and_storage<P, S>(
+        protocol: P,
+        world_dir: &std::path::Path,
+        source: S,
+        min_y: i32,
+        height: i32,
+        mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
+        mob_center: (i32, i32),
+        mob_count: usize,
+        view_radius: i32,
+        autosave: std::time::Duration,
+        storage: crate::world_storage::WorldStorage,
+    ) -> Result<
+        (
+            Self,
+            DuplexStream,
+            crate::region_source::RegionChunkSource<S>,
+        ),
+        crate::region_source::Error,
+    >
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
+        let (mut server, client, world) = Self::open_persistent_with_mobs(
+            protocol,
+            world_dir,
+            source,
+            min_y,
+            height,
+            mob_area,
+            mob_center,
+            mob_count,
+            view_radius,
+            autosave,
+        )?;
+        server.world_storage = Some(std::sync::Arc::new(storage));
+        Ok((server, client, world))
+    }
+
+    /// Commits one native backend transaction containing only the records a
+    /// producer marked dirty.
+    ///
+    /// A server without the explicit storage constructor returns an error;
+    /// callers cannot mistake an unwired native producer for a successful save.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_dirty_records(
+        &self,
+        writes: impl IntoIterator<Item = lodestone_storage::RecordWrite>,
+    ) -> Result<usize, crate::world_storage::Error> {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.write_dirty(writes)
     }
 
     /// The world's shared game rules, difficulty and clock.
@@ -3499,6 +3579,8 @@ impl IntegratedServer {
             portals: None,
             #[cfg(not(target_arch = "wasm32"))]
             poi_storage: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            world_storage: None,
             // RCON's `/setblock`/`/fill`/`/summon`/`/worldborder` surface — see
             // each field's own doc comment on `IntegratedServer`.
             #[cfg(not(target_arch = "wasm32"))]
@@ -4819,6 +4901,91 @@ mod tests {
             "a control that counts nothing cannot detect the defect"
         );
         drop(handle);
+    }
+
+    /// The integrated-server consumer, not just the native segment's own
+    /// tests: selecting the native backend reaches the server handle and
+    /// commits exactly the submitted record. The empty control proves a clean
+    /// autosave boundary does not append a replacement for unchanged state.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn persistent_server_flushes_only_explicitly_dirty_native_records() {
+        use lodestone_storage::{NativeStore, RecordKey, RecordWrite};
+        use lodestone_storage_schema::{
+            ChunkRecord, ChunkSection, StorageRecord, generated::storage_record,
+        };
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "lodestone-world-storage-{}-{unique}",
+            std::process::id()
+        ));
+        let native_dir = world_dir.join("native");
+        let storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir.clone(),
+            },
+        )
+        .expect("open native test segment");
+        let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            Silent,
+            &world_dir,
+            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+            0,
+            16,
+            (0..=0, 0..=0),
+            (0, 0),
+            0,
+            0,
+            std::time::Duration::from_secs(3600),
+            storage,
+        )
+        .expect("open persistent server with native record storage");
+        let key = RecordKey::chunk(4, -2);
+        let record = StorageRecord {
+            format_version: 1,
+            record: Some(storage_record::Record::Chunk(ChunkRecord {
+                column_x: 4,
+                column_z: -2,
+                game_data_version: 46_002,
+                sections: vec![ChunkSection {
+                    section_y: 0,
+                    palette_bits: 1,
+                    palette_state_ids: vec![12],
+                    block_state_indices: vec![0; 512],
+                    sky_light: Vec::new(),
+                    block_light: Vec::new(),
+                }],
+                extensions: Vec::new(),
+            })),
+        };
+
+        assert_eq!(
+            server
+                .write_dirty_records([RecordWrite::new(key, record.clone())])
+                .expect("write the one dirty record"),
+            1
+        );
+        assert_eq!(
+            server
+                .write_dirty_records(std::iter::empty())
+                .expect("an empty dirty set is a no-op"),
+            0
+        );
+        server.shutdown().await;
+
+        let mut reopened = NativeStore::open(&native_dir).expect("reopen native segment");
+        assert_eq!(reopened.get(key).expect("read committed record"), Some(record));
+        assert_eq!(
+            reopened.recovery().transactions,
+            1,
+            "only the submitted dirty record may have produced a transaction"
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(&world_dir).expect("remove test world");
     }
 
     /// Wall-clock world-open cost with the **real** composed overworld
