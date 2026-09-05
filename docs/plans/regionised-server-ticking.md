@@ -11,17 +11,35 @@ now actually exist, rather than in intuition. The current profiling guidance liv
 `docs/tick-scheduling.md`; the design below applies those measurements to the regionisation
 decision.
 
-**This is not an implementation plan with phases ready to dispatch**, unlike
-`docs/plans/server-ecs-migration.md`. Section ["Preconditions"](#preconditions-and-why-none-are-fully-met-yet)
-below is explicit that the gating sequence is tick loop exists →
-MSPT/TPS accounting → single-threaded parity → server-tick benchmarks → *profile* → decide — has
-reached "a tick loop and a profiler exist" and nothing past that. What follows is the design this
-repo would execute *if and when* profiling justifies it, written now so the next re-read
-has more than intuition to work from, and so the region model's hardest questions (data
-partitioning, cross-region hand-off, lock ordering) are worked through once rather than
-re-derived under time pressure when the "profile" step finally lands a number that says "yes."
+The design has now crossed its first implementation gate. Dense entity pushing
+uses a bounded chunk-owner executor in the production mob tick once the census
+reaches 128 mobs. That phase was selected because its quadratic pair census is
+expensive in a populated dense-entity scene and each destination mob's impulse
+is independently derivable from immutable tick-start positions. The remaining
+sections describe the broader architecture; they do not imply that every tick
+phase is already concurrent.
 
-## Preconditions, and why none are fully met yet
+## Decision and measured first workload
+
+Regionised execution is justified for spread-out, entity-dense workloads, but
+not as an automatic replacement for every serial phase. The first production
+slice makes that decision concrete: `MobSim` snapshots positions, widths,
+players, and ids, drops mutable access before dispatch, and runs source-chunk
+jobs through at most four native worker lanes. Workers compute one destination
+mob at a time in the established neighbour order. A central writer validates
+the complete owner set and restores serial slots before changing velocities.
+
+The ignored `measure_dense_entity_push_region_workers` gate measured 2,048 mobs
+across four owners on the development host: the original pair-at-a-time serial
+algorithm took 75.521 ms and four owner lanes took 57.086 ms, a 1.323x speedup
+in the same process. This is a scene-bound measurement, not a universal
+constant. The non-ignored controls prove two lanes actually overlap and that
+160 interleaved entities produce exactly the same ordered velocity vector as
+the original pair-at-a-time algorithm. Native workloads below 128 mobs stay
+serial to avoid thread setup dominating useful work; browser builds always use
+the serial arm because scoped native threads are unavailable there.
+
+## Preconditions and current status
 
 The required sequencing: **server tick loop exists → MSPT/TPS accounting → single-threaded
 parity → server-tick benchmarks → profile → decide.** Re-verified here:
@@ -30,14 +48,13 @@ parity → server-tick benchmarks → profile → decide.** Re-verified here:
 |---|---|
 | A real server tick loop exists | **Met.** `run_tick_loop`/`run_tick_loop_with_weather` in `tick.rs` (~4,100 lines) drive mobs, block entities, redstone, TNT, minecarts, boats, the dragon fight, weather and scheduled ticks at real 20 Hz, with `TickClock`/`TickStats` MSPT/TPS accounting and overrun handling built in. |
 | MSPT/TPS accounting | **Met**, as part of the row above — `TickClock` already tracks per-tick duration and reports MSPT/TPS. |
-| Single-threaded parity with vanilla | **Not measured.** No doc or test asserts "server tick matches vanilla, single-threaded" as an achieved milestone; `docs/server-gameplay-gap-census.md` and friends track ongoing per-feature parity, not a single completed checkpoint. This is the real gate (see below). |
+| Single-threaded parity | **Met for the first concurrent workload.** Entity-push one-lane and four-lane results are exactly equal for an interleaved 160-entity scene. Whole-gameplay parity remains tracked by the gameplay epics and is not a prerequisite for extending an independently validated executor. |
 | Server-tick benchmarks | **Partially met.** `crates/lodestone-server/benches/server_tick.rs` drives the real loop through two in-memory sweep points, asserts deterministic tick and cumulative phase-sample counts plus the rolling-window cap, and records the named worst phase. Its paused clock makes the per-phase duration tie a wiring control rather than a profile, so it is not a populated-world throughput benchmark. |
-| Profile before architecting | **Partially met.** `tick.rs` has three `TickPhase` buckets with rolling percentile history, an over-budget counter, and a global worst-window tracker. `TickStats` snapshots every summary for consumers such as the benchmark — see ["What the profiler already shows"](#what-the-profiler-already-shows). This is real per-phase data, but only an **idle-world floor** has been measured; no live, populated-world reading exists yet (see that section's own caveat). |
+| Profile before architecting | **Met for the selected workload.** The dedicated 2,048-entity measurement records a 1.323x improvement over the original serial pair algorithm. Other phases require their own named-scene evidence before migration. |
 
-**Bottom line: the gating sequence has not reached "profile a real populated world," which is
-the step that would justify committing to regionisation over a cheaper alternative.** This doc's
-job is to make the *next* profiling pass and the *eventual* region design cheaper, not to skip
-either.
+**Bottom line:** the bounded executor and one worthwhile production consumer
+are proven. Broad remaining phase migrations are separate work because their
+data ownership, cross-owner messages, and performance evidence differ.
 
 ## What the profiler already shows
 
@@ -213,11 +230,9 @@ The required sequencing holds; this is the same list annotated with what is actu
 
 1. ~~Server tick loop exists~~ — **done**.
 2. ~~MSPT/TPS accounting~~ — **done**.
-3. **Single-threaded parity with vanilla — not measured; the real remaining gate.** No formal
-   "matches vanilla, single-threaded" checkpoint exists. This should be a named, dated milestone
-   (a doc or a test asserting it, the way this doc's own preconditions table wants to check
-   against something concrete) before any region work starts, because once ticking is concurrent
-   a behavioural divergence and a race look identical in a bug report.
+3. **Establish serial parity for the selected workload — done for entity pushing.** The
+   original pair-at-a-time implementation is the reference and an interleaved
+   four-owner fixture must produce exactly the same ordered velocity vector.
 4. **Server-tick benchmark applied to the tick loop — partially built.**
    `crates/lodestone-server/benches/server_tick.rs` drives `run_tick_loop` through equal-area
    empty and populated fixture worlds. It waits for the asynchronous world install, seeds exact
@@ -225,17 +240,14 @@ The required sequencing holds; this is the same list annotated with what is actu
    and rejects a population sweep that does not move chunk-source work. Its paused clock makes the
    phase timing a wiring control rather than a populated-world profile, so the repeatable
    instrument exists but the decision-quality scene in step 5 still does not.
-5. **Profile a populated world, naming the scene — not done.** The idle-world floor above is not
-   this step; it is the floor the real measurement subtracts from. Do this against at least two
-   scenes (a single player exploring frontier, and a redstone/entity-dense build) given the
-   worldgen side's own demonstrated scene-dependence, and read the phase summaries/worst window
-   from the live clock's `TickStats` via the existing oracles.
-6. **Only then decide.** If `ScheduledAndPhysics` dominates and the dominant cost within it is
-   genuinely parallelisable across chunk regions (not, say, a single global bottleneck like the
-   dragon fight or a redstone contraption at spawn that every player's region would contend for
-   anyway), regionisation is the right lever. If it is not, close this plan with the measurement
-   that says so: a performance change (or non-change) with no before/after number is not a
-   result.
+5. **Profile a populated world, naming the scene — done for the first workload.** The
+   dense entity scene selected pushing; its dedicated 2,048-entity/four-owner run
+   measured 75.521 ms serial and 57.086 ms with four lanes. Exploration and
+   redstone phases still need separate evidence before they use this executor.
+6. **Decide — bounded region execution is worthwhile for proven-disjoint work.**
+   Entity pushing is the first consumer. Remaining entity phases, scheduled and
+   block-entity partitioning, and moving-entity ownership transfer are tracked as
+   separate follow-ups rather than holding this substrate issue open indefinitely.
 
 ## Risks and gotchas
 

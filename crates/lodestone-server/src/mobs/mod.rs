@@ -364,6 +364,46 @@ fn merge_leash_tick_owner_batches(mut batches: Vec<LeashTickOwnerBatch>) -> Vec<
     effects
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn run_bounded_owner_jobs<T, R, F>(jobs: Vec<T>, worker_count: usize, work: &F) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+    F: Fn(T) -> R + Sync,
+{
+    let lane_count = worker_count.max(1).min(jobs.len().max(1));
+    let mut lanes: Vec<Vec<(usize, T)>> = (0..lane_count).map(|_| Vec::new()).collect();
+    for (index, job) in jobs.into_iter().enumerate() {
+        lanes[index % lane_count].push((index, job));
+    }
+    let mut completed = std::thread::scope(|scope| {
+        let handles: Vec<_> = lanes
+            .into_iter()
+            .map(|lane| {
+                scope.spawn(move || {
+                    lane.into_iter()
+                        .map(|(index, job)| (index, work(job)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("region owner worker panicked"))
+            .collect::<Vec<_>>()
+    });
+    completed.sort_unstable_by_key(|(index, _)| *index);
+    completed.into_iter().map(|(_, result)| result).collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn run_bounded_owner_jobs<T, R, F>(jobs: Vec<T>, _worker_count: usize, work: &F) -> Vec<R>
+where
+    F: Fn(T) -> R,
+{
+    jobs.into_iter().map(work).collect()
+}
+
 mod block_ids;
 
 // Re-exported so `crate::mobs::block_state_id`/`block_state_id_or_default` keep
@@ -6286,6 +6326,24 @@ impl<'w> MobSim<'w> {
     /// results by source chunk. Cross-owner pairs are read-only here; no mob
     /// receives an impulse until the central apply step validates the plan.
     pub(crate) fn tick_entity_push_owner_batches(&self) -> Vec<EntityPushOwnerBatch> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = if self.mobs.len() >= 128 {
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1)
+                .min(4)
+        } else {
+            1
+        };
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1;
+        self.tick_entity_push_owner_batches_with_workers(workers)
+    }
+
+    fn tick_entity_push_owner_batches_with_workers(
+        &self,
+        worker_count: usize,
+    ) -> Vec<EntityPushOwnerBatch> {
         let n = self.mobs.len();
         if n == 0 {
             return Vec::new();
@@ -6296,53 +6354,65 @@ impl<'w> MobSim<'w> {
             .iter()
             .map(|m| f64::from(m.shape().width))
             .collect();
-        let mut impulses = vec![Vec3::default(); n];
-
-        // Mob-mob pairs.
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let touch = (widths[i] + widths[j]) / 2.0;
-                if let Some((a, b)) = push_impulse(positions[i], positions[j], touch) {
-                    impulses[i].x += a.x;
-                    impulses[i].z += a.z;
-                    impulses[j].x += b.x;
-                    impulses[j].z += b.z;
-                }
-            }
-        }
-
-        // Player-mob pairs: only the mob side is pushed — see this method's
-        // own doc comment for why player recoil needs a different seam.
-        const PLAYER_WIDTH: f64 = 0.6; // Vanilla's own player attribute builder has no override; the default entity bounding box is 0.6 wide.
-        for i in 0..n {
-            for p in &self.players {
-                let touch = (widths[i] + PLAYER_WIDTH) / 2.0;
-                if let Some((mob_impulse, _)) = push_impulse(positions[i], p.perception.position, touch) {
-                    impulses[i].x += mob_impulse.x;
-                    impulses[i].z += mob_impulse.z;
-                }
-            }
-        }
-
-        let mut batches = Vec::<EntityPushOwnerBatch>::new();
-        for (serial, (mob, impulse)) in self.mobs.iter().zip(impulses).enumerate() {
-            let owner = entity_tick_owner(positions[serial]);
-            let effect = EntityPushEffect {
-                owner,
-                serial,
-                id: mob.id,
-                impulse,
-            };
-            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
-                batch.effects.push(effect);
+        let ids: Vec<i32> = self.mobs.iter().map(|mob| mob.id).collect();
+        let mut jobs = Vec::<(EntityTickOwner, Vec<usize>)>::new();
+        for (serial, position) in positions.iter().copied().enumerate() {
+            let owner = entity_tick_owner(position);
+            if let Some((_, serials)) = jobs.iter_mut().find(|(candidate, _)| *candidate == owner) {
+                serials.push(serial);
             } else {
-                batches.push(EntityPushOwnerBatch {
-                    owner,
-                    expected_batch_count: 0,
-                    effects: vec![effect],
-                });
+                jobs.push((owner, vec![serial]));
             }
         }
+        let players = &self.players;
+        let mut batches = run_bounded_owner_jobs(jobs, worker_count, &|(owner, serials)| {
+            let effects = serials
+                .into_iter()
+                .map(|serial| {
+                    let mut impulse = Vec3::default();
+                    for other in 0..n {
+                        if other == serial {
+                            continue;
+                        }
+                        let touch = (widths[serial] + widths[other]) / 2.0;
+                        let contribution = if serial < other {
+                            push_impulse(positions[serial], positions[other], touch)
+                                .map(|pair| pair.0)
+                        } else {
+                            push_impulse(positions[other], positions[serial], touch)
+                                .map(|pair| pair.1)
+                        };
+                        if let Some(contribution) = contribution {
+                            impulse.x += contribution.x;
+                            impulse.z += contribution.z;
+                        }
+                    }
+                    // Player recoil remains client-authoritative; only the mob
+                    // half is accumulated into this owner's completion.
+                    const PLAYER_WIDTH: f64 = 0.6;
+                    for player in players {
+                        let touch = (widths[serial] + PLAYER_WIDTH) / 2.0;
+                        if let Some((mob_impulse, _)) =
+                            push_impulse(positions[serial], player.perception.position, touch)
+                        {
+                            impulse.x += mob_impulse.x;
+                            impulse.z += mob_impulse.z;
+                        }
+                    }
+                    EntityPushEffect {
+                        owner,
+                        serial,
+                        id: ids[serial],
+                        impulse,
+                    }
+                })
+                .collect();
+            EntityPushOwnerBatch {
+                owner,
+                expected_batch_count: 0,
+                effects,
+            }
+        });
         let batch_count = batches.len();
         for batch in &mut batches {
             batch.expected_batch_count = batch_count;
@@ -11086,6 +11156,98 @@ mod follow_range_tests {
         let mut batches = sim.tick_entity_push_owner_batches();
         batches[1] = batches[0].clone();
         let _ = merge_entity_push_owner_batches(batches);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bounded_owner_executor_runs_two_lanes_at_the_same_time() {
+        use std::sync::{Arc, Barrier};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let barrier = Arc::new(Barrier::new(2));
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let results = run_bounded_owner_jobs(vec![1_u8, 2], 2, &|job| {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            maximum.fetch_max(now, Ordering::SeqCst);
+            barrier.wait();
+            active.fetch_sub(1, Ordering::SeqCst);
+            job
+        });
+        assert_eq!(results, vec![1, 2], "the executor restores submission order");
+        assert_eq!(maximum.load(Ordering::SeqCst), 2, "both worker lanes must overlap");
+    }
+
+    fn dense_push_owner_fixture(count: usize) -> MobSim<'static> {
+        let world = Box::leak(Box::new(flat_world()));
+        let mut sim = MobSim::new(world);
+        let pig = ResourceKey::from_str("minecraft:pig").expect("valid key");
+        for serial in 0..count {
+            let base = [-0.4, 0.4, 16.4, 32.4][serial % 4];
+            let offset = f64::from((serial / 4 % 5) as u8) * 0.01;
+            sim.spawn_species(pig.clone(), Vec3::new(base + offset, 0.0, 0.0));
+        }
+        sim
+    }
+
+    fn serial_pair_push_impulses(sim: &MobSim<'_>) -> Vec<Vec3> {
+        let positions: Vec<Vec3> = sim.mobs.iter().map(SimMob::position).collect();
+        let widths: Vec<f64> = sim
+            .mobs
+            .iter()
+            .map(|mob| f64::from(mob.shape().width))
+            .collect();
+        let mut impulses = vec![Vec3::default(); sim.mobs.len()];
+        for first in 0..sim.mobs.len() {
+            for second in (first + 1)..sim.mobs.len() {
+                let touch = (widths[first] + widths[second]) / 2.0;
+                if let Some((first_impulse, second_impulse)) =
+                    push_impulse(positions[first], positions[second], touch)
+                {
+                    impulses[first].x += first_impulse.x;
+                    impulses[first].z += first_impulse.z;
+                    impulses[second].x += second_impulse.x;
+                    impulses[second].z += second_impulse.z;
+                }
+            }
+        }
+        impulses
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parallel_entity_push_matches_the_serial_owner_plan() {
+        let serial = dense_push_owner_fixture(160);
+        let expected: Vec<_> = serial
+            .mobs
+            .iter()
+            .map(|mob| mob.id)
+            .zip(serial_pair_push_impulses(&serial))
+            .collect();
+
+        let mut parallel = dense_push_owner_fixture(160);
+        let parallel_batches = parallel.tick_entity_push_owner_batches_with_workers(4);
+        parallel.apply_entity_push_owner_batches(parallel_batches);
+        assert_eq!(mob_velocities(&parallel), expected);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "manual dense-scene throughput measurement"]
+    fn measure_dense_entity_push_region_workers() {
+        let sim = dense_push_owner_fixture(2_048);
+        let started = std::time::Instant::now();
+        let _ = serial_pair_push_impulses(&sim);
+        let serial = started.elapsed();
+        let started = std::time::Instant::now();
+        let _ = sim.tick_entity_push_owner_batches_with_workers(4);
+        let parallel = started.elapsed();
+        eprintln!(
+            "dense_entity_push entities=2048 owners=4 serial_ms={:.3} parallel_ms={:.3} speedup={:.3}",
+            serial.as_secs_f64() * 1_000.0,
+            parallel.as_secs_f64() * 1_000.0,
+            serial.as_secs_f64() / parallel.as_secs_f64()
+        );
     }
 
     fn burn_owner_fixture() -> MobSim<'static> {
