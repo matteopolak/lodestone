@@ -131,7 +131,7 @@ pub(crate) fn is_water(name: &str) -> bool {
     name.split('[').next().unwrap_or(name) == "minecraft:water"
 }
 
-/// One palette entry's canonical state string → its global 26.2 block-state id,
+/// One palette entry's canonical state string → its validated 26.2 state id,
 /// with air for a block name the generated table does not carry.
 ///
 /// The **single** definition of that fallback on this side of the seam, and
@@ -142,9 +142,9 @@ pub(crate) fn is_water(name: &str) -> bool {
 /// fallback ("the lowest id sharing the name") and became silent callers when it
 /// changed; one of them failed as a 30-second live timeout rather than a
 /// mismatch. Do not copy this logic — call it.
-pub(crate) fn resolve_palette_state_id(state: &str) -> u32 {
-    lodestone_data::block_states::state_id(state)
-        .unwrap_or_else(lodestone_data::block_states::air_state_id)
+pub(crate) fn resolve_palette_state_id(state: &str) -> lodestone_data::block_states::StateId {
+    lodestone_data::block_states::StateId::from_state_str(state)
+        .unwrap_or_else(lodestone_data::block_states::air_state)
 }
 
 /// A decoded chunk column: the block state of every block in a 16×`height`×16
@@ -185,9 +185,10 @@ pub struct ChunkColumn {
     /// — property-sensitive families like `leaves_should_decay` included — so a
     /// per-entry classification is exact, not an approximation.
     palette_ticking: Vec<bool>,
-    /// `palette_state_ids[id]` is `palette[id]`'s **global 26.2 block-state id**
-    /// (`lodestone_data::block_states::state_id`, air for a name the table does
-    /// not carry), computed once per palette entry as that entry is appended —
+    /// `palette_state_ids[id]` is `palette[id]`'s **validated 26.2 block-state
+    /// id** (`lodestone_data::block_states::StateId::from_state_str`, or air
+    /// for a name the table does not carry), computed once per palette entry as
+    /// that entry is appended —
     /// sound for exactly the reason [`palette_ticking`](Self::palette_ticking)
     /// is, and maintained in the same two places.
     ///
@@ -205,10 +206,10 @@ pub struct ChunkColumn {
     ///
     /// 26.2 is the one canonical internal version, and `lodestone-data` is
     /// deliberately outside the protocol-family feature seam, so holding a
-    /// numeric id here is not a version-seam crossing: no `lodestone-v26-2`
+    /// validated id here is not a version-seam crossing: no `lodestone-v26-2`
     /// dependency is implied, and `cargo check -p lodestone-shell
     /// --no-default-features` still passes.
-    palette_state_ids: Vec<u32>,
+    palette_state_ids: Vec<lodestone_data::block_states::StateId>,
     /// `palette_reaction[id] == crate::redstone_graph::classify(&palette[id])`
     /// — which family, if any, a neighbour notification landing on a cell
     /// holding `palette[id]` dispatches to. The third per-palette-entry
@@ -987,7 +988,26 @@ impl ChunkColumn {
     pub fn block_state_id(&self, x: i32, y: i32, z: i32) -> u32 {
         let y_local = y - self.min_y;
         if !(0..self.height).contains(&y_local) {
-            return lodestone_data::block_states::air_state_id();
+            return lodestone_data::block_states::air_state().raw();
+        }
+        self.palette_state_ids[self.blocks.get(x, y_local, z) as usize].raw()
+    }
+
+    /// The validated global 26.2 state at a local coordinate.
+    ///
+    /// This is the in-process counterpart of [`block_state_id`](Self::block_state_id).
+    /// The raw form remains for protocol encoders; callers that stay within the
+    /// canonical registry should use this total lookup instead.
+    #[must_use]
+    pub fn resolved_block_state_id(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> lodestone_data::block_states::StateId {
+        let y_local = y - self.min_y;
+        if !(0..self.height).contains(&y_local) {
+            return lodestone_data::block_states::air_state();
         }
         self.palette_state_ids[self.blocks.get(x, y_local, z) as usize]
     }
@@ -1019,7 +1039,7 @@ impl ChunkColumn {
     /// gate uses to check these ids against the jar-derived dump without
     /// re-deriving them.
     #[must_use]
-    pub fn palette_state_ids(&self) -> &[u32] {
+    pub fn palette_state_ids(&self) -> &[lodestone_data::block_states::StateId] {
         &self.palette_state_ids
     }
 
@@ -1100,8 +1120,7 @@ impl ChunkColumn {
             .palette_state_ids
             .iter()
             .map(|&id| {
-                lodestone_data::block_states::StateId::new(id)
-                    .and_then(lodestone_data::block_entity_types::block_entity_type)
+                lodestone_data::block_entity_types::block_entity_type(id)
                     .map(lodestone_data::block_entity_types::block_entity_type_name)
             })
             .collect();

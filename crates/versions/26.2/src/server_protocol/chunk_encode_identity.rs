@@ -334,19 +334,19 @@ fn palette_state_ids_agree_with_the_jar_derived_dump() {
                 None => (state.as_str(), ""),
             };
             assert_eq!(
-                block_name(id),
-                Some(name),
-                "{state} resolved to id {id}, whose block name is {:?}",
-                block_name(id)
+                id.name(),
+                name,
+                "{state} resolved to id {}, whose block name is {:?}",
+                id.raw(),
+                id.name()
             );
-            let have = properties(id).expect("resolved id is in range");
+            let have = id.properties();
             if raw_props.is_empty() {
                 assert!(
-                    lodestone_data::block_states::StateId::new(id)
-                        .expect("resolved id is in the generated state table")
-                        .is_default(),
-                    "bare {state} resolved to id {id}, which the jar does not mark as \
-                     {name}'s default state (properties {have:?})"
+                    id.is_default(),
+                    "bare {state} resolved to id {}, which the jar does not mark as \
+                     {name}'s default state (properties {have:?})",
+                    id.raw()
                 );
                 checked_bare += 1;
             } else {
@@ -358,8 +358,9 @@ fn palette_state_ids_agree_with_the_jar_derived_dump() {
                     if have.iter().any(|(k, _)| *k == key) {
                         assert!(
                             have.contains(&(key, value)),
-                            "{state} resolved to id {id}, whose {key} is not {value} \
-                             (properties {have:?})"
+                            "{state} resolved to id {}, whose {key} is not {value} \
+                             (properties {have:?})",
+                            id.raw()
                         );
                     }
                 }

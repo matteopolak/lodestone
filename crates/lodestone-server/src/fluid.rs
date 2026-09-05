@@ -644,25 +644,22 @@ const NEVER_HOLDS_FLUID: [&str; 6] = [
 /// carry — [`crate::chunk::resolve_palette_state_id`], deliberately not a
 /// re-derivation of it (CLAUDE.md: two test helpers hand-duplicated an older
 /// version of that fallback and became silent callers when it changed).
-fn state_id(state: &str) -> Option<lodestone_data::block_states::StateId> {
-    lodestone_data::block_states::StateId::new(crate::chunk::resolve_palette_state_id(state))
+fn state_id(state: &str) -> lodestone_data::block_states::StateId {
+    crate::chunk::resolve_palette_state_id(state)
 }
 
 fn collision_boxes_for(state: &str) -> &'static [lodestone_data::collision_shapes::Aabb] {
-    state_id(state)
-        .map(lodestone_data::collision_shapes::collision_boxes)
-        .unwrap_or(&[])
+    lodestone_data::collision_shapes::collision_boxes(state_id(state))
 }
 
 /// The real blocks-motion query, out of `lodestone_data`'s jar-derived census.
 ///
-/// A state missing from the census is invalid, and the safe
-/// answer is **yes it blocks** — a gap must stop fluid rather than let it
-/// through a block we failed to classify.
+/// A state missing from the built-in census resolves to air at the shared
+/// palette boundary. That deliberately matches this crate's existing palette
+/// convention; a plugin or data-pack name remains in the string palette for
+/// its owner to interpret rather than becoming a forged built-in `StateId`.
 fn blocks_motion(state: &str) -> bool {
-    state_id(state)
-        .map(lodestone_data::block_solidity::blocks_motion)
-        .unwrap_or(true)
+    lodestone_data::block_solidity::blocks_motion(state_id(state))
 }
 
 /// `true` iff this block is a real liquid-block-container — in 26.2 that is

@@ -1275,13 +1275,12 @@ pub fn create_portal<S: ChunkSource + ?Sized>(
 
 /// Whether a state blocks motion, out of `lodestone_data`'s jar-derived census.
 ///
-/// A state the census does not carry answers **yes**, the same direction
-/// `crate::fluid` chose for the same question: an unclassified block should stop
-/// the site search rather than be quietly carved out.
+/// A state the built-in census does not carry follows the shared palette
+/// resolver's air fallback. The original namespaced string remains in the
+/// palette for its owning registry; this complete census is never indexed with
+/// an unvalidated raw value.
 fn blocks_motion(state: &str) -> bool {
-    lodestone_data::block_states::StateId::new(crate::chunk::resolve_palette_state_id(state))
-        .map(lodestone_data::block_solidity::blocks_motion)
-        .unwrap_or(true)
+    lodestone_data::block_solidity::blocks_motion(crate::chunk::resolve_palette_state_id(state))
 }
 
 /// The real can-portal-replace-block rule: not-solid and no fluid state.
