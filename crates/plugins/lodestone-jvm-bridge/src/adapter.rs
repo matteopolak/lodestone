@@ -493,7 +493,7 @@ fn resolve_resident_block_handle(
 /// or wrong-kind handle therefore fails before it can reach the host, and the
 /// host still owns the distinction between a resident air block and an absent
 /// column.
-fn resident_block_handle_state_id(bits: i64) -> Result<jint, AdapterError> {
+pub(crate) fn resident_block_handle_state_id(bits: i64) -> Result<jint, AdapterError> {
     let (x, y, z) = resolve_resident_block_handle(bits).map_err(|error| {
         AdapterError::new(error.to_string().replace("blockHandlePosition", "blockHandleStateId"))
     })?;
