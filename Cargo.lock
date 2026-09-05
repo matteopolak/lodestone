@@ -3349,8 +3349,10 @@ dependencies = [
 name = "lodestone-storage"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "lodestone-storage-schema",
  "prost",
+ "redb",
  "tempfile",
 ]
 
