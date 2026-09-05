@@ -33,6 +33,13 @@ id as a signed VarInt, unlike protocol 5's fixed `i32` and later fixed `i64` for
 wire control fixes the VarInt bytes directly and proves a trailing byte is rejected rather than
 treated as an acknowledgement; an external 1.8.9 client session remains the compatibility check.
 
+Serverbound `settings` now supplies its signed-byte view distance to the same shared view tracker
+through `ServerBound::ClientInformationChanged`; resizing streams the added or removed columns to
+the connected client, subject to the server ceiling. Locale, chat settings, and skin parts are
+decoded only to establish the exact packet boundary. The in-memory host starts at radius zero,
+sends a radius-one settings update, and observes column `(1, 0)` on the client; protocol 47's
+settings body ends after the skin-parts byte, without a main-hand field.
+
 ## How to change it
 
 Keep protocol-47 section encoding local to this family. Its raw state-word layout differs from the

@@ -62,6 +62,14 @@ which lets `lodestone-server` clear its connection-local pending challenge. Prot
 body bytes, each protocol's generated ids, and a trailing-byte rejection rather than a codec
 round-trip. They do not substitute for the four external-client sessions.
 
+Each hosted table also decodes its serverbound `settings` id into
+`ServerBound::ClientInformationChanged`. The shared server consumes its signed-byte view distance
+to resize the connection's streamed chunk window; locale, chat visibility, colours, skin parts,
+and main hand establish the full wire boundary but have no hosted consumer. The settings id is 4
+in all four tables, and the body is the same through 110, 210, 316, and 340: locale, distance,
+VarInt chat mode, colours, skin parts, and VarInt main hand. Literal-body controls check every
+table and reject trailing bytes.
+
 Dispatch is one `lodestone_core::dispatch::Table` per protocol, cached in a four-slot array of
 `OnceLock`s indexed the same way `ids_for` resolves a table. A handler or `IGNORED` entry may
 declare a `ProtocolRange`; `Table::build` skips one whose range excludes the protocol it is

@@ -69,6 +69,11 @@ keep-alive challenge and lifts the exact serverbound echo to
 Protocol 5 uses a fixed signed `i32` body in both directions; the server
 protocol test pins literal bytes and rejects a trailing byte instead of
 acknowledging a malformed response.
+Its serverbound `settings` packet also reaches the shared view tracker as
+`ClientInformationChanged`: the signed one-byte view distance is the only
+field the host consumes, while locale, chat settings, difficulty, and cape
+preference remain client-local. The packet's protocol-5 tail is difficulty
+then cape boolean, so it must not reuse the protocol-47 settings decoder.
 That control does not replace a live protocol-5 client session against the
 host, which remains the external compatibility check.
 

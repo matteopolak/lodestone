@@ -363,6 +363,46 @@ fn hosted_keep_alive_uses_each_protocols_own_id_and_width() {
 }
 
 #[test]
+fn hosted_client_settings_lift_each_protocols_view_distance() {
+    fn settings_wire_control(protocol: &dyn ServerProtocol, packet_id: i32) {
+        // `en_us`, distance 6, hidden chat (VarInt 2), colours, every skin
+        // part, and right main hand. The literal distinguishes this form from
+        // protocol 47's byte chat mode and absent main-hand field.
+        let body = [5, b'e', b'n', b'_', b'u', b's', 6, 2, 1, 0x7f, 1];
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &body),
+            ServerBound::ClientInformationChanged { view_distance: 6 }
+        );
+        assert_eq!(
+            protocol.decode(
+                State::Play,
+                packet_id,
+                &[5, b'e', b'n', b'_', b'u', b's', 6, 2, 1, 0x7f, 1, 0],
+            ),
+            ServerBound::Ignored,
+            "a settings packet with a trailing byte must not resize the client view"
+        );
+    }
+
+    settings_wire_control(
+        &V110ServerProtocol,
+        lodestone_v1_9::packet_ids_110::play::serverbound::SETTINGS,
+    );
+    settings_wire_control(
+        &V210ServerProtocol,
+        lodestone_v1_9::packet_ids_210::play::serverbound::SETTINGS,
+    );
+    settings_wire_control(
+        &V316ServerProtocol,
+        lodestone_v1_9::packet_ids_316::play::serverbound::SETTINGS,
+    );
+    settings_wire_control(
+        &V340ServerProtocol,
+        lodestone_v1_9::packet_ids::play::serverbound::SETTINGS,
+    );
+}
+
+#[test]
 fn play_join_chunk_and_block_update_have_340_wire_ids() {
     let protocol = V340ServerProtocol;
     let join = protocol.begin_play(8);
