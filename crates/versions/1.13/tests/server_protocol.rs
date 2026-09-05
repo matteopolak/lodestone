@@ -1,8 +1,11 @@
 use lodestone_core::{Ctx, Reader, State, encode_body};
-use lodestone_model::{ClientAction, ConnectionState, VersionAdapter};
+use lodestone_model::{
+    AnimationAction, ClientAction, ClientEvent, ConnectionState, Directive, Hand, VersionAdapter,
+};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_13::{V404Adapter, V404ServerProtocol};
 use lodestone_v1_13::packet_ids::{handshaking, play};
+use lodestone_world::World;
 use lodestone_v1_13::packets::handshake::SetProtocol;
 
 const CTX: Ctx = Ctx { version: 404 };
@@ -223,6 +226,61 @@ fn block_dig_non_breaking_statuses_reach_their_server_consumers() {
         protocol.decode(State::Play, play::serverbound::BLOCK_DIG, &body(7)),
         ServerBound::Ignored,
         "an unmodelled status must stay ignored rather than selecting a neighbouring action"
+    );
+}
+
+#[test]
+fn registry_selected_arm_animation_connects_protocol_404_to_the_shared_swing_broadcast() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(404)
+        .expect("protocol 404 must resolve to its hosted server protocol");
+    let adapter = V404Adapter::new();
+
+    for (hand, expected_hand, expected_action) in [
+        (Hand::Main, 0, AnimationAction::SwingMainHand),
+        (Hand::Off, 1, AnimationAction::SwingOffHand),
+    ] {
+        let action = ClientAction::SwingArm { hand };
+        let Some((packet_id, payload)) = adapter
+            .encode_action(ConnectionState::Play, &action)
+            .expect("protocol-404 adapter encodes arm swings")
+        else {
+            panic!("{action:?} must produce a protocol-404 packet");
+        };
+        assert_eq!(packet_id, play::serverbound::ARM_ANIMATION);
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &payload),
+            ServerBound::Swing { hand: expected_hand },
+            "{action:?} must reach the shared-server swing consumer"
+        );
+
+        let animation = if expected_hand == 0 { 0 } else { 3 };
+        let ServerDirective::Send { packet_id, payload } =
+            protocol.encode_animate(321, animation)
+        else {
+            panic!("the protocol-404 host must encode an animation reply");
+        };
+        assert_eq!(packet_id, play::clientbound::ANIMATION);
+        let mut world = World::new();
+        assert_eq!(
+            adapter
+                .handle_packet(&mut world, ConnectionState::Play, packet_id, &payload)
+                .expect("the protocol-404 client decodes host animation"),
+            vec![Directive::Emit(ClientEvent::EntityAnimation {
+                entity_id: 321,
+                action: expected_action,
+            })]
+        );
+    }
+
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::ARM_ANIMATION, &[2]),
+        ServerBound::Ignored,
+        "a third hand ordinal must not become an arbitrary animation"
+    );
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::ARM_ANIMATION, &[0, 0]),
+        ServerBound::Ignored,
+        "a trailing byte must not be accepted as a swing"
     );
 }
 
