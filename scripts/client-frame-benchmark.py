@@ -35,6 +35,7 @@ HEAVY_COMMAND_PHASES = ("setup", "after_join", "mutation")
 HEAVY_SCENARIOS = (
     "palette", "transparency", "light", "liquid", "sign", "block-entity", "entity", "scheduled", "mixed", "dense-mixed",
 )
+HEAVY_CAMERA_PLANS = ("stationary", "orbit")
 # The server's immutable-plan ceiling is intentionally larger for offline plan
 # inspection. The client runner is a foreground local profiler: keep its actual
 # resource envelope small enough for a shared development machine.
@@ -572,7 +573,7 @@ def validate_heavy_profile_artifact(artifact: pathlib.Path) -> dict:
     required_durations = {"warmup", "mutation", "stationary", "moving"}
     record_capture = record.get("capture")
     if (
-        record.get("schema") != 1
+        record.get("schema") != 2
         or record.get("workload") != "heavyweight"
         or record.get("profile") != "release"
         or not isinstance(record_capture, str)
@@ -582,10 +583,15 @@ def validate_heavy_profile_artifact(artifact: pathlib.Path) -> dict:
         or any(character not in "0123456789abcdef" for character in scene_hash)
         or record.get("scenario") not in HEAVY_SCENARIOS
         or not isinstance(record.get("seed"), int)
+        or record.get("camera_plan") not in HEAVY_CAMERA_PLANS
         or not isinstance(record.get("scale"), int)
-        or not 1 <= record["scale"] <= MAX_HEAVY_SCALE
+        or not 1 <= record["scale"] <= MAX_HEAVY_SCALE_BY_SCENARIO.get(
+            record["scenario"], MAX_HEAVY_SCALE
+        )
         or not isinstance(record.get("requested_scale"), int)
-        or not 1 <= record["requested_scale"] <= MAX_HEAVY_SCALE
+        or not 1 <= record["requested_scale"] <= MAX_HEAVY_SCALE_BY_SCENARIO.get(
+            record["scenario"], MAX_HEAVY_SCALE
+        )
         or not isinstance(record.get("durations_seconds"), dict)
         or set(record["durations_seconds"]) != required_durations
         or any(
@@ -856,11 +862,11 @@ def _append_records(
 
 def _heavy_record(
     workload: str, trial: int, binary: pathlib.Path, durations: tuple[int, ...],
-    debug_overlay: str, requested_scale: int, scene: dict, segments: dict,
+    debug_overlay: str, requested_scale: int, camera_plan: str, scene: dict, segments: dict,
 ) -> dict:
     spec = scene["spec"]
     return {
-        "schema": 1,
+        "schema": 2,
         "workload": workload,
         "trial": trial,
         "profile": "release",
@@ -872,6 +878,7 @@ def _heavy_record(
         "seed": spec["seed"],
         "requested_scale": requested_scale,
         "scale": spec["scale"],
+        "camera_plan": camera_plan,
         "scene_hash": scene["scene_hash"],
         "debug_overlay": debug_overlay,
         "durations_seconds": dict(zip(("warmup", "mutation", "stationary", "moving"), durations)),
@@ -906,7 +913,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--heavy-scenario", choices=HEAVY_SCENARIOS)
     parser.add_argument("--heavy-seed", type=int, default=1)
     parser.add_argument("--heavy-scale", type=int, default=2)
-    parser.add_argument("--heavy-camera-plan", choices=("stationary", "orbit"), default="orbit")
+    parser.add_argument("--heavy-camera-plan", choices=HEAVY_CAMERA_PLANS, default="orbit")
     parser.add_argument("--heavy-mutation-seconds", type=int, default=7)
     parser.add_argument("--debug-overlay", choices=("closed", "open", "both"))
     parser.add_argument(
@@ -1010,7 +1017,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.workload == "heavyweight":
                 record = _heavy_record(
                     args.workload, trial, binary, durations, debug_overlay, args.heavy_scale,
-                    heavy_scene, result["segments"],
+                    args.heavy_camera_plan, heavy_scene, result["segments"],
                 )
                 if profile_artifact is not None:
                     record_path = _heavy_profile_record_path(profile_artifact)
