@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.12.0;
+package lodestone:plugin@0.13.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -293,10 +293,10 @@ interface types {
     /// it never exposes a direct selected-slot write or packet constructor.
     type hotbar-slot = u8;
 
-    /// The deliberately narrow first inventory-click surface. Complex modes
-    /// (dragging, quick move, hotbar swaps, and cursor drops) need their own
-    /// ownership and validation contracts; this action can only pick up or place
-    /// with the normal primary/secondary buttons.
+    /// The deliberately narrow pickup/place inventory-click surface. Complex
+    /// modes (dragging, hotbar swaps, and cursor drops) need their own ownership
+    /// and validation contracts; this action can only pick up or place with the
+    /// normal primary/secondary buttons.
     enum inventory-click-button {
         left,
         right,
@@ -339,6 +339,13 @@ interface types {
         /// Request one bounded left/right click through the shell's live menu
         /// predictor — capability `act:inventory-click`.
         inventory-click(inventory-click),
+        /// Request one bounded shift-click through the shell's live menu
+        /// predictor — capability `act:inventory-quick-move`.
+        ///
+        /// The guest supplies only a menu slot. The shell still chooses the
+        /// quick-move button, validates the live menu, predicts, asks the veto,
+        /// and owns state ids, changed slots, and packet egress.
+        inventory-quick-move(u16),
     }
 
     /// A root command a guest wants the host to register. The host supplies one
@@ -408,7 +415,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.12.0"`.
+        /// `"lodestone:plugin@0.13.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.

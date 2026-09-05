@@ -83,7 +83,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.12.0".to_string(),
+            abi: "lodestone:plugin@0.13.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -141,7 +141,13 @@ impl Guest for ChatResponder {
             button: InventoryClickButton::Right,
         })];
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid")))]
+        #[cfg(feature = "inventory-quick-move")]
+        return vec![Action::InventoryQuickMove(36)];
+
+        #[cfg(feature = "inventory-quick-move-invalid")]
+        return vec![Action::InventoryQuickMove(u16::MAX)];
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid")))]
         return respond(events);
     }
 

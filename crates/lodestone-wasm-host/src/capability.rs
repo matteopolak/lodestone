@@ -106,6 +106,13 @@ pub enum Capability {
     /// the slot against the active menu, then owns prediction, vetoes, state ids,
     /// and protocol egress.
     ActInventoryClick,
+    /// Request one shift-click quick move through the shell-owned menu predictor.
+    ///
+    /// This is intentionally separate from [`Self::ActInventoryClick`]: a policy
+    /// that permits pickup/place does not implicitly permit the wider transfer
+    /// operation. The guest supplies only a bounded menu slot; the shell owns
+    /// the transfer order, validation, prediction, vetoes, and egress.
+    ActInventoryQuickMove,
     /// Receive a generation-bounded outcome after a WASM or native placement
     /// attempt resolves.
     ///
@@ -156,6 +163,7 @@ impl Capability {
         Self::ActPlace,
         Self::ActSelectSlot,
         Self::ActInventoryClick,
+        Self::ActInventoryQuickMove,
         Self::ObservePlace,
         Self::ObserveBreak,
         Self::VetoActions,
@@ -181,6 +189,7 @@ impl Capability {
             Self::ActPlace => "act:place",
             Self::ActSelectSlot => "act:select-slot",
             Self::ActInventoryClick => "act:inventory-click",
+            Self::ActInventoryQuickMove => "act:inventory-quick-move",
             Self::ObservePlace => "observe:place",
             Self::ObserveBreak => "observe:break",
             Self::VetoActions => "veto:actions",
@@ -221,6 +230,7 @@ impl Capability {
             | Self::ActPlace
             | Self::ActSelectSlot
             | Self::ActInventoryClick
+            | Self::ActInventoryQuickMove
             | Self::ObservePlace
             | Self::ObserveBreak
             | Self::VetoActions

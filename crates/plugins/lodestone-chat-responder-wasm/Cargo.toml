@@ -96,6 +96,11 @@ inventory = []
 # the shell before it reaches the live predictor.
 inventory-click = []
 inventory-click-invalid = []
+# A copied shift-click through the host's separately granted quick-move action.
+inventory-quick-move = []
+# The maximum ABI slot confirms the shell rejects malformed quick moves before
+# the live menu predictor can enqueue a container action.
+inventory-quick-move-invalid = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is
