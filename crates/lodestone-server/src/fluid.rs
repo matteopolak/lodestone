@@ -131,7 +131,7 @@ use lodestone_model::BlockPos;
 
 use crate::chunk::ChunkSource;
 use crate::neighbor_update::Direction;
-use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
+use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, ScheduledTickSink, TickPriority};
 
 /// The scheduled-tick `kind` string every fluid tick carries, the way
 /// `crate::redstone::TICK_TORCH` and friends key the block queue.
@@ -1392,11 +1392,11 @@ fn write_block<S: ChunkSource + ?Sized>(
 ///
 /// Every block this writes is appended to `changes` *and* already written
 /// through `world`; the caller forwards `changes` to connected clients.
-pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
+pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<String> + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
-    fluid_ticks: &mut ScheduledTickQueue<String>,
+    fluid_ticks: &mut Q,
     current_tick: u64,
     changes: &mut Vec<(BlockPos, String)>,
 ) {
@@ -1451,7 +1451,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
                 fluid = new_fluid;
                 state = fluid.block_state();
                 write_block(world, env, pos, &state, changes);
-                fluid_ticks.schedule(
+                fluid_ticks.schedule_tick(
                     (pos.x, pos.y, pos.z),
                     TICK_FLUID.to_owned(),
                     current_tick + env.tick_delay(fluid.kind),
@@ -1540,7 +1540,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
             let holds_fluid = notified == changed
                 || fluid_state_of(&world.block_state(notified.x, notified.y, notified.z)).is_some();
             if holds_fluid {
-                fluid_ticks.schedule(
+                fluid_ticks.schedule_tick(
                     (notified.x, notified.y, notified.z),
                     TICK_FLUID.to_owned(),
                     delay,

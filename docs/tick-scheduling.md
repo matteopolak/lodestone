@@ -28,11 +28,20 @@ collision either, so every decorated grass patch silently died on its first rand
 
 ### Scheduled ticks
 
-Two queues, block before fluid, drained every world tick in that fixed order: every entry whose
-trigger tick has arrived, in (trigger tick, priority, insertion order), with the whole due set
-collected before any of its callbacks run — so a tick scheduled while processing this tick's batch
-cannot itself run in the same batch. A second schedule for a position/kind pair already pending is
-a silent no-op, matching vanilla's own dedup behavior for the same case.
+Two queues, block before fluid, drain every world tick in that fixed order. Every entry whose
+trigger tick has arrived runs in `(trigger tick, priority, insertion order)`, with the whole due set
+collected before any callback runs — so a tick scheduled while processing this tick's batch cannot
+itself run in the same batch. A second schedule for a position/kind pair already pending is a silent
+no-op, matching vanilla's dedup behavior for the same case.
+
+The fluid half is now physically partitioned by chunk column. `ChunkScheduledTickQueue` routes a
+fluid tick to the column that owns its position, but its outer owner assigns one shared insertion
+sequence and merges only each local queue's due head. Thus a flow that schedules its next step over a
+chunk border cannot gain or lose priority because of a map traversal or the target column's key. The
+current tick task still executes that merged sequence serially; chunk-local storage makes the future
+hand-off boundary explicit without claiming concurrent fluid simulation. Block ticks remain one
+world-wide queue because their active redstone and piston reactions borrow that queue across
+multi-column mutations; splitting them before that API has an explicit hand-off would be unsound.
 
 ### Neighbor-update propagation
 
@@ -127,6 +136,11 @@ cold-region number is the more dramatic-looking figure.
 - **Adding a real scheduled-tick producer**: call the scheduling primitive from wherever a block
   decides "run again in N ticks", the same way vanilla's own tick-scheduling call works; it does not
   care what value type it schedules.
+- **Changing fluid tick ownership**: preserve the outer queue's one global insertion sequence and
+  due-head merge. Do not drain columns in coordinate order or assign an insertion counter per
+  column: either change can reorder equal-time updates crossing a column border. A new block-tick
+  local owner also needs a hand-off design for redstone and piston callbacks before it can replace
+  the current global queue.
 - **Adding a real neighbor-update producer**: call the propagator once per mutated position with a
   callback that performs the mutation and returns any further single-target notifications that
   mutation itself triggers — never call the propagator recursively from inside that callback, since

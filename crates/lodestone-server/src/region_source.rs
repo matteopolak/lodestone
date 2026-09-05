@@ -554,22 +554,34 @@ impl ScheduledTickHandle {
     /// real vanilla worlds.
     fn saved_ticks_for(&self, cx: i32, cz: i32) -> (Vec<chunk_nbt::SavedTick>, Vec<chunk_nbt::SavedTick>) {
         let now = i64::try_from(self.game_tick()).unwrap_or(i64::MAX);
-        let convert = |queue: &crate::scheduled_tick::ScheduledTickQueue<String>| {
-            queue
-                .iter()
-                .filter(|tick| (tick.pos.0 >> 4, tick.pos.2 >> 4) == (cx, cz))
-                .map(|tick| chunk_nbt::SavedTick {
-                    pos: tick.pos,
-                    kind: tick.kind.clone(),
-                    delay: i32::try_from(
-                        i64::try_from(tick.trigger_tick).unwrap_or(i64::MAX) - now,
-                    )
-                    .unwrap_or(i32::MAX),
-                    priority: tick.priority,
-                })
-                .collect::<Vec<_>>()
+        let convert = |tick: &crate::scheduled_tick::ScheduledTick<String>| chunk_nbt::SavedTick {
+            pos: tick.pos,
+            kind: tick.kind.clone(),
+            delay: i32::try_from(
+                i64::try_from(tick.trigger_tick).unwrap_or(i64::MAX) - now,
+            )
+            .unwrap_or(i32::MAX),
+            priority: tick.priority,
         };
-        self.with(|queues| (convert(&queues.block), convert(&queues.fluid)))
+        self.with(|queues| {
+            let belongs_to_column = |tick: &crate::scheduled_tick::ScheduledTick<String>| {
+                (tick.pos.0.div_euclid(16), tick.pos.2.div_euclid(16)) == (cx, cz)
+            };
+            (
+                queues
+                    .block
+                    .iter()
+                    .filter(|tick| belongs_to_column(tick))
+                    .map(convert)
+                    .collect(),
+                queues
+                    .fluid
+                    .iter()
+                    .filter(|tick| belongs_to_column(tick))
+                    .map(convert)
+                    .collect(),
+            )
+        })
     }
 
     /// The set of chunks holding at least one pending tick in either queue.
@@ -578,12 +590,12 @@ impl ScheduledTickHandle {
             queues
                 .block
                 .iter()
-                .map(|tick| (tick.pos.0 >> 4, tick.pos.2 >> 4))
+                .map(|tick| (tick.pos.0.div_euclid(16), tick.pos.2.div_euclid(16)))
                 .chain(
                     queues
                         .fluid
                         .iter()
-                        .map(|tick| (tick.pos.0 >> 4, tick.pos.2 >> 4)),
+                        .map(|tick| (tick.pos.0.div_euclid(16), tick.pos.2.div_euclid(16))),
                 )
                 .collect()
         })
