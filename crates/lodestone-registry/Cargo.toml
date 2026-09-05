@@ -68,3 +68,13 @@ v1-17 = ["dep:lodestone-v1-17"]
 v1-19 = ["dep:lodestone-v1-19"]
 v1-20-6 = ["dep:lodestone-v1-20-6"]
 v1-21-11 = ["dep:lodestone-v1-21-11"]
+
+[dev-dependencies]
+# The acceptance matrix runs every registry-selected host against the real
+# version-free client driver over the in-memory transport. This is test-only:
+# production registry resolution remains independent of the client crate.
+lodestone-client = { workspace = true }
+lodestone-core = { workspace = true }
+lodestone-data = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }

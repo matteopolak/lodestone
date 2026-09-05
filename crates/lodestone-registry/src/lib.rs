@@ -61,7 +61,7 @@ pub mod version_table;
 ///
 /// `protocols` deliberately **points at the family crate's own `PROTOCOLS`
 /// const** rather than restating the numbers here — the same reasoning
-/// [`ServerFamily::supports`] gives for delegating. A family's coverage has
+/// [`ServerFamily::protocols`] gives for borrowing. A family's coverage has
 /// one definition, which its `VersionAdapter::supports` also tests membership
 /// in, so this table cannot drift from the adapter it resolves to.
 #[derive(Clone, Copy)]
@@ -344,9 +344,10 @@ struct ServerFamily {
     /// Human-readable family label, e.g. `"v26-2"`. Same value as the matching
     /// [`Family::label`].
     label: &'static str,
-    /// Whether this host implements a given protocol number. A family may host
-    /// fewer revisions than its joining adapter supports.
-    supports: fn(i32) -> bool,
+    /// Every protocol revision this family can host. This is deliberately
+    /// separate from [`Family::protocols`]: a family can join revisions whose
+    /// server packet layouts are not implemented.
+    protocols: &'static [i32],
     /// Constructs a boxed server protocol for the negotiated protocol.
     make: fn(i32) -> Box<dyn lodestone_server::ServerProtocol>,
 }
@@ -356,6 +357,7 @@ impl std::fmt::Debug for ServerFamily {
         formatter
             .debug_struct("ServerFamily")
             .field("label", &self.label)
+            .field("protocols", &self.protocols)
             .finish_non_exhaustive()
     }
 }
@@ -369,19 +371,19 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
     #[cfg(feature = "v1-7")]
     ServerFamily {
         label: "v1-7",
-        supports: |protocol| protocol == lodestone_v1_7::PROTOCOL,
+        protocols: &[lodestone_v1_7::PROTOCOL],
         make: |_| Box::new(lodestone_v1_7::V5ServerProtocol),
     },
     #[cfg(feature = "v1-8")]
     ServerFamily {
         label: "v1-8",
-        supports: |protocol| protocol == lodestone_v1_8::PROTOCOL,
+        protocols: &[lodestone_v1_8::PROTOCOL],
         make: |_| Box::new(lodestone_v1_8::V47ServerProtocol),
     },
     #[cfg(feature = "v26-2")]
     ServerFamily {
         label: "v26-2",
-        supports: |protocol| lodestone_v26_2::adapter().supports(protocol),
+        protocols: &[lodestone_v26_2::PROTOCOL],
         make: |_| Box::new(lodestone_v26_2::V770ServerProtocol),
     },
     #[cfg(feature = "v1-9")]
@@ -390,12 +392,7 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
         // The host implementations have distinct packet-id tables. The
         // family adapter covers earlier revisions too, but their server packet
         // layouts have not been implemented.
-        supports: |protocol| {
-            protocol == lodestone_v1_9::PROTOCOL
-                || protocol == 110
-                || protocol == 210
-                || protocol == 316
-        },
+        protocols: &[110, 210, 316, lodestone_v1_9::PROTOCOL],
         make: |protocol| match protocol {
             110 => Box::new(lodestone_v1_9::V110ServerProtocol),
             210 => Box::new(lodestone_v1_9::V210ServerProtocol),
@@ -406,7 +403,7 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
     #[cfg(feature = "v1-13")]
     ServerFamily {
         label: "v1-13",
-        supports: |protocol| protocol == lodestone_v1_13::PROTOCOL,
+        protocols: &[lodestone_v1_13::PROTOCOL],
         make: |_| Box::new(lodestone_v1_13::V404ServerProtocol),
     },
     #[cfg(feature = "v1-14")]
@@ -414,11 +411,11 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
         label: "v1-14",
         // Hosting has separate implementations for all three packet layouts;
         // each selector owns its packet ids, join shape and chunk framing.
-        supports: |protocol| {
-            protocol == lodestone_v1_14::PROTOCOL_1_14_4
-                || protocol == lodestone_v1_14::PROTOCOL_1_15_2
-                || protocol == lodestone_v1_14::PROTOCOL_1_16_5
-        },
+        protocols: &[
+            lodestone_v1_14::PROTOCOL_1_14_4,
+            lodestone_v1_14::PROTOCOL_1_15_2,
+            lodestone_v1_14::PROTOCOL_1_16_5,
+        ],
         make: |protocol| match protocol {
             lodestone_v1_14::PROTOCOL_1_14_4 => Box::new(lodestone_v1_14::V498ServerProtocol),
             lodestone_v1_14::PROTOCOL_1_15_2 => Box::new(lodestone_v1_14::V578ServerProtocol),
@@ -429,10 +426,10 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
     #[cfg(feature = "v1-17")]
     ServerFamily {
         label: "v1-17",
-        supports: |protocol| {
-            protocol == lodestone_v1_17::PROTOCOL_1_17_1
-                || protocol == lodestone_v1_17::PROTOCOL_1_18_2
-        },
+        protocols: &[
+            lodestone_v1_17::PROTOCOL_1_17_1,
+            lodestone_v1_17::PROTOCOL_1_18_2,
+        ],
         make: |protocol| match protocol {
             lodestone_v1_17::PROTOCOL_1_17_1 => Box::new(lodestone_v1_17::V756ServerProtocol),
             lodestone_v1_17::PROTOCOL_1_18_2 => Box::new(lodestone_v1_17::V758ServerProtocol),
@@ -442,19 +439,19 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
     #[cfg(feature = "v1-19")]
     ServerFamily {
         label: "v1-19",
-        supports: |protocol| protocol == lodestone_v1_19::PROTOCOL_1_19_4,
+        protocols: &[lodestone_v1_19::PROTOCOL_1_19_4],
         make: |_| Box::new(lodestone_v1_19::V762ServerProtocol),
     },
     #[cfg(feature = "v1-20-6")]
     ServerFamily {
         label: "v1-20-6",
-        supports: |protocol| protocol == lodestone_v1_20_6::PROTOCOL,
+        protocols: &[lodestone_v1_20_6::PROTOCOL],
         make: |_| Box::new(lodestone_v1_20_6::V766ServerProtocol),
     },
     #[cfg(feature = "v1-21-11")]
     ServerFamily {
         label: "v1-21-11",
-        supports: |protocol| protocol == lodestone_v1_21_11::PROTOCOL,
+        protocols: &[lodestone_v1_21_11::PROTOCOL],
         make: |_| Box::new(lodestone_v1_21_11::V774ServerProtocol),
     },
 ];
@@ -479,8 +476,23 @@ pub fn server_protocol_for_protocol(
 ) -> Option<Box<dyn lodestone_server::ServerProtocol>> {
     SERVER_FAMILIES
         .iter()
-        .find(|family| (family.supports)(protocol))
+        .find(|family| family.protocols.contains(&protocol))
         .map(|family| (family.make)(protocol))
+}
+
+/// Returns every protocol number compiled into this build that can be hosted
+/// in-process.
+///
+/// This is the server-side counterpart to [`supported_protocols`]. Its values
+/// come directly from [`SERVER_FAMILIES`], so a diagnostics surface or
+/// acceptance test can enumerate the hostable rows without duplicating the
+/// distinction between joining coverage and hosting coverage.
+#[must_use]
+pub fn hosted_protocols() -> Vec<i32> {
+    SERVER_FAMILIES
+        .iter()
+        .flat_map(|family| family.protocols.iter().copied())
+        .collect()
 }
 
 /// Returns the label of every compiled-in family that can be served in-process
@@ -751,7 +763,7 @@ mod tests {
     /// This is the drift guard that makes [`Family::protocols`] safe to consult
     /// *instead of* constructing an adapter and asking it. Without it the
     /// registry would hold a second, independent protocol list — exactly the
-    /// duplication [`ServerFamily::supports`] delegates to avoid.
+    /// duplication [`ServerFamily::protocols`] avoids for hosting coverage.
     ///
     /// The negative half is load-bearing: a family must answer `false` for
     /// `protocol + 1`. A `supports` that returned `true` unconditionally would
