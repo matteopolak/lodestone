@@ -160,35 +160,6 @@ pub fn block_name(id: u32) -> Option<&'static str> {
     Some(block_name_at_alphabetical_index(block))
 }
 
-/// The interned identifier for the `minecraft:block` registry entry `id` (for
-/// example `minecraft:note_block`), or `None` if `id` is out of range.
-///
-/// This is the *block-type* registry (one id per block, 1,196 entries in
-/// 26.2), distinct from the block-*state* ids [`block_name`] indexes: packets
-/// such as `block_event` carry one registry id per block type rather than a
-/// palette state id, and so does a `minecraft:tool` rule's explicit block set.
-///
-/// # The two id spaces are not the same order
-///
-/// The block-state table does not carry a second copy of these names. Its first
-/// column remains an **alphabetical** index from the name-keyed blocks report;
-/// the lookup resolves it through
-/// [`crate::generated_block_enum::REGISTRY_IDS_BY_NAME`] into this
-/// registration-order canonical column. `minecraft:air` is registry id 0 but
-/// alphabetical index 19, and `minecraft:stone` is registry id 1 but
-/// alphabetical index 975, so the two orders cannot be used interchangeably.
-///
-/// [`block_name`] follows that same alphabetical index through the permutation,
-/// so it retains its public behavior without retaining duplicate names.
-///
-/// Zero-heap: returns a `&'static str` straight from rodata. O(1).
-#[must_use]
-pub fn block_type_name(id: u32) -> Option<&'static str> {
-    crate::generated_block_registry::BLOCK_REGISTRY_NAMES
-        .get(id as usize)
-        .copied()
-}
-
 /// The property values for `id` as a sorted slice of `(name, value)` pairs, or
 /// `None` if `id` is not in `0..`[`STATE_COUNT`]. An empty slice means the block
 /// has no properties.

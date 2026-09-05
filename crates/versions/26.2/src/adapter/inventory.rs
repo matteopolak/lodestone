@@ -2,6 +2,7 @@
 //! display, containers, merchant offers, advancements and stats. Split out
 //! of the former monolithic `adapter.rs`.
 use super::*;
+use lodestone_data::block::Block;
 // Not in `adapter::mod`'s own `lodestone_model` import list — added directly
 // here rather than widening that shared glob for one type this file alone
 // needs.
@@ -2701,12 +2702,14 @@ fn decode_award_stats(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
             Some(StatValueRegistry::CustomStat) => custom_stat_name(value_id),
             Some(StatValueRegistry::Item) => item_name(value_id),
             Some(StatValueRegistry::EntityType) => entity_type_name(value_id),
-            // `block_type_name` indexes the `minecraft:block` *registry* (one id
-            // per block type, registration order), which is what a `minecraft:mined`
-            // stat value is — not a palette state id. `block_name` would be the
-            // wrong table here and would resolve every id to an unrelated block.
+            // This is one registration-order block type, not a palette state.
+            // Decode the wire integer once into `Block`; using a state lookup
+            // here would resolve every id to an unrelated block.
             Some(StatValueRegistry::Block) => {
-                u32::try_from(value_id).ok().and_then(block_type_name)
+                u16::try_from(value_id)
+                    .ok()
+                    .and_then(Block::from_registry_id)
+                    .map(Block::name)
             }
             None => None,
         };

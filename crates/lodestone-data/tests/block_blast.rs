@@ -486,7 +486,10 @@ fn odds_use_only_vanillas_named_tiers() {
 fn dump_registry_order_matches_the_block_registry_table() {
     let rows = parse_dump(DUMP);
     for row in &rows {
-        let expected = lodestone_data::block_states::block_type_name(row.id as u32)
+        let id = u16::try_from(row.id)
+            .unwrap_or_else(|_| panic!("registry id {} does not fit u16", row.id));
+        let expected = Block::from_registry_id(id)
+            .map(Block::name)
             .unwrap_or_else(|| panic!("registry id {} out of range", row.id));
         assert_eq!(expected, row.name, "registry id {}", row.id);
     }

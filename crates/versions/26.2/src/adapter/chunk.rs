@@ -3,6 +3,7 @@
 //! out of the former monolithic `adapter.rs`.
 use super::*;
 use super::player::game_mode;
+use lodestone_data::block::Block;
 
 impl V770Adapter {
     /// Clientbound play-state packets in the chunk domain, split out of the
@@ -441,13 +442,15 @@ impl V770Adapter {
             reader.ensure_empty().map_err(dec_err)?;
             let block_id = u32::try_from(block_id)
                 .map_err(|_| AdapterError::Decode(format!("negative block id {block_id}")))?;
-            let name = block_type_name(block_id)
+            let block = u16::try_from(block_id)
+                .ok()
+                .and_then(Block::from_registry_id)
                 .ok_or_else(|| AdapterError::Decode(format!("unknown block id {block_id}")))?;
             return Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
                 pos: unpack_block_pos(packed),
                 b0,
                 b1,
-                block: parse_key(name, "block")?,
+                block: parse_key(block.name(), "block")?,
             })]);
         }
         if packet_id == play::clientbound::BLOCK_DESTRUCTION {
@@ -1441,4 +1444,3 @@ fn decode_waypoint(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         },
     })])
 }
-

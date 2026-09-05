@@ -51,7 +51,13 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use lodestone_data::{block_states::{self, StateId}, hardness, item::Item, tool};
+use lodestone_data::{
+    block::Block,
+    block_states::{self, StateId},
+    hardness,
+    item::Item,
+    tool,
+};
 use lodestone_model::{ItemStack, ItemTool, ToolBlocks, ToolMining, ToolPatch, ToolRule};
 
 fn manifest_dir() -> PathBuf {
@@ -862,15 +868,15 @@ fn block_registry_ids_match_the_dump() {
     // *not* the alphabetical order the block-state table is sorted in.
     assert_eq!(dump.blocks[0], "minecraft:air");
     for (id, name) in dump.blocks.iter().enumerate() {
-        let id = u32::try_from(id).expect("registry id fits u32");
+        let id = u16::try_from(id).expect("registry id fits u16");
         assert_eq!(
-            block_states::block_type_name(id),
+            Block::from_registry_id(id).map(Block::name),
             Some(name.as_str()),
             "block registry id {id} resolved to the wrong name"
         );
     }
     assert_eq!(
-        block_states::block_type_name(u32::try_from(dump.blocks.len()).expect("fits")),
+        Block::from_registry_id(u16::try_from(dump.blocks.len()).expect("fits")),
         None,
         "an out-of-range registry id must not resolve"
     );
@@ -1194,12 +1200,10 @@ fn registries_report_blocks() -> Option<Vec<String>> {
 /// The **registry-order** half of the census, re-derived from Mojang's own
 /// `generated/reports/registries.json` rather than from our JVM dump.
 ///
-/// This is the test that would have caught the original defect: `block_type_name`
-/// used to treat the *alphabetical* block index from name-keyed `blocks.json`
-/// as a `minecraft:block` registry id, so every id resolved to an unrelated
-/// block — `air` is registry 0 but alphabetical 19, `stone` is registry 1 but
-/// alphabetical 975. Nothing in the tree disagreed, because the one consumer
-/// (`block_event`) was tested with an alphabetical id too.
+/// This test distinguishes registration order from the alphabetical block order
+/// in name-keyed `blocks.json`: `air` is registry 0 but alphabetical 19, and
+/// `stone` is registry 1 but alphabetical 975. A lookup that uses the latter
+/// as a registry id resolves every id to an unrelated block.
 ///
 /// Skipped (not failed) when the cache is absent, as its sibling report test is;
 /// the committed dump remains the anchor either way.
@@ -1216,9 +1220,9 @@ fn block_registry_order_agrees_with_mojangs_registries_report() {
     );
     assert_eq!(names[0], "minecraft:air", "registration order starts at air");
     for (id, name) in names.iter().enumerate() {
-        let id = u32::try_from(id).expect("registry id fits u32");
+        let id = u16::try_from(id).expect("registry id fits u16");
         assert_eq!(
-            block_states::block_type_name(id),
+            Block::from_registry_id(id).map(Block::name),
             Some(name.as_str()),
             "registry id {id} resolves to the wrong block name"
         );

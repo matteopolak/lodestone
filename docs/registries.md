@@ -97,6 +97,12 @@ etc.): a `u32` where a value below the built-in count is a registry id and at or
 indexes an opaque host-owned interner, so an application with no plugins links zero bytes of
 interner code.
 
+At a built-in block-registry boundary, convert the decoded non-negative integer to `u16` and
+call `Block::from_registry_id`; only call `Block::name` after that validation succeeds. Do not
+replace this with a raw id-to-string helper: it loses the distinction between a block type and a
+state. A custom or data-pack key stays as its parsed identifier in the owning dynamic registry;
+it is not coerced into `Block` merely because its path resembles a built-in name.
+
 **`Block` and `StateId` are two different id spaces and conflating them is the mistake that
 surfaces late.** `Block` has 1,196 values in **registration** order (wire use: `Holder<Block>`
 in `block_event`, tool rules); `StateId` has 32,366 values in **name-sorted** order (wire use:
