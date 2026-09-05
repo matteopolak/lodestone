@@ -25,7 +25,8 @@ pub const ISOLATED_PLUGIN_DESCRIPTOR_CLASS: &str = "lodestone.bridge.IsolatedPlu
 /// Binary name of the one callback interface accepted by the isolated event seam.
 ///
 /// This is neither a Bukkit listener nor a general event base type. It observes
-/// only a host-confirmed resident block-state replacement.
+/// only a host-confirmed resident block-state replacement, with an optional
+/// value-only player handle available during that callback.
 pub const ISOLATED_RESIDENT_BLOCK_CHANGE_LISTENER_CLASS: &str =
     "lodestone.bridge.ResidentBlockChangeListener";
 
@@ -56,7 +57,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 9] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 11] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -91,6 +92,14 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 9] = [
     },
     NativeMethodSpec {
         name: "blockHandlePosition",
+        descriptor: "(J)Ljava/lang/String;",
+    },
+    NativeMethodSpec {
+        name: "currentPlayerHandle",
+        descriptor: "()J",
+    },
+    NativeMethodSpec {
+        name: "playerHandleName",
         descriptor: "(J)Ljava/lang/String;",
     },
 ];
@@ -130,7 +139,7 @@ pub enum NativeRegistrationStep {
     Register(NativeMethodSpec),
 }
 
-const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 18] = [
+const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 22] = [
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[2]),
@@ -140,6 +149,8 @@ const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 18] = [
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[6]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[7]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[8]),
+    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[9]),
+    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[10]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[2]),
@@ -149,6 +160,8 @@ const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 18] = [
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[6]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[7]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[8]),
+    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[9]),
+    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[10]),
 ];
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -339,10 +352,18 @@ fn method_id(
         ),
         ("currentBlockHandle", "()J") => {
             env.get_static_method_id(class, jni_str!("currentBlockHandle"), jni_sig!("()J"))
-        }
+        },
         ("blockHandlePosition", "(J)Ljava/lang/String;") => env.get_static_method_id(
             class,
             jni_str!("blockHandlePosition"),
+            jni_sig!("(J)Ljava/lang/String;"),
+        ),
+        ("currentPlayerHandle", "()J") => {
+            env.get_static_method_id(class, jni_str!("currentPlayerHandle"), jni_sig!("()J"))
+        },
+        ("playerHandleName", "(J)Ljava/lang/String;") => env.get_static_method_id(
+            class,
+            jni_str!("playerHandleName"),
             jni_sig!("(J)Ljava/lang/String;"),
         ),
         _ => unreachable!("the isolated native surface has only generated method specs"),
@@ -407,6 +428,20 @@ fn register_method(
                 method.descriptor,
             )
         }
+        ("currentPlayerHandle", "()J") => adapter::register_current_player_handle_query(
+            env,
+            class,
+            method.name,
+            method.descriptor,
+        ),
+        ("playerHandleName", "(J)Ljava/lang/String;") => {
+            adapter::register_player_handle_name_query(
+                env,
+                class,
+                method.name,
+                method.descriptor,
+            )
+        },
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -571,6 +606,14 @@ mod tests {
                     name: "blockHandlePosition",
                     descriptor: "(J)Ljava/lang/String;",
                 },
+                NativeMethodSpec {
+                    name: "currentPlayerHandle",
+                    descriptor: "()J",
+                },
+                NativeMethodSpec {
+                    name: "playerHandleName",
+                    descriptor: "(J)Ljava/lang/String;",
+                },
             ],
         );
         let block_state = isolated_shim_methods()[0];
@@ -592,6 +635,8 @@ mod tests {
                 NativeRegistrationStep::Validate(block_change_subscription),
                 NativeRegistrationStep::Validate(isolated_shim_methods()[7]),
                 NativeRegistrationStep::Validate(isolated_shim_methods()[8]),
+                NativeRegistrationStep::Validate(isolated_shim_methods()[9]),
+                NativeRegistrationStep::Validate(isolated_shim_methods()[10]),
                 NativeRegistrationStep::Register(block_state),
                 NativeRegistrationStep::Register(server_tick),
                 NativeRegistrationStep::Register(block_write),
@@ -601,6 +646,8 @@ mod tests {
                 NativeRegistrationStep::Register(block_change_subscription),
                 NativeRegistrationStep::Register(isolated_shim_methods()[7]),
                 NativeRegistrationStep::Register(isolated_shim_methods()[8]),
+                NativeRegistrationStep::Register(isolated_shim_methods()[9]),
+                NativeRegistrationStep::Register(isolated_shim_methods()[10]),
             ],
             "a registration must never precede declaration validation",
         );
@@ -687,7 +734,9 @@ mod tests {
              public static native IsolatedPluginDescriptor currentPluginDescriptor(); \
              public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
              public static native long currentBlockHandle(); \
-             public static native String blockHandlePosition(long handle); }",
+             public static native String blockHandlePosition(long handle); \
+             public static native long currentPlayerHandle(); \
+             public static native String playerHandleName(long handle); }",
         )
         .expect("shim source");
         let descriptor_source = source_root.join("IsolatedPluginDescriptor.java");
@@ -765,7 +814,9 @@ mod tests {
              public static native IsolatedPluginDescriptor currentPluginDescriptor(); \
              public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
              public static native long currentBlockHandle(); \
-             public static native String blockHandlePosition(long handle); }",
+             public static native String blockHandlePosition(long handle); \
+             public static native long currentPlayerHandle(); \
+             public static native String playerHandleName(long handle); }",
         )
         .expect("shim source");
         let descriptor_source = shim_source_root.join("IsolatedPluginDescriptor.java");

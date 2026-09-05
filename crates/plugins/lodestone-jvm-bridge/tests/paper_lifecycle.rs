@@ -57,7 +57,9 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native IsolatedPluginDescriptor currentPluginDescriptor(); \
          public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
          public static native long currentBlockHandle(); \
-         public static native String blockHandlePosition(long handle); }",
+         public static native String blockHandlePosition(long handle); \
+         public static native long currentPlayerHandle(); \
+         public static native String playerHandleName(long handle); }",
     )
     .expect("shim source");
     let descriptor_source = shim_package.join("IsolatedPluginDescriptor.java");

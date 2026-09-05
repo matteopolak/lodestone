@@ -924,18 +924,23 @@ Three details that are decisions rather than implementation:
 `ObjectRegistry` is generic over a host-owned, value-like payload and carries the expected
 `ObjectKind` (`World`, `Player`, `Block`, and the remaining object categories) beside each opaque
 reference. `try_handle_for` is the fallible path used at native boundaries, so a full registry is
-reported rather than growing or returning a default. The first production callback consumer is the
-resident block-change listener described in §4.5: it exposes block handles only during the callback
-and invalidates them on entry failure, disable, or worker cleanup. World and player handles have the
-generation machinery but still need live server registries and producer callbacks.
+reported rather than growing or returning a default. The resident block-change listener described
+in §4.5 is the first callback consumer: the same worker-local registry now carries both its block
+handle and an optional value-only `PlayerIdentity` supplied by the host. A listener obtains the
+player through `currentPlayerHandle()` only while that callback is active and can resolve its
+name through `playerHandleName(long)`; both operations return an opaque generation-checked value,
+never an ECS or connection pointer. Handles are scoped to the retained entry that observed the
+callback, so disabling that entry releases its block and player payloads together. The worker-wide
+handle bound is shared by both kinds, and worker teardown clears the registry. A live player
+registry/disconnect producer and the remaining world/object resolvers are still Paper gates.
 
 Hermetic registry tests force slot reuse after release, exercise kind mismatch and capacity
 exhaustion, and verify that `clear` advances every live generation before reuse. The adapter's
-worker-local callback test also obtains a block handle, checks that it is available only while the
-listener is running, releases the owner, and proves the old bits resolve as stale. The ignored JVM
-fixtures validate the declaration and callback ABI separately; they do not claim complete Paper
-object compatibility. A typed world/player resolver still waits on corresponding live registries
-and producer callbacks.
+worker-local callback tests obtain both block and player handles, check that the player is available
+only while the listener is running, release the retained entry, and prove the old bits resolve as
+stale. The ignored JVM fixtures validate the declaration and callback ABI separately; they do not
+claim complete Paper object compatibility. A live player registry/disconnect producer and typed
+world resolver still wait on corresponding server capabilities.
 
 The same composed caller exercises recursive Java-to-Rust-to-Java callbacks below and above the
 budget. Depth `2` returns `REENTRANT:OK:3`; depth `4` attempts one more callback and receives
@@ -973,9 +978,10 @@ counter while unwinding, so the over-limit control cannot poison later callbacks
 - `lodestone_jvm_bridge::callback::DEFAULT_CALLBACK_DEPTH_LIMIT` — the maximum nested
   Java/Rust callback depth before the boundary reports an error; a host may use
   `CallbackDepthGuard::enter_with_limit` when its policy needs a different bound.
-- `lodestone_jvm_bridge::adapter::MAX_RESIDENT_BLOCK_HANDLES` — the worker-wide bound for opaque
-  block handles retained by resident block-change listeners. World and player handle producers are
-  not configured yet; they remain gated on live registries and lifecycle callbacks.
+- `lodestone_jvm_bridge::adapter::MAX_RESIDENT_OBJECT_HANDLES` — the worker-wide bound for opaque
+  block and player handles retained by resident block-change listeners. The old
+  `MAX_RESIDENT_BLOCK_HANDLES` name remains as a compatibility alias. A live player registry and
+  disconnect producer are not configured yet; they remain a Paper gate.
 - `lodestone_jni_invocation_spike::REQUEST_DEADLINE` — the prototype's 150 ms deadline, chosen to
   make the silent servicer control fast while the runner's outer 15-second timeout remains an
   independent hang gate.

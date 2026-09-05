@@ -4,8 +4,10 @@
 //! discovery mechanism. The supplied class declares `static void onTick(long)`,
 //! `static void onBlockStateChanged(int, int, int, int)`, and `static native
 //! int blockStateId(int, int, int)`. Native requests cross the world port; the
-//! worker never receives world state. A host must service the port and poll
-//! completion, and must not dispatch another callback until idle.
+//! worker never receives world state. The resident block-change listener may
+//! also receive a value-only player identity as an opaque handle for the
+//! duration of its callback. A host must service the port and poll completion,
+//! and must not dispatch another callback until idle.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -21,7 +23,8 @@ use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
 
 use crate::runtime::{JvmConfig, JvmRuntime};
 use crate::{
-    CallbackDepthGuard, ObjectKind, ObjectRef, ObjectRegistry, PortServicer, WorldPort, channel,
+    CallbackDepthGuard, ObjectKind, ObjectRef, ObjectRegistry, PortServicer, ResolveError,
+    WorldPort, channel,
 };
 
 /// A block query in the host's primary world, in absolute block coordinates.
@@ -47,6 +50,44 @@ pub struct BlockStateWrite {
     pub y: i32,
     pub z: i32,
     pub state_id: u32,
+}
+
+/// The value-only identity of the player associated with one host-confirmed
+/// callback.
+///
+/// This is deliberately not an ECS entity, connection, or borrowed server
+/// object. The host supplies the stable profile bytes and display name, and
+/// the adapter turns that value into an opaque, generation-checked handle for
+/// the listener callback. A reconnect can therefore supply a new identity
+/// without making an old Java `long` point at the replacement player.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PlayerIdentity {
+    uuid: [u8; 16],
+    name: String,
+}
+
+impl PlayerIdentity {
+    /// Creates a player identity from its stable profile bytes and name.
+    #[must_use]
+    pub fn new(uuid: [u8; 16], name: impl Into<String>) -> Self {
+        Self {
+            uuid,
+            name: name.into(),
+        }
+    }
+
+    /// The stable profile bytes used to distinguish reconnects and players
+    /// with the same display name.
+    #[must_use]
+    pub const fn uuid(&self) -> [u8; 16] {
+        self.uuid
+    }
+
+    /// The host-authored display name exposed by the narrow fixture query.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// A failed write must not be reported as a successful no-op.
@@ -89,10 +130,11 @@ thread_local! {
     static CALLBACK_PORT: RefCell<Option<BlockPort>> = const { RefCell::new(None) };
     static BLOCK_WRITE_PORT: RefCell<Option<BlockWritePort>> = const { RefCell::new(None) };
     static SERVER_TICK_PORT: RefCell<Option<TickPort>> = const { RefCell::new(None) };
-    static RESIDENT_BLOCK_HANDLES: RefCell<Option<ObjectRegistry<(LifecycleIdentity, (i32, i32, i32))>>> = const {
+    static RESIDENT_OBJECT_HANDLES: RefCell<Option<ObjectRegistry<ResidentObject>>> = const {
         RefCell::new(None)
     };
     static CURRENT_RESIDENT_BLOCK_HANDLE: RefCell<Option<ObjectRef>> = const { RefCell::new(None) };
+    static CURRENT_RESIDENT_PLAYER_HANDLE: RefCell<Option<ObjectRef>> = const { RefCell::new(None) };
     static LIFECYCLE_IDENTITY: RefCell<Vec<LifecycleIdentity>> = const {
         RefCell::new(Vec::new())
     };
@@ -136,12 +178,27 @@ pub struct ResidentBlockChangeListenerFailure {
 /// process-lifetime collection without limit.
 const MAX_RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS: usize = 64;
 
-/// Maximum number of live block references retained by one adapter worker.
+/// Maximum number of live object references retained by one adapter worker.
 ///
-/// References are worker-local values, so this bound covers all retained
-/// plugin entries on that worker. Releasing an entry's references returns the
-/// slots to the same generation-safe registry for reuse.
-pub const MAX_RESIDENT_BLOCK_HANDLES: usize = 1024;
+/// References are worker-local values, so this bound covers all retained block
+/// and player entries on that worker. Releasing an entry's references returns
+/// the slots to the same generation-safe registry for reuse.
+pub const MAX_RESIDENT_OBJECT_HANDLES: usize = 1024;
+
+/// Compatibility name for the original block-handle budget.
+pub const MAX_RESIDENT_BLOCK_HANDLES: usize = MAX_RESIDENT_OBJECT_HANDLES;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ResidentObject {
+    Block {
+        owner: LifecycleIdentity,
+        position: (i32, i32, i32),
+    },
+    Player {
+        owner: LifecycleIdentity,
+        player: PlayerIdentity,
+    },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ResidentBlockChangeRegistration {
@@ -258,6 +315,25 @@ impl Drop for ResidentBlockHandleGuard {
     }
 }
 
+/// Restores the previous callback player when a listener returns, including
+/// when it recursively calls back into Java.
+struct ResidentPlayerHandleGuard(Option<ObjectRef>);
+
+impl ResidentPlayerHandleGuard {
+    fn enter(handle: Option<ObjectRef>) -> Self {
+        let previous = CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| slot.replace(handle));
+        Self(previous)
+    }
+}
+
+impl Drop for ResidentPlayerHandleGuard {
+    fn drop(&mut self) {
+        CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+
 fn current_resident_block_handle() -> Result<ObjectRef, AdapterError> {
     CURRENT_RESIDENT_BLOCK_HANDLE
         .with(|slot| *slot.borrow())
@@ -268,11 +344,21 @@ fn current_resident_block_handle() -> Result<ObjectRef, AdapterError> {
         })
 }
 
+fn current_resident_player_handle() -> Result<ObjectRef, AdapterError> {
+    CURRENT_RESIDENT_PLAYER_HANDLE
+        .with(|slot| *slot.borrow())
+        .ok_or_else(|| {
+            AdapterError::new(
+                "currentPlayerHandle requires an active resident block-change callback with a player",
+            )
+        })
+}
+
 fn resident_block_handle(
     identity: &LifecycleIdentity,
     change: BlockStateWrite,
 ) -> Result<ObjectRef, AdapterError> {
-    RESIDENT_BLOCK_HANDLES.with(|slot| {
+    RESIDENT_OBJECT_HANDLES.with(|slot| {
         let mut handles = slot.borrow_mut();
         let handles = handles.as_mut().ok_or_else(|| {
             AdapterError::new("block reference registry requires the adapter worker thread")
@@ -280,7 +366,31 @@ fn resident_block_handle(
         handles
             .try_handle_for(
                 ObjectKind::Block,
-                (identity.clone(), (change.x, change.y, change.z)),
+                ResidentObject::Block {
+                    owner: identity.clone(),
+                    position: (change.x, change.y, change.z),
+                },
+            )
+            .map_err(|error| AdapterError::new(error.to_string()))
+    })
+}
+
+fn resident_player_handle(
+    identity: &LifecycleIdentity,
+    player: &PlayerIdentity,
+) -> Result<ObjectRef, AdapterError> {
+    RESIDENT_OBJECT_HANDLES.with(|slot| {
+        let mut handles = slot.borrow_mut();
+        let handles = handles.as_mut().ok_or_else(|| {
+            AdapterError::new("player reference registry requires the adapter worker thread")
+        })?;
+        handles
+            .try_handle_for(
+                ObjectKind::Player,
+                ResidentObject::Player {
+                    owner: identity.clone(),
+                    player: player.clone(),
+                },
             )
             .map_err(|error| AdapterError::new(error.to_string()))
     })
@@ -290,30 +400,63 @@ fn resolve_resident_block_handle(
     bits: i64,
 ) -> Result<(i32, i32, i32), AdapterError> {
     let handle = ObjectRef::from_bits(bits, ObjectKind::Block);
-    RESIDENT_BLOCK_HANDLES.with(|slot| {
+    RESIDENT_OBJECT_HANDLES.with(|slot| {
         let handles = slot.borrow();
         let handles = handles.as_ref().ok_or_else(|| {
             AdapterError::new("blockHandlePosition requires the adapter worker thread")
         })?;
         handles
             .resolve(handle, ObjectKind::Block)
-            .map(|(_, position)| *position)
+            .and_then(|object| match object {
+                ResidentObject::Block { position, .. } => Ok(*position),
+                ResidentObject::Player { .. } => Err(ResolveError::KindMismatch {
+                    expected: ObjectKind::Block,
+                    actual: ObjectKind::Player,
+                }),
+            })
             .map_err(|error| AdapterError::new(format!("blockHandlePosition: {error}")))
     })
 }
 
-fn release_resident_block_handles(identity: &LifecycleIdentity) -> usize {
-    RESIDENT_BLOCK_HANDLES.with(|slot| {
+fn resolve_resident_player_handle(bits: i64) -> Result<String, AdapterError> {
+    let handle = ObjectRef::from_bits(bits, ObjectKind::Player);
+    RESIDENT_OBJECT_HANDLES.with(|slot| {
+        let handles = slot.borrow();
+        let handles = handles.as_ref().ok_or_else(|| {
+            AdapterError::new("playerHandleName requires the adapter worker thread")
+        })?;
+        handles
+            .resolve(handle, ObjectKind::Player)
+            .and_then(|object| match object {
+                ResidentObject::Player { player, .. } => Ok(player.name().to_owned()),
+                ResidentObject::Block { .. } => Err(ResolveError::KindMismatch {
+                    expected: ObjectKind::Player,
+                    actual: ObjectKind::Block,
+                }),
+            })
+            .map_err(|error| AdapterError::new(format!("playerHandleName: {error}")))
+    })
+}
+
+fn release_resident_handles(identity: &LifecycleIdentity) -> usize {
+    RESIDENT_OBJECT_HANDLES.with(|slot| {
         slot.borrow_mut().as_mut().map_or(0, |handles| {
             handles.release_matching(|kind, payload| {
-                kind == ObjectKind::Block && &payload.0 == identity
+                match payload {
+                    ResidentObject::Block { owner, .. } => {
+                        kind == ObjectKind::Block && owner == identity
+                    }
+                    ResidentObject::Player { owner, .. } => {
+                        kind == ObjectKind::Player && owner == identity
+                    }
+                }
             })
         })
     })
 }
 
-fn clear_resident_block_handles() -> usize {
-    RESIDENT_BLOCK_HANDLES.with(|slot| {
+fn clear_resident_handles() -> usize {
+    RESIDENT_OBJECT_HANDLES.with(|slot| {
         slot.borrow_mut().as_mut().map_or(0, |handles| handles.clear())
     })
 }
@@ -359,10 +502,13 @@ pub(crate) fn with_lifecycle_identity<T>(
 /// The single command channel and [`State::Running`] permit only one of these
 /// at a time. A block-change callback therefore cannot be dispatched while a
 /// native read or write callback is waiting for the host.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AdapterCommand {
     Tick(u64),
-    BlockStateChanged(BlockStateWrite),
+    BlockStateChanged {
+        change: BlockStateWrite,
+        player: Option<PlayerIdentity>,
+    },
 }
 
 /// A completed worker transition. Payload-bearing events preserve the host's
@@ -376,6 +522,9 @@ pub enum AdapterEvent {
     /// of making the adapter terminal.
     BlockStateChangedCompleted {
         change: BlockStateWrite,
+        /// The value-only player identity supplied for this change, if any.
+        /// The listener sees it only through the worker-owned player handle.
+        player: Option<PlayerIdentity>,
         listener_failures: Vec<ResidentBlockChangeListenerFailure>,
     },
 }
@@ -511,17 +660,37 @@ impl AdapterHost {
     /// This is a narrow bridge callback, not a Bukkit or Paper event. It calls
     /// the explicit adapter method `onBlockStateChanged(int, int, int, int)`;
     /// no listener registry, cancellation, plugin instance, or Paper event
-    /// type exists yet.
+    /// type exists yet. Use [`Self::dispatch_block_state_changed_for_player`]
+    /// when the host has a value-only player identity for the change.
     pub fn dispatch_block_state_changed(
         &mut self,
         change: BlockStateWrite,
+    ) -> Result<(), AdapterError> {
+        self.dispatch_block_state_changed_for_player(change, None)
+    }
+
+    /// Queues one host-confirmed resident block-state change with its value-only
+    /// player identity, if a player caused the change.
+    ///
+    /// The existing listener callback remains the boundary: a listener calls
+    /// `currentPlayerHandle()` while it runs, and may retain the returned bits
+    /// for later `playerHandleName(long)` resolution. The identity is copied
+    /// into the worker-owned generational registry; no ECS entity or server
+    /// pointer is sent to Java.
+    pub fn dispatch_block_state_changed_for_player(
+        &mut self,
+        change: BlockStateWrite,
+        player: Option<PlayerIdentity>,
     ) -> Result<(), AdapterError> {
         if i32::try_from(change.state_id).is_err() {
             return Err(AdapterError::new(
                 "block-state callback state id exceeds Java int range",
             ));
         }
-        self.dispatch_command(AdapterCommand::BlockStateChanged(change), "block-state callback")
+        self.dispatch_command(
+            AdapterCommand::BlockStateChanged { change, player },
+            "block-state callback",
+        )
     }
 
     fn dispatch_command(
@@ -532,7 +701,7 @@ impl AdapterHost {
         if !self.is_idle() {
             return Err(AdapterError::new("adapter is not idle; poll its pending operation"));
         }
-        self.commands.try_send(command)
+        self.commands.try_send(command.clone())
             .map_err(|error| AdapterError::new(format!("adapter {operation} dispatch: {error}")))?;
         self.state = State::Running { command, started: Instant::now() };
         Ok(())
@@ -591,8 +760,8 @@ impl AdapterHost {
         if let State::Failed(error) = &self.state {
             return Err(error.clone());
         }
-        let started = match self.state {
-            State::Loading(started) | State::Running { started, .. } => Some(started),
+        let started = match &self.state {
+            State::Loading(started) | State::Running { started, .. } => Some(*started),
             _ => None,
         };
         if started.is_some_and(|started| started.elapsed() >= self.deadline) {
@@ -611,11 +780,18 @@ impl AdapterHost {
                 }
                 (
                     State::Running {
-                        command: AdapterCommand::BlockStateChanged(expected),
+                        command: AdapterCommand::BlockStateChanged {
+                            change: expected,
+                            player,
+                        },
                         ..
                     },
-                    AdapterEvent::BlockStateChangedCompleted { change, .. },
-                ) if *expected == *change => {
+                    AdapterEvent::BlockStateChangedCompleted {
+                        change,
+                        player: completed_player,
+                        ..
+                    },
+                ) if *expected == *change && player.as_ref() == completed_player.as_ref() => {
                     Ok(Some(event))
                 }
                 _ => Err(AdapterError::new("adapter worker returned an unexpected completion")),
@@ -685,12 +861,13 @@ fn run_java<S>(
             CALLBACK_PORT.with(|slot| *slot.borrow_mut() = Some(port.clone()));
             BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = Some(block_write_port.clone()));
             SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = Some(server_tick_port.clone()));
-            RESIDENT_BLOCK_HANDLES.with(|slot| {
+            RESIDENT_OBJECT_HANDLES.with(|slot| {
                 *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(
-                    MAX_RESIDENT_BLOCK_HANDLES,
+                    MAX_RESIDENT_OBJECT_HANDLES,
                 ))
             });
             CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
+            CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
             RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS
                 .with(|slot| *slot.borrow_mut() = Some(Default::default()));
             let surface = NativeServerSurface::from_ports(
@@ -731,7 +908,7 @@ fn run_java<S>(
                         })?;
                         AdapterEvent::TickCompleted(tick)
                     }
-                    AdapterCommand::BlockStateChanged(change) => {
+                    AdapterCommand::BlockStateChanged { change, player } => {
                         let state_id = i32::try_from(change.state_id).map_err(|_| {
                             AdapterError::new("block-state callback state id exceeds Java int range")
                         })?;
@@ -754,9 +931,11 @@ fn run_java<S>(
                                 error,
                                 ))
                         })?;
-                        let listener_failures = dispatch_resident_block_change(env, change);
+                        let listener_failures =
+                            dispatch_resident_block_change(env, change, player.as_ref());
                         AdapterEvent::BlockStateChangedCompleted {
                             change,
+                            player,
                             listener_failures,
                         }
                     }
@@ -768,8 +947,9 @@ fn run_java<S>(
             drop(setup_state);
             Ok(())
         })();
-        clear_resident_block_handles();
+        clear_resident_handles();
         CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
+        CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
         CALLBACK_PORT.with(|slot| *slot.borrow_mut() = None);
         BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = None);
         SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = None);
@@ -985,6 +1165,50 @@ pub(crate) fn register_block_handle_position_query(
     }
 }
 
+#[allow(unsafe_code)]
+pub(crate) fn register_current_player_handle_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts no arguments and returns a
+    // jlong. The callback returns only an opaque generation-checked handle;
+    // it never publishes a player pointer or an ECS value.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_current_player_handle as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
+pub(crate) fn register_player_handle_name_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts one jlong and returns a
+    // Java string. Resolution copies the value-only player name from the
+    // worker-local registry, never a pointer into the server ECS.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_player_handle_name as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
 extern "system" fn native_block_state_id<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -1105,6 +1329,34 @@ extern "system" fn native_block_handle_position<'local>(
     .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+extern "system" fn native_current_player_handle<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        Ok::<_, AdapterError>(current_resident_player_handle()?.to_bits())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_name<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jstring {
+    env.with_env(|env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        let name = resolve_resident_player_handle(bits)?;
+        env.new_string(name)
+            .map(|value| value.into_raw())
+            .map_err(|error| AdapterError::new(format!("playerHandleName: {error}")))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 fn subscribe_resident_block_changes(
     env: &mut Env<'_>,
     listener: JObject<'_>,
@@ -1169,7 +1421,7 @@ pub(crate) fn clear_resident_block_change_subscriptions(
     main_class: &str,
 ) -> usize {
     let identity = lifecycle_identity(name, version, main_class);
-    release_resident_block_handles(&identity);
+    release_resident_handles(&identity);
     RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS.with(|slot| {
         slot.borrow_mut()
             .as_mut()
@@ -1180,6 +1432,7 @@ pub(crate) fn clear_resident_block_change_subscriptions(
 fn dispatch_resident_block_change(
     env: &mut Env<'_>,
     change: BlockStateWrite,
+    player: Option<&PlayerIdentity>,
 ) -> Vec<ResidentBlockChangeListenerFailure> {
     let state_id = i32::try_from(change.state_id)
         .expect("block-state callback range was checked before worker dispatch");
@@ -1204,7 +1457,21 @@ fn dispatch_resident_block_change(
                             None
                         }
                     };
-                    listeners.push((registration, identity.clone(), listener, handle));
+                    let player_handle = match player {
+                        Some(player) => match resident_player_handle(identity, player) {
+                            Ok(handle) => Some(handle),
+                            Err(error) => {
+                                failures.push(ResidentBlockChangeListenerFailure {
+                                    registration,
+                                    plugin_name: identity.name.clone(),
+                                    detail: error.to_string(),
+                                });
+                                None
+                            }
+                        },
+                        None => None,
+                    };
+                    listeners.push((registration, identity.clone(), listener, handle, player_handle));
                 }
                 Err(error) => failures.push(ResidentBlockChangeListenerFailure {
                     registration,
@@ -1217,16 +1484,21 @@ fn dispatch_resident_block_change(
         }
     });
     failures.extend(dispatch_isolated_listeners(
-        listeners.into_iter().map(|(registration, identity, listener, handle)| {
-            (registration, identity.name.clone(), (identity, listener, handle))
+        listeners.into_iter().map(|(registration, identity, listener, handle, player_handle)| {
+            (
+                registration,
+                identity.name.clone(),
+                (identity, listener, handle, player_handle),
+            )
         }),
-        |(identity, listener, handle)| {
+        |(identity, listener, handle, player_handle)| {
             with_lifecycle_identity(
                 &identity.name,
                 &identity.version,
                 &identity.main_class,
                 || {
                     let _block_handle = ResidentBlockHandleGuard::enter(*handle);
+                    let _player_handle = ResidentPlayerHandleGuard::enter(*player_handle);
                     let result = env.with_local_frame(16, |env| {
                         env.call_method(
                             listener,
@@ -1444,9 +1716,16 @@ mod tests {
             assert_ne!(std::thread::current().id(), host_thread);
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             let command = commands.recv().expect("one host callback");
-            assert_eq!(command, AdapterCommand::BlockStateChanged(expected));
+            assert_eq!(
+                command,
+                AdapterCommand::BlockStateChanged {
+                    change: expected,
+                    player: None,
+                },
+            );
             events.send(Ok(AdapterEvent::BlockStateChangedCompleted {
                 change: expected,
+                player: None,
                 listener_failures: Vec::new(),
             })).unwrap();
         }).unwrap();
@@ -1457,6 +1736,7 @@ mod tests {
             await_event(&mut host),
             AdapterEvent::BlockStateChangedCompleted {
                 change: expected,
+                player: None,
                 listener_failures: Vec::new(),
             },
         );
@@ -1466,6 +1746,50 @@ mod tests {
             .dispatch_block_state_changed(oversized)
             .expect_err("the Java callback cannot represent this native state id");
         assert!(error.to_string().contains("Java int range"), "{error}");
+    }
+
+    #[test]
+    fn player_block_change_dispatch_preserves_the_value_identity() {
+        let player = PlayerIdentity::new([9; 16], "Alice");
+        let expected = BlockStateWrite {
+            x: 2,
+            y: 64,
+            z: -4,
+            state_id: 17,
+        };
+        let player_for_worker = player.clone();
+        let mut host = AdapterHost::spawn(
+            Duration::from_secs(2),
+            move |commands, events, _, _, _| {
+                events.send(Ok(AdapterEvent::Ready)).unwrap();
+                assert_eq!(
+                    commands.recv().expect("one player callback"),
+                    AdapterCommand::BlockStateChanged {
+                        change: expected,
+                        player: Some(player_for_worker.clone()),
+                    },
+                );
+                events
+                    .send(Ok(AdapterEvent::BlockStateChangedCompleted {
+                        change: expected,
+                        player: Some(player_for_worker),
+                        listener_failures: Vec::new(),
+                    }))
+                    .unwrap();
+            },
+        )
+        .unwrap();
+        assert_eq!(await_event(&mut host), AdapterEvent::Ready);
+        host.dispatch_block_state_changed_for_player(expected, Some(player.clone()))
+            .expect("player identity fits the callback");
+        assert_eq!(
+            await_event(&mut host),
+            AdapterEvent::BlockStateChangedCompleted {
+                change: expected,
+                player: Some(player),
+                listener_failures: Vec::new(),
+            },
+        );
     }
 
     #[test]
@@ -1646,10 +1970,11 @@ mod tests {
             z: 4,
             state_id: 1234,
         };
-        RESIDENT_BLOCK_HANDLES.with(|slot| {
+        RESIDENT_OBJECT_HANDLES.with(|slot| {
             *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(2));
         });
         CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
+        CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
 
         let first = resident_block_handle(&identity, change).expect("first block handle");
         let other = resident_block_handle(
@@ -1659,12 +1984,18 @@ mod tests {
         .expect("other owner's block handle");
         assert_eq!(first.kind(), ObjectKind::Block);
         assert_eq!(
-            RESIDENT_BLOCK_HANDLES.with(|slot| {
+            RESIDENT_OBJECT_HANDLES.with(|slot| {
                 slot.borrow()
                     .as_ref()
                     .expect("registry")
                     .resolve(first, ObjectKind::Block)
-                    .map(|(_, position)| *position)
+                    .and_then(|object| match object {
+                        ResidentObject::Block { position, .. } => Ok(*position),
+                        ResidentObject::Player { .. } => Err(ResolveError::KindMismatch {
+                            expected: ObjectKind::Block,
+                            actual: ObjectKind::Player,
+                        }),
+                    })
             }),
             Ok((11, 1, 4)),
         );
@@ -1689,7 +2020,7 @@ mod tests {
             (11, 1, 4),
         );
 
-        assert_eq!(release_resident_block_handles(&identity), 1);
+        assert_eq!(release_resident_handles(&identity), 1);
         assert_eq!(
             resolve_resident_block_handle(first.to_bits()),
             Err(AdapterError::new(
@@ -1697,7 +2028,7 @@ mod tests {
             )),
         );
         assert_eq!(
-            RESIDENT_BLOCK_HANDLES.with(|slot| {
+            RESIDENT_OBJECT_HANDLES.with(|slot| {
                 slot.borrow()
                     .as_ref()
                     .expect("registry")
@@ -1706,19 +2037,116 @@ mod tests {
             Err(ResolveError::Stale),
         );
         assert_eq!(
-            RESIDENT_BLOCK_HANDLES.with(|slot| {
+            RESIDENT_OBJECT_HANDLES.with(|slot| {
                 slot.borrow()
                     .as_ref()
                     .expect("registry")
                     .resolve(other, ObjectKind::Block)
-                    .map(|(_, position)| *position)
+                    .and_then(|object| match object {
+                        ResidentObject::Block { position, .. } => Ok(*position),
+                        ResidentObject::Player { .. } => Err(ResolveError::KindMismatch {
+                            expected: ObjectKind::Block,
+                            actual: ObjectKind::Player,
+                        }),
+                    })
             }),
             Ok((12, 1, 4)),
             "disabling one entry must not invalidate another entry's handle",
         );
         let replacement = resident_block_handle(&identity, change).expect("replacement handle");
         assert_ne!(replacement, first);
-        RESIDENT_BLOCK_HANDLES.with(|slot| *slot.borrow_mut() = None);
+        RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
         CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
+        CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn callback_player_handles_are_typed_generation_checked_and_bounded() {
+        let identity = lifecycle_identity("alpha", "one", "alpha.Main");
+        let other_identity = lifecycle_identity("bravo", "one", "bravo.Main");
+        let player = PlayerIdentity::new([7; 16], "Alice");
+        let other_player = PlayerIdentity::new([8; 16], "Bob");
+        RESIDENT_OBJECT_HANDLES.with(|slot| {
+            *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(2));
+        });
+        CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
+
+        let first = resident_player_handle(&identity, &player).expect("first player handle");
+        assert_eq!(first.kind(), ObjectKind::Player);
+        assert_eq!(player.uuid(), [7; 16]);
+        assert_eq!(player.name(), "Alice");
+        assert_eq!(resolve_resident_player_handle(first.to_bits()), Ok("Alice".to_owned()));
+        assert_eq!(
+            RESIDENT_OBJECT_HANDLES.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .expect("registry")
+                    .resolve(first, ObjectKind::Block)
+                    .map(|_| ())
+            }),
+            Err(ResolveError::KindMismatch {
+                expected: ObjectKind::Block,
+                actual: ObjectKind::Player,
+            }),
+            "a player handle must not resolve through the block kind",
+        );
+        assert_eq!(
+            current_resident_player_handle(),
+            Err(AdapterError::new(
+                "currentPlayerHandle requires an active resident block-change callback with a player",
+            )),
+        );
+        {
+            let _guard = ResidentPlayerHandleGuard::enter(Some(first));
+            assert_eq!(current_resident_player_handle().expect("callback player"), first);
+        }
+        assert_eq!(
+            current_resident_player_handle(),
+            Err(AdapterError::new(
+                "currentPlayerHandle requires an active resident block-change callback with a player",
+            )),
+        );
+
+        assert_eq!(
+            resident_player_handle(&other_identity, &other_player)
+                .expect("second player fits")
+                .kind(),
+            ObjectKind::Player,
+        );
+        let full = resident_player_handle(&identity, &other_player)
+            .expect_err("the bounded shared registry must reject a third live object");
+        assert!(full.to_string().contains("capacity 2 exceeded"), "{full}");
+
+        assert_eq!(release_resident_handles(&identity), 1);
+        assert_eq!(
+            resolve_resident_player_handle(first.to_bits()),
+            Err(AdapterError::new(
+                "playerHandleName: the referenced object no longer exists",
+            )),
+        );
+        let replacement = resident_player_handle(&identity, &player).expect("slot is reusable");
+        assert_ne!(replacement, first, "release must advance the player generation");
+        assert_eq!(
+            RESIDENT_OBJECT_HANDLES.with(|slot| {
+                slot.borrow_mut()
+                    .as_mut()
+                    .expect("registry")
+                    .clear()
+            }),
+            1,
+            "worker cleanup must release the replacement too",
+        );
+        assert_eq!(
+            RESIDENT_OBJECT_HANDLES.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .expect("registry")
+                    .resolve(replacement, ObjectKind::Player)
+            }),
+            Err(ResolveError::Stale),
+            "worker cleanup must invalidate every outstanding player handle",
+        );
+        RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+        CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
     }
 }
