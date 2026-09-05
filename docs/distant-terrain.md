@@ -23,7 +23,9 @@ query and skip this pass.
 colour/flags (another 2,654,208 bytes on the GPU). The redraw path installs it only while Distant
 Horizon is enabled, recentres it around the camera, applies the configured outer radius, and uploads
 at most one 64×64-cell tile per redraw. The shader clips both the near streamed field and the outer
-horizon circle. Tile residency considers only tiles intersecting that circle, so a small setting
+horizon circle. Its fog keeps the world-sourced colour but moves the distance ramp from the streamed
+chunk edge to the coarse horizon edge; otherwise every far sample would resolve to the sky colour.
+Tile residency considers only tiles intersecting that circle, so a small setting
 does not gradually populate the full 9×9 atlas. Shrinking the radius stops submitting outer tiles;
 growing it reuses resident inner tiles and fills newly eligible tiles without growing the atlas.
 Dry cells draw the terrain surface, while wet cells draw at their stored water-surface height.
