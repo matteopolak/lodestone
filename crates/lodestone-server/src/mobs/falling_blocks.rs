@@ -3,12 +3,110 @@
 //! file split (see `docs/plans/crate-and-file-splits.md`). Zero visibility
 //! churn: every method here was already `pub`.
 
+use std::collections::{HashMap, HashSet};
+
 use lodestone_model::{BlockPos, Vec3};
 use uuid::Uuid;
 
 use crate::gravity_tick::FallingBlockEffect;
 
 use super::{MobSim, TrackedFallingBlock};
+
+/// The chunk responsible for a falling block at tick start.
+///
+/// A falling block does not travel horizontally in this simulation, so its
+/// tick-start owner remains the owner of both landing effects. Keeping that
+/// fact on the returned message prevents a future executor from making
+/// landing publication depend on which chunk finishes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum FallingBlockTickOwner {
+    /// The owner of the chunk containing the falling entity.
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl FallingBlockTickOwner {
+    fn for_position(position: Vec3) -> Self {
+        Self::Chunk {
+            cx: (position.x.floor() as i32).div_euclid(16),
+            cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+}
+
+/// One ordered landing effect returned by a chunk owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FallingBlockTickEffect {
+    owner: FallingBlockTickOwner,
+    serial: usize,
+    effect: FallingBlockEffect,
+}
+
+/// One chunk owner's completion for a falling-block tick.
+///
+/// Empty completions are retained. They make a skipped owner observable to the
+/// central writer even when none of that owner's blocks happened to land this
+/// tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FallingBlockTickEffectBatch {
+    owner: FallingBlockTickOwner,
+    serial: usize,
+    batch_count: usize,
+    effects: Vec<FallingBlockTickEffect>,
+}
+
+/// Restores the serial falling-block effect sequence at the central writer.
+///
+/// Owner completion order is deliberately not observable. Every tick-start
+/// owner must return exactly one batch, and every returned effect must retain
+/// its original serial slot before the world is allowed to apply a landing.
+#[must_use]
+pub(crate) fn merge_falling_block_tick_effect_batches(
+    mut batches: Vec<FallingBlockTickEffectBatch>,
+) -> Vec<FallingBlockEffect> {
+    let expected_count = batches.first().map_or(0, |batch| batch.batch_count);
+    assert_eq!(
+        batches.len(),
+        expected_count,
+        "falling-block owner completion omitted or duplicated a plan batch"
+    );
+    assert!(
+        batches
+            .iter()
+            .all(|batch| batch.batch_count == expected_count),
+        "falling-block owner completions disagree about their tick-start plan"
+    );
+    let mut owners = HashSet::new();
+    assert!(
+        batches.iter().all(|batch| owners.insert(batch.owner)),
+        "falling-block owner completion has a duplicate owner"
+    );
+    batches.sort_unstable_by_key(|batch| batch.serial);
+    for (serial, batch) in batches.iter().enumerate() {
+        assert_eq!(
+            batch.serial, serial,
+            "falling-block owner completion has a missing or stale plan slot"
+        );
+    }
+
+    let mut effects = Vec::new();
+    for batch in batches {
+        for effect in batch.effects {
+            assert_eq!(
+                effect.owner, batch.owner,
+                "a falling-block owner completion contains another owner's effect"
+            );
+            effects.push(effect);
+        }
+    }
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "falling-block owner completion has a duplicate, missing, or stale effect slot"
+        );
+    }
+    effects.into_iter().map(|effect| effect.effect).collect()
+}
 
 impl<'w> MobSim<'w> {
     // -----------------------------------------------------------------------
@@ -128,6 +226,71 @@ impl<'w> MobSim<'w> {
             }
         }
         effects
+    }
+
+    /// Ticks falling blocks and returns one completion per tick-start chunk
+    /// owner for the central world writer.
+    ///
+    /// Simulation remains serial through [`Self::tick_falling_blocks`]. This
+    /// method only makes the existing write hand-off explicit: it snapshots
+    /// every live entity's owner before advancing, retains empty owner results,
+    /// and tags each produced effect with the sequence the former serial path
+    /// gave it. The caller must use
+    /// [`merge_falling_block_tick_effect_batches`] before applying effects.
+    pub(crate) fn tick_falling_block_owner_batches(
+        &mut self,
+    ) -> Vec<FallingBlockTickEffectBatch> {
+        let mut ids: Vec<i32> = self.falling_blocks.keys().copied().collect();
+        ids.sort_unstable();
+
+        let mut owner_by_entity = HashMap::new();
+        let mut batches = Vec::new();
+        for id in ids {
+            let tracked = self
+                .falling_blocks
+                .get(&id)
+                .expect("a tick-start falling-block id must remain present before its tick");
+            let owner = FallingBlockTickOwner::for_position(tracked.motion.position);
+            owner_by_entity.insert(id, owner);
+            if !batches
+                .iter()
+                .any(|batch: &FallingBlockTickEffectBatch| batch.owner == owner)
+            {
+                batches.push(FallingBlockTickEffectBatch {
+                    owner,
+                    serial: batches.len(),
+                    batch_count: 0,
+                    effects: Vec::new(),
+                });
+            }
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.batch_count = batch_count;
+        }
+
+        for (serial, effect) in self.tick_falling_blocks().into_iter().enumerate() {
+            let entity_id = match &effect {
+                FallingBlockEffect::ClearedOrigin { entity_id, .. }
+                | FallingBlockEffect::Spawned { entity_id }
+                | FallingBlockEffect::Placed { entity_id, .. }
+                | FallingBlockEffect::Discarded { entity_id } => *entity_id,
+            };
+            let owner = *owner_by_entity
+                .get(&entity_id)
+                .expect("a falling-block tick effect must belong to its tick-start owner");
+            batches
+                .iter_mut()
+                .find(|batch| batch.owner == owner)
+                .expect("a tick-start owner must have an effect completion")
+                .effects
+                .push(FallingBlockTickEffect {
+                    owner,
+                    serial,
+                    effect,
+                });
+        }
+        batches
     }
 
     /// The number of live falling blocks.
@@ -278,6 +441,98 @@ mod falling_block_tests {
             0,
             "the discard must really remove the entity, or it streams forever"
         );
+    }
+
+    fn owner_batch_fixture() -> MobSim<'static> {
+        let mut sim = sim();
+        // Entity ids give the old serial order A, B, A. Reversing owner
+        // completion therefore differs from that sequence instead of passing
+        // vacuously because each owner has only one landing.
+        sim.spawn_falling_block(
+            "minecraft:sand".to_string(),
+            BlockPos::new(-1, 70, -1),
+            64,
+        );
+        sim.spawn_falling_block(
+            "minecraft:gravel".to_string(),
+            BlockPos::new(16, 70, 0),
+            64,
+        );
+        sim.spawn_falling_block(
+            "minecraft:red_sand".to_string(),
+            BlockPos::new(-2, 70, -2),
+            64,
+        );
+        sim
+    }
+
+    fn first_serial_landing(sim: &mut MobSim<'static>) -> Vec<FallingBlockEffect> {
+        for _ in 0..40 {
+            let effects = sim.tick_falling_blocks();
+            if !effects.is_empty() {
+                return effects;
+            }
+        }
+        panic!("all fixture blocks must land inside 40 ticks");
+    }
+
+    fn first_owner_batches(sim: &mut MobSim<'static>) -> Vec<FallingBlockTickEffectBatch> {
+        for _ in 0..40 {
+            let batches = sim.tick_falling_block_owner_batches();
+            if batches.iter().any(|batch| !batch.effects.is_empty()) {
+                return batches;
+            }
+        }
+        panic!("all fixture blocks must land inside 40 ticks");
+    }
+
+    /// Owner completion is not the old entity-id sequence. The serial
+    /// reference runs a separate simulation through the former direct path;
+    /// the owner path then reverses the same completions before the central
+    /// merge consumes them.
+    #[test]
+    fn falling_block_owner_batches_restore_serial_effect_order_after_reversed_completion() {
+        let serial = first_serial_landing(&mut owner_batch_fixture());
+        let mut batches = first_owner_batches(&mut owner_batch_fixture());
+        assert_eq!(
+            batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
+            [
+                FallingBlockTickOwner::Chunk { cx: -1, cz: -1 },
+                FallingBlockTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "owners enter the completion plan at their first serial entity"
+        );
+        batches.reverse();
+        let completion_order = batches
+            .iter()
+            .flat_map(|batch| batch.effects.iter())
+            .map(|effect| effect.effect.clone())
+            .collect::<Vec<_>>();
+        assert_ne!(
+            completion_order, serial,
+            "control requires reversed owner completion to change raw effect order"
+        );
+        assert_eq!(
+            merge_falling_block_tick_effect_batches(batches),
+            serial,
+            "the central merge must restore every serial landing effect"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "omitted or duplicated a plan batch")]
+    fn falling_block_owner_batch_merge_rejects_a_missing_owner() {
+        let mut batches = first_owner_batches(&mut owner_batch_fixture());
+        batches.pop();
+        let _ = merge_falling_block_tick_effect_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate owner")]
+    fn falling_block_owner_batch_merge_rejects_a_duplicate_owner() {
+        let mut batches = first_owner_batches(&mut owner_batch_fixture());
+        batches[1] = batches[0].clone();
+        let _ = merge_falling_block_tick_effect_batches(batches);
     }
 
     /// The block a landing places is the one that left, at the cell it landed in —

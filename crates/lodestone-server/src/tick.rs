@@ -54,7 +54,8 @@ use crate::block_entities::BlockEntityHandle;
 use crate::border::{BorderFeed, WorldBorder};
 use crate::chunk::ChunkSource;
 use crate::mobs::{
-    Detonation, EntityTickEffectBatch, EntityTickOwner, LiveMobSource, MobHandle, MobSim,
+    merge_falling_block_tick_effect_batches, Detonation, EntityTickEffectBatch, EntityTickOwner,
+    LiveMobSource, MobHandle, MobSim,
 };
 use lodestone_entity::ai::mob::EatenBlock;
 use crate::random_tick::RandomTickScheduler;
@@ -3614,10 +3615,14 @@ async fn run_tick_loop_with_weather_impl<W>(
         //
         // Inside the queue scope rather than in the mob block above because a
         // landing has to `propagate_and_react`, which needs `block_ticks`.
-        // `MobSim::tick_falling_blocks` returns only the ticks that *finished*; an
-        // airborne entity's new position rides the ordinary `snapshots()` diff, so
-        // there is no per-tick position event to forward.
-        for effect in mobs.with(MobSim::tick_falling_blocks) {
+        // Owners return a complete tick-start batch set. This is the central
+        // consumer: it restores the old entity-id effect sequence before the
+        // first landing can write world state or notify a neighbour.
+        // An airborne entity still contributes an empty owner completion; its
+        // new position rides the ordinary `snapshots()` diff, so there is no
+        // per-tick position event to forward.
+        let falling_block_effects = mobs.with(MobSim::tick_falling_block_owner_batches);
+        for effect in merge_falling_block_tick_effect_batches(falling_block_effects) {
             // No column: `Placed` carries world coordinates and `ChunkSource`
             // already takes them. The propagation below needs one, so it is built
             // on demand — a landing is rare, unlike the per-tick step.
