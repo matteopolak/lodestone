@@ -208,8 +208,8 @@ pub struct Particles {
     /// `redstone_dust_*`), so dropping the tint does not merely desaturate their
     /// debris — it renders it near-**white**. See `docs/break-particles.md`.
     state_tint: Arc<Vec<[f32; 3]>>,
-    /// Per-**item** atlas UV rect, indexed by network item registry id —
-    /// `SpriteSource::Item`, i.e. `BreakingItemParticle`'s sprite.
+    /// Per-built-in-item atlas UV rect. `SpriteSource::Item` keeps the typed
+    /// identity until [`Self::sprite_rect`] lowers it for this indexed lookup.
     ///
     /// Indexed by id rather than keyed by name for the same reason `state_uv` is:
     /// the engine ticks in the simulation while the models live in the renderer, so
