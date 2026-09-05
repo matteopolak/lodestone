@@ -42,6 +42,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_assets::{ResourceManager, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
 use lodestone_render::{BlockAtlas, BlockModels, RenderLayer, blocks_json_registry, is_full_cube};
 
@@ -77,12 +78,16 @@ fn build_models() -> (BlockModels, ResourceManager, Box<dyn BlockStateRegistry>)
     (models, manager, Box::new(registry))
 }
 
+fn state_id(raw: u32) -> StateId {
+    StateId::new(raw).expect("state id from the canonical blocks report")
+}
+
 #[test]
 #[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
 fn stone_is_an_occluding_full_cube() {
     let (models, _mgr, reg) = build_models();
     let id = find_state(reg.as_ref(), "minecraft:stone", &[]).expect("stone in registry");
-    let sm = models.state(id);
+    let sm = models.state(state_id(id));
     assert_eq!(sm.quads.len(), 6, "stone should bake to six cube faces");
     assert!(is_full_cube(&sm.quads), "stone geometry is a full cube");
     assert!(sm.occludes, "an opaque full cube must occlude");
@@ -95,7 +100,7 @@ fn short_grass_is_a_non_occluding_cross() {
     let (models, mgr, reg) = build_models();
     let id =
         find_state(reg.as_ref(), "minecraft:short_grass", &[]).expect("short_grass in registry");
-    let sm = models.state(id);
+    let sm = models.state(state_id(id));
 
     // A cross plant is two crossed quads — never six cube faces.
     assert!(
@@ -133,7 +138,7 @@ fn short_grass_is_a_non_occluding_cross() {
 /// The quad count if a state's geometry is a full cube, else `None` — used to
 /// assert the model path is *not* a cube.
 fn model_quad_count_if_cube(models: &BlockModels, id: u32) -> Option<usize> {
-    let q = models.quads(id);
+    let q = models.quads(state_id(id));
     is_full_cube(q).then_some(q.len())
 }
 
@@ -143,7 +148,7 @@ fn oak_slab_bottom_is_half_height() {
     let (models, _mgr, reg) = build_models();
     let id = find_state(reg.as_ref(), "minecraft:oak_slab", &[("type", "bottom")])
         .expect("oak_slab[type=bottom] in registry");
-    let sm = models.state(id);
+    let sm = models.state(state_id(id));
     assert!(!sm.quads.is_empty(), "a slab must render geometry");
     assert!(!is_full_cube(&sm.quads), "a bottom slab is not a full cube");
     // Every vertex sits in the lower half of the block (y <= 0.5 + eps): a
@@ -166,7 +171,7 @@ fn stained_glass_is_a_translucent_non_occluding_cube() {
     let (models, _mgr, reg) = build_models();
     let id = find_state(reg.as_ref(), "minecraft:white_stained_glass", &[])
         .expect("white_stained_glass in registry");
-    let sm = models.state(id);
+    let sm = models.state(state_id(id));
     // Stained glass is a full cube geometrically, but its sprite has partial
     // alpha, so it lands on the translucent pass and must *not* occlude — you can
     // see through it. This proves the sprite-alpha layer derivation on real baked
@@ -201,14 +206,16 @@ fn water_classifies_as_a_fluid_with_resolvable_sprites() {
     let (models, _mgr, reg) = build_models();
     let id = find_state(reg.as_ref(), "minecraft:water", &[]).expect("water in registry");
 
-    let sm = models.state(id);
+    let sm = models.state(state_id(id));
     assert!(
         sm.quads.is_empty(),
         "water has no baked blockstate model; it renders through bake_fluid"
     );
     assert!(!sm.occludes, "empty water geometry does not occlude");
 
-    let fluid = models.fluid(id).expect("water is classified as a fluid");
+    let fluid = models
+        .fluid(state_id(id))
+        .expect("water is classified as a fluid");
     assert_eq!(fluid.kind, FluidKind::Water);
     assert_eq!(
         fluid.state,
@@ -232,7 +239,7 @@ fn water_classifies_as_a_fluid_with_resolvable_sprites() {
     // Lava classifies too, on its opaque/full-bright path.
     let lava_id = find_state(reg.as_ref(), "minecraft:lava", &[]).expect("lava in registry");
     assert_eq!(
-        models.fluid(lava_id).expect("lava is a fluid").kind,
+        models.fluid(state_id(lava_id)).expect("lava is a fluid").kind,
         FluidKind::Lava
     );
 }
@@ -254,7 +261,7 @@ fn nether_portal_is_a_translucent_non_occluding_swirl() {
     let (models, _mgr, reg) = build_models();
     let id = find_state(reg.as_ref(), "minecraft:nether_portal", &[("axis", "x")])
         .expect("nether_portal[axis=x] in registry");
-    let sm = models.state(id);
+    let sm = models.state(state_id(id));
     assert!(!sm.quads.is_empty(), "nether_portal must render geometry");
     assert_eq!(
         sm.layer,
@@ -272,7 +279,7 @@ fn nether_portal_is_a_translucent_non_occluding_swirl() {
     // assertion.
     let stone_id = find_state(reg.as_ref(), "minecraft:stone", &[]).expect("stone in registry");
     assert_eq!(
-        models.state(stone_id).layer,
+        models.state(state_id(stone_id)).layer,
         RenderLayer::Solid,
         "control: stone must stay on the solid pass"
     );
@@ -322,7 +329,7 @@ fn baked_quad_sprite_index_names_the_sprite_its_own_uvs_were_baked_against() {
     let mut checked_states: u64 = 0;
     let mut mismatches: Vec<String> = Vec::new();
     for id in 0..reg.state_count() {
-        let sm = models.state(id);
+        let sm = models.state(state_id(id));
         if sm.quads.is_empty() {
             continue;
         }
@@ -415,7 +422,7 @@ fn occlusion_is_per_face_so_grass_block_occludes_despite_its_cutout_layer() {
 
     let grass = find_state(reg.as_ref(), "minecraft:grass_block", &[("snowy", "false")])
         .expect("grass_block[snowy=false] in registry");
-    let sm = models.state(grass);
+    let sm = models.state(state_id(grass));
     assert_eq!(
         sm.layer,
         RenderLayer::Cutout,
@@ -463,9 +470,9 @@ fn occlusion_is_per_face_so_grass_block_occludes_despite_its_cutout_layer() {
     ] {
         let id = find_state(reg.as_ref(), block, &[]).unwrap_or_else(|| panic!("{block} in registry"));
         assert!(
-            !models.occludes(id),
+            !models.occludes(state_id(id)),
             "{block} must not occlude: {why} (face_occludes = {:?})",
-            models.state(id).face_occludes
+            models.state(state_id(id)).face_occludes
         );
     }
 }
@@ -473,10 +480,10 @@ fn occlusion_is_per_face_so_grass_block_occludes_despite_its_cutout_layer() {
 /// The single tinted colour every tinted quad of `state_id` resolves to (its
 /// palette entry), asserting the block is a single tint *source* so the number
 /// is unambiguous. Panics if the state has no tinted quad.
-fn one_tint_colour(models: &BlockModels, state_id: u32, name: &str) -> [f32; 4] {
+fn one_tint_colour(models: &BlockModels, raw_state_id: u32, name: &str) -> [f32; 4] {
     let palette = models.tint_palette();
     let colours: Vec<[f32; 4]> = models
-        .quads(state_id)
+        .quads(state_id(raw_state_id))
         .iter()
         .filter_map(|q| q.tint_index.map(|i| palette[i as usize]))
         .collect();

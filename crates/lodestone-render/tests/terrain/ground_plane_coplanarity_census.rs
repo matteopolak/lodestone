@@ -54,6 +54,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_assets::{ResourceManager, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockStateRegistry;
 use lodestone_render::{BlockModels, blocks_json_registry};
 
@@ -78,6 +79,10 @@ fn build_models() -> (BlockModels, Box<dyn BlockStateRegistry>) {
     let registry = blocks_json_registry(&report).expect("parse blocks.json into a registry");
     let models = BlockModels::build(&manager, &registry).expect("bake block models");
     (models, Box::new(registry))
+}
+
+fn state_id(raw: u32) -> StateId {
+    StateId::new(raw).expect("state id from the canonical blocks report")
 }
 
 /// `Some(y)` when the quad's four corners all share one `y`.
@@ -110,7 +115,7 @@ fn census(models: &BlockModels, reg: &dyn BlockStateRegistry) -> (Rows, usize, u
         let Some(state) = reg.resolve(id) else {
             continue;
         };
-        let sm = models.state(id);
+        let sm = models.state(state_id(id));
         if sm.quads.is_empty() {
             continue;
         }
@@ -210,7 +215,7 @@ fn every_ground_plate_sits_at_vanillas_own_offset_above_the_block_floor() {
             if state.block.to_string() != block {
                 continue;
             }
-            for quad in &models.state(id).quads {
+            for quad in &models.state(state_id(id)).quads {
                 if quad.cullface.is_some() {
                     continue;
                 }

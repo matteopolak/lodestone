@@ -148,6 +148,14 @@ cell carries water, what do we draw" — see fluid rendering below; the two were
 conflated once in a shoreline-lighting report that turned out to be entirely about
 the *bank* block's occlusion, with the classifier innocent throughout.
 
+State-keyed `BlockModels` lookups accept `lodestone_data::block_states::StateId`,
+not an unchecked integer. The snapshot view is the raw-palette ingress: it validates
+canonical values once before asking for model geometry, fluid classification,
+occlusion, or render-layer data. Values outside the generated census, and
+protocol-local or dynamic extension values even when their numbers overlap the
+canonical range, remain unresolved and take the existing empty/open fallback rather
+than drawing a potentially unrelated built-in model.
+
 ### Fluid rendering
 
 Vanilla renders fluids outside the block-model pipeline entirely — their blockstate

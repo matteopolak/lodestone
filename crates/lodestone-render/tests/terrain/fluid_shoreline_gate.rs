@@ -35,6 +35,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_assets::{ResourceManager, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
 use lodestone_render::block_models::{FluidCell, FluidKind, FluidSprites};
 use lodestone_render::models::{FluidSectionView, mesh_fluids};
@@ -71,6 +72,10 @@ enum Rule {
     PreFixWholeBlock,
 }
 
+fn state_id(raw: u32) -> StateId {
+    StateId::new(raw).expect("state id from the canonical blocks report")
+}
+
 /// A 16³ pond of vanilla `water` walled and floored with vanilla `grass_block`,
 /// answering neighbourhood queries out of a real [`BlockModels`].
 struct Pond<'a> {
@@ -102,15 +107,15 @@ impl Pond<'_> {
 
 impl FluidSectionView for Pond<'_> {
     fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell> {
-        self.models.fluid(self.state_at(x, y, z))
+        self.models.fluid(state_id(self.state_at(x, y, z)))
     }
 
     fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
         let id = self.state_at(x, y, z);
         match self.rule {
-            Rule::PerFace => self.models.occludes(id),
+            Rule::PerFace => self.models.occludes(state_id(id)),
             Rule::PreFixWholeBlock => {
-                let sm = self.models.state(id);
+                let sm = self.models.state(state_id(id));
                 is_full_cube(&sm.quads) && sm.layer == RenderLayer::Solid
             }
         }

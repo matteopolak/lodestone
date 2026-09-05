@@ -26,6 +26,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_assets::{GuiLight, ResourceLocation, ResourceManager, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
 use lodestone_render::{
     BlockModels, Camera, blocks_json_registry, gui_item_pose, gui_ortho, is_full_cube,
@@ -48,6 +49,10 @@ fn build_models() -> (BlockModels, Box<dyn BlockStateRegistry>) {
 
 fn loc(s: &str) -> ResourceLocation {
     s.parse().expect("valid resource location")
+}
+
+fn state_id(raw: u32) -> StateId {
+    StateId::new(raw).expect("state id from the canonical blocks report")
 }
 
 /// The signed screen area of a triangle after `m` — the quantity whose **sign**
@@ -126,7 +131,7 @@ fn stone_item_is_a_cube_sharing_the_block_atlas() {
     // Same atlas as the block state: the item's UVs must land on the same sprite
     // rect the block state's do. This is the "no second atlas" claim, measured.
     let state = find_state(reg.as_ref(), "minecraft:stone", &[]).expect("stone state");
-    let block_uv = models.quads(state)[0].uvs[0];
+    let block_uv = models.quads(state_id(state))[0].uvs[0];
     let matches = item
         .quads
         .iter()
