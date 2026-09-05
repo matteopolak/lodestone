@@ -53,8 +53,9 @@ while `BlockEntityRegistry::tick_plan` assigns its tick-start snapshot to
 chunk owners. It executes one owner batch at a time and returns a
 `BlockEntityTickEffectBatch` for each owner, including an empty batch when no
 visible write occurred. `tick::apply_block_entity_effect_batches` is the sole
-central consumer: it applies each batch and publishes its furnace changes in
-the established owner order. This makes the message boundary real without
+central consumer: it validates the complete tick-start batch set, restores its
+serial slots after independent completion, then applies and publishes furnace
+changes in the established order. This makes the message boundary real without
 claiming workers can run concurrently. The ambient entity-effect phase uses the
 same shape: `MobSim::take_ambient_sound_effect_batches` groups each emitted
 effect under `EntityTickOwner::Chunk`, and
@@ -127,8 +128,9 @@ size in this module alone. First complete the parity and named-scene profiling
 prerequisites in `docs/plans/regionised-server-ticking.md`. A concurrent
 partitioning change must retain deterministic ordering within each owner and
 add an explicit cross-owner hand-off path before any mutation may cross a
-boundary. Reuse the block-entity shape: an owner returns a typed batch and the
-central writer applies batches in a declared order. Do not give a worker a
+boundary. Reuse the block-entity shape: an owner returns a typed batch carrying
+its tick-start slot and the central writer validates the complete slot set
+before applying batches in that declared order. Do not give a worker a
 second owner's `ChunkSource` just to avoid defining that message.
 
 Keep `FollowArea` as the producer until the live tick loop obtains its work

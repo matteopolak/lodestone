@@ -1489,30 +1489,23 @@ fn apply_block_entity_effect_batches<W: ChunkSource>(
     block_tick_out: &BlockTickFeed,
     batches: Vec<crate::block_entities::BlockEntityTickEffectBatch>,
 ) {
-    for batch in batches {
-        for effect in batch.effects() {
-            let pos = effect.pos;
-            let lit = effect.lit;
-            debug_assert_eq!(
-                effect.owner,
-                batch.owner,
-                "a block-entity owner batch may contain only its own effects"
-            );
-            debug_assert_eq!(
-                effect.owner,
-                crate::block_entities::BlockEntityTickOwner::Chunk {
-                    cx: pos.x.div_euclid(16),
-                    cz: pos.z.div_euclid(16),
-                },
-                "a block-entity effect must be handed to the writer by its position's owner"
-            );
-            let state = world.block_state(pos.x, pos.y, pos.z);
-            let new_state =
-                crate::redstone::with_property(&state, "lit", if lit { "true" } else { "false" });
-            if new_state != state {
-                world.set_block(pos.x, pos.y, pos.z, &new_state);
-                block_tick_out.publish(pos.x, pos.y, pos.z, new_state);
-            }
+    for effect in crate::block_entities::merge_tick_effect_batches(batches) {
+        let pos = effect.pos;
+        let lit = effect.lit;
+        debug_assert_eq!(
+            effect.owner,
+            crate::block_entities::BlockEntityTickOwner::Chunk {
+                cx: pos.x.div_euclid(16),
+                cz: pos.z.div_euclid(16),
+            },
+            "a block-entity effect must be handed to the writer by its position's owner"
+        );
+        let state = world.block_state(pos.x, pos.y, pos.z);
+        let new_state =
+            crate::redstone::with_property(&state, "lit", if lit { "true" } else { "false" });
+        if new_state != state {
+            world.set_block(pos.x, pos.y, pos.z, &new_state);
+            block_tick_out.publish(pos.x, pos.y, pos.z, new_state);
         }
     }
 }
