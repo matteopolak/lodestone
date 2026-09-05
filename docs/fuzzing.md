@@ -320,6 +320,11 @@ What exists:
   two-cell section update into an all-air resident chunk, compares every
   commanded position after its packet, and proves that omitting the bulk
   packet leaves both cells at the all-air baseline.
+- `tests/differential_captured_chunk_lifecycle.rs` — a fixed externally
+  captured full chunk load, block update and chunk unload through the real
+  26.2 adapter and public client world read model. It verifies the loaded
+  chunk and command-authored block state, then proves the unload makes both
+  unavailable; an omitted-unload control remains loaded with the update.
 - `tests/differential_generated_gravity.rs` — a bounded generated gravity
   action domain through `IntegratedServer`, covering sand, red sand and gravel.
   It injects the public `BlockTickFeed` schedule, reads the server's retained
@@ -677,11 +682,56 @@ and expectations are external. It therefore proves update routing and public
 world visibility, but does not yet differentially verify chunk-packet palette,
 light, biome, heightmap or block-entity contents.
 
+### Captured chunk lifecycle
+
+`differential_captured_chunk_lifecycle.rs` replays three unmodified payloads
+from `tests/fixtures/chunk_lifecycle_26_2.json`: the full chunk-and-light
+packet for `(0, 0)`, a one-cell update at `(8, 100, 8)`, and the later unload
+for `(0, 0)`. The packet bytes came from one bounded local creative-oracle
+session. The source commands force-loaded the initial chunk, set the named
+position to a gold block, then moved that capture client beyond its view range.
+The gold block name is the independent expected value; the replay resolves its
+state ID through the generated block-state report rather than encoding a local
+packet.
+
+The fixture stores each raw payload as zlib-compressed base64 to keep the
+checked-in JSON reviewable. The test restores those exact bytes before passing
+them unchanged to the production adapter and `ClientBuilder` driver. It first
+observes `ClientEvent::ChunkLoaded` and `ClientHandle::is_chunk_loaded`, then
+the block-update event and `ClientHandle::block_at`, and finally the matching
+unload event with both public reads absent. Its required control omits only the
+unload and observes that the captured chunk and gold-block update remain
+visible. This is a deterministic correctness detector, not a malformed-input
+or general robustness test.
+
+To refresh the bounded capture, start the local headless creative oracle, then
+run:
+
+```bash
+LODESTONE_CHUNK_LIFECYCLE_CAPTURE_OUT=/absolute/path/to/lodestone/crates/lodestone-fuzz/tests/fixtures/chunk_lifecycle_26_2.json \\
+CARGO_TARGET_DIR=/private/tmp/lodestone-batch-549 cargo test -p lodestone-fuzz \\
+  --no-default-features --features v26-2,rcon-oracle \\
+  --test differential_captured_chunk_lifecycle acquire_chunk_lifecycle_from_external_server \\
+  -j 2 --no-fail-fast -- --ignored --nocapture
+```
+
+The output path is deliberately explicit because the test binary's working
+directory is not the repository root. Without it, acquisition prints the JSON
+instead. The acquisition uses only the local game and RCON ports, removes the
+gold block, and releases the forced chunk after capture.
+
+The lane proves folding of this particular external chunk lifecycle through the
+public state model. It does not yet compare the chunk packet's initial palette,
+light, biome, heightmap or block-entity contents against an independently read
+world snapshot, nor does it cover a broader range of chunk positions or
+transitions.
+
 ### What Track B still does not do
 - **The client-state packet corpus is still small.** The captured lane covers
-  three inventory slot payloads and one block-update sequence, but no captured
-  full chunk or broader inventory packet sequence. The captured armor-stand
-  lane covers spawn, movement and removal, but not metadata. The two committed item-entity
+  three inventory slot payloads, one block-update sequence, and one full
+  chunk load/update/unload lifecycle, but no broader inventory or chunk packet
+  sequence. The captured armor-stand lane covers spawn, movement and removal,
+  but not metadata. The two committed item-entity
   metadata fixtures remain unpaired with their own session's spawn, so they
   cannot independently drive an item-entity lifecycle. The generated
   block/entity/inventory/container campaign remains
