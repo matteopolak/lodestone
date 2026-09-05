@@ -82,7 +82,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | capability | client, native | client, WASM | server |
 |---|---|---|---|
 | observe a typed event | **done** — `GameEvent(ClientEvent)` via `MessageReader`, off by default, installed for every shipped `App` by `ServerBrandChannelPlugin` in `lodestone_app::client_app` | partial — 3 event kinds of ~110 | partial — plugin-defined `Message` types use `App::add_message`, independent readers, and tick-owned retention; no built-in gameplay event bus, and `dispatch_play_packet` applies inline |
-| cancel an event (`setCancelled`) | **done** — `ActionVetoes` for all six declared verbs, all asked in production | **gap** — no verdict-shaped export | **gap** — `TickSet::Adjudicate` runs but has no proposal or verdict systems; `CraftingStationHooks` is the one Allow/Deny/Replace hook |
+| cancel an event (`setCancelled`) | **done** — `ActionVetoes` for all six declared verbs, all asked in production | **done** — `on-verdict(verdict-context) -> plugin-verdict`, gated by `veto:actions`, brokers to all six existing `ActionVetoes` ask sites | **gap** — `TickSet::Adjudicate` runs but has no proposal or verdict systems; `CraftingStationHooks` is the one Allow/Deny/Replace hook |
 | priority order across plugins | **done** — `EventPriority::{Lowest..Monitor}` chained into all four schedules | partial — manifest `priority` orders guests; nothing else | **gap** |
 | `MONITOR` read-only | **done** — checked against bevy's per-system access set; blind to deferred `Commands` | **gap** | **gap** |
 | sync delayed/repeating tasks | **done** — `TaskScheduler::{schedule_once, schedule_repeating, cancel}` | **done** — `scheduler::{schedule-once, schedule-repeating, cancel}` returns guest-local handles and dispatches `on-task` on host ticks | **done, native** — `ServerTaskScheduler::{schedule_once, schedule_repeating, cancel}`, drained by `ServerCorePlugin` on the production primary world's `GameTick` |
@@ -157,14 +157,13 @@ decide keeps an `Arc` its own system refreshes each tick. `EgressFilters` callba
 same way for the same reason. A `Monitor`-tier system gets `&World` from the runner and cannot take
 a second guard; a `Commands` mutation from that tier is the one hole the access check cannot see.
 
-**Client, WASM.** A guest is asked nothing; it only receives the tick's events after the fact. There
-is no export through which the host could obtain a verdict at an ask site. Adding one is
-reentrancy-safe by construction (the guest has no `World`, and the conductor's `PluginHost` is a
-resource the ask site can reach through `&self`), but it means a second guest export beside
-`on-tick`, called synchronously from inside `drive_mining` and `Sim::attack_entity`, and a fuel
-budget per ask rather than per tick. Priority is the manifest's `priority` field, ordering whole
-guests; `Monitor` is unenforced because a guest returning an empty action list is indistinguishable
-from one that read nothing.
+**Client, WASM.** `on-verdict` is called synchronously through the `ActionVetoes` broker at all six
+existing typed ask sites. Its `verdict-context` is a copy and contains no world access, so it can run
+while the tick owner holds the guard without re-entry. The `veto:actions` capability gates delivery;
+eligible guests run in deterministic load order, the first `deny` wins, and a trap or verdict-fuel
+exhaustion denies the current action while permanently unloading that guest. `Monitor` remains
+unenforced because a guest returning an empty action list is indistinguishable from one that read
+nothing.
 
 **Server.** There is no event bus, no cancellation, and no hook registration of any kind on the
 packet path: `dispatch_play_packet` in `lodestone_server::server` matches `ServerBound` and calls
@@ -493,29 +492,27 @@ plan, not a sprint.
    Medium; depends on 3.
 8. **WASM: the intent half of the ABI** — install/remove-shaped break/place/move/look plus an
    outcome poll. Client, WASM. Medium.
-9. **WASM: a verdict export**, called synchronously at the six ask sites, with its own fuel budget.
-   Client, WASM. Medium; this is what makes a protection plugin expressible on the sandboxed tier.
-10. **WASM: commands, `fs:write`, and `Monitor` enforcement.** Delayed/repeating scheduling with
-    cancellation and native-windowed shell discovery are shipped. Client, WASM. Medium, three small
-    pieces.
-11. **Both: durable per-entity/per-chunk plugin data**, one opaque blob per namespaced key,
+9. **WASM: commands, `fs:write`, and `Monitor` enforcement.** Delayed/repeating scheduling,
+   synchronous verdicts, and native-windowed shell discovery are shipped. Client, WASM. Medium,
+   three small pieces.
+10. **Both: durable per-entity/per-chunk plugin data**, one opaque blob per namespaced key,
     through the world save on the server and the plugin data directory on the client. Both sides,
     native (WASM follows via `fs:write`). Medium; the server half needs the save path to carry an
     opaque section it does not model.
-12. **Both: a reentrancy ledger for the other lock classes** — `MobHandle`, `ChunkWorld`, the chunk
+11. **Both: a reentrancy ledger for the other lock classes** — `MobHandle`, `ChunkWorld`, the chunk
     edit cache — or a type-level shape for `MobHandle::with` that cannot nest. Both sides, native.
     Small to medium.
-13. **Client native: `RawPacket`**, inbound, observation-only, off by default. **Shipped** through
+12. **Client native: `RawPacket`**, inbound, observation-only, off by default. **Shipped** through
     `RawPacketBusPlugin` and the driver's pre-decode publication point; focused unit and hermetic
     driver tests preserve the exact state, id, and payload. Client, native.
-14. **Server: custom item data through save/load** — verify and, if missing, carry
+13. **Server: custom item data through save/load** — verify and, if missing, carry
     `custom_data` through `player_data::to_nbt`/`from_nbt`. Server, native. Small to medium.
-15. **Server: open a plugin menu on a remote player.** Needs the container-open packet family and
+14. **Server: open a plugin menu on a remote player.** Needs the container-open packet family and
     the click echo. Server, native. Large.
-16. **Both: document the `VersionAdapter` and `ServerProtocol` decorators as the version-locked
+15. **Both: document the `VersionAdapter` and `ServerProtocol` decorators as the version-locked
     packet escape hatch**, with one test each proving a wrapped protocol sees and can append
     traffic. Both sides, native. Small.
-17. **JVM tier: the JNI spike** — one shim class, one native method through `WorldPort`, one trivial
+16. **JVM tier: the JNI spike** — one shim class, one native method through `WorldPort`, one trivial
     plugin. Server, native. Medium, and only after 1, 2 and 5.
 
 ## See also

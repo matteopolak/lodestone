@@ -64,7 +64,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.2.0".to_string(),
+            abi: "lodestone:plugin@0.3.0".to_string(),
         }
     }
 
@@ -121,6 +121,17 @@ impl Guest for ChatResponder {
             let _ = (id, token);
             Vec::new()
         }
+    }
+
+    fn on_verdict(_context: VerdictContext) -> PluginVerdict {
+        #[cfg(feature = "verdict-trap")]
+        panic!("verdict fixture trap");
+
+        #[cfg(feature = "verdict-deny")]
+        return PluginVerdict::Deny;
+
+        #[cfg(not(any(feature = "verdict-deny", feature = "verdict-trap")))]
+        PluginVerdict::Allow
     }
 }
 

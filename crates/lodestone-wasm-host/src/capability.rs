@@ -69,6 +69,11 @@ pub enum Capability {
     ActChat,
     /// Push `ClientAction::SwingArm`.
     ActInteract,
+    /// Decide whether the client may commit one of its typed player actions.
+    ///
+    /// This is data-flow gated at the synchronous host callback: a guest without
+    /// it is never called at an action-veto point.
+    VetoActions,
     /// Read a file through the `lodestone:plugin/filesystem` interface.
     ///
     /// **Never in [`CapabilitySet::default_policy`].** This is the import-column
@@ -93,6 +98,7 @@ impl Capability {
         Self::ObserveBlocks,
         Self::ActChat,
         Self::ActInteract,
+        Self::VetoActions,
         Self::FsRead,
         Self::ScheduleTasks,
     ];
@@ -107,6 +113,7 @@ impl Capability {
             Self::ObserveBlocks => "observe:blocks",
             Self::ActChat => "act:chat",
             Self::ActInteract => "act:interact",
+            Self::VetoActions => "veto:actions",
             Self::FsRead => "fs:read",
             Self::ScheduleTasks => "schedule:tasks",
         }
@@ -135,7 +142,8 @@ impl Capability {
             | Self::ObserveHealth
             | Self::ObserveBlocks
             | Self::ActChat
-            | Self::ActInteract => false,
+            | Self::ActInteract
+            | Self::VetoActions => false,
         }
     }
 }
@@ -179,6 +187,7 @@ impl CapabilitySet {
             Capability::ObserveBlocks,
             Capability::ActChat,
             Capability::ActInteract,
+            Capability::VetoActions,
         ])
     }
 

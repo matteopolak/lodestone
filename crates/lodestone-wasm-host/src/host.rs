@@ -53,8 +53,9 @@ use crate::capability::{Capability, CapabilitySet};
 /// back; the rest are their payload records. Each mirrors a `lodestone_model` type
 /// named in `wit/lodestone-plugin.wit`.
 pub use crate::bindings::lodestone::plugin::types::{
-    Action, BlockOffset, ChatKind, ChatMessage, Event, Hand, Health, LogLevel, PluginInfo,
-    SectionBlocksChanged, SectionPos,
+    Action, BlockBreakVerdict, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
+    EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict, LogLevel, PlayerInteractVerdict,
+    PlayerMoveVerdict, PluginInfo, PluginVerdict, SectionBlocksChanged, SectionPos, VerdictContext,
 };
 
 /// The world version this host speaks. A guest's `init` must return this, and a
@@ -63,12 +64,17 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.2.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.3.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
 /// loop": the chat responder's real tick uses low thousands of units.
 pub const DEFAULT_FUEL_PER_TICK: u64 = 10_000_000;
+
+/// Default fuel budget for one synchronous verdict call. This is separate from
+/// tick delivery: one guest cannot consume an unbounded amount of tick time by
+/// forcing a large budget at every typed ask site.
+pub const DEFAULT_FUEL_PER_VERDICT: u64 = 500_000;
 
 /// Default per-guest linear-memory ceiling.
 pub const DEFAULT_MEMORY_LIMIT: usize = 32 * 1024 * 1024;
@@ -320,6 +326,7 @@ pub struct LoadedPlugin {
     store: Store<GuestState>,
     on_tick: TypedFunc<(Vec<Event>,), (Vec<Action>,)>,
     on_task: TypedFunc<(types::TaskId, u64), (Vec<Action>,)>,
+    on_verdict: TypedFunc<(VerdictContext,), (PluginVerdict,)>,
     failure: Option<String>,
 }
 
@@ -433,6 +440,45 @@ impl LoadedPlugin {
             }
         }
     }
+
+    fn verdict(
+        &mut self,
+        context: VerdictContext,
+        fuel: u64,
+    ) -> Result<PluginVerdict, String> {
+        if let Some(failure) = &self.failure {
+            return Err(failure.clone());
+        }
+        if let Err(e) = self.store.set_fuel(fuel) {
+            let message = format!("setting verdict fuel: {e:?}");
+            self.failure = Some(message.clone());
+            return Err(message);
+        }
+        match self.on_verdict.call(&mut self.store, (context,)) {
+            Ok((verdict,)) => Ok(verdict),
+            Err(e) => {
+                let message = format!("{e:?}");
+                tracing::error!(plugin = %self.name, "plugin verdict failed and will not be called again: {message}");
+                self.failure = Some(message.clone());
+                Err(message)
+            }
+        }
+    }
+}
+
+/// The result of synchronously asking the loaded verdict guests.
+///
+/// A guest failure is distinct from an ordinary denial for diagnostics, but both
+/// map to the native veto's `Deny`: the action currently being decided must not
+/// escape while a declared protection guest failed to answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictDispatch {
+    /// Every eligible guest allowed the action, or no guest was eligible.
+    Allow,
+    /// One eligible guest denied it.
+    Deny,
+    /// One eligible guest trapped or exhausted its verdict fuel.
+    Error,
 }
 
 /// The host: one engine, one policy, N loaded guests.
@@ -440,6 +486,7 @@ pub struct PluginHost {
     engine: Engine,
     policy: CapabilitySet,
     fuel_per_tick: u64,
+    verdict_fuel: u64,
     memory_limit: usize,
     fs_root: Option<PathBuf>,
     plugins: Vec<LoadedPlugin>,
@@ -450,6 +497,7 @@ impl fmt::Debug for PluginHost {
         f.debug_struct("PluginHost")
             .field("policy", &self.policy)
             .field("fuel_per_tick", &self.fuel_per_tick)
+            .field("verdict_fuel", &self.verdict_fuel)
             .field("memory_limit", &self.memory_limit)
             .field("fs_root", &self.fs_root)
             .field("plugins", &self.plugins)
@@ -475,6 +523,7 @@ impl PluginHost {
             engine,
             policy,
             fuel_per_tick: DEFAULT_FUEL_PER_TICK,
+            verdict_fuel: DEFAULT_FUEL_PER_VERDICT,
             memory_limit: DEFAULT_MEMORY_LIMIT,
             fs_root: None,
             plugins: Vec::new(),
@@ -484,6 +533,13 @@ impl PluginHost {
     #[must_use]
     pub fn with_fuel(mut self, fuel_per_tick: u64) -> Self {
         self.fuel_per_tick = fuel_per_tick;
+        self
+    }
+
+    /// Set the independent instruction budget for one synchronous verdict call.
+    #[must_use]
+    pub fn with_verdict_fuel(mut self, verdict_fuel: u64) -> Self {
+        self.verdict_fuel = verdict_fuel;
         self
     }
 
@@ -510,6 +566,11 @@ impl PluginHost {
     #[must_use]
     pub fn fuel_per_tick(&self) -> u64 {
         self.fuel_per_tick
+    }
+
+    #[must_use]
+    pub fn verdict_fuel(&self) -> u64 {
+        self.verdict_fuel
     }
 
     #[must_use]
@@ -680,6 +741,13 @@ impl PluginHost {
                 export: "on-task".to_owned(),
                 message: format!("{e:?}"),
             })?;
+        let on_verdict = instance
+            .get_typed_func::<(VerdictContext,), (PluginVerdict,)>(&mut store, "on-verdict")
+            .map_err(|e| HostError::MissingExport {
+                name: name.to_owned(),
+                export: "on-verdict".to_owned(),
+                message: format!("{e:?}"),
+            })?;
 
         let (info,) = init.call(&mut store, ()).map_err(|e| HostError::Trap {
             name: name.to_owned(),
@@ -707,6 +775,7 @@ impl PluginHost {
             store,
             on_tick,
             on_task,
+            on_verdict,
             failure: None,
         });
         Ok(self.plugins.len() - 1)
@@ -781,6 +850,34 @@ impl PluginHost {
             out.extend(plugin.tick(events, fuel));
         }
         out
+    }
+
+    /// Ask every `veto:actions` guest in stable load order.
+    ///
+    /// The first `deny` stops dispatch. A trap or fuel exhaustion also stops it
+    /// and returns [`VerdictDispatch::Error`], so the action currently under
+    /// consideration is denied by the native bridge. The failed guest is marked
+    /// permanently failed and skipped on later asks, preserving failure isolation
+    /// without turning one failed plugin into a permanent global freeze.
+    pub fn verdict_all(
+        &mut self,
+        context: &lodestone_ecs::veto::VerbContext,
+    ) -> VerdictDispatch {
+        let Some(context) = crate::abi::lift_verdict_context(context) else {
+            tracing::error!("the wasm verdict ABI cannot represent a native action context; denying it");
+            return VerdictDispatch::Error;
+        };
+        for plugin in &mut self.plugins {
+            if !plugin.granted().contains(Capability::VetoActions) || plugin.failure().is_some() {
+                continue;
+            }
+            match plugin.verdict(context.clone(), self.verdict_fuel) {
+                Ok(PluginVerdict::Allow) => {}
+                Ok(PluginVerdict::Deny) => return VerdictDispatch::Deny,
+                Err(_) => return VerdictDispatch::Error,
+            }
+        }
+        VerdictDispatch::Allow
     }
 }
 

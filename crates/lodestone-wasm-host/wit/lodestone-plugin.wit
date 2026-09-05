@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.2.0;
+package lodestone:plugin@0.3.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -44,6 +44,58 @@ interface types {
     /// A guest-local opaque handle returned by the scheduler. The host preserves
     /// it when a repeating task fires so the callback can cancel itself.
     type task-id = u64;
+
+    record block-break-verdict {
+        pos: block-pos,
+        state-id: option<u32>,
+    }
+
+    record block-place-verdict {
+        pos: block-pos,
+    }
+
+    record entity-damage-verdict {
+        target-entity-id: s32,
+    }
+
+    record inventory-click-verdict {
+        window-id: s32,
+        slot: s32,
+        button: s32,
+    }
+
+    record player-move-verdict {
+        moving: bool,
+        jumping: bool,
+        sprinting: bool,
+    }
+
+    record player-interact-verdict {
+        pos: option<block-pos>,
+        target-entity-id: option<s32>,
+    }
+
+    /// The copy-only context for one action the client is about to commit.
+    ///
+    /// This deliberately contains no world handle, entity handle, or callback:
+    /// `on-verdict` runs while the tick owner may already hold the world guard.
+    /// A guest can decide from this value and state it owns, but cannot re-enter
+    /// the client world through the ABI.
+    variant verdict-context {
+        block-break(block-break-verdict),
+        block-place(block-place-verdict),
+        entity-damage(entity-damage-verdict),
+        inventory-click(inventory-click-verdict),
+        player-move(player-move-verdict),
+        player-interact(player-interact-verdict),
+    }
+
+    /// The only synchronous cancellation result. `deny` stops the action before
+    /// prediction and before egress; there is no mutation channel in this call.
+    enum plugin-verdict {
+        allow,
+        deny,
+    }
 
     /// `lodestone_model::event::ChatKind`.
     enum chat-kind {
@@ -141,7 +193,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.2.0"`.
+        /// `"lodestone:plugin@0.3.0"`.
         abi: string,
     }
 
@@ -191,7 +243,7 @@ interface scheduler {
 }
 
 world plugin {
-    use types.{event, action, plugin-info, task-id};
+    use types.{action, event, plugin-info, plugin-verdict, task-id, verdict-context};
 
     import logging;
     import filesystem;
@@ -209,4 +261,8 @@ world plugin {
     /// Called when a task scheduled through the `scheduler` import becomes due.
     /// `token` is guest-defined state that crosses the otherwise stateless ABI.
     export on-task: func(id: task-id, token: u64) -> list<action>;
+
+    /// Called synchronously at a typed action-veto point. Guests run in stable
+    /// host load order; the first `deny` (or failed guest call) ends this ask.
+    export on-verdict: func(context: verdict-context) -> plugin-verdict;
 }
