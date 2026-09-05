@@ -313,10 +313,19 @@ impl EntityStorage {
     /// `entities/` directory in its source world.
     #[must_use]
     pub fn open_readonly(world_dir: &Path) -> Self {
+        Self::open_readonly_for_dimension(world_dir, crate::dimension::Dimension::Overworld)
+    }
+
+    /// Opens one built-in dimension's entity-sidecar path without creating it.
+    #[must_use]
+    pub fn open_readonly_for_dimension(
+        world_dir: &Path,
+        dimension: crate::dimension::Dimension,
+    ) -> Self {
         let dir = world_dir
             .join("dimensions")
             .join("minecraft")
-            .join("overworld")
+            .join(dimension.dir_name())
             .join("entities");
         Self {
             dir: std::sync::Arc::new(dir),
@@ -336,10 +345,18 @@ impl EntityStorage {
     ///
     /// [`Error::Io`] if the directory cannot be created.
     pub fn new(world_dir: &Path) -> Result<Self, Error> {
+        Self::new_for_dimension(world_dir, crate::dimension::Dimension::Overworld)
+    }
+
+    /// Opens one built-in dimension's writable entity-sidecar path.
+    pub fn new_for_dimension(
+        world_dir: &Path,
+        dimension: crate::dimension::Dimension,
+    ) -> Result<Self, Error> {
         let dir = world_dir
             .join("dimensions")
             .join("minecraft")
-            .join("overworld")
+            .join(dimension.dir_name())
             .join("entities");
         std::fs::create_dir_all(&dir).map_err(|source| Error::Io {
             path: dir.clone(),
