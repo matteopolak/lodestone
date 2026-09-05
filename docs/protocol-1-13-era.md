@@ -65,6 +65,19 @@ pose) and `minecraft:entity` (an abstract base packet no real server sends).
 carries light inside the chunk packet**, which is why neither neighbouring
 era's chunk decoder can serve it.
 
+### Hosted position confirmation and movement
+
+Protocol 404's clientbound position carries a teleport id, and the host now
+decodes `teleport_confirm` into `ServerBound::TeleportationAccepted`. That
+activates the shared pending-id gate: movement stays blocked until the matching
+reply arrives. `position`, `position_look`, `look`, and `flying` are decoded
+separately so a pose, rotation-only change, or grounded-only change reaches its
+own shared-server consumer. The in-memory control joins through the real 404
+adapter, confirms its initial placement, then crosses into chunk `(1, 0)`;
+arrival of that column proves the acknowledgement and movement chain reached
+view streaming. A real 1.13.2 client session remains the external wire
+compatibility gate.
+
 The packed `position` row is the widest single difference from the era above:
 fifteen of the twenty-eight packets whose shape changes between 1.13.2 and
 1.14.4 change *only* because they carry a position. That is why

@@ -40,6 +40,13 @@ decoded only to establish the exact packet boundary. The in-memory host starts a
 sends a radius-one settings update, and observes column `(1, 0)` on the client; protocol 47's
 settings body ends after the skin-parts byte, without a main-hand field.
 
+The host also lifts all four movement forms: `position` and `position_look`
+carry an absolute pose, while `look` and `flying` carry only rotation or the
+grounded flag. Protocol 47 has no teleport id: a matching `position_look` is
+the placement echo, so it must remain ordinary movement rather than be
+invented as a separate acknowledgement. The in-memory movement control crosses
+into chunk `(1, 0)` and observes that the shared view tracker streams it.
+
 ## How to change it
 
 Keep protocol-47 section encoding local to this family. Its raw state-word layout differs from the

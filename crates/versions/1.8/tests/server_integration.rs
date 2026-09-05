@@ -6,7 +6,7 @@ use std::time::Duration;
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, ChatMode, ClientAction, ClientSettings,
-    DisplayedSkinParts, MainHand, ParticleStatus,
+    DisplayedSkinParts, MainHand, ParticleStatus, Rotation, Vec3,
 };
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_8::adapter;
@@ -145,6 +145,34 @@ async fn client_settings_expand_the_hosted_view_on_the_client() {
         .await
         .expect("the settings-driven view expansion must stream a new column");
 
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn position_look_recenters_the_hosted_protocol_47_view() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
+        .expect("protocol 47 must resolve to a hosted family");
+    let source = Arc::new(LegacyFixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, _events) = ClientBuilder::new(address(), profile(), Box::new(adapter()))
+        .player_loaded_policy(PlayerLoadedPolicy::Manual)
+        .connect_with(client_io);
+    handle.wait_for_spawn(Duration::from_secs(10)).await.expect("must join Play");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
+        .await
+        .expect("initial column must arrive");
+    handle.send_action(ClientAction::Move {
+        pos: Vec3::new(24.0, 100.0, 8.0),
+        rotation: Rotation { yaw: 0.0, pitch: 0.0 },
+        on_ground: true,
+        horizontal_collision: false,
+    }).expect("joined client accepts movement");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
+        .await
+        .expect("position/look must recenter the hosted view");
     handle.shutdown();
     server.shutdown().await;
 }

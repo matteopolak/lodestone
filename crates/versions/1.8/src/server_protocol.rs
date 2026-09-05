@@ -6,7 +6,7 @@
 
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
 use lodestone_server::{
     ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -15,7 +15,10 @@ use uuid::Uuid;
 use crate::PROTOCOL;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
-use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGame};
+use crate::packets::game::{
+    BlockDig, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
+    ServerboundPosition, ServerboundPositionLook,
+};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
@@ -213,6 +216,44 @@ impl ServerProtocol for V47ServerProtocol {
                     face,
                     sequence: 0,
                 }
+            }
+            // Protocol 47 confirms a placement by echoing position/look; it
+            // deliberately has no separate teleport id or confirmation frame.
+            State::Play if packet_id == play::serverbound::POSITION => {
+                decode_full::<ServerboundPosition>(payload).map_or(ServerBound::Ignored, |move_| {
+                    ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: None,
+                        on_ground: move_.on_ground,
+                    }
+                })
+            }
+            State::Play if packet_id == play::serverbound::POSITION_LOOK => {
+                decode_full::<ServerboundPositionLook>(payload).map_or(ServerBound::Ignored, |move_| {
+                    ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: Some(Rotation { yaw: move_.yaw, pitch: move_.pitch }),
+                        on_ground: move_.on_ground,
+                    }
+                })
+            }
+            State::Play if packet_id == play::serverbound::LOOK => {
+                decode_full::<ServerboundLook>(payload).map_or(ServerBound::Ignored, |look| {
+                    ServerBound::PlayerRotated {
+                        yaw: look.yaw,
+                        pitch: look.pitch,
+                        on_ground: look.on_ground,
+                    }
+                })
+            }
+            State::Play if packet_id == play::serverbound::FLYING => {
+                decode_full::<ServerboundFlying>(payload).map_or(ServerBound::Ignored, |flying| {
+                    ServerBound::PlayerStatusOnly { on_ground: flying.on_ground }
+                })
             }
             State::Play if packet_id == play::serverbound::KEEP_ALIVE => {
                 decode_full::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {

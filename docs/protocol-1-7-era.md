@@ -77,6 +77,15 @@ then cape boolean, so it must not reuse the protocol-47 settings decoder.
 That control does not replace a live protocol-5 client session against the
 host, which remains the external compatibility check.
 
+Hosted movement now lifts all four serverbound shapes into the shared server:
+`position` and `position_look` update the authoritative player sample,
+`look` updates rotation alone, and `flying` updates the grounded state alone.
+The former two retain protocol 5's `x, y, stance, z` decoding; `stance` is a
+wire-only confirmation constraint, not the player's feet position. There is
+no id acknowledgement in this era, so the echoed `position_look` itself is
+the placement confirmation. The in-memory movement control crosses from chunk
+`(0, 0)` to `(1, 0)` and observes the new streamed column.
+
 ### What is genuinely different, not merely older
 
 Measured, not assumed. Each is documented where it is implemented.

@@ -70,6 +70,16 @@ in all four tables, and the body is the same through 110, 210, 316, and 340: loc
 VarInt chat mode, colours, skin parts, and VarInt main hand. Literal-body controls check every
 table and reject trailing bytes.
 
+Unlike protocol 47, all four hosted 1.9-era tables put a teleport id on the
+clientbound position packet and accept a distinct `teleport_confirm` at
+serverbound id `0`. Their host decoders lift that reply to
+`ServerBound::TeleportationAccepted`, enabling the shared server's pending-id
+gate; a mismatched reply leaves movement inert. The same tables lift each of
+the four movement shapes (`position`, `position_look`, `look`, and `flying`)
+using that table's own ids. In-memory controls cover every hosted protocol:
+the family adapter confirms the initial placement, moves across the chunk
+boundary, and observes the newly streamed `(1, 0)` column.
+
 Dispatch is one `lodestone_core::dispatch::Table` per protocol, cached in a four-slot array of
 `OnceLock`s indexed the same way `ids_for` resolves a table. A handler or `IGNORED` entry may
 declare a `ProtocolRange`; `Table::build` skips one whose range excludes the protocol it is
