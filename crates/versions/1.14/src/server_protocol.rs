@@ -22,7 +22,7 @@ use crate::packet_ids::{handshaking as handshaking_754, login as login_754, play
 use crate::packet_ids_498::{handshaking as handshaking_498, login as login_498, play as play_498};
 use crate::packets::game::{
     BlockDig, BlockPlace, ClientboundPositionLook, JoinGameLegacy, KickDisconnect, ServerboundFlying,
-    ServerboundLook, ServerboundPosition, ServerboundPositionLook,
+    ServerboundArmAnimation, ServerboundLook, ServerboundPosition, ServerboundPositionLook,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccessString, SetCompression};
@@ -84,6 +84,16 @@ fn decode_full_498<T: Decode>(payload: &[u8]) -> Option<T> {
     let value = T::decode(&mut reader, CTX_498).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
+}
+
+fn encode_animate(packet_id: i32, entity_id: i32, action: u8) -> ServerDirective {
+    let mut payload = Writer::default();
+    payload.var_i32(entity_id);
+    payload.u8(action);
+    ServerDirective::Send {
+        packet_id,
+        payload: payload.into_vec(),
+    }
 }
 
 fn block_action(status: i32) -> Option<BlockActionKind> {
@@ -583,6 +593,15 @@ impl ServerProtocol for V578ServerProtocol {
             State::Play if packet_id == play::serverbound::BLOCK_PLACE => {
                 decode_full::<BlockPlace>(payload).map_or(ServerBound::Ignored, block_use)
             }
+            State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
+                let Some(hand) = decode_full::<ServerboundArmAnimation>(payload)
+                    .and_then(|packet| u8::try_from(packet.hand).ok())
+                    .filter(|&hand| hand <= 1)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::Swing { hand }
+            }
             // The four movement forms have distinct payloads. Position-bearing
             // forms are what drive view recentering and the integrated server's
             // chunk stream; look and grounded-only updates still carry real
@@ -688,6 +707,10 @@ impl ServerProtocol for V578ServerProtocol {
             .expect("call try_encode_block_update to handle an unrepresentable protocol-578 state")
     }
 
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        encode_animate(play::clientbound::ANIMATION, entity_id, action)
+    }
+
     fn encode_disconnect(&self, state: State, reason: &Text) -> ServerDirective {
         if state != State::Play {
             return ServerDirective::None;
@@ -768,6 +791,15 @@ impl ServerProtocol for V754ServerProtocol {
             }
             State::Play if packet_id == play_754::serverbound::BLOCK_PLACE => {
                 decode_full_754::<BlockPlace>(payload).map_or(ServerBound::Ignored, block_use)
+            }
+            State::Play if packet_id == play_754::serverbound::ARM_ANIMATION => {
+                let Some(hand) = decode_full_754::<ServerboundArmAnimation>(payload)
+                    .and_then(|packet| u8::try_from(packet.hand).ok())
+                    .filter(|&hand| hand <= 1)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::Swing { hand }
             }
             State::Play if packet_id == play_754::serverbound::POSITION => {
                 decode_full_754::<ServerboundPosition>(payload).map_or(
@@ -890,6 +922,10 @@ impl ServerProtocol for V754ServerProtocol {
             .expect("call try_encode_block_update to handle an unrepresentable protocol-754 state")
     }
 
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        encode_animate(play_754::clientbound::ANIMATION, entity_id, action)
+    }
+
     fn encode_disconnect(&self, state: State, reason: &Text) -> ServerDirective {
         if state != State::Play {
             return ServerDirective::None;
@@ -957,6 +993,15 @@ impl ServerProtocol for V498ServerProtocol {
             }
             State::Play if packet_id == play_498::serverbound::BLOCK_PLACE => {
                 decode_full_498::<BlockPlace>(payload).map_or(ServerBound::Ignored, block_use)
+            }
+            State::Play if packet_id == play_498::serverbound::ARM_ANIMATION => {
+                let Some(hand) = decode_full_498::<ServerboundArmAnimation>(payload)
+                    .and_then(|packet| u8::try_from(packet.hand).ok())
+                    .filter(|&hand| hand <= 1)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::Swing { hand }
             }
             State::Play if packet_id == play_498::serverbound::POSITION => {
                 decode_full_498::<ServerboundPosition>(payload).map_or(
@@ -1071,6 +1116,10 @@ impl ServerProtocol for V498ServerProtocol {
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
         self.try_encode_block_update(x, y, z, state)
             .expect("call try_encode_block_update to handle an unrepresentable protocol-498 state")
+    }
+
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        encode_animate(play_498::clientbound::ANIMATION, entity_id, action)
     }
 
     fn encode_disconnect(&self, state: State, reason: &Text) -> ServerDirective {

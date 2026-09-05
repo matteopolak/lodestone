@@ -68,6 +68,16 @@ rather than inventing one. Literal wire bodies prove the decoder separately
 for 498, 578 and 754; adapter-to-registry tests prove the matching producer and
 host agree, including rejection outside Play and for an invalid face.
 
+The three hosts also lift the arm-swing request: its one VarInt hand field
+(`0` main hand or `1` off hand) becomes `ServerBound::Swing`. The shared swing
+consumer's broadcast is encoded as a VarInt entity id followed by the raw
+animation action byte (`0` for main hand or `3` for off hand), using each
+protocol's own clientbound packet id. The protocol test keeps the one-byte
+request and three-byte broadcast bodies literal, then sends the latter through
+the registry-selected adapter into `ClientEvent::EntityAnimation`. Unknown
+hand values, trailing request bytes, and requests delivered before Play all
+remain ignored.
+
 The host tests anchor packet ids in the committed generated tables and exercise
 each differing chunk framing against the crate's independent decoder. Every
 hosted protocol also has a literal reference join body and its own in-memory
