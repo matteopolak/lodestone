@@ -7,9 +7,9 @@
 //! things must hold, and they are checked separately because they fail
 //! separately:
 //!
-//! 1. **Nothing in the workspace depends on this crate.** Checked by scanning
-//!    every workspace manifest — the edge a future change actually adds is a
-//!    crate *naming* this one, and that is a line in a `Cargo.toml`. Nested
+//! 1. **Production consumers explicitly opt in.** Checked by scanning every
+//!    workspace manifest: the dedicated host may name this crate only through
+//!    an optional dependency and its default-off `jvm` feature. Nested
 //!    standalone workspaces are executable experiments, not production graph
 //!    members, so they are excluded explicitly.
 //! 2. **This crate names no JVM linkage of its own**, and if it ever does, it
@@ -46,7 +46,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// This crate. Nothing may name it.
+/// This crate. Production consumers must keep its edge default-off.
 const SELF_NAME: &str = "lodestone-jvm-bridge";
 
 /// Crate names that imply JVM linkage. Substrings are not used — an exact
@@ -129,13 +129,10 @@ fn dependency_names(manifest: &Path) -> Vec<String> {
     names
 }
 
-/// The load-bearing assertion: no crate in this workspace names the bridge, so
-/// it is absent from every default build's graph by construction.
-///
-/// The bridge runtime is behind an **optional dependency plus a feature that
-/// is off by default**; the feature declaration has its own assertion below.
+/// Production consumers keep the runtime behind an optional dependency and
+/// an explicitly default-off feature, so default builds cannot reach JNI.
 #[test]
-fn nothing_in_the_workspace_depends_on_the_bridge() {
+fn production_bridge_edges_are_explicitly_default_off() {
     let root = workspace_root();
     let manifests = workspace_manifests(&root);
 
@@ -160,19 +157,50 @@ fn nothing_in_the_workspace_depends_on_the_bridge() {
             .iter()
             .any(|name| name == SELF_NAME)
         {
-            dependents.push(manifest.display().to_string());
+            let text = std::fs::read_to_string(manifest).expect("read dependent manifest");
+            if manifest != &root.join("crates/lodestone-dedicated-server/Cargo.toml")
+                || !bridge_edge_is_default_off(&text)
+            {
+                dependents.push(manifest.display().to_string());
+            }
         }
     }
 
     assert!(
         dependents.is_empty(),
-        "{SELF_NAME} is now a dependency of {dependents:?}. The bridge must not \
+        "{SELF_NAME} has an unguarded dependency in {dependents:?}. The bridge must not \
          be reachable from a default build — a user who loads no Java plugin \
          pays no libjvm linkage, no JVM startup and no per-tick cost. If this \
          edge is deliberate, it belongs behind an OPTIONAL dependency and a \
          default-off feature, and this test should be changed to assert that \
          rather than removed. See docs/java-plugin-bridge.md."
     );
+}
+
+fn bridge_edge_is_default_off(text: &str) -> bool {
+    let lines: Vec<String> = text.lines()
+        .map(|line| line.split('#').next().unwrap_or("").chars()
+            .filter(|character| !character.is_whitespace()).collect())
+        .collect();
+    lines.iter().any(|line| line == "default=[]")
+        && lines.iter().any(|line| line == "jvm=[\"dep:lodestone-jvm-bridge\"]")
+        && lines.iter().any(|line| line.starts_with("lodestone-jvm-bridge=")
+            && line.contains("optional=true") && line.contains("features=[\"jvm\"]"))
+}
+
+#[test]
+fn optional_edge_detector_rejects_unconditional_and_default_enabled_controls() {
+    let manifest = r#"
+[features]
+default = []
+jvm = ["dep:lodestone-jvm-bridge"]
+[dependencies]
+lodestone-jvm-bridge = { path = "bridge", optional = true, features = ["jvm"] }
+"#;
+    assert!(bridge_edge_is_default_off(manifest));
+    assert!(!bridge_edge_is_default_off(&manifest.replace("optional = true", "optional = false")));
+    assert!(!bridge_edge_is_default_off(&manifest.replace("default = []", "default = [\"jvm\"]")));
+    assert!(!bridge_edge_is_default_off(&manifest.replace("dep:lodestone-jvm-bridge", "unrelated")));
 }
 
 /// The control. The same parser and the same predicate, looking for a crate
