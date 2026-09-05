@@ -20,13 +20,20 @@ use lodestone_storage::{
 use lodestone_storage_schema::{
     BiomeSection, BuiltinDimension, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1,
     EntityRecord, GeneralRecord, LightData as StoredLightData, LightSection, PlayerRecord,
-    RegisteredExtension,
+    RegisteredExtension, WorldProperties,
     ScheduledTick as StoredScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord,
     generated::{general_record, light_data, storage_record},
 };
 
 const GAME_DATA_VERSION: u32 = 46_002;
 const SECTION_CELLS: usize = 16 * 16 * 16;
+
+/// The fixed native key for the world's one typed properties record.
+///
+/// General-record keys otherwise identify players and resident entities. This
+/// reserved slot has no source path in its body, so a metadata import replaces
+/// the previous typed record without retaining source file names or NBT.
+pub const WORLD_PROPERTIES_KEY: RecordKey = RecordKey::general(i32::MIN, i32::MIN, u32::MAX);
 
 /// One native player record's deliberately bounded, typed locator state.
 ///
@@ -184,6 +191,8 @@ pub enum Error {
     Player(PlayerRecordError),
     /// A native resident-entity record is malformed, unsupported, or ambiguous.
     Entity(EntityRecordError),
+    /// The one native world-properties record is malformed or unsupported.
+    WorldProperties(WorldPropertiesError),
 }
 
 impl fmt::Display for Error {
@@ -196,6 +205,9 @@ impl fmt::Display for Error {
             Self::Chunk(error) => write!(formatter, "native chunk record failed: {error}"),
             Self::Player(error) => write!(formatter, "native player record failed: {error}"),
             Self::Entity(error) => write!(formatter, "native entity record failed: {error}"),
+            Self::WorldProperties(error) => {
+                write!(formatter, "native world-properties record failed: {error}")
+            }
         }
     }
 }
@@ -223,6 +235,12 @@ impl From<PlayerRecordError> for Error {
 impl From<EntityRecordError> for Error {
     fn from(error: EntityRecordError) -> Self {
         Self::Entity(error)
+    }
+}
+
+impl From<WorldPropertiesError> for Error {
+    fn from(error: WorldPropertiesError) -> Self {
+        Self::WorldProperties(error)
     }
 }
 
@@ -493,6 +511,40 @@ impl fmt::Display for ChunkRecordError {
 }
 
 impl std::error::Error for ChunkRecordError {}
+
+/// A malformed or unsupported native world-properties record.
+#[derive(Debug, Eq, PartialEq)]
+pub enum WorldPropertiesError {
+    /// The envelope has a format version this reader does not understand.
+    UnsupportedFormatVersion(u32),
+    /// The envelope did not contain a typed general body.
+    MissingGeneralBody,
+    /// The general body was not a world-properties record.
+    MissingWorldPropertiesBody,
+    /// World properties have no extension consumer in this format revision.
+    UnsupportedExtensions,
+}
+
+impl fmt::Display for WorldPropertiesError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedFormatVersion(version) => {
+                write!(formatter, "unsupported world-properties record format version {version}")
+            }
+            Self::MissingGeneralBody => {
+                formatter.write_str("record does not contain a general body")
+            }
+            Self::MissingWorldPropertiesBody => {
+                formatter.write_str("general record does not contain world properties")
+            }
+            Self::UnsupportedExtensions => {
+                formatter.write_str("world-properties record carries unsupported extension payloads")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WorldPropertiesError {}
 
 /// A malformed, unsupported, or ambiguous native player locator record.
 #[derive(Debug, Eq, PartialEq)]
@@ -779,6 +831,24 @@ impl WorldStorage {
             .lock()
             .expect("world storage lock poisoned")
             .register_extensions(&registrations)
+            .map_err(Into::into)
+    }
+
+    /// Reopens the one typed native world-properties record, if present.
+    ///
+    /// This is the read boundary for the operator metadata import. The record
+    /// carries no extension consumer in format version 1, so any extension
+    /// payload fails closed instead of becoming ignored data on reopen.
+    pub fn load_world_properties(&self) -> Result<Option<WorldProperties>, Error> {
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        native
+            .lock()
+            .expect("world storage lock poisoned")
+            .get(WORLD_PROPERTIES_KEY)?
+            .map(decode_world_properties)
+            .transpose()
             .map_err(Into::into)
     }
 
@@ -1572,6 +1642,22 @@ fn tick_priority(priority: ScheduledTickPriority) -> crate::scheduled_tick::Tick
         ScheduledTickPriority::VeryLow => crate::scheduled_tick::TickPriority::VeryLow,
         ScheduledTickPriority::ExtremelyLow => crate::scheduled_tick::TickPriority::ExtremelyLow,
     }
+}
+
+fn decode_world_properties(record: StorageRecord) -> Result<WorldProperties, WorldPropertiesError> {
+    if record.format_version != FORMAT_VERSION_V1 {
+        return Err(WorldPropertiesError::UnsupportedFormatVersion(record.format_version));
+    }
+    let Some(storage_record::Record::General(general)) = record.record else {
+        return Err(WorldPropertiesError::MissingGeneralBody);
+    };
+    if !general.extensions.is_empty() {
+        return Err(WorldPropertiesError::UnsupportedExtensions);
+    }
+    let Some(general_record::Record::WorldProperties(properties)) = general.record else {
+        return Err(WorldPropertiesError::MissingWorldPropertiesBody);
+    };
+    Ok(properties)
 }
 
 fn player_key(uuid: [u8; 16]) -> RecordKey {

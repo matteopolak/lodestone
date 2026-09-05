@@ -1,4 +1,4 @@
-//! Explicit command-line entry point for terrain-only Anvil/native conversion.
+//! Explicit command-line entry point for bounded Anvil/native conversion.
 //!
 //! This intentionally sits in the dedicated-server binary rather than in the
 //! game launch path. Conversion is an operator action with an explicit source,
@@ -10,8 +10,10 @@ use std::{fmt, fmt::Write as _, path::PathBuf};
 use lodestone_anvil::{
     CompressionScheme,
     import_preflight::{LossDecision, PreflightReport},
+    level_dat, world_gen_settings,
 };
 use lodestone_server::{
+    anvil_import::{import_world_properties, preflight_world_properties},
     anvil_world_export::{
         ChunkCoordinate, WorldExportInput, WorldExportLossDecision, WorldExportReport,
         export_world_directory, preflight_world_export,
@@ -30,21 +32,26 @@ const USAGE: &str = concat!(
     "--height <blocks> (--chunk <x,z> [--chunk <x,z> ...] | --all-terrain) --game-time <ticks> ",
     "--timestamp <seconds> --compression <gzip|zlib|uncompressed|lz4> ",
     "[--apply --acknowledge <review-token>]\n\n",
+    "  lodestone-server anvil-convert import-metadata --source <anvil-world> ",
+    "--destination <native-store> --native-path <native-store> ",
+    "[--apply --acknowledge <review-token>]\n\n",
     "Without --apply this command only reports its payload-free preflight and refuses mutation. ",
     "A lossy --apply requires the exact review token printed by that preflight.",
 );
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Direction {
-    Import,
-    Export,
+    ImportTerrain,
+    ExportTerrain,
+    ImportMetadata,
 }
 
 impl Direction {
     const fn name(self) -> &'static str {
         match self {
-            Self::Import => "import",
-            Self::Export => "export",
+            Self::ImportTerrain => "import",
+            Self::ExportTerrain => "export",
+            Self::ImportMetadata => "import-metadata",
         }
     }
 }
@@ -55,8 +62,8 @@ struct ConversionLaunch {
     source: PathBuf,
     destination: PathBuf,
     native_path: PathBuf,
-    min_y: i32,
-    height: i32,
+    min_y: Option<i32>,
+    height: Option<i32>,
     dimension: Option<String>,
     chunks: Vec<ChunkCoordinate>,
     all_terrain: bool,
@@ -80,12 +87,13 @@ pub(super) fn run(args: impl IntoIterator<Item = impl Into<String>>) -> Result<S
 fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<ConversionLaunch, String> {
     let mut args = args.into_iter().map(Into::into);
     let direction = match args.next().as_deref() {
-        Some("import") => Direction::Import,
-        Some("export") => Direction::Export,
+        Some("import") => Direction::ImportTerrain,
+        Some("export") => Direction::ExportTerrain,
+        Some("import-metadata") => Direction::ImportMetadata,
         Some("--help") | Some("-h") | None => return Err(USAGE.to_owned()),
         Some(other) => {
             return Err(format!(
-                "anvil-convert expects import or export, got {other:?}\n{USAGE}"
+                "anvil-convert expects import, export, or import-metadata, got {other:?}\n{USAGE}"
             ));
         }
     };
@@ -142,8 +150,8 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
         source: source.ok_or_else(|| "--source is required".to_owned())?,
         destination: destination.ok_or_else(|| "--destination is required".to_owned())?,
         native_path: native_path.ok_or_else(|| "--native-path is required".to_owned())?,
-        min_y: min_y.ok_or_else(|| "--min-y is required".to_owned())?,
-        height: height.ok_or_else(|| "--height is required".to_owned())?,
+        min_y,
+        height,
         dimension,
         chunks,
         all_terrain,
@@ -162,18 +170,28 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
         return Err("--source and --destination must name different paths".to_owned());
     }
     let native_endpoint = match launch.direction {
-        Direction::Import => &launch.destination,
-        Direction::Export => &launch.source,
+        Direction::ImportTerrain | Direction::ImportMetadata => &launch.destination,
+        Direction::ExportTerrain => &launch.source,
     };
     if native_endpoint != &launch.native_path {
         return Err(format!(
             "--native-path must exactly name the {} endpoint for {}",
-            if launch.direction == Direction::Import { "destination" } else { "source" },
+            if matches!(
+                launch.direction,
+                Direction::ImportTerrain | Direction::ImportMetadata
+            ) {
+                "destination"
+            } else {
+                "source"
+            },
             launch.direction.name(),
         ));
     }
     match launch.direction {
-        Direction::Import => {
+        Direction::ImportTerrain => {
+            if launch.min_y.is_none() || launch.height.is_none() {
+                return Err("import requires --min-y and --height".to_owned());
+            }
             if launch.dimension.as_deref().is_none_or(str::is_empty) {
                 return Err("import requires a non-empty --dimension".to_owned());
             }
@@ -186,7 +204,10 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
                 return Err("--chunk, --game-time, --timestamp, and --compression are export-only".to_owned());
             }
         }
-        Direction::Export => {
+        Direction::ExportTerrain => {
+            if launch.min_y.is_none() || launch.height.is_none() {
+                return Err("export requires --min-y and --height".to_owned());
+            }
             if launch.dimension.is_some() {
                 return Err("--dimension is import-only; export is terrain-only".to_owned());
             }
@@ -203,6 +224,22 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
                 return Err("export requires --game-time, --timestamp, and --compression".to_owned());
             }
         }
+        Direction::ImportMetadata => {
+            if launch.min_y.is_some()
+                || launch.height.is_some()
+                || launch.dimension.is_some()
+                || !launch.chunks.is_empty()
+                || launch.all_terrain
+                || launch.game_time.is_some()
+                || launch.timestamp.is_some()
+                || launch.compression.is_some()
+            {
+                return Err(
+                    "import-metadata accepts only --source, --destination, --native-path, --apply, and --acknowledge"
+                        .to_owned(),
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -212,8 +249,9 @@ fn execute(launch: &ConversionLaunch) -> Result<String, String> {
         // Import preflight reads only the Anvil source. Opening a destination
         // NativeStore may create its directory, so defer it until --apply has
         // passed every review gate.
-        Direction::Import => execute_import(launch),
-        Direction::Export => {
+        Direction::ImportTerrain => execute_import(launch),
+        Direction::ImportMetadata => execute_metadata_import(launch),
+        Direction::ExportTerrain => {
             let storage = open_native_backend(launch)?;
             execute_export(launch, &storage)
         }
@@ -237,15 +275,15 @@ fn execute_import(launch: &ConversionLaunch) -> Result<String, String> {
     let report = preflight_world_directory(dimension, &launch.source)
         .map_err(|error| format!("import preflight failed: {error}"))?;
     let token = review_token(launch, &report);
-    let mut output = format_review(Direction::Import, &report, &token);
+    let mut output = format_review(Direction::ImportTerrain, &report, &token);
     require_apply(launch, &report, &token, &mut output)?;
     let storage = open_native_backend(launch)?;
     let result = import_world_directory(
         &storage,
         dimension,
         &launch.source,
-        launch.min_y,
-        launch.height,
+        launch.min_y.expect("validated import min Y"),
+        launch.height.expect("validated import height"),
         Some(report.decide(LossDecision::ProceedAndDiscardUnsupported)),
     )
     .map_err(|error| format!("import refused before completing conversion: {error}"))?;
@@ -253,6 +291,34 @@ fn execute_import(launch: &ConversionLaunch) -> Result<String, String> {
         output,
         "Converted {} terrain chunks into {}.",
         result.records_written,
+        launch.destination.display()
+    )
+    .expect("write to String");
+    Ok(output)
+}
+
+fn execute_metadata_import(launch: &ConversionLaunch) -> Result<String, String> {
+    let level = level_dat::read_from_file(&level_dat::path_in(&launch.source))
+        .map_err(|error| format!("metadata preflight could not read level.dat: {error}"))?;
+    let settings =
+        world_gen_settings::read_from_file(&world_gen_settings::path_in(&launch.source)).map_err(
+            |error| format!("metadata preflight could not read world-generation settings: {error}"),
+        )?;
+    let report = preflight_world_properties(&level, &settings);
+    let token = review_token(launch, &report);
+    let mut output = format_review(Direction::ImportMetadata, &report, &token);
+    require_apply(launch, &report, &token, &mut output)?;
+    let storage = open_native_backend(launch)?;
+    let records_written = import_world_properties(
+        &storage,
+        &level,
+        &settings,
+        Some(report.decide(LossDecision::ProceedAndDiscardUnsupported)),
+    )
+    .map_err(|error| format!("metadata import refused before completing conversion: {error}"))?;
+    writeln!(
+        output,
+        "Converted {records_written} typed world-properties record into {}.",
         launch.destination.display()
     )
     .expect("write to String");
@@ -276,8 +342,8 @@ fn execute_export(launch: &ConversionLaunch, storage: &WorldStorage) -> Result<S
     let selected_count = chunks.len();
     let input = WorldExportInput::new(
         chunks,
-        launch.min_y,
-        launch.height,
+        launch.min_y.expect("validated export min Y"),
+        launch.height.expect("validated export height"),
         launch.game_time.expect("validated export game time"),
         launch.compression.expect("validated export compression"),
         launch.timestamp.expect("validated export timestamp"),
@@ -288,7 +354,7 @@ fn execute_export(launch: &ConversionLaunch, storage: &WorldStorage) -> Result<S
     let token = review_token(launch, &report);
     let mut output = format!(
         "Selected {selected_count} terrain chunks.\n{}",
-        format_review(Direction::Export, &report, &token)
+        format_review(Direction::ExportTerrain, &report, &token)
     );
     require_apply(launch, &report, &token, &mut output)?;
     let result = export_world_directory(
@@ -363,7 +429,7 @@ fn format_review<T: fmt::Debug>(direction: Direction, report: &T, token: &str) -
 
 fn review_token<T: fmt::Debug>(launch: &ConversionLaunch, report: &T) -> String {
     let reviewed = format!(
-        "v2|{:?}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        "v2|{:?}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
         launch.direction,
         launch.source.display(),
         launch.destination.display(),
@@ -428,8 +494,15 @@ mod tests {
     use super::*;
 
     const SCRATCH: &str = "/private/tmp/lodestone-wave-storage-enum-711";
+    const METADATA_SCRATCH: &str = "/private/tmp/lodestone-wave-storage-meta-711";
+    const LEVEL_DAT_FIXTURE: &[u8] =
+        include_bytes!("../../lodestone-anvil/tests/support/level_dat_26_2_vanilla.dat");
+    const WORLD_GEN_FIXTURE: &[u8] =
+        include_bytes!("../../lodestone-anvil/tests/support/world_gen_settings_26_2_vanilla.dat");
 
     struct Scratch;
+
+    struct MetadataScratch;
 
     impl Scratch {
         fn create() -> Self {
@@ -446,6 +519,25 @@ mod tests {
     impl Drop for Scratch {
         fn drop(&mut self) {
             std::fs::remove_dir_all(SCRATCH).expect("remove exact CLI scratch path");
+        }
+    }
+
+    impl MetadataScratch {
+        fn create() -> Self {
+            let path = Path::new(METADATA_SCRATCH);
+            assert!(
+                !path.exists(),
+                "metadata CLI scratch path must be absent before this test"
+            );
+            std::fs::create_dir(path).expect("create exact metadata CLI scratch path");
+            Self
+        }
+    }
+
+    impl Drop for MetadataScratch {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(METADATA_SCRATCH)
+                .expect("remove exact metadata CLI scratch path");
         }
     }
 
@@ -579,5 +671,74 @@ mod tests {
         ])
         .expect_err("selection modes must remain unambiguous");
         assert!(mixed.contains("either --all-terrain or explicit --chunk"));
+    }
+
+    #[test]
+    fn metadata_command_preflights_authorizes_and_reopens_typed_world_properties() {
+        let _scratch = MetadataScratch::create();
+        let root = Path::new(METADATA_SCRATCH);
+
+        let source = root.join("anvil-source");
+        let native_destination = root.join("native-destination");
+        std::fs::create_dir(&source).expect("create fixture Anvil world directory");
+        std::fs::write(source.join("level.dat"), LEVEL_DAT_FIXTURE)
+            .expect("write checked-in level metadata fixture");
+        let settings_path = source.join("data/minecraft/world_gen_settings.dat");
+        std::fs::create_dir_all(settings_path.parent().expect("world-gen settings parent"))
+            .expect("create world-generation settings directory");
+        std::fs::write(&settings_path, WORLD_GEN_FIXTURE)
+            .expect("write checked-in world-generation settings fixture");
+
+        let import = [
+            "import-metadata",
+            "--source",
+            source.to_str().expect("UTF-8 source path"),
+            "--destination",
+            native_destination.to_str().expect("UTF-8 destination path"),
+            "--native-path",
+            native_destination.to_str().expect("UTF-8 native path"),
+        ];
+        let preview = run(import).expect_err("metadata preview reports and refuses mutation");
+        assert!(preview.contains("UnsupportedData"), "preflight reports discarded metadata");
+        assert!(preview.contains("Refusing mutation without --apply."));
+        assert!(
+            !native_destination.exists(),
+            "metadata preview cannot create the native destination"
+        );
+
+        let mut unacknowledged = import.to_vec();
+        unacknowledged.push("--apply");
+        let refusal = run(unacknowledged)
+            .expect_err("lossy metadata conversion cannot apply without the review token");
+        assert!(refusal.contains("Lossy conversion requires --acknowledge"));
+        assert!(
+            !native_destination.exists(),
+            "unacknowledged metadata loss cannot create the native destination"
+        );
+
+        let mut approved = import.to_vec();
+        approved.extend(["--apply", "--acknowledge", token(&preview)]);
+        let applied = run(approved).expect("acknowledged metadata import commits typed properties");
+        assert!(applied.contains("Converted 1 typed world-properties record"));
+        assert_eq!(
+            std::fs::read(source.join("level.dat")).expect("re-read source metadata"),
+            LEVEL_DAT_FIXTURE,
+            "conversion does not rewrite source metadata"
+        );
+
+        let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: native_destination,
+        })
+        .expect("reopen native destination after CLI conversion");
+        let properties = reopened
+            .load_world_properties()
+            .expect("read typed world properties after filesystem reopen")
+            .expect("CLI conversion committed world properties");
+        assert_eq!(properties.game_data_version, 4_903);
+        assert_eq!(properties.seed, -195_764_831);
+        assert!(
+            properties.day_time == 0,
+            "unsupported total-age metadata is reported and not retained"
+        );
     }
 }
