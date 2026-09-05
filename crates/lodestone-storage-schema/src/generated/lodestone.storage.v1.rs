@@ -31,6 +31,14 @@ pub struct ChunkRecord {
     pub game_data_version: u32,
     #[prost(message, repeated, tag = "4")]
     pub sections: ::prost::alloc::vec::Vec<ChunkSection>,
+    /// The complete 4x4x4 biome container for each 16-row block section. Built-in
+    /// biome values are enum discriminants, never resource-location strings.
+    #[prost(message, repeated, tag = "5")]
+    pub biome_sections: ::prost::alloc::vec::Vec<BiomeSection>,
+    /// The 4x4 surface-biome answer used by surface-facing consumers. It is kept
+    /// separately because it is not always the top row of the 3-D container.
+    #[prost(enumeration = "BuiltinBiome", repeated, tag = "6")]
+    pub surface_biome_ids: ::prost::alloc::vec::Vec<i32>,
     #[prost(message, repeated, tag = "10")]
     pub extensions: ::prost::alloc::vec::Vec<ExtensionValue>,
 }
@@ -48,6 +56,18 @@ pub struct ChunkSection {
     pub sky_light: ::prost::alloc::vec::Vec<u8>,
     #[prost(bytes = "vec", tag = "6")]
     pub block_light: ::prost::alloc::vec::Vec<u8>,
+}
+/// One 16-row block section's 4x4x4 biome cells in `(qy * 4 + qz) * 4 + qx`
+/// order. `quart_rows` is four for a full section and narrows only the final
+/// partial section of a dimension.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BiomeSection {
+    #[prost(sint32, tag = "1")]
+    pub section_y: i32,
+    #[prost(uint32, tag = "2")]
+    pub quart_rows: u32,
+    #[prost(enumeration = "BuiltinBiome", repeated, tag = "3")]
+    pub biome_ids: ::prost::alloc::vec::Vec<i32>,
 }
 /// General state is typed rather than a string-keyed property map. Future
 /// built-in records are added as new GeneralRecord oneof members.
@@ -148,6 +168,232 @@ pub struct ExtensionValue {
     pub local_id: u32,
     #[prost(bytes = "vec", tag = "2")]
     pub payload: ::prost::alloc::vec::Vec<u8>,
+}
+/// Stable built-in biome discriminants for this game-data version. Extension
+/// biomes require an explicit future extension-table representation rather than
+/// being silently coerced into a built-in value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum BuiltinBiome {
+    Unspecified = 0,
+    Badlands = 1,
+    BambooJungle = 2,
+    BasaltDeltas = 3,
+    Beach = 4,
+    BirchForest = 5,
+    CherryGrove = 6,
+    ColdOcean = 7,
+    CrimsonForest = 8,
+    DarkForest = 9,
+    DeepColdOcean = 10,
+    DeepDark = 11,
+    DeepFrozenOcean = 12,
+    DeepLukewarmOcean = 13,
+    DeepOcean = 14,
+    Desert = 15,
+    DripstoneCaves = 16,
+    EndBarrens = 17,
+    EndHighlands = 18,
+    EndMidlands = 19,
+    ErodedBadlands = 20,
+    FlowerForest = 21,
+    Forest = 22,
+    FrozenOcean = 23,
+    FrozenPeaks = 24,
+    FrozenRiver = 25,
+    Grove = 26,
+    IceSpikes = 27,
+    JaggedPeaks = 28,
+    Jungle = 29,
+    LukewarmOcean = 30,
+    LushCaves = 31,
+    MangroveSwamp = 32,
+    Meadow = 33,
+    MushroomFields = 34,
+    NetherWastes = 35,
+    Ocean = 36,
+    OldGrowthBirchForest = 37,
+    OldGrowthPineTaiga = 38,
+    OldGrowthSpruceTaiga = 39,
+    PaleGarden = 40,
+    Plains = 41,
+    River = 42,
+    Savanna = 43,
+    SavannaPlateau = 44,
+    SmallEndIslands = 45,
+    SnowyBeach = 46,
+    SnowyPlains = 47,
+    SnowySlopes = 48,
+    SnowyTaiga = 49,
+    SoulSandValley = 50,
+    SparseJungle = 51,
+    StonyPeaks = 52,
+    StonyShore = 53,
+    SulfurCaves = 54,
+    SunflowerPlains = 55,
+    Swamp = 56,
+    Taiga = 57,
+    TheEnd = 58,
+    TheVoid = 59,
+    WarmOcean = 60,
+    WarpedForest = 61,
+    WindsweptForest = 62,
+    WindsweptGravellyHills = 63,
+    WindsweptHills = 64,
+    WindsweptSavanna = 65,
+    WoodedBadlands = 66,
+}
+impl BuiltinBiome {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "BUILTIN_BIOME_UNSPECIFIED",
+            Self::Badlands => "BUILTIN_BIOME_BADLANDS",
+            Self::BambooJungle => "BUILTIN_BIOME_BAMBOO_JUNGLE",
+            Self::BasaltDeltas => "BUILTIN_BIOME_BASALT_DELTAS",
+            Self::Beach => "BUILTIN_BIOME_BEACH",
+            Self::BirchForest => "BUILTIN_BIOME_BIRCH_FOREST",
+            Self::CherryGrove => "BUILTIN_BIOME_CHERRY_GROVE",
+            Self::ColdOcean => "BUILTIN_BIOME_COLD_OCEAN",
+            Self::CrimsonForest => "BUILTIN_BIOME_CRIMSON_FOREST",
+            Self::DarkForest => "BUILTIN_BIOME_DARK_FOREST",
+            Self::DeepColdOcean => "BUILTIN_BIOME_DEEP_COLD_OCEAN",
+            Self::DeepDark => "BUILTIN_BIOME_DEEP_DARK",
+            Self::DeepFrozenOcean => "BUILTIN_BIOME_DEEP_FROZEN_OCEAN",
+            Self::DeepLukewarmOcean => "BUILTIN_BIOME_DEEP_LUKEWARM_OCEAN",
+            Self::DeepOcean => "BUILTIN_BIOME_DEEP_OCEAN",
+            Self::Desert => "BUILTIN_BIOME_DESERT",
+            Self::DripstoneCaves => "BUILTIN_BIOME_DRIPSTONE_CAVES",
+            Self::EndBarrens => "BUILTIN_BIOME_END_BARRENS",
+            Self::EndHighlands => "BUILTIN_BIOME_END_HIGHLANDS",
+            Self::EndMidlands => "BUILTIN_BIOME_END_MIDLANDS",
+            Self::ErodedBadlands => "BUILTIN_BIOME_ERODED_BADLANDS",
+            Self::FlowerForest => "BUILTIN_BIOME_FLOWER_FOREST",
+            Self::Forest => "BUILTIN_BIOME_FOREST",
+            Self::FrozenOcean => "BUILTIN_BIOME_FROZEN_OCEAN",
+            Self::FrozenPeaks => "BUILTIN_BIOME_FROZEN_PEAKS",
+            Self::FrozenRiver => "BUILTIN_BIOME_FROZEN_RIVER",
+            Self::Grove => "BUILTIN_BIOME_GROVE",
+            Self::IceSpikes => "BUILTIN_BIOME_ICE_SPIKES",
+            Self::JaggedPeaks => "BUILTIN_BIOME_JAGGED_PEAKS",
+            Self::Jungle => "BUILTIN_BIOME_JUNGLE",
+            Self::LukewarmOcean => "BUILTIN_BIOME_LUKEWARM_OCEAN",
+            Self::LushCaves => "BUILTIN_BIOME_LUSH_CAVES",
+            Self::MangroveSwamp => "BUILTIN_BIOME_MANGROVE_SWAMP",
+            Self::Meadow => "BUILTIN_BIOME_MEADOW",
+            Self::MushroomFields => "BUILTIN_BIOME_MUSHROOM_FIELDS",
+            Self::NetherWastes => "BUILTIN_BIOME_NETHER_WASTES",
+            Self::Ocean => "BUILTIN_BIOME_OCEAN",
+            Self::OldGrowthBirchForest => "BUILTIN_BIOME_OLD_GROWTH_BIRCH_FOREST",
+            Self::OldGrowthPineTaiga => "BUILTIN_BIOME_OLD_GROWTH_PINE_TAIGA",
+            Self::OldGrowthSpruceTaiga => "BUILTIN_BIOME_OLD_GROWTH_SPRUCE_TAIGA",
+            Self::PaleGarden => "BUILTIN_BIOME_PALE_GARDEN",
+            Self::Plains => "BUILTIN_BIOME_PLAINS",
+            Self::River => "BUILTIN_BIOME_RIVER",
+            Self::Savanna => "BUILTIN_BIOME_SAVANNA",
+            Self::SavannaPlateau => "BUILTIN_BIOME_SAVANNA_PLATEAU",
+            Self::SmallEndIslands => "BUILTIN_BIOME_SMALL_END_ISLANDS",
+            Self::SnowyBeach => "BUILTIN_BIOME_SNOWY_BEACH",
+            Self::SnowyPlains => "BUILTIN_BIOME_SNOWY_PLAINS",
+            Self::SnowySlopes => "BUILTIN_BIOME_SNOWY_SLOPES",
+            Self::SnowyTaiga => "BUILTIN_BIOME_SNOWY_TAIGA",
+            Self::SoulSandValley => "BUILTIN_BIOME_SOUL_SAND_VALLEY",
+            Self::SparseJungle => "BUILTIN_BIOME_SPARSE_JUNGLE",
+            Self::StonyPeaks => "BUILTIN_BIOME_STONY_PEAKS",
+            Self::StonyShore => "BUILTIN_BIOME_STONY_SHORE",
+            Self::SulfurCaves => "BUILTIN_BIOME_SULFUR_CAVES",
+            Self::SunflowerPlains => "BUILTIN_BIOME_SUNFLOWER_PLAINS",
+            Self::Swamp => "BUILTIN_BIOME_SWAMP",
+            Self::Taiga => "BUILTIN_BIOME_TAIGA",
+            Self::TheEnd => "BUILTIN_BIOME_THE_END",
+            Self::TheVoid => "BUILTIN_BIOME_THE_VOID",
+            Self::WarmOcean => "BUILTIN_BIOME_WARM_OCEAN",
+            Self::WarpedForest => "BUILTIN_BIOME_WARPED_FOREST",
+            Self::WindsweptForest => "BUILTIN_BIOME_WINDSWEPT_FOREST",
+            Self::WindsweptGravellyHills => "BUILTIN_BIOME_WINDSWEPT_GRAVELLY_HILLS",
+            Self::WindsweptHills => "BUILTIN_BIOME_WINDSWEPT_HILLS",
+            Self::WindsweptSavanna => "BUILTIN_BIOME_WINDSWEPT_SAVANNA",
+            Self::WoodedBadlands => "BUILTIN_BIOME_WOODED_BADLANDS",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "BUILTIN_BIOME_UNSPECIFIED" => Some(Self::Unspecified),
+            "BUILTIN_BIOME_BADLANDS" => Some(Self::Badlands),
+            "BUILTIN_BIOME_BAMBOO_JUNGLE" => Some(Self::BambooJungle),
+            "BUILTIN_BIOME_BASALT_DELTAS" => Some(Self::BasaltDeltas),
+            "BUILTIN_BIOME_BEACH" => Some(Self::Beach),
+            "BUILTIN_BIOME_BIRCH_FOREST" => Some(Self::BirchForest),
+            "BUILTIN_BIOME_CHERRY_GROVE" => Some(Self::CherryGrove),
+            "BUILTIN_BIOME_COLD_OCEAN" => Some(Self::ColdOcean),
+            "BUILTIN_BIOME_CRIMSON_FOREST" => Some(Self::CrimsonForest),
+            "BUILTIN_BIOME_DARK_FOREST" => Some(Self::DarkForest),
+            "BUILTIN_BIOME_DEEP_COLD_OCEAN" => Some(Self::DeepColdOcean),
+            "BUILTIN_BIOME_DEEP_DARK" => Some(Self::DeepDark),
+            "BUILTIN_BIOME_DEEP_FROZEN_OCEAN" => Some(Self::DeepFrozenOcean),
+            "BUILTIN_BIOME_DEEP_LUKEWARM_OCEAN" => Some(Self::DeepLukewarmOcean),
+            "BUILTIN_BIOME_DEEP_OCEAN" => Some(Self::DeepOcean),
+            "BUILTIN_BIOME_DESERT" => Some(Self::Desert),
+            "BUILTIN_BIOME_DRIPSTONE_CAVES" => Some(Self::DripstoneCaves),
+            "BUILTIN_BIOME_END_BARRENS" => Some(Self::EndBarrens),
+            "BUILTIN_BIOME_END_HIGHLANDS" => Some(Self::EndHighlands),
+            "BUILTIN_BIOME_END_MIDLANDS" => Some(Self::EndMidlands),
+            "BUILTIN_BIOME_ERODED_BADLANDS" => Some(Self::ErodedBadlands),
+            "BUILTIN_BIOME_FLOWER_FOREST" => Some(Self::FlowerForest),
+            "BUILTIN_BIOME_FOREST" => Some(Self::Forest),
+            "BUILTIN_BIOME_FROZEN_OCEAN" => Some(Self::FrozenOcean),
+            "BUILTIN_BIOME_FROZEN_PEAKS" => Some(Self::FrozenPeaks),
+            "BUILTIN_BIOME_FROZEN_RIVER" => Some(Self::FrozenRiver),
+            "BUILTIN_BIOME_GROVE" => Some(Self::Grove),
+            "BUILTIN_BIOME_ICE_SPIKES" => Some(Self::IceSpikes),
+            "BUILTIN_BIOME_JAGGED_PEAKS" => Some(Self::JaggedPeaks),
+            "BUILTIN_BIOME_JUNGLE" => Some(Self::Jungle),
+            "BUILTIN_BIOME_LUKEWARM_OCEAN" => Some(Self::LukewarmOcean),
+            "BUILTIN_BIOME_LUSH_CAVES" => Some(Self::LushCaves),
+            "BUILTIN_BIOME_MANGROVE_SWAMP" => Some(Self::MangroveSwamp),
+            "BUILTIN_BIOME_MEADOW" => Some(Self::Meadow),
+            "BUILTIN_BIOME_MUSHROOM_FIELDS" => Some(Self::MushroomFields),
+            "BUILTIN_BIOME_NETHER_WASTES" => Some(Self::NetherWastes),
+            "BUILTIN_BIOME_OCEAN" => Some(Self::Ocean),
+            "BUILTIN_BIOME_OLD_GROWTH_BIRCH_FOREST" => Some(Self::OldGrowthBirchForest),
+            "BUILTIN_BIOME_OLD_GROWTH_PINE_TAIGA" => Some(Self::OldGrowthPineTaiga),
+            "BUILTIN_BIOME_OLD_GROWTH_SPRUCE_TAIGA" => Some(Self::OldGrowthSpruceTaiga),
+            "BUILTIN_BIOME_PALE_GARDEN" => Some(Self::PaleGarden),
+            "BUILTIN_BIOME_PLAINS" => Some(Self::Plains),
+            "BUILTIN_BIOME_RIVER" => Some(Self::River),
+            "BUILTIN_BIOME_SAVANNA" => Some(Self::Savanna),
+            "BUILTIN_BIOME_SAVANNA_PLATEAU" => Some(Self::SavannaPlateau),
+            "BUILTIN_BIOME_SMALL_END_ISLANDS" => Some(Self::SmallEndIslands),
+            "BUILTIN_BIOME_SNOWY_BEACH" => Some(Self::SnowyBeach),
+            "BUILTIN_BIOME_SNOWY_PLAINS" => Some(Self::SnowyPlains),
+            "BUILTIN_BIOME_SNOWY_SLOPES" => Some(Self::SnowySlopes),
+            "BUILTIN_BIOME_SNOWY_TAIGA" => Some(Self::SnowyTaiga),
+            "BUILTIN_BIOME_SOUL_SAND_VALLEY" => Some(Self::SoulSandValley),
+            "BUILTIN_BIOME_SPARSE_JUNGLE" => Some(Self::SparseJungle),
+            "BUILTIN_BIOME_STONY_PEAKS" => Some(Self::StonyPeaks),
+            "BUILTIN_BIOME_STONY_SHORE" => Some(Self::StonyShore),
+            "BUILTIN_BIOME_SULFUR_CAVES" => Some(Self::SulfurCaves),
+            "BUILTIN_BIOME_SUNFLOWER_PLAINS" => Some(Self::SunflowerPlains),
+            "BUILTIN_BIOME_SWAMP" => Some(Self::Swamp),
+            "BUILTIN_BIOME_TAIGA" => Some(Self::Taiga),
+            "BUILTIN_BIOME_THE_END" => Some(Self::TheEnd),
+            "BUILTIN_BIOME_THE_VOID" => Some(Self::TheVoid),
+            "BUILTIN_BIOME_WARM_OCEAN" => Some(Self::WarmOcean),
+            "BUILTIN_BIOME_WARPED_FOREST" => Some(Self::WarpedForest),
+            "BUILTIN_BIOME_WINDSWEPT_FOREST" => Some(Self::WindsweptForest),
+            "BUILTIN_BIOME_WINDSWEPT_GRAVELLY_HILLS" => {
+                Some(Self::WindsweptGravellyHills)
+            }
+            "BUILTIN_BIOME_WINDSWEPT_HILLS" => Some(Self::WindsweptHills),
+            "BUILTIN_BIOME_WINDSWEPT_SAVANNA" => Some(Self::WindsweptSavanna),
+            "BUILTIN_BIOME_WOODED_BADLANDS" => Some(Self::WoodedBadlands),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

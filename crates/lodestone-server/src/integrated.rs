@@ -2756,11 +2756,11 @@ impl IntegratedServer {
     /// Saves one dirty terrain column through the selected native record backend.
     ///
     /// This is deliberately a narrow producer, not a switch of the live world
-    /// away from Anvil: the version-1 native chunk record preserves only the
-    /// block-state grid. A column with biome, block-entity, structure,
-    /// heightmap, shaped-generation, or pending-spawn state returns an explicit
-    /// loss error. Callers therefore cannot accidentally convert a richer world
-    /// into terrain-only records.
+    /// away from Anvil: the version-1 native chunk record preserves the
+    /// block-state grid plus built-in surface and three-dimensional biomes.
+    /// A column with block-entity, structure, heightmap, shaped-generation, or
+    /// pending-spawn state returns an explicit loss error. Callers therefore
+    /// cannot accidentally convert a richer world into a partial record.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn write_dirty_native_chunk(
         &self,
@@ -2774,7 +2774,7 @@ impl IntegratedServer {
         storage.write_dirty_chunk(column_x, column_z, column)
     }
 
-    /// Loads one native typed terrain column from the selected backend.
+    /// Loads one native typed terrain-and-biome column from the selected backend.
     ///
     /// The caller provides the active dimension's vertical contract. This is a
     /// real reopen/read consumer for the native segment, but it intentionally
@@ -5001,6 +5001,8 @@ mod tests {
                     sky_light: Vec::new(),
                     block_light: Vec::new(),
                 }],
+                biome_sections: Vec::new(),
+                surface_biome_ids: Vec::new(),
                 extensions: Vec::new(),
             })),
         };
@@ -5037,7 +5039,7 @@ mod tests {
     /// accidentally retained the first in-memory column cannot pass.
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn persistent_server_reopens_a_native_terrain_only_chunk() {
+    async fn persistent_server_reopens_native_chunk_with_biome_metadata() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock after Unix epoch")
@@ -5070,6 +5072,11 @@ mod tests {
         let mut source = crate::chunk::ChunkColumn::new(0, 16);
         source.set_block(2, 3, 4, "minecraft:stone");
         source.set_block(9, 14, 10, "minecraft:oak_log[axis=z]");
+        source.set_biome_cell(0, 0, 0, "minecraft:desert");
+        source.set_biome_cell(3, 3, 3, "minecraft:deep_dark");
+        let mut surface = vec!["minecraft:plains".to_string(); 16];
+        surface[10] = "minecraft:cherry_grove".to_string();
+        source.set_biome_quarts(&surface);
         server
             .write_dirty_native_chunk(3, -5, &source)
             .expect("write native terrain-only chunk");
@@ -5101,6 +5108,9 @@ mod tests {
             .expect("saved terrain is present");
         assert_eq!(loaded.block_state(2, 3, 4), "minecraft:stone");
         assert_eq!(loaded.block_state(9, 14, 10), "minecraft:oak_log[axis=z]");
+        assert_eq!(loaded.biome_state_at(0, 0, 0), "minecraft:desert");
+        assert_eq!(loaded.biome_state_at(12, 15, 12), "minecraft:deep_dark");
+        assert_eq!(loaded.biome_state(8, 8), "minecraft:cherry_grove");
         assert!(
             reopened.load_native_chunk(4, -5, 0, 16).unwrap().is_none(),
             "a different record key must not be satisfied from the first server's memory"

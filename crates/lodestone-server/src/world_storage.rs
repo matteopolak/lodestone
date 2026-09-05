@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use lodestone_storage::{NativeStore, RecordKey, RecordWrite, StoreError};
 use lodestone_storage_schema::{
-    ChunkRecord, ChunkSection, FORMAT_VERSION_V1, StorageRecord,
+    BiomeSection, ChunkRecord, ChunkSection, FORMAT_VERSION_V1, StorageRecord,
     generated::storage_record,
 };
 
@@ -82,8 +82,6 @@ impl From<ChunkRecordError> for Error {
 /// happened to create it, so a plugin-created column gets the same protection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct UnsupportedChunkFields {
-    /// The column has a non-default three-dimensional biome grid.
-    pub biomes: bool,
     /// The column has block-entity state.
     pub block_entities: bool,
     /// The column has structure starts or references.
@@ -98,8 +96,7 @@ pub struct UnsupportedChunkFields {
 
 impl UnsupportedChunkFields {
     fn any(self) -> bool {
-        self.biomes
-            || self.block_entities
+        self.block_entities
             || self.structures
             || self.motion_blocking
             || self.shaped_generation
@@ -131,8 +128,22 @@ pub enum ChunkRecordError {
     UnexpectedSectionY { expected: i32, actual: i32 },
     /// The record contains too few or too many sections for the requested extent.
     SectionCount { expected: usize, actual: usize },
+    /// A stored biome section is not the expected next 16-row window.
+    UnexpectedBiomeSectionY { expected: i32, actual: i32 },
+    /// The record contains too few or too many biome sections for its extent.
+    BiomeSectionCount { expected: usize, actual: usize },
+    /// A biome section's stated vertical-quart extent is invalid.
+    InvalidBiomeQuartRows { expected: usize, actual: u32 },
+    /// A biome section does not contain one enum value per quart cell.
+    InvalidBiomeCellCount { expected: usize, actual: usize },
+    /// The stored surface-biome answer is not its required four-by-four grid.
+    InvalidSurfaceBiomeCount { actual: usize },
     /// A section carries light or extension payloads this adapter cannot retain.
     UnsupportedStoredSectionData,
+    /// A source column names a biome not available in this built-in census.
+    UnsupportedBiome(String),
+    /// A stored integer is not one of this format version's biome enum values.
+    UnknownBuiltinBiome(i32),
     /// A stored numeric block-state ID is not in this build's registry.
     UnknownBlockStateId(u32),
     /// Packed local palette data is structurally invalid.
@@ -164,9 +175,26 @@ impl fmt::Display for ChunkRecordError {
             Self::SectionCount { expected, actual } => {
                 write!(formatter, "expected {expected} sections, found {actual}")
             }
+            Self::UnexpectedBiomeSectionY { expected, actual } => {
+                write!(formatter, "expected biome section Y {expected}, found {actual}")
+            }
+            Self::BiomeSectionCount { expected, actual } => {
+                write!(formatter, "expected {expected} biome sections, found {actual}")
+            }
+            Self::InvalidBiomeQuartRows { expected, actual } => {
+                write!(formatter, "expected {expected} biome quart rows, found {actual}")
+            }
+            Self::InvalidBiomeCellCount { expected, actual } => {
+                write!(formatter, "expected {expected} biome cells, found {actual}")
+            }
+            Self::InvalidSurfaceBiomeCount { actual } => {
+                write!(formatter, "expected 16 surface biome cells, found {actual}")
+            }
             Self::UnsupportedStoredSectionData => {
                 formatter.write_str("stored section carries unsupported light or extension data")
             }
+            Self::UnsupportedBiome(name) => write!(formatter, "unsupported built-in biome {name}"),
+            Self::UnknownBuiltinBiome(id) => write!(formatter, "unknown built-in biome ID {id}"),
             Self::UnknownBlockStateId(id) => write!(formatter, "unknown built-in block-state ID {id}"),
             Self::InvalidPackedStates(reason) => write!(formatter, "invalid packed block states: {reason}"),
         }
@@ -337,6 +365,33 @@ fn encode_chunk(
             })
         })
         .collect::<Result<Vec<_>, ChunkRecordError>>()?;
+    let biome_sections = (0..column.section_count())
+        .map(|section_index| {
+            let quart_rows = section_rows(column.height, section_index).div_ceil(4);
+            let mut biome_ids = Vec::with_capacity(quart_rows * 16);
+            for qy in 0..quart_rows {
+                for qz in 0..4 {
+                    for qx in 0..4 {
+                        biome_ids.push(builtin_biome_id(column.biome_cell(
+                            qx,
+                            section_index * 4 + qy,
+                            qz,
+                        ))?);
+                    }
+                }
+            }
+            Ok(BiomeSection {
+                section_y: column.min_y.div_euclid(16) + section_index as i32,
+                quart_rows: quart_rows as u32,
+                biome_ids,
+            })
+        })
+        .collect::<Result<Vec<_>, ChunkRecordError>>()?;
+    let surface_biome_ids = column
+        .biome_quarts()
+        .iter()
+        .map(|name| builtin_biome_id(name))
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(StorageRecord {
         format_version: FORMAT_VERSION_V1,
@@ -345,6 +400,8 @@ fn encode_chunk(
             column_z,
             game_data_version: GAME_DATA_VERSION,
             sections,
+            biome_sections,
+            surface_biome_ids,
             extensions: Vec::new(),
         })),
     })
@@ -411,21 +468,63 @@ fn decode_chunk(
             &local_indices,
         );
     }
+    // Older terrain-only records intentionally omitted both biome fields. They
+    // decode to `ChunkColumn::new`'s all-default biome state, while a record
+    // that carries either field must carry the complete paired representation.
+    if !chunk.biome_sections.is_empty() || !chunk.surface_biome_ids.is_empty() {
+        if chunk.biome_sections.len() != expected_sections {
+            return Err(ChunkRecordError::BiomeSectionCount {
+                expected: expected_sections,
+                actual: chunk.biome_sections.len(),
+            });
+        }
+        if chunk.surface_biome_ids.len() != 16 {
+            return Err(ChunkRecordError::InvalidSurfaceBiomeCount {
+                actual: chunk.surface_biome_ids.len(),
+            });
+        }
+        for (section_index, section) in chunk.biome_sections.iter().enumerate() {
+            let expected_section_y = min_y.div_euclid(16) + section_index as i32;
+            if section.section_y != expected_section_y {
+                return Err(ChunkRecordError::UnexpectedBiomeSectionY {
+                    expected: expected_section_y,
+                    actual: section.section_y,
+                });
+            }
+            let expected_quart_rows = section_rows(height, section_index).div_ceil(4);
+            if section.quart_rows != expected_quart_rows as u32 {
+                return Err(ChunkRecordError::InvalidBiomeQuartRows {
+                    expected: expected_quart_rows,
+                    actual: section.quart_rows,
+                });
+            }
+            let expected_cells = expected_quart_rows * 16;
+            if section.biome_ids.len() != expected_cells {
+                return Err(ChunkRecordError::InvalidBiomeCellCount {
+                    expected: expected_cells,
+                    actual: section.biome_ids.len(),
+                });
+            }
+            for (offset, &biome_id) in section.biome_ids.iter().enumerate() {
+                let qy = section_index * 4 + offset / 16;
+                let qz = (offset / 4) % 4;
+                let qx = offset % 4;
+                let name = builtin_biome_name(biome_id)?;
+                column.set_biome_cell(qx, qy, qz, &name);
+            }
+        }
+        let surface = chunk
+            .surface_biome_ids
+            .iter()
+            .map(|&biome_id| builtin_biome_name(biome_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        column.set_biome_quarts(&surface);
+    }
     Ok(column)
 }
 
 fn unsupported_fields(column: &crate::chunk::ChunkColumn) -> UnsupportedChunkFields {
     UnsupportedChunkFields {
-        biomes: (0..4).any(|qz| {
-            (0..4).any(|qx| {
-                column.biome_state((qx * 4) as i32, (qz * 4) as i32)
-                    != crate::chunk::DEFAULT_BIOME
-            })
-        }) || (0..column.biome_y_quarts()).any(|qy| {
-            (0..4).any(|qz| {
-                (0..4).any(|qx| column.biome_cell(qx, qy, qz) != crate::chunk::DEFAULT_BIOME)
-            })
-        }),
         block_entities: !column.block_entities().is_empty(),
         structures: !column.structure_starts().is_empty()
             || !column.structure_references().is_empty(),
@@ -433,6 +532,28 @@ fn unsupported_fields(column: &crate::chunk::ChunkColumn) -> UnsupportedChunkFie
         shaped_generation: column.generation_stage() == crate::chunk::ChunkGenerationStage::Shaped,
         pending_generation_spawns: column.has_pending_generation_spawns(),
     }
+}
+
+fn builtin_biome_id(name: &str) -> Result<i32, ChunkRecordError> {
+    let Some(path) = name.strip_prefix("minecraft:") else {
+        return Err(ChunkRecordError::UnsupportedBiome(name.to_string()));
+    };
+    let index = lodestone_data::biomes::BIOME_NAMES
+        .binary_search(&path)
+        .map_err(|_| ChunkRecordError::UnsupportedBiome(name.to_string()))?;
+    Ok((index + 1) as i32)
+}
+
+fn builtin_biome_name(id: i32) -> Result<String, ChunkRecordError> {
+    lodestone_storage_schema::BuiltinBiome::try_from(id)
+        .map_err(|_| ChunkRecordError::UnknownBuiltinBiome(id))?;
+    let Some(path) = id
+        .checked_sub(1)
+        .and_then(|index| lodestone_data::biomes::BIOME_NAMES.get(index as usize))
+    else {
+        return Err(ChunkRecordError::UnknownBuiltinBiome(id));
+    };
+    Ok(format!("minecraft:{path}"))
 }
 
 fn validate_extent(min_y: i32, height: i32) -> Result<(), ChunkRecordError> {
@@ -566,6 +687,8 @@ mod tests {
                         sky_light: Vec::new(),
                         block_light: Vec::new(),
                     }],
+                    biome_sections: Vec::new(),
+                    surface_biome_ids: Vec::new(),
                     extensions: Vec::new(),
                 })),
             },
@@ -645,13 +768,13 @@ mod tests {
     }
 
     #[test]
-    fn native_chunk_refuses_biome_data_instead_of_dropping_it() {
+    fn native_chunk_reopens_surface_and_three_dimensional_biomes() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock after Unix epoch")
             .as_nanos();
         let directory = std::env::temp_dir().join(format!(
-            "lodestone-native-chunk-loss-{}-{unique}",
+            "lodestone-native-chunk-biomes-{}-{unique}",
             std::process::id()
         ));
         let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
@@ -660,17 +783,43 @@ mod tests {
         .expect("open native store");
         let mut source = crate::chunk::ChunkColumn::new(0, 16);
         source.set_biome_cell(0, 0, 0, "minecraft:desert");
-        source.set_biome_quarts(&["minecraft:desert".to_string()]);
+        source.set_biome_cell(1, 3, 2, "minecraft:deep_dark");
+        let mut surface = vec!["minecraft:plains".to_string(); 16];
+        surface[5] = "minecraft:cherry_grove".to_string();
+        source.set_biome_quarts(&surface);
 
-        assert!(matches!(
-            storage.write_dirty_chunk(0, 0, &source),
-            Err(Error::Chunk(ChunkRecordError::UnsupportedFields(UnsupportedChunkFields {
-                biomes: true,
-                ..
-            })))
-        ));
-        assert!(storage.load_chunk(0, 0, 0, 16).unwrap().is_none());
+        storage
+            .write_dirty_chunk(0, 0, &source)
+            .expect("write built-in biome metadata");
         drop(storage);
-        std::fs::remove_dir_all(directory).expect("remove native test segment");
+
+        let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("reopen native store");
+        let loaded = reopened
+            .load_chunk(0, 0, 0, 16)
+            .expect("decode saved biome metadata")
+            .expect("saved chunk is present");
+        assert_eq!(loaded.biome_state_at(0, 0, 0), "minecraft:desert");
+        assert_eq!(loaded.biome_state_at(4, 15, 8), "minecraft:deep_dark");
+        assert_eq!(loaded.biome_state(4, 4), "minecraft:cherry_grove");
+        drop(reopened);
+        std::fs::remove_dir_all(&directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn stored_biome_discriminants_match_the_built_in_census() {
+        for (index, &path) in lodestone_data::biomes::BIOME_NAMES.iter().enumerate() {
+            let id = (index + 1) as i32;
+            assert_eq!(builtin_biome_id(&format!("minecraft:{path}")).unwrap(), id);
+            assert_eq!(builtin_biome_name(id).unwrap(), format!("minecraft:{path}"));
+            assert_eq!(
+                lodestone_storage_schema::BuiltinBiome::try_from(id)
+                    .unwrap()
+                    .as_str_name(),
+                format!("BUILTIN_BIOME_{}", path.to_ascii_uppercase())
+            );
+        }
     }
 }

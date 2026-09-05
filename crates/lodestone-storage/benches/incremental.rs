@@ -49,6 +49,8 @@ fn chunk(column: i32, seed: u8) -> StorageRecord {
                 sky_light: vec![],
                 block_light: vec![],
             }],
+            biome_sections: vec![],
+            surface_biome_ids: vec![],
             extensions: vec![],
         })),
     }
