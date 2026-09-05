@@ -69,6 +69,12 @@ pub enum Capability {
     ActChat,
     /// Push `ClientAction::SwingArm`.
     ActInteract,
+    /// Install or remove the local player's copied look intent.
+    ///
+    /// This is deliberately distinct from `act:interact`: changing a player's
+    /// facing changes simulation and movement-packet output, not merely a
+    /// cosmetic arm animation.
+    ActLook,
     /// Decide whether the client may commit one of its typed player actions.
     ///
     /// This is data-flow gated at the synchronous host callback: a guest without
@@ -104,6 +110,7 @@ impl Capability {
         Self::ObserveBlocks,
         Self::ActChat,
         Self::ActInteract,
+        Self::ActLook,
         Self::VetoActions,
         Self::RegisterCommands,
         Self::FsRead,
@@ -120,6 +127,7 @@ impl Capability {
             Self::ObserveBlocks => "observe:blocks",
             Self::ActChat => "act:chat",
             Self::ActInteract => "act:interact",
+            Self::ActLook => "act:look",
             Self::VetoActions => "veto:actions",
             Self::RegisterCommands => "commands:register",
             Self::FsRead => "fs:read",
@@ -151,6 +159,7 @@ impl Capability {
             | Self::ObserveBlocks
             | Self::ActChat
             | Self::ActInteract
+            | Self::ActLook
             | Self::VetoActions
             | Self::RegisterCommands => false,
         }

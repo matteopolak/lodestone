@@ -24,7 +24,7 @@
 mod support;
 
 use lodestone_ecs::events::GameEvent;
-use lodestone_ecs::player::ActionQueue;
+use lodestone_ecs::player::{ActionQueue, Egress, LocalPlayer, PhysicsState};
 use lodestone_ecs::{GameTick, app::App};
 use lodestone_model::{ClientAction, ClientEvent, Text};
 use lodestone_physics::{PlayerState, Vec3d};
@@ -41,6 +41,16 @@ fn chat(text: &str) -> GameEvent {
 
 fn responder_capabilities() -> CapabilitySet {
     CapabilitySet::from_iter([Capability::Log, Capability::ObserveChat, Capability::ActChat])
+}
+
+fn look_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActLook])
+}
+
+fn look_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActLook);
+    policy
 }
 
 /// A composed client `App`, optionally with the wasm tier installed.
@@ -184,7 +194,7 @@ fn every_ticks_events_reach_the_guest_not_every_other_ticks() {
 #[test]
 fn an_action_the_guest_was_not_granted_is_refused_and_counted() {
     let wasm = support::build_example_plugin(&[]);
-    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    let mut host = PluginHost::new(look_host_policy()).expect("engine");
     // Observe, but do not act. The guest does not know that and replies anyway.
     host.load_file(
         "chat-responder",
@@ -211,4 +221,64 @@ fn an_action_the_guest_was_not_granted_is_refused_and_counted() {
         "the refusal must be counted — a silent drop is the failure this counter exists to \
          make visible"
     );
+}
+
+/// A separately-built guest claims the copied look intent, and the existing
+/// local-player consumer commits it before the controller derives and queues this
+/// tick's movement report. This is deliberately not a direct component unit test:
+/// it proves the ABI boundary reaches the production physics/send chain.
+#[test]
+fn a_wasm_look_intent_reaches_the_existing_physics_and_send_consumers() {
+    let wasm = support::build_example_plugin(&["look"]);
+    let mut host = PluginHost::new(look_host_policy()).expect("engine");
+    host.load_file("look-owner", &wasm, &look_capabilities())
+        .expect("the look fixture must load");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(&mut app, PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
+    *app.world_mut().resource_mut::<Egress>() = Egress { in_world: true, live: true };
+    app.world_mut().run_schedule(GameTick);
+
+    let rotation = {
+        let world = app.world_mut();
+        let mut players = world.query_filtered::<&PhysicsState, bevy_ecs::query::With<LocalPlayer>>();
+        let state = players.single(world).expect("one spawned local player");
+        (state.0.yaw, state.0.pitch)
+    };
+    assert_eq!(rotation, (37.5, -12.0));
+    let actions = action_queue(&app);
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            ClientAction::Move { rotation, .. }
+                if rotation.yaw == 37.5 && rotation.pitch == -12.0
+        )),
+        "the normal controller sender must report the WASM-owned look in this tick's move action: {actions:?}"
+    );
+}
+
+/// The host-side capability gate must reject the same guest output before it can
+/// claim the local-player component. This control distinguishes a missing look
+/// change from a guest that simply returned no action.
+#[test]
+fn a_wasm_look_intent_without_its_capability_is_refused_before_physics() {
+    let wasm = support::build_example_plugin(&["look"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file("look-owner", &wasm, &CapabilitySet::from_iter([Capability::Log]))
+        .expect("the guest remains valid when its data-flow grant is withheld");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(&mut app, PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
+    app.world_mut().run_schedule(GameTick);
+
+    let rotation = {
+        let world = app.world_mut();
+        let mut players = world.query_filtered::<&PhysicsState, bevy_ecs::query::With<LocalPlayer>>();
+        let state = players.single(world).expect("one spawned local player");
+        (state.0.yaw, state.0.pitch)
+    };
+    assert_eq!(rotation, (0.0, 0.0));
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
 }

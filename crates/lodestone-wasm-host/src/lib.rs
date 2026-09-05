@@ -34,7 +34,7 @@
 //!                                                                      │
 //!                                                                     lower
 //!                                                                      ▼
-//!                                                                 ActionQueue
+//!                                                   ActionQueue or copied intent seam
 //! ```
 //!
 //! The pieces, and what each owns:
@@ -45,7 +45,7 @@
 //! | [`capability`] | the capability vocabulary and the two enforcement mechanisms |
 //! | `wit/lodestone-plugin.wit` | the ABI surface — the WIT world, vendored as the single source of truth |
 //! | [`abi`] | the lift from `ClientEvent` and the lower to `ClientAction`, each capability-gated |
-//! | [`conductor`] | [`WasmHostPlugin`]: the one native system that drives every guest and is the single writer of `ActionQueue` on their behalf |
+//! | [`conductor`] | [`WasmHostPlugin`]: the one native system that drives every guest, writes protocol actions to `ActionQueue`, and routes copied intents to their existing ECS consumers |
 //! | [`manifest`] | `plugin.toml`: name, version, ABI world, priority, declared capabilities |
 //!
 //! # Why the ABI is the intent doctrine, not a new vocabulary
@@ -109,15 +109,18 @@ pub mod conductor;
 pub mod host;
 pub mod manifest;
 
-pub use abi::{capability_for, lift_command_context, lift_event, lift_verdict_context, lower_action};
+pub use abi::{
+    IntentAction, LoweredAction, capability_for, lift_command_context, lift_event,
+    lift_verdict_context, lower_action,
+};
 pub use capability::{Capability, CapabilitySet};
 pub use conductor::{WasmHostPlugin, WasmPlugins, drive_wasm_plugins};
 pub use host::{
     ABI_WORLD, Action, BlockOffset, ChatKind, ChatMessage, CommandAnchor, CommandContext,
     CommandEntity, CommandExecution, CommandOutcome, CommandPosition, CommandRotation, CommandSpec,
     DEFAULT_FUEL_PER_TICK, DEFAULT_FUEL_PER_VERDICT, DEFAULT_MEMORY_LIMIT, Event, Hand, Health,
-    HostError, LoadError, LoadedPlugin, LogLevel, PluginHost, PluginInfo, SectionBlocksChanged,
-    SectionPos, VerdictDispatch,
+    HostError, LoadError, LoadedPlugin, LogLevel, LookIntent, PluginHost, PluginInfo,
+    SectionBlocksChanged, SectionPos, VerdictDispatch,
 };
 pub use manifest::{Manifest, ManifestError, Priority, scan_directory};
 

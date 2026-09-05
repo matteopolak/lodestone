@@ -15,7 +15,7 @@
 //! is return a list. Guests order among themselves by load order, which
 //! `crate::manifest` sorts by their declared `EventPriority` tier.
 //!
-//! # Why `TickSet::Predict`, which will look wrong
+//! # Why the conductor runs in `TickSet::Intent`
 //!
 //! Actions are egress, so `TickSet::Send` is the semantically obvious home and is
 //! **not** used. The reason is a real ordering hazard rather than taste:
@@ -23,9 +23,10 @@
 //! and is private, so a reader placed in the same set is *unordered* against the
 //! thing that ages the message buffer it reads — a coin flip, resolved at schedule
 //! build time, that would show up as a plugin missing every other tick's events.
-//! `Predict` runs strictly before `Send`, and pushing to `ActionQueue` early costs
-//! nothing because the driver drains it after the whole schedule rather than inside
-//! it.
+//! `Predict` would run strictly before `Send`, but look intents must be installed before the existing
+//! `apply_look_intent` consumer, physics, and the movement sender. The host therefore
+//! runs at `TickSet::Intent`; the event bus is still safe there because it is only
+//! aged at `Send`.
 //!
 //! **If `lodestone-ecs` ever exposes a public ordering anchor for the bus ager, this
 //! system should move to `TickSet::Send` and order `.before` it.** That is a
@@ -42,17 +43,20 @@
 use std::sync::{Arc, Mutex};
 
 use bevy_app::{App, Plugin};
-use bevy_ecs::prelude::{IntoScheduleConfigs, MessageReader, ResMut, Resource};
+use bevy_ecs::prelude::{
+    Commands, Entity, IntoScheduleConfigs, MessageReader, Query, ResMut, Resource, With,
+};
 use lodestone_command::StringArgument;
 use lodestone_ecs::commands::{CommandOutcome, CommandRegistry, PluginCommand, PluginCommandsPlugin};
 use lodestone_ecs::events::{GameEvent, GameEventBusPlugin};
-use lodestone_ecs::player::ActionQueue;
+use lodestone_ecs::player::{ActionQueue, LocalPlayer, LookIntent};
 use lodestone_ecs::veto::{ActionVetoPlugin, ActionVetoes, Verdict};
 // `TickSet` via the crate root, not `lodestone_ecs::sets::TickSet`: the `sets` module
 // itself is private and only its re-exports are public.
 use lodestone_ecs::{CorePlugin, GameTick, TickSet};
 
 use crate::abi;
+use crate::abi::{IntentAction, LoweredAction};
 use crate::host::{Event, PluginHost};
 
 /// The loaded guests, as an ECS resource.
@@ -73,6 +77,15 @@ pub struct WasmPlugins {
     /// header for why this is a counter and not a silent drop.
     refused: u64,
 }
+
+/// Intent updates emitted by guests during the current game tick.
+///
+/// They are kept out of [`ActionQueue`] because they are not protocol actions:
+/// the local-player systems own validation, simulation, and packet production.
+/// The vector preserves guest/load order, and the final look request wins just as
+/// successive native writes to the same optional component do.
+#[derive(Resource, Default, Debug)]
+pub struct PendingWasmIntents(Vec<IntentAction>);
 
 impl std::fmt::Debug for WasmPlugins {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -264,12 +277,24 @@ impl Plugin for WasmHostPlugin {
         }
         register_wasm_commands(app, &verdict_broker);
         app.insert_resource(plugins);
-        app.add_systems(GameTick, drive_wasm_plugins.in_set(TickSet::Predict));
+        app.init_resource::<PendingWasmIntents>();
+        app.add_systems(
+            GameTick,
+            drive_wasm_plugins
+                .in_set(TickSet::Intent)
+                .before(apply_wasm_intents),
+        );
+        app.add_systems(
+            GameTick,
+            apply_wasm_intents
+                .in_set(TickSet::Intent)
+                .before(lodestone_ecs::player::apply_look_intent),
+        );
     }
 }
 
-/// `TickSet::Predict`: lift this tick's events, drive every guest, lower what comes
-/// back onto [`ActionQueue`].
+/// `TickSet::Intent`: lift this tick's events, drive every guest, then lower what
+/// comes back onto [`ActionQueue`] or the local-player intent seam.
 ///
 /// The per-guest lift is not hoisted out of the loop on purpose: the set of events a
 /// guest sees depends on *its own* capabilities, so two guests with different
@@ -280,13 +305,15 @@ pub fn drive_wasm_plugins(
     mut plugins: ResMut<WasmPlugins>,
     mut events: MessageReader<GameEvent>,
     mut queue: ResMut<ActionQueue>,
+    mut intents: ResMut<PendingWasmIntents>,
 ) {
     let batch: Vec<lodestone_model::ClientEvent> = events.read().map(|e| e.0.clone()).collect();
 
     let mut refused = 0_u64;
-    let lowered = plugins.with_host(|host| {
+    let (lowered, lowered_intents) = plugins.with_host(|host| {
         let fuel = host.fuel_per_tick();
         let mut out = Vec::new();
+        let mut intent_out = Vec::new();
         for plugin in host.plugins_mut() {
             let granted = plugin.granted().clone();
             let lifted: Vec<Event> = batch
@@ -295,7 +322,8 @@ pub fn drive_wasm_plugins(
                 .collect();
             for action in plugin.tick(&lifted, fuel) {
                 match abi::lower_action(action, &granted) {
-                    Ok(client_action) => out.push(client_action),
+                    Ok(LoweredAction::Client(client_action)) => out.push(client_action),
+                    Ok(LoweredAction::Intent(intent)) => intent_out.push(intent),
                     Err(missing) => {
                         refused += 1;
                         tracing::warn!(
@@ -307,11 +335,42 @@ pub fn drive_wasm_plugins(
                 }
             }
         }
-        out
+        (out, intent_out)
     });
 
     plugins.refused = plugins.refused.saturating_add(refused);
     // Appended, not assigned: `ActionQueue` is shared with every native system in
     // the tick, and order is send order on the wire.
     queue.0.extend(lowered);
+    intents.0.extend(lowered_intents);
+}
+
+/// Apply the guest-owned intent updates before the existing ECS look consumer.
+///
+/// A `LookIntent` is optional on the local player, so inserting and removing it
+/// is the ownership hand-off. `Commands` remains correct here because the explicit
+/// ordering against `apply_look_intent` makes Bevy flush this deferred buffer before
+/// that reader; the integration gate asserts the resulting rotation reaches the
+/// normal outbound movement action in this same `GameTick`.
+fn apply_wasm_intents(
+    mut pending: ResMut<PendingWasmIntents>,
+    players: Query<Entity, With<LocalPlayer>>,
+    mut commands: Commands,
+) {
+    let Some(last) = pending.0.pop() else {
+        return;
+    };
+    pending.0.clear();
+
+    let IntentAction::Look(look) = last;
+    for entity in &players {
+        match look {
+            Some(look) => {
+                commands.entity(entity).insert(look);
+            }
+            None => {
+                commands.entity(entity).remove::<LookIntent>();
+            }
+        };
+    }
 }
