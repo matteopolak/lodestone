@@ -10,17 +10,40 @@
 pub use crate::generated_particle_types::PARTICLE_TYPE_COUNT;
 use crate::generated_particle_types::PARTICLE_TYPE_NAMES;
 
+/// A validated entry in the built-in 26.2 particle-type registry.
+///
+/// Decode or import a raw registry id with [`Self::new`] before consulting the
+/// census. A custom, future, or malformed value deliberately remains outside
+/// this type: it may have a payload whose shape this built-in table cannot
+/// describe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParticleTypeId(i32);
+
+impl ParticleTypeId {
+    /// Validates a raw particle-type registry id at a wire or import boundary.
+    #[must_use]
+    pub const fn new(raw: i32) -> Option<Self> {
+        if raw >= 0 && raw < PARTICLE_TYPE_COUNT as i32 {
+            Some(Self(raw))
+        } else {
+            None
+        }
+    }
+
+    /// The registry id emitted by the version-specific wire codec.
+    #[must_use]
+    pub const fn raw(self) -> i32 {
+        self.0
+    }
+}
+
 /// Resolves a network particle-type id to its canonical `minecraft:*`
 /// identifier.
 ///
-/// Returns `None` for ids outside `0..PARTICLE_TYPE_COUNT`, so a malformed or
-/// future-version id surfaces as an explicit miss rather than a panic or a
-/// silently wrong particle.
+/// Raw values enter through [`ParticleTypeId::new`], so this lookup is total.
 #[must_use]
-pub fn particle_type_name(id: i32) -> Option<&'static str> {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| PARTICLE_TYPE_NAMES.get(index).copied())
+pub fn particle_type_name(id: ParticleTypeId) -> &'static str {
+    PARTICLE_TYPE_NAMES[id.raw() as usize]
 }
 
 /// Whether a network particle-type id has **no** per-particle payload beyond
@@ -45,8 +68,8 @@ pub fn particle_type_name(id: i32) -> Option<&'static str> {
 /// still consumes exactly zero further bytes for it — nothing else to read,
 /// by construction.
 ///
-/// Returns `false` (not skippable) for an id outside `0..PARTICLE_TYPE_COUNT`,
-/// the same fail-closed convention [`particle_type_name`] uses.
+/// Raw values must be validated with [`ParticleTypeId::new`] first, making an
+/// invalid value an explicit decode miss rather than a false classification.
 ///
 /// Regenerate by re-running the derivation this table was built from: match
 /// every `register("<name>", <bool>` call in vanilla's own particle-type
@@ -55,11 +78,8 @@ pub fn particle_type_name(id: i32) -> Option<&'static str> {
 /// join by name against `registries.json`'s `minecraft:particle_type`
 /// `protocol_id`s.
 #[must_use]
-pub fn is_simple_particle_type(id: i32) -> bool {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| PARTICLE_TYPE_IS_SIMPLE.get(index).copied())
-        .unwrap_or(false)
+pub fn is_simple_particle_type(id: ParticleTypeId) -> bool {
+    PARTICLE_TYPE_IS_SIMPLE[id.raw() as usize]
 }
 
 /// Indexed by network particle-type id, `true` for a simple particle type —
@@ -212,21 +232,16 @@ mod tests {
     /// a perfectly byte-skippable id.
     #[test]
     fn known_ids_classify_correctly() {
-        assert!(is_simple_particle_type(29), "explosion_emitter");
-        assert!(is_simple_particle_type(30), "explosion");
-        assert!(is_simple_particle_type(33), "gust_emitter_large");
-        assert!(is_simple_particle_type(34), "gust_emitter_small");
-        assert!(!is_simple_particle_type(1), "block carries a BlockParticleOption");
-        assert!(!is_simple_particle_type(21), "dust carries a DustParticleOptions");
-        assert!(!is_simple_particle_type(54), "item carries an ItemParticleOption");
-        assert!(
-            !is_simple_particle_type(-1),
-            "an out-of-range id must fail closed, not claim skippability"
-        );
-        assert!(
-            !is_simple_particle_type(PARTICLE_TYPE_COUNT as i32),
-            "one past the end must fail closed"
-        );
+        let id = |raw| ParticleTypeId::new(raw).expect("known particle id validates");
+        assert!(is_simple_particle_type(id(29)), "explosion_emitter");
+        assert!(is_simple_particle_type(id(30)), "explosion");
+        assert!(is_simple_particle_type(id(33)), "gust_emitter_large");
+        assert!(is_simple_particle_type(id(34)), "gust_emitter_small");
+        assert!(!is_simple_particle_type(id(1)), "block carries a BlockParticleOption");
+        assert!(!is_simple_particle_type(id(21)), "dust carries a DustParticleOptions");
+        assert!(!is_simple_particle_type(id(54)), "item carries an ItemParticleOption");
+        assert_eq!(ParticleTypeId::new(-1), None);
+        assert_eq!(ParticleTypeId::new(PARTICLE_TYPE_COUNT as i32), None);
     }
 
     /// The table's length must track the registry, or a version bump silently

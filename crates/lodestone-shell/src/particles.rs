@@ -2186,9 +2186,10 @@ mod tests {
                 clippy::cast_possible_wrap,
                 reason = "the registry count is far below i32::MAX"
             )]
-            let Some(name) = lodestone_data::particle_types::particle_type_name(id as i32) else {
+            let Some(id) = lodestone_data::particle_types::ParticleTypeId::new(id as i32) else {
                 continue;
             };
+            let name = lodestone_data::particle_types::particle_type_name(id);
             let kind = name.split_once(':').map_or(name, |(_, path)| path);
             let mut p = Particles::new(None);
             // Some types drop outright without their payload, so a bare
@@ -4031,9 +4032,10 @@ mod tests {
                 clippy::cast_possible_wrap,
                 reason = "the registry count is far below i32::MAX"
             )]
-            let Some(name) = lodestone_data::particle_types::particle_type_name(id as i32) else {
+            let Some(id) = lodestone_data::particle_types::ParticleTypeId::new(id as i32) else {
                 continue;
             };
+            let name = lodestone_data::particle_types::particle_type_name(id);
             let kind = name.split_once(':').map_or(name, |(_, path)| path);
             let options = match kind {
                 "dust" => ParticleOptions::Dust { color: [1.0, 0.0, 0.0], scale: 1.0 },

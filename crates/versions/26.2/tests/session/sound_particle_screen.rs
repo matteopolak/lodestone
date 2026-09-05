@@ -711,7 +711,10 @@ fn explode_rejects_a_parameterised_explosion_particle() {
     // `false`, i.e. not skippable. Asserted here rather than assumed, so this
     // gate reports its own premise expiring instead of silently passing.
     assert!(
-        !lodestone_data::particle_types::is_simple_particle_type(1),
+        !lodestone_data::particle_types::is_simple_particle_type(
+            lodestone_data::particle_types::ParticleTypeId::new(1)
+                .expect("particle id 1 validates"),
+        ),
         "particle id 1 must be parameterised or this gate proves nothing",
     );
     bytes[33] = 1;

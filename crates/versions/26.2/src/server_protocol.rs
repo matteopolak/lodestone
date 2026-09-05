@@ -546,14 +546,19 @@ fn sound_event_registry_id(name: &str) -> Option<SoundEventId> {
 /// to send for an argument-less `SimpleParticleType`. Every producer in
 /// `lodestone_server::effects` is one; a future option-carrying particle needs
 /// the options written too, not just this id.
-fn simple_particle_registry_id(name: &str) -> Option<i32> {
-    static INDEX: std::sync::OnceLock<std::collections::HashMap<&'static str, i32>> =
+fn simple_particle_registry_id(
+    name: &str,
+) -> Option<lodestone_data::particle_types::ParticleTypeId> {
+    static INDEX: std::sync::OnceLock<
+        std::collections::HashMap<&'static str, lodestone_data::particle_types::ParticleTypeId>,
+    > =
         std::sync::OnceLock::new();
     INDEX
         .get_or_init(|| {
             (0..)
                 .map_while(|id| {
-                    lodestone_data::particle_types::particle_type_name(id).map(|name| (name, id))
+                    let id = lodestone_data::particle_types::ParticleTypeId::new(id)?;
+                    Some((lodestone_data::particle_types::particle_type_name(id), id))
                 })
                 .collect()
         })
@@ -5901,7 +5906,7 @@ impl ServerProtocol for V770ServerProtocol {
         w.f32(offset.z);
         w.f32(max_speed);
         w.i32(count);
-        w.var_i32(particle_id);
+        w.var_i32(particle_id.raw());
         ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_PARTICLES,
             payload: w.into_vec(),
