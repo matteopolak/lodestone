@@ -403,7 +403,10 @@ fn light_from_nbt(root: &Nbt, min_y: i32, section_count: usize) -> Result<Column
                 field: format!("sections[{index}].{name}"),
                 actual: bytes.len(),
             })?;
-            let data = LightData::from_array(array);
+            let data = match array.uniform_value() {
+                Some(value) => LightData::Uniform(value),
+                None => LightData::Values(array),
+            };
             if destination {
                 *light.sky_mut(light_index) = data;
             } else {
