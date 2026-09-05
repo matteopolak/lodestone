@@ -82,6 +82,7 @@ mod container_input;
 mod creative_screen;
 mod frame_profile;
 mod frame_profile_dump;
+mod friends;
 mod input;
 mod launch;
 mod lifecycle;
@@ -101,6 +102,7 @@ mod weather;
 use advancements_screen::{advancements_panel_geometry, advancements_title};
 #[allow(unused_imports)]
 use benchmark::{BenchmarkDriver, BenchmarkSegment};
+use friends::FriendsApp;
 #[allow(unused_imports)]
 pub(crate) use creative_screen::CreativeSearchEdit;
 #[allow(unused_imports)]
@@ -689,6 +691,8 @@ struct WindowApp {
     /// Per-server status pings for the multiplayer list. Probes run on their own
     /// threads; `pump()` moves results into slots once per frame.
     statuses: StatusCache,
+    /// Credential-free Friends view backed by the private service worker.
+    friends: FriendsApp,
     /// Self-contained menu pipeline (own shader, own buffer, clears the frame).
     /// `None` until GPU bring-up.
     menu: Option<MenuRenderer>,

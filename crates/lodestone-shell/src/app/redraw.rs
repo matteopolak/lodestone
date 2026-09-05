@@ -16,6 +16,7 @@ impl WindowApp {
         // (This also reconciles a server-initiated container close back to
         // `Screen::Playing` — see `drive_ui_from_session`'s own tail.)
         self.drive_ui_from_session();
+        self.drive_friends();
         if self.sim.open_menu().is_some() && self.ui.is_playing() {
             self.ui.open_container();
             self.set_grab(false);
