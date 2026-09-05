@@ -130,6 +130,8 @@ stab = []
 # A one-shot respawn request through the normal client action queue. The server
 # remains authoritative over whether the request is legal.
 respawn = []
+# A one-shot orderly disconnect request through the live client queue.
+disconnect = []
 # A denied-by-default filesystem write import. The fixture writes one file inside
 # the configured root and attempts one path outside it for the confinement gate.
 fs-write = []

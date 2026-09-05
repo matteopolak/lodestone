@@ -92,6 +92,8 @@ pub enum Capability {
     /// The server still decides whether the current player state permits the
     /// request; this grant only permits the guest to ask.
     ActRespawn,
+    /// Request an orderly disconnect through the live client's action queue.
+    ActDisconnect,
     /// Install or remove the local player's copied look intent.
     ///
     /// This is deliberately distinct from `act:interact`: changing a player's
@@ -212,6 +214,7 @@ impl Capability {
         Self::ActReleaseUseItem,
         Self::ActStab,
         Self::ActRespawn,
+        Self::ActDisconnect,
         Self::ActLook,
         Self::ActMovement,
         Self::ActBreak,
@@ -248,6 +251,7 @@ impl Capability {
             Self::ActReleaseUseItem => "act:release-use-item",
             Self::ActStab => "act:stab",
             Self::ActRespawn => "act:respawn",
+            Self::ActDisconnect => "act:disconnect",
             Self::ActLook => "act:look",
             Self::ActMovement => "act:movement",
             Self::ActBreak => "act:break",
@@ -299,6 +303,7 @@ impl Capability {
             | Self::ActReleaseUseItem
             | Self::ActStab
             | Self::ActRespawn
+            | Self::ActDisconnect
             | Self::ActLook
             | Self::ActMovement
             | Self::ActBreak
@@ -523,6 +528,10 @@ mod tests {
         assert!(
             !policy.contains(Capability::ActReleaseUseItem),
             "act:release-use-item must not be granted by default"
+        );
+        assert!(
+            !policy.contains(Capability::ActDisconnect),
+            "act:disconnect must not be granted by default"
         );
         assert!(
             !policy.contains(Capability::ActStab),

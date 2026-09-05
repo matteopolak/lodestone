@@ -377,6 +377,8 @@ The no-argument `stab` action is separately guarded by `act:stab`; it carries no
 attack-state data, and the live client owns its protocol encoding.
 The no-argument `respawn` action is separately guarded by `act:respawn`; it only asks, leaving the
 server authoritative over whether the local player's current state permits respawn.
+The no-argument `disconnect` action is separately guarded by `act:disconnect`; it exposes no transport
+or session handle, and the live client owns orderly shutdown through its normal action queue.
 Placement returns a finite, generation-bounded result only to a guest granted `observe:place`; a
 multi-tick break claim remains
 outside the ABI because it needs a separate cancellation and ownership contract. Command
