@@ -13,6 +13,10 @@ use lodestone_anvil::{
     level_dat, world_gen_settings,
 };
 use lodestone_server::{
+    anvil_native_entity_import::{
+        EntityChunkSelection, EntityLossDecision, SelectedEntityChunk, discover_entity_chunks,
+        import_entity_batch, preflight_entity_batch,
+    },
     anvil_player_storage::{
         PlayerBatchImportReport, PlayerFileSelection, PlayerLossDecision, discover_player_files,
         import_player_batch, preflight_player_batch,
@@ -43,6 +47,10 @@ const USAGE: &str = concat!(
     "--destination <native-store> --native-path <native-store> ",
     "(--player <uuid> [--player <uuid> ...] | --all-players) ",
     "[--apply --acknowledge <review-token>]\n\n",
+    "  lodestone-server anvil-convert import-entities --source <anvil-world> ",
+    "--destination <native-store> --native-path <native-store> --min-y <blocks> ",
+    "--height <blocks> (--entity-chunk <x,z> [--entity-chunk <x,z> ...] | --all-entities) ",
+    "[--apply --acknowledge <review-token>]\n\n",
     "Without --apply this command only reports its payload-free preflight and refuses mutation. ",
     "A lossy --apply requires the exact review token printed by that preflight.",
 );
@@ -53,6 +61,7 @@ enum Direction {
     ExportTerrain,
     ImportMetadata,
     ImportPlayers,
+    ImportEntities,
 }
 
 impl Direction {
@@ -62,6 +71,7 @@ impl Direction {
             Self::ExportTerrain => "export",
             Self::ImportMetadata => "import-metadata",
             Self::ImportPlayers => "import-players",
+            Self::ImportEntities => "import-entities",
         }
     }
 }
@@ -82,6 +92,8 @@ struct ConversionLaunch {
     compression: Option<CompressionScheme>,
     players: Vec<uuid::Uuid>,
     all_players: bool,
+    entity_chunks: Vec<SelectedEntityChunk>,
+    all_entities: bool,
     apply: bool,
     acknowledgement: Option<String>,
 }
@@ -103,10 +115,11 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
         Some("export") => Direction::ExportTerrain,
         Some("import-metadata") => Direction::ImportMetadata,
         Some("import-players") => Direction::ImportPlayers,
+        Some("import-entities") => Direction::ImportEntities,
         Some("--help") | Some("-h") | None => return Err(USAGE.to_owned()),
         Some(other) => {
             return Err(format!(
-                "anvil-convert expects import, export, import-metadata, or import-players, got {other:?}\n{USAGE}"
+                "anvil-convert expects import, export, import-metadata, import-players, or import-entities, got {other:?}\n{USAGE}"
             ));
         }
     };
@@ -123,6 +136,8 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
     let mut compression = None;
     let mut players = Vec::new();
     let mut all_players = false;
+    let mut entity_chunks = Vec::new();
+    let mut all_entities = false;
     let mut apply = false;
     let mut acknowledgement = None;
 
@@ -159,6 +174,14 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
                     .map_err(|_| "--player must be a canonical UUID".to_owned())?,
             ),
             "--all-players" => all_players = true,
+            "--entity-chunk" => {
+                let chunk = parse_chunk(&next_arg("--entity-chunk", &mut args)?)?;
+                entity_chunks.push(SelectedEntityChunk {
+                    column_x: chunk.x,
+                    column_z: chunk.z,
+                });
+            }
+            "--all-entities" => all_entities = true,
             "--apply" => apply = true,
             "--acknowledge" => acknowledgement = Some(next_arg("--acknowledge", &mut args)?),
             "--help" | "-h" => return Err(USAGE.to_owned()),
@@ -181,6 +204,8 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
         compression,
         players,
         all_players,
+        entity_chunks,
+        all_entities,
         apply,
         acknowledgement,
     };
@@ -193,7 +218,10 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
         return Err("--source and --destination must name different paths".to_owned());
     }
     let native_endpoint = match launch.direction {
-        Direction::ImportTerrain | Direction::ImportMetadata | Direction::ImportPlayers => {
+        Direction::ImportTerrain
+        | Direction::ImportMetadata
+        | Direction::ImportPlayers
+        | Direction::ImportEntities => {
             &launch.destination
         }
         Direction::ExportTerrain => &launch.source,
@@ -203,7 +231,10 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
             "--native-path must exactly name the {} endpoint for {}",
             if matches!(
                 launch.direction,
-                Direction::ImportTerrain | Direction::ImportMetadata | Direction::ImportPlayers
+                Direction::ImportTerrain
+                    | Direction::ImportMetadata
+                    | Direction::ImportPlayers
+                    | Direction::ImportEntities
             ) {
                 "destination"
             } else {
@@ -294,6 +325,31 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
                 );
             }
         }
+        Direction::ImportEntities => {
+            if launch.min_y.is_none() || launch.height.is_none() {
+                return Err("import-entities requires --min-y and --height".to_owned());
+            }
+            if launch.dimension.is_some()
+                || !launch.chunks.is_empty()
+                || launch.all_terrain
+                || launch.game_time.is_some()
+                || launch.timestamp.is_some()
+                || launch.compression.is_some()
+                || !launch.players.is_empty()
+                || launch.all_players
+            {
+                return Err(
+                    "import-entities accepts only --source, --destination, --native-path, --min-y, --height, --entity-chunk, --all-entities, --apply, and --acknowledge"
+                        .to_owned(),
+                );
+            }
+            if launch.all_entities == !launch.entity_chunks.is_empty() {
+                return Err(
+                    "import-entities requires exactly one selection mode: --all-entities or one or more --entity-chunk <x,z>"
+                        .to_owned(),
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -306,6 +362,7 @@ fn execute(launch: &ConversionLaunch) -> Result<String, String> {
         Direction::ImportTerrain => execute_import(launch),
         Direction::ImportMetadata => execute_metadata_import(launch),
         Direction::ImportPlayers => execute_player_import(launch),
+        Direction::ImportEntities => execute_entity_import(launch),
         Direction::ExportTerrain => {
             let storage = open_native_backend(launch)?;
             execute_export(launch, &storage)
@@ -428,6 +485,75 @@ fn execute_player_import(launch: &ConversionLaunch) -> Result<String, String> {
     Ok(output)
 }
 
+fn execute_entity_import(launch: &ConversionLaunch) -> Result<String, String> {
+    let selection = if launch.all_entities {
+        EntityChunkSelection::All
+    } else {
+        EntityChunkSelection::Chunks(launch.entity_chunks.clone())
+    };
+    let selected = discover_entity_chunks(&launch.source, selection)
+        .map_err(|error| format!("entity discovery failed: {error}"))?;
+    let plan = preflight_entity_batch(
+        &launch.source,
+        &selected,
+        launch.min_y.expect("validated entity import min Y"),
+        launch.height.expect("validated entity import height"),
+    )
+    .map_err(|error| format!("entity preflight failed: {error}"))?;
+    let token = review_token(launch, plan.report());
+    let mut output = format!(
+        "Selected {} entity sidecar chunks.\n{}",
+        selected.len(),
+        format_review(Direction::ImportEntities, plan.report(), &token)
+    );
+    require_apply(launch, plan.report(), &token, &mut output)?;
+    let authorization = plan
+        .report()
+        .decide(EntityLossDecision::ProceedAndDiscardUnsupported);
+    let storage = open_native_backend(launch)?;
+    let result = import_entity_batch(&storage, plan, Some(authorization))
+        .map_err(|error| format!("entity import refused before committing conversion: {error}"))?;
+    drop(storage);
+
+    let reopened = open_native_backend(launch)?;
+    for chunk in result.report.chunks() {
+        let sidecar = crate_entity_uuids(&launch.source, chunk.column_x, chunk.column_z)?;
+        for uuid in sidecar {
+            if reopened
+                .load_entity(
+                    *uuid.as_bytes(),
+                    chunk.column_x,
+                    chunk.column_z,
+                    launch.min_y.expect("validated entity import min Y"),
+                    launch.height.expect("validated entity import height"),
+                )
+                .map_err(|error| format!("entity import reopen failed: {error}"))?
+                .is_none()
+            {
+                return Err(format!(
+                    "entity import reopen found no pose for selected UUID {uuid}"
+                ));
+            }
+        }
+    }
+    writeln!(
+        output,
+        "Converted {} resident entity poses from {} sidecar chunks into {} and reopened every selected pose.",
+        result.records_written,
+        result.chunks_seen,
+        launch.destination.display()
+    )
+    .expect("write to String");
+    Ok(output)
+}
+
+fn crate_entity_uuids(source: &std::path::Path, column_x: i32, column_z: i32) -> Result<Vec<uuid::Uuid>, String> {
+    lodestone_server::entity_storage::EntityStorage::open_readonly(source)
+        .load_chunk(column_x, column_z)
+        .map_err(|error| format!("entity import reopen could not reread source sidecar: {error}"))
+        .map(|entities| entities.into_iter().map(|entity| entity.uuid).collect())
+}
+
 fn execute_export(launch: &ConversionLaunch, storage: &WorldStorage) -> Result<String, String> {
     let chunks = if launch.all_terrain {
         storage
@@ -512,6 +638,16 @@ impl ReviewReport for PlayerBatchImportReport {
     }
 }
 
+impl ReviewReport for lodestone_server::anvil_native_entity_import::EntityBatchImportReport {
+    fn has_loss(&self) -> bool {
+        self.unsupported_count() != 0
+    }
+
+    fn has_blocker(&self) -> bool {
+        self.blocker_count() != 0
+    }
+}
+
 fn require_apply<T: ReviewReport>(
     launch: &ConversionLaunch,
     report: &T,
@@ -542,7 +678,7 @@ fn format_review<T: fmt::Debug>(direction: Direction, report: &T, token: &str) -
 
 fn review_token<T: fmt::Debug>(launch: &ConversionLaunch, report: &T) -> String {
     let reviewed = format!(
-        "v2|{:?}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        "v2|{:?}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
         launch.direction,
         launch.source.display(),
         launch.destination.display(),
@@ -556,6 +692,8 @@ fn review_token<T: fmt::Debug>(launch: &ConversionLaunch, report: &T) -> String 
         launch.timestamp,
         launch.players,
         launch.all_players,
+        launch.entity_chunks,
+        launch.all_entities,
         report,
     );
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -611,6 +749,7 @@ mod tests {
     const SCRATCH: &str = "/private/tmp/lodestone-wave-storage-enum-711";
     const METADATA_SCRATCH: &str = "/private/tmp/lodestone-wave-storage-meta-711";
     const PLAYER_SCRATCH: &str = "/private/tmp/lodestone-wave-storage-player-711";
+    const ENTITY_SCRATCH: &str = "/private/tmp/lodestone-wave-storage-entity-711";
     const LEVEL_DAT_FIXTURE: &[u8] =
         include_bytes!("../../lodestone-anvil/tests/support/level_dat_26_2_vanilla.dat");
     const WORLD_GEN_FIXTURE: &[u8] =
@@ -621,6 +760,8 @@ mod tests {
     struct MetadataScratch;
 
     struct PlayerScratch;
+
+    struct EntityScratch;
 
     impl Scratch {
         fn create() -> Self {
@@ -675,6 +816,25 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(PLAYER_SCRATCH)
                 .expect("remove exact player CLI scratch path");
+        }
+    }
+
+    impl EntityScratch {
+        fn create() -> Self {
+            let path = Path::new(ENTITY_SCRATCH);
+            assert!(
+                !path.exists(),
+                "entity CLI scratch path must be absent before this test"
+            );
+            std::fs::create_dir(path).expect("create exact entity CLI scratch path");
+            Self
+        }
+    }
+
+    impl Drop for EntityScratch {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(ENTITY_SCRATCH)
+                .expect("remove exact entity CLI scratch path");
         }
     }
 
@@ -916,6 +1076,82 @@ mod tests {
                 .expect("re-read source player after conversion"),
             first_bytes,
             "native import never rewrites complete Anvil player data"
+        );
+    }
+
+    #[test]
+    fn entity_command_preflights_authorizes_commits_and_reopens_one_batch() {
+        let _scratch = EntityScratch::create();
+        let root = Path::new(ENTITY_SCRATCH);
+        let source = root.join("anvil-source");
+        let native_destination = root.join("native-destination");
+        let sidecar = lodestone_server::entity_storage::EntityStorage::new(&source)
+            .expect("create fixture entity sidecar");
+        let first: uuid::Uuid = "00000000-0000-0001-0000-000000000011"
+            .parse()
+            .expect("canonical first entity UUID");
+        let second: uuid::Uuid = "00000000-0000-0002-0000-000000000012"
+            .parse()
+            .expect("canonical second entity UUID");
+        let entity = |uuid, x, z| lodestone_server::entity_storage::SavedEntity {
+            id: "minecraft:cow".parse().expect("canonical entity type"),
+            uuid,
+            pos: lodestone_model::Vec3::new(x, 64.0, z),
+            motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            rotation: lodestone_model::Rotation::new(0.0, 0.0),
+            health: None,
+            item: None,
+            age: None,
+            pickup_delay: None,
+            extra: Vec::new(),
+        };
+        sidecar
+            .save(&[entity(first, 0.5, 0.5), entity(second, 16.5, 0.5)])
+            .expect("write two entity sidecar chunks");
+        let source_before = std::fs::read(
+            source.join("dimensions/minecraft/overworld/entities/r.0.0.mca"),
+        )
+        .expect("capture source sidecar before conversion");
+
+        let command = [
+            "import-entities",
+            "--source",
+            source.to_str().expect("UTF-8 Anvil source"),
+            "--destination",
+            native_destination.to_str().expect("UTF-8 native destination"),
+            "--native-path",
+            native_destination.to_str().expect("UTF-8 native path"),
+            "--min-y",
+            "0",
+            "--height",
+            "128",
+            "--all-entities",
+        ];
+        let preview = run(command).expect_err("entity preview reports and refuses mutation");
+        assert!(preview.contains("Selected 2 entity sidecar chunks."));
+        assert!(preview.contains("Motion"), "motion loss is visible before apply");
+        assert!(!native_destination.exists(), "preview cannot create native storage");
+        let mut unacknowledged = command.to_vec();
+        unacknowledged.push("--apply");
+        assert!(
+            run(unacknowledged)
+                .expect_err("lossy entity conversion needs its exact token")
+                .contains("Lossy conversion requires --acknowledge")
+        );
+        assert!(
+            !native_destination.exists(),
+            "unacknowledged entity loss cannot create native storage"
+        );
+        let mut approved = command.to_vec();
+        approved.extend(["--apply", "--acknowledge", token(&preview)]);
+        let applied = run(approved).expect("acknowledged entity batch commits");
+        assert!(applied.contains("Converted 2 resident entity poses from 2 sidecar chunks"));
+        assert!(applied.contains("reopened every selected pose"));
+        assert_eq!(
+            std::fs::read(source.join("dimensions/minecraft/overworld/entities/r.0.0.mca"))
+                .expect("re-read source sidecar"),
+            source_before,
+            "native import never rewrites the Anvil entity sidecar"
         );
     }
 

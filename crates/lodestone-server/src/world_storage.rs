@@ -80,6 +80,24 @@ pub struct NativeEntityRecord {
     pub rotation: lodestone_model::Rotation,
 }
 
+/// One source-column batch in a reviewed resident-entity import.
+///
+/// The column and vertical extent remain part of the input, so every pose is
+/// checked before a whole-world import opens its one native transaction.
+#[derive(Clone, Debug)]
+pub struct NativeDirtyEntityChunk {
+    /// Source chunk-column X coordinate.
+    pub column_x: i32,
+    /// Source chunk-column Z coordinate.
+    pub column_z: i32,
+    /// Inclusive lower bound of the source vertical window.
+    pub min_y: i32,
+    /// Positive size of the source vertical window in blocks.
+    pub height: i32,
+    /// Resident entity poses selected from this source column.
+    pub entities: Vec<NativeEntityRecord>,
+}
+
 /// The complete typed input for one dirty native chunk replacement.
 ///
 /// A native chunk replacement is deliberately one value rather than a family
@@ -964,29 +982,57 @@ impl WorldStorage {
         height: i32,
         entities: impl IntoIterator<Item = NativeEntityRecord>,
     ) -> Result<usize, Error> {
-        validate_extent(min_y, height)?;
-        let entities: Vec<_> = entities.into_iter().collect();
-        if entities.is_empty() {
+        self.write_dirty_entity_chunks([NativeDirtyEntityChunk {
+            column_x,
+            column_z,
+            min_y,
+            height,
+            entities: entities.into_iter().collect(),
+        }])
+    }
+
+    /// Atomically saves every reviewed resident-entity source chunk.
+    ///
+    /// Every column, pose, UUID and compact key is validated before the one
+    /// native transaction begins. This keeps a later corrupt sidecar from
+    /// committing an earlier column during a filesystem conversion.
+    pub fn write_dirty_entity_chunks(
+        &self,
+        chunks: impl IntoIterator<Item = NativeDirtyEntityChunk>,
+    ) -> Result<usize, Error> {
+        let chunks: Vec<_> = chunks.into_iter().collect();
+        if chunks.is_empty() {
             return Ok(0);
         }
-
         let mut seen_uuids = HashSet::new();
         let mut keys = BTreeMap::new();
-        let mut writes = Vec::with_capacity(entities.len());
-        for entity in &entities {
-            if !seen_uuids.insert(entity.uuid) {
-                return Err(EntityRecordError::DuplicateUuid(entity.uuid).into());
-            }
-            validate_entity_residency(entity, column_x, column_z, min_y, height)?;
-            let key = entity_key(entity.uuid);
-            if let Some(stored) = keys.insert(key, entity.uuid) {
-                return Err(EntityRecordError::KeyCollision {
-                    requested: entity.uuid,
-                    stored,
+        let mut writes = Vec::new();
+        for chunk in chunks {
+            validate_extent(chunk.min_y, chunk.height)?;
+            for entity in &chunk.entities {
+                if !seen_uuids.insert(entity.uuid) {
+                    return Err(EntityRecordError::DuplicateUuid(entity.uuid).into());
                 }
-                .into());
+                validate_entity_residency(
+                    entity,
+                    chunk.column_x,
+                    chunk.column_z,
+                    chunk.min_y,
+                    chunk.height,
+                )?;
+                let key = entity_key(entity.uuid);
+                if let Some(stored) = keys.insert(key, entity.uuid) {
+                    return Err(EntityRecordError::KeyCollision {
+                        requested: entity.uuid,
+                        stored,
+                    }
+                    .into());
+                }
+                writes.push((key, entity.uuid, encode_entity(entity)?));
             }
-            writes.push((key, entity.uuid, encode_entity(entity)?));
+        }
+        if writes.is_empty() {
+            return Ok(0);
         }
 
         let Some(native) = &self.native else {

@@ -306,6 +306,23 @@ pub struct EntityStorage {
 }
 
 impl EntityStorage {
+    /// Opens the overworld entity-sidecar path without creating it.
+    ///
+    /// This is the read-only entry point for migration preflight. In
+    /// particular, a conversion preview must not manufacture an empty
+    /// `entities/` directory in its source world.
+    #[must_use]
+    pub fn open_readonly(world_dir: &Path) -> Self {
+        let dir = world_dir
+            .join("dimensions")
+            .join("minecraft")
+            .join("overworld")
+            .join("entities");
+        Self {
+            dir: std::sync::Arc::new(dir),
+        }
+    }
+
     /// Roots a store at `world_dir`'s overworld `entities/` directory, creating
     /// it eagerly so a later save cannot fail for a reason the caller could have
     /// been told at world open.
@@ -335,6 +352,65 @@ impl EntityStorage {
 
     fn region_path(&self, rx: i32, rz: i32) -> PathBuf {
         self.dir.join(format!("r.{rx}.{rz}.mca"))
+    }
+
+    /// Lists every populated entity-sidecar chunk in deterministic coordinate
+    /// order without decoding its payload.
+    ///
+    /// Missing sidecar directories are an empty selection. A malformed region
+    /// filename is refused rather than silently omitted, since an operator's
+    /// `--all-entities` review must cover every apparent region file.
+    pub fn populated_chunks(&self) -> Result<Vec<(i32, i32)>, Error> {
+        let entries = match std::fs::read_dir(self.dir.as_path()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(Error::Io {
+                    path: self.dir.as_path().to_path_buf(),
+                    source,
+                });
+            }
+        };
+        let mut regions = BTreeMap::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| Error::Io {
+                path: self.dir.as_path().to_path_buf(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("mca") {
+                continue;
+            }
+            if !entry.file_type().map_err(|source| Error::Io {
+                path: path.clone(),
+                source,
+            })?.is_file() {
+                return Err(invalid_region_filename(path));
+            }
+            let Some((region_x, region_z)) = parse_region_name(&path) else {
+                return Err(invalid_region_filename(path));
+            };
+            regions.insert((region_x, region_z), path);
+        }
+        let mut chunks = Vec::new();
+        for ((region_x, region_z), path) in regions {
+            let bytes = std::fs::read(&path).map_err(|source| Error::Io {
+                path: path.clone(),
+                source,
+            })?;
+            let region = RegionFile::parse(&bytes).map_err(Error::Anvil)?;
+            for local_z in 0..32_u8 {
+                for local_x in 0..32_u8 {
+                    if region.has_chunk(local_x, local_z).map_err(Error::Anvil)? {
+                        chunks.push((
+                            region_x * 32 + i32::from(local_x),
+                            region_z * 32 + i32::from(local_z),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(chunks)
     }
 
     /// Every entity stored in chunk `(cx, cz)`.
@@ -688,6 +764,25 @@ fn entity_list(nbt: &Nbt) -> &[Nbt] {
     match field(nbt, "Entities") {
         Some(Nbt::List { elements, .. }) => elements,
         _ => &[],
+    }
+}
+
+fn parse_region_name(path: &Path) -> Option<(i32, i32)> {
+    let stem = path.file_name()?.to_str()?.strip_suffix(".mca")?;
+    let mut parts = stem.split('.');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("r"), Some(x), Some(z), None) => Some((x.parse().ok()?, z.parse().ok()?)),
+        _ => None,
+    }
+}
+
+fn invalid_region_filename(path: PathBuf) -> Error {
+    Error::Io {
+        path,
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "entity region file name must be canonical r.<x>.<z>.mca",
+        ),
     }
 }
 

@@ -8,9 +8,14 @@
 //! item state, age, pickup delay, and preserved fields have no native field;
 //! every one is reported before a caller may authorize the write.
 
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::Path,
+};
+
 use crate::{
     entity_storage::{EntityStorage, SavedEntity},
-    world_storage::{NativeEntityRecord, WorldStorage},
+    world_storage::{NativeDirtyEntityChunk, NativeEntityRecord, WorldStorage},
 };
 use lodestone_storage_schema::BuiltinDimension;
 
@@ -195,9 +200,178 @@ pub struct EntityImportResult {
     pub records_written: usize,
 }
 
+/// One deterministic entity-sidecar source chunk selected for a batch import.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct SelectedEntityChunk {
+    /// Chunk-column X coordinate.
+    pub column_x: i32,
+    /// Chunk-column Z coordinate.
+    pub column_z: i32,
+}
+
+/// Filesystem selection for a native entity-sidecar conversion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EntityChunkSelection {
+    /// Every populated canonical overworld entity-sidecar chunk.
+    All,
+    /// Exactly these chunk columns, in deterministic coordinate order.
+    Chunks(Vec<SelectedEntityChunk>),
+}
+
+/// One selected source chunk's payload-free loss report.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EntityChunkImportReport {
+    /// Source chunk-column X coordinate.
+    pub column_x: i32,
+    /// Source chunk-column Z coordinate.
+    pub column_z: i32,
+    /// Loss and safety report for that source sidecar chunk.
+    pub report: EntityImportReport,
+}
+
+/// A source condition that prevents a whole entity-sidecar batch from being
+/// committed safely.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EntityBatchImportBlocker {
+    /// A UUID appears in more than one selected source chunk.
+    DuplicateUuid {
+        /// The colliding durable identity.
+        uuid: uuid::Uuid,
+        /// First selected source chunk holding that identity.
+        first: SelectedEntityChunk,
+        /// Later selected source chunk holding that identity.
+        second: SelectedEntityChunk,
+    },
+}
+
+/// Payload-free aggregate review for a selected entity-sidecar batch.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct EntityBatchImportReport {
+    chunks: Vec<EntityChunkImportReport>,
+    blockers: Vec<EntityBatchImportBlocker>,
+}
+
+impl EntityBatchImportReport {
+    /// Source reports in deterministic `(x, z)` order.
+    #[must_use]
+    pub fn chunks(&self) -> &[EntityChunkImportReport] {
+        &self.chunks
+    }
+
+    /// Cross-chunk conditions that no loss acknowledgement can authorize.
+    #[must_use]
+    pub fn blockers(&self) -> &[EntityBatchImportBlocker] {
+        &self.blockers
+    }
+
+    /// Number of discarded source-field categories across the batch.
+    #[must_use]
+    pub fn unsupported_count(&self) -> usize {
+        self.chunks
+            .iter()
+            .map(|chunk| chunk.report.unsupported().len())
+            .sum()
+    }
+
+    /// Number of unsafe source values and cross-chunk collisions.
+    #[must_use]
+    pub fn blocker_count(&self) -> usize {
+        self.blockers.len()
+            + self
+                .chunks
+                .iter()
+                .map(|chunk| chunk.report.blockers().len())
+                .sum::<usize>()
+    }
+
+    /// Applies one decision after the entire sidecar selection is reviewed.
+    #[must_use]
+    pub fn decide(&self, decision: EntityLossDecision) -> EntityBatchImportAuthorization {
+        if self.blocker_count() != 0 {
+            return EntityBatchImportAuthorization::Blocked {
+                blockers: self.blocker_count(),
+            };
+        }
+        match decision {
+            EntityLossDecision::Abort => EntityBatchImportAuthorization::Aborted,
+            EntityLossDecision::ProceedAndDiscardUnsupported if self.unsupported_count() == 0 => {
+                EntityBatchImportAuthorization::Lossless
+            }
+            EntityLossDecision::ProceedAndDiscardUnsupported => {
+                EntityBatchImportAuthorization::LossAccepted {
+                    discarded_entries: self.unsupported_count(),
+                }
+            }
+        }
+    }
+}
+
+/// An authorization tied to the exact aggregate entity-sidecar report.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use = "pass this to import_entity_batch; entity fields must not be discarded implicitly"]
+pub enum EntityBatchImportAuthorization {
+    /// The caller declined conversion.
+    Aborted,
+    /// The complete source selection is lossless.
+    Lossless,
+    /// The caller accepted every reported discarded source value.
+    LossAccepted {
+        /// Number of report entries acknowledged by the caller.
+        discarded_entries: usize,
+    },
+    /// The source contained non-representable or ambiguous records.
+    Blocked {
+        /// Number of blocking report entries.
+        blockers: usize,
+    },
+}
+
+impl EntityBatchImportAuthorization {
+    fn permits_conversion(self) -> bool {
+        matches!(self, Self::Lossless | Self::LossAccepted { .. })
+    }
+}
+
+/// Prepared, typed inputs for a reviewed entity-sidecar batch.
+#[derive(Clone, Debug)]
+pub struct EntityBatchImportPlan {
+    report: EntityBatchImportReport,
+    chunks: Vec<NativeDirtyEntityChunk>,
+}
+
+impl EntityBatchImportPlan {
+    /// The payload-free aggregate report requiring review.
+    #[must_use]
+    pub fn report(&self) -> &EntityBatchImportReport {
+        &self.report
+    }
+}
+
+/// Completed result for one committed entity-sidecar batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EntityBatchImportResult {
+    /// Fresh aggregate report whose authorization permitted the native write.
+    pub report: EntityBatchImportReport,
+    /// Number of selected source chunks.
+    pub chunks_seen: usize,
+    /// Number of typed resident entity records committed in one transaction.
+    pub records_written: usize,
+}
+
 /// An error that prevents an Anvil entity-sidecar chunk becoming native records.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The filesystem selection did not name any sidecar chunks.
+    #[error("entity import selected no sidecar chunks")]
+    NoSelectedChunks,
+    /// An explicit entity chunk was named more than once.
+    #[error("entity import selected chunk ({column_x}, {column_z}) more than once")]
+    DuplicateChunkSelection {
+        /// Duplicate chunk-column X coordinate.
+        column_x: i32,
+        /// Duplicate chunk-column Z coordinate.
+        column_z: i32,
+    },
     /// Native-only conversion needs an explicit review of every discarded field.
     #[error("Anvil entity import requires an explicit EntityImportAuthorization")]
     MissingAuthorization,
@@ -217,6 +391,25 @@ pub enum Error {
         supplied: EntityImportAuthorization,
         /// Authorization the current source requires.
         required: EntityImportAuthorization,
+    },
+    /// The batch authorization was not supplied.
+    #[error("Anvil entity batch import requires an explicit EntityBatchImportAuthorization")]
+    MissingBatchAuthorization,
+    /// The supplied aggregate decision cannot permit conversion.
+    #[error("Anvil entity batch import authorization does not permit conversion: {authorization:?}")]
+    BatchAuthorizationDenied {
+        /// Authorization supplied by the caller.
+        authorization: EntityBatchImportAuthorization,
+    },
+    /// The batch changed after review or the authorization targets another selection.
+    #[error(
+        "Anvil entity batch import authorization does not match the selected chunks: supplied {supplied:?}, required {required:?}"
+    )]
+    BatchAuthorizationMismatch {
+        /// Authorization supplied by the caller.
+        supplied: EntityBatchImportAuthorization,
+        /// Authorization required by the prepared batch.
+        required: EntityBatchImportAuthorization,
     },
     /// The selected Anvil entity sidecar could not be decoded.
     #[error("Anvil entity-sidecar read error: {0}")]
@@ -344,6 +537,129 @@ pub fn import_entity_chunk(
     Ok(EntityImportResult {
         report,
         entities_seen: entities.len(),
+        records_written,
+    })
+}
+
+/// Discovers an explicit or complete deterministic entity-sidecar selection
+/// without creating the source world's `entities/` directory.
+pub fn discover_entity_chunks(
+    world_directory: &Path,
+    selection: EntityChunkSelection,
+) -> Result<Vec<SelectedEntityChunk>, Error> {
+    let selected = match selection {
+        EntityChunkSelection::All => crate::entity_storage::EntityStorage::open_readonly(world_directory)
+            .populated_chunks()
+            .map_err(Error::EntitySidecar)?
+            .into_iter()
+            .map(|(column_x, column_z)| SelectedEntityChunk { column_x, column_z })
+            .collect(),
+        EntityChunkSelection::Chunks(chunks) => chunks,
+    };
+    let mut ordered = BTreeSet::new();
+    for chunk in selected {
+        if !ordered.insert(chunk) {
+            return Err(Error::DuplicateChunkSelection {
+                column_x: chunk.column_x,
+                column_z: chunk.column_z,
+            });
+        }
+    }
+    if ordered.is_empty() {
+        return Err(Error::NoSelectedChunks);
+    }
+    Ok(ordered.into_iter().collect())
+}
+
+/// Decodes and inventories every selected sidecar chunk before native storage
+/// is opened. The returned plan retains only typed resident-entity poses.
+pub fn preflight_entity_batch(
+    world_directory: &Path,
+    selected: &[SelectedEntityChunk],
+    min_y: i32,
+    height: i32,
+) -> Result<EntityBatchImportPlan, Error> {
+    if selected.is_empty() {
+        return Err(Error::NoSelectedChunks);
+    }
+    let sidecar = crate::entity_storage::EntityStorage::open_readonly(world_directory);
+    let mut reports = Vec::with_capacity(selected.len());
+    let mut chunks = Vec::with_capacity(selected.len());
+    let mut uuids = HashMap::new();
+    let mut batch_blockers = Vec::new();
+    for &selected_chunk in selected {
+        let entities = sidecar
+            .load_chunk(selected_chunk.column_x, selected_chunk.column_z)
+            .map_err(Error::EntitySidecar)?;
+        let report = preflight_entities(
+            selected_chunk.column_x,
+            selected_chunk.column_z,
+            min_y,
+            height,
+            &entities,
+        );
+        for entity in &entities {
+            if let Some(first) = uuids.insert(entity.uuid, selected_chunk) {
+                batch_blockers.push(EntityBatchImportBlocker::DuplicateUuid {
+                    uuid: entity.uuid,
+                    first,
+                    second: selected_chunk,
+                });
+            }
+        }
+        reports.push(EntityChunkImportReport {
+            column_x: selected_chunk.column_x,
+            column_z: selected_chunk.column_z,
+            report,
+        });
+        chunks.push(NativeDirtyEntityChunk {
+            column_x: selected_chunk.column_x,
+            column_z: selected_chunk.column_z,
+            min_y,
+            height,
+            entities: entities.iter().map(native_record).collect(),
+        });
+    }
+    Ok(EntityBatchImportPlan {
+        report: EntityBatchImportReport {
+            chunks: reports,
+            blockers: batch_blockers,
+        },
+        chunks,
+    })
+}
+
+/// Commits every prepared entity-sidecar chunk in exactly one transaction.
+///
+/// Every source chunk has already decoded and every UUID/pose has already been
+/// reviewed before this reaches [`WorldStorage::write_dirty_entity_chunks`].
+pub fn import_entity_batch(
+    storage: &WorldStorage,
+    plan: EntityBatchImportPlan,
+    authorization: Option<EntityBatchImportAuthorization>,
+) -> Result<EntityBatchImportResult, Error> {
+    let Some(authorization) = authorization else {
+        return Err(Error::MissingBatchAuthorization);
+    };
+    if !authorization.permits_conversion() {
+        return Err(Error::BatchAuthorizationDenied { authorization });
+    }
+    let required = plan
+        .report
+        .decide(EntityLossDecision::ProceedAndDiscardUnsupported);
+    if authorization != required {
+        return Err(Error::BatchAuthorizationMismatch {
+            supplied: authorization,
+            required,
+        });
+    }
+    let chunks_seen = plan.chunks.len();
+    let records_written = storage
+        .write_dirty_entity_chunks(plan.chunks)
+        .map_err(Error::Storage)?;
+    Ok(EntityBatchImportResult {
+        report: plan.report,
+        chunks_seen,
         records_written,
     })
 }
