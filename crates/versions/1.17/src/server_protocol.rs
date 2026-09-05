@@ -6,7 +6,7 @@
 //! one by protocol range.
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, State, Writer, encode_body, write_named_nbt};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -16,7 +16,10 @@ use crate::adapter::PROTOCOL_1_18_2;
 use crate::canonical::{wire_state_for_756, wire_state_for_758};
 use crate::packet_ids::{handshaking, login, play};
 use crate::packet_ids_758::{handshaking as handshaking_758, login as login_758, play as play_758};
-use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGame};
+use crate::packets::game::{
+    BlockDig, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
+    ServerboundPosition, ServerboundPositionLook,
+};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
@@ -276,6 +279,51 @@ impl ServerProtocol for V756ServerProtocol {
                     face,
                     sequence: 0,
                 }
+            }
+            // The four movement forms have distinct payloads.  In particular,
+            // only the first two carry a position, which is what drives the
+            // integrated server's view recentering and tick-area publication.
+            State::Play if packet_id == play::serverbound::POSITION => {
+                decode_full::<ServerboundPosition>(payload).map_or(ServerBound::Ignored, |move_| {
+                    ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: None,
+                        on_ground: move_.on_ground,
+                    }
+                })
+            }
+            State::Play if packet_id == play::serverbound::POSITION_LOOK => {
+                decode_full::<ServerboundPositionLook>(payload).map_or(
+                    ServerBound::Ignored,
+                    |move_| ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: Some(Rotation {
+                            yaw: move_.yaw,
+                            pitch: move_.pitch,
+                        }),
+                        on_ground: move_.on_ground,
+                    },
+                )
+            }
+            State::Play if packet_id == play::serverbound::LOOK => {
+                decode_full::<ServerboundLook>(payload).map_or(ServerBound::Ignored, |look| {
+                    ServerBound::PlayerRotated {
+                        yaw: look.yaw,
+                        pitch: look.pitch,
+                        on_ground: look.on_ground,
+                    }
+                })
+            }
+            State::Play if packet_id == play::serverbound::FLYING => {
+                decode_full::<ServerboundFlying>(payload).map_or(ServerBound::Ignored, |status| {
+                    ServerBound::PlayerStatusOnly {
+                        on_ground: status.on_ground,
+                    }
+                })
             }
             _ => ServerBound::Ignored,
         }
@@ -564,6 +612,51 @@ impl ServerProtocol for V758ServerProtocol {
                     face,
                     sequence: 0,
                 }
+            }
+            State::Play if packet_id == play_758::serverbound::POSITION => {
+                decode_full_758::<ServerboundPosition>(payload).map_or(
+                    ServerBound::Ignored,
+                    |move_| ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: None,
+                        on_ground: move_.on_ground,
+                    },
+                )
+            }
+            State::Play if packet_id == play_758::serverbound::POSITION_LOOK => {
+                decode_full_758::<ServerboundPositionLook>(payload).map_or(
+                    ServerBound::Ignored,
+                    |move_| ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: Some(Rotation {
+                            yaw: move_.yaw,
+                            pitch: move_.pitch,
+                        }),
+                        on_ground: move_.on_ground,
+                    },
+                )
+            }
+            State::Play if packet_id == play_758::serverbound::LOOK => {
+                decode_full_758::<ServerboundLook>(payload).map_or(
+                    ServerBound::Ignored,
+                    |look| ServerBound::PlayerRotated {
+                        yaw: look.yaw,
+                        pitch: look.pitch,
+                        on_ground: look.on_ground,
+                    },
+                )
+            }
+            State::Play if packet_id == play_758::serverbound::FLYING => {
+                decode_full_758::<ServerboundFlying>(payload).map_or(
+                    ServerBound::Ignored,
+                    |status| ServerBound::PlayerStatusOnly {
+                        on_ground: status.on_ground,
+                    },
+                )
             }
             _ => ServerBound::Ignored,
         }
