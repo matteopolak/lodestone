@@ -4222,6 +4222,10 @@ pub fn route(event: &ClientEvent) -> Route {
         // before the shell event loop runs, so this is a client-internal
         // consumer rather than an island.
         ClientEvent::Ping { .. } => CLIENT,
+        // The client retains the echoed request timestamp in its local
+        // read-model; the shell compares it with its portable current clock for
+        // the F3 round-trip-time line.
+        ClientEvent::PongReceived { .. } => CLIENT,
         // `Driver::emit` answers from its in-memory cookie store immediately;
         // the resulting `CookieResponse` action is sent before the event reaches
         // the shell, so this is a client-internal consumer rather than an island.
@@ -4383,7 +4387,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
         | ClientEvent::ServerDataReceived { .. }
-        | ClientEvent::PongReceived { .. }
         | ClientEvent::PlayerLookAt { .. } => Route::NOWHERE,
     }
 }
@@ -4823,6 +4826,12 @@ mod route_tests {
             "SharedState publishes it to the production plugin event bus"
         );
         assert!(!r.is_island(), "the installed brand channel consumes it");
+
+        let pong = ClientEvent::PongReceived { time: 1_700_000_123_456 };
+        let r = route(&pong);
+        assert!(!r.ingest && !r.session && !r.shell, "no router claims it");
+        assert!(r.client, "the client preserves the echoed ping timestamp");
+        assert!(!r.is_island(), "the F3 latency reader consumes it");
 
         assert!(
             route(&ClientEvent::PlayerCombatEntered).is_island(),

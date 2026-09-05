@@ -45,8 +45,9 @@ Vanilla's default debug profile enables nine entries, laid out alphabetically by
 A handful of lines have no vanilla counterpart at all and exist because this engine needs them: a
 fixed-timestep health ratio, a live-chunk/dropped-mesh counter (a chunk the server reports loaded that
 silently fails to mesh used to vanish with no signal at all), an occlusion-culling summary, resident
-chunk memory, and GPU mesh residency (see below) — plus a handful of conditional lines (recipes,
-world border, maps, spawn point) that only appear once their data has actually arrived from the server.
+chunk memory, the latest F3 probe round-trip time, and GPU mesh residency (see below) — plus a
+handful of conditional lines (recipes, world border, maps, spawn point) that only appear once their
+data has actually arrived from the server.
 
 Two values are read fresh every frame rather than cached, deliberately: the current dimension (read off
 the local player's own dimension component, so a portal trip updates it immediately rather than only at

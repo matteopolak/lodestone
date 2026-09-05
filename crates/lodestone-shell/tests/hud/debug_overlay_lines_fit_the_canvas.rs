@@ -83,6 +83,7 @@ fn realistic_stats() -> DebugStats {
         pitch: -22.25,
         fps: 143.0,
         frame_ms: 6.31,
+        ping_rtt_ms: Some(37),
         chunk_count: 1024,
         live_columns: 961,
         mesh_drops: 0,

@@ -58,7 +58,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**13 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**12 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -86,6 +86,9 @@ surfacing the event, while the shell records the target for the resulting discon
 A resource-pack pop is claimed by the shell's connection loop: it clears the active in-memory pack
 and any matching prompt before generic forwarding, so it is marked as a shell interception rather
 than requiring a `NetUpdate` arm.
+
+A play-state pong is claimed by the client read-model: it retains the echoed timestamp from the
+F3 ping probe, and the shell compares it against its portable epoch clock to show round-trip time.
 
 `CustomPayload` is also claimed by `Route::client`. `lodestone_client::state::SharedState::apply`
 publishes it through the optional `GameEvent` bus, and the production app installs a typed

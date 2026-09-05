@@ -481,6 +481,9 @@ pub struct DebugStats {
     /// other's reciprocal is what hid a counter that reported 20,000 fps under
     /// a 10 fps cap, so the overlay labels them as separate quantities.
     pub frame_ms: f32,
+    /// Round-trip time of the latest F3-gated ping reply, in milliseconds.
+    /// `None` means no probe has completed yet.
+    pub ping_rtt_ms: Option<u64>,
     /// Loaded chunk columns.
     pub chunk_count: usize,
     /// Columns resident in the *live client-owned* world, read through
@@ -942,6 +945,8 @@ impl DebugStats {
             // Leaving it unlabelled invited exactly that misreading — see both
             // fields' own docs.
             format!("{:.0} fps ({:.2} ms work)", self.fps, self.frame_ms),
+            self.ping_rtt_ms
+                .map_or_else(|| "Ping: -".to_string(), |ms| format!("Ping: {ms} ms")),
             String::new(),
             // `DebugEntryLight`'s group, verbatim: `"Client Light: " +
             // rawBrightness + " (" + sky + " sky, " + block + " block)"`.
@@ -8305,6 +8310,25 @@ mod tests {
         // Crosshair alone is 2 quads = 12 verts; text adds far more.
         assert!(geo.vertex_count() > 100, "expected glyphs + crosshair");
         assert_eq!(geo.verts.len() % FLOATS_PER_VERTEX, 0);
+    }
+
+    #[test]
+    fn completed_ping_reply_reaches_the_debug_text() {
+        let stats = DebugStats {
+            ping_rtt_ms: Some(37),
+            ..Default::default()
+        };
+        assert!(
+            stats.left_lines().iter().any(|line| line == "Ping: 37 ms"),
+            "the response measurement must reach a visible F3 line"
+        );
+        assert!(
+            DebugStats::default()
+                .left_lines()
+                .iter()
+                .any(|line| line == "Ping: -"),
+            "the line must distinguish no completed reply from a zero-millisecond reply"
+        );
     }
 
     #[test]
