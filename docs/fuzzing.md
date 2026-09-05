@@ -342,6 +342,15 @@ What exists:
   must fail on the fixed partial-stack witness, proving that the comparison
   reads real slot state rather than accepting an inert model.
 
+- `tests/differential_generated_text_nbt.rs` — a bounded fixed-seed model
+  check for the modern NBT text fold. A grammar independently builds scalar,
+  list, and compound `text`/`extra` values, and a separate plain-text fold is
+  compared with `lodestone_model::Text::from_nbt`. Those values enter the live
+  26.2 chat, inventory, and scoreboard adapters, so the property checks a
+  shared production consumer rather than an isolated format helper. A reader
+  that deliberately drops an `extra` child must disagree, proving the detector
+  observes the folded output instead of accepting every generated input.
+
 - `tests/differential_client_state.rs` — a bounded hermetic client-state
   comparison. It replays fixed block, entity and inventory packet scripts
   through the public `ClientBuilder` over `lodestone_net::memory_pair`, with a
