@@ -603,11 +603,16 @@ pub enum SpriteSource {
         /// Frame index within it.
         frame: u16,
     },
-    /// The particle texture of a block state — a broken block's own fragments
-    /// take the block's model particle sprite, which is why a broken oak log
-    /// throws bark-coloured fragments rather than generic grey ones. The shell
-    /// resolves the state to a sprite through the block model set.
-    BlockState(u32),
+    /// The particle texture of a validated built-in block state — a broken
+    /// block's own fragments take the block's model particle sprite, which is
+    /// why a broken oak log throws bark-coloured fragments rather than generic
+    /// grey ones. The shell resolves the state to a sprite through the block
+    /// model set, lowering it to an atlas index only at that lookup boundary.
+    ///
+    /// Custom or data-pack state ids stay raw at the packet/import boundary:
+    /// they cannot name an entry in this build's generated model census, so an
+    /// emitter must not manufacture a terrain particle for one.
+    BlockState(lodestone_data::block_states::StateId),
     /// The particle texture of an **item**, by network registry id — an
     /// eaten or broken item's crumbs take the item model's own sprite.
     ///

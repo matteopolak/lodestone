@@ -45,15 +45,16 @@ Terrain (block-break) debris is a small camera-facing billboard textured from a 
 broken block's `#particle` sprite (its baked model's particle-icon reference — not necessarily any
 face's own texture: `grass_block` declares `#particle` as `block/dirt`), tinted by a per-block-state
 colour, and shaded by the light at its cell. Three layers own the parts: `lodestone-particle` emits an
-opaque `SpriteSource::BlockState(id)` with no atlas and no tint opinion; `lodestone-render`'s
+opaque `SpriteSource::BlockState(StateId)` with no atlas and no tint opinion; `lodestone-render`'s
 `block_models.rs` bakes each state's particle UV rect and tint once from the jar; `lodestone-shell`'s
 `particles.rs` joins the two and builds GPU instances.
 
 The shell is the raw state-id ingress for both decoded block-particle options and local break effects.
-It validates once into `lodestone_data::block_states::StateId`; particle emitters accept only that
-validated type and lower it to the raw atlas index only when constructing `SpriteSource::BlockState`.
-An out-of-census or custom state fails closed before spawning debris, while names introduced by a plugin
-or data pack remain in their registry/import owners rather than being coerced into a built-in state.
+It validates once into `lodestone_data::block_states::StateId`; particle emitters and
+`SpriteSource::BlockState` retain that proof, and the shell lowers it to a raw atlas index only at the
+final indexed lookup. An out-of-census or custom state fails closed before spawning debris, while names
+introduced by a plugin or data pack remain in their registry/import owners rather than being coerced into
+a built-in state.
 
 The ambient world probe has the same boundary before it chooses a block-specific animation: it converts
 the returned numeric state to `StateId`, then dispatches on the typed `Block` and reads properties only
