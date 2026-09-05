@@ -238,6 +238,23 @@ was discovered only because a codegen change surfaced it.
 both hermetic and live oracle paths.**
 What exists:
 
+- `tests/support/tick_corpus.rs` and
+  `scripts/live-oracles/capture-differential-ticks.py` — a deliberately small
+  companion lane for a one-to-sixteen-tick Java-oracle trace. The recorder
+  takes a SetBlock-only JSON plan, waits for the server's own game-time value,
+  and writes the observed candidate-alphabet state for every probe after every
+  tick. It rejects a counter jump rather than silently labelling two elapsed
+  ticks as one. The Rust consumer accepts only a versioned artifact marked
+  `real-java-rcon`, requires exact contiguous observations and an exact-one
+  game-time increment, and compares an in-process production oracle to those
+  externally authored expected values. Its hermetic detector control corrupts
+  the Rust-side read at a known second tick and requires the corpus runner to
+  return that tick, position, expected state and actual state. This is a
+  capture/replay seam, not a live corpus yet: run the recorder against a
+  prepared real-oracle rig, inspect the resulting JSON, then add the reviewed
+  artifact and a scenario-specific model test. The checked-in example is a
+  plan only and has no expected values.
+
 - [`Action`]/[`ScriptStep`]/[`Script`] — the shared action-sequence type used
   by both hand-written live scripts and the hermetic generator.
 - [`WorldOracle`] — the trait a "side" of the comparison implements:
