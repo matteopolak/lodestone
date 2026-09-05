@@ -163,7 +163,8 @@ impl SoundRegistry {
 
     /// Looks up an event by name.
     pub fn event(&self, name: &str) -> Option<&SoundEvent> {
-        self.events.get(name)
+        let key = SoundEventKey::parse(name).ok()?;
+        self.events.get(&key)
     }
 
     /// The number of registered events.
@@ -203,19 +204,26 @@ impl SoundRegistry {
     /// The total selection weight of an event, following `type: event`
     /// references (which contribute their target's total weight).
     pub fn total_weight(&self, name: &str) -> Result<u64, SoundError> {
-        self.total_weight_inner(name, &mut Vec::new())
+        let Some(name) = SoundEventKey::parse(name).ok() else {
+            return Ok(0);
+        };
+        self.total_weight_inner(&name, &mut Vec::new())
     }
 
-    fn total_weight_inner(&self, name: &str, stack: &mut Vec<String>) -> Result<u64, SoundError> {
+    fn total_weight_inner(
+        &self,
+        name: &SoundEventKey,
+        stack: &mut Vec<SoundEventKey>,
+    ) -> Result<u64, SoundError> {
         if stack.len() > MAX_CHAIN_DEPTH || stack.iter().any(|s| s == name) {
             return Err(SoundError::ReferenceCycle {
-                id: name.to_string(),
+                id: name.as_str().to_owned(),
             });
         }
         let Some(ev) = self.events.get(name) else {
             return Ok(0);
         };
-        stack.push(name.to_string());
+        stack.push(name.clone());
         let mut sum = 0u64;
         for entry in &ev.sounds {
             sum += self.entry_weight(entry, stack)?;
@@ -224,7 +232,11 @@ impl SoundRegistry {
         Ok(sum)
     }
 
-    fn entry_weight(&self, entry: &SoundEntry, stack: &mut Vec<String>) -> Result<u64, SoundError> {
+    fn entry_weight(
+        &self,
+        entry: &SoundEntry,
+        stack: &mut Vec<SoundEventKey>,
+    ) -> Result<u64, SoundError> {
         match entry.kind {
             SoundKind::File => Ok(entry.weight as u64),
             SoundKind::Event => self.total_weight_inner(&event_key(&entry.name), stack),
@@ -243,27 +255,30 @@ impl SoundRegistry {
         name: &str,
         roll: &mut impl FnMut(u32) -> u32,
     ) -> Result<Option<ResolvedSound>, SoundError> {
-        self.resolve_inner(name, roll, 1.0, 1.0, false, &mut Vec::new())
+        let Some(name) = SoundEventKey::parse(name).ok() else {
+            return Ok(None);
+        };
+        self.resolve_inner(&name, roll, 1.0, 1.0, false, &mut Vec::new())
     }
 
     fn resolve_inner(
         &self,
-        name: &str,
+        name: &SoundEventKey,
         roll: &mut impl FnMut(u32) -> u32,
         vol_acc: f32,
         pitch_acc: f32,
         stream_acc: bool,
-        stack: &mut Vec<String>,
+        stack: &mut Vec<SoundEventKey>,
     ) -> Result<Option<ResolvedSound>, SoundError> {
         if stack.len() > MAX_CHAIN_DEPTH || stack.iter().any(|s| s == name) {
             return Err(SoundError::ReferenceCycle {
-                id: name.to_string(),
+                id: name.as_str().to_owned(),
             });
         }
         let Some(ev) = self.events.get(name) else {
             return Ok(None);
         };
-        stack.push(name.to_string());
+        stack.push(name.clone());
 
         // Compute per-entry weights (event entries use their target's total).
         let mut weights = Vec::with_capacity(ev.sounds.len());
@@ -316,11 +331,11 @@ impl SoundRegistry {
 /// `Identifier`; the JSON keys are the bare `minecraft`-namespaced paths, so a
 /// `minecraft:` reference maps back to its path and any other namespace keeps
 /// its full form.
-fn event_key(loc: &ResourceLocation) -> String {
+fn event_key(loc: &ResourceLocation) -> SoundEventKey {
     if loc.namespace() == "minecraft" {
-        loc.path().to_string()
+        SoundEventKey(loc.path().to_owned())
     } else {
-        loc.to_string()
+        SoundEventKey(loc.to_string())
     }
 }
 
