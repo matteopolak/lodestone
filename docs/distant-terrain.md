@@ -14,17 +14,23 @@ and flags in eight bytes. At the 256-chunk visual horizon this has a fixed 2,654
 ceiling. Recentring replaces tile coordinates and clears samples without growing the allocation.
 
 The future population path uses `OverworldGenerator::preliminary_surface_level`, biome lookup,
-and sea level without generating a real chunk. A dedicated `lod_terrain.wgsl` shader validates now
-and is designed for vertex-pulled height and colour textures, but no `wgpu` pipeline or shell draw
-call is constructed yet.
+and sea level without generating a real chunk. The shell now has an inert `DistantTerrainRenderer`
+bridge: two fixed 576×576 `R32Uint` atlases store height/water and colour/flags (another 2,654,208
+bytes on the GPU), and a vertex-pulled `lod_terrain.wgsl` pipeline can submit only tiles whose
+surface samples were uploaded. It has no `RenderState` owner or redraw caller yet, so it still
+cannot alter normal rendering.
 
 ## How to change it
 
 Keep `HORIZON_CELL_BLOCKS`, `HORIZON_TILE_CELLS`, and the tile radius derived together: changing
 any one changes the fixed memory budget and coverage. Maintain the floor-division behavior in
 `HorizonTileCoord::containing_block`; truncating negative positions would shift a horizon tile at
-the world origin. The first screen-visible integration must add a far pass outside the normal
-chunk mesh loop and demonstrate a visible horizon plus an omitted-tile detector control.
+the world origin. The first screen-visible integration must store this renderer as an optional
+`RenderState` field, populate one tile per redraw from the query source, and submit it before
+normal chunk meshes in the same depth-tested pass. Do not add it to `TerrainCull` or expand the
+normal camera far plane. The pixel gate must prove pixels beyond the real chunk field and include
+the supplied omitted-tile detector control: a synthetic draw submission for an unpopulated slot
+must fail.
 
 ## Configuration
 
@@ -35,6 +41,5 @@ path.
 
 ## Dependencies
 
-The model is pure Rust. Its eventual data source is `lodestone-worldgen`'s query-only overworld
-surface estimate; its eventual GPU consumer is a shell-owned `wgpu` pipeline using
-`crates/lodestone-render/src/shaders/lod_terrain.wgsl`.
+The model is pure Rust. Its query source is `lodestone-worldgen`'s query-only overworld surface
+estimate; the shell bridge uses `wgpu` and `crates/lodestone-render/src/shaders/lod_terrain.wgsl`.

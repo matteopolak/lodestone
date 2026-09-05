@@ -130,6 +130,15 @@ impl HorizonTile {
             .then(|| self.cells[z * HORIZON_TILE_CELLS + x])
     }
 
+    /// The tile's fixed row-major samples.
+    ///
+    /// The coarse GPU atlas copies one tile at a time from this slice, avoiding
+    /// a second retained full-horizon staging allocation.
+    #[must_use]
+    pub fn cells(&self) -> &[HorizonCell] {
+        &self.cells
+    }
+
     /// Replaces one cell at tile-local coordinates, returning whether it was in
     /// range. The narrow return avoids panics from an untrusted tile payload.
     pub fn set_cell(&mut self, x: usize, z: usize, cell: HorizonCell) -> bool {
@@ -203,6 +212,15 @@ impl DistantTerrain {
     /// Iterates the fixed square in stable row-major order.
     pub fn tiles(&self) -> impl ExactSizeIterator<Item = &HorizonTile> {
         self.tiles.iter()
+    }
+
+    /// Iterates the fixed square mutably in the same stable row-major order as
+    /// [`Self::tiles`].
+    ///
+    /// The GPU bridge fills one tile at a time and must not retain a second
+    /// copy of all horizon cells merely to make them writable.
+    pub fn tiles_mut(&mut self) -> impl ExactSizeIterator<Item = &mut HorizonTile> {
+        self.tiles.iter_mut()
     }
 
     /// Reassigns every tile to the fixed square around the new camera tile and
