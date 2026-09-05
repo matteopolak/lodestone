@@ -812,6 +812,30 @@ fn resident_block_handle_coordinate(
     Ok([position.0, position.1, position.2][coordinate])
 }
 
+/// Reports whether an opaque block handle still belongs to its lifecycle entry.
+///
+/// This is a narrow stale-reference control, not a world-residency query. A
+/// released generation returns `false`, while a forged, out-of-range, or
+/// wrong-kind handle still fails loudly so a plugin cannot treat malformed
+/// input as an ordinary lifecycle transition.
+fn resident_block_handle_is_retained(bits: i64) -> Result<bool, AdapterError> {
+    let handle = ObjectRef::from_bits(bits, ObjectKind::Block);
+    RESIDENT_OBJECT_HANDLES.with(|slot| {
+        let handles = slot.borrow();
+        let handles = handles.as_ref().ok_or_else(|| {
+            AdapterError::new("blockHandleIsRetained requires the adapter worker thread")
+        })?;
+        match handles.resolve(handle, ObjectKind::Block) {
+            Ok(ResidentObject::Block { .. }) => Ok(true),
+            Ok(ResidentObject::Player { .. }) => Err(AdapterError::new(
+                "blockHandleIsRetained: expected a Block handle, got a Player handle",
+            )),
+            Err(ResolveError::Stale) => Ok(false),
+            Err(error) => Err(AdapterError::new(format!("blockHandleIsRetained: {error}"))),
+        }
+    })
+}
+
 /// Resolves a block handle before requesting its current state from the host.
 ///
 /// The coordinate lookup happens entirely in the worker-owned registry, then
@@ -1816,6 +1840,27 @@ pub(crate) fn register_block_handle_z_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_block_handle_is_retained_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts one opaque jlong and
+    // returns a copied worker-local boolean. It does not read a world value.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_block_handle_is_retained as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 fn register_block_handle_coordinate_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -2263,6 +2308,19 @@ extern "system" fn native_block_handle_z<'local>(
         let _depth = CallbackDepthGuard::enter()
             .map_err(|error| AdapterError::new(error.to_string()))?;
         resident_block_handle_coordinate(bits, 2, "blockHandleZ")
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_block_handle_is_retained<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jboolean {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        Ok::<_, AdapterError>(jboolean::from(resident_block_handle_is_retained(bits)?))
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -3656,8 +3714,18 @@ mod tests {
             Ok(4),
             "coordinates are copied from the worker registry without a world request",
         );
+        assert_eq!(
+            resident_block_handle_is_retained(first.to_bits()),
+            Ok(true),
+            "a live retained block handle is distinguishable without a host query",
+        );
 
         assert_eq!(release_resident_handles(&identity), 1);
+        assert_eq!(
+            resident_block_handle_is_retained(first.to_bits()),
+            Ok(false),
+            "the stale-generation control remains false after lifecycle cleanup",
+        );
         assert_eq!(
             resolve_resident_block_handle(first.to_bits(), "blockHandlePosition"),
             Err(AdapterError::new(
@@ -3700,6 +3768,12 @@ mod tests {
         );
         let replacement = resident_block_handle(&identity, change).expect("replacement handle");
         assert_ne!(replacement, first);
+        assert_eq!(
+            resident_block_handle_is_retained(first.to_bits()),
+            Ok(false),
+            "a recycled slot cannot revive the earlier lifecycle handle",
+        );
+        assert_eq!(resident_block_handle_is_retained(replacement.to_bits()), Ok(true));
         RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
         CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
         CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);

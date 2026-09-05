@@ -55,6 +55,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native int setBlockStateId(int x, int y, int z, int stateId); \
          public static native String currentPluginName(); \
          public static native String currentPluginVersion(); \
+         public static native String currentPluginMainClass(); \
          public static native IsolatedPluginDescriptor currentPluginDescriptor(); \
          public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
          public static native long currentBlockHandle(); \
@@ -63,6 +64,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native int blockHandleY(long handle); \
          public static native int blockHandleZ(long handle); \
          public static native int blockHandleStateId(long handle); \
+         public static native boolean blockHandleIsRetained(long handle); \
          public static native long currentPlayerHandle(); \
          public static native String playerHandleName(long handle); \
          public static native String playerHandleUuid(long handle); \
@@ -300,6 +302,7 @@ fn plugin_child_reads_resident_block_state_through_operator_member() {
          public static native int setBlockStateId(int x, int y, int z, int stateId); \
          public static native String currentPluginName(); \
          public static native String currentPluginVersion(); \
+         public static native String currentPluginMainClass(); \
          public static native IsolatedPluginDescriptor currentPluginDescriptor(); \
          public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
          public static native long currentBlockHandle(); \
@@ -308,6 +311,7 @@ fn plugin_child_reads_resident_block_state_through_operator_member() {
          public static native int blockHandleY(long handle); \
          public static native int blockHandleZ(long handle); \
          public static native int blockHandleStateId(long handle); \
+         public static native boolean blockHandleIsRetained(long handle); \
          public static native long currentPlayerHandle(); \
          public static native String playerHandleName(long handle); \
          public static native String playerHandleUuid(long handle); \

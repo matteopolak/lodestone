@@ -773,6 +773,11 @@ read only the worker-owned payload: they deliberately make no host query, so the
 coordinate lookup into chunk generation or a server-world read. Hermetic controls use coordinates
 whose components differ and then release the handle to prove both the selected component and the
 stale-generation failure path.
+`blockHandleIsRetained(long)` is the corresponding soft stale-generation control: it returns `true`
+only while that block handle remains in its owning lifecycle entry's worker registry and `false`
+after that entry releases it. It is not a terrain-residency query. A forged, out-of-range, or
+wrong-kind handle remains a named Java error rather than becoming indistinguishable from normal
+lifecycle cleanup.
 `blockHandleStateId(long)` first generation-checks that same handle, then asks the host's bounded
 resident-block query port for the state at its copied coordinate. This preserves the distinction
 between air and an unavailable column, and a stale handle fails before a host query is sent.
