@@ -1,0 +1,19 @@
+{
+  "source": "Unmodified payloads captured from the external 26.2 creative server on 25570, protocol 776. An armor stand with UUID [I;123,456,789,1011] was summoned at (0.25,100.5,0.75), teleported to (10.25,101.5,1.75), then killed. Capture entry point: acquire_entity_lifecycle_from_external_server. Entity id is session-scoped.",
+  "protocol": 776,
+  "entity_id": 104,
+  "packets": [
+    {
+      "packet_id": 1,
+      "payload": [104,0,0,0,123,0,0,1,200,0,0,3,21,0,0,3,243,5,63,208,0,0,0,0,0,0,64,89,32,0,0,0,0,0,63,232,0,0,0,0,0,0,0,0,0,0,0]
+    },
+    {
+      "packet_id": 35,
+      "payload": [104,64,36,128,0,0,0,0,0,64,89,96,0,0,0,0,0,63,252,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]
+    },
+    {
+      "packet_id": 77,
+      "payload": [1,104]
+    }
+  ]
+}
