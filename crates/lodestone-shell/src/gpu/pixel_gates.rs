@@ -695,7 +695,7 @@ fn entity_hitbox_and_chunk_border_vertices_draw_visible_pixels() {
     // F3+B: one zombie standing squarely in frame — same placement idiom as
     // `structure_block_outline_draws_visible_pixels`'s structure. `"zombie"`
     // is a real entry in the jar-derived dimension census, so this exercises
-    // the same `entity_type_id_parts` → `base_dimensions` lookup production
+    // the same `EntityType::from_name` → `base_dimensions` lookup production
     // makes, not a stubbed box.
     let zombie = EntityDraw {
         id: 1,

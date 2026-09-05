@@ -181,9 +181,7 @@ fn movement_collision_candidate(pushes: bool, collidable: bool) -> bool {
 fn max_dimensions_matching(mut includes: impl FnMut(EntityType) -> bool) -> Option<(f32, f32)> {
     EntityType::all()
         .filter(|&entity_type| includes(entity_type))
-        .filter_map(|entity_type| {
-            crate::entity_dimensions::base_dimensions(i32::from(entity_type.registry_id()))
-        })
+        .map(crate::entity_dimensions::base_dimensions)
         .fold(None, |acc, dims| {
             Some(match acc {
                 Some((width, height)) => (width.max(dims.width), height.max(dims.height)),
@@ -362,8 +360,7 @@ mod tests {
         assert_eq!(TYPE_COUNT, crate::entity_dimensions::TYPE_COUNT);
         assert_eq!(TYPE_COUNT, crate::entity_types::TYPE_COUNT);
         let zombie = EntityType::from_name("minecraft:zombie").expect("zombie is real");
-        let dims = base_dimensions(i32::from(zombie.registry_id()))
-            .expect("zombie has dimensions");
+        let dims = base_dimensions(zombie);
         assert_eq!((dims.width, dims.height), (0.6, 1.95));
     }
 
@@ -381,10 +378,8 @@ mod tests {
         assert!(by_name("minecraft:giant"));
         let dragon = EntityType::from_name("minecraft:ender_dragon").expect("dragon is real");
         let giant = EntityType::from_name("minecraft:giant").expect("giant is real");
-        let dragon = base_dimensions(i32::from(dragon.registry_id()))
-            .expect("dragon has dimensions");
-        let giant = base_dimensions(i32::from(giant.registry_id()))
-            .expect("giant has dimensions");
+        let dragon = base_dimensions(dragon);
+        let giant = base_dimensions(giant);
         assert_eq!(dragon.width, 16.0, "ender_dragon is expected to be the widest pusher");
         assert_eq!(giant.height, 12.0, "giant is expected to be the tallest pusher");
 
@@ -418,8 +413,7 @@ mod tests {
         let boat = EntityType::from_name("minecraft:oak_boat").expect("oak boat is real");
         assert!(!pushes_players(boat));
         assert!(can_be_collided_with(boat));
-        let boat_dimensions = base_dimensions(i32::from(boat.registry_id()))
-            .expect("oak boat has dimensions");
+        let boat_dimensions = base_dimensions(boat);
 
         let maxima = movement_collision_max_dimensions()
             .expect("the movement collision census is non-empty");

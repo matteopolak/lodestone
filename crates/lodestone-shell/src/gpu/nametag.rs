@@ -705,7 +705,7 @@ fn font_shear(v: f32) -> f32 {
 #[must_use]
 fn entity_base_height(type_path: &str) -> f32 {
     lodestone_data::entity_type::EntityType::from_name(type_path)
-        .map(lodestone_data::entity_dimensions::base_dimensions_for)
+        .map(lodestone_data::entity_dimensions::base_dimensions)
         .map(|dims| dims.height)
         .filter(|h| *h > 0.0)
         .unwrap_or(FALLBACK_HEIGHT)

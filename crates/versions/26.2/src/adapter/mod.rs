@@ -966,7 +966,10 @@ impl VersionAdapter for V770Adapter {
         // version-free consumer never names v26-2 or the data crate directly.
         // Base dims only — the caller folds SCALE/STEP_HEIGHT from the
         // entity's attribute map.
-        lodestone_data::entity_dimensions::base_dimensions(entity_type_id)
+        let entity_type = u8::try_from(entity_type_id)
+            .ok()
+            .and_then(lodestone_data::entity_type::EntityType::from_registry_id)?;
+        Some(lodestone_data::entity_dimensions::base_dimensions(entity_type))
     }
 
     fn entity_facts(&self, entity_type: &ResourceKey) -> Option<EntityFacts> {
@@ -980,9 +983,7 @@ impl VersionAdapter for V770Adapter {
         }
         let entity_type = lodestone_data::entity_type::EntityType::from_name(entity_type.path())?;
         Some(EntityFacts {
-            dimensions: lodestone_data::entity_dimensions::base_dimensions(i32::from(
-                entity_type.registry_id(),
-            ))?,
+            dimensions: lodestone_data::entity_dimensions::base_dimensions(entity_type),
             pushes_players: lodestone_data::entity_census::pushes_players(entity_type),
             collidable: lodestone_data::entity_census::can_be_collided_with(entity_type),
         })

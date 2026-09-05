@@ -622,8 +622,11 @@ fn census_dimensions_match_the_committed_dimension_table() {
             "the two dumps disagree on {}'s hitbox bits",
             row.name
         );
-        let shipped = lodestone_data::entity_dimensions::base_dimensions(row.id as i32)
-            .unwrap_or_else(|| panic!("id {} missing from the dimension table", row.id));
+        let entity_type = lodestone_data::entity_type::EntityType::from_registry_id(
+            u8::try_from(row.id).unwrap_or_else(|_| panic!("id {} does not fit u8", row.id)),
+        )
+        .unwrap_or_else(|| panic!("id {} is absent from EntityType", row.id));
+        let shipped = lodestone_data::entity_dimensions::base_dimensions(entity_type);
         assert_eq!(shipped.width.to_bits(), width_bits, "{} width", row.name);
         assert_eq!(shipped.height.to_bits(), height_bits, "{} height", row.name);
         checked += 1;

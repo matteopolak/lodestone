@@ -953,7 +953,7 @@ fn spawner_spin_speed(state_id: u32) -> Option<f32> {
 fn spawner_mob_scale(entity_type: &str) -> f32 {
     match lodestone_data::entity_type::EntityType::from_name(entity_type) {
         Some(t) => {
-            let dims = lodestone_data::entity_dimensions::base_dimensions_for(t);
+            let dims = lodestone_data::entity_dimensions::base_dimensions(t);
             lodestone_render::spawner_display_scale(dims.width, dims.height)
         }
         None => lodestone_render::spawner_display_scale(0.0, 0.0),

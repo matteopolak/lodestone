@@ -397,7 +397,7 @@ fn hide_armor_stand_parts(
 /// once per on-fire entity per frame.
 fn flame_hitbox_width(type_path: &str, age_scale: f32) -> Option<f32> {
     let entity_type = lodestone_data::entity_type::EntityType::from_name(type_path)?;
-    let dims = lodestone_data::entity_dimensions::base_dimensions_for(entity_type);
+    let dims = lodestone_data::entity_dimensions::base_dimensions(entity_type);
     let width = dims.width * age_scale;
     (width > 0.0).then_some(width)
 }
@@ -873,7 +873,7 @@ fn eye_probe_offset(type_path: &str, age_scale: f32) -> f32 {
     // dimensions table `flame_hitbox_width` reads. Same binary-search resolve
     // as that function, for the same reason.
     lodestone_data::entity_type::EntityType::from_name(type_path)
-        .map(lodestone_data::entity_dimensions::base_dimensions_for)
+        .map(lodestone_data::entity_dimensions::base_dimensions)
         .map_or(0.0, |dims| dims.height * 0.85 * age_scale)
 }
 
