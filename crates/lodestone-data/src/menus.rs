@@ -9,16 +9,37 @@
 pub use crate::generated_menus::MENU_COUNT;
 use crate::generated_menus::MENU_NAMES;
 
-/// Resolves a network menu id to its canonical `minecraft:*` identifier.
+/// A validated entry in the 26.2 menu registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MenuId(i32);
+
+impl MenuId {
+    /// Validates a raw network registry id at a wire or import boundary.
+    #[must_use]
+    pub const fn new(raw: i32) -> Option<Self> {
+        if raw >= 0 && raw < MENU_COUNT as i32 {
+            Some(Self(raw))
+        } else {
+            None
+        }
+    }
+
+    /// The registry id used by the version-specific wire codec.
+    #[must_use]
+    pub const fn raw(self) -> i32 {
+        self.0
+    }
+}
+
+/// Resolves a validated network menu id to its canonical `minecraft:*`
+/// identifier.
 ///
-/// Returns `None` for ids outside `0..MENU_COUNT`, so a malformed or
-/// future-version id surfaces as an explicit miss rather than a panic or a
-/// silently wrong menu.
+/// Raw values are validated by [`MenuId::new`] before they enter this total
+/// lookup, so a malformed or future-version id remains an explicit miss at
+/// the boundary rather than a silently wrong menu.
 #[must_use]
-pub fn menu_name(id: i32) -> Option<&'static str> {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| MENU_NAMES.get(index).copied())
+pub fn menu_name(id: MenuId) -> &'static str {
+    MENU_NAMES[id.raw() as usize]
 }
 
 /// Resolves a canonical `minecraft:*` menu identifier to its network registry
@@ -30,32 +51,33 @@ pub fn menu_name(id: i32) -> Option<&'static str> {
 /// tradeoff `lodestone_data::items::item_id` already makes over its own
 /// (much larger) generated table.
 #[must_use]
-pub fn menu_id(name: &str) -> Option<i32> {
+pub fn menu_id(name: &str) -> Option<MenuId> {
     MENU_NAMES
         .iter()
         .position(|candidate| *candidate == name)
         .and_then(|index| i32::try_from(index).ok())
+        .and_then(MenuId::new)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every generated entry round-trips both directions, and `menu_id` picks
-    /// out exactly the id `menu_name` would resolve back — the control that
-    /// [`menu_id`]'s reverse scan agrees with the forward table it scans,
-    /// rather than e.g. an off-by-one that happens to compile.
+    /// Every generated entry round-trips both directions. This checks the
+    /// reverse scan, while the integration suite supplies literal registry-id
+    /// controls that do not derive either expected value from this table.
     #[test]
     fn menu_id_and_menu_name_round_trip_every_generated_entry() {
         for id in 0..MENU_COUNT as i32 {
-            let name = menu_name(id).unwrap_or_else(|| panic!("id {id} in 0..MENU_COUNT must resolve"));
-            assert_eq!(menu_id(name), Some(id), "menu {name} (id {id}) did not round-trip");
+            let id = MenuId::new(id).expect("table id validates");
+            let name = menu_name(id);
+            assert_eq!(menu_id(name), Some(id), "menu {name} ({id:?}) did not round-trip");
         }
     }
 
     #[test]
     fn menu_id_resolves_the_furnace_family_and_hopper() {
-        assert_eq!(menu_name(menu_id("minecraft:furnace").unwrap()), Some("minecraft:furnace"));
+        assert_eq!(menu_name(menu_id("minecraft:furnace").unwrap()), "minecraft:furnace");
         assert!(menu_id("minecraft:smoker").is_some());
         assert!(menu_id("minecraft:blast_furnace").is_some());
         assert!(menu_id("minecraft:hopper").is_some());

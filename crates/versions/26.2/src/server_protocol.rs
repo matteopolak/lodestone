@@ -101,7 +101,7 @@ use uuid::Uuid;
 use lodestone_data::block_states::{block_name, properties};
 use lodestone_data::entity_types::entity_type_id;
 use lodestone_data::items::{item_id, item_name};
-use lodestone_data::menus::menu_id;
+use lodestone_data::menus::{MenuId, menu_id};
 use lodestone_data::mob_effects::{mob_effect_id, mob_effect_name};
 use crate::entity_variants;
 use crate::packet_ids::{MINECRAFT_VERSION, configuration, handshaking, login, play, status};
@@ -2398,10 +2398,10 @@ fn encode_merchant_offers_body(
     w.into_vec()
 }
 
-fn encode_open_screen_body(window_id: i32, menu_registry_id: i32, title: &str) -> Vec<u8> {
+fn encode_open_screen_body(window_id: i32, menu_registry_id: MenuId, title: &str) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(window_id);
-    w.var_i32(menu_registry_id);
+    w.var_i32(menu_registry_id.raw());
     let component = Nbt::Compound(vec![("text".to_owned(), Nbt::String(title.to_owned()))]);
     write_network_nbt(&mut w, &component).expect("plain string NBT component always encodes");
     w.into_vec()

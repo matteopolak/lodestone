@@ -2374,9 +2374,10 @@ fn read_trailing_item_stack(
 fn decode_open_screen(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let window_id = reader.var_i32().map_err(dec_err)?;
-    let menu_id = reader.var_i32().map_err(dec_err)?;
-    let menu = menu_name(menu_id)
-        .ok_or_else(|| AdapterError::Decode(format!("unknown menu id {menu_id}")))?;
+    let raw_menu_id = reader.var_i32().map_err(dec_err)?;
+    let menu_id = MenuId::new(raw_menu_id)
+        .ok_or_else(|| AdapterError::Decode(format!("unknown menu id {raw_menu_id}")))?;
+    let menu = menu_name(menu_id);
     let menu_type = parse_key(menu, "menu")?;
     let title = read_network_nbt(&mut reader).map_err(dec_err)?;
     reader.ensure_empty().map_err(dec_err)?;

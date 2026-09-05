@@ -182,6 +182,14 @@ unchecked constructor. The committed-table suite checks the type's lower and upp
 the metadata codec's hand-built byte fixtures independently pin the registry values used in both
 directions.
 
+`lodestone_data::menus::MenuId` gives the menu registry the same boundary. The open-screen decoder
+turns its raw VarInt into a `MenuId` before calling the total `menu_name` lookup, so an unknown
+wire id still fails explicitly. The server encoder obtains a `MenuId` from `menu_id` and emits its
+`raw` value only at the wire writer; an unknown custom or future menu name remains a failed lookup
+and therefore produces no made-up built-in id. The data suite checks lower and upper bounds plus
+literal furnace and merchant ids, while the packet fixture independently pins furnace's encoded
+VarInt.
+
 ### `lodestone-data`: the crate these censuses live in
 
 Owns roughly twenty generated 26.2 game-data tables — block states, hardness, collision
