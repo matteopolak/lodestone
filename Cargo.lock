@@ -2877,6 +2877,7 @@ dependencies = [
  "lodestone-auth",
  "lodestone-data",
  "lodestone-jvm-bridge",
+ "lodestone-model",
  "lodestone-registry",
  "lodestone-server",
  "lodestone-world",
@@ -2885,6 +2886,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
