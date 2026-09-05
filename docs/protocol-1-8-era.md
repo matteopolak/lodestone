@@ -74,6 +74,14 @@ shapes, including trailing-byte rejection; the in-memory protocol-47 control
 selects the host through the registry, sends the real client action, and
 observes the decorated reply through the adapter's `ClientEvent` stream.
 
+The protocol-47 `arm_animation` request is an empty Play body, so it lifts to
+the shared main-hand `ServerBound::Swing` consumer. The host broadcasts the
+result through the legacy `animation` packet; its varint entity id and raw
+animation byte are decoded by the family adapter into `ClientEvent::EntityAnimation`.
+Literal empty/trailing-byte request controls and literal main/off-hand animation
+codes cover both packet directions, while the registry-selected adapter test
+proves the complete protocol-to-consumer-to-client-event path.
+
 ### External-client acceptance
 
 The opt-in release-client gate covers hosted protocol **47** (1.8.9). Run it with
