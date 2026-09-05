@@ -23,9 +23,18 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     let fixture = FixtureDirectory::new();
     let paper_sources = fixture.path().join("paper-sources");
     let paper_classes = fixture.path().join("paper-classes");
+    let shim_sources = fixture.path().join("shim-sources");
+    let shim_classes = fixture.path().join("shim-classes");
     let adapter_sources = fixture.path().join("adapter-sources");
     let adapter_classes = fixture.path().join("adapter-classes");
-    for path in [&paper_sources, &paper_classes, &adapter_sources, &adapter_classes] {
+    for path in [
+        &paper_sources,
+        &paper_classes,
+        &shim_sources,
+        &shim_classes,
+        &adapter_sources,
+        &adapter_classes,
+    ] {
         fs::create_dir_all(path).expect("fixture directory");
     }
     let bootstrap_source = paper_sources.join("PaperBootstrap.java");
@@ -34,6 +43,19 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
         "package io.papermc.paper; public final class PaperBootstrap { static { if (System.nanoTime() != Long.MIN_VALUE) throw new AssertionError(\"bootstrap initialized\"); } }",
     )
     .expect("bootstrap source");
+    let shim_package = shim_sources.join("lodestone/bridge");
+    fs::create_dir_all(&shim_package).expect("shim package directory");
+    let shim_source = shim_package.join("IsolatedPaperShim.java");
+    fs::write(
+        &shim_source,
+        "package lodestone.bridge; public final class IsolatedPaperShim { \
+         public static native int blockStateId(int x, int y, int z); \
+         public static native long serverTickCount(); \
+         public static native int setBlockStateId(int x, int y, int z, int stateId); \
+         public static native String currentPluginName(); \
+         public static native String currentPluginVersion(); }",
+    )
+    .expect("shim source");
     let adapter_package = adapter_sources.join("fixture/adapter");
     fs::create_dir_all(&adapter_package).expect("adapter package directory");
     let adapter_source = adapter_package.join("LifecycleAdapter.java");
@@ -46,6 +68,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     )
     .expect("adapter source");
     compile(&jdk, &paper_classes, &bootstrap_source);
+    compile(&jdk, &shim_classes, &shim_source);
     compile(&jdk, &adapter_classes, &adapter_source);
     let manifest = fixture.path().join("MANIFEST.MF");
     fs::write(&manifest, "Manifest-Version: 1.0\nImplementation-Title: Paper\n")
@@ -75,7 +98,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
             callback_plugin_source(package, name, fail_enable, fail_disable),
         )
         .expect("plugin source");
-        compile(&jdk, &classes, &source);
+        compile_with_classpath(&jdk, &classes, &source, &shim_classes);
         fs::write(
             classes.join("plugin.yml"),
             format!("name: {name}\nversion: one\nmain: {package}.Main\n"),
@@ -85,6 +108,8 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     }
 
     let plan = PaperBootstrapConfig::new(&paper_jar, &plugins)
+        .with_shim_path(&shim_classes)
+        .with_isolated_native_shim()
         .discover()
         .expect("discover stand-in lifecycle inputs");
     let (status_sender, status_receiver) = sync_channel(1);
@@ -105,7 +130,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
             let construction = lifecycle
                 .into_construction_plan(
                     env,
-                    PaperServerFacadeInput::entry_construction_only(native_surface),
+                    PaperServerFacadeInput::native_server_surface(native_surface),
                 )
                 .expect("retain entry-only construction state")
                 .construct_entries(env);
@@ -155,7 +180,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     assert_eq!(status.plugins()[3].phase(), PaperPluginLifecyclePhase::Disabled);
     assert_eq!(
         fs::read_to_string(&callback_log).expect("callback log"),
-        "Alpha-enable\nBravo-enable\nCharlie-enable\nDelta-enable\nDelta-disable\nCharlie-disable\nAlpha-disable\n",
+        "Alpha-construct:Alpha:one\nBravo-construct:Bravo:one\nCharlie-construct:Charlie:one\nDelta-construct:Delta:one\nAlpha-enable:Alpha:one\nBravo-enable:Bravo:one\nCharlie-enable:Charlie:one\nDelta-enable:Delta:one\nDelta-disable:Delta:one\nCharlie-disable:Charlie:one\nAlpha-disable:Alpha:one\n",
     );
 }
 
@@ -173,9 +198,10 @@ fn callback_plugin_source(
          java.nio.file.Path.of(System.getProperty(\"fixture.lifecycle.log\")), event + \"\\n\", \
          java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND); \
          }} catch (java.io.IOException error) {{ throw new RuntimeException(error); }} }} \
-         public Main() {{}} \
-         public void onEnable() {{ log(\"{name}-enable\"); {enable_failure} }} \
-         public void onDisable() {{ log(\"{name}-disable\"); {disable_failure} }} }}"
+         private static String identity() {{ return lodestone.bridge.IsolatedPaperShim.currentPluginName() + \":\" + lodestone.bridge.IsolatedPaperShim.currentPluginVersion(); }} \
+         public Main() {{ log(\"{name}-construct:\" + identity()); }} \
+         public void onEnable() {{ log(\"{name}-enable:\" + identity()); {enable_failure} }} \
+         public void onDisable() {{ log(\"{name}-disable:\" + identity()); {disable_failure} }} }}"
     )
 }
 
@@ -205,6 +231,22 @@ impl Drop for FixtureDirectory {
 
 fn compile(jdk: &Path, output: &Path, source: &Path) {
     let result = Command::new(jdk.join("bin/javac"))
+        .arg("-d")
+        .arg(output)
+        .arg(source)
+        .output()
+        .expect("javac");
+    assert!(
+        result.status.success(),
+        "javac: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+fn compile_with_classpath(jdk: &Path, output: &Path, source: &Path, classpath: &Path) {
+    let result = Command::new(jdk.join("bin/javac"))
+        .arg("-classpath")
+        .arg(classpath)
         .arg("-d")
         .arg(output)
         .arg(source)
