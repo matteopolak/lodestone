@@ -2874,6 +2874,7 @@ dependencies = [
  "bevy_app",
  "bevy_ecs",
  "lodestone-auth",
+ "lodestone-jvm-bridge",
  "lodestone-registry",
  "lodestone-server",
  "reqwest",
@@ -2937,8 +2938,11 @@ dependencies = [
 name = "lodestone-fuzz"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.0",
+ "flate2",
  "lodestone-client",
  "lodestone-core",
+ "lodestone-data",
  "lodestone-model",
  "lodestone-net",
  "lodestone-server",
@@ -2987,6 +2991,7 @@ dependencies = [
  "jni",
  "lodestone-ecs",
  "lodestone-plugin-support",
+ "zip",
 ]
 
 [[package]]
@@ -3442,12 +3447,15 @@ dependencies = [
 name = "lodestone-v1-20-6"
 version = "0.1.0"
 dependencies = [
+ "lodestone-client",
  "lodestone-core",
  "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
  "lodestone-protocol-common",
+ "lodestone-registry",
+ "lodestone-server",
  "lodestone-testsupport",
  "lodestone-world",
  "serde_json",
@@ -3460,12 +3468,15 @@ dependencies = [
 name = "lodestone-v1-21-11"
 version = "0.1.0"
 dependencies = [
+ "lodestone-client",
  "lodestone-core",
  "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
  "lodestone-protocol-common",
+ "lodestone-registry",
+ "lodestone-server",
  "lodestone-testsupport",
  "lodestone-world",
  "serde_json",
