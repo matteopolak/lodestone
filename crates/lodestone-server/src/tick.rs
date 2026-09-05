@@ -1409,6 +1409,48 @@ pub(crate) async fn run_primary_tick_loop_with_weather<W>(
     .await;
 }
 
+/// Applies block-entity owner messages after their serial execution phase.
+///
+/// Block-entity owners may mutate their own simulation state, but they do not
+/// receive a [`ChunkSource`] and therefore cannot make visible world writes.
+/// This is the single central writer. It consumes each owner batch in the
+/// plan's established order, preserving today's deterministic behavior while
+/// making a later cross-owner executor return messages instead of borrowing a
+/// second region's world state.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_block_entity_effect_batches<W: ChunkSource>(
+    world: &W,
+    block_tick_out: &BlockTickFeed,
+    batches: Vec<crate::block_entities::BlockEntityTickEffectBatch>,
+) {
+    for batch in batches {
+        for effect in batch.effects() {
+            let pos = effect.pos;
+            let lit = effect.lit;
+            debug_assert_eq!(
+                effect.owner,
+                batch.owner,
+                "a block-entity owner batch may contain only its own effects"
+            );
+            debug_assert_eq!(
+                effect.owner,
+                crate::block_entities::BlockEntityTickOwner::Chunk {
+                    cx: pos.x.div_euclid(16),
+                    cz: pos.z.div_euclid(16),
+                },
+                "a block-entity effect must be handed to the writer by its position's owner"
+            );
+            let state = world.block_state(pos.x, pos.y, pos.z);
+            let new_state =
+                crate::redstone::with_property(&state, "lit", if lit { "true" } else { "false" });
+            if new_state != state {
+                world.set_block(pos.x, pos.y, pos.z, &new_state);
+                block_tick_out.publish(pos.x, pos.y, pos.z, new_state);
+            }
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 async fn run_tick_loop_with_weather_impl<W>(
     mobs: MobHandle,
@@ -2158,8 +2200,8 @@ async fn run_tick_loop_with_weather_impl<W>(
         // has no eviction). `is_column_resident` answers with no generation at
         // all, so a hopper outside every loaded chunk now costs a `HashMap`
         // lookup instead of a worldgen call.
-        let furnace_lit_changes = block_entities.with(|registry| {
-            registry.tick_all_with_hopper_lock(
+        let furnace_effect_batches = block_entities.with(|registry| {
+            registry.tick_all_by_owner_with_hopper_lock(
                 &|pos| world.is_column_resident(pos.x.div_euclid(16), pos.z.div_euclid(16)),
                 &|pos| crate::redstone::hopper_enabled(&world.block_state(pos.x, pos.y, pos.z)),
             )
@@ -2170,25 +2212,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // streamed — the same shape as the target-block write just above, and
         // the one production caller that module's own doc names as holding
         // both a `ChunkSource` and the registry.
-        for effect in furnace_lit_changes {
-            let pos = effect.pos;
-            let lit = effect.lit;
-            debug_assert_eq!(
-                effect.owner,
-                crate::block_entities::BlockEntityTickOwner::Chunk {
-                    cx: pos.x.div_euclid(16),
-                    cz: pos.z.div_euclid(16),
-                },
-                "a block-entity effect must be handed to the writer by its position's owner"
-            );
-            let state = world.block_state(pos.x, pos.y, pos.z);
-            let new_state =
-                crate::redstone::with_property(&state, "lit", if lit { "true" } else { "false" });
-            if new_state != state {
-                world.set_block(pos.x, pos.y, pos.z, &new_state);
-                block_tick_out.publish(pos.x, pos.y, pos.z, new_state);
-            }
-        }
+        apply_block_entity_effect_batches(&*world, &block_tick_out, furnace_effect_batches);
 
         // Spawner block entities.
         // `tick_all_with_hopper_lock` above deliberately does not advance one —
