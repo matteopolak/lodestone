@@ -93,11 +93,48 @@ use std::path::{Path, PathBuf};
 
 use lodestone_assets::ResourceSource;
 
+/// A validated content address from an asset index.
+///
+/// Asset objects are stored at a path derived from a lowercase, 40-character
+/// hexadecimal SHA-1 digest. This type owns that boundary: callers parsing the
+/// untrusted JSON index validate it once, while store reads and presence checks
+/// can only build a fanout path from an address with that shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AssetObjectHash(Box<str>);
+
+impl AssetObjectHash {
+    /// Validates the lowercase hexadecimal SHA-1 spelling used by asset indexes.
+    ///
+    /// Uppercase and shortened strings are rejected instead of being normalized:
+    /// the object-store layout addresses the exact lowercase spelling, and a
+    /// normalized value could name a different on-disk path than the index did.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        (value.len() == 40
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        .then(|| Self(value.into()))
+    }
+
+    /// Returns the digest spelling used as the object's filename.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn fanout(&self) -> &str {
+        // `parse` admits exactly ASCII hexadecimal text, so byte index two is a
+        // valid UTF-8 boundary as well as the object store's two-character fanout.
+        &self.0[..2]
+    }
+}
+
 /// What the index says about one object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectMeta {
     /// Lowercase hex SHA-1, which is also the object's path.
-    pub hash: String,
+    pub hash: AssetObjectHash,
     /// Length in bytes, used as the read-path integrity check.
     pub size: u64,
 }
@@ -433,16 +470,14 @@ pub fn parse_asset_index(bytes: &[u8]) -> Result<HashMap<String, ObjectMeta>, St
         let Some(hash) = meta.get("hash").and_then(|h| h.as_str()) else {
             continue;
         };
-        // A hash that is not a plausible SHA-1 would build a nonsense path; skip
-        // it rather than manufacturing `objects/xx/garbage`.
-        if hash.len() < 2 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        let Some(hash) = AssetObjectHash::parse(hash) else {
             continue;
-        }
+        };
         let size = meta.get("size").and_then(serde_json::Value::as_u64);
         index.insert(
             name.clone(),
             ObjectMeta {
-                hash: hash.to_string(),
+                hash,
                 size: size.unwrap_or(0),
             },
         );
@@ -455,13 +490,11 @@ pub fn parse_asset_index(bytes: &[u8]) -> Result<HashMap<String, ObjectMeta>, St
 
 /// `<root>/objects/<hash[0..2]>/<hash>`.
 ///
-/// # Panics
-///
-/// Panics if `hash` is shorter than two characters; [`parse_asset_index`] rejects
-/// those, so every hash reaching here has been screened.
+/// `hash` has already passed [`AssetObjectHash::parse`], so its fanout is always
+/// the first two lowercase hexadecimal characters.
 #[must_use]
-pub fn object_relpath(root: &Path, hash: &str) -> PathBuf {
-    root.join("objects").join(&hash[0..2]).join(hash)
+pub fn object_relpath(root: &Path, hash: &AssetObjectHash) -> PathBuf {
+    root.join("objects").join(hash.fanout()).join(hash.as_str())
 }
 
 #[cfg(test)]
@@ -488,12 +521,37 @@ mod tests {
         let pano = index
             .get("minecraft/textures/gui/title/background/panorama_0.png")
             .expect("panorama_0 is in the index");
-        assert_eq!(pano.hash, "f5e0a5cfbc2e7b1e89094d7882dde106b030ec26");
+        assert_eq!(
+            pano.hash.as_str(),
+            "f5e0a5cfbc2e7b1e89094d7882dde106b030ec26"
+        );
         // The real 26.2 size, which is also the evidence the jar's 69-byte entry
         // is a stub rather than the asset.
         assert_eq!(pano.size, 547_239);
         assert!(!index.contains_key("minecraft/broken"));
         assert!(!index.contains_key("minecraft/hashless"));
+    }
+
+    #[test]
+    fn asset_object_hash_accepts_only_the_store_address_shape() {
+        let known = "f5e0a5cfbc2e7b1e89094d7882dde106b030ec26";
+        let hash = AssetObjectHash::parse(known).expect("lowercase SHA-1 is valid");
+        assert_eq!(hash.as_str(), known);
+
+        // These are separate boundary controls: each could otherwise make a
+        // plausible-looking but unreachable `objects/<fanout>/<hash>` path.
+        for invalid in [
+            "F5E0A5CFBC2E7B1E89094D7882DDE106B030EC26",
+            "f5e0a5cfbc2e7b1e89094d7882dde106b030ec2",
+            "f5e0a5cfbc2e7b1e89094d7882dde106b030ec260",
+            "f5e0a5cfbc2e7b1e89094d7882dde106b030ec2g",
+        ] {
+            assert_eq!(AssetObjectHash::parse(invalid), None, "{invalid}");
+        }
+
+        // This compile-time control keeps the path builder behind the typed
+        // boundary rather than letting a future caller pass an arbitrary string.
+        let _typed_path: fn(&Path, &AssetObjectHash) -> PathBuf = object_relpath;
     }
 
     #[test]
@@ -509,10 +567,9 @@ mod tests {
 
     #[test]
     fn the_object_path_is_the_two_character_fanout() {
-        let p = object_relpath(
-            Path::new("/root"),
-            "f5e0a5cfbc2e7b1e89094d7882dde106b030ec26",
-        );
+        let hash = AssetObjectHash::parse("f5e0a5cfbc2e7b1e89094d7882dde106b030ec26")
+            .expect("known-good SHA-1");
+        let p = object_relpath(Path::new("/root"), &hash);
         assert_eq!(
             p,
             Path::new("/root/objects/f5/f5e0a5cfbc2e7b1e89094d7882dde106b030ec26")
@@ -536,7 +593,7 @@ mod tests {
         index.insert(
             "minecraft/thing".to_string(),
             ObjectMeta {
-                hash: hash.to_string(),
+                hash: AssetObjectHash::parse(hash).expect("test hash is valid"),
                 size: 999,
             },
         );
@@ -558,7 +615,7 @@ mod tests {
         ok_index.insert(
             "minecraft/thing".to_string(),
             ObjectMeta {
-                hash: hash.to_string(),
+                hash: AssetObjectHash::parse(hash).expect("test hash is valid"),
                 size: 5,
             },
         );
@@ -662,7 +719,7 @@ mod tests {
             index.insert(
                 key.to_string(),
                 ObjectMeta {
-                    hash: hash.to_string(),
+                    hash: AssetObjectHash::parse(hash).expect("test hash is valid"),
                     size,
                 },
             );
