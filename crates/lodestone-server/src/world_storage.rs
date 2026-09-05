@@ -72,6 +72,87 @@ pub struct NativeEntityRecord {
     pub rotation: lodestone_model::Rotation,
 }
 
+/// The complete typed input for one dirty native chunk replacement.
+///
+/// A native chunk replacement is deliberately one value rather than a family
+/// of partial writers. `ChunkColumn` owns blocks, biomes, heightmaps, and
+/// resident block entities; `ColumnLight` owns the canonical light sections;
+/// and `ScheduledTickHandle` owns the pending block and fluid queues. Requiring
+/// all three at this boundary prevents a later save from replacing a complete
+/// record with a terrain-only snapshot.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeDirtyChunkRecord<'a> {
+    /// The chunk's horizontal column X coordinate.
+    pub column_x: i32,
+    /// The chunk's horizontal column Z coordinate.
+    pub column_z: i32,
+    /// The complete column payload, including typed biome and entity state.
+    pub column: &'a crate::chunk::ChunkColumn,
+    /// The complete canonical light payload, including boundary sections.
+    pub light: &'a lodestone_world::ColumnLight,
+    /// The live scheduler whose pending ticks belong to this save snapshot.
+    pub scheduled: &'a crate::scheduled_tick::ScheduledTickHandle,
+}
+
+impl<'a> NativeDirtyChunkRecord<'a> {
+    /// Creates one complete typed dirty-chunk input.
+    #[must_use]
+    pub const fn new(
+        column_x: i32,
+        column_z: i32,
+        column: &'a crate::chunk::ChunkColumn,
+        light: &'a lodestone_world::ColumnLight,
+        scheduled: &'a crate::scheduled_tick::ScheduledTickHandle,
+    ) -> Self {
+        Self {
+            column_x,
+            column_z,
+            column,
+            light,
+            scheduled,
+        }
+    }
+}
+
+/// Every typed value reconstructed by a native chunk reopen.
+///
+/// The pending ticks remain as persisted records until the caller explicitly
+/// stages them into its live [`crate::scheduled_tick::ScheduledTickHandle`].
+/// Keeping both queues on the return value means a caller cannot accidentally
+/// lose them by choosing a light-only tuple. [`Self::stage_scheduled_ticks`]
+/// performs that handoff while retaining each tick's world-wide insertion
+/// order.
+#[derive(Debug)]
+pub struct NativeChunkRecord {
+    /// The reconstructed block, biome, heightmap, and block-entity column.
+    pub column: crate::chunk::ChunkColumn,
+    /// The reconstructed canonical sky and block light column.
+    pub light: lodestone_world::ColumnLight,
+    /// Pending typed block ticks owned by this column.
+    pub block_scheduled_ticks: Vec<crate::scheduled_tick::PersistedScheduledTick>,
+    /// Pending typed fluid ticks owned by this column.
+    pub fluid_scheduled_ticks: Vec<crate::scheduled_tick::PersistedScheduledTick>,
+}
+
+impl NativeChunkRecord {
+    /// Stages this record's pending ticks into the live scheduler.
+    ///
+    /// Staging is deferred by
+    /// [`crate::scheduled_tick::ScheduledTickHandle::stage_persisted`] so a
+    /// caller loading from the tick thread cannot re-enter its queue lock.
+    /// The returned count is the number handed to the staging boundary; the
+    /// next scheduler access makes both queues visible.
+    pub fn stage_scheduled_ticks(
+        &self,
+        scheduled: &crate::scheduled_tick::ScheduledTickHandle,
+    ) -> u64 {
+        scheduled.stage_persisted(
+            self.block_scheduled_ticks.clone(),
+            self.fluid_scheduled_ticks.clone(),
+        )
+    }
+}
+
 /// The explicit persistent-record backend selected by a host.
 ///
 /// `Anvil` is the compatibility selection: existing region-file persistence
@@ -792,82 +873,55 @@ impl WorldStorage {
         Ok(Some(entity))
     }
 
-    /// Saves one independently dirty server chunk through the native typed
+    /// Atomically saves one complete dirty chunk through the native typed
     /// record path.
     ///
-    /// The adapter is intentionally bounded: it stores block-state sections,
-    /// built-in biome grids, the optional motion-blocking heightmap, and
-    /// complete resident block-entity NBT roots, while refusing a column
-    /// carrying any other state it cannot preserve. `Anvil` stays unchanged
-    /// and refuses this method just as it
-    /// refuses [`Self::write_dirty`].
-    pub fn write_dirty_chunk(
-        &self,
-        column_x: i32,
-        column_z: i32,
-        column: &crate::chunk::ChunkColumn,
-    ) -> Result<(), Error> {
-        let record = encode_chunk(column_x, column_z, column, None)?;
-        self.write_dirty([RecordWrite::new(RecordKey::chunk(column_x, column_z), record)])?;
+    /// The input requires block/biome/entity state, canonical light, and both
+    /// pending tick queues together. `Anvil` stays unchanged and refuses this
+    /// method before inspecting or converting the supplied values.
+    pub fn write_dirty_chunk(&self, dirty: NativeDirtyChunkRecord<'_>) -> Result<(), Error> {
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        let ticks = dirty
+            .scheduled
+            .snapshot_column(dirty.column_x, dirty.column_z);
+        let record = encode_chunk_with_light(
+            dirty.column_x,
+            dirty.column_z,
+            dirty.column,
+            dirty.light,
+            Some(ticks),
+        )?;
+        native
+            .lock()
+            .expect("world storage lock poisoned")
+            .write_transaction(vec![RecordWrite::new(
+                RecordKey::chunk(dirty.column_x, dirty.column_z),
+                record,
+            )])?;
         Ok(())
     }
 
-    /// Saves one dirty chunk together with its canonical sky/block light.
-    ///
-    /// The light column is supplied separately because the server's
-    /// `ChunkColumn` owns block and biome state while `lodestone_world` owns
-    /// the copy-on-write light representation. The native record retains all
-    /// `section_count + 2` light sections, including the boundary sections,
-    /// and uses uniform tags instead of expanding common arrays.
-    pub fn write_dirty_chunk_with_light(
-        &self,
-        column_x: i32,
-        column_z: i32,
-        column: &crate::chunk::ChunkColumn,
-        light: &lodestone_world::ColumnLight,
-    ) -> Result<(), Error> {
-        let record = encode_chunk_with_light(column_x, column_z, column, light, None)?;
-        self.write_dirty([RecordWrite::new(RecordKey::chunk(column_x, column_z), record)])?;
-        Ok(())
-    }
-
-    /// Saves one dirty chunk and its pending typed scheduled ticks together.
-    ///
-    /// The queue snapshot is non-destructive. Anvil continues to use its
-    /// existing NBT tick writer; this path is only for an explicitly selected
-    /// native backend.
-    pub fn write_dirty_chunk_with_scheduled_ticks(
-        &self,
-        column_x: i32,
-        column_z: i32,
-        column: &crate::chunk::ChunkColumn,
-        scheduled: &crate::scheduled_tick::ScheduledTickHandle,
-    ) -> Result<(), Error> {
-        let ticks = scheduled.snapshot_column(column_x, column_z);
-        let record = encode_chunk(column_x, column_z, column, Some(ticks))?;
-        self.write_dirty([RecordWrite::new(RecordKey::chunk(column_x, column_z), record)])?;
-        Ok(())
-    }
-
-    /// Reopens a typed native chunk record as a real [`crate::chunk::ChunkColumn`].
+    /// Reopens one complete typed native chunk record.
     ///
     /// `min_y` and `height` remain an explicit dimension contract because the
     /// version-1 record stores section coordinates, not a dimension definition.
-    /// A mismatch, a future data version, extensions, persisted light state,
-    /// malformed block-entity NBT, or block entities outside this record's
-    /// extent is an error rather than a partial load. Use
-    /// [`Self::load_chunk_with_light`] when the light stream is wanted.
+    /// Every stored field is returned in [`NativeChunkRecord`], including both
+    /// pending tick queues. A missing light stream is rejected rather than
+    /// interpreted as darkness, and malformed or unsupported payloads are
+    /// rejected rather than partially restored.
     pub fn load_chunk(
         &self,
         column_x: i32,
         column_z: i32,
         min_y: i32,
         height: i32,
-    ) -> Result<Option<crate::chunk::ChunkColumn>, Error> {
-        validate_extent(min_y, height)?;
+    ) -> Result<Option<NativeChunkRecord>, Error> {
         let Some(native) = &self.native else {
             return Err(Error::AnvilDoesNotAcceptTypedRecords);
         };
+        validate_extent(min_y, height)?;
         let record = native
             .lock()
             .expect("world storage lock poisoned")
@@ -875,69 +929,15 @@ impl WorldStorage {
         let Some(record) = record else {
             return Ok(None);
         };
-        let (column, _, light) = decode_chunk(column_x, column_z, min_y, height, record)?;
-        if light.is_some() {
-            return Err(ChunkRecordError::UnsupportedStoredSectionData.into());
-        }
-        Ok(Some(column))
-    }
-
-    /// Reopens a native chunk and its complete canonical sky/block light.
-    ///
-    /// Records written by [`Self::write_dirty_chunk`] intentionally have no
-    /// light stream and return [`ChunkRecordError::MissingStoredLight`]; this
-    /// prevents a fast reload from silently treating unknown light as dark.
-    pub fn load_chunk_with_light(
-        &self,
-        column_x: i32,
-        column_z: i32,
-        min_y: i32,
-        height: i32,
-    ) -> Result<Option<(crate::chunk::ChunkColumn, lodestone_world::ColumnLight)>, Error> {
-        validate_extent(min_y, height)?;
-        let Some(native) = &self.native else {
-            return Err(Error::AnvilDoesNotAcceptTypedRecords);
-        };
-        let record = native
-            .lock()
-            .expect("world storage lock poisoned")
-            .get(RecordKey::chunk(column_x, column_z))?;
-        let Some(record) = record else {
-            return Ok(None);
-        };
-        let (column, _, light) = decode_chunk(column_x, column_z, min_y, height, record)?;
+        let (column, (block_scheduled_ticks, fluid_scheduled_ticks), light) =
+            decode_chunk(column_x, column_z, min_y, height, record)?;
         let light = light.ok_or(ChunkRecordError::MissingStoredLight)?;
-        Ok(Some((column, light)))
-    }
-
-    /// Reopens one typed chunk and stages its pending ticks for the supplied
-    /// live scheduler. The next scheduler access merges them with the stored
-    /// insertion orders intact.
-    pub fn load_chunk_with_scheduled_ticks(
-        &self,
-        column_x: i32,
-        column_z: i32,
-        min_y: i32,
-        height: i32,
-        scheduled: &crate::scheduled_tick::ScheduledTickHandle,
-    ) -> Result<Option<crate::chunk::ChunkColumn>, Error> {
-        validate_extent(min_y, height)?;
-        let Some(native) = &self.native else {
-            return Err(Error::AnvilDoesNotAcceptTypedRecords);
-        };
-        let record = native
-            .lock()
-            .expect("world storage lock poisoned")
-            .get(RecordKey::chunk(column_x, column_z))?;
-        let Some(record) = record else {
-            return Ok(None);
-        };
-        let (column, (block, fluid), light) = decode_chunk(column_x, column_z, min_y, height, record)?;
-        if light.is_some() {
-            return Err(ChunkRecordError::UnsupportedStoredSectionData.into());
-        }
-        scheduled.stage_persisted(block, fluid);
-        Ok(Some(column))
+        Ok(Some(NativeChunkRecord {
+            column,
+            light,
+            block_scheduled_ticks,
+            fluid_scheduled_ticks,
+        }))
     }
 }
 
@@ -1887,7 +1887,7 @@ fn state_string(state_id: u32) -> Result<String, ChunkRecordError> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use lodestone_storage::RecordKey;
+    use lodestone_storage::{RecordKey, RecordWrite};
     use lodestone_storage_schema::{ChunkRecord, ChunkSection, StorageRecord, generated::storage_record};
 
     use super::*;
@@ -1977,6 +1977,19 @@ mod tests {
         let storage = WorldStorage::open(WorldStorageBackend::Anvil).unwrap();
         assert!(matches!(
             storage.write_dirty([chunk(2, 3, 9)]),
+            Err(Error::AnvilDoesNotAcceptTypedRecords)
+        ));
+        let column = crate::chunk::ChunkColumn::new(0, 16);
+        let light = lodestone_world::ColumnLight::new(column.section_count());
+        let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
+        assert!(matches!(
+            storage.write_dirty_chunk(NativeDirtyChunkRecord::new(
+                0, 0, &column, &light, &scheduled,
+            )),
+            Err(Error::AnvilDoesNotAcceptTypedRecords)
+        ));
+        assert!(matches!(
+            storage.load_chunk(0, 0, 1, 0),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
         assert!(matches!(
@@ -2235,6 +2248,8 @@ mod tests {
         })
         .expect("open native store");
         let mut source = crate::chunk::ChunkColumn::new(-16, 32);
+        let light = lodestone_world::ColumnLight::new(source.section_count());
+        let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
         source.set_block(1, -16, 2, "minecraft:stone");
         source.set_block(3, -1, 4, "minecraft:oak_log[axis=x]");
         source.set_block(5, 15, 6, "minecraft:water[level=3]");
@@ -2267,7 +2282,9 @@ mod tests {
         ]);
 
         storage
-            .write_dirty_chunk(-7, 11, &source)
+            .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                -7, 11, &source, &light, &scheduled,
+            ))
             .expect("write supported terrain-only chunk");
         drop(storage);
 
@@ -2279,15 +2296,18 @@ mod tests {
             .load_chunk(-7, 11, -16, 32)
             .expect("decode reopened chunk")
             .expect("stored chunk is present");
-        assert_eq!(loaded.block_state(1, -16, 2), "minecraft:stone");
-        assert_eq!(loaded.block_state(3, -1, 4), "minecraft:oak_log[axis=x]");
-        assert_eq!(loaded.block_state(5, 15, 6), "minecraft:water[level=3]");
-        assert_eq!(loaded.block_state(0, 0, 0), "minecraft:air");
+        assert_eq!(loaded.column.block_state(1, -16, 2), "minecraft:stone");
+        assert_eq!(loaded.column.block_state(3, -1, 4), "minecraft:oak_log[axis=x]");
+        assert_eq!(loaded.column.block_state(5, 15, 6), "minecraft:water[level=3]");
+        assert_eq!(loaded.column.block_state(0, 0, 0), "minecraft:air");
         assert_eq!(
-            loaded.block_entities(),
+            loaded.column.block_entities(),
             source.block_entities(),
             "resident simulated and opaque block entities survive a native reopen"
         );
+        assert_eq!(loaded.light, light);
+        assert!(loaded.block_scheduled_ticks.is_empty());
+        assert!(loaded.fluid_scheduled_ticks.is_empty());
         assert!(
             reopened.load_chunk(-8, 11, -16, 32).unwrap().is_none(),
             "a distinct key is the independent absence control"
@@ -2313,6 +2333,7 @@ mod tests {
         let mut source = crate::chunk::ChunkColumn::new(-16, 32);
         source.set_block(1, -16, 2, "minecraft:stone");
         let mut light = lodestone_world::ColumnLight::new(source.section_count());
+        let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
         *light.sky_mut(1) = lodestone_world::LightData::Uniform(15);
         *light.block_mut(1) = lodestone_world::LightData::Uniform(0);
         let mut sky_values = lodestone_world::NibbleArray::filled(0);
@@ -2329,7 +2350,9 @@ mod tests {
         *light.block_mut(2) = lodestone_world::LightData::Values(block_values);
 
         storage
-            .write_dirty_chunk_with_light(-3, 8, &source, &light)
+            .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                -3, 8, &source, &light, &scheduled,
+            ))
             .expect("write terrain and canonical light");
         drop(storage);
 
@@ -2338,8 +2361,9 @@ mod tests {
         })
         .expect("reopen native store");
         let (loaded, loaded_light) = reopened
-            .load_chunk_with_light(-3, 8, -16, 32)
+            .load_chunk(-3, 8, -16, 32)
             .expect("decode reopened chunk and light")
+            .map(|record| (record.column, record.light))
             .expect("stored chunk is present");
         assert_eq!(loaded.block_state(1, -16, 2), "minecraft:stone");
         assert_eq!(loaded_light.sky(1), &lodestone_world::LightData::Uniform(15));
@@ -2354,11 +2378,35 @@ mod tests {
                 .get(lodestone_world::NibbleArray::index(5, 6, 7)),
             Some(12)
         );
-        assert!(matches!(
-            reopened.load_chunk(-3, 8, -16, 32),
-            Err(Error::Chunk(ChunkRecordError::UnsupportedStoredSectionData))
-        ));
         drop(reopened);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_chunk_reopen_refuses_a_terrain_only_record() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-chunk-missing-light-{}-{unique}",
+            std::process::id()
+        ));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        let source = crate::chunk::ChunkColumn::new(0, 16);
+        let record = encode_chunk(0, 0, &source, None).expect("encode terrain-only record");
+        storage
+            .write_dirty([RecordWrite::new(RecordKey::chunk(0, 0), record)])
+            .expect("write legacy terrain-only record");
+
+        assert!(matches!(
+            storage.load_chunk(0, 0, 0, 16),
+            Err(Error::Chunk(ChunkRecordError::MissingStoredLight))
+        ));
+        drop(storage);
         std::fs::remove_dir_all(directory).expect("remove native test segment");
     }
 
@@ -2377,6 +2425,8 @@ mod tests {
         })
         .expect("open native store");
         let mut source = crate::chunk::ChunkColumn::new(0, 16);
+        let light = lodestone_world::ColumnLight::new(source.section_count());
+        let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
         source.set_biome_cell(0, 0, 0, "minecraft:desert");
         source.set_biome_cell(1, 3, 2, "minecraft:deep_dark");
         let mut surface = vec!["minecraft:plains".to_string(); 16];
@@ -2384,7 +2434,9 @@ mod tests {
         source.set_biome_quarts(&surface);
 
         storage
-            .write_dirty_chunk(0, 0, &source)
+            .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                0, 0, &source, &light, &scheduled,
+            ))
             .expect("write built-in biome metadata");
         drop(storage);
 
@@ -2396,9 +2448,9 @@ mod tests {
             .load_chunk(0, 0, 0, 16)
             .expect("decode saved biome metadata")
             .expect("saved chunk is present");
-        assert_eq!(loaded.biome_state_at(0, 0, 0), "minecraft:desert");
-        assert_eq!(loaded.biome_state_at(4, 15, 8), "minecraft:deep_dark");
-        assert_eq!(loaded.biome_state(4, 4), "minecraft:cherry_grove");
+        assert_eq!(loaded.column.biome_state_at(0, 0, 0), "minecraft:desert");
+        assert_eq!(loaded.column.biome_state_at(4, 15, 8), "minecraft:deep_dark");
+        assert_eq!(loaded.column.biome_state(4, 4), "minecraft:cherry_grove");
         drop(reopened);
         std::fs::remove_dir_all(&directory).expect("remove native test segment");
     }

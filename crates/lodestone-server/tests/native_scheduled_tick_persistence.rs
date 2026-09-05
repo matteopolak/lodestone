@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use lodestone_server::world_storage::{Error, WorldStorage, WorldStorageBackend};
+use lodestone_server::world_storage::{
+    Error, NativeDirtyChunkRecord, WorldStorage, WorldStorageBackend,
+};
 use lodestone_server::{ChunkColumn, ScheduledTickHandle, TickPriority};
 
 fn tempdir(name: &str) -> PathBuf {
@@ -28,6 +30,7 @@ fn native_chunk_ticks_reopen_in_their_original_world_wide_order() {
     })
     .expect("open first native store");
     let scheduled = ScheduledTickHandle::new();
+    let light = lodestone_world::ColumnLight::new(column.section_count());
 
     scheduled.with(|queues| {
         // Deliberately schedule east before west. On reopen the columns are
@@ -61,7 +64,9 @@ fn native_chunk_ticks_reopen_in_their_original_world_wide_order() {
 
     for (x, z) in [(1, 0), (0, 0), (-1, 0)] {
         first
-            .write_dirty_chunk_with_scheduled_ticks(x, z, &column, &scheduled)
+            .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                x, z, &column, &light, &scheduled,
+            ))
             .expect("write typed column and its pending ticks");
     }
     drop(first);
@@ -72,10 +77,11 @@ fn native_chunk_ticks_reopen_in_their_original_world_wide_order() {
     .expect("reopen native store");
     let restored = ScheduledTickHandle::new();
     for (x, z) in [(-1, 0), (0, 0), (1, 0)] {
-        assert!(reopened
-            .load_chunk_with_scheduled_ticks(x, z, 0, 16, &restored)
+        let loaded = reopened
+            .load_chunk(x, z, 0, 16)
             .expect("load typed column")
-            .is_some());
+            .expect("stored typed column is present");
+        loaded.stage_scheduled_ticks(&restored);
     }
 
     let (block, fluid) = restored.with(|queues| {
@@ -124,6 +130,8 @@ fn native_tick_save_refuses_a_custom_action_instead_of_losing_it() {
     })
     .expect("open native store");
     let scheduled = ScheduledTickHandle::new();
+    let column = ChunkColumn::new(0, 16);
+    let light = lodestone_world::ColumnLight::new(column.section_count());
     scheduled.with(|queues| {
         assert!(queues.block.schedule(
             (0, 4, 0),
@@ -133,7 +141,9 @@ fn native_tick_save_refuses_a_custom_action_instead_of_losing_it() {
         ));
     });
     assert!(matches!(
-        storage.write_dirty_chunk_with_scheduled_ticks(0, 0, &ChunkColumn::new(0, 16), &scheduled),
+        storage.write_dirty_chunk(NativeDirtyChunkRecord::new(
+            0, 0, &column, &light, &scheduled,
+        )),
         Err(Error::Chunk(lodestone_server::world_storage::ChunkRecordError::UnsupportedScheduledTickKind(kind))) if kind == "example:plugin_action"
     ));
     drop(storage);
