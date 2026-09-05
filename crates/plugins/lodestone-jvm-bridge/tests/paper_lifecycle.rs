@@ -67,6 +67,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native int blockHandleY(long handle); \
          public static native int blockHandleZ(long handle); \
          public static native int blockHandleStateId(long handle); \
+         public static native int setBlockHandleStateId(long handle, int stateId); \
          public static native boolean blockHandleIsRetained(long handle); \
          public static native long currentPlayerHandle(); \
          public static native String playerHandleName(long handle); \
@@ -283,10 +284,10 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
 /// This uses one plugin-child class that can reach an operator-selected
 /// bootstrap definition only through its retained parent loader. The native
 /// member receives opaque block-handle bits, so a stale or wrong-kind value is
-/// rejected by the worker registry before the one bounded host read.
+/// rejected by the worker registry before the bounded host read or write.
 #[test]
 #[ignore = "requires JAVA_HOME pointing to a JDK with javac and libjvm"]
-fn plugin_child_reads_resident_block_state_through_operator_member() {
+fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
     let jdk = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"));
     let fixture = FixtureDirectory::new();
     let paper_sources = fixture.path().join("paper-sources");
@@ -332,6 +333,7 @@ fn plugin_child_reads_resident_block_state_through_operator_member() {
          public static native int blockHandleY(long handle); \
          public static native int blockHandleZ(long handle); \
          public static native int blockHandleStateId(long handle); \
+         public static native int setBlockHandleStateId(long handle, int stateId); \
          public static native boolean blockHandleIsRetained(long handle); \
          public static native long currentPlayerHandle(); \
          public static native String playerHandleName(long handle); \
@@ -422,7 +424,8 @@ fn plugin_child_reads_resident_block_state_through_operator_member() {
          new lodestone.bridge.ResidentBlockChangeListener() { \
          public void onResidentBlockStateChanged(int x, int y, int z, int stateId) { \
          long handle = lodestone.bridge.IsolatedPaperShim.currentBlockHandle(); \
-         log(\"state=\" + fixture.intercepted.BlockValue.state(handle)); } }); } \
+         log(\"state=\" + fixture.intercepted.BlockValue.state(handle)); \
+         log(\"written=\" + lodestone.bridge.IsolatedPaperShim.setBlockHandleStateId(handle, 1234)); } }); } \
          public void onDisable() {} }",
     )
     .expect("plugin source");
@@ -477,10 +480,15 @@ fn plugin_child_reads_resident_block_state_through_operator_member() {
     host.dispatch_block_state_changed(change)
         .expect("dispatch resident block change");
     let completion_limit = Instant::now() + Duration::from_secs(5);
+    let mut observed_write = None;
     loop {
         host.service_pending(1, |query| {
             assert_eq!((query.x, query.y, query.z), (-17, 64, 33));
             Ok(422)
+        });
+        host.service_pending_block_writes(1, |write| {
+            assert!(observed_write.replace(write).is_none(), "one write expected");
+            Ok(())
         });
         match host.poll().expect("resident block completion") {
             Some(AdapterEvent::BlockStateChangedCompleted {
@@ -497,7 +505,14 @@ fn plugin_child_reads_resident_block_state_through_operator_member() {
         }
         std::thread::yield_now();
     }
-    assert_eq!(fs::read_to_string(callback_log).expect("block-state callback log"), "state=422\n");
+    assert_eq!(
+        observed_write,
+        Some(BlockStateWrite { x: -17, y: 64, z: 33, state_id: 1234 }),
+    );
+    assert_eq!(
+        fs::read_to_string(callback_log).expect("block-state callback log"),
+        "state=422\nwritten=1234\n",
+    );
 }
 
 fn callback_plugin_source(
