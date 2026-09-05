@@ -164,7 +164,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 25] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 26] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -220,6 +220,10 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 25] = [
     NativeMethodSpec {
         name: "blockHandleStateId",
         descriptor: "(J)I",
+    },
+    NativeMethodSpec {
+        name: "blockHandleIsRetained",
+        descriptor: "(J)Z",
     },
     NativeMethodSpec {
         name: "currentPlayerHandle",
@@ -302,48 +306,43 @@ pub enum NativeRegistrationStep {
     Register(NativeMethodSpec),
 }
 
-const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 40] = [
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[0]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[1]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[2]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[3]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[4]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[5]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[6]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[7]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[8]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[9]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[10]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[11]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[12]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[13]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[14]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[15]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[16]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[17]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[18]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[19]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[0]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[1]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[2]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[3]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[4]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[5]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[6]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[7]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[8]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[9]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[10]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[11]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[12]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[13]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[14]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[15]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[16]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[17]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[18]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[19]),
-];
+macro_rules! registration_steps {
+    ($($method:expr),+ $(,)?) => {
+        &[
+            $(NativeRegistrationStep::Validate($method),)+
+            $(NativeRegistrationStep::Register($method),)+
+        ]
+    };
+}
+
+const ISOLATED_SHIM_REGISTRATION: &[NativeRegistrationStep] = registration_steps!(
+    ISOLATED_SHIM_METHODS[0],
+    ISOLATED_SHIM_METHODS[1],
+    ISOLATED_SHIM_METHODS[2],
+    ISOLATED_SHIM_METHODS[3],
+    ISOLATED_SHIM_METHODS[4],
+    ISOLATED_SHIM_METHODS[5],
+    ISOLATED_SHIM_METHODS[6],
+    ISOLATED_SHIM_METHODS[7],
+    ISOLATED_SHIM_METHODS[8],
+    ISOLATED_SHIM_METHODS[9],
+    ISOLATED_SHIM_METHODS[10],
+    ISOLATED_SHIM_METHODS[11],
+    ISOLATED_SHIM_METHODS[12],
+    ISOLATED_SHIM_METHODS[13],
+    ISOLATED_SHIM_METHODS[14],
+    ISOLATED_SHIM_METHODS[15],
+    ISOLATED_SHIM_METHODS[16],
+    ISOLATED_SHIM_METHODS[17],
+    ISOLATED_SHIM_METHODS[18],
+    ISOLATED_SHIM_METHODS[19],
+    ISOLATED_SHIM_METHODS[20],
+    ISOLATED_SHIM_METHODS[21],
+    ISOLATED_SHIM_METHODS[22],
+    ISOLATED_SHIM_METHODS[23],
+    ISOLATED_SHIM_METHODS[24],
+    ISOLATED_SHIM_METHODS[25],
+);
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
 ///
@@ -800,6 +799,11 @@ fn method_id(
         ("blockHandleStateId", "(J)I") => {
             env.get_static_method_id(class, jni_str!("blockHandleStateId"), jni_sig!("(J)I"))
         }
+        ("blockHandleIsRetained", "(J)Z") => env.get_static_method_id(
+            class,
+            jni_str!("blockHandleIsRetained"),
+            jni_sig!("(J)Z"),
+        ),
         ("currentPlayerHandle", "()J") => {
             env.get_static_method_id(class, jni_str!("currentPlayerHandle"), jni_sig!("()J"))
         },
@@ -939,6 +943,12 @@ fn register_method(
             method.descriptor,
         ),
         ("blockHandleStateId", "(J)I") => adapter::register_block_handle_state_id_query(
+            env,
+            class,
+            method.name,
+            method.descriptor,
+        ),
+        ("blockHandleIsRetained", "(J)Z") => adapter::register_block_handle_is_retained_query(
             env,
             class,
             method.name,
@@ -1195,6 +1205,7 @@ mod tests {
                 NativeMethodSpec { name: "blockHandleY", descriptor: "(J)I" },
                 NativeMethodSpec { name: "blockHandleZ", descriptor: "(J)I" },
                 NativeMethodSpec { name: "blockHandleStateId", descriptor: "(J)I" },
+                NativeMethodSpec { name: "blockHandleIsRetained", descriptor: "(J)Z" },
                 NativeMethodSpec {
                     name: "currentPlayerHandle",
                     descriptor: "()J",
@@ -1241,59 +1252,27 @@ mod tests {
                 },
             ],
         );
-        let block_state = isolated_shim_methods()[0];
-        let server_tick = isolated_shim_methods()[1];
-        let block_write = isolated_shim_methods()[2];
-        let plugin_name = isolated_shim_methods()[3];
-        let plugin_version = isolated_shim_methods()[4];
-        let plugin_descriptor = isolated_shim_methods()[5];
-        let block_change_subscription = isolated_shim_methods()[6];
+        let methods = isolated_shim_methods();
+        let registration = isolated_shim_registration_steps();
         assert_eq!(
-            isolated_shim_registration_steps(),
-            &[
-                NativeRegistrationStep::Validate(block_state),
-                NativeRegistrationStep::Validate(server_tick),
-                NativeRegistrationStep::Validate(block_write),
-                NativeRegistrationStep::Validate(plugin_name),
-                NativeRegistrationStep::Validate(plugin_version),
-                NativeRegistrationStep::Validate(plugin_descriptor),
-                NativeRegistrationStep::Validate(block_change_subscription),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[7]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[8]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[9]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[10]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[11]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[12]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[13]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[14]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[15]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[16]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[17]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[18]),
-                NativeRegistrationStep::Validate(isolated_shim_methods()[19]),
-                NativeRegistrationStep::Register(block_state),
-                NativeRegistrationStep::Register(server_tick),
-                NativeRegistrationStep::Register(block_write),
-                NativeRegistrationStep::Register(plugin_name),
-                NativeRegistrationStep::Register(plugin_version),
-                NativeRegistrationStep::Register(plugin_descriptor),
-                NativeRegistrationStep::Register(block_change_subscription),
-                NativeRegistrationStep::Register(isolated_shim_methods()[7]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[8]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[9]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[10]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[11]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[12]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[13]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[14]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[15]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[16]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[17]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[18]),
-                NativeRegistrationStep::Register(isolated_shim_methods()[19]),
-            ],
-            "a registration must never precede declaration validation",
+            registration.len(),
+            methods.len() * 2,
+            "every declared native must have one validation and one registration step",
         );
+        for (step, method) in registration[..methods.len()].iter().zip(methods) {
+            assert_eq!(
+                *step,
+                NativeRegistrationStep::Validate(*method),
+                "every declaration must validate before any native pointer is installed",
+            );
+        }
+        for (step, method) in registration[methods.len()..].iter().zip(methods) {
+            assert_eq!(
+                *step,
+                NativeRegistrationStep::Register(*method),
+                "every validated declaration must receive its native implementation",
+            );
+        }
         assert_eq!(
             isolated_plugin_descriptor_members(),
             &[
@@ -1416,6 +1395,7 @@ mod tests {
              public static native int blockHandleY(long handle); \
              public static native int blockHandleZ(long handle); \
              public static native int blockHandleStateId(long handle); \
+             public static native boolean blockHandleIsRetained(long handle); \
              public static native long currentPlayerHandle(); \
              public static native String playerHandleName(long handle); \
              public static native String playerHandleUuid(long handle); \
@@ -1510,6 +1490,7 @@ mod tests {
              public static native int blockHandleY(long handle); \
              public static native int blockHandleZ(long handle); \
              public static native int blockHandleStateId(long handle); \
+             public static native boolean blockHandleIsRetained(long handle); \
              public static native long currentPlayerHandle(); \
              public static native String playerHandleName(long handle); \
              public static native String playerHandleUuid(long handle); \
