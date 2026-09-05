@@ -33,12 +33,13 @@ SCENE = ROOT / "scripts" / "benchmark-scenes" / "showcase.txt"
 HEAVY_SCENE_EMITTER = ROOT / "target" / "release" / "examples" / "heavy-scene-server"
 HEAVY_COMMAND_PHASES = ("setup", "after_join", "mutation")
 HEAVY_SCENARIOS = (
-    "palette", "transparency", "light", "liquid", "sign", "block-entity", "entity", "scheduled", "mixed",
+    "palette", "transparency", "light", "liquid", "sign", "block-entity", "entity", "scheduled", "mixed", "dense-mixed",
 )
 # The server's immutable-plan ceiling is intentionally larger for offline plan
 # inspection. The client runner is a foreground local profiler: keep its actual
 # resource envelope small enough for a shared development machine.
 MAX_HEAVY_SCALE = 2
+MAX_HEAVY_SCALE_BY_SCENARIO = {"dense-mixed": 1}
 MAX_HEAVY_MUTATION_SECONDS = 10
 MAX_HEAVY_TOTAL_SECONDS = 120
 RCON_PASSWORD = "lodestone"
@@ -926,6 +927,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--heavy-seed must be non-negative")
     if not 1 <= args.heavy_scale <= MAX_HEAVY_SCALE:
         parser.error(f"--heavy-scale must be in 1..={MAX_HEAVY_SCALE}")
+    scenario_max_scale = MAX_HEAVY_SCALE_BY_SCENARIO.get(args.heavy_scenario, MAX_HEAVY_SCALE)
+    if args.heavy_scale > scenario_max_scale:
+        parser.error(
+            f"--heavy-scale for {args.heavy_scenario} must be in 1..={scenario_max_scale}; "
+            "its fixed density already bounds local setup"
+        )
     if not 0 <= args.heavy_mutation_seconds <= MAX_HEAVY_MUTATION_SECONDS:
         parser.error(
             f"--heavy-mutation-seconds must be in 0..={MAX_HEAVY_MUTATION_SECONDS}"

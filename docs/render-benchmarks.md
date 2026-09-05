@@ -96,6 +96,16 @@ durations, but never bypasses emitted witnesses. The runner permits scale 1–2,
 mutation 0–10 seconds, and at most 120 seconds of client choreography; it also
 always performs exactly one heavyweight trial, including Samply captures.
 
+`mixed` is the ordinary broad scene. `dense-mixed` reuses those same production
+builders at a fixed scale-one envelope: 2,048 tagged entities; 1,536 signs; 1,024
+each of light and liquid cells; 768 transparent cells; 512 palette cells, block
+entities, and scheduled producers. It is intentionally capped at scale one so a
+single local capture cannot turn into an unbounded RCON setup. The emitted
+post-join phase places the benchmark player above the compact subject volume before
+the warmup begins; that command is consumed by the same local-server command path
+as the scene setup, rather than by a renderer-only fixture. Use
+`just profile-client-heavy-dense` for this opt-in Samply input.
+
 The frame CSV carries the production submission witnesses
 `world.opaque_sections_drawn`, `world.water_sections_drawn`,
 `world.translucent_sections_drawn`, `world.entities_drawn`,
