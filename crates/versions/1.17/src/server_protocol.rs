@@ -18,7 +18,8 @@ use crate::packet_ids::{handshaking, login, play};
 use crate::packet_ids_758::{handshaking as handshaking_758, login as login_758, play as play_758};
 use crate::packets::game::{
     BlockDig, BlockPlace, ClientboundChat, ClientboundPositionLook, JoinGame, ServerboundChat,
-    ServerboundFlying, ServerboundLook, ServerboundPosition, ServerboundPositionLook,
+    ServerboundArmAnimation, ServerboundFlying, ServerboundLook, ServerboundPosition,
+    ServerboundPositionLook,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -363,6 +364,18 @@ impl ServerProtocol for V756ServerProtocol {
                     }
                 })
             }
+            State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
+                let Some(ServerboundArmAnimation { hand }) = decode_full(payload) else {
+                    return ServerBound::Ignored;
+                };
+                let Ok(hand) = u8::try_from(hand) else {
+                    return ServerBound::Ignored;
+                };
+                if hand > 1 {
+                    return ServerBound::Ignored;
+                }
+                ServerBound::Swing { hand }
+            }
             // The four movement forms have distinct payloads.  In particular,
             // only the first two carry a position, which is what drives the
             // integrated server's view recentering and tick-area publication.
@@ -505,6 +518,16 @@ impl ServerProtocol for V756ServerProtocol {
 
     fn encode_system_chat(&self, message: &str) -> ServerDirective {
         send(play::clientbound::CHAT, &system_chat(message))
+    }
+
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(entity_id);
+        payload.u8(action);
+        ServerDirective::Send {
+            packet_id: play::clientbound::ANIMATION,
+            payload: payload.into_vec(),
+        }
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
@@ -745,6 +768,18 @@ impl ServerProtocol for V758ServerProtocol {
                     },
                 )
             }
+            State::Play if packet_id == play_758::serverbound::ARM_ANIMATION => {
+                let Some(ServerboundArmAnimation { hand }) = decode_full_758(payload) else {
+                    return ServerBound::Ignored;
+                };
+                let Ok(hand) = u8::try_from(hand) else {
+                    return ServerBound::Ignored;
+                };
+                if hand > 1 {
+                    return ServerBound::Ignored;
+                }
+                ServerBound::Swing { hand }
+            }
             State::Play if packet_id == play_758::serverbound::POSITION => {
                 decode_full_758::<ServerboundPosition>(payload).map_or(
                     ServerBound::Ignored,
@@ -887,6 +922,16 @@ impl ServerProtocol for V758ServerProtocol {
 
     fn encode_system_chat(&self, message: &str) -> ServerDirective {
         send_758(play_758::clientbound::CHAT, &system_chat(message))
+    }
+
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(entity_id);
+        payload.u8(action);
+        ServerDirective::Send {
+            packet_id: play_758::clientbound::ANIMATION,
+            payload: payload.into_vec(),
+        }
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {

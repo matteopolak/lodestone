@@ -1,12 +1,16 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
 use lodestone_data::block_states;
-use lodestone_model::{BlockFace, BlockPos, Rotation, Vec3f};
+use lodestone_model::{
+    AnimationAction, BlockFace, BlockPos, ClientAction, ClientEvent, ConnectionState, Directive,
+    Hand, Rotation, Vec3f, VersionAdapter,
+};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_17::{V756ServerProtocol, V758ServerProtocol};
 use lodestone_v1_17::packet_ids::handshaking;
 use lodestone_v1_17::packets::chunk::{ChunkShape, MapChunk};
 use lodestone_v1_17::packets::game::JoinGame;
 use lodestone_v1_17::packets::handshake::SetProtocol;
+use lodestone_world::World;
 
 const CTX: Ctx = Ctx { version: 756 };
 const CTX_758: Ctx = Ctx { version: 758 };
@@ -210,6 +214,92 @@ fn protocol_758_lifts_literal_block_place_body() {
         &V758ServerProtocol,
         lodestone_v1_17::packet_ids_758::play::serverbound::BLOCK_PLACE,
     );
+}
+
+#[test]
+fn registry_selected_1_17_era_arm_animation_reaches_the_shared_swing_consumer() {
+    for (protocol_version, server_arm, client_animation) in [
+        (
+            756,
+            lodestone_v1_17::packet_ids::play::serverbound::ARM_ANIMATION,
+            lodestone_v1_17::packet_ids::play::clientbound::ANIMATION,
+        ),
+        (
+            758,
+            lodestone_v1_17::packet_ids_758::play::serverbound::ARM_ANIMATION,
+            lodestone_v1_17::packet_ids_758::play::clientbound::ANIMATION,
+        ),
+    ] {
+        let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+            .expect("every hosted 1.17-era protocol must select a server protocol");
+        let adapter = lodestone_v1_17::adapter_for(protocol_version);
+
+        for (wire_hand, expected_action) in [
+            (0_u8, AnimationAction::SwingMainHand),
+            (1_u8, AnimationAction::SwingOffHand),
+        ] {
+            // A one-byte VarInt hand body is deliberately assembled without
+            // the adapter encoder, keeping the hosted decoder independently
+            // pinned to the two valid wire ordinals.
+            let body = [wire_hand];
+            assert_eq!(
+                protocol.decode(State::Play, server_arm, &body),
+                ServerBound::Swing { hand: wire_hand },
+                "protocol {protocol_version} must lift its literal swing body"
+            );
+
+            let action = ClientAction::SwingArm {
+                hand: if wire_hand == 0 { Hand::Main } else { Hand::Off },
+            };
+            let Some((encoded_id, encoded_body)) = adapter
+                .encode_action(ConnectionState::Play, &action)
+                .expect("the era adapter must encode arm swings")
+            else {
+                panic!("{action:?} must produce a serverbound packet");
+            };
+            assert_eq!(encoded_id, server_arm);
+            assert_eq!(encoded_body, body);
+
+            let animation = if wire_hand == 0 { 0 } else { 3 };
+            let ServerDirective::Send { packet_id, payload } =
+                protocol.encode_animate(321, animation)
+            else {
+                panic!("protocol {protocol_version} must encode an animation broadcast");
+            };
+            assert_eq!(packet_id, client_animation);
+            assert_eq!(payload, vec![0xc1, 0x02, animation]);
+            assert_eq!(
+                adapter
+                    .handle_packet(
+                        &mut World::new(),
+                        ConnectionState::Play,
+                        packet_id,
+                        &payload,
+                    )
+                    .expect("the era adapter must decode the hosted animation"),
+                vec![Directive::Emit(ClientEvent::EntityAnimation {
+                    entity_id: 321,
+                    action: expected_action,
+                })]
+            );
+        }
+
+        assert_eq!(
+            protocol.decode(State::Play, server_arm, &[2]),
+            ServerBound::Ignored,
+            "protocol {protocol_version} must reject an unknown hand ordinal"
+        );
+        assert_eq!(
+            protocol.decode(State::Play, server_arm, &[0, 0]),
+            ServerBound::Ignored,
+            "protocol {protocol_version} must reject a trailing byte"
+        );
+        assert_eq!(
+            protocol.decode(State::Login, server_arm, &[0]),
+            ServerBound::Ignored,
+            "protocol {protocol_version} must not accept Play input during Login"
+        );
+    }
 }
 
 #[test]
