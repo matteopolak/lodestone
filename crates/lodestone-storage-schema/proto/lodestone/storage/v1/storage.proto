@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package lodestone.storage.v1;
+
+// The outer record version changes only for incompatible storage-record
+// semantics. New optional fields within this version retain their field number.
+message StorageRecord {
+  uint32 format_version = 1;
+
+  oneof record {
+    ChunkRecord chunk = 10;
+    GeneralRecord general = 11;
+  }
+}
+
+// A column is independently replaceable. Palette entries are canonical numeric
+// block-state IDs, and block_state_indices is the packed bit stream selected by
+// palette_bits; neither representation carries registry strings.
+message ChunkRecord {
+  sint32 column_x = 1;
+  sint32 column_z = 2;
+  uint32 game_data_version = 3;
+  repeated ChunkSection sections = 4;
+  repeated ExtensionValue extensions = 10;
+}
+
+message ChunkSection {
+  sint32 section_y = 1;
+  uint32 palette_bits = 2;
+  repeated uint32 palette_state_ids = 3 [packed = true];
+  bytes block_state_indices = 4;
+  bytes sky_light = 5;
+  bytes block_light = 6;
+}
+
+// General state is typed rather than a string-keyed property map. Future
+// built-in records are added as new GeneralRecord oneof members.
+message GeneralRecord {
+  oneof record {
+    WorldProperties world_properties = 1;
+    PlayerRecord player = 2;
+    EntityRecord entity = 3;
+  }
+  repeated ExtensionValue extensions = 10;
+}
+
+message WorldProperties {
+  uint32 game_data_version = 1;
+  sint64 seed = 2;
+  BuiltinDimension spawn_dimension = 3;
+  sint32 spawn_x = 4;
+  sint32 spawn_y = 5;
+  sint32 spawn_z = 6;
+  uint64 day_time = 7;
+  GameMode default_game_mode = 8;
+}
+
+message PlayerRecord {
+  bytes player_uuid = 1;
+  BuiltinDimension dimension = 2;
+  sint32 x_fixed = 3;
+  sint32 y_fixed = 4;
+  sint32 z_fixed = 5;
+  sint32 yaw_millidegrees = 6;
+  sint32 pitch_millidegrees = 7;
+}
+
+message EntityRecord {
+  uint64 entity_id = 1;
+  uint32 entity_type_id = 2;
+  BuiltinDimension dimension = 3;
+  sint32 x_fixed = 4;
+  sint32 y_fixed = 5;
+  sint32 z_fixed = 6;
+}
+
+enum BuiltinDimension {
+  BUILTIN_DIMENSION_UNSPECIFIED = 0;
+  BUILTIN_DIMENSION_OVERWORLD = 1;
+  BUILTIN_DIMENSION_NETHER = 2;
+  BUILTIN_DIMENSION_END = 3;
+}
+
+enum GameMode {
+  GAME_MODE_UNSPECIFIED = 0;
+  GAME_MODE_SURVIVAL = 1;
+  GAME_MODE_CREATIVE = 2;
+  GAME_MODE_ADVENTURE = 3;
+  GAME_MODE_SPECTATOR = 4;
+}
+
+// Extension registrations are the one place the format carries names. Core
+// records retain only local_id, so an extension payload never repeats its
+// namespace or schema label.
+message ExtensionTable {
+  uint32 table_version = 1;
+  repeated RegisteredExtension extensions = 2;
+}
+
+message RegisteredExtension {
+  uint32 local_id = 1;
+  string namespace = 2;
+  string name = 3;
+  uint32 schema_version = 4;
+}
+
+message ExtensionValue {
+  uint32 local_id = 1;
+  bytes payload = 2;
+}
