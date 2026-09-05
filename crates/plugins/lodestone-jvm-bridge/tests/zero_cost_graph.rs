@@ -306,7 +306,14 @@ fn jvm_support_is_explicitly_default_off() {
     );
     assert!(
         text.lines()
-            .any(|line| line.trim() == "jvm = [\"dep:jni\"]"),
-        "the JVM runtime must be reachable only through the named jvm feature"
+            .any(|line| line.trim() == "jvm = [\"dep:jni\", \"dep:zip\"]"),
+        "JVM startup and operator-jar discovery must be reachable only through \
+         the named jvm feature"
+    );
+    let zip = text.lines().find(|line| line.trim_start().starts_with("zip ="));
+    assert!(
+        zip.is_some_and(|line| line.contains("optional = true")),
+        "the archive reader is part of operator-jar discovery and must not enter \
+         the default graph"
     );
 }

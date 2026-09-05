@@ -26,6 +26,8 @@
 //!   attachment, with no ECS guard or world handle in the callback API.
 //! - [`adapter`] (with `jvm`) — a dedicated worker that loads an explicit
 //!   adapter class, registers its native block query, and dispatches ticks.
+//! - [`paper`] (with `jvm`) — validates an operator-supplied Paper jar and
+//!   discovers sorted plugin descriptors without extracting either archive.
 //!
 //! ## What is deliberately not here
 //!
@@ -84,6 +86,9 @@ pub mod runtime;
 
 #[cfg(feature = "jvm")]
 pub mod adapter;
+
+#[cfg(feature = "jvm")]
+pub mod paper;
 
 pub use callback::{
     CallbackDepthError, CallbackDepthGuard, DEFAULT_CALLBACK_DEPTH_LIMIT,

@@ -506,7 +506,41 @@ then resolves that shim without changing, copying, or redistributing either oper
 primitive loads one named class only; it does not yet select Paper's bootstrap class, discover
 plugin descriptors, or implement its lifecycle.
 
-### 4.4 Experimental adapter worker
+### 4.4 Paper bootstrap plan and plugin discovery
+
+`paper::PaperBootstrapConfig` is the pre-JVM, host-callable intake boundary for an
+operator-supplied Paper server jar and a plugin directory. `discover` opens archives in place; it
+never extracts an entry or permits an archive path to become a filesystem path. The server jar must
+carry both the expected Paper bootstrap class entry and the Paper manifest marker. Each top-level
+`.jar` in the plugin directory is sorted by path, subject to a default limit of 256, and must contain
+exactly one descriptor: either `paper-plugin.yml` or `plugin.yml`. A jar carrying both is rejected
+instead of guessing which lifecycle it wanted.
+
+The descriptor reader is deliberately narrow and loud: it accepts top-level scalar `name`,
+`version`, and `main` fields, rejects duplicate fields, invalid Java binary names, control text, and
+duplicate plugin names (case-insensitively). Descriptor reads are capped at 64 KiB, so discovery
+cannot decompress an unbounded manifest. This admits the ordinary Paper and Bukkit descriptor
+shapes while making unsupported YAML constructs a named input error rather than an accidental
+partial plugin load.
+
+The resulting `PaperBootstrapPlan` records the validated plugin metadata but keeps plugin jars out
+of the server bootstrap classpath. Its `start_runtime` starts an empty-system-classpath JVM;
+`load_bootstrap` is the plan's real JVM consumer and supplies the ordered operator paths only to the
+isolated loader. It loads Paper's bootstrap class without initializing or invoking it. Plugins need
+distinct lifecycle class-loader policy, native shims, and event dispatch before any plugin entry
+point can run. The dedicated binary does not yet expose this plan through environment configuration;
+its current explicit Java-adapter path remains a separate, read-only bootstrap.
+
+The ignored local-jar gate uses a locally materialized server jar and does not download or extract
+it:
+
+```bash
+LODESTONE_PAPER_JAR=<local-paper-server.jar> \
+    cargo test -p lodestone-jvm-bridge --features jvm --lib \
+    paper::tests::local_paper_jar_is_discovered_without_extracting_it -- --ignored --exact
+```
+
+### 4.5 Experimental adapter worker
 
 `adapter::AdapterHost` is the production loading and invocation boundary for an explicitly supplied
 adapter class. It is not Paper plugin discovery or a Fabric mod loader. The host starts it with a
@@ -582,7 +616,7 @@ To extend the boundary, change the adapter's native declaration and the correspo
 registration together, then add an independently predicted end-to-end fixture. Add concrete public
 host queries on demand rather than enumerating a speculative compatibility surface.
 
-### 4.5 Dedicated-host connection
+### 4.6 Dedicated-host connection
 
 The dedicated binary enables the bridge only with its default-off `jvm` feature. Set both
 `LODESTONE_JAVA_ADAPTER_CLASS` (dotted class name) and `LODESTONE_JAVA_CLASSPATH` (platform path list
