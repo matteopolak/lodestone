@@ -255,7 +255,6 @@ pub(crate) fn progress_per_tick(block_state: &str, held: Option<&ItemStack>) -> 
     // `StopDestroy` that an instant block never sends. See
     // `crate::mobs::block_state_id_or_default`.
     let state_id = crate::mobs::block_state_id_or_default(block_state)?;
-    let state_id = lodestone_data::block_states::StateId::new(state_id)?;
     let hardness = lodestone_data::hardness::hardness(state_id).hardness;
     if hardness < 0.0 {
         return Some(0.0);

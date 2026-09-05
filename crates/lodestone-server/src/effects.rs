@@ -43,7 +43,6 @@
 //! `publish_effect` is for effects with
 //! no acting player at all.
 
-use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, SoundCategory, Vec3, Vec3f};
 
 /// One sound, particle burst or level event for a connection to be told about.
@@ -323,7 +322,7 @@ pub fn block_destroyed(pos: BlockPos, state: &str) -> Option<WorldEffect> {
     Some(WorldEffect::LevelEvent {
         event: PARTICLES_DESTROY_BLOCK,
         pos,
-        data: i32::try_from(id).ok()?,
+        data: i32::try_from(id.raw()).ok()?,
         global: false,
     })
 }
@@ -333,7 +332,7 @@ pub fn block_destroyed(pos: BlockPos, state: &str) -> Option<WorldEffect> {
 /// `soundType.getPlaceSound()` at `(volume + 1) / 2` and `pitch * 0.8`.
 #[must_use]
 pub fn block_placed(pos: BlockPos, state: &str, seed: i64) -> Option<WorldEffect> {
-    let id = StateId::new(crate::mobs::block_state_id_or_default(state)?)?;
+    let id = crate::mobs::block_state_id_or_default(state)?;
     let sound = lodestone_data::sound_types::place_sound_name(id)?;
     let kind = lodestone_data::sound_types::sound_type(id);
     Some(WorldEffect::Sound {
@@ -589,7 +588,7 @@ mod tests {
             Some(WorldEffect::LevelEvent {
                 event: PARTICLES_DESTROY_BLOCK,
                 pos: BlockPos::new(4, 5, 6),
-                data: expected as i32,
+                data: expected.raw() as i32,
                 global: false,
             })
         );

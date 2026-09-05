@@ -9384,23 +9384,11 @@ impl CollisionView for ItemCollision<'_> {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<lodestone_physics::Aabb>) {
         self.probe_count.set(self.probe_count.get() + 1);
         let name = (self.block_state)(x, y, z);
-        // **`block_state_id` then `block_states::state_id`, and emphatically NOT
-        // `block_state_id_or_default`.** That helper resolves a bare name to the
-        // block's *lowest* state id, and its own doc comment says in as many words
-        // that it "is not a substitute for `block_state_id` where the properties
-        // matter (collision shapes, path types)". It was used here for one iteration
-        // and a bare `minecraft:oak_slab` resolved to a full cube — the lowest id is
-        // not `type=bottom` — so the item rested at the top of the cell and the fix
-        // reproduced the very bug it removes. `block_states::state_id` consults
-        // `span.default`, which is vanilla's real `defaultBlockState()`.
-        //
-        // The exact-string map is tried first because it is O(1) and because a
-        // `ChunkSource` normally hands back a full canonical state; `state_id` scans
-        // the block's own span, which is short but not free.
-        let Some(id) = block_state_id(&name).or_else(|| block_states::state_id(&name)) else {
-            return;
-        };
-        let Some(state) = block_states::StateId::new(id) else {
+        // The shared resolver preserves every named property and supplies only a
+        // block's registered default for properties the input omits. Replacing it
+        // with a lowest-id fallback makes a bare oak slab a full cube rather than
+        // its default bottom slab, so the item rests at the wrong height.
+        let Some(state) = block_state_id(&name) else {
             return;
         };
         let shape = collision_shapes::collision_boxes(state);
