@@ -4,13 +4,14 @@ use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Hand, Vec3f,
-    VersionAdapter,
+    AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
+    ConnectionState, Directive, Hand, Vec3f, VersionAdapter,
 };
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_8::{V47Adapter, V47ServerProtocol};
 use lodestone_v1_8::packet_ids::{handshaking, play};
 use lodestone_v1_8::packets::handshake::SetProtocol;
+use lodestone_world::World;
 
 const CTX: Ctx = Ctx { version: 47 };
 
@@ -170,6 +171,70 @@ fn legacy_chat_uses_its_single_string_body_for_chat_commands_and_replies() {
         payload,
         b"\x1c{\"text\":\"legacy \\\"chat\\\"\\n\"}\x01",
         "the JSON component is length-prefixed once, followed by position 1"
+    );
+}
+
+#[test]
+fn registry_selected_arm_animation_connects_protocol_47_to_the_shared_swing_broadcast() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(47)
+        .expect("protocol 47 must resolve to its hosted server protocol");
+    let adapter = V47Adapter::new();
+
+    // Protocol 47 has no hand field in its arm-animation request. The
+    // adapter's main- and off-hand actions therefore share the same literal
+    // empty request body, and the hosted decoder maps both to main hand.
+    for hand in [Hand::Main, Hand::Off] {
+        let action = ClientAction::SwingArm { hand };
+        let Some((packet_id, payload)) = adapter
+            .encode_action(ConnectionState::Play, &action)
+            .expect("protocol-47 adapter encodes arm swings")
+        else {
+            panic!("{action:?} must produce a protocol-47 packet");
+        };
+        assert_eq!(packet_id, play::serverbound::ARM_ANIMATION);
+        assert!(payload.is_empty(), "protocol-47 arm animation has no fields");
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &[]),
+            ServerBound::Swing { hand: 0 },
+            "the literal empty body must reach the shared swing consumer"
+        );
+    }
+
+    // The clientbound animation body is independently assembled: entity id
+    // 321 is varint [0xc1, 0x02], followed by the raw action byte.
+    for (action, expected) in [
+        (0, AnimationAction::SwingMainHand),
+        (3, AnimationAction::SwingOffHand),
+    ] {
+        let ServerDirective::Send { packet_id, payload } =
+            protocol.encode_animate(321, action)
+        else {
+            panic!("the protocol-47 host must encode an animation reply");
+        };
+        assert_eq!(packet_id, play::clientbound::ANIMATION);
+        assert_eq!(payload, vec![0xc1, 0x02, action]);
+        assert_eq!(
+            adapter
+                .handle_packet(&mut World::new(), ConnectionState::Play, packet_id, &payload)
+                .expect("the protocol-47 client decodes host animation"),
+            vec![Directive::Emit(ClientEvent::EntityAnimation {
+                entity_id: 321,
+                action: expected,
+            })]
+        );
+    }
+
+    // Controls distinguish the empty request body from a mistaken hand
+    // ordinal, and keep a valid prefix with trailing bytes from being accepted.
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::ARM_ANIMATION, &[0]),
+        ServerBound::Ignored,
+        "protocol 47 has no hand ordinal in this packet"
+    );
+    assert_eq!(
+        protocol.decode(State::Login, play::serverbound::ARM_ANIMATION, &[]),
+        ServerBound::Ignored,
+        "the Play packet must not be accepted before Play"
     );
 }
 

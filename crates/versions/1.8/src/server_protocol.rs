@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::PROTOCOL;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
+use crate::packets::entity::Animation;
 use crate::packets::game::{
     BlockDig, BlockPlace, ClientboundChat, ClientboundPositionLook, JoinGame, ServerboundChat,
     ServerboundFlying, ServerboundLook, ServerboundPosition, ServerboundPositionLook,
@@ -297,6 +298,16 @@ impl ServerProtocol for V47ServerProtocol {
                     sequence: 0,
                 }
             }
+            // Protocol 47's arm-animation request is an empty body. The
+            // era has only a main hand, so the shared swing consumer receives
+            // hand zero; any byte is a trailing-byte error, not a hand value.
+            State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
+                if payload.is_empty() {
+                    ServerBound::Swing { hand: 0 }
+                } else {
+                    ServerBound::Ignored
+                }
+            }
             State::Play if packet_id == play::serverbound::CHAT => {
                 decode_full::<ServerboundChat>(payload).map_or(ServerBound::Ignored, |chat| {
                     // The one string carries both text and commands in this
@@ -466,6 +477,16 @@ impl ServerProtocol for V47ServerProtocol {
                 message: legacy_text_component(message),
                 // Protocol 47 uses position 1 for ordinary system chat.
                 position: 1,
+            },
+        )
+    }
+
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        send(
+            play::clientbound::ANIMATION,
+            &Animation {
+                entity_id,
+                animation: action,
             },
         )
     }
