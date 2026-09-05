@@ -1267,6 +1267,8 @@ pub enum NetUpdate {
         rotation: Rotation,
         /// Which components of `pos`/`rotation` are relative to the current pose.
         flags: lodestone_model::event::TeleportFlags,
+        /// Velocity correction carried by newer protocol families.
+        velocity: Option<lodestone_model::event::TeleportVelocity>,
     },
 }
 
@@ -5374,6 +5376,7 @@ fn forward(
             pos,
             rotation,
             flags,
+            velocity,
         } => {
             // The `transfer` target's middle hop: the moment the teleport left
             // the driver and entered the sim's channel. Between the driver
@@ -5415,6 +5418,7 @@ fn forward(
                 pos,
                 rotation,
                 flags,
+                velocity,
             }
         }
         // World weather (`GAME_EVENT` codes 1, 2, 7, 8). Folded into the shared

@@ -476,6 +476,7 @@ pub fn lift_entity_events(
             pos,
             rotation: entity_rotation,
             flags,
+            ..
         } => vec![Event::PlayerTeleported(PlayerTeleported {
             pos: vector(*pos),
             rotation: rotation(*entity_rotation),

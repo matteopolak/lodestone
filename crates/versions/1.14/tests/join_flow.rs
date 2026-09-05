@@ -648,6 +648,7 @@ fn play_position_emits_teleport_and_confirms() {
                 pos,
                 rotation,
                 flags,
+                ..
             }),
         ] => {
             assert_eq!(*packet_id, play::serverbound::TELEPORT_CONFIRM);

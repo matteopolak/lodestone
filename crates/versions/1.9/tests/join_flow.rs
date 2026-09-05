@@ -579,6 +579,7 @@ fn play_position_emits_teleport_and_confirms() {
                 pos,
                 rotation,
                 flags,
+                ..
             }),
         ] => {
             assert_eq!(*packet_id, play::serverbound::TELEPORT_CONFIRM);
@@ -1031,4 +1032,3 @@ fn play_block_action_rejects_trailing_bytes() {
         "expected a decode error, got {result:?}"
     );
 }
-

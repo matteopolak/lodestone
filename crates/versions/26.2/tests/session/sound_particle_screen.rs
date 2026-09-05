@@ -631,15 +631,26 @@ fn explode_bytes() -> Vec<u8> {
 fn explode_decodes_the_explosion_sound_at_its_centre() {
     let adapter = V770Adapter::new();
     let directives = handle(&adapter, play::clientbound::EXPLODE, &explode_bytes());
-    // A leading `Particles` directive (the shockwave/smoke
-    // visual) now precedes the `Sound` directive this test was already
-    // pinning — see `decode_explode`'s doc comment.
+    // Gameplay impulse, visual, then sound.
     assert_eq!(
         directives.len(),
-        2,
-        "one Particles directive, then one Sound directive"
+        3,
+        "one Explosion, one Particles, then one Sound directive"
     );
-    let Directive::Emit(ClientEvent::Particles { particle, .. }) = &directives[0] else {
+    let Directive::Emit(ClientEvent::Explosion {
+        pos,
+        radius,
+        affected_blocks,
+        knockback,
+    }) = &directives[0]
+    else {
+        panic!("expected an Explosion directive first, got {:?}", directives[0]);
+    };
+    assert_eq!(*pos, Vec3::new(1.0, 2.0, 3.0));
+    assert_eq!(*radius, 3.0);
+    assert!(affected_blocks.is_empty());
+    assert_eq!(*knockback, None);
+    let Directive::Emit(ClientEvent::Particles { particle, .. }) = &directives[1] else {
         panic!("expected a Particles directive first, got {:?}", directives[0]);
     };
     assert_eq!(*particle, key("minecraft:explosion_emitter"));
@@ -651,7 +662,7 @@ fn explode_decodes_the_explosion_sound_at_its_centre() {
         pitch,
         seed: _,
         fixed_range: _,
-    }) = &directives[1]
+    }) = &directives[2]
     else {
         panic!("expected a Sound directive second, got {:?}", directives[1]);
     };
@@ -689,7 +700,7 @@ fn explode_accepts_the_plain_explosion_particle_too() {
     assert_eq!(bytes[33], 29);
     bytes[33] = 30;
     let directives = handle(&adapter, play::clientbound::EXPLODE, &bytes);
-    assert_eq!(directives.len(), 2, "one Particles directive, then one Sound directive");
+    assert_eq!(directives.len(), 3, "one Explosion, one Particles, then one Sound directive");
 }
 
 /// A **parameterised** `explosionParticle` must fail loudly rather than
@@ -732,9 +743,7 @@ fn explode_rejects_a_parameterised_explosion_particle() {
     );
 }
 
-/// Player knockback, when present, must still leave the reader aligned to
-/// reach `explosionSound` correctly — even though nothing consumes the
-/// knockback value itself yet.
+/// Player knockback must be surfaced and leave the following fields aligned.
 #[test]
 fn explode_stays_aligned_past_a_present_player_knockback() {
     let adapter = V770Adapter::new();
@@ -752,8 +761,11 @@ fn explode_stays_aligned_past_a_present_player_knockback() {
     bytes.push(0xBC);
     bytes.push(0x05);
     let directives = handle(&adapter, play::clientbound::EXPLODE, &bytes);
-    // `directives[0]` is now the leading `Particles` directive.
-    let Directive::Emit(ClientEvent::Sound { sound, pos, .. }) = &directives[1] else {
+    let Directive::Emit(ClientEvent::Explosion { knockback, .. }) = &directives[0] else {
+        panic!("expected an Explosion directive");
+    };
+    assert_eq!(*knockback, Some(Vec3::new(0.1, 0.2, 0.3)));
+    let Directive::Emit(ClientEvent::Sound { sound, pos, .. }) = &directives[2] else {
         panic!("expected a Sound directive");
     };
     assert_eq!(*sound, key("minecraft:entity.generic.explode"));

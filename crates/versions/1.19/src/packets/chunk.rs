@@ -95,11 +95,13 @@
 //! the exact-length half of it is given up, and only where the wire forces
 //! it.
 
-use lodestone_core::{Nbt, Reader, read_named_nbt};
+use lodestone_core::{Nbt, NbtTag, Reader, read_named_nbt};
+use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_macros::Packet;
+use lodestone_model::Text;
 use lodestone_world::{
-    ChunkColumn, ChunkSection, ColumnLight, LightPatch, LongArrayFraming, PaletteKind,
-    PalettedContainer, Result,
+    BlockEntity, ChunkColumn, ChunkSection, ColumnLight, LightPatch, LongArrayFraming,
+    PaletteKind, PalettedContainer, Result,
 };
 
 use crate::canonical::{CanonicalTable, FallbackTally};
@@ -257,6 +259,8 @@ pub struct ChunkData {
     /// `update_light` packet still exists and still arrives for light-only
     /// changes; this is the copy that rides along with the column.
     pub light: ColumnLight,
+    /// Block entities positioned within this column.
+    pub block_entities: Vec<BlockEntity>,
     /// How many blocks in this column had a wire state id outside this era's
     /// own state range while bridging to a canonical 26.2 state — see
     /// [`CanonicalTable::resolve_or_air`]. Zero for every real-world column;
@@ -338,14 +342,19 @@ impl MapChunk {
 
         // Block entities became a positioned record rather than a bare NBT
         // compound: a packed `(x << 4) | z` nibble pair, a whole-world `y`,
-        // the block-entity type, then the data. Consumed but not retained, to
-        // keep the zero-trailing-bytes gate honest.
+        // the block-entity type, then the data. Canonical type is derived from
+        // the resolved state at that position, matching state-write updates.
         let entries = read_length(r)?;
+        let mut block_entities = Vec::with_capacity(entries.min(4096));
         for _ in 0..entries {
-            let _packed_xz = r.u8()?;
-            let _y = r.i16()?;
+            let packed_xz = r.u8()?;
+            let y = r.i16()?;
             let _kind = r.var_i32()?;
-            let _ = read_named_nbt(r)?;
+            let (_, nbt) = read_named_nbt(r)?;
+            let rel_x = packed_xz >> 4;
+            let rel_z = packed_xz & 0x0f;
+            let state = column.get_block(rel_x as usize, i32::from(y), rel_z as usize);
+            block_entities.push(block_entity_from_state(rel_x, rel_z, y, state, nbt));
         }
 
         // The light payload, in exactly the shape `update_light` carries it.
@@ -358,9 +367,67 @@ impl MapChunk {
             z,
             column,
             light,
+            block_entities,
             fallback,
         })
     }
+}
+
+fn block_entity_from_state(rel_x: u8, rel_z: u8, y: i16, state: u32, nbt: Nbt) -> BlockEntity {
+    let type_id = lodestone_data::block_states::StateId::new(state)
+        .and_then(block_entity_type)
+        .map(|kind| kind.raw())
+        .unwrap_or(0);
+    let nbt = if lodestone_data::block_states::block_name(state)
+        .is_some_and(|name| name.ends_with("_sign"))
+    {
+        legacy_sign_nbt(&nbt)
+    } else {
+        nbt
+    };
+    BlockEntity {
+        rel_x,
+        rel_z,
+        y,
+        type_id,
+        nbt,
+    }
+}
+
+fn legacy_sign_nbt(nbt: &Nbt) -> Nbt {
+    let Nbt::Compound(fields) = nbt else {
+        return nbt.clone();
+    };
+    let field = |key: &str| fields.iter().find(|(name, _)| name == key).map(|(_, value)| value);
+    let messages = ["Text1", "Text2", "Text3", "Text4"]
+        .into_iter()
+        .map(|key| {
+            let json = match field(key) {
+                Some(Nbt::String(value)) => value.as_str(),
+                _ => "",
+            };
+            Nbt::String(Text::from_json(json).to_plain_string())
+        })
+        .collect();
+    let color = match field("Color") {
+        Some(Nbt::String(value)) => value.clone(),
+        _ => "black".to_owned(),
+    };
+    let glowing = matches!(field("GlowingText"), Some(Nbt::Byte(value)) if *value != 0);
+    Nbt::Compound(vec![(
+        "front_text".to_owned(),
+        Nbt::Compound(vec![
+            (
+                "messages".to_owned(),
+                Nbt::List {
+                    element_type: NbtTag::String,
+                    elements: messages,
+                },
+            ),
+            ("color".to_owned(), Nbt::String(color)),
+            ("has_glowing_text".to_owned(), Nbt::Byte(i8::from(glowing))),
+        ]),
+    )])
 }
 
 /// Builds the empty column this shape's sections are written into.

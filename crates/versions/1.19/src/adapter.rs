@@ -872,7 +872,7 @@ impl V762Adapter {
         let pos = ChunkPos::new(data.x, data.z);
         world.load(
             WorldChunkPos::new(data.x, data.z),
-            LoadedChunk::new(data.column, data.light, Heightmaps::new(), Vec::new()),
+            LoadedChunk::new(data.column, data.light, Heightmaps::new(), data.block_entities),
         );
         Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })])
     }
@@ -1055,6 +1055,7 @@ impl V762Adapter {
                 pos: Vec3::new(body.x, body.y, body.z),
                 rotation: Rotation::new(body.yaw, body.pitch),
                 flags,
+                velocity: None,
             }),
         ])
     }

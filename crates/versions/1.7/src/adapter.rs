@@ -732,6 +732,7 @@ impl V5Adapter {
                 // relative-flags byte arrives with protocol 47, and the
                 // trailing byte here is an on-ground boolean instead.
                 flags: TeleportFlags::default(),
+                velocity: None,
             }),
         ])
     }

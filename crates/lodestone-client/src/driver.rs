@@ -1028,6 +1028,7 @@ impl<T: Transport> Driver<T> {
             pos,
             rotation,
             flags,
+            ..
         } = &event
         {
             let predicted_pos = self.read_model.position().unwrap_or_default();

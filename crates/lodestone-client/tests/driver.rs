@@ -379,6 +379,7 @@ fn teleport_event() -> ClientEvent {
             relative_yaw: false,
             relative_pitch: false,
         },
+        velocity: None,
     }
 }
 
