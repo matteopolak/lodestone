@@ -173,6 +173,15 @@ back to the component's custom data. When adding a generated potion row, regener
 and let `PotionId`'s length check follow the regenerated name table; do not add an unchecked
 numeric constructor or replace an unknown raw model value with a built-in default.
 
+`lodestone_data::attribute_types::AttributeId` is the equivalent boundary for the attribute
+registry. The 26.2 metadata codec validates each raw wire varint with `AttributeId::new` before
+calling `attribute_name`; the data lookup is total for the resulting type. Encoding obtains the
+same type from `attribute_id` and writes it back with `AttributeId::raw`. Keep raw integers at
+that codec seam: callers holding a validated id must not reintroduce a fallible data lookup or an
+unchecked constructor. The committed-table suite checks the type's lower and upper controls, and
+the metadata codec's hand-built byte fixtures independently pin the registry values used in both
+directions.
+
 ### `lodestone-data`: the crate these censuses live in
 
 Owns roughly twenty generated 26.2 game-data tables — block states, hardness, collision
