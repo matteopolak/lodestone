@@ -133,6 +133,85 @@ fn projects_the_legacy_window_and_decodes_break_actions() {
 }
 
 #[test]
+fn hosted_block_dig_item_actions_reach_registry_selected_shared_consumers() {
+    let protocol = V5ServerProtocol;
+
+    // Independent fixed-width protocol-5 bodies: status, i32 x, u8 y, i32 z,
+    // then signed face. The item actions ignore the target fields, but their
+    // nonzero values make this a wire-shape test rather than a copy of the
+    // adapter's zero-target convenience frame.
+    for (body, expected) in [
+        (
+            &[3, 0x12, 0x34, 0x56, 0x78, 0x9a, 0x87, 0x65, 0x43, 0x21, 5][..],
+            ServerBound::ItemDropped { whole_stack: true },
+        ),
+        (
+            &[4, 0x87, 0x65, 0x43, 0x21, 0x6b, 0x12, 0x34, 0x56, 0x78, 0xff][..],
+            ServerBound::ItemDropped { whole_stack: false },
+        ),
+        (
+            &[5, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xfd, 0, 0][..],
+            ServerBound::ReleaseUseItem,
+        ),
+    ] {
+        assert_eq!(
+            protocol.decode(State::Play, play::serverbound::BLOCK_DIG, body),
+            expected,
+            "the literal protocol-5 item-action body must reach its shared consumer"
+        );
+    }
+
+    for (body, description) in [
+        (&[3, 0, 0, 0, 0, 0, 0, 0, 0, 0][..], "truncated frames"),
+        (&[4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..], "trailing bytes"),
+        (&[6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][..], "unknown statuses"),
+    ] {
+        assert_eq!(
+            protocol.decode(State::Play, play::serverbound::BLOCK_DIG, body),
+            ServerBound::Ignored,
+            "{description} must not select an item consumer"
+        );
+    }
+    assert_eq!(
+        protocol.decode(
+            State::Login,
+            play::serverbound::BLOCK_DIG,
+            &[3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ),
+        ServerBound::Ignored,
+        "block-dig item actions belong to Play"
+    );
+
+    let adapter = V5Adapter::new();
+    let registry_protocol = lodestone_registry::server_protocol_for_protocol(5)
+        .expect("protocol 5 must resolve to its hosted server protocol");
+    for (action, expected) in [
+        (
+            ClientAction::DropSelectedItemStack,
+            ServerBound::ItemDropped { whole_stack: true },
+        ),
+        (
+            ClientAction::DropSelectedItem,
+            ServerBound::ItemDropped { whole_stack: false },
+        ),
+        (ClientAction::ReleaseUseItem, ServerBound::ReleaseUseItem),
+    ] {
+        let Some((packet_id, payload)) = adapter
+            .encode_action(ConnectionState::Play, &action)
+            .expect("protocol-5 adapter encodes the supported item action")
+        else {
+            panic!("{action:?} must produce a protocol-5 Play packet");
+        };
+        assert_eq!(packet_id, play::serverbound::BLOCK_DIG, "{action:?}");
+        assert_eq!(
+            registry_protocol.decode(State::Play, packet_id, &payload),
+            expected,
+            "the registry-selected host must pass {action:?} to its shared consumer"
+        );
+    }
+}
+
+#[test]
 fn legacy_chat_uses_its_single_string_body_for_chat_commands_and_replies() {
     let protocol = V5ServerProtocol;
     // VarInt length 14, then the complete string body. This is deliberately

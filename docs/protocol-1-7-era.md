@@ -95,6 +95,16 @@ negative, out-of-range, malformed, and trailing-byte forms are ignored. The
 protocol test uses literal final-slot and rejection bodies, then passes the
 real adapter's selection action through the registry-selected hosted decoder.
 
+The same fixed-width `block_dig` body also carries three no-target actions:
+drop the selected stack, drop one selected item, and release an in-progress
+item use. Their statuses `3`, `4`, and `5` lift respectively to
+`ServerBound::ItemDropped` and `ServerBound::ReleaseUseItem`, so the shared
+inventory and use-state consumers handle them rather than leaving their input
+keys as adapter-only islands. Literal nonzero-target bodies anchor the legacy
+shape; truncated, trailing-byte, unknown-status, and wrong-state controls are
+ignored. The test separately routes the three adapter actions through the
+registry-selected protocol-5 host.
+
 The same legacy `chat` frame now drives both hosted text and commands. Its
 only field is a length-prefixed string: ordinary text becomes unsigned
 `ServerBound::Chat` with explicit zero timestamp and salt, while a leading

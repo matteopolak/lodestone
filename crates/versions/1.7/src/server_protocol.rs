@@ -322,14 +322,27 @@ impl ServerProtocol for V5ServerProtocol {
                 else {
                     return ServerBound::Ignored;
                 };
-                let (Some(action), Some(face)) = (block_action(status), block_face(face)) else {
-                    return ServerBound::Ignored;
-                };
-                ServerBound::BlockAction {
-                    action,
-                    pos: BlockPos::new(x, i32::from(y), z),
-                    face,
-                    sequence: 0,
+                match status {
+                    0..=2 => {
+                        let (Some(action), Some(face)) = (block_action(status), block_face(face))
+                        else {
+                            return ServerBound::Ignored;
+                        };
+                        ServerBound::BlockAction {
+                            action,
+                            pos: BlockPos::new(x, i32::from(y), z),
+                            face,
+                            sequence: 0,
+                        }
+                    }
+                    // These no-target actions share the legacy block-dig
+                    // body. The adapter already emits all three statuses;
+                    // preserving them here lets the version-free inventory
+                    // and use-state consumers observe the corresponding keys.
+                    3 => ServerBound::ItemDropped { whole_stack: true },
+                    4 => ServerBound::ItemDropped { whole_stack: false },
+                    5 => ServerBound::ReleaseUseItem,
+                    _ => ServerBound::Ignored,
                 }
             }
             State::Play if packet_id == play::serverbound::CHAT => {
