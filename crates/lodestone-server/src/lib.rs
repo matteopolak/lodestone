@@ -413,6 +413,10 @@ pub mod anvil_export;
 /// deliberately smaller native player locator record.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod anvil_player_storage;
+/// Authorization-gated import of one Anvil entity-sidecar chunk into the
+/// bounded native resident-entity record schema.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod anvil_native_entity_import;
 /// [`live_save::LiveSaveSlot`] — the one piece of the player-save story that
 /// has to compile on every target. Deliberately **not** `cfg`-gated, unlike
 /// `player_data` above: `LiveSaveSlot` is threaded unconditionally through
