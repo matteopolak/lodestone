@@ -63,6 +63,7 @@ pub fn export_entities(
                 Some(entity)
             }
             NativeGeneralRecord::Entity(_)
+            | NativeGeneralRecord::EntityRoster(_)
             | NativeGeneralRecord::WorldProperties(_)
             | NativeGeneralRecord::Player(_) => None,
         })
@@ -124,16 +125,28 @@ fn entity_directory(world: &Path, dimension: Dimension) -> PathBuf {
 }
 
 fn to_anvil_entity(entity: NativeEntityRecord) -> SavedEntity {
+    let (health, item, age, pickup_delay) = match entity.state {
+        Some(crate::world_storage::NativeEntityState::Living { health }) => {
+            (Some(health), None, None, None)
+        }
+        Some(crate::world_storage::NativeEntityState::Item {
+            item,
+            count,
+            age,
+            pickup_delay,
+        }) => (None, Some((item, count)), Some(age), Some(pickup_delay)),
+        None => (None, None, None, None),
+    };
     SavedEntity {
         id: entity.entity_type,
         uuid: uuid::Uuid::from_bytes(entity.uuid),
         pos: entity.position,
-        motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+        motion: entity.motion,
         rotation: entity.rotation,
-        health: None,
-        item: None,
-        age: None,
-        pickup_delay: None,
+        health,
+        item,
+        age,
+        pickup_delay,
         extra: Vec::new(),
     }
 }
@@ -164,6 +177,8 @@ mod tests {
             dimension,
             position: lodestone_model::Vec3::new(1.25, 64.5, 2.75),
             rotation: lodestone_model::Rotation::new(-90.0, 30.0),
+            motion: lodestone_model::Vec3::new(0.125, -0.25, 0.5),
+            state: Some(crate::world_storage::NativeEntityState::Living { health: 7.5 }),
         }
     }
 
@@ -202,7 +217,9 @@ mod tests {
         assert_eq!(exported[0].uuid, uuid::Uuid::from_bytes(overworld.uuid));
         assert_eq!(exported[0].id, overworld.entity_type);
         assert_eq!(exported[0].pos, overworld.position);
+        assert_eq!(exported[0].motion, overworld.motion);
         assert_eq!(exported[0].rotation, overworld.rotation);
+        assert_eq!(exported[0].health, Some(7.5));
         assert!(
             EntityStorage::open_readonly_for_dimension(&destination, Dimension::Nether)
                 .populated_chunks()

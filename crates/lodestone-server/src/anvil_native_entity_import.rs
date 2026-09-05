@@ -3,10 +3,9 @@
 //! The existing [`crate::entity_storage::EntityStorage`] codec owns the
 //! `entities/` region layout and decodes complete [`crate::entity_storage::SavedEntity`]
 //! values. This module is its deliberately narrow native consumer: it imports
-//! one selected overworld chunk's durable identity, type, feet position, and
-//! rotation into [`crate::world_storage::NativeEntityRecord`]. Motion, health,
-//! item state, age, pickup delay, and preserved fields have no native field;
-//! every one is reported before a caller may authorize the write.
+//! one selected overworld chunk's common live state into
+//! [`crate::world_storage::NativeEntityRecord`]. Species-specific preserved
+//! fields remain explicit losses before a caller may authorize the write.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -22,31 +21,6 @@ use lodestone_storage_schema::BuiltinDimension;
 /// One typed Anvil entity value absent from a native resident-entity record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UnsupportedEntityData {
-    /// Velocity has no native resident-entity field.
-    Motion {
-        /// Zero-based position in the selected source chunk's entity list.
-        entity_index: usize,
-    },
-    /// Living health has no native resident-entity field.
-    Health {
-        /// Zero-based position in the selected source chunk's entity list.
-        entity_index: usize,
-    },
-    /// Dropped-item stack state has no native resident-entity field.
-    Item {
-        /// Zero-based position in the selected source chunk's entity list.
-        entity_index: usize,
-    },
-    /// Item lifetime has no native resident-entity field.
-    Age {
-        /// Zero-based position in the selected source chunk's entity list.
-        entity_index: usize,
-    },
-    /// Item pickup delay has no native resident-entity field.
-    PickupDelay {
-        /// Zero-based position in the selected source chunk's entity list.
-        entity_index: usize,
-    },
     /// Fields preserved by the Anvil entity codec but not represented natively.
     PreservedFields {
         /// Zero-based position in the selected source chunk's entity list.
@@ -422,9 +396,8 @@ pub enum Error {
 /// Inventories every source field that native resident-entity records cannot retain.
 ///
 /// The current Anvil codec normalizes a missing motion list to a zero vector,
-/// so motion is reported for every decoded entity. This deliberately
-/// conservative report avoids treating an omitted source field as native
-/// support just because the codec supplied its semantic default.
+/// Preserved source fields remain losses even when every common live field is
+/// representable by the typed record.
 #[must_use]
 pub fn preflight_entities(
     column_x: i32,
@@ -442,29 +415,6 @@ pub fn preflight_entities(
 
     let mut uuids = std::collections::HashSet::new();
     for (entity_index, entity) in entities.iter().enumerate() {
-        report
-            .unsupported
-            .push(UnsupportedEntityData::Motion { entity_index });
-        if entity.health.is_some() {
-            report
-                .unsupported
-                .push(UnsupportedEntityData::Health { entity_index });
-        }
-        if entity.item.is_some() {
-            report
-                .unsupported
-                .push(UnsupportedEntityData::Item { entity_index });
-        }
-        if entity.age.is_some() {
-            report
-                .unsupported
-                .push(UnsupportedEntityData::Age { entity_index });
-        }
-        if entity.pickup_delay.is_some() {
-            report
-                .unsupported
-                .push(UnsupportedEntityData::PickupDelay { entity_index });
-        }
         if !entity.extra.is_empty() {
             report
                 .unsupported
@@ -665,12 +615,29 @@ pub fn import_entity_batch(
 }
 
 fn native_record(entity: &SavedEntity) -> NativeEntityRecord {
+    let state = if entity.id.to_string() == "minecraft:item" {
+        entity.item.as_ref().map(|(item, count)| {
+            crate::world_storage::NativeEntityState::Item {
+                item: item.clone(),
+                count: *count,
+                age: entity.age.unwrap_or(0),
+                pickup_delay: entity.pickup_delay.unwrap_or(0),
+            }
+        })
+    } else {
+        entity
+            .health
+            .filter(|health| health.is_finite() && *health > 0.0)
+            .map(|health| crate::world_storage::NativeEntityState::Living { health })
+    };
     NativeEntityRecord {
         uuid: *entity.uuid.as_bytes(),
         entity_type: entity.id.clone(),
         dimension: BuiltinDimension::Overworld,
         position: entity.pos,
         rotation: entity.rotation,
+        motion: entity.motion,
+        state,
     }
 }
 

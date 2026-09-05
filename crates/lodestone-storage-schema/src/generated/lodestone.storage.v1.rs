@@ -148,7 +148,7 @@ pub struct BiomeSection {
 pub struct GeneralRecord {
     #[prost(message, repeated, tag = "10")]
     pub extensions: ::prost::alloc::vec::Vec<ExtensionValue>,
-    #[prost(oneof = "general_record::Record", tags = "1, 2, 3")]
+    #[prost(oneof = "general_record::Record", tags = "1, 2, 3, 4")]
     pub record: ::core::option::Option<general_record::Record>,
 }
 /// Nested message and enum types in `GeneralRecord`.
@@ -161,6 +161,8 @@ pub mod general_record {
         Player(super::PlayerRecord),
         #[prost(message, tag = "3")]
         Entity(super::EntityRecord),
+        #[prost(message, tag = "4")]
+        EntityRoster(super::EntityRoster),
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -288,6 +290,49 @@ pub struct EntityRecord {
     pub yaw: f32,
     #[prost(float, tag = "13")]
     pub pitch: f32,
+    #[prost(double, tag = "14")]
+    pub motion_x: f64,
+    #[prost(double, tag = "15")]
+    pub motion_y: f64,
+    #[prost(double, tag = "16")]
+    pub motion_z: f64,
+    #[prost(oneof = "entity_record::DurableState", tags = "17, 18")]
+    pub durable_state: ::core::option::Option<entity_record::DurableState>,
+}
+/// Nested message and enum types in `EntityRecord`.
+pub mod entity_record {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum DurableState {
+        #[prost(message, tag = "17")]
+        Living(super::LivingEntityState),
+        #[prost(message, tag = "18")]
+        Item(super::ItemEntityState),
+    }
+}
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct LivingEntityState {
+    #[prost(float, tag = "1")]
+    pub health: f32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ItemEntityState {
+    #[prost(string, tag = "1")]
+    pub item_key: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub count: u32,
+    #[prost(sint32, tag = "3")]
+    pub age: i32,
+    #[prost(sint32, tag = "4")]
+    pub pickup_delay: i32,
+}
+/// The roster is the atomic liveness boundary for a dimension. Entity records
+/// omitted from the latest roster are stale and never restored.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EntityRoster {
+    #[prost(enumeration = "BuiltinDimension", tag = "1")]
+    pub dimension: i32,
+    #[prost(bytes = "vec", repeated, tag = "2")]
+    pub entity_uuids: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
 }
 /// Extension registrations are the one place the format carries names. Core
 /// records retain only local_id, so an extension payload never repeats its

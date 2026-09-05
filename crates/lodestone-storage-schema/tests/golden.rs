@@ -1,7 +1,7 @@
 use lodestone_storage_schema::generated::{general_record, storage_record};
 use lodestone_storage_schema::{
     validate_extension_table, validate_record, validate_record_with_extensions, BiomeSection,
-    BuiltinBiome, BuiltinDimension, EntityRecord, ExtensionTable, FORMAT_VERSION_V1, GameMode,
+    BuiltinBiome, BuiltinDimension, EntityRecord, EntityRoster, ExtensionTable, FORMAT_VERSION_V1, GameMode,
     GeneralRecord, LightData, LightSection, PlayerRecord, PlayerRuntimeState, ScheduledTick,
     ScheduledTickKind, ScheduledTickPriority, StorageRecord,
     ValidationError,
@@ -13,6 +13,36 @@ const WORLD_PROPERTIES_V1: &str = include_str!("fixtures/world-properties-v1.hex
 const EXTENSIONS_V1: &str = include_str!("fixtures/extensions-v1.hex");
 const PLAYER_RUNTIME_V1: &str = include_str!("fixtures/player-runtime-v1.hex");
 const PLAYER_INVENTORY_V1: &str = include_str!("fixtures/player-inventory-v1.hex");
+const ENTITY_ROSTER_V1: &str = include_str!("fixtures/entity-roster-v1.hex");
+
+#[test]
+fn entity_roster_fixture_is_the_atomic_liveness_set() {
+    let expected = fixture(ENTITY_ROSTER_V1);
+    let roster = EntityRoster::decode(expected.as_slice()).unwrap();
+    assert_eq!(roster.dimension, BuiltinDimension::Overworld as i32);
+    assert_eq!(roster.entity_uuids, vec![vec![0x22; 16]]);
+    assert_eq!(roster.encode_to_vec(), expected);
+
+    let mut record = StorageRecord {
+        format_version: FORMAT_VERSION_V1,
+        record: Some(storage_record::Record::General(GeneralRecord {
+            extensions: Vec::new(),
+            record: Some(general_record::Record::EntityRoster(roster.clone())),
+        })),
+    };
+    validate_record(&record).unwrap();
+    let Some(storage_record::Record::General(general)) = &mut record.record else {
+        unreachable!();
+    };
+    let Some(general_record::Record::EntityRoster(roster)) = &mut general.record else {
+        unreachable!();
+    };
+    roster.entity_uuids.push(vec![0x22; 16]);
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::DuplicateEntityRosterUuid)
+    );
+}
 
 #[test]
 fn player_inventory_fixture_is_sparse_and_slot_typed() {
