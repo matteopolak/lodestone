@@ -106,3 +106,8 @@ proptest = "1"
 lodestone-worldgen-core = { path = "../lodestone-worldgen-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Keeps the full captured chunk payload compact on disk. The test restores its
+# unmodified bytes before adapter replay, so this is fixture transport rather
+# than a production dependency.
+base64 = { workspace = true }
+flate2 = { workspace = true }
