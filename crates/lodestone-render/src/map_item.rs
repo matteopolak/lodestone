@@ -73,22 +73,54 @@ pub const MAP_COLOR_BASE: [u32; 62] = [
     5_647_422, 1_356_933, 6_579_300, 14_200_723, 8_365_974,
 ];
 
+/// One packed map-colour byte from the fixed presentation palette.
+///
+/// The high six bits select one of the 62 populated base-colour entries and
+/// the low two bits select its brightness. A byte whose base id is 62 or 63
+/// is outside the populated palette and is rejected before colour arithmetic
+/// runs. Keeping this value typed prevents an arbitrary byte from being passed
+/// to the palette resolver as if it named a real colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PackedMapColour(u8);
+
+impl PackedMapColour {
+    /// Validates a packed map-colour byte against the populated palette.
+    #[must_use]
+    pub const fn new(raw: u8) -> Option<Self> {
+        if (raw >> 2) < MAP_COLOR_BASE.len() as u8 {
+            Some(Self(raw))
+        } else {
+            None
+        }
+    }
+
+    /// The packed byte used by the map grid.
+    #[must_use]
+    pub const fn raw(self) -> u8 {
+        self.0
+    }
+
+    /// The transparent colour used when a malformed wire byte is discarded.
+    pub const NONE: Self = Self(0);
+}
+
 /// Resolve one packed map colour byte to RGBA8.
 ///
-/// Vanilla's map-color packed-id-to-colour resolver: `byte >> 2` is the base id, `byte & 3` the
+/// The packed-id-to-colour resolver: `byte >> 2` is the base id, `byte & 3` the
 /// brightness. An id past the table (vanilla's `null` tail) resolves to `NONE`
-/// exactly as `byIdUnsafe` does, so a malformed byte draws nothing rather than
-/// indexing out of range.
+/// at the grid boundary, so a malformed byte draws nothing rather than
+/// indexing out of range. Callers that already hold a [`PackedMapColour`]
+/// cannot reach that malformed path.
 #[must_use]
-pub fn map_color_rgba(packed: u8) -> [u8; 4] {
-    let id = usize::from(packed >> 2);
-    let base = MAP_COLOR_BASE.get(id).copied().unwrap_or(0);
-    if id == 0 || base == 0 {
+pub fn map_color_rgba(packed: PackedMapColour) -> [u8; 4] {
+    let id = usize::from(packed.raw() >> 2);
+    let base = MAP_COLOR_BASE[id];
+    if id == 0 {
         // Vanilla's none-color-resolution function returns literally `0`: alpha zero, so the
         // unexplored part of a map is a hole and not a black square.
         return [0, 0, 0, 0];
     }
-    let modifier = MAP_BRIGHTNESS[usize::from(packed & 3)];
+    let modifier = MAP_BRIGHTNESS[usize::from(packed.raw() & 3)];
     let scale = |channel: u32| u8::try_from((channel * modifier / 255).min(255)).unwrap_or(255);
     [
         scale((base >> 16) & 0xFF),
@@ -109,7 +141,12 @@ pub fn map_texture_rgba(colors: &[u8]) -> Vec<u8> {
     let pixels = (MAP_SIZE * MAP_SIZE) as usize;
     let mut rgba = Vec::with_capacity(pixels * 4);
     for index in 0..pixels {
-        rgba.extend_from_slice(&map_color_rgba(colors.get(index).copied().unwrap_or(0)));
+        let packed = colors
+            .get(index)
+            .copied()
+            .and_then(PackedMapColour::new)
+            .unwrap_or(PackedMapColour::NONE);
+        rgba.extend_from_slice(&map_color_rgba(packed));
     }
     rgba
 }
@@ -170,9 +207,10 @@ mod tests {
     /// brightness instead of by id.
     #[test]
     fn the_palette_matches_the_jar() {
-        assert_eq!(map_color_rgba(0b0000_0110), [0x7F, 0xB2, 0x38, 255]);
+        let high = PackedMapColour::new(0b0000_0110).expect("grass high is populated");
+        assert_eq!(map_color_rgba(high), [0x7F, 0xB2, 0x38, 255]);
         assert_eq!(
-            map_color_rgba(0b0000_0111),
+            map_color_rgba(PackedMapColour::new(0b0000_0111).expect("grass lowest is populated")),
             [
                 u8::try_from(0x7F * 135 / 255).unwrap(),
                 u8::try_from(0xB2 * 135 / 255).unwrap(),
@@ -182,9 +220,9 @@ mod tests {
         );
         // `LOW` (180) must be darker than `NORMAL` (220) must be darker than
         // `HIGH` (255) — the contour ordering, stated as values not as a sign.
-        let low = map_color_rgba(0b0000_0100)[1];
-        let normal = map_color_rgba(0b0000_0101)[1];
-        let high = map_color_rgba(0b0000_0110)[1];
+        let low = map_color_rgba(PackedMapColour::new(0b0000_0100).unwrap())[1];
+        let normal = map_color_rgba(PackedMapColour::new(0b0000_0101).unwrap())[1];
+        let high = map_color_rgba(PackedMapColour::new(0b0000_0110).unwrap())[1];
         assert_eq!(
             (low, normal, high),
             (
@@ -201,20 +239,36 @@ mod tests {
     #[test]
     fn unexplored_is_transparent() {
         for brightness in 0..4u8 {
-            assert_eq!(map_color_rgba(brightness), [0, 0, 0, 0]);
+            assert_eq!(
+                map_color_rgba(PackedMapColour::new(brightness).unwrap()),
+                [0, 0, 0, 0]
+            );
         }
         let rgba = map_texture_rgba(&[]);
         assert_eq!(rgba.len(), (MAP_SIZE * MAP_SIZE) as usize * 4);
         assert!(rgba.iter().all(|byte| *byte == 0));
     }
 
-    /// An id past vanilla's populated range resolves to `NONE` rather than
-    /// panicking — the array vanilla allocates is 64 long and only 62 entries
-    /// are non-null.
+    /// A base id past the populated range is rejected rather than smuggled
+    /// into the resolver. The texture boundary still fails closed to the
+    /// transparent entry, preserving the old malformed-grid behaviour.
     #[test]
-    fn an_id_past_the_table_is_none() {
-        assert_eq!(map_color_rgba(63 << 2), [0, 0, 0, 0]);
-        assert_eq!(map_color_rgba(u8::MAX), [0, 0, 0, 0]);
+    fn packed_colour_rejects_ids_past_the_table() {
+        assert_eq!(PackedMapColour::new(62 << 2), None);
+        assert_eq!(PackedMapColour::new(u8::MAX), None);
+        assert_eq!(
+            map_texture_rgba(&[62 << 2]),
+            vec![0; (MAP_SIZE * MAP_SIZE) as usize * 4]
+        );
+    }
+
+    /// The boundary keeps the two packed fields together: a real base id with
+    /// the highest brightness remains distinct from the neighbouring base id.
+    #[test]
+    fn packed_colour_accepts_a_populated_high_brightness_value() {
+        let colour = PackedMapColour::new((61 << 2) | 2).expect("last palette entry is valid");
+        assert_eq!(colour.raw(), (61 << 2) | 2);
+        assert_eq!(map_color_rgba(colour), [0x7F, 0xA7, 0x96, 255]);
     }
 
     /// The image is row-major and its `V` grows downward, so grid row 0 lands on
