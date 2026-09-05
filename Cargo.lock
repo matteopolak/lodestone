@@ -3082,6 +3082,7 @@ dependencies = [
 name = "lodestone-particle"
 version = "0.1.0"
 dependencies = [
+ "lodestone-data",
  "lodestone-javarandom",
  "lodestone-physics",
  "lodestone-time",
