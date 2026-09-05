@@ -3842,15 +3842,18 @@ pub struct Route {
     /// state**, plus anything the renderer, HUD or audio reads off the shell's own
     /// `NetUpdate` stream. Such events need no `handles_event` arm at all.
     pub shell: bool,
-    /// The shell's arm is **conditional** — a match guard or a literal field
-    /// pattern — so some values of this variant legitimately fall through to
-    /// `forward`'s catch-all and the `debug_assert!` there must not fire.
+    /// The shell's arm is **conditional or intercepted** — a match guard or a
+    /// literal field pattern in `forward`, or a pre-forward shell consumer — so
+    /// the `debug_assert!` on `forward`'s catch-all must not demand an
+    /// unconditional forwarding arm.
     ///
-    /// Two variants only, and both are a property of `net.rs` as it stands rather
-    /// than of the event: `LevelEvent` (only sub-event `2001` is consumed) and
-    /// `EntitySpawned` (only `lightning_bolt`, to count flashes). If either arm
-    /// ever becomes unconditional, clear this and the assert gets stricter for
-    /// free.
+    /// Three variants currently use this escape hatch, and all are a property
+    /// of `net.rs` as it stands rather than of the event: `LevelEvent` (only
+    /// sub-event `2001` is consumed), `EntitySpawned` (only `lightning_bolt`, to
+    /// count flashes), and `ResourcePackPopped` (the connection loop clears the
+    /// live pack before `forward` sees the event). If a guarded arm becomes
+    /// unconditional, or the pre-forward consumer moves into `forward`, clear
+    /// or adjust this and the assert gets stricter for free.
     pub shell_conditional: bool,
     /// Consumed inside `lodestone-client` itself by something that is **not** one
     /// of the three routers, so [`Route::NOWHERE`] can mean "nothing anywhere"
@@ -4161,6 +4164,11 @@ pub fn route(event: &ClientEvent) -> Route {
         // turns it into `NetUpdate::BookOpened`, and `Sim` holds it until the
         // app projects the selected hand into the book screen.
         | ClientEvent::BookOpened { .. } => SHELL,
+        // `run_session` consumes this before calling `forward`: it clears the
+        // live server pack and any matching prompt. There is no `NetUpdate` to
+        // enqueue, so this is a shell interception rather than an unconditional
+        // `forward` arm; `SHELL_PARTIAL` keeps the catch-all assertion honest.
+        ClientEvent::ResourcePackPopped { .. } => SHELL_PARTIAL,
         // Chat reaches the shell feed *and* the driver's signed-message
         // acknowledgement valve.
         ClientEvent::Chat { .. } => Route {
@@ -4358,7 +4366,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
         | ClientEvent::ResourcePackPushed { .. }
-        | ClientEvent::ResourcePackPopped { .. }
         | ClientEvent::CustomPayload { .. }
         | ClientEvent::ServerDataReceived { .. }
         | ClientEvent::PongReceived { .. }
@@ -4581,6 +4588,23 @@ mod route_tests {
         let r = route(&event);
         assert!(!r.ingest && !r.session && !r.shell);
         assert!(r.client, "the driver answers resource-pack pushes automatically");
+        assert!(!r.is_island());
+    }
+
+    /// The shell's connection loop clears a pushed pack and its pending prompt
+    /// before the event reaches generic `forward`. The route must record that
+    /// existing consumer without requiring a `NetUpdate` arm for an event that
+    /// has already been handled.
+    #[test]
+    fn resource_pack_pop_reaches_the_shell_interceptor() {
+        let event = ClientEvent::ResourcePackPopped { id: Some(Uuid::nil()) };
+        let r = route(&event);
+        assert!(r.shell, "the connection loop clears popped server packs");
+        assert!(
+            r.shell_conditional,
+            "the pop is consumed before generic forwarding"
+        );
+        assert!(!r.must_forward());
         assert!(!r.is_island());
     }
 
