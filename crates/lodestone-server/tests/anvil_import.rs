@@ -6,10 +6,11 @@
 
 use std::path::PathBuf;
 
+use lodestone_core::{Nbt, Reader, read_named_nbt};
 use lodestone_anvil::import_preflight::{ImportAuthorization, LossDecision, PreflightReport};
 use lodestone_anvil::{level_dat, world_gen_settings};
 use lodestone_server::anvil_import::{
-    Error, WORLD_PROPERTIES_KEY, import_world_properties,
+    Error, WORLD_PROPERTIES_KEY, import_chunk_bytes, import_world_properties, preflight_chunk,
 };
 use lodestone_server::world_storage::{WorldStorage, WorldStorageBackend};
 use lodestone_storage::NativeStore;
@@ -20,6 +21,8 @@ const LEVEL_DAT_FIXTURE: &[u8] =
 const WORLD_GEN_FIXTURE: &[u8] = include_bytes!(
     "../../lodestone-anvil/tests/support/world_gen_settings_26_2_vanilla.dat"
 );
+const CHUNK_FIXTURE: &[u8] =
+    include_bytes!("support/vanilla_26_2_block_entity_chunk.nbt");
 
 fn scratch(name: &str) -> PathBuf {
     let unique = std::time::SystemTime::now()
@@ -50,6 +53,18 @@ fn source() -> (
     let authorization = report.decide(LossDecision::ProceedAndDiscardUnsupported);
     assert!(authorization.permits_conversion());
     (level, settings, authorization)
+}
+
+fn chunk_source() -> (Nbt, ImportAuthorization, PreflightReport) {
+    let mut reader = Reader::new(CHUNK_FIXTURE);
+    let (name, chunk) = read_named_nbt(&mut reader).expect("checked-in chunk fixture decodes");
+    assert!(name.is_empty(), "chunk fixture uses an empty named-NBT root");
+    reader.ensure_empty().expect("chunk fixture has no trailing bytes");
+    let report = preflight_chunk("minecraft:overworld", 6, 12, &chunk);
+    assert!(report.blockers().is_empty(), "fixture must be importable");
+    let authorization = report.decide(LossDecision::ProceedAndDiscardUnsupported);
+    assert!(authorization.permits_conversion());
+    (chunk, authorization, report)
 }
 
 #[test]
@@ -159,4 +174,128 @@ fn anvil_backend_is_not_redirected_into_native_conversion() {
             lodestone_server::world_storage::Error::AnvilDoesNotAcceptTypedRecords
         ))
     ));
+}
+
+#[test]
+fn checked_in_anvil_chunk_maps_supported_terrain_and_reports_dropped_payloads() {
+    let (chunk, authorization, expected_report) = chunk_source();
+    let directory = scratch("chunk");
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: directory.clone(),
+    })
+    .expect("open native backend");
+
+    let result = import_chunk_bytes(
+        &storage,
+        "minecraft:overworld",
+        6,
+        12,
+        CHUNK_FIXTURE,
+        -64,
+        384,
+        Some(authorization),
+    )
+    .expect("import one authorized chunk");
+    assert_eq!(result.records_written, 1);
+    assert_eq!(result.report, expected_report);
+    let dropped: Vec<&str> = result
+        .report
+        .unsupported()
+        .iter()
+        .map(|item| item.location.path.as_str())
+        .collect();
+    for path in [
+        "block_entities",
+        "block_ticks",
+        "fluid_ticks",
+        "structures",
+        "entities",
+        "PostProcessing",
+    ] {
+        assert!(
+            dropped.contains(&path),
+            "unsupported source field {path:?} must be reported before it is dropped"
+        );
+    }
+    drop(storage);
+
+    let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative { directory: directory.clone() })
+        .expect("reopen native backend");
+    let loaded = reopened
+        .load_chunk(6, 12, -64, 384)
+        .expect("load imported chunk")
+        .expect("imported chunk exists");
+    assert_eq!(loaded.column.block_state(1, -59, 7), "minecraft:blast_furnace");
+    assert!(
+        loaded.column.motion_blocking().is_some(),
+        "MOTION_BLOCKING from the checked-in chunk must reach the native record"
+    );
+    assert_eq!(loaded.light.light_section_count(), 26);
+    assert!(
+        (0..loaded.light.light_section_count())
+            .all(|section| matches!(loaded.light.sky(section), lodestone_world::LightData::Missing)
+                && matches!(loaded.light.block(section), lodestone_world::LightData::Missing)),
+        "the fixture's absent light payload must remain explicit Missing light"
+    );
+    assert!(
+        loaded.column.block_entities().is_empty(),
+        "unsupported block-entity payload is reported and omitted from this bounded record"
+    );
+
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn chunk_authorization_and_anvil_backend_are_fail_closed() {
+    let (_chunk, authorization, _report) = chunk_source();
+    let directory = scratch("chunk-authorization");
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: directory.clone(),
+    })
+    .expect("open native backend");
+    assert!(matches!(
+        import_chunk_bytes(
+            &storage,
+            "minecraft:overworld",
+            6,
+            12,
+            CHUNK_FIXTURE,
+            -64,
+            384,
+            None,
+        ),
+        Err(Error::MissingAuthorization)
+    ));
+    assert!(matches!(
+        import_chunk_bytes(
+            &storage,
+            "minecraft:overworld",
+            6,
+            12,
+            CHUNK_FIXTURE,
+            -64,
+            384,
+            Some(ImportAuthorization::Lossless),
+        ),
+        Err(Error::AuthorizationMismatch { .. })
+    ));
+    drop(storage);
+
+    let storage = WorldStorage::open(WorldStorageBackend::Anvil).expect("open Anvil backend");
+    assert!(matches!(
+        import_chunk_bytes(
+            &storage,
+            "minecraft:overworld",
+            6,
+            12,
+            CHUNK_FIXTURE,
+            -64,
+            384,
+            Some(authorization),
+        ),
+        Err(Error::Storage(
+            lodestone_server::world_storage::Error::AnvilDoesNotAcceptTypedRecords
+        ))
+    ));
+    let _ = std::fs::remove_dir_all(directory);
 }
