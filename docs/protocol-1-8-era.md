@@ -47,6 +47,14 @@ the placement echo, so it must remain ordinary movement rather than be
 invented as a separate acknowledgement. The in-memory movement control crosses
 into chunk `(1, 0)` and observes that the shared view tracker streams it.
 
+The protocol-47 `block_dig` decoder also preserves the non-breaking actions
+that share its legacy body: statuses `3` and `4` drop the whole selected stack
+or one selected item, and status `5` releases an item use. They lift to the
+server's inventory-drop and release-use consumers instead of becoming ignored
+after the adapter has successfully encoded the key input. Unlike later legacy
+families, protocol 47 stops there: its pre-off-hand wire vocabulary has no
+status-`6` hand swap.
+
 ## How to change it
 
 Keep protocol-47 section encoding local to this family. Its raw state-word layout differs from the

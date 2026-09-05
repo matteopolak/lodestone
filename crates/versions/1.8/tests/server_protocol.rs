@@ -3,9 +3,11 @@
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, VersionAdapter,
+};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
-use lodestone_v1_8::V47ServerProtocol;
+use lodestone_v1_8::{V47Adapter, V47ServerProtocol};
 use lodestone_v1_8::packet_ids::{handshaking, play};
 use lodestone_v1_8::packets::handshake::SetProtocol;
 
@@ -118,6 +120,76 @@ fn projects_only_the_legacy_vertical_window_and_decodes_break_actions() {
             face: BlockFace::Up,
             sequence: 0,
         }
+    );
+}
+
+#[test]
+fn block_dig_non_breaking_statuses_reach_their_server_consumers() {
+    let protocol = V47ServerProtocol;
+    let adapter = V47Adapter::new();
+    // Independent literal protocol-47 bodies: the status VarInt, the legacy
+    // packed zero position, then the signed-byte direction. These actions
+    // ignore the position/direction, but those bytes prove this decoder is
+    // consuming the protocol-47 block-dig shape rather than a later action
+    // packet.
+    let body = |status| {
+        let mut payload = vec![status];
+        payload.extend_from_slice(&[0; 8]);
+        payload.push(0);
+        payload
+    };
+
+    for (status, expected) in [
+        (3, ServerBound::ItemDropped { whole_stack: true }),
+        (4, ServerBound::ItemDropped { whole_stack: false }),
+        (5, ServerBound::ReleaseUseItem),
+    ] {
+        assert_eq!(
+            protocol.decode(State::Play, play::serverbound::BLOCK_DIG, &body(status)),
+            expected,
+            "status {status} must survive protocol-47 decoding"
+        );
+    }
+
+    // The adapter and server own separate ends of the production hand-off.
+    // Keep the literals above as the wire-shape oracle, then prove each input
+    // action reaches the version-free variant which the integrated server
+    // consumes for inventory drop and item-use cancellation/release.
+    for (action, expected) in [
+        (
+            ClientAction::DropSelectedItemStack,
+            ServerBound::ItemDropped { whole_stack: true },
+        ),
+        (
+            ClientAction::DropSelectedItem,
+            ServerBound::ItemDropped { whole_stack: false },
+        ),
+        (ClientAction::ReleaseUseItem, ServerBound::ReleaseUseItem),
+    ] {
+        let Some((packet_id, payload)) = adapter
+            .encode_action(ConnectionState::Play, &action)
+            .expect("protocol-47 adapter encodes the supported action")
+        else {
+            panic!("{action:?} must produce a protocol-47 packet");
+        };
+        assert_eq!(packet_id, play::serverbound::BLOCK_DIG, "{action:?}");
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &payload),
+            expected,
+            "{action:?} must reach its server consumer variant"
+        );
+    }
+
+    // Controls distinguish ordinary mining from the target actions and prove
+    // an adjacent unsupported status cannot select a neighbouring consumer.
+    assert!(matches!(
+        protocol.decode(State::Play, play::serverbound::BLOCK_DIG, &body(2)),
+        ServerBound::BlockAction { .. }
+    ));
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::BLOCK_DIG, &body(6)),
+        ServerBound::Ignored,
+        "protocol 47 has no off-hand swap status"
     );
 }
 
