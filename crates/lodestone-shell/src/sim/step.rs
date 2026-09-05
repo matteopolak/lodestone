@@ -1073,6 +1073,17 @@ fn submit_wasm_menu_clicks(
                     }
                 }
             }
+            lodestone_wasm_host::InventoryClickIntent::Throw { slot, mode } => {
+                let slot = usize::from(slot);
+                if slot >= live_menu().slot_count() {
+                    tracing::warn!(slot, "refused a WASM inventory throw outside the active menu");
+                    continue;
+                }
+                match mode {
+                    lodestone_wasm_host::InventoryThrowMode::One => Click::drop_one(slot),
+                    lodestone_wasm_host::InventoryThrowMode::Stack => Click::drop_stack(slot),
+                }
+            }
             lodestone_wasm_host::InventoryClickIntent::DropCursor => {
                 if live_menu().carried().is_none() {
                     tracing::warn!("refused a WASM cursor drop without a carried stack");
@@ -1095,7 +1106,7 @@ mod wasm_menu_click_tests {
     };
     use lodestone_model::{AdapterError, ClientEvent, ContainerClickType, ItemStack};
     use lodestone_net::{Connection, memory_pair};
-    use lodestone_wasm_host::{InventoryClickIntent, InventoryClickMode};
+    use lodestone_wasm_host::{InventoryClickIntent, InventoryClickMode, InventoryThrowMode};
     use lodestone_world::WorldSink;
     use uuid::Uuid;
 
@@ -1104,6 +1115,7 @@ mod wasm_menu_click_tests {
     const CONTAINER_CLICK_PACKET: i32 = 0x31;
     const BARRIER_PACKET: i32 = 0x32;
     const SEED_CURSOR_PACKET: i32 = 0x33;
+    const SEED_THROW_SLOT_PACKET: i32 = 0x34;
 
     /// A protocol-free encoder that makes the client action queue observable.
     #[derive(Debug)]
@@ -1139,17 +1151,26 @@ mod wasm_menu_click_tests {
             packet_id: i32,
             _payload: &[u8],
         ) -> Result<Vec<Directive>, AdapterError> {
-            if packet_id != SEED_CURSOR_PACKET {
+            if packet_id != SEED_CURSOR_PACKET && packet_id != SEED_THROW_SLOT_PACKET {
                 return Ok(Vec::new());
+            }
+            let mut items = vec![None; 46];
+            if packet_id == SEED_THROW_SLOT_PACKET {
+                items[36] = Some(ItemStack::new(
+                    "minecraft:stone".parse().expect("constant item key"),
+                    4,
+                ));
             }
             Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
                 window_id: 0,
                 state_id: 7,
-                items: vec![None; 46],
-                carried_item: Some(ItemStack::new(
-                    "minecraft:stone".parse().expect("constant item key"),
-                    4,
-                )),
+                items,
+                carried_item: (packet_id == SEED_CURSOR_PACKET).then(|| {
+                    ItemStack::new(
+                        "minecraft:stone".parse().expect("constant item key"),
+                        4,
+                    )
+                }),
             })])
         }
 
@@ -1384,6 +1405,104 @@ mod wasm_menu_click_tests {
         assert!(
             handle.player_menu().carried().is_none(),
             "the live predictor must clear the cursor before it rejects the second request"
+        );
+        drop(events);
+    }
+
+    /// A slot throw selects the live menu's `Throw` mode and preserves the
+    /// explicit one-item/whole-stack button. The invalid copied slot is
+    /// rejected before it can pass the queue barrier.
+    #[tokio::test]
+    async fn bounded_slot_throws_reach_the_live_predictor_and_invalid_slots_do_not() {
+        let (client_io, server_io) = memory_pair();
+        let (handle, mut events) = ClientBuilder::new(
+            ServerAddress {
+                host: "memory".into(),
+                port: 0,
+            },
+            LoginProfile {
+                username: "PluginTest".into(),
+                uuid: Uuid::nil(),
+            },
+            Box::new(ClickAdapter {
+                expected: ContainerClickType::Throw,
+            }),
+        )
+        .connect_with(client_io);
+        let mut peer = Connection::new(server_io);
+        peer.write_packet(SEED_THROW_SLOT_PACKET, &[])
+            .await
+            .expect("the wire seed must reach the client read model");
+        events
+            .recv()
+            .await
+            .expect("the slot seed must be folded before the throw");
+
+        submit_wasm_menu_clicks(
+            &handle,
+            vec![
+                InventoryClickIntent::Throw {
+                    slot: 36,
+                    mode: InventoryThrowMode::One,
+                },
+                InventoryClickIntent::Throw {
+                    slot: 36,
+                    mode: InventoryThrowMode::Stack,
+                },
+                InventoryClickIntent::Throw {
+                    slot: u16::MAX,
+                    mode: InventoryThrowMode::One,
+                },
+            ],
+        );
+        handle
+            .send_action(ClientAction::KeepAliveResponse { id: 80 })
+            .expect("the barrier action must enter the same live queue");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the one-item throw must reach the client action queue")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the one-item throw");
+        assert_eq!(first.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            first.1,
+            [0_i32, 7, 36, 0]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the one-item form must choose Throw button 0 with the live state id"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the stack throw must reach the client action queue")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the stack throw");
+        assert_eq!(second.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            second.1,
+            [0_i32, 7, 36, 1]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the stack form must choose Throw button 1 after the predictor advances state"
+        );
+
+        let barrier = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the barrier must follow the two valid slot throws")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the barrier");
+        assert_eq!(
+            barrier,
+            (BARRIER_PACKET, 80_i64.to_be_bytes().to_vec()),
+            "the invalid slot must not reach ClientHandle::menu_click"
+        );
+        assert_eq!(
+            handle.player_menu().slot_item(36).map(|stack| stack.count()),
+            None,
+            "the live predictor must consume the seeded slot before the barrier"
         );
         drop(events);
     }

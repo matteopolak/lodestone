@@ -75,6 +75,9 @@ pub enum InventoryClickIntent {
     /// A slot-addressed operation, kept as copied primitive data until the
     /// shell validates it against the active live menu.
     Slot { slot: u16, mode: InventoryClickMode },
+    /// Drop one item or the complete stack from a live menu slot. The shell
+    /// validates the slot and owns the resulting predictor side effects.
+    Throw { slot: u16, mode: InventoryThrowMode },
     /// Drop the complete carried stack outside the menu. The guest cannot name
     /// a slot, inspect the cursor, or manufacture the outside-click packet.
     DropCursor,
@@ -89,6 +92,15 @@ pub enum InventoryClickMode {
     QuickMove,
     /// A number-key exchange with one of the nine hotbar positions.
     HotbarSwap(u8),
+}
+
+/// The two explicit slot-drop forms supported by the live menu predictor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryThrowMode {
+    /// Drop one item from the addressed slot.
+    One,
+    /// Drop every item in the addressed slot.
+    Stack,
 }
 
 /// The two buttons supported by [`InventoryClickMode::Pickup`].
@@ -370,6 +382,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::InventoryClick(_) => Capability::ActInventoryClick,
         Action::InventoryQuickMove(_) => Capability::ActInventoryQuickMove,
         Action::InventoryHotbarSwap(_) => Capability::ActInventoryHotbarSwap,
+        Action::InventoryThrow(_) => Capability::ActInventoryThrow,
         Action::InventoryDropCursor => Capability::ActInventoryDropCursor,
     }
 }
@@ -459,6 +472,15 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
                 mode: InventoryClickMode::HotbarSwap(swap.hotbar),
             }))
         }
+        Action::InventoryThrow(request) => LoweredAction::Intent(IntentAction::InventoryClick(
+            InventoryClickIntent::Throw {
+                slot: request.slot,
+                mode: match request.mode {
+                    crate::host::InventoryThrowMode::One => InventoryThrowMode::One,
+                    crate::host::InventoryThrowMode::Stack => InventoryThrowMode::Stack,
+                },
+            },
+        )),
         Action::InventoryDropCursor => {
             LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent::DropCursor))
         }
@@ -724,6 +746,36 @@ mod tests {
         );
     }
 
+    /// Slot throws carry only a bounded slot and an explicit one/stack mode;
+    /// pickup/place authority must not widen into an item-removal capability.
+    #[test]
+    fn inventory_throw_lowers_onto_the_shell_owned_menu_predictor() {
+        let request = crate::host::InventoryThrow {
+            slot: 36,
+            mode: crate::host::InventoryThrowMode::Stack,
+        };
+        assert_eq!(
+            lower_action(
+                Action::InventoryThrow(request),
+                &CapabilitySet::from_iter([Capability::ActInventoryThrow]),
+            ),
+            Ok(LoweredAction::Intent(IntentAction::InventoryClick(
+                InventoryClickIntent::Throw {
+                    slot: 36,
+                    mode: InventoryThrowMode::Stack,
+                },
+            )))
+        );
+        assert_eq!(
+            lower_action(
+                Action::InventoryThrow(request),
+                &CapabilitySet::from_iter([Capability::ActInventoryClick]),
+            ),
+            Err(Capability::ActInventoryThrow),
+            "pickup/place authority must not also grant slot throws"
+        );
+    }
+
     /// Look ownership crosses as a copied intent, not a fabricated movement
     /// packet. The existing local-player systems own clamping, physics, and send.
     #[test]
@@ -927,6 +979,16 @@ mod tests {
             ),
             Err(Capability::ActInventoryHotbarSwap)
         );
+        assert_eq!(
+            lower_action(
+                Action::InventoryThrow(crate::host::InventoryThrow {
+                    slot: 6,
+                    mode: crate::host::InventoryThrowMode::One,
+                }),
+                &CapabilitySet::empty(),
+            ),
+            Err(Capability::ActInventoryThrow)
+        );
     }
 
     /// Every action variant is gated by something. Trivial-looking, and it is the
@@ -954,6 +1016,10 @@ mod tests {
             Action::InventoryHotbarSwap(crate::host::InventoryHotbarSwap {
                 slot: 0,
                 hotbar: 0,
+            }),
+            Action::InventoryThrow(crate::host::InventoryThrow {
+                slot: 0,
+                mode: crate::host::InventoryThrowMode::Stack,
             }),
             Action::InventoryDropCursor,
         ] {
