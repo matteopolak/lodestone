@@ -270,23 +270,66 @@ impl PaperPluginLifecycleStatusSet {
     }
 }
 
-/// The server-owned API prerequisite for constructing a loaded plugin entry.
+/// A concrete Java-facing capability supplied by the hosting server.
+///
+/// This is deliberately an input, not a claim that a Bukkit `Server` object
+/// exists. `NativeBlockStateRead` means the host has installed the one native
+/// `blockStateId` declaration in every isolated loader and will service its
+/// requests from live server state. It is useful to retain as an exact, real
+/// Java-facing capability, but cannot safely construct a plugin: construction
+/// also needs loader-owned plugin metadata and a much broader server facade.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperServerFacadeInput {
+    /// No Java-facing server capability is available to a retained loader.
+    Unavailable,
+    /// The isolated native shim can read one loaded block-state ID.
+    NativeBlockStateRead,
+}
+
+impl PaperServerFacadeInput {
+    /// The read-only block-state capability served by the dedicated host.
+    pub const fn native_block_state_read() -> Self {
+        Self::NativeBlockStateRead
+    }
+
+    fn state(self) -> PaperServerFacadeState {
+        match self {
+            Self::Unavailable => PaperServerFacadeState::Unavailable,
+            Self::NativeBlockStateRead => PaperServerFacadeState::NativeBlockStateRead,
+        }
+    }
+
+    fn construction_blocker(self) -> PaperPluginConstructionBlocker {
+        match self {
+            Self::Unavailable => PaperPluginConstructionBlocker::ServerFacadeUnavailable,
+            Self::NativeBlockStateRead => {
+                PaperPluginConstructionBlocker::PluginConstructionUnsupported
+            }
+        }
+    }
+}
+
+/// The server-owned API prerequisite state for constructing a loaded plugin entry.
 ///
 /// Loading a class proves only that its private loader can resolve it. Before
 /// construction, the entry also needs a server facade which can truthfully
-/// answer the API calls its constructor may make. The bridge has not installed
-/// one, so `Unavailable` is a deliberate product state rather than permission
-/// to guess at a broad compatibility surface.
+/// answer the API calls its constructor may make. A narrow native capability is
+/// observable here without being mistaken for that complete facade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaperServerFacadeState {
     /// No compatible server facade has been supplied to the retained loader.
     Unavailable,
+    /// The private loader has only the native read-only block-state seam.
+    NativeBlockStateRead,
 }
 
 impl fmt::Display for PaperServerFacadeState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unavailable => formatter.write_str("no compatible server facade is installed"),
+            Self::NativeBlockStateRead => {
+                formatter.write_str("the isolated native block-state read seam is installed")
+            }
         }
     }
 }
@@ -296,6 +339,8 @@ impl fmt::Display for PaperServerFacadeState {
 pub enum PaperPluginConstructionBlocker {
     /// The entry loaded, but its loader has no compatible server facade.
     ServerFacadeUnavailable,
+    /// A narrow Java-facing capability exists, but cannot construct a plugin.
+    PluginConstructionUnsupported,
     /// The isolated entry load failed, so there is no retained class to construct.
     EntryLoadFailed,
 }
@@ -306,6 +351,9 @@ impl fmt::Display for PaperPluginConstructionBlocker {
             Self::ServerFacadeUnavailable => {
                 formatter.write_str("no compatible server facade is installed")
             }
+            Self::PluginConstructionUnsupported => formatter.write_str(
+                "the installed server capability cannot supply plugin construction semantics",
+            ),
             Self::EntryLoadFailed => formatter.write_str("the isolated plugin entry did not load"),
         }
     }
@@ -337,9 +385,10 @@ impl PaperPluginConstructionStatus {
 /// The construction precondition snapshot paired with retained lifecycle loaders.
 ///
 /// This records every descriptor, including failed loads, so an operator can
-/// distinguish a bad entry jar from the universal missing-facade gate. No
-/// variant currently permits construction: adding one requires a real,
-/// server-owned facade attached to the same retained loader as its entry class.
+/// distinguish a bad entry jar, no facade, and a deliberately narrow facade
+/// input. No variant currently permits construction: adding one requires a
+/// real server-owned facade attached to the same retained loader as its entry
+/// class.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaperPluginConstructionReadiness {
     facade: PaperServerFacadeState,
@@ -348,14 +397,17 @@ pub struct PaperPluginConstructionReadiness {
 }
 
 impl PaperPluginConstructionReadiness {
-    fn from_lifecycle(status: &PaperPluginLifecycleStatusSet) -> Self {
+    fn from_lifecycle(
+        status: &PaperPluginLifecycleStatusSet,
+        facade_input: PaperServerFacadeInput,
+    ) -> Self {
         Self {
-            facade: PaperServerFacadeState::Unavailable,
+            facade: facade_input.state(),
             lifecycle: status.clone(),
             plugins: status.plugins().iter().map(|plugin| PaperPluginConstructionStatus {
                 descriptor: plugin.descriptor().clone(),
                 blocker: if plugin.phase() == PaperPluginLifecyclePhase::Loaded {
-                    PaperPluginConstructionBlocker::ServerFacadeUnavailable
+                    facade_input.construction_blocker()
                 } else {
                     PaperPluginConstructionBlocker::EntryLoadFailed
                 },
@@ -391,6 +443,7 @@ pub struct PaperLifecycleLoad {
     bootstrap_loader: Global<JObject<'static>>,
     plugins: Vec<PaperLoadedPlugin>,
     status: PaperPluginLifecycleStatusSet,
+    native_shim: bool,
 }
 
 /// Retained lifecycle classes plus the construction prerequisites that govern them.
@@ -473,14 +526,20 @@ impl PaperLifecycleLoad {
         &self.plugins
     }
 
-    /// Retains this lifecycle load with the current explicit construction gate.
+    /// Retains this lifecycle load with a server-owned Java-facing input.
     ///
     /// This consumes the raw lifecycle owner so later code cannot separate a
-    /// construction description from the loader and class it describes. It
-    /// does not invoke any Java constructor or callback.
-    pub fn into_construction_plan(self) -> PaperPluginConstructionPlan {
-        let readiness = PaperPluginConstructionReadiness::from_lifecycle(&self.status);
-        PaperPluginConstructionPlan { lifecycle: self, readiness }
+    /// construction description from the loader and class it describes. The
+    /// native read input is accepted only when that same lifecycle installed
+    /// its declaration in every private loader. It does not invoke any Java
+    /// constructor or callback.
+    pub fn into_construction_plan(
+        self,
+        facade_input: PaperServerFacadeInput,
+    ) -> Result<PaperPluginConstructionPlan, PaperBootstrapError> {
+        validate_construction_facade(self.native_shim, facade_input)?;
+        let readiness = PaperPluginConstructionReadiness::from_lifecycle(&self.status, facade_input);
+        Ok(PaperPluginConstructionPlan { lifecycle: self, readiness })
     }
 }
 
@@ -632,7 +691,12 @@ impl PaperBootstrapPlan {
                 )),
             }
         }
-        Ok(PaperLifecycleLoad { bootstrap_loader, plugins, status })
+        Ok(PaperLifecycleLoad {
+            bootstrap_loader,
+            plugins,
+            status,
+            native_shim: self.native_shim,
+        })
     }
 
     #[cfg(feature = "jvm")]
@@ -663,6 +727,22 @@ impl PaperBootstrapPlan {
             return Err(PaperBootstrapError::native_surface(error));
         }
         loaded.map_err(|error| PaperBootstrapError::new(error.to_string()))
+    }
+}
+
+fn validate_construction_facade(
+    native_shim: bool,
+    facade_input: PaperServerFacadeInput,
+) -> Result<(), PaperBootstrapError> {
+    match (native_shim, facade_input) {
+        (false, PaperServerFacadeInput::Unavailable)
+        | (true, PaperServerFacadeInput::NativeBlockStateRead) => Ok(()),
+        (false, PaperServerFacadeInput::NativeBlockStateRead) => Err(PaperBootstrapError::new(
+            "the native block-state facade input requires an isolated native shim in every loader",
+        )),
+        (true, PaperServerFacadeInput::Unavailable) => Err(PaperBootstrapError::new(
+            "an isolated native shim was installed without the server-owned block-state facade input",
+        )),
     }
 }
 
@@ -1394,7 +1474,10 @@ mod tests {
         })
         .expect("the bootstrap and first entry load");
 
-        let readiness = PaperPluginConstructionReadiness::from_lifecycle(&status);
+        let readiness = PaperPluginConstructionReadiness::from_lifecycle(
+            &status,
+            PaperServerFacadeInput::Unavailable,
+        );
         assert_eq!(readiness.facade(), PaperServerFacadeState::Unavailable);
         assert_eq!(readiness.plugins().len(), 2);
         assert_eq!(readiness.plugins()[0].descriptor().name(), "Failed");
@@ -1413,6 +1496,47 @@ mod tests {
             PaperPluginConstructionBlocker::ServerFacadeUnavailable.to_string(),
             "no compatible server facade is installed",
         );
+    }
+
+    #[test]
+    fn native_block_state_facade_is_distinct_from_a_constructible_server() {
+        let fixture = Fixture::new();
+        fixture.paper_jar();
+        fixture.plugin_jar("ready.jar", PAPER_DESCRIPTOR, valid_descriptor("Ready", "a.Main"));
+        let plan = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
+            .discover()
+            .expect("discover construction fixture");
+        let status = plan
+            .load_lifecycle_entries(|_, _| Ok::<_, &'static str>(()))
+            .expect("load fixture entries");
+
+        let readiness = PaperPluginConstructionReadiness::from_lifecycle(
+            &status,
+            PaperServerFacadeInput::native_block_state_read(),
+        );
+        assert_eq!(readiness.facade(), PaperServerFacadeState::NativeBlockStateRead);
+        assert_eq!(
+            readiness.plugins()[0].blocker(),
+            PaperPluginConstructionBlocker::PluginConstructionUnsupported,
+        );
+        assert_eq!(
+            readiness.plugins()[0].blocker().to_string(),
+            "the installed server capability cannot supply plugin construction semantics",
+        );
+    }
+
+    #[test]
+    fn native_block_state_facade_requires_the_lifecycle_that_installs_it() {
+        let missing_shim = validate_construction_facade(
+            false,
+            PaperServerFacadeInput::native_block_state_read(),
+        )
+        .expect_err("a facade input cannot claim an uninstalled Java declaration");
+        assert!(missing_shim.to_string().contains("isolated native shim"));
+
+        let missing_input = validate_construction_facade(true, PaperServerFacadeInput::Unavailable)
+            .expect_err("a registered native declaration requires its server-owned input");
+        assert!(missing_input.to_string().contains("server-owned block-state facade input"));
     }
 
     #[test]

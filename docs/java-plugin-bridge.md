@@ -686,12 +686,16 @@ a JVM, then loads the Paper bootstrap followed by each plugin entry class throug
 isolated loaders before the adapter can report ready. The dedicated adapter owns the resulting
 worker-lifetime lifecycle state and snapshots each descriptor's Load status before readiness. Each
 plugin loader sees shim paths, the server jar, and only its own jar. The worker also snapshots each
-descriptor's construction prerequisite: the only facade state is explicitly unavailable. These are
-non-initializing class loads: the host does **not** initialize Paper, construct or enable plugins,
-dispatch Paper events, or promise plugin compatibility. Successfully loaded entries are retained but
-blocked from construction rather than receiving a fake partial API. A failed plugin entry is logged
-with its descriptor and stays disabled; a failed Paper bootstrap remains terminal for the configured
-run.
+descriptor's construction prerequisite. Without `LODESTONE_PAPER_SHIM_PATH`, no facade is available.
+With it, the dedicated host supplies exactly one Java-facing, loader-local capability: the registered
+native block-state read. That capability is served from `IntegratedServer::resident_block_state_id`
+and is installed into each private loader before its entry class loads. It is not a Bukkit `Server`,
+a plugin loader, or a construction permit: loaded entries remain blocked from construction with a
+named insufficient-facade result. These are non-initializing class loads: the host does **not**
+initialize Paper, construct or enable plugins, dispatch Paper events, or promise plugin
+compatibility. Successfully loaded entries are retained but blocked from construction rather than
+receiving a fake partial API. A failed plugin entry is logged with its descriptor and stays disabled;
+a failed Paper bootstrap remains terminal for the configured run.
 A malformed Paper configuration or bootstrap Load failure saves the world before the configured run
 can continue. A plugin-entry Load failure is instead retained as disabled descriptor status, rather
 than silently removing the operator input or preventing the later isolated entries from being checked.
