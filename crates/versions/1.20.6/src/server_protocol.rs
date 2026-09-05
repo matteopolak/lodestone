@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 use crate::PROTOCOL_1_20_6;
 use crate::packet_ids::{configuration, handshaking, login, play};
+use crate::packets::chat::{ChatMessage, SystemChat};
+use crate::packets::common::NetworkNbt;
 use crate::packets::configuration::RegistryData;
 use crate::packets::game::{
     BlockDig, BlockPlace, ChunkBatchFinished, ChunkBatchStart, ClientboundPositionLook, JoinGame,
@@ -406,6 +408,16 @@ impl ServerProtocol for V766ServerProtocol {
                         desired_chunks_per_tick: ack.chunks_per_tick,
                     })
             }
+            State::Play if packet_id == play::serverbound::CHAT_MESSAGE => {
+                decode_full::<ChatMessage>(payload).map_or(ServerBound::Ignored, |message| {
+                    ServerBound::Chat {
+                        message: message.message,
+                        timestamp_millis: message.timestamp,
+                        salt: message.salt,
+                        signature: message.signature.map(|signature| signature.0),
+                    }
+                })
+            }
             State::Play if packet_id == play::serverbound::POSITION => {
                 decode_full::<ServerboundPosition>(payload).map_or(
                     ServerBound::Ignored,
@@ -572,6 +584,19 @@ impl ServerProtocol for V766ServerProtocol {
 
     fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
         send(play::clientbound::CHUNK_BATCH_FINISHED, &ChunkBatchFinished { batch_size })
+    }
+
+    fn encode_system_chat(&self, message: &str) -> ServerDirective {
+        send(
+            play::clientbound::SYSTEM_CHAT,
+            &SystemChat {
+                content: NetworkNbt(Nbt::Compound(vec![(
+                    "text".to_owned(),
+                    Nbt::String(message.to_owned()),
+                )])),
+                is_action_bar: false,
+            },
+        )
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
