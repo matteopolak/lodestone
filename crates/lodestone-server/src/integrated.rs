@@ -797,16 +797,58 @@ struct NativeSaveContext {
     source: ErasedChunkSource,
     protocol: Arc<Box<dyn ServerProtocol>>,
     mobs: MobHandle,
+    generation_spawns: GenerationSpawnHandoff,
+}
+
+/// Coordinates whose one-shot generation candidates have reached the live
+/// simulation. Native chunk snapshots may discard the transient candidate list
+/// only after this acknowledgement; an interrupted seed task leaves it pending
+/// and therefore makes the save fail closed.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, Default)]
+struct GenerationSpawnHandoff(
+    Arc<std::sync::Mutex<std::collections::HashSet<(i32, i32)>>>,
+);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl GenerationSpawnHandoff {
+    fn acknowledge(&self, coordinates: impl IntoIterator<Item = (i32, i32)>) {
+        self.0
+            .lock()
+            .expect("generation-spawn handoff lock poisoned")
+            .extend(coordinates);
+    }
+
+    fn drain_acknowledged(&self, snapshots: &mut [crate::region_source::NativeDirtyChunkSnapshot]) {
+        let acknowledged = self
+            .0
+            .lock()
+            .expect("generation-spawn handoff lock poisoned");
+        for snapshot in snapshots {
+            if acknowledged.contains(&(snapshot.column_x, snapshot.column_z)) {
+                let _ = snapshot.column.take_generation_spawns();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn contains(&self, coordinate: (i32, i32)) -> bool {
+        self.0
+            .lock()
+            .expect("generation-spawn handoff lock poisoned")
+            .contains(&coordinate)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate::world_storage::Error> {
-    let snapshots = context
+    let mut snapshots = context
         .save
         .native_dirty_chunks(context.source.0.as_ref())
         .map_err(|error| crate::world_storage::Error::Chunk(
             crate::world_storage::ChunkRecordError::SourceSnapshot(error.to_string()),
         ))?;
+    context.generation_spawns.drain_acknowledged(&mut snapshots);
     let scheduled = context.save.scheduled_ticks();
     let protocol: &dyn ServerProtocol = &**context.protocol;
     let source: &dyn ChunkSource = context.source.0.as_ref();
@@ -904,6 +946,8 @@ pub struct IntegratedServer {
     /// gate ("5 tick periods must produce exactly 5 ticks"). Seeding races
     /// `shutdown` like the tick task does, so it cannot outlive this handle.
     seed_task: Option<Task>,
+    #[cfg(not(target_arch = "wasm32"))]
+    generation_spawns: Option<GenerationSpawnHandoff>,
     /// The world-save handle, `Some` only for
     /// [`open_persistent_with_mobs`](Self::open_persistent_with_mobs).
     ///
@@ -1386,6 +1430,8 @@ impl IntegratedServer {
                 // (see the `mobs` binding above), so there is nothing to seed.
                 seed_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
+                generation_spawns: None,
+                #[cfg(not(target_arch = "wasm32"))]
                 save: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 autosave_task: None,
@@ -1548,6 +1594,8 @@ impl IntegratedServer {
                 // Nothing seeds a mob population through this constructor (see
                 // the `mobs` binding above), so there is nothing to seed.
                 seed_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                generation_spawns: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 save: None,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2096,6 +2144,10 @@ impl IntegratedServer {
         // the entity area to restore, and where from. Cloned here
         // because the ranges are consumed by `seed_coords` above.
         let restore_area = (cx_range.clone(), cz_range.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        let generation_spawns = GenerationSpawnHandoff::default();
+        #[cfg(not(target_arch = "wasm32"))]
+        let seed_generation_spawns = generation_spawns.clone();
         let seed_task = spawn_tick_task(&shutdown, async move {
             let t_seed = lodestone_time::Instant::now();
             tracing::info!(
@@ -2111,7 +2163,7 @@ impl IntegratedServer {
             // `demo_mob_count(mob_count)`, not `mob_count`: singleplayer is a game,
             // not a demo harness. See that function.
             seed_mobs.reseed(
-                ChunkWorld::from_columns(seed_coords.into_iter().zip(columns)),
+                ChunkWorld::from_columns(seed_coords.iter().copied().zip(columns)),
                 center_x,
                 center_z,
                 demo_mob_count(mob_count),
@@ -2158,6 +2210,8 @@ impl IntegratedServer {
                     Err(err) => tracing::error!("entity load failed, mobs not restored: {err}"),
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            seed_generation_spawns.acknowledge(seed_coords.iter().copied());
             // Read the clock **once**: calling `elapsed()` twice can make the
             // logged parts fail to sum to the logged total. Use `saturating_sub` for
             // the same reason as `server.rs`'s welcome timing — `as_millis()` is
@@ -2421,6 +2475,8 @@ impl IntegratedServer {
                 server_tick: Some(server_tick),
                 spawn_proposals: Some(spawn_proposals),
                 seed_task: Some(seed_task),
+                #[cfg(not(target_arch = "wasm32"))]
+                generation_spawns: Some(generation_spawns),
                 #[cfg(not(target_arch = "wasm32"))]
                 save: None,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -3025,6 +3081,7 @@ impl IntegratedServer {
             source: self.world_source.as_ref()?.clone(),
             protocol: self.host.as_ref()?.protocol.clone(),
             mobs: self.mobs.as_ref()?.clone(),
+            generation_spawns: self.generation_spawns.as_ref()?.clone(),
         })
     }
 
@@ -4111,6 +4168,8 @@ impl IntegratedServer {
             // here — see the `mobs` binding above), so there is nothing to seed.
             seed_task: None,
             #[cfg(not(target_arch = "wasm32"))]
+            generation_spawns: None,
+            #[cfg(not(target_arch = "wasm32"))]
             save: None,
             #[cfg(not(target_arch = "wasm32"))]
             autosave_task: None,
@@ -5007,6 +5066,82 @@ mod tests {
                 column: Arc::new(Mutex::new(column)),
             }
         }
+
+        fn with_generation_spawn() -> Self {
+            let source = Self::new();
+            source
+                .column
+                .lock()
+                .expect("native lifecycle source lock poisoned")
+                .set_generation_spawns_for_test(vec![
+                    lodestone_worldgen::spawn_stage::GenerationSpawn {
+                        entity_type: "minecraft:cow".to_owned(),
+                        x: 4,
+                        y: 5,
+                        z: 4,
+                    },
+                ]);
+            source
+        }
+    }
+
+    #[test]
+    fn generation_spawn_handoff_drains_only_acknowledged_columns() {
+        let pending = NativeLifecycleSource::with_generation_spawn().column(0, 0);
+        let untouched = pending.clone();
+        let handoff = GenerationSpawnHandoff::default();
+        let mut snapshots = [crate::region_source::NativeDirtyChunkSnapshot {
+            column_x: 0,
+            column_z: 0,
+            column: pending,
+        }];
+
+        handoff.drain_acknowledged(&mut snapshots);
+        assert!(snapshots[0].column.has_pending_generation_spawns());
+        handoff.acknowledge([(1, 0)]);
+        handoff.drain_acknowledged(&mut snapshots);
+        assert!(snapshots[0].column.has_pending_generation_spawns());
+
+        handoff.acknowledge([(0, 0)]);
+        handoff.drain_acknowledged(&mut snapshots);
+        assert!(!snapshots[0].column.has_pending_generation_spawns());
+        assert!(handoff.contains((0, 0)));
+
+        let restarted = GenerationSpawnHandoff::default();
+        let mut early_shutdown = [crate::region_source::NativeDirtyChunkSnapshot {
+            column_x: 0,
+            column_z: 0,
+            column: untouched,
+        }];
+        restarted.drain_acknowledged(&mut early_shutdown);
+        assert!(early_shutdown[0].column.has_pending_generation_spawns());
+
+        let scratch = tempfile::tempdir().expect("create early-shutdown native scratch");
+        let storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: scratch.path().to_owned(),
+            },
+        )
+        .expect("open early-shutdown native store");
+        let light = lodestone_world::ColumnLight::new(
+            early_shutdown[0].column.section_count(),
+        );
+        let scheduled = crate::scheduled_tick::ScheduledTickHandle::default();
+        let error = storage
+            .write_dirty_chunks([crate::world_storage::NativeDirtyChunkRecord::new(
+                0,
+                0,
+                &early_shutdown[0].column,
+                &light,
+                &scheduled,
+            )])
+            .expect_err("an unacknowledged early shutdown must fail closed");
+        assert!(matches!(
+            error,
+            crate::world_storage::Error::Chunk(
+                crate::world_storage::ChunkRecordError::UnsupportedFields(fields)
+            ) if fields.pending_generation_spawns
+        ));
     }
 
     impl ChunkSource for NativeLifecycleSource {
@@ -6011,7 +6146,7 @@ mod tests {
         let (server, _client, world) = IntegratedServer::open_persistent_with_mobs_and_storage(
             LightSilent,
             &world_dir,
-            NativeLifecycleSource::new(),
+            NativeLifecycleSource::with_generation_spawn(),
             0,
             16,
             (0..=0, 0..=0),
@@ -6022,6 +6157,20 @@ mod tests {
             storage,
         )
         .expect("open persistent server with native lifecycle storage");
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !server
+            .generation_spawns
+            .as_ref()
+            .expect("persistent server owns generation handoff")
+            .contains((0, 0))
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "generation-spawn handoff was never acknowledged"
+            );
+            tokio::task::yield_now().await;
+        }
 
         // This mutation goes through the real RegionChunkSource, which is the
         // same source wrapped by the running connection and save context.

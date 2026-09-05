@@ -734,6 +734,14 @@ impl ChunkColumn {
         std::mem::take(&mut self.generation_spawns)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_generation_spawns_for_test(
+        &mut self,
+        spawns: Vec<lodestone_worldgen::spawn_stage::GenerationSpawn>,
+    ) {
+        self.generation_spawns = spawns;
+    }
+
     /// Whether this freshly generated column still owns one-shot spawn candidates.
     ///
     /// A persistence adapter must not serialize the block grid and quietly drop
