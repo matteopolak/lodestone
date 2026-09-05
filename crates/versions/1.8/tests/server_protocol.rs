@@ -122,6 +122,28 @@ fn projects_only_the_legacy_vertical_window_and_decodes_break_actions() {
 }
 
 #[test]
+fn keep_alive_uses_the_protocol_47_varint_body_in_both_directions() {
+    let protocol = V47ServerProtocol;
+    // 0x1234 as a VarInt. The literal bytes distinguish this wire shape from
+    // protocol 5's fixed i32 and the later fixed i64 form.
+    let body = [0xB4, 0x24];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::KEEP_ALIVE, &body),
+        ServerBound::KeepAlive { id: 0x1234 }
+    );
+    assert!(matches!(
+        protocol.encode_keep_alive(0x1234),
+        ServerDirective::Send { packet_id, payload }
+            if packet_id == play::clientbound::KEEP_ALIVE && payload == body
+    ));
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::KEEP_ALIVE, &[0xB4, 0x24, 0]),
+        ServerBound::Ignored,
+        "a keep-alive body with a trailing byte must not acknowledge the challenge"
+    );
+}
+
+#[test]
 fn unsupported_states_are_errors_not_air_substitutions() {
     let protocol = V47ServerProtocol;
     assert!(protocol

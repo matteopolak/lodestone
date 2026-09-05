@@ -55,6 +55,13 @@ registry-selected server through the family adapter, observe a known chunk block
 block update after breaking it. Live 1.9.4, 1.10.2, 1.11.2 and 1.12.2 client sessions remain the
 required real-client validation.
 
+All four hosted protocols now also carry the server's keep-alive watchdog. Each server protocol
+emits the clientbound challenge and converts the exact serverbound echo into `ServerBound::KeepAlive`,
+which lets `lodestone-server` clear its connection-local pending challenge. Protocols 110, 210, and
+316 use a signed VarInt id; 340 widened it to a fixed signed `i64`. The wire controls use literal
+body bytes, each protocol's generated ids, and a trailing-byte rejection rather than a codec
+round-trip. They do not substitute for the four external-client sessions.
+
 Dispatch is one `lodestone_core::dispatch::Table` per protocol, cached in a four-slot array of
 `OnceLock`s indexed the same way `ids_for` resolves a table. A handler or `IGNORED` entry may
 declare a `ProtocolRange`; `Table::build` skips one whose range excludes the protocol it is

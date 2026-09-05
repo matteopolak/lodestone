@@ -293,6 +293,76 @@ fn accepts_only_the_hosted_handshake_protocol() {
 }
 
 #[test]
+fn hosted_keep_alive_uses_each_protocols_own_id_and_width() {
+    fn varint_wire_control(
+        protocol: &dyn ServerProtocol,
+        clientbound_id: i32,
+        serverbound_id: i32,
+    ) {
+        // 0x1234 as a VarInt. This literal distinguishes 110/210/316 from
+        // protocol 340's eight-byte body below.
+        let body = [0xB4, 0x24];
+        assert_eq!(
+            protocol.decode(State::Play, serverbound_id, &body),
+            ServerBound::KeepAlive { id: 0x1234 }
+        );
+        assert!(matches!(
+            protocol.encode_keep_alive(0x1234),
+            ServerDirective::Send { packet_id, payload }
+                if packet_id == clientbound_id && payload == body
+        ));
+        assert_eq!(
+            protocol.decode(State::Play, serverbound_id, &[0xB4, 0x24, 0]),
+            ServerBound::Ignored,
+            "a trailing byte must not acknowledge a keep-alive"
+        );
+    }
+
+    varint_wire_control(
+        &V110ServerProtocol,
+        lodestone_v1_9::packet_ids_110::play::clientbound::KEEP_ALIVE,
+        lodestone_v1_9::packet_ids_110::play::serverbound::KEEP_ALIVE,
+    );
+    varint_wire_control(
+        &V210ServerProtocol,
+        lodestone_v1_9::packet_ids_210::play::clientbound::KEEP_ALIVE,
+        lodestone_v1_9::packet_ids_210::play::serverbound::KEEP_ALIVE,
+    );
+    varint_wire_control(
+        &V316ServerProtocol,
+        lodestone_v1_9::packet_ids_316::play::clientbound::KEEP_ALIVE,
+        lodestone_v1_9::packet_ids_316::play::serverbound::KEEP_ALIVE,
+    );
+
+    let protocol = V340ServerProtocol;
+    let body = [1, 2, 3, 4, 5, 6, 7, 8];
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            lodestone_v1_9::packet_ids::play::serverbound::KEEP_ALIVE,
+            &body,
+        ),
+        ServerBound::KeepAlive {
+            id: 0x0102_0304_0506_0708,
+        }
+    );
+    assert!(matches!(
+        protocol.encode_keep_alive(0x0102_0304_0506_0708),
+        ServerDirective::Send { packet_id, payload }
+            if packet_id == lodestone_v1_9::packet_ids::play::clientbound::KEEP_ALIVE && payload == body
+    ));
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            lodestone_v1_9::packet_ids::play::serverbound::KEEP_ALIVE,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 0],
+        ),
+        ServerBound::Ignored,
+        "a trailing byte must not acknowledge a keep-alive"
+    );
+}
+
+#[test]
 fn play_join_chunk_and_block_update_have_340_wire_ids() {
     let protocol = V340ServerProtocol;
     let join = protocol.begin_play(8);

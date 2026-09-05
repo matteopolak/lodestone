@@ -27,6 +27,12 @@ break phases and six faces so an observed chunk block can produce an observed up
 integration test connects the family adapter to a registry-selected server transport, verifies a
 known dandelion appears, breaks it, and observes the replacement air state.
 
+`V47ServerProtocol` also participates in the shared connection watchdog: it encodes a clientbound
+keep-alive and consumes its serverbound echo as `ServerBound::KeepAlive`. Protocol 47 carries the
+id as a signed VarInt, unlike protocol 5's fixed `i32` and later fixed `i64` forms. The hosted
+wire control fixes the VarInt bytes directly and proves a trailing byte is rejected rather than
+treated as an acknowledgement; an external 1.8.9 client session remains the compatibility check.
+
 ## How to change it
 
 Keep protocol-47 section encoding local to this family. Its raw state-word layout differs from the

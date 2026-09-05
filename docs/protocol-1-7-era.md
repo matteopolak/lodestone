@@ -62,7 +62,13 @@ state must have an exact legacy inverse within protocol 5's defined numeric
 block ranges `0..=164` or `170..=175`; unsupported states fail encoding rather
 than becoming air. Block updates use their protocol-5 position shape and the
 same conversion. The in-memory integration test reaches Play, observes a known
-chunk block, breaks it, and observes its replacement update.
+chunk block, breaks it, and observes its replacement update. The same hosted
+path carries the connection watchdog: `V5ServerProtocol` emits a clientbound
+keep-alive challenge and lifts the exact serverbound echo to
+`ServerBound::KeepAlive`, so `lodestone-server` can clear its pending challenge.
+Protocol 5 uses a fixed signed `i32` body in both directions; the server
+protocol test pins literal bytes and rejects a trailing byte instead of
+acknowledging a malformed response.
 That control does not replace a live protocol-5 client session against the
 host, which remains the external compatibility check.
 
