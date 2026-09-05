@@ -80,6 +80,9 @@ pub enum Capability {
     /// The guest cannot construct a position or packet: physics consumes the
     /// copied intent and the controller remains the sole egress producer.
     ActMovement,
+    /// Start, continue, retarget, or abort a local-player block break through
+    /// the shell-owned mining lifecycle.
+    ActBreak,
     /// Request one local-player block placement through the shell-owned
     /// placement lifecycle.
     ///
@@ -94,6 +97,8 @@ pub enum Capability {
     /// The event exposes the normal finite status/rejection vocabulary rather
     /// than a world handle or an unbounded error string.
     ObservePlace,
+    /// Receive changed, bounded outcomes from the local-player break lifecycle.
+    ObserveBreak,
     /// Decide whether the client may commit one of its typed player actions.
     ///
     /// This is data-flow gated at the synchronous host callback: a guest without
@@ -131,8 +136,10 @@ impl Capability {
         Self::ActInteract,
         Self::ActLook,
         Self::ActMovement,
+        Self::ActBreak,
         Self::ActPlace,
         Self::ObservePlace,
+        Self::ObserveBreak,
         Self::VetoActions,
         Self::RegisterCommands,
         Self::FsRead,
@@ -151,8 +158,10 @@ impl Capability {
             Self::ActInteract => "act:interact",
             Self::ActLook => "act:look",
             Self::ActMovement => "act:movement",
+            Self::ActBreak => "act:break",
             Self::ActPlace => "act:place",
             Self::ObservePlace => "observe:place",
+            Self::ObserveBreak => "observe:break",
             Self::VetoActions => "veto:actions",
             Self::RegisterCommands => "commands:register",
             Self::FsRead => "fs:read",
@@ -186,8 +195,10 @@ impl Capability {
             | Self::ActInteract
             | Self::ActLook
             | Self::ActMovement
+            | Self::ActBreak
             | Self::ActPlace
             | Self::ObservePlace
+            | Self::ObserveBreak
             | Self::VetoActions
             | Self::RegisterCommands => false,
         }

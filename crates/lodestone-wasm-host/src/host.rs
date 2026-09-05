@@ -57,8 +57,9 @@ pub use crate::bindings::lodestone::plugin::types::{
     Action, BlockBreakVerdict, BlockFace, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
     CommandAnchor, CommandContext, CommandEntity, CommandExecution, CommandOutcome,
     CommandPosition, CommandRotation, CommandSpec, EntityDamageVerdict, Event, Hand, Health,
-    InventoryClickVerdict, LogLevel, LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,
-    PlaceRejection, PlaceStatus, PlayerInteractVerdict, PlayerMoveVerdict, PluginInfo, PluginVerdict,
+    BreakIntent, BreakOutcome, BreakRejection, BreakStatus, InventoryClickVerdict, LogLevel, LookIntent,
+    MovementIntent, PlaceIntent, PlaceOutcome, PlaceRejection, PlaceStatus, PlayerInteractVerdict,
+    PlayerMoveVerdict, PluginInfo, PluginVerdict,
     SectionBlocksChanged, SectionPos, VerdictContext,
 };
 
@@ -68,7 +69,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.8.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.9.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
@@ -344,6 +345,10 @@ pub struct LoadedPlugin {
     /// generation at zero; comparing only the number would hide the first
     /// result after reconnecting.
     last_place_outcome: Option<(Entity, u64)>,
+    /// The previous observable mining state for this player session. A mining
+    /// intent can remain valid for hundreds of ticks, so unlike placement this
+    /// cursor is a status edge rather than a generation counter.
+    last_break_outcome: Option<(Entity, crate::host::BreakStatus)>,
 }
 
 impl fmt::Debug for LoadedPlugin {
@@ -378,6 +383,35 @@ impl LoadedPlugin {
             return false;
         }
         self.last_place_outcome = Some(cursor);
+        true
+    }
+
+    /// Whether this mining lifecycle state is new for the guest's current
+    /// local-player session. Unchanged `Progressing` and unchanged rejections
+    /// are intentionally suppressed: a guest gets state transitions, not an
+    /// unbounded per-tick feed.
+    pub(crate) fn observe_break_outcome(
+        &mut self,
+        player: Entity,
+        outcome: &crate::host::BreakOutcome,
+    ) -> bool {
+        let cursor = (player, outcome.status.clone());
+        if self
+            .last_break_outcome
+            .as_ref()
+            .is_none_or(|(previous_player, _)| *previous_player != player)
+            && matches!(&outcome.status, crate::host::BreakStatus::Idle)
+        {
+            // The always-present initial Idle is component setup, not a lifecycle
+            // result. Remember it for *this* session so the first real transition
+            // is observable without waking a guest merely because a player spawned.
+            self.last_break_outcome = Some(cursor);
+            return false;
+        }
+        if self.last_break_outcome.as_ref() == Some(&cursor) {
+            return false;
+        }
+        self.last_break_outcome = Some(cursor);
         true
     }
 
@@ -912,6 +946,7 @@ impl PluginHost {
             on_command,
             failure: None,
             last_place_outcome: None,
+            last_break_outcome: None,
         });
         Ok(self.plugins.len() - 1)
     }

@@ -79,6 +79,9 @@ movement = []
 # unresolvable request, then reports the bounded outcome delivered on a later
 # tick rather than depending on a world handle or packet result.
 place = []
+# The multi-tick mining lifecycle fixture. It starts a copied break claim,
+# observes one bounded rejection from the shell, then explicitly releases it.
+break = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is

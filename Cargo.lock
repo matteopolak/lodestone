@@ -3126,6 +3126,9 @@ dependencies = [
 name = "lodestone-registry"
 version = "0.1.0"
 dependencies = [
+ "lodestone-client",
+ "lodestone-core",
+ "lodestone-data",
  "lodestone-model",
  "lodestone-physics",
  "lodestone-server",
@@ -3139,6 +3142,8 @@ dependencies = [
  "lodestone-v1-8",
  "lodestone-v1-9",
  "lodestone-v26-2",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -3642,6 +3647,7 @@ dependencies = [
  "lodestone-ecs",
  "lodestone-model",
  "lodestone-physics",
+ "lodestone-shell",
  "serde",
  "thiserror 2.0.19",
  "toml",
