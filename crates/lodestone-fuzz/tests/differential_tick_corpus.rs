@@ -11,6 +11,7 @@ mod tick_corpus;
 use std::collections::HashMap;
 use std::convert::Infallible;
 
+use lodestone_fuzz::differential::fluid::FluidModelOracle;
 use lodestone_fuzz::differential::{Action, WorldOracle};
 use tick_corpus::{CorpusOutcome, TickCorpus};
 
@@ -30,6 +31,8 @@ const CORPUS: &str = r#"{
     { "tick": 1, "game_time": 9002, "states": ["minecraft:stone"] }
   ]
 }"#;
+
+const LIVE_STONE_CORPUS: &str = include_str!("fixtures/tick_corpus_26_2_stone.json");
 
 #[derive(Default)]
 struct CorpusWorld {
@@ -100,6 +103,14 @@ fn external_tick_observations_replay_without_a_live_server() {
         corpus.compare(&mut CorpusWorld::default()),
         CorpusOutcome::Agreed
     ));
+}
+
+#[test]
+fn captured_stone_placement_replays_through_the_production_fluid_model() {
+    let corpus = TickCorpus::from_json(LIVE_STONE_CORPUS)
+        .expect("reviewed real-server stone capture with redacted provenance");
+    let mut model = FluidModelOracle::new((0, 0, 0), -1, "minecraft:stone");
+    assert!(matches!(corpus.compare(&mut model), CorpusOutcome::Agreed));
 }
 
 #[test]
