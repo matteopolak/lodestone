@@ -12,7 +12,7 @@ use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
 use lodestone_server::{
-    ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol,
+    ChunkColumn, ChunkEncodeError, HOTBAR_SIZE, ServerBound, ServerDirective, ServerProtocol,
 };
 use uuid::Uuid;
 
@@ -31,6 +31,7 @@ use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
 use crate::packets::settings::Settings;
+use crate::packets::window::ServerboundHeldItemSlot;
 
 const CTX_340: Ctx = Ctx { version: PROTOCOL };
 const CTX_110: Ctx = Ctx {
@@ -74,6 +75,7 @@ struct ServerPacketIds {
     login_success: i32,
     block_dig: i32,
     block_place: i32,
+    held_item_slot: i32,
     chat_serverbound: i32,
     teleport_confirm: i32,
     flying: i32,
@@ -97,6 +99,7 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     login_success: login::clientbound::SUCCESS,
     block_dig: play::serverbound::BLOCK_DIG,
     block_place: play::serverbound::BLOCK_PLACE,
+    held_item_slot: play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: play::serverbound::CHAT,
     teleport_confirm: play::serverbound::TELEPORT_CONFIRM,
     flying: play::serverbound::FLYING,
@@ -120,6 +123,7 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     login_success: crate::packet_ids_316::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_316::play::serverbound::BLOCK_DIG,
     block_place: crate::packet_ids_316::play::serverbound::BLOCK_PLACE,
+    held_item_slot: crate::packet_ids_316::play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: crate::packet_ids_316::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_316::play::serverbound::TELEPORT_CONFIRM,
     flying: crate::packet_ids_316::play::serverbound::FLYING,
@@ -143,6 +147,7 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     login_success: crate::packet_ids_210::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_210::play::serverbound::BLOCK_DIG,
     block_place: crate::packet_ids_210::play::serverbound::BLOCK_PLACE,
+    held_item_slot: crate::packet_ids_210::play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: crate::packet_ids_210::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_210::play::serverbound::TELEPORT_CONFIRM,
     flying: crate::packet_ids_210::play::serverbound::FLYING,
@@ -166,6 +171,7 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     login_success: crate::packet_ids_110::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_110::play::serverbound::BLOCK_DIG,
     block_place: crate::packet_ids_110::play::serverbound::BLOCK_PLACE,
+    held_item_slot: crate::packet_ids_110::play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: crate::packet_ids_110::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_110::play::serverbound::TELEPORT_CONFIRM,
     flying: crate::packet_ids_110::play::serverbound::FLYING,
@@ -608,6 +614,15 @@ fn decode_packet(
                         Vec3f::new(cursor_x, cursor_y, cursor_z),
                     )
                 }
+            }
+            State::Play if packet_id == ids.held_item_slot => {
+                let Some(slot) = decode_full::<ServerboundHeldItemSlot>(payload, ctx)
+                    .and_then(|packet| u8::try_from(packet.slot).ok())
+                    .filter(|&slot| slot < HOTBAR_SIZE)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::CarriedItemChanged { slot }
             }
             State::Play if packet_id == ids.chat_serverbound => {
                 decode_full::<ServerboundChat>(payload, ctx).map_or(ServerBound::Ignored, |chat| {

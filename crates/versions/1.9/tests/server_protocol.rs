@@ -1,7 +1,9 @@
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
-use lodestone_model::{BlockFace, BlockPos, Vec3f};
+use lodestone_model::{
+    BlockFace, BlockPos, ClientAction, ConnectionState, Vec3f, VersionAdapter,
+};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_9::{V110ServerProtocol, V210ServerProtocol, V316ServerProtocol, V340ServerProtocol};
 use lodestone_v1_9::packet_ids::handshaking;
@@ -400,6 +402,68 @@ fn hosted_client_settings_lift_each_protocols_view_distance() {
     settings_wire_control(
         &V340ServerProtocol,
         lodestone_v1_9::packet_ids::play::serverbound::SETTINGS,
+    );
+}
+
+#[test]
+fn hosted_held_item_slots_reach_the_shared_inventory_consumer() {
+    fn held_slot_wire_control(protocol: &dyn ServerProtocol, packet_id: i32) {
+        // A held-slot body is one big-endian i16. This literal is deliberately
+        // not built by the family encoder: slot 8 separates the final legal
+        // hotbar position from the out-of-range control below.
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &[0, 8]),
+            ServerBound::CarriedItemChanged { slot: 8 }
+        );
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &[0, 9]),
+            ServerBound::Ignored,
+            "an out-of-range held slot must not change the server inventory"
+        );
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &[0, 8, 0]),
+            ServerBound::Ignored,
+            "a held-slot prefix with trailing bytes must not reach the inventory consumer"
+        );
+    }
+
+    held_slot_wire_control(
+        &V110ServerProtocol,
+        lodestone_v1_9::packet_ids_110::play::serverbound::HELD_ITEM_SLOT,
+    );
+    held_slot_wire_control(
+        &V210ServerProtocol,
+        lodestone_v1_9::packet_ids_210::play::serverbound::HELD_ITEM_SLOT,
+    );
+    held_slot_wire_control(
+        &V316ServerProtocol,
+        lodestone_v1_9::packet_ids_316::play::serverbound::HELD_ITEM_SLOT,
+    );
+    held_slot_wire_control(
+        &V340ServerProtocol,
+        lodestone_v1_9::packet_ids::play::serverbound::HELD_ITEM_SLOT,
+    );
+}
+
+#[test]
+fn registry_selected_protocol_340_decodes_the_real_selected_slot_action() {
+    let (packet_id, payload) = lodestone_v1_9::adapter_for(340)
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::SetCarriedItem { slot: 4 },
+        )
+        .expect("protocol-340 selection must encode")
+        .expect("selection is a Play packet");
+    assert_eq!(
+        packet_id,
+        lodestone_v1_9::packet_ids::play::serverbound::HELD_ITEM_SLOT
+    );
+
+    let protocol = lodestone_registry::server_protocol_for_protocol(340)
+        .expect("protocol 340 must resolve to the hosted 1.9 family");
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &payload),
+        ServerBound::CarriedItemChanged { slot: 4 }
     );
 }
 
