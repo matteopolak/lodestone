@@ -5,7 +5,7 @@ use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Duration;
 
 use lodestone_jvm_bridge::adapter::{
-    AdapterEvent, AdapterHost, BlockStateWrite, PlayerIdentity, PlayerPosition,
+    AdapterEvent, AdapterHost, BlockStateWrite, PlayerIdentity, PlayerSnapshot,
 };
 use lodestone_jvm_bridge::native_surface::OperatorBlockStateMember;
 use lodestone_jvm_bridge::paper::{
@@ -335,7 +335,8 @@ impl JavaAdapter {
                         .into_iter()
                         .find(|player| player.uuid == uuid)
                 })
-                .map(|player| PlayerPosition {
+                .map(|player| PlayerSnapshot {
+                    entity_id: player.id,
                     x: player.position.x,
                     y: player.position.y,
                     z: player.position.z,

@@ -97,13 +97,14 @@ pub type BlockStateWriteAnswer = Result<(), String>;
 
 /// A live-position query keyed by copied account identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PlayerPositionQuery {
+pub struct PlayerSnapshotQuery {
     pub uuid: [u8; 16],
 }
 
 /// A copied player position returned by the host.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PlayerPosition {
+pub struct PlayerSnapshot {
+    pub entity_id: i32,
     pub x: f64,
     pub y: f64,
     pub z: f64,
@@ -112,12 +113,12 @@ pub struct PlayerPosition {
 }
 
 /// A disconnected player must remain distinct from a valid origin position.
-pub type PlayerPositionAnswer = Result<PlayerPosition, String>;
+pub type PlayerSnapshotAnswer = Result<PlayerSnapshot, String>;
 
 type BlockPort = WorldPort<BlockStateQuery, BlockStateAnswer>;
 type BlockWritePort = WorldPort<BlockStateWrite, BlockStateWriteAnswer>;
 type TickPort = WorldPort<(), ServerTickAnswer>;
-type PlayerPositionPort = WorldPort<PlayerPositionQuery, PlayerPositionAnswer>;
+type PlayerSnapshotPort = WorldPort<PlayerSnapshotQuery, PlayerSnapshotAnswer>;
 type Events = SyncSender<Result<AdapterEvent, AdapterError>>;
 
 /// A host must distinguish an inactive game tick from a valid count.
@@ -136,7 +137,7 @@ pub struct NativeServerSurface {
     _block_port: BlockPort,
     _block_write_port: BlockWritePort,
     _tick_port: TickPort,
-    _player_position_port: PlayerPositionPort,
+    _player_position_port: PlayerSnapshotPort,
 }
 
 impl NativeServerSurface {
@@ -144,7 +145,7 @@ impl NativeServerSurface {
         block_port: BlockPort,
         block_write_port: BlockWritePort,
         tick_port: TickPort,
-        player_position_port: PlayerPositionPort,
+        player_position_port: PlayerSnapshotPort,
     ) -> Self {
         Self {
             _block_port: block_port,
@@ -159,7 +160,7 @@ thread_local! {
     static CALLBACK_PORT: RefCell<Option<BlockPort>> = const { RefCell::new(None) };
     static BLOCK_WRITE_PORT: RefCell<Option<BlockWritePort>> = const { RefCell::new(None) };
     static SERVER_TICK_PORT: RefCell<Option<TickPort>> = const { RefCell::new(None) };
-    static PLAYER_POSITION_PORT: RefCell<Option<PlayerPositionPort>> = const { RefCell::new(None) };
+    static PLAYER_POSITION_PORT: RefCell<Option<PlayerSnapshotPort>> = const { RefCell::new(None) };
     static RESIDENT_OBJECT_HANDLES: RefCell<Option<ObjectRegistry<ResidentObject>>> = const {
         RefCell::new(None)
     };
@@ -977,7 +978,7 @@ fn resolve_resident_player_position(bits: i64, axis: usize, operation: &str) -> 
         AdapterError::new(format!("{operation} requires the adapter worker thread"))
     })?;
     let position = port
-        .request(PlayerPositionQuery { uuid: player.uuid() })
+        .request(PlayerSnapshotQuery { uuid: player.uuid() })
         .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?
         .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?;
     let value = match axis {
@@ -999,7 +1000,7 @@ fn resolve_resident_player_rotation(bits: i64, axis: usize, operation: &str) -> 
         AdapterError::new(format!("{operation} requires the adapter worker thread"))
     })?;
     let position = port
-        .request(PlayerPositionQuery { uuid: player.uuid() })
+        .request(PlayerSnapshotQuery { uuid: player.uuid() })
         .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?
         .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?;
     let value = match axis {
@@ -1012,6 +1013,18 @@ fn resolve_resident_player_rotation(bits: i64, axis: usize, operation: &str) -> 
     } else {
         Err(AdapterError::new(format!("{operation}: host returned a non-finite rotation")))
     }
+}
+
+fn resolve_resident_player_entity_id(bits: i64) -> Result<jint, AdapterError> {
+    let operation = "playerHandleEntityId";
+    let player = resolve_resident_player_handle(bits, operation)?;
+    let port = PLAYER_POSITION_PORT.with(|slot| slot.borrow().clone()).ok_or_else(|| {
+        AdapterError::new(format!("{operation} requires the adapter worker thread"))
+    })?;
+    port.request(PlayerSnapshotQuery { uuid: player.uuid() })
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?
+        .map(|snapshot| snapshot.entity_id)
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))
 }
 
 /// Reports whether a live player handle's copied profile is in the worker's
@@ -1191,7 +1204,7 @@ pub struct AdapterHost {
     servicer: PortServicer<BlockStateQuery, BlockStateAnswer>,
     block_write_servicer: PortServicer<BlockStateWrite, BlockStateWriteAnswer>,
     server_tick_servicer: PortServicer<(), ServerTickAnswer>,
-    player_position_servicer: PortServicer<PlayerPositionQuery, PlayerPositionAnswer>,
+    player_position_servicer: PortServicer<PlayerSnapshotQuery, PlayerSnapshotAnswer>,
     deadline: Duration,
     state: State,
 }
@@ -1254,7 +1267,7 @@ impl AdapterHost {
 
     fn spawn(
         deadline: Duration,
-        run: impl FnOnce(Receiver<AdapterCommand>, Events, BlockPort, BlockWritePort, TickPort, PlayerPositionPort)
+        run: impl FnOnce(Receiver<AdapterCommand>, Events, BlockPort, BlockWritePort, TickPort, PlayerSnapshotPort)
             + Send
             + 'static,
     ) -> Result<Self, AdapterError> {
@@ -1429,7 +1442,7 @@ impl AdapterHost {
     pub fn service_pending_player_positions(
         &self,
         max: usize,
-        answer: impl FnMut(PlayerPositionQuery) -> PlayerPositionAnswer,
+        answer: impl FnMut(PlayerSnapshotQuery) -> PlayerSnapshotAnswer,
     ) -> usize {
         if matches!(self.state, State::Failed(_)) {
             return 0;
@@ -1546,7 +1559,7 @@ fn run_java<S>(
     port: BlockPort,
     block_write_port: BlockWritePort,
     server_tick_port: TickPort,
-    player_position_port: PlayerPositionPort,
+    player_position_port: PlayerSnapshotPort,
     setup: impl for<'local> FnOnce(&JvmRuntime, &mut Env<'local>, NativeServerSurface)
         -> Result<S, String>,
 ) -> Result<(), AdapterError> {
@@ -2373,6 +2386,7 @@ pub(crate) fn register_player_handle_position_query(
         "playerHandleZ" => native_player_handle_z as *mut c_void,
         "playerHandleYaw" => native_player_handle_yaw as *mut c_void,
         "playerHandlePitch" => native_player_handle_pitch as *mut c_void,
+        "playerHandleEntityId" => native_player_handle_entity_id as *mut c_void,
         _ => unreachable!("validated player coordinate member"),
     };
     // SAFETY: each validated native accepts one opaque handle and returns one
@@ -2695,6 +2709,19 @@ extern "system" fn native_player_handle_pitch<'local>(
         let _depth = CallbackDepthGuard::enter()
             .map_err(|error| AdapterError::new(error.to_string()))?;
         resolve_resident_player_rotation(bits, 1, "playerHandlePitch")
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_entity_id<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resolve_resident_player_entity_id(bits)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -4338,6 +4365,7 @@ mod tests {
             let handle = resident_player_handle(&identity, &player).expect("player handle");
             let result = resolve_resident_player_position(handle.to_bits(), 2, "playerHandleZ");
             let yaw = resolve_resident_player_rotation(handle.to_bits(), 0, "playerHandleYaw");
+            let entity_id = resolve_resident_player_entity_id(handle.to_bits());
             let non_finite =
                 resolve_resident_player_position(handle.to_bits(), 0, "playerHandleX");
             assert_eq!(release_resident_handles(&identity), 1);
@@ -4345,32 +4373,36 @@ mod tests {
             PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = None);
             RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
             sender
-                .send((result, yaw, non_finite, stale))
+                .send((result, yaw, entity_id, non_finite, stale))
                 .expect("position results");
         });
         let limit = Instant::now() + Duration::from_secs(1);
         let mut requests = 0;
-        while requests < 3 {
+        while requests < 4 {
             requests += servicer.service_all_pending(1, |query| {
-                assert_eq!(query, PlayerPositionQuery { uuid: [7; 16] });
-                if requests < 2 {
-                    Ok(PlayerPosition {
+                assert_eq!(query, PlayerSnapshotQuery { uuid: [7; 16] });
+                if requests < 3 {
+                    Ok(PlayerSnapshot {
+                        entity_id: 91,
                         x: 12.5, y: 64.0, z: -9.25, yaw: 45.0, pitch: -12.0,
                     })
                 } else {
-                    Ok(PlayerPosition {
+                    Ok(PlayerSnapshot {
+                        entity_id: 91,
                         x: f64::NAN, y: 64.0, z: -9.25, yaw: 45.0, pitch: -12.0,
                     })
                 }
             });
-            if requests < 3 {
+            if requests < 4 {
                 assert!(Instant::now() < limit, "worker did not request a player position");
                 std::thread::yield_now();
             }
         }
-        let (result, yaw, non_finite, stale) = receiver.recv().expect("position results");
+        let (result, yaw, entity_id, non_finite, stale) =
+            receiver.recv().expect("position results");
         assert_eq!(result, Ok(-9.25));
         assert_eq!(yaw, Ok(45.0));
+        assert_eq!(entity_id, Ok(91));
         assert_eq!(
             non_finite,
             Err(AdapterError::new(
