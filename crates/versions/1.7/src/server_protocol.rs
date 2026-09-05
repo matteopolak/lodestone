@@ -9,7 +9,7 @@ use std::io::Write as _;
 use flate2::{Compression, write::ZlibEncoder};
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
 use lodestone_server::{
     ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -24,7 +24,7 @@ use crate::packets::game::{
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess};
 use crate::packets::settings::Settings;
-use crate::packets::world::{BlockChange, BlockDig};
+use crate::packets::world::{BlockChange, BlockDig, BlockPlace};
 use crate::packets::position::PositionIbi;
 
 const CTX: Ctx = Ctx { version: PROTOCOL };
@@ -85,6 +85,15 @@ fn block_face(face: i8) -> Option<BlockFace> {
         5 => Some(BlockFace::East),
         _ => None,
     }
+}
+
+/// Converts protocol 5's signed cursor byte to its block-local coordinate.
+///
+/// The wire range is nominally `0..=15`, one sixteenth per unit. Invalid
+/// signed values are rejected before they reach placement rather than being
+/// clamped into a plausible click location.
+fn cursor_coordinate(value: i8) -> Option<f32> {
+    (0..=15).contains(&value).then_some(f32::from(value) / 16.0)
 }
 
 fn legacy_composite(canonical: u32) -> Result<u32, ChunkEncodeError> {
@@ -290,6 +299,40 @@ impl ServerProtocol for V5ServerProtocol {
                     action,
                     pos: BlockPos::new(x, i32::from(y), z),
                     face,
+                    sequence: 0,
+                }
+            }
+            State::Play if packet_id == play::serverbound::BLOCK_PLACE => {
+                let Some(BlockPlace {
+                    x,
+                    y,
+                    z,
+                    direction,
+                    held_item: _,
+                    cursor_x,
+                    cursor_y,
+                    cursor_z,
+                }) = decode_full(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                let (Some(face), Some(cursor_x), Some(cursor_y), Some(cursor_z)) = (
+                    block_face(direction),
+                    cursor_coordinate(cursor_x),
+                    cursor_coordinate(cursor_y),
+                    cursor_coordinate(cursor_z),
+                ) else {
+                    // The `(-1, 255, -1), -1` use-in-air sentinel has no
+                    // canonical hand-independent action in this hosted era;
+                    // keep it ignored until the server has one.
+                    return ServerBound::Ignored;
+                };
+                ServerBound::UseItemOn {
+                    pos: BlockPos::new(x, i32::from(y), z),
+                    face,
+                    cursor: Vec3f::new(cursor_x, cursor_y, cursor_z),
+                    // The wire pre-dates off-hand and prediction sequences.
+                    hand: 0,
                     sequence: 0,
                 }
             }

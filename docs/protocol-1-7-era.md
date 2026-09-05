@@ -77,6 +77,17 @@ then cape boolean, so it must not reuse the protocol-47 settings decoder.
 That control does not replace a live protocol-5 client session against the
 host, which remains the external compatibility check.
 
+The legacy `block_place` frame now reaches the shared placement path as
+`ServerBound::UseItemOn`. It carries a separate `i32, u8, i32` position, a
+face byte, an inline item slot even though the host uses its authoritative
+inventory, and three signed sixteenth cursor offsets. Protocol 5 has neither
+an off-hand selector nor a prediction sequence, so the bridge fixes those to
+main hand and zero. Invalid faces, cursor values outside `0..=15`, the
+use-in-air sentinel, and trailing bytes are rejected rather than clamped into
+a believable block click. The focused protocol test uses an independent
+literal body and also follows an adapter-emitted main-hand use through the
+same shared `UseItemOn` boundary that `lodestone_server::server` consumes.
+
 Hosted movement now lifts all four serverbound shapes into the shared server:
 `position` and `position_look` update the authoritative player sample,
 `look` updates rotation alone, and `flying` updates the grounded state alone.
