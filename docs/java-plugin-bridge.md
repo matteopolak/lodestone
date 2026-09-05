@@ -530,11 +530,13 @@ rather than accidental partial plugin loads.
 
 The resulting `PaperBootstrapPlan` records the validated plugin metadata and exact entry surfaces
 but keeps plugin jars out of the server bootstrap classpath. Its `start_runtime` starts an empty-system-classpath JVM.
-`load_lifecycle_entries` is an injectable, JVM-independent loading seam: it requests the bootstrap
-first, then every plugin entry in sorted discovery order. Each plugin request has a fresh isolated
-loader path of shim paths, the server jar, and that plugin jar only; no plugin jar appears in another
-plugin's request. The dedicated host uses `load_lifecycle_entries_in_runtime`, which turns every
-request into one fresh isolated loader and calls `loadClass` without initialization. Its returned
+`lifecycle_load_requests` is an injectable, JVM-independent loading seam: it requests the bootstrap
+first, then every plugin entry in sorted discovery order. The bootstrap loader owns the shim paths
+and server jar. Each plugin request has only its own jar and is a fresh child of that retained
+bootstrap loader; no plugin jar appears in another plugin's request, but every plugin observes the
+same server-API and shim definitions. The dedicated host uses
+`load_lifecycle_entries_in_runtime`, which turns that topology into loaders and calls `loadClass`
+without initialization. Its returned
 `PaperLifecycleLoad` keeps the bootstrap loader, then every successfully loaded plugin's descriptor,
 loader, and non-initialized entry class together for the Java adapter worker's lifetime. Its
 `PaperPluginLifecycleStatusSet` records each descriptor's Load result separately. The lifecycle
@@ -544,11 +546,12 @@ enable or disable callback because either could run arbitrary plugin code before
 server-owned API state exists. A bootstrap Load failure remains terminal; a plugin Load failure is
 isolated, reported against that descriptor, and does not stop the host from checking later isolated
 entries. When the operator
-also requests the isolated native shim, that same loader first resolves
+also requests the isolated native shim, the shared bootstrap loader first resolves
 `lodestone.bridge.IsolatedPaperShim`, verifies its exact static native
 `blockStateId(int, int, int): int` and `serverTickCount(): long` declarations, then registers both
-Rust callbacks before it loads the bootstrap or plugin entry. A different loader never inherits that
-registration, so installing it per fresh lifecycle loader is required rather than optional bookkeeping.
+Rust callbacks before it loads the bootstrap or plugin entry. Each plugin child inherits that one
+registration and definition, preventing the same Java API type from being separately defined for
+each plugin loader.
 
 The native declaration list is generated from one Rust `NativeMethodSpec`, and its class, name,
 descriptor, and order have hermetic tests that need neither a JDK nor operator jars. Registration
@@ -681,12 +684,13 @@ Configuration supplied to a build without `jvm` is a reported error followed by 
 To add Paper bootstrap intake to that same worker, set `LODESTONE_PAPER_JAR` and
 `LODESTONE_PAPER_PLUGIN_DIRECTORY`; `LODESTONE_PAPER_SHIM_PATH` optionally names one shim directory
 or jar. When set, it must contain the operator-built `lodestone.bridge.IsolatedPaperShim` native
-declarations; the host registers its block-state query and server-tick callbacks in each fresh loader
-before loading the corresponding entry. The host discovers and retains a `PaperBootstrapPlan` before starting
-a JVM, then loads the Paper bootstrap followed by each plugin entry class through separate shim-first
-isolated loaders before the adapter can report ready. The dedicated adapter owns the resulting
+declarations; the host registers its block-state query and server-tick callbacks in the shared
+bootstrap loader before loading any entry. The host discovers and retains a `PaperBootstrapPlan` before starting
+a JVM, then loads the Paper bootstrap followed by each plugin entry class through fresh plugin-child
+loaders before the adapter can report ready. The dedicated adapter owns the resulting
 worker-lifetime lifecycle state and snapshots each descriptor's Load status before readiness. Each
-plugin loader sees shim paths, the server jar, and only its own jar. The worker also snapshots each
+bootstrap loader sees shim paths and the server jar; each plugin child sees only its own jar and
+inherits those shared definitions. The worker also snapshots each
 descriptor's construction prerequisite. Without `LODESTONE_PAPER_SHIM_PATH`, no facade is available.
 With it, the dedicated host supplies one Java-facing, loader-local native read surface: block state and
 the current server tick. `AdapterHost::start_with_setup` mints the corresponding capability token only

@@ -115,6 +115,29 @@ impl JvmRuntime {
         config: &JvmConfig,
         operation: impl FnOnce(&mut Env<'local>, &JObject<'local>) -> Result<T, JvmError>,
     ) -> Result<T, JvmError> {
+        let parent = env.call_static_method(
+            jni_str!("java/lang/ClassLoader"),
+            jni_str!("getPlatformClassLoader"),
+            jni_sig!("()Ljava/lang/ClassLoader;"),
+            &[],
+        )?.l()?;
+        self.with_isolated_loader_with_parent(env, config, &parent, operation)
+    }
+
+    /// Runs one operation with a fresh isolated URL loader below `parent`.
+    ///
+    /// A server-owned host uses this to give every plugin a fresh child loader
+    /// while retaining one shared definition of the server API and bridge shim
+    /// in the parent.  Supplying the parent explicitly is important for Java
+    /// type identity: placing the server jar in every plugin's URL list would
+    /// create separate definitions of the same API class.
+    pub fn with_isolated_loader_with_parent<'local, T>(
+        &self,
+        env: &mut Env<'local>,
+        config: &JvmConfig,
+        parent: &JObject<'local>,
+        operation: impl FnOnce(&mut Env<'local>, &JObject<'local>) -> Result<T, JvmError>,
+    ) -> Result<T, JvmError> {
         if config.classpath.is_empty() {
             return Err(JvmError::new(
                 "isolated class loading requires at least one operator path",
@@ -154,12 +177,6 @@ impl JvmRuntime {
             )?.l()?;
             urls.set_element(env, index, &url)?;
         }
-        let parent = env.call_static_method(
-            jni_str!("java/lang/ClassLoader"),
-            jni_str!("getPlatformClassLoader"),
-            jni_sig!("()Ljava/lang/ClassLoader;"),
-            &[],
-        )?.l()?;
         let loader = env.new_object(
             jni_str!("java/net/URLClassLoader"),
             jni_sig!("([Ljava/net/URL;Ljava/lang/ClassLoader;)V"),

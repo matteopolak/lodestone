@@ -136,6 +136,47 @@ pub struct PaperBootstrapPlan {
     plugins: Vec<PaperPluginDescriptor>,
 }
 
+/// The parent selected for one private lifecycle loader.
+///
+/// The bootstrap loader starts below the platform loader. Every plugin loader
+/// is instead a fresh child of that retained bootstrap loader, so all plugins
+/// observe one definition of the server API and the optional native shim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperLifecycleLoaderParent {
+    /// The runtime's platform loader supplies only standard Java classes.
+    Platform,
+    /// The retained bootstrap loader supplies the server API and bridge shim.
+    Bootstrap,
+}
+
+/// One non-initializing class-load request made by a lifecycle plan.
+///
+/// `paths` are this loader's own URLs, not a flattened transitive classpath.
+/// In particular, a plugin jar never carries a private copy of the server jar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaperLifecycleLoadRequest {
+    parent: PaperLifecycleLoaderParent,
+    paths: Vec<PathBuf>,
+    class_name: String,
+}
+
+impl PaperLifecycleLoadRequest {
+    /// The parent relationship that preserves server API type identity.
+    pub fn parent(&self) -> PaperLifecycleLoaderParent {
+        self.parent
+    }
+
+    /// The URLs owned directly by this fresh loader, in resolution order.
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
+    /// The dotted binary class name to load without initialization.
+    pub fn class_name(&self) -> &str {
+        &self.class_name
+    }
+}
+
 /// The only lifecycle operations a server-owned Java-plugin host may perform.
 ///
 /// A descriptor first becomes `Loaded`; only a loaded plugin may later be
@@ -275,10 +316,11 @@ impl PaperPluginLifecycleStatusSet {
 /// A concrete Java-facing capability supplied by the hosting server.
 ///
 /// This is deliberately an input, not a claim that a Bukkit `Server` object
-/// exists. `NativeServerRead` means the host has installed the narrow native
-/// block-state and tick-count declarations in every isolated loader and will
-/// service their requests from live server state. It is useful to retain as an
-/// exact, real Java-facing capability, but cannot safely construct a plugin:
+/// exists. `NativeServerRead` means the host installed the narrow native
+/// block-state and tick-count declarations in the shared server loader, where
+/// every isolated plugin loader inherits them, and will service their requests
+/// from live server state. It is useful to retain as an exact, real
+/// Java-facing capability, but cannot safely construct a plugin:
 /// construction also needs loader-owned plugin metadata and a much broader
 /// server facade.
 #[derive(Debug)]
@@ -446,10 +488,10 @@ impl PaperPluginConstructionReadiness {
 
 /// Loader state retained after non-initializing lifecycle entry loading.
 ///
-/// Each global reference owns one fresh isolated loader. Keeping those loaders
-/// and their non-initialized entry classes alive preserves the definitions
-/// selected from private classpaths and the native registration installed on a
-/// shim definition. It retains no plugin object: construction and enablement
+/// Each global reference owns one fresh isolated plugin loader below the shared
+/// bootstrap loader. Keeping those loaders and their non-initialized entry
+/// classes alive preserves private plugin definitions while all plugins share
+/// the server API and native shim definitions. It retains no plugin object: construction and enablement
 /// remain a later, server-lifecycle-owned decision.
 #[cfg(feature = "jvm")]
 pub struct PaperLifecycleLoad {
@@ -620,13 +662,37 @@ impl PaperBootstrapPlan {
         })
     }
 
+    /// Returns the concrete non-initializing class-load requests for this plan.
+    ///
+    /// The first request creates the shared server loader. Every later request
+    /// creates a private plugin child loader. Hosts that need to inspect or
+    /// instrument lifecycle loading should consume this rather than rebuilding
+    /// URL lists: flattening the server jar into plugin URLs breaks Java type
+    /// identity even when every class name resolves.
+    pub fn lifecycle_load_requests(&self) -> Vec<PaperLifecycleLoadRequest> {
+        let mut requests = Vec::with_capacity(1 + self.plugins.len());
+        requests.push(PaperLifecycleLoadRequest {
+            parent: PaperLifecycleLoaderParent::Platform,
+            paths: self.bootstrap_loader_paths(),
+            class_name: BOOTSTRAP_CLASS.to_owned(),
+        });
+        requests.extend(self.plugins.iter().map(|plugin| PaperLifecycleLoadRequest {
+            parent: PaperLifecycleLoaderParent::Bootstrap,
+            paths: vec![plugin.jar().to_owned()],
+            class_name: plugin.main_class().to_owned(),
+        }));
+        requests
+    }
+
     /// Requests every validated entry class through its own isolated loader.
     ///
     /// The callback is invoked first for the server bootstrap and then once
-    /// per plugin in discovery order. Each plugin request contains shims, the
-    /// server jar, and only that plugin's jar, in that order. The callback must
-    /// use a fresh isolated loader for every request; this prevents a plugin
-    /// from making its implementation classes visible to another plugin.
+    /// per plugin in discovery order. The bootstrap request owns the shims and
+    /// server jar. Each plugin request owns only that plugin's jar and names
+    /// the bootstrap request as its parent. The callback must use a fresh
+    /// plugin child loader for every request; this prevents a plugin from
+    /// making its implementation classes visible to another plugin while
+    /// preserving the shared server API definition.
     ///
     /// The seam is JVM-independent so hosts can prove their ordering and error
     /// policy without starting a JVM. A successful callback means only that a
@@ -637,21 +703,22 @@ impl PaperBootstrapPlan {
     /// or establish API compatibility.
     pub fn load_lifecycle_entries<E>(
         &self,
-        mut load_class: impl FnMut(&[PathBuf], &str) -> Result<(), E>,
+        mut load_class: impl FnMut(&PaperLifecycleLoadRequest) -> Result<(), E>,
     ) -> Result<PaperPluginLifecycleStatusSet, PaperBootstrapError>
     where
         E: fmt::Display,
     {
-        let bootstrap_paths = self.loader_paths(None);
-        load_class(&bootstrap_paths, BOOTSTRAP_CLASS).map_err(|error| {
+        let requests = self.lifecycle_load_requests();
+        let bootstrap = &requests[0];
+        load_class(bootstrap).map_err(|error| {
             PaperBootstrapError::new(format!(
                 "could not load Paper bootstrap class {BOOTSTRAP_CLASS}: {error}"
             ))
         })?;
         let mut status = PaperPluginLifecycleStatusSet::discovered(&self.plugins);
         for (index, plugin) in self.plugins.iter().enumerate() {
-            let plugin_paths = self.loader_paths(Some(plugin.jar()));
-            match load_class(&plugin_paths, plugin.main_class()) {
+            let request = &requests[index + 1];
+            match load_class(request) {
                 Ok(()) => status.loaded(index),
                 Err(error) => status.failed_to_load(index, format!(
                     "could not load plugin {:?} entry class {}: {error}",
@@ -663,12 +730,9 @@ impl PaperBootstrapPlan {
         Ok(status)
     }
 
-    fn loader_paths(&self, plugin_jar: Option<&Path>) -> Vec<PathBuf> {
+    fn bootstrap_loader_paths(&self) -> Vec<PathBuf> {
         let mut paths = self.shim_paths.clone();
         paths.push(self.paper_jar.clone());
-        if let Some(plugin_jar) = plugin_jar {
-            paths.push(plugin_jar.to_owned());
-        }
         paths
     }
 
@@ -687,8 +751,16 @@ impl PaperBootstrapPlan {
         runtime: &JvmRuntime,
         env: &mut Env<'local>,
     ) -> Result<PaperLifecycleLoad, PaperBootstrapError> {
-        let bootstrap_paths = self.loader_paths(None);
-        let (bootstrap_loader, _) = self.load_one_entry_in_runtime(runtime, env, &bootstrap_paths, BOOTSTRAP_CLASS)
+        let requests = self.lifecycle_load_requests();
+        let bootstrap = &requests[0];
+        let (bootstrap_loader, _) = self.load_one_entry_in_runtime(
+            runtime,
+            env,
+            bootstrap.paths(),
+            BOOTSTRAP_CLASS,
+            None,
+            self.native_shim,
+        )
             .map_err(|error| PaperBootstrapError::lifecycle(
                 format!("could not load Paper bootstrap class {BOOTSTRAP_CLASS}"),
                 error,
@@ -696,8 +768,15 @@ impl PaperBootstrapPlan {
         let mut status = PaperPluginLifecycleStatusSet::discovered(&self.plugins);
         let mut plugins = Vec::with_capacity(self.plugins.len());
         for (index, plugin) in self.plugins.iter().enumerate() {
-            let plugin_paths = self.loader_paths(Some(plugin.jar()));
-            match self.load_one_entry_in_runtime(runtime, env, &plugin_paths, plugin.main_class()) {
+            let request = &requests[index + 1];
+            match self.load_one_entry_in_runtime(
+                runtime,
+                env,
+                request.paths(),
+                plugin.main_class(),
+                Some(bootstrap_loader.as_obj()),
+                false,
+            ) {
                 Ok((loader, entry_class)) => {
                     status.loaded(index);
                     plugins.push(PaperLoadedPlugin {
@@ -728,27 +807,61 @@ impl PaperBootstrapPlan {
         env: &mut Env<'local>,
         paths: &[PathBuf],
         binary_name: &str,
+        parent: Option<&JObject<'local>>,
+        install_native_shim: bool,
     ) -> Result<(Global<JObject<'static>>, Global<JClass<'static>>), PaperBootstrapError> {
         let config = paths.iter().fold(JvmConfig::new(), |config, path| {
             config.with_classpath(path)
         });
         let native_error = std::cell::RefCell::new(None);
-        let loaded = runtime.with_isolated_loader(env, &config, |env, loader| {
-            if self.native_shim {
-                if let Err(error) = native_surface::install_in_loader(runtime, env, loader) {
-                    *native_error.borrow_mut() = Some(error.clone());
-                    return Err(crate::runtime::JvmError::new(error.to_string()));
-                }
-            }
-            let entry_class = runtime.load_class_from_loader(env, loader, binary_name)?;
-            let loader = env.new_global_ref(loader).map_err(crate::runtime::JvmError::from)?;
-            let entry_class = env.new_global_ref(entry_class).map_err(crate::runtime::JvmError::from)?;
-            Ok((loader, entry_class))
-        });
+        let loaded = if let Some(parent) = parent {
+            runtime.with_isolated_loader_with_parent(env, &config, parent, |env, loader| {
+                Self::retain_runtime_entry(
+                    runtime,
+                    env,
+                    loader,
+                    binary_name,
+                    install_native_shim,
+                    &native_error,
+                )
+            })
+        } else {
+            runtime.with_isolated_loader(env, &config, |env, loader| {
+                Self::retain_runtime_entry(
+                    runtime,
+                    env,
+                    loader,
+                    binary_name,
+                    install_native_shim,
+                    &native_error,
+                )
+            })
+        };
         if let Some(error) = native_error.into_inner() {
             return Err(PaperBootstrapError::native_surface(error));
         }
         loaded.map_err(|error| PaperBootstrapError::new(error.to_string()))
+    }
+
+    #[cfg(feature = "jvm")]
+    fn retain_runtime_entry<'local>(
+        runtime: &JvmRuntime,
+        env: &mut Env<'local>,
+        loader: &JObject<'local>,
+        binary_name: &str,
+        install_native_shim: bool,
+        native_error: &std::cell::RefCell<Option<crate::native_surface::NativeSurfaceError>>,
+    ) -> Result<(Global<JObject<'static>>, Global<JClass<'static>>), crate::runtime::JvmError> {
+        if install_native_shim {
+            if let Err(error) = native_surface::install_in_loader(runtime, &mut *env, loader) {
+                *native_error.borrow_mut() = Some(error.clone());
+                return Err(crate::runtime::JvmError::new(error.to_string()));
+            }
+        }
+        let entry_class = runtime.load_class_from_loader(&mut *env, loader, binary_name)?;
+        let loader = env.new_global_ref(loader).map_err(crate::runtime::JvmError::from)?;
+        let entry_class = env.new_global_ref(entry_class).map_err(crate::runtime::JvmError::from)?;
+        Ok((loader, entry_class))
     }
 }
 
@@ -762,7 +875,7 @@ fn validate_construction_facade(
         (true, PaperServerFacadeInput::NativeServerRead(_)) => Ok(()),
         #[cfg(feature = "jvm")]
         (false, PaperServerFacadeInput::NativeServerRead(_)) => Err(PaperBootstrapError::new(
-            "the native server-read facade input requires an isolated native shim in every loader",
+            "the native server-read facade input requires the shared isolated native shim",
         )),
         (true, PaperServerFacadeInput::Unavailable) => Err(PaperBootstrapError::new(
             "an isolated native shim requires the adapter worker's server-owned read capabilities",
@@ -1434,9 +1547,13 @@ mod tests {
             .discover()
             .expect("discover lifecycle fixture");
         let mut requests = Vec::new();
-        let status = plan.load_lifecycle_entries(|paths, class| {
-            requests.push((paths.to_vec(), class.to_owned()));
-            if class == "z.Main" {
+        let status = plan.load_lifecycle_entries(|request| {
+            requests.push((
+                request.parent(),
+                request.paths().to_vec(),
+                request.class_name().to_owned(),
+            ));
+            if request.class_name() == "z.Main" {
                 Err("fixture loader rejected Zulu")
             } else {
                 Ok(())
@@ -1445,25 +1562,20 @@ mod tests {
         .expect("one plugin loader failure must be isolated");
 
         assert_eq!(requests.len(), 3, "every plugin must receive an isolated load attempt");
-        assert_eq!(requests[0].1, BOOTSTRAP_CLASS);
-        assert_eq!(requests[1].1, "a.Main");
-        assert_eq!(requests[2].1, "z.Main");
-        assert_eq!(requests[0].0, vec![shim.clone(), fixture.paper_path()]);
+        assert_eq!(requests[0].2, BOOTSTRAP_CLASS);
+        assert_eq!(requests[1].2, "a.Main");
+        assert_eq!(requests[2].2, "z.Main");
+        assert_eq!(requests[0].0, PaperLifecycleLoaderParent::Platform);
+        assert_eq!(requests[0].1, vec![shim.clone(), fixture.paper_path()]);
+        assert_eq!(requests[1].0, PaperLifecycleLoaderParent::Bootstrap);
         assert_eq!(
-            requests[1].0,
-            vec![
-                shim.clone(),
-                fixture.paper_path(),
-                fixture.plugins_path().join("a-first.jar"),
-            ]
+            requests[1].1,
+            vec![fixture.plugins_path().join("a-first.jar")]
         );
+        assert_eq!(requests[2].0, PaperLifecycleLoaderParent::Bootstrap);
         assert_eq!(
-            requests[2].0,
-            vec![
-                shim,
-                fixture.paper_path(),
-                fixture.plugins_path().join("z-last.jar"),
-            ]
+            requests[2].1,
+            vec![fixture.plugins_path().join("z-last.jar")]
         );
         assert_eq!(status.plugins()[0].phase(), PaperPluginLifecyclePhase::Loaded);
         assert_eq!(status.plugins()[1].phase(), PaperPluginLifecyclePhase::Failed);
@@ -1493,8 +1605,12 @@ mod tests {
         let plan = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
             .discover()
             .expect("discover construction fixture");
-        let status = plan.load_lifecycle_entries(|_, class| {
-            if class == "b.Main" { Err("fixture entry failure") } else { Ok(()) }
+        let status = plan.load_lifecycle_entries(|request| {
+            if request.class_name() == "b.Main" {
+                Err("fixture entry failure")
+            } else {
+                Ok(())
+            }
         })
         .expect("the bootstrap and first entry load");
 
@@ -1545,8 +1661,8 @@ mod tests {
             .discover()
             .expect("discover lifecycle fixture");
         let mut classes = Vec::new();
-        let error = plan.load_lifecycle_entries(|_, class| {
-            classes.push(class.to_owned());
+        let error = plan.load_lifecycle_entries(|request| {
+            classes.push(request.class_name().to_owned());
             Err("bootstrap unavailable")
         })
         .expect_err("bootstrap failure must stop before plugin loading");
