@@ -254,7 +254,8 @@ fn register_wasm_commands(
 
     let mut roots = Vec::new();
     for (plugin_index, spec) in specs {
-        let mut command = PluginCommand::new(spec.name);
+        let command_name = spec.name.clone();
+        let mut command = PluginCommand::new(command_name.clone());
         command.description(spec.description);
         for alias in spec.aliases {
             command.alias(alias);
@@ -280,7 +281,7 @@ fn register_wasm_commands(
         });
 
         match registry.register(command) {
-            Ok(()) => roots.push(root.to_lowercase()),
+            Ok(()) => roots.push(command_name.to_lowercase()),
             Err(error) => {
                 tracing::error!(plugin_index, "refused WASM command registration: {error}");
             }
