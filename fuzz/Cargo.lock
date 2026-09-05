@@ -1831,6 +1831,7 @@ dependencies = [
  "lodestone-data",
  "lodestone-fuzz",
  "lodestone-model",
+ "lodestone-net",
  "lodestone-server",
  "lodestone-v26-2",
  "lodestone-worldgen-core",
