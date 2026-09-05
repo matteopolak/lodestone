@@ -15,8 +15,8 @@ use lodestone_model::command_tree::{
 };
 use lodestone_model::{
     AdapterError, AdvancementDisplay, AdvancementEntry, AdvancementFrame, AnimationAction,
-    ArmorTrim, BannerPatternLayer, BlockAabb, BlockActionKind, BlockFace, BlockHardness,
-    BlockPos,
+    ArmorTrim, BannerPatternLayer, BlockAabb, BlockActionKind, BlockFace, BlockHardness, BlockPos,
+    BlockStateRef,
     BossAction,
     BossColor,
     BossOverlay, ChatAckInfo, ChatCompletionsAction, ChatKind, ChatMode, ChunkPos, ClientAction,

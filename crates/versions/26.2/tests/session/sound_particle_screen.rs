@@ -7,8 +7,8 @@
 //! and the server-rolled sound `seed` is asserted to survive decode untouched.
 
 use lodestone_model::{
-    ClientEvent, ConnectionState, Directive, ParticleOptions, ResourceKey, SoundCategory, Text,
-    Vec3, Vec3f, VersionAdapter,
+    BlockStateRef, ClientEvent, ConnectionState, Directive, ParticleOptions, ResourceKey,
+    SoundCategory, Text, Vec3, Vec3f, VersionAdapter,
 };
 use lodestone_v26_2::V770Adapter;
 use lodestone_v26_2::packet_ids::play;
@@ -456,7 +456,9 @@ fn level_particles_decodes_the_block_particle_option_family() {
         assert_eq!(*particle, key(name));
         assert_eq!(
             *options,
-            ParticleOptions::BlockState { state: STATE },
+            ParticleOptions::BlockState {
+                state: BlockStateRef::canonical(STATE),
+            },
             "{name} must decode its block state as a VarInt"
         );
     }

@@ -1301,7 +1301,9 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
                      vanilla's own block-state registry ids are non-negative"
                 ))
             })?;
-            Ok(ParticleOptions::BlockState { state })
+            Ok(ParticleOptions::BlockState {
+                state: BlockStateRef::canonical(state),
+            })
         }
         _ => Ok(ParticleOptions::None),
     }

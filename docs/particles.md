@@ -49,12 +49,16 @@ opaque `SpriteSource::BlockState(StateId)` with no atlas and no tint opinion; `l
 `block_models.rs` bakes each state's particle UV rect and tint once from the jar; `lodestone-shell`'s
 `particles.rs` joins the two and builds GPU instances.
 
-The shell is the raw state-id ingress for both decoded block-particle options and local break effects.
-It validates once into `lodestone_data::block_states::StateId`; particle emitters and
+The shell is the generated-state ingress for both decoded block-particle options and local break effects.
+The version-free `lodestone_model::BlockStateRef` tags a 26.2 global id as `Canonical`, while a legacy
+family or synchronized extension keeps its numeric value as `ProtocolLocal`; an overlapping small number
+must not accidentally become a 26.2 state just because it fits this build's table. The particle seam
+validates only `Canonical` ids into `lodestone_data::block_states::StateId`; particle emitters and
 `SpriteSource::BlockState` retain that proof, and the shell lowers it to a raw atlas index only at the
-final indexed lookup. An out-of-census or custom state fails closed before spawning debris, while names
-introduced by a plugin or data pack remain in their registry/import owners rather than being coerced into
-a built-in state.
+final indexed lookup. An out-of-census canonical value drops there; a protocol-local/custom value is
+not rendered by this built-in resolver rather than being coerced into a built-in state. A version or
+dynamic-registry renderer can dispatch on its `BlockStateRef` source without reconstructing intent from
+the raw number.
 
 Item crumbs follow the same ownership rule. `SpriteSource::Item` carries the generated
 `lodestone_data::item::Item` enum, not a numeric registry value. The only two producers are a local
