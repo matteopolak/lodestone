@@ -235,7 +235,8 @@ was discovered only because a codegen change surfaced it.
 ### Track B: the differential-fuzzing harness (`differential.rs`)
 
 **Status: two fixed live comparisons, plus generated and shrunk fluid cases on
-both hermetic and live oracle paths.**
+both hermetic and live oracle paths, and a fixed-seed scheduled-tick queue
+model check.**
 What exists:
 
 - `tests/support/tick_corpus.rs` and
@@ -303,6 +304,15 @@ What exists:
   waits for `server_tick_count()` before each comparison. A deliberate source
   read fault is caught at the first differing tick, so the proof exercises the
   real server tick loop without routing reads through command parsing.
+- `tests/scheduled_tick_queue_model.rs` is a bounded, fixed-ChaCha-seed model
+  check over the production `ScheduledTickHandle` used by the world tick loop
+  and by the save path's column snapshot. Each generated script starts with a
+  cross-chunk, same-tick priority conflict, then adds at most 32 shrinkable
+  schedule, drain, and cancellation operations over both block and fluid
+  queues. An independent vector model predicts acceptance, due ordering,
+  hard drain caps, `(position, kind)` deduplication, cancellation, queue
+  membership, and persisted insertion order. The wrong-priority control is
+  required to fail and shrink, so a permanently agreeing harness cannot pass.
 - `differential::redstone::RedstoneModelOracle` — the **our-side** oracle over
   the redstone model, driving two production entry points rather than one:
   `lodestone_server::react_at_placement_with_entities` for a world edit, and
@@ -815,7 +825,9 @@ test.
   client read-model has no scheduled-tick queue to compare: inbound ticking
   metadata folds into session server information, while world reactions belong
   to the server-side scheduler rather than the client state exposed by
-  `ClientHandle`.
+  `ClientHandle`. The server-side queue itself is covered by the separate
+  fixed-seed model lane above; this does not claim a live client packet oracle
+  for scheduled ticks.
 - **The live comparison still uses the fluid model for its our-side world.**
   `FluidModelOracle` drives `lodestone_server::fluid`'s production
   scheduled-tick entry point over a sparse world. The hermetic
