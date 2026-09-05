@@ -261,14 +261,22 @@ Chunks cover y=-64 through 319, use anonymous NBT heightmaps, counted palette
 long arrays, and inline light framing without a trust-edges byte. The outbound
 block-state inverse accepts only unique canonical mappings. Unsupported states,
 non-plains biomes and block entities return explicit chunk-encoding errors.
-Light arrays are currently empty; external-client lighting and broad gameplay
-acceptance remain unverified. This is a minimal host, not full Play coverage.
+Sky and block light are computed over canonical states with the shared light
+solver and the canonical per-state opacity/emission table. Initial chunks carry
+the result inline; edits use the server's relight path and this family's
+light-update packet. The compute is isolated to one column, so neighbouring
+columns cannot contribute light across borders. External-client acceptance and
+broader Play coverage remain unverified.
 
 To extend hosting, change this family's `server_protocol` and add outside wire
 controls to `tests/server_protocol.rs`. Re-extract the fixture's configuration
 packet IDs 7, 12 and 13 if the authoritative join capture changes; the fixture
 identity test detects drift. `tests/server_integration.rs` checks the actual
 registry-selected server/client path through Play, chunk receipt and block break.
+Its enclosed-room lighting gate checks sky 0 inside and 15 outside, torch 14,
+adjacent air 13, and extinction after removing the torch. Fixture opacity and
+emission are cross-checked against the protocol-766 block report in the vendored
+dataset. The test reads the same client light snapshots that feed rendering.
 
 ## Dependencies
 

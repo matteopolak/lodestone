@@ -211,15 +211,21 @@ Chunks cover y=-64 through 319 with typed heightmap arrays, uncounted palette
 long arrays and inline light framing. The teleport includes its leading ID,
 three velocity fields and 32-bit flags. Canonical block states must have a
 unique exact inverse; unsupported states, non-plains biomes and block entities
-produce explicit chunk-encoding errors. Light arrays are currently empty;
-external-client lighting and broad gameplay acceptance remain unverified.
+produce explicit chunk-encoding errors. Sky and block light use the shared
+solver with canonical per-state opacity and emission. Initial chunks include
+the result; block edits trigger the normal server relight path and this
+family's light-update packet. Computation is isolated to each column, so
+cross-border light contribution and external-client acceptance remain open.
 
 Extend the family's `server_protocol` and its `tests/server_protocol.rs` wire
 controls together. When replacing the authoritative capture, re-extract
 configuration packet IDs 7, 12 and 13; the fixture identity test checks the
 production payloads against that capture. `tests/server_integration.rs` verifies
 registry-selected login, Play, chunk receipt and a block break through the real
-integrated-server loop.
+integrated-server loop. Its enclosed-room light gate reads the client's render
+light snapshots, checking sky 0 inside and 15 outside, torch emission 14,
+adjacent air 13, and extinction after removing the source. Fixture properties
+are independently checked against the vendored 1.21.11 block dataset.
 
 ## Dependencies
 

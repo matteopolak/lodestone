@@ -102,6 +102,42 @@ fn encode_heightmaps(column: &ChunkColumn) -> Result<Vec<u8>, ChunkEncodeError> 
     Ok(out.into_vec())
 }
 
+/// Reads canonical states in the fixed hosted Overworld window.
+struct HostedLightVolume<'a>(&'a ChunkColumn);
+
+impl lodestone_world::BlockVolume for HostedLightVolume<'_> {
+    fn block(&self, x: usize, y: i32, z: usize) -> u32 {
+        if !(MIN_Y..MIN_Y + HEIGHT).contains(&y) {
+            return lodestone_data::block_states::air_state_id();
+        }
+        self.0.block_state_id(x as i32, y, z as i32)
+    }
+
+    fn min_y(&self) -> i32 { MIN_Y }
+
+    fn section_count(&self) -> usize { SECTION_COUNT }
+}
+
+struct CanonicalLightProperties;
+
+impl lodestone_world::LightProperties for CanonicalLightProperties {
+    fn opacity(&self, state: u32) -> u8 {
+        let state = lodestone_data::block_states::StateId::new(state)
+            .expect("server column contains canonical block states");
+        lodestone_data::light_props::light_props(state).0
+    }
+
+    fn emission(&self, state: u32) -> u8 {
+        let state = lodestone_data::block_states::StateId::new(state)
+            .expect("server column contains canonical block states");
+        lodestone_data::light_props::light_props(state).1
+    }
+}
+
+fn served_light(column: &ChunkColumn) -> lodestone_world::ColumnLight {
+    lodestone_world::compute_column_light(&HostedLightVolume(column), &CanonicalLightProperties)
+}
+
 fn wire_inverse() -> &'static std::collections::BTreeMap<u32, Option<u32>> {
     static INVERSE: std::sync::OnceLock<std::collections::BTreeMap<u32, Option<u32>>> =
         std::sync::OnceLock::new();
@@ -226,11 +262,7 @@ fn encode_chunk_body(
         .var_bytes(&sections.into_vec())
         .map_err(|error| ChunkEncodeError::new(error.to_string()))?;
     packet.var_i32(0);
-    for _ in 0..4 {
-        packet.var_i32(0);
-    }
-    packet.var_i32(0);
-    packet.var_i32(0);
+    served_light(column).encode(&mut packet);
     Ok(packet.into_vec())
 }
 
@@ -429,5 +461,24 @@ impl ServerProtocol for V766ServerProtocol {
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
         self.try_encode_block_update(x, y, z, state)
             .expect("call try_encode_block_update to handle an unrepresentable protocol-766 state")
+    }
+
+    fn compute_column_light(&self, column: &ChunkColumn) -> Option<lodestone_world::ColumnLight> {
+        let end = column.min_y.checked_add(column.height)?;
+        if column.min_y > MIN_Y || end < MIN_Y + HEIGHT {
+            return None;
+        }
+        Some(served_light(column))
+    }
+
+    fn encode_light_update(&self, cx: i32, cz: i32, light: &lodestone_world::ColumnLight) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(cx);
+        payload.var_i32(cz);
+        light.encode(&mut payload);
+        ServerDirective::Send {
+            packet_id: play::clientbound::UPDATE_LIGHT,
+            payload: payload.into_vec(),
+        }
     }
 }

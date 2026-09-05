@@ -99,3 +99,57 @@ async fn registry_selected_protocol_766_reaches_play_and_confirms_a_block_break(
 fn protocol_765_is_not_hosted() {
     assert!(lodestone_registry::server_protocol_for_protocol(765).is_none());
 }
+
+#[tokio::test]
+async fn hosted_lighting_reaches_client_and_extinguishes_after_a_block_break() {
+    let optics: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../vendor/minecraft-data/data/pc/1.20.5/blocks.json"
+    )).unwrap();
+    let property = |name: &str, field: &str| {
+        optics.as_array().unwrap().iter().find(|block| block["name"] == name).unwrap()[field]
+            .as_u64().unwrap()
+    };
+    assert_eq!(property("torch", "emitLight"), 14);
+    assert_eq!(property("stone", "filterLight"), 15);
+    assert_eq!(property("air", "filterLight"), 0);
+    let protocol = lodestone_registry::server_protocol_for_protocol(766).unwrap();
+    let mut room = ChunkColumn::new(-64, 384);
+    for y in 98..=104 {
+        for z in 5..=11 {
+            for x in 5..=11 {
+                if y == 98 || y == 104 || x == 5 || x == 11 || z == 5 || z == 11 {
+                    room.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+    }
+    room.set_block(8, 100, 8, "minecraft:torch");
+    let source = Arc::new(FixtureSource { column: Mutex::new(room) });
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, _) = ClientBuilder::new(
+        ServerAddress { host: "memory".to_owned(), port: 0 },
+        LoginProfile { username: "LightFixture".to_owned(), uuid: uuid::Uuid::new_v4() },
+        Box::new(adapter_for(766)),
+    ).player_loaded_policy(PlayerLoadedPolicy::Manual).connect_with(client_io);
+    handle.wait_for_spawn(Duration::from_secs(10)).await.unwrap();
+    let pos = lodestone_client::ChunkPos::new(0, 0);
+    handle.wait_for_chunk(pos, Duration::from_secs(10)).await.unwrap();
+    // World y=100 is block section 10 and local y=4; its light section is 11.
+    let light = handle.section_light(pos, 11).expect("received chunk light");
+    assert_eq!(light.sky_at(8, 4, 8), 0, "sealed room bbox=(5,98,5)..(11,104,11)");
+    assert_eq!(light.sky_at(8, 9, 8), 15, "open sky bbox=(8,105,8)..(8,105,8)");
+    assert_eq!(light.block_at(8, 4, 8), 14, "torch bbox=(8,100,8)..(8,100,8)");
+    assert_eq!(light.block_at(9, 4, 8), 13, "adjacent air bbox=(9,100,8)..(9,100,8)");
+    handle.send_action(ClientAction::BlockAction {
+        action: BlockActionKind::StartDestroy,
+        pos: TARGET,
+        face: BlockFace::Up,
+        sequence: 23,
+    }).unwrap();
+    handle.wait_for(Duration::from_secs(10), move |client| {
+        client.block_at(TARGET) == Some(lodestone_data::block_states::air_state_id())
+            && client.section_light(pos, 11).is_some_and(|light| light.block_at(9, 4, 8) == 0)
+    }).await.expect("torch removal extinguishes bbox=(9,100,8)..(9,100,8)");
+    handle.shutdown();
+    server.shutdown().await;
+}
