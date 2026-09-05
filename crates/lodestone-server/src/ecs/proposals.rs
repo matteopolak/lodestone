@@ -8,7 +8,8 @@ use std::time::Duration;
 use bevy_ecs::message::{Message, MessageWriter};
 use bevy_ecs::prelude::{ResMut, Resource};
 use bevy_ecs::schedule::IntoScheduleConfigs;
-use lodestone_model::{ResourceKey, Vec3};
+use lodestone_data::block_states::StateId;
+use lodestone_model::{BlockPos, ResourceKey, Vec3};
 
 use super::TickSet;
 
@@ -41,6 +42,13 @@ pub enum ServerProposalAction {
     },
     /// Remove this exact live mob id through `IntegratedServer`.
     DespawnMob { id: i32 },
+    /// Replace one already-resident block through `IntegratedServer`.
+    ///
+    /// The state id is validated at the boundary by [`StateId`], so an
+    /// adjudicator never has to defend a raw registry integer. The resident
+    /// requirement is intentional: a plugin proposal must not turn into an
+    /// unbounded chunk load or generation request.
+    SetResidentBlock { pos: BlockPos, state: StateId },
 }
 
 /// A plugin's answer to a [`ServerProposal`].
@@ -116,6 +124,16 @@ impl ServerProposalHandle {
     /// Submit a despawn and await one `Drain → Adjudicate → Apply` pass.
     pub async fn despawn_mob(&self, id: i32) -> Result<ServerProposalAction, DespawnProposalRefusal> {
         self.submit(ServerProposalAction::DespawnMob { id }).await
+    }
+
+    /// Submit one bounded resident-block mutation and await one
+    /// `Drain → Adjudicate → Apply` pass.
+    pub async fn set_resident_block(
+        &self,
+        pos: BlockPos,
+        state: StateId,
+    ) -> Result<ServerProposalAction, ProposalRefusal> {
+        self.submit(ServerProposalAction::SetResidentBlock { pos, state }).await
     }
 }
 

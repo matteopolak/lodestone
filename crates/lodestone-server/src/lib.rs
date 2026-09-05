@@ -590,7 +590,7 @@ pub use hopper::{
     HOPPER_SIZE, Hopper, HopperTick, MAX_STACK_SIZE as HOPPER_MAX_STACK_SIZE,
     TRANSFER_COOLDOWN_TICKS as HOPPER_TRANSFER_COOLDOWN_TICKS, try_move_one_item,
 };
-pub use integrated::IntegratedServer;
+pub use integrated::{BlockMutationRefusal, IntegratedServer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use integrated::{LanConfig, LanDiscovery, PublishConfig};
 #[cfg(not(target_arch = "wasm32"))]

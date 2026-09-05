@@ -2088,7 +2088,12 @@ async fn run_tick_loop_with_weather_impl<W>(
                             Ok(crate::ecs::ServerProposalAction::SpawnMob { entity_type, pos }) => {
                                 sim.spawn_species(entity_type, pos);
                             }
-                            Ok(crate::ecs::ServerProposalAction::DespawnMob { .. }) | Err(_) => {}
+                            // These tickets were staged exclusively from natural
+                            // spawn candidates above. A replacement outside the
+                            // mob vocabulary cannot become a mob-side effect.
+                            Ok(crate::ecs::ServerProposalAction::DespawnMob { .. })
+                            | Ok(crate::ecs::ServerProposalAction::SetResidentBlock { .. })
+                            | Err(_) => {}
                         }
                     }
                 });

@@ -6,14 +6,18 @@ use bevy_ecs::message::MessageReader;
 use bevy_ecs::prelude::ResMut;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use lodestone_core::State;
-use lodestone_model::{ResourceKey, Vec3};
+use lodestone_data::block_states::StateId;
+use lodestone_model::{BlockPos, ResourceKey, Vec3};
 use lodestone_server::ecs::{
     GameTick, ProposalVerdict, ServerApp, ServerProposal, ServerProposalAction,
     ServerProposalDecisions, SpawnProposalRefusal, TickSet,
 };
 use lodestone_server::{
-    ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective, ServerProtocol,
+    BlockMutationRefusal, ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective,
+    ServerProtocol,
 };
+use std::collections::HashMap;
+use std::sync::Mutex;
 use uuid::Uuid;
 
 const MIN_Y: i32 = 0;
@@ -53,23 +57,45 @@ impl ServerProtocol for SilentProtocol {
     }
 }
 
-#[derive(Debug)]
-struct FlatWorld;
+#[derive(Debug, Default)]
+struct FlatWorld {
+    blocks: Mutex<HashMap<(i32, i32, i32), String>>,
+}
 
 impl ChunkSource for FlatWorld {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         ChunkColumn::new(MIN_Y, HEIGHT)
     }
 
-    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
-        "minecraft:air".to_string()
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        self.blocks
+            .lock()
+            .expect("test world lock")
+            .get(&(x, y, z))
+            .cloned()
+            .unwrap_or_else(|| "minecraft:air".to_string())
+    }
+
+    fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
+        (MIN_Y..MIN_Y + HEIGHT).contains(&y)
+            .then(|| self.block_state(x, y, z))
+            .and_then(|state| StateId::from_state_str(&state))
+    }
+
+    fn resident_column(&self, _cx: i32, _cz: i32) -> Option<ChunkColumn> {
+        Some(ChunkColumn::new(MIN_Y, HEIGHT))
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:plains".to_string()
     }
 
-    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        self.blocks
+            .lock()
+            .expect("test world lock")
+            .insert((x, y, z), name.to_string());
+    }
 }
 
 struct SpawnPolicy;
@@ -82,6 +108,37 @@ impl Plugin for SpawnPolicy {
             GameTick,
             (deny_spawns, replace_pigs).chain().in_set(TickSet::Adjudicate),
         );
+    }
+}
+
+struct BlockPolicy;
+
+impl Plugin for BlockPolicy {
+    fn build(&self, app: &mut App) {
+        app.add_systems(GameTick, decide_blocks.in_set(TickSet::Adjudicate));
+    }
+}
+
+fn decide_blocks(
+    mut proposals: MessageReader<ServerProposal>,
+    mut decisions: ResMut<ServerProposalDecisions>,
+) {
+    for proposal in proposals.read() {
+        let ServerProposalAction::SetResidentBlock { pos, .. } = &proposal.action else {
+            continue;
+        };
+        if pos.x == 1 {
+            decisions.decide(proposal.id(), 0, ProposalVerdict::Deny);
+        } else if pos.x == 2 {
+            decisions.decide(
+                proposal.id(),
+                0,
+                ProposalVerdict::Replace(ServerProposalAction::SetResidentBlock {
+                    pos: *pos,
+                    state: state("minecraft:diamond_block"),
+                }),
+            );
+        }
     }
 }
 
@@ -121,6 +178,10 @@ fn key(value: &str) -> ResourceKey {
     value.parse().expect("test resource key")
 }
 
+fn state(value: &str) -> StateId {
+    StateId::from_state_str(value).expect("test block state exists")
+}
+
 #[tokio::test]
 async fn native_plugins_deny_or_prioritize_replacement_before_integrated_spawn() {
     let server_app = ServerApp::bootstrap_with(|app| {
@@ -128,7 +189,7 @@ async fn native_plugins_deny_or_prioritize_replacement_before_integrated_spawn()
     });
     let (server, client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
         SilentProtocol,
-        FlatWorld,
+        FlatWorld::default(),
         (0..=0, 0..=0),
         (0, 0),
         0,
@@ -165,6 +226,55 @@ async fn native_plugins_deny_or_prioritize_replacement_before_integrated_spawn()
     assert!(
         mobs.with(|sim| sim.get(id).is_none()),
         "a checked despawn must remove the resolved id from the live simulation"
+    );
+
+    server.shutdown().await;
+}
+
+/// The native server consumer and the shared proposal queue must reach the
+/// retained source, not merely resolve a verdict in an isolated ECS app.
+#[tokio::test]
+async fn native_plugin_block_mutations_are_adjudicated_then_reach_the_authoritative_source() {
+    let server_app = ServerApp::bootstrap_with(|app| {
+        app.add_plugins(BlockPolicy);
+    });
+    let (server, client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
+        SilentProtocol,
+        FlatWorld::default(),
+        (0..=0, 0..=0),
+        (0, 0),
+        0,
+        1,
+        server_app,
+    );
+    std::mem::forget(client);
+
+    let denied = server
+        .set_resident_block_state_proposed(BlockPos::new(1, 4, 3), state("minecraft:gold_block"))
+        .await;
+    assert_eq!(denied, Err(BlockMutationRefusal::Denied));
+    assert_eq!(
+        server.resident_block_state_id(1, 4, 3),
+        Some(state("minecraft:air")),
+        "a denied proposal must leave the authoritative source unchanged"
+    );
+
+    server
+        .set_resident_block_state_proposed(BlockPos::new(2, 4, 3), state("minecraft:gold_block"))
+        .await
+        .expect("the replacement proposal must write through the live source");
+    assert_eq!(
+        server.resident_block_state_id(2, 4, 3),
+        Some(state("minecraft:diamond_block")),
+        "the resolved replacement, not the caller's requested state, must become authoritative"
+    );
+
+    assert_eq!(
+        server
+            .set_resident_block_state_proposed(BlockPos::new(2, HEIGHT, 3), state("minecraft:gold_block"))
+            .await,
+        Err(BlockMutationRefusal::OutOfBounds),
+        "a finite validation result must replace a source-specific error string"
     );
 
     server.shutdown().await;
