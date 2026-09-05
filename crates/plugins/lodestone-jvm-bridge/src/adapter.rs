@@ -18,9 +18,9 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::time::{Duration, Instant};
 
 use jni::errors::ThrowRuntimeExAndDefault;
-use jni::objects::{Global, JClass, JObject, JString};
+use jni::objects::{Global, JClass, JIntArray, JObject, JString};
 use jni::strings::JNIString;
-use jni::sys::{jboolean, jdouble, jfloat, jint, jlong, jobject, jstring};
+use jni::sys::{jboolean, jdouble, jfloat, jint, jintArray, jlong, jobject, jstring};
 use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
 
 use crate::runtime::{JvmConfig, JvmRuntime};
@@ -37,8 +37,27 @@ pub struct BlockStateQuery {
     pub z: i32,
 }
 
+/// The largest number of absolute block positions one batch request may carry.
+///
+/// A batch is deliberately bounded before it leaves Java: a bulk edit must
+/// apply backpressure through the same finite port as a scalar read instead of
+/// allocating an unbounded Java-to-host payload.
+pub const MAX_BLOCK_STATE_BATCH_POSITIONS: usize = 4096;
+
+/// Several resident block-state reads carried by one bounded port request.
+///
+/// Positions retain caller order, so the returned state vector can be mapped
+/// back to a Java `int[]` without object wrappers or a server-owned reference.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockStateBatchQuery {
+    pub positions: Vec<BlockStateQuery>,
+}
+
 /// A host must distinguish an unavailable position from a valid air state.
 pub type BlockStateAnswer = Result<u32, String>;
+
+/// Host answer for one ordered resident block-state batch.
+pub type BlockStateBatchAnswer = Result<Vec<u32>, String>;
 
 /// A requested replacement of one already-resident primary-world block.
 ///
@@ -128,6 +147,7 @@ pub enum PlayerGameMode {
 pub type PlayerSnapshotAnswer = Result<PlayerSnapshot, String>;
 
 type BlockPort = WorldPort<BlockStateQuery, BlockStateAnswer>;
+type BlockBatchPort = WorldPort<BlockStateBatchQuery, BlockStateBatchAnswer>;
 type BlockWritePort = WorldPort<BlockStateWrite, BlockStateWriteAnswer>;
 type TickPort = WorldPort<(), ServerTickAnswer>;
 type PlayerSnapshotPort = WorldPort<PlayerSnapshotQuery, PlayerSnapshotAnswer>;
@@ -147,6 +167,7 @@ pub type ServerTickAnswer = Result<u64, String>;
 #[derive(Debug)]
 pub struct NativeServerSurface {
     _block_port: BlockPort,
+    _block_batch_port: BlockBatchPort,
     _block_write_port: BlockWritePort,
     _tick_port: TickPort,
     _player_position_port: PlayerSnapshotPort,
@@ -155,12 +176,14 @@ pub struct NativeServerSurface {
 impl NativeServerSurface {
     fn from_ports(
         block_port: BlockPort,
+        block_batch_port: BlockBatchPort,
         block_write_port: BlockWritePort,
         tick_port: TickPort,
         player_position_port: PlayerSnapshotPort,
     ) -> Self {
         Self {
             _block_port: block_port,
+            _block_batch_port: block_batch_port,
             _block_write_port: block_write_port,
             _tick_port: tick_port,
             _player_position_port: player_position_port,
@@ -170,6 +193,7 @@ impl NativeServerSurface {
 
 thread_local! {
     static CALLBACK_PORT: RefCell<Option<BlockPort>> = const { RefCell::new(None) };
+    static BLOCK_BATCH_PORT: RefCell<Option<BlockBatchPort>> = const { RefCell::new(None) };
     static BLOCK_WRITE_PORT: RefCell<Option<BlockWritePort>> = const { RefCell::new(None) };
     static SERVER_TICK_PORT: RefCell<Option<TickPort>> = const { RefCell::new(None) };
     static PLAYER_POSITION_PORT: RefCell<Option<PlayerSnapshotPort>> = const { RefCell::new(None) };
@@ -1253,6 +1277,7 @@ pub struct AdapterHost {
     commands: SyncSender<AdapterCommand>,
     events: Receiver<Result<AdapterEvent, AdapterError>>,
     servicer: PortServicer<BlockStateQuery, BlockStateAnswer>,
+    block_batch_servicer: PortServicer<BlockStateBatchQuery, BlockStateBatchAnswer>,
     block_write_servicer: PortServicer<BlockStateWrite, BlockStateWriteAnswer>,
     server_tick_servicer: PortServicer<(), ServerTickAnswer>,
     player_position_servicer: PortServicer<PlayerSnapshotQuery, PlayerSnapshotAnswer>,
@@ -1298,13 +1323,14 @@ impl AdapterHost {
             return Err(AdapterError::new("adapter deadline must be positive"));
         }
         let class = class.to_owned();
-        Self::spawn(deadline, move |commands, events, port, block_write_port, server_tick_port, player_position_port| {
+        Self::spawn(deadline, move |commands, events, port, block_batch_port, block_write_port, server_tick_port, player_position_port| {
             let result = run_java(
                 config,
                 &class,
                 commands,
                 &events,
                 port,
+                block_batch_port,
                 block_write_port,
                 server_tick_port,
                 player_position_port,
@@ -1318,24 +1344,26 @@ impl AdapterHost {
 
     fn spawn(
         deadline: Duration,
-        run: impl FnOnce(Receiver<AdapterCommand>, Events, BlockPort, BlockWritePort, TickPort, PlayerSnapshotPort)
+        run: impl FnOnce(Receiver<AdapterCommand>, Events, BlockPort, BlockBatchPort, BlockWritePort, TickPort, PlayerSnapshotPort)
             + Send
             + 'static,
     ) -> Result<Self, AdapterError> {
         let (commands, receiver) = sync_channel(1);
         let (sender, events) = sync_channel(1);
         let (port, servicer) = channel(deadline);
+        let (block_batch_port, block_batch_servicer) = channel(deadline);
         let (block_write_port, block_write_servicer) = channel(deadline);
         let (server_tick_port, server_tick_servicer) = channel(deadline);
         let (player_position_port, player_position_servicer) = channel(deadline);
         std::thread::Builder::new()
             .name("lodestone-java-adapter".to_owned())
-            .spawn(move || run(receiver, sender, port, block_write_port, server_tick_port, player_position_port))
+            .spawn(move || run(receiver, sender, port, block_batch_port, block_write_port, server_tick_port, player_position_port))
             .map_err(|error| AdapterError::new(format!("adapter worker startup: {error}")))?;
         Ok(Self {
             commands,
             events,
             servicer,
+            block_batch_servicer,
             block_write_servicer,
             server_tick_servicer,
             player_position_servicer,
@@ -1455,6 +1483,23 @@ impl AdapterHost {
             return 0;
         }
         self.servicer.service_all_pending(max, answer)
+    }
+
+    /// Answers ordered resident block-state batches on the caller's thread.
+    ///
+    /// The closure receives one whole Java request, so a region edit crosses
+    /// JNI and the world port once rather than once per block. It must return
+    /// exactly one state per position and preserve the input order; absent
+    /// positions remain a named host error rather than becoming generated air.
+    pub fn service_pending_block_state_batches(
+        &self,
+        max: usize,
+        answer: impl FnMut(BlockStateBatchQuery) -> BlockStateBatchAnswer,
+    ) -> usize {
+        if matches!(self.state, State::Failed(_)) {
+            return 0;
+        }
+        self.block_batch_servicer.service_all_pending(max, answer)
     }
 
     /// Applies at most `max` native block-state writes on the caller's thread.
@@ -1608,6 +1653,7 @@ fn run_java<S>(
     commands: Receiver<AdapterCommand>,
     events: &Events,
     port: BlockPort,
+    block_batch_port: BlockBatchPort,
     block_write_port: BlockWritePort,
     server_tick_port: TickPort,
     player_position_port: PlayerSnapshotPort,
@@ -1622,6 +1668,7 @@ fn run_java<S>(
     runtime.with_attached_thread(|env| {
         let result = (|| {
             CALLBACK_PORT.with(|slot| *slot.borrow_mut() = Some(port.clone()));
+            BLOCK_BATCH_PORT.with(|slot| *slot.borrow_mut() = Some(block_batch_port.clone()));
             BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = Some(block_write_port.clone()));
             SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = Some(server_tick_port.clone()));
             PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = Some(player_position_port.clone()));
@@ -1637,6 +1684,7 @@ fn run_java<S>(
                 .with(|slot| *slot.borrow_mut() = Some(Default::default()));
             let surface = NativeServerSurface::from_ports(
                 port.clone(),
+                block_batch_port.clone(),
                 block_write_port.clone(),
                 server_tick_port.clone(),
                 player_position_port.clone(),
@@ -1791,6 +1839,7 @@ fn run_java<S>(
         CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
         CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
         CALLBACK_PORT.with(|slot| *slot.borrow_mut() = None);
+        BLOCK_BATCH_PORT.with(|slot| *slot.borrow_mut() = None);
         BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = None);
         SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = None);
         PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = None);
@@ -1833,6 +1882,29 @@ pub(crate) fn register_block_query(
         let signature = JNIString::new(descriptor);
         let method = NativeMethod::from_raw_parts(&name, &signature,
             native_block_state_id as *mut c_void);
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
+pub(crate) fn register_block_batch_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the generated isolated surface validates the exact `int[] ->
+    // int[]` ABI before this pointer is installed. The callback copies both
+    // arrays, then uses one bounded host-port request; it never exposes a
+    // server object, pointer, or guard to Java.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_block_state_ids as *mut c_void,
+        );
         env.register_native_methods(class, &[method])
     }
 }
@@ -2492,6 +2564,78 @@ extern "system" fn native_block_state_id<'local>(
             .map_err(|error| AdapterError::new(format!("blockStateId({x},{y},{z}): {error}")))?;
         jint::try_from(state).map_err(|_| AdapterError::new("blockStateId exceeds Java int range"))
     }).resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[allow(unsafe_code)]
+extern "system" fn native_block_state_ids<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    packed_positions: jintArray,
+) -> jintArray {
+    env.with_env(|env| -> Result<jintArray, AdapterError> {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        if packed_positions.is_null() {
+            return Err(AdapterError::new("blockStateIds requires a non-null int[] of x,y,z triples"));
+        }
+        // SAFETY: JNI passed a local `int[]` matching the validated descriptor.
+        // The wrapper is used only in this local frame and is its sole owner.
+        let positions = unsafe { JIntArray::from_raw(env, packed_positions) };
+        let len = positions
+            .len(env)
+            .map_err(|error| AdapterError::new(format!("blockStateIds: {error}")))?;
+        if len % 3 != 0 {
+            return Err(AdapterError::new("blockStateIds requires an int[] whose length is divisible by 3"));
+        }
+        let count = len / 3;
+        if count > MAX_BLOCK_STATE_BATCH_POSITIONS {
+            return Err(AdapterError::new(format!(
+                "blockStateIds accepts at most {MAX_BLOCK_STATE_BATCH_POSITIONS} positions"
+            )));
+        }
+        let mut packed = vec![0_i32; len];
+        positions
+            .get_region(env, 0, &mut packed)
+            .map_err(|error| AdapterError::new(format!("blockStateIds: {error}")))?;
+        if count == 0 {
+            return JIntArray::new(env, 0)
+                .map(JIntArray::into_raw)
+                .map_err(|error| AdapterError::new(format!("blockStateIds: {error}")));
+        }
+        let request = BlockStateBatchQuery {
+            positions: packed
+                .chunks_exact(3)
+                .map(|coordinates| BlockStateQuery {
+                    x: coordinates[0],
+                    y: coordinates[1],
+                    z: coordinates[2],
+                })
+                .collect(),
+        };
+        let port = BLOCK_BATCH_PORT.with(|slot| slot.borrow().clone()).ok_or_else(|| {
+            AdapterError::new("blockStateIds requires the adapter worker thread")
+        })?;
+        let states = port.request(request)
+            .map_err(|error| AdapterError::new(format!("blockStateIds: {error}")))?
+            .map_err(|error| AdapterError::new(format!("blockStateIds: {error}")))?;
+        if states.len() != count {
+            return Err(AdapterError::new(format!(
+                "blockStateIds host returned {} states for {count} positions",
+                states.len(),
+            )));
+        }
+        let states = states.into_iter()
+            .map(|state| jint::try_from(state)
+                .map_err(|_| AdapterError::new("blockStateIds state id exceeds Java int range")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = JIntArray::new(env, count)
+            .map_err(|error| AdapterError::new(format!("blockStateIds: {error}")))?;
+        result
+            .set_region(env, 0, &states)
+            .map_err(|error| AdapterError::new(format!("blockStateIds: {error}")))?;
+        Ok(result.into_raw())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 extern "system" fn native_server_tick_count<'local>(
@@ -3416,7 +3560,7 @@ mod tests {
     #[test]
     fn callback_queries_run_on_host_and_ticks_do_not_overlap() {
         let host_thread = std::thread::current().id();
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, port, _, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, port, _, _, _, _| {
             assert_ne!(std::thread::current().id(), host_thread);
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             for command in commands {
@@ -3447,6 +3591,47 @@ mod tests {
     }
 
     #[test]
+    fn block_state_batches_cross_the_host_port_once_and_preserve_order() {
+        let host_thread = std::thread::current().id();
+        let mut host = AdapterHost::spawn(
+            Duration::from_secs(2),
+            move |_commands, events, _port, batch_port, _write_port, _tick_port, _player_port| {
+                assert_ne!(std::thread::current().id(), host_thread);
+                events.send(Ok(AdapterEvent::Ready)).unwrap();
+                let result = batch_port.request(BlockStateBatchQuery {
+                    positions: vec![
+                        BlockStateQuery { x: -17, y: 64, z: 33 },
+                        BlockStateQuery { x: 5, y: -12, z: 91 },
+                        BlockStateQuery { x: 0, y: 0, z: 0 },
+                    ],
+                }).unwrap();
+                assert_eq!(result, Ok(vec![422, 17, 0]));
+            },
+        )
+        .unwrap();
+        assert_eq!(await_event(&mut host), AdapterEvent::Ready);
+        let limit = Instant::now() + Duration::from_secs(2);
+        let mut calls = 0;
+        while host.service_pending_block_state_batches(1, |batch| {
+            calls += 1;
+            assert_eq!(std::thread::current().id(), host_thread);
+            assert_eq!(
+                batch.positions,
+                vec![
+                    BlockStateQuery { x: -17, y: 64, z: 33 },
+                    BlockStateQuery { x: 5, y: -12, z: 91 },
+                    BlockStateQuery { x: 0, y: 0, z: 0 },
+                ],
+            );
+            Ok(vec![422, 17, 0])
+        }) == 0 {
+            assert!(Instant::now() < limit, "batch query did not reach the host");
+            std::thread::yield_now();
+        }
+        assert_eq!(calls, 1, "one region read must become one port request");
+    }
+
+    #[test]
     fn block_change_callbacks_are_bounded_and_preserve_the_applied_value() {
         let host_thread = std::thread::current().id();
         let expected = BlockStateWrite {
@@ -3455,7 +3640,7 @@ mod tests {
             z: 33,
             state_id: 1234,
         };
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, _, _, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, _, _, _, _, _| {
             assert_ne!(std::thread::current().id(), host_thread);
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             let command = commands.recv().expect("one host callback");
@@ -3503,7 +3688,7 @@ mod tests {
         let player_for_worker = player.clone();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |commands, events, _, _, _, _| {
+            move |commands, events, _, _, _, _, _| {
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(
                     commands.recv().expect("one player callback"),
@@ -3542,7 +3727,7 @@ mod tests {
         let disconnected = player.clone();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |commands, events, _, _, _, _| {
+            move |commands, events, _, _, _, _, _| {
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(
                     commands.recv().expect("join transition"),
@@ -4034,7 +4219,7 @@ mod tests {
 
     #[test]
     fn deadline_rejects_a_late_completion_and_remains_terminal() {
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _, _, _| {
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             let _ = commands.recv();
         }).unwrap();
@@ -4058,7 +4243,7 @@ mod tests {
 
     #[test]
     fn worker_errors_preserve_the_named_failure() {
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _, _, _| {
             events.send(Err(AdapterError::new("example.Adapter.onTick: missing member"))).unwrap();
             let _ = commands.recv();
         }).unwrap();
@@ -4080,7 +4265,7 @@ mod tests {
         let host_thread = std::thread::current().id();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |_commands, events, _port, _write_port, tick_port, _| {
+            move |_commands, events, _port, _batch_port, _write_port, tick_port, _| {
                 assert_ne!(std::thread::current().id(), host_thread);
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(tick_port.request(()).unwrap(), Ok(0));
@@ -4100,7 +4285,7 @@ mod tests {
         let host_thread = std::thread::current().id();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |_commands, events, _port, write_port, _tick_port, _| {
+            move |_commands, events, _port, _batch_port, write_port, _tick_port, _| {
                 assert_ne!(std::thread::current().id(), host_thread);
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(

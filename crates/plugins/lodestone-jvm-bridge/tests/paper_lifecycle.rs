@@ -53,6 +53,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
         &shim_source,
         "package lodestone.bridge; public final class IsolatedPaperShim { \
          public static native int blockStateId(int x, int y, int z); \
+         public static native int[] blockStateIds(int[] positions); \
          public static native long serverTickCount(); \
          public static native int setBlockStateId(int x, int y, int z, int stateId); \
          public static native String currentPluginName(); \
@@ -328,6 +329,7 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
         &shim_source,
         "package lodestone.bridge; public final class IsolatedPaperShim { \
          public static native int blockStateId(int x, int y, int z); \
+         public static native int[] blockStateIds(int[] positions); \
          public static native long serverTickCount(); \
          public static native int setBlockStateId(int x, int y, int z, int stateId); \
          public static native String currentPluginName(); \
@@ -443,6 +445,8 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
          public void onResidentBlockStateChanged(int x, int y, int z, int stateId) { \
          long handle = lodestone.bridge.IsolatedPaperShim.currentBlockHandle(); \
          log(\"state=\" + fixture.intercepted.BlockValue.state(handle)); \
+         int[] states = lodestone.bridge.IsolatedPaperShim.blockStateIds(new int[] { x, y, z, 5, -12, 91 }); \
+         log(\"batch=\" + states[0] + \",\" + states[1]); \
          log(\"written=\" + lodestone.bridge.IsolatedPaperShim.setBlockHandleStateId(handle, 1234)); } }); } \
          public void onDisable() {} }",
     )
@@ -499,10 +503,22 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
         .expect("dispatch resident block change");
     let completion_limit = Instant::now() + Duration::from_secs(5);
     let mut observed_write = None;
+    let mut batch_requests = 0;
     loop {
         host.service_pending(1, |query| {
             assert_eq!((query.x, query.y, query.z), (-17, 64, 33));
             Ok(422)
+        });
+        host.service_pending_block_state_batches(1, |batch| {
+            batch_requests += 1;
+            assert_eq!(
+                batch.positions,
+                vec![
+                    lodestone_jvm_bridge::adapter::BlockStateQuery { x: -17, y: 64, z: 33 },
+                    lodestone_jvm_bridge::adapter::BlockStateQuery { x: 5, y: -12, z: 91 },
+                ],
+            );
+            Ok(vec![422, 17])
         });
         host.service_pending_block_writes(1, |write| {
             assert!(observed_write.replace(write).is_none(), "one write expected");
@@ -527,9 +543,10 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
         observed_write,
         Some(BlockStateWrite { x: -17, y: 64, z: 33, state_id: 1234 }),
     );
+    assert_eq!(batch_requests, 1, "two Java block reads must use one host batch request");
     assert_eq!(
         fs::read_to_string(callback_log).expect("block-state callback log"),
-        "state=422\nwritten=1234\n",
+        "state=422\nbatch=422,17\nwritten=1234\n",
     );
 }
 

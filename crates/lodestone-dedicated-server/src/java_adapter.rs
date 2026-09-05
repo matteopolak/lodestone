@@ -311,6 +311,16 @@ impl JavaAdapter {
                 .map(|state| state.raw())
                 .ok_or_else(|| format!("primary-world block unavailable at {},{},{}", query.x, query.y, query.z))
         });
+        self.host.service_pending_block_state_batches(1, |batch| {
+            batch.positions.into_iter()
+                .map(|query| server.resident_block_state_id(query.x, query.y, query.z)
+                    .map(|state| state.raw())
+                    .ok_or_else(|| format!(
+                        "primary-world block unavailable at {},{},{}",
+                        query.x, query.y, query.z,
+                    )))
+                .collect()
+        });
         let available_block_change_events = MAX_PENDING_BLOCK_CHANGE_EVENTS
             .saturating_sub(self.pending_block_change_events.len());
         self.host.service_pending_block_writes(available_block_change_events, |write| {
