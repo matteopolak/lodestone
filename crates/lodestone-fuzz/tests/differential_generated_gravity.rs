@@ -7,6 +7,10 @@
 //! A deliberately wrong-read control proves that the comparison reports the
 //! first bad tick.
 
+#[allow(dead_code)]
+#[path = "support/differential_generation.rs"]
+mod differential_generation;
+
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
@@ -23,6 +27,8 @@ use lodestone_server::{
 };
 use uuid::Uuid;
 
+use differential_generation::{GenerationDomain, SearchBudget, SearchOutcome, search_and_shrink};
+
 const AIR: &str = "minecraft:air";
 const SAND: &str = "minecraft:sand";
 const RED_SAND: &str = "minecraft:red_sand";
@@ -32,9 +38,11 @@ const GRAVITY_TICK: &str = "gravity";
 const FALLING_POS: (i32, i32, i32) = (0, 2, 0);
 const LANDING_POS: (i32, i32, i32) = (0, 1, 0);
 const FLOOR_POS: (i32, i32, i32) = (0, 0, 0);
+const GENERATED_FALLING_POSITIONS: [(i32, i32, i32); 2] = [(0, 2, 0), (2, 2, 0)];
 const GRAVITY: f64 = 0.04;
 const AIR_DRAG: f64 = 0.98;
 const DELAY_AFTER_PLACE: u64 = 2;
+const GENERATED_SETTLE_TICKS: u64 = 7;
 
 #[derive(Clone)]
 struct GravitySource {
@@ -44,7 +52,9 @@ struct GravitySource {
 impl GravitySource {
     fn new() -> Self {
         let mut blocks = HashMap::new();
-        blocks.insert(FLOOR_POS, STONE.to_owned());
+        for (x, _, z) in GENERATED_FALLING_POSITIONS {
+            blocks.insert((x, FLOOR_POS.1, z), STONE.to_owned());
+        }
         Self {
             blocks: Arc::new(Mutex::new(blocks)),
         }
@@ -226,12 +236,16 @@ impl WorldOracle for GravityServerOracle {
 #[derive(Default)]
 struct GravityExpectedWorld {
     blocks: HashMap<(i32, i32, i32), String>,
-    scheduled_tick: Option<u64>,
-    falling_state: Option<String>,
-    falling_y: Option<f64>,
-    velocity_y: f64,
+    scheduled_ticks: HashMap<(i32, i32, i32), u64>,
+    falling: HashMap<(i32, i32, i32), FallingBlock>,
     tick: u64,
     wrong_read_after_tick: Option<u64>,
+}
+
+struct FallingBlock {
+    state: String,
+    y: f64,
+    velocity_y: f64,
 }
 
 impl GravityExpectedWorld {
@@ -240,7 +254,9 @@ impl GravityExpectedWorld {
             wrong_read_after_tick,
             ..Self::default()
         };
-        world.blocks.insert(FLOOR_POS, STONE.to_owned());
+        for (x, _, z) in GENERATED_FALLING_POSITIONS {
+            world.blocks.insert((x, FLOOR_POS.1, z), STONE.to_owned());
+        }
         world
     }
 }
@@ -254,8 +270,9 @@ impl WorldOracle for GravityExpectedWorld {
             if matches!(state.as_str(), SAND | RED_SAND | GRAVEL) {
                 // The feed is drained at the next server tick, then rebases
                 // this relative delay onto that tick's counter.
-                self.scheduled_tick = Some(self.tick + DELAY_AFTER_PLACE + 1);
-                self.falling_state = Some(state.clone());
+                self.scheduled_ticks
+                    .entry(*pos)
+                    .or_insert(self.tick + DELAY_AFTER_PLACE + 1);
             }
         }
         Ok(())
@@ -263,36 +280,43 @@ impl WorldOracle for GravityExpectedWorld {
 
     fn advance_tick(&mut self) -> Result<(), Self::Error> {
         self.tick += 1;
-        if self.scheduled_tick == Some(self.tick) {
-            self.scheduled_tick = None;
-            if self.blocks.get(&FALLING_POS).is_some_and(|state| {
-                matches!(state.as_str(), SAND | RED_SAND | GRAVEL)
-            })
-                && self
-                    .blocks
-                    .get(&(FALLING_POS.0, FALLING_POS.1 - 1, FALLING_POS.2))
-                    .is_none_or(|state| state == AIR)
+        let due = self
+            .scheduled_ticks
+            .iter()
+            .filter_map(|(&pos, &scheduled_tick)| (scheduled_tick == self.tick).then_some(pos))
+            .collect::<Vec<_>>();
+        for pos in due {
+            self.scheduled_ticks.remove(&pos);
+            let state = self.blocks.get(&pos).cloned().unwrap_or_else(|| AIR.to_owned());
+            let below = (pos.0, pos.1 - 1, pos.2);
+            if matches!(state.as_str(), SAND | RED_SAND | GRAVEL)
+                && self.blocks.get(&below).is_none_or(|state| state == AIR)
             {
-                self.blocks.insert(FALLING_POS, AIR.to_owned());
-                self.falling_y = Some(f64::from(FALLING_POS.1));
-                self.velocity_y = 0.0;
+                self.blocks.insert(pos, AIR.to_owned());
+                self.falling.insert(
+                    pos,
+                    FallingBlock {
+                        state,
+                        y: f64::from(pos.1),
+                        velocity_y: 0.0,
+                    },
+                );
             }
         }
-        if let Some(y) = self.falling_y {
-            let after_gravity = self.velocity_y - GRAVITY;
-            self.velocity_y = after_gravity * AIR_DRAG;
-            let next_y = y + after_gravity;
-            if next_y <= f64::from(LANDING_POS.1) {
-                self.blocks.insert(
-                    LANDING_POS,
-                    self.falling_state
-                        .clone()
-                        .expect("falling state is set when gravity is scheduled"),
-                );
-                self.falling_y = None;
+        let mut landed = Vec::new();
+        for (&origin, block) in &mut self.falling {
+            let after_gravity = block.velocity_y - GRAVITY;
+            block.velocity_y = after_gravity * AIR_DRAG;
+            let next_y = block.y + after_gravity;
+            if next_y <= f64::from(origin.1 - 1) {
+                landed.push((origin, block.state.clone()));
             } else {
-                self.falling_y = Some(next_y);
+                block.y = next_y;
             }
+        }
+        for (origin, state) in landed {
+            self.blocks.insert((origin.0, origin.1 - 1, origin.2), state);
+            self.falling.remove(&origin);
         }
         Ok(())
     }
@@ -333,6 +357,51 @@ fn generated_scripts() -> [&'static str; 3] {
     [SAND, RED_SAND, GRAVEL]
 }
 
+fn generated_domain() -> GenerationDomain {
+    GenerationDomain::new(
+        GENERATED_FALLING_POSITIONS.to_vec(),
+        vec![
+            AIR.to_owned(),
+            SAND.to_owned(),
+            RED_SAND.to_owned(),
+            GRAVEL.to_owned(),
+        ],
+        3,
+        // `GravitySource` supplies fixture setup before the server retains a
+        // column. Keep every generated edit in that pre-tick window; later
+        // edits need the server's public world-mutation path instead.
+        0,
+    )
+    .expect("the generated gravity domain is valid")
+}
+
+fn generated_budget() -> SearchBudget {
+    SearchBudget {
+        seed: 0x549_6a71,
+        cases: 8,
+        shrink_attempts: 32,
+    }
+}
+
+fn generated_region() -> Vec<((i32, i32, i32), Vec<String>)> {
+    let falling_states = vec![
+        AIR.to_owned(),
+        SAND.to_owned(),
+        RED_SAND.to_owned(),
+        GRAVEL.to_owned(),
+    ];
+    GENERATED_FALLING_POSITIONS
+        .into_iter()
+        .flat_map(|(x, y, z)| {
+            [
+                ((x, y, z), falling_states.clone()),
+                ((x, y - 1, z), falling_states.clone()),
+                ((x, y - 2, z), vec![STONE.to_owned(), AIR.to_owned()]),
+            ]
+        })
+        .collect()
+}
+
 fn region() -> Vec<((i32, i32, i32), Vec<String>)> {
     [
         (
@@ -361,6 +430,54 @@ fn falling_block_action_matches_the_live_integrated_server() {
         .expect("falling-block differential thread");
         assert!(matches!(result, DifferentialOutcome::Agreed), "{state}: {result:?}");
     }
+}
+
+#[test]
+fn generated_falling_block_sequences_match_the_integrated_server() {
+    let outcome = thread::spawn(|| {
+        search_and_shrink(
+            &generated_domain(),
+            generated_budget(),
+            &generated_region(),
+            GENERATED_SETTLE_TICKS,
+            || (GravityExpectedWorld::new(None), GravityServerOracle::new()),
+        )
+    })
+    .join()
+    .expect("generated falling-block differential thread");
+
+    assert!(
+        matches!(outcome, SearchOutcome::NoDivergence { cases_run: 8 }),
+        "the fixed generated gravity stream must agree with the independent arithmetic oracle: {outcome:?}"
+    );
+}
+
+#[test]
+fn generated_falling_block_sequences_shrink_a_wrong_read() {
+    let outcome = thread::spawn(|| {
+        search_and_shrink(
+            &generated_domain(),
+            SearchBudget {
+                cases: 1,
+                ..generated_budget()
+            },
+            &generated_region(),
+            GENERATED_SETTLE_TICKS,
+            || (GravityExpectedWorld::new(Some(1)), GravityServerOracle::new()),
+        )
+    })
+    .join()
+    .expect("generated falling-block detector thread");
+
+    let SearchOutcome::Found(found) = outcome else {
+        panic!("the generated falling-block detector must find its wrong read: {outcome:?}");
+    };
+    assert_eq!(found.minimal_divergence.tick, 0);
+    assert_eq!(found.minimal_divergence.pos, FALLING_POS);
+    assert!(
+        found.minimal_script.steps.len() <= found.original_script.steps.len(),
+        "shrinking must not add generated actions"
+    );
 }
 
 #[test]
