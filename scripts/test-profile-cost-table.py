@@ -51,8 +51,10 @@ above it could be vacuous and nothing would say so.
 from __future__ import annotations
 
 import copy
+import contextlib
 import gzip
 import importlib.util
+import io
 import json
 import os
 import re
@@ -244,6 +246,49 @@ def control_real_capture_truncated_samples() -> None:
         assert parse_section(text, SELF), "expected a populated self-time table"
 
     require_wrong("emptied samples", assert_correct)
+
+
+def test_cpu_time_requirement_accepts_the_real_capture() -> None:
+    """The strict mode is usable on the committed external capture, rather
+    than only rejecting synthetic bad cases."""
+    text = report(load_fixture(REAL), sidecar_for(REAL))
+    assert "weight: threadCPUDelta" in text, text
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert pct.main([str(FIXTURES / REAL), "--require-cpu-time"]) == 0
+
+
+def control_cpu_time_requirement_rejects_zero_delta_capture() -> None:
+    """Planted no-work detector control: a syntactically complete profile
+    with every sampled stack assigned zero CPU time must fail strict mode.
+
+    Without this gate the rendered tables say ``(no weight recorded)`` and a
+    capture can still look like a completed profiling run.
+    """
+    raw = load_fixture(REAL)
+    samples = raw["threads"][0]["samples"]
+    samples["threadCPUDelta"] = [0] * len(samples["stack"])
+    expect_exit(
+        lambda: pct.build_report(pct.Profile(raw, sidecar_for(REAL)), None, 20, True),
+        "no positive threadCPUDelta",
+    )
+
+
+def test_cpu_time_requirement_rejects_missing_and_malformed_deltas() -> None:
+    """The strict flag must not accept a partial attribution array merely
+    because another sample happened to contain CPU time."""
+    missing = load_fixture(REAL)
+    missing["threads"][0]["samples"].pop("threadCPUDelta")
+    expect_exit(
+        lambda: pct.build_report(pct.Profile(missing, sidecar_for(REAL)), None, 20, True),
+        "no threadCPUDelta array",
+    )
+
+    malformed = load_fixture(REAL)
+    malformed["threads"][0]["samples"]["threadCPUDelta"][0] = "not-a-duration"
+    expect_exit(
+        lambda: pct.build_report(pct.Profile(malformed, sidecar_for(REAL)), None, 20, True),
+        "incomplete threadCPUDelta",
+    )
 
 
 # --------------------------------------------------------------------------
@@ -541,6 +586,9 @@ def main() -> int:
         ("CONTROL: no sidecar -> raw addresses", control_real_capture_without_sidecar_is_raw_addresses),
         ("CONTROL: corrupted sidecar symbol breaks attribution", control_real_capture_corrupted_symbol_table),
         ("CONTROL: emptied samples report no table", control_real_capture_truncated_samples),
+        ("strict CPU-time requirement accepts real capture", test_cpu_time_requirement_accepts_the_real_capture),
+        ("CONTROL: strict CPU-time requirement rejects zero-delta capture", control_cpu_time_requirement_rejects_zero_delta_capture),
+        ("strict CPU-time requirement rejects missing and malformed deltas", test_cpu_time_requirement_rejects_missing_and_malformed_deltas),
         ("collision fixture, per-thread layout (v55)", test_collision_fixture_per_thread_v55),
         ("collision fixture, hoisted layout (v56)", test_collision_fixture_shared_v56),
         ("CONTROL: fixture libraries really do collide at 0x1000", control_collision_fixture_still_collides),

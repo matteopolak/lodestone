@@ -152,7 +152,9 @@ direction.
    one that reads `acquire()` stalls as work ([`../camera-and-view.md`](../camera-and-view.md)'s
    occluded-`CAMetalLayer` finding is the same trap, found independently). The script
    warns loudly and falls back to sample-count weighting only if the capture genuinely
-   has no `threadCPUDelta` data -- never silently.
+   has no `threadCPUDelta` data -- never silently. Add `--require-cpu-time` when the
+   table will support a CPU-cost claim: it rejects missing, malformed, or zero-total
+   deltas instead of presenting a no-work capture as evidence.
 5. **Read the sidecar-join warning line.** `symbolicated N raw address(es) via sidecar,
    M unresolved` -- a high `M` usually means the binary changed between recording and
    the sidecar being written (rebuild, then re-record) or the profiled process wasn't

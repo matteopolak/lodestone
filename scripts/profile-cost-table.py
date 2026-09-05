@@ -140,6 +140,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -433,6 +434,60 @@ class Profile:
         return max(indices, key=sample_count)
 
 
+def require_positive_cpu_time(thread: dict) -> None:
+    """Reject a selected thread that cannot support CPU-cost attribution.
+
+    The default report remains useful for inspecting captures from platforms
+    that omit ``threadCPUDelta``. A performance claim is a narrower use: every
+    sampled stack must have a finite, non-negative CPU delta and their total
+    must be positive. Otherwise a table can look complete while describing
+    only blocked time or no work at all.
+    """
+    samples = thread["samples"]
+    stacks = samples["stack"]
+    cpu_delta = samples.get("threadCPUDelta")
+    if not isinstance(cpu_delta, list):
+        raise SystemExit(
+            "selected thread has no threadCPUDelta array; cannot require CPU-time "
+            "attribution. Re-record with a Samply setup that records CPU deltas."
+        )
+    if len(cpu_delta) != len(stacks):
+        raise SystemExit(
+            "selected thread has threadCPUDelta entries for "
+            f"{len(cpu_delta)} samples but {len(stacks)} stack entries; refusing "
+            "a misaligned CPU-time table."
+        )
+
+    missing = 0
+    invalid = 0
+    total = 0.0
+    for stack, delta in zip(stacks, cpu_delta):
+        if stack is None:
+            continue
+        if delta is None:
+            missing += 1
+            continue
+        if isinstance(delta, bool) or not isinstance(delta, (int, float)):
+            invalid += 1
+            continue
+        value = float(delta)
+        if not math.isfinite(value) or value < 0:
+            invalid += 1
+            continue
+        total += value
+
+    if missing or invalid:
+        raise SystemExit(
+            "selected thread has incomplete threadCPUDelta data for sampled stacks "
+            f"({missing} missing, {invalid} invalid); refusing CPU-cost attribution."
+        )
+    if total <= 0:
+        raise SystemExit(
+            "selected thread has no positive threadCPUDelta across sampled stacks; "
+            "the capture contains no observed CPU work to attribute."
+        )
+
+
 def compute_cost_tables(tables: Tables, thread: dict) -> tuple[dict, dict, float, str]:
     """Returns `(self_time, inclusive_time, total_weight, weight_kind)`,
     where `weight_kind` is `"threadCPUDelta"` or `"sample count (fallback)"`.
@@ -504,10 +559,14 @@ def render_table(title: str, costs: dict, total: float, top: int) -> str:
     return "\n".join(lines)
 
 
-def build_report(profile: Profile, thread_name: str | None, top: int) -> str:
+def build_report(
+    profile: Profile, thread_name: str | None, top: int, require_cpu_time: bool = False
+) -> str:
     """The whole stdout body, as a string, so a test can assert on it."""
     thread_index = profile.pick_thread(thread_name)
     thread = profile.threads[thread_index]
+    if require_cpu_time:
+        require_positive_cpu_time(thread)
     tables = profile.tables_for(thread_index)
     self_time, inclusive_time, total, weight_kind = compute_cost_tables(tables, thread)
 
@@ -530,7 +589,7 @@ def build_report(profile: Profile, thread_name: str | None, top: int) -> str:
     return "\n".join(out)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Join a samply profile with its .syms.json sidecar into a "
@@ -567,7 +626,13 @@ def main() -> int:
         default=20,
         help="how many functions to print per table (default: 20)",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--require-cpu-time",
+        action="store_true",
+        help="fail unless every sampled stack has a finite non-negative threadCPUDelta "
+        "and their total is positive; use when the report supports a CPU-cost claim",
+    )
+    args = parser.parse_args(argv)
 
     if not args.profile.exists():
         parser.error(f"profile not found: {args.profile}")
@@ -586,7 +651,7 @@ def main() -> int:
 
     raw_profile = load_json_maybe_gz(args.profile)
     profile = Profile(raw_profile, syms)
-    print(build_report(profile, args.thread, args.top))
+    print(build_report(profile, args.thread, args.top, args.require_cpu_time))
     return 0
 
 
