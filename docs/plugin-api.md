@@ -363,6 +363,15 @@ the remaining guests. The `veto:actions` data-flow capability gates delivery to 
 `act:command` capability. Both still enter the ordinary client action queue, but a conversational
 plugin cannot silently escalate into command execution.
 
+`world:read` is likewise default-denied, but it is a structural WIT import rather than an action
+filter: a component that references `world-snapshot.read-blocks` cannot instantiate unless its manifest and
+the embedding policy both grant it. One call contains at most 128 positions and returns copied
+`option<u32>` state ids in input order (`none` means unloaded/out-of-range; `some(0)` is loaded air).
+The host takes the `ChunkWorld` lock only to copy that vector and drops it before guest code resumes;
+neither a chunk guard nor an ECS guard crosses the component boundary. The result is a client-view
+snapshot, so multiplayer authority remains with the server and direct world writes remain absent.
+See [`wasm-world-snapshots.md`](wasm-world-snapshots.md) for the lifetime and mutation boundary.
+
 The ABI includes copied look and movement intent plus one-shot placement and deliberately narrow
 inventory actions. Pickup-all double click has its own `act:inventory-double-click` grant and carries
 only a `u16` slot; the live carried stack determines what matching items can be collected. For an

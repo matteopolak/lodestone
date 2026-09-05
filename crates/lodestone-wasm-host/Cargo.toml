@@ -86,3 +86,4 @@ lodestone-app = { workspace = true }
 # the mining predictor or its validation/prediction consumer.
 lodestone-shell = { path = "../lodestone-shell" }
 lodestone-physics = { workspace = true }
+lodestone-world = { workspace = true }

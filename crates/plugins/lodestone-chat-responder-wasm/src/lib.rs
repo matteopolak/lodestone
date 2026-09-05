@@ -49,7 +49,11 @@ use lodestone::plugin::types::LookIntent;
 #[cfg(feature = "movement")]
 use lodestone::plugin::types::MovementIntent;
 #[cfg(any(feature = "place", feature = "break"))]
-use lodestone::plugin::types::{BlockFace, BlockPos};
+use lodestone::plugin::types::BlockFace;
+#[cfg(any(feature = "place", feature = "break", feature = "world-read"))]
+use lodestone::plugin::types::BlockPos;
+#[cfg(feature = "world-read")]
+use lodestone::plugin::world_snapshot::read_blocks;
 #[cfg(feature = "place")]
 use lodestone::plugin::types::{PlaceIntent, PlaceStatus};
 #[cfg(feature = "break")]
@@ -109,7 +113,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.23.0".to_string(),
+            abi: "lodestone:plugin@0.24.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -252,10 +256,13 @@ impl Guest for ChatResponder {
             Vec::new()
         };
 
+        #[cfg(feature = "world-read")]
+        return report_world_snapshot();
+
         #[cfg(feature = "fs-write")]
         return write_files();
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "send-command", feature = "fs-write")))]
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "send-command", feature = "world-read", feature = "fs-write")))]
         return respond(events);
     }
 
@@ -344,6 +351,22 @@ impl Guest for ChatResponder {
         let _ = (input, context);
         CommandOutcome::Failure("unknown command".to_owned())
     }
+}
+
+#[cfg(feature = "world-read")]
+fn report_world_snapshot() -> Vec<Action> {
+    let positions = vec![
+        BlockPos { x: 2, y: 60, z: 2 },
+        BlockPos { x: 17, y: 60, z: 2 },
+        BlockPos { x: 2, y: 320, z: 2 },
+    ];
+    let states = read_blocks(&positions).expect("the host must install a world snapshot");
+    let states = states
+        .into_iter()
+        .map(|state| state.map_or("none".to_owned(), |state| state.to_string()))
+        .collect::<Vec<_>>()
+        .join(",");
+    vec![Action::SendChat(format!("world:{states}"))]
 }
 
 /// Exercise both halves of the write contract. The parent traversal must be

@@ -134,6 +134,8 @@ respawn = []
 disconnect = []
 # A one-shot command send used to prove command authority is separate from chat.
 send-command = []
+# Reads a three-position, bounded world snapshot and reports the copied values.
+world-read = []
 # A denied-by-default filesystem write import. The fixture writes one file inside
 # the configured root and attempts one path outside it for the confinement gate.
 fs-write = []

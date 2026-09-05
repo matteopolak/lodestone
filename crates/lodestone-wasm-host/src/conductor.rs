@@ -59,7 +59,7 @@ use lodestone_ecs::player::{
 use lodestone_ecs::veto::{ActionVetoPlugin, ActionVetoes, Verdict};
 // `TickSet` via the crate root, not `lodestone_ecs::sets::TickSet`: the `sets` module
 // itself is private and only its re-exports are public.
-use lodestone_ecs::{CorePlugin, GameTick, TickSet};
+use lodestone_ecs::{ChunkWorld, CorePlugin, GameTick, TickSet};
 
 use crate::abi;
 use crate::abi::{IntentAction, LoweredAction};
@@ -502,6 +502,7 @@ pub fn drive_wasm_plugins(
     mut queue: ResMut<ActionQueue>,
     mut intents: ResMut<PendingWasmIntents>,
     mut menu_clicks: ResMut<PendingWasmMenuClicks>,
+    chunk_world: Option<Res<ChunkWorld>>,
     players: Query<(Entity, &BreakOutcome, &PlaceOutcome), With<LocalPlayer>>,
 ) {
     let batch: Vec<lodestone_model::ClientEvent> = events.read().map(|e| e.0.clone()).collect();
@@ -516,6 +517,10 @@ pub fn drive_wasm_plugins(
 
     let mut refused = 0_u64;
     let (lowered, lowered_intents, lowered_menu_clicks) = plugins.with_host(|host| {
+        // `ChunkWorld` is a cloneable Arc handle, not an ECS guard. Guests can
+        // only reach it through the bounded `world-snapshot.read-blocks` import, which
+        // copies values and drops the chunk lock before returning to guest code.
+        host.set_chunk_world(chunk_world.as_deref().cloned());
         let fuel = host.fuel_per_tick();
         let mut out = Vec::new();
         let mut intent_out = Vec::new();
