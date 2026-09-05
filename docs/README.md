@@ -23,14 +23,47 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   conversion. It separates source values with a typed destination, values that a lossy
   conversion would discard, and malformed or incompatible values that block
   conversion. `lodestone_server::anvil_import` consumes that decision for one bounded
-  `WorldProperties` record and one bounded chunk record; it is not a whole-world
-  walker or an opaque-data preservation layer.
+  `WorldProperties` record, one bounded chunk record, or every present chunk in one
+  explicitly selected terrain region file; it is not a whole-world walker or an
+  opaque-data preservation layer.
+- [Anvil native chunk export](./anvil-native-chunk-export.md) —
+  `lodestone_server::anvil_export` converts one complete `NativeChunkRecord` into the
+  NBT tree for an Anvil terrain-region slot. It is a bounded interoperability seam,
+  not a world-directory exporter: callers select the destination region slot, write
+  the returned named-NBT tree through the existing Anvil container API, and retain
+  responsibility for world metadata, player data, and resident-entity region files.
+- [Anvil native entity import](./anvil-native-entity-import.md) —
+  `lodestone_server::anvil_native_entity_import` moves explicitly selected or
+  deterministically discovered overworld `entities/` sidecar chunks into bounded
+  native resident-entity records. It is an opt-in migration seam: the Anvil sidecar
+  remains the complete entity source, while native storage receives only identity,
+  type, feet position, and rotation.
+- [Anvil player locator import](./anvil-player-storage.md) —
+  `lodestone_server::anvil_player_storage` imports an explicitly selected
+  deterministic batch of gzip-wrapped Anvil player-data files into a small typed
+  native player record. It retains identity, dimension, position, rotation, and game
+  mode; the Anvil player file remains the complete player-state authority.
+- [Anvil world terrain export](./anvil-world-export.md) —
+  `lodestone_server::anvil_world_export` exports one explicitly selected batch of
+  complete native terrain records into a new Anvil world directory. It is
+  terrain-only: the resulting directory contains `region/` terrain files, not
+  metadata, players, entities, POI, or auxiliary data.
+- [Anvil world terrain import](./anvil-world-import.md) —
+  `lodestone_server::anvil_world_import` composes the bounded Anvil terrain-region
+  converter into one deterministic world-directory import. It imports only canonical
+  terrain files under `region/`; player, entity, POI, metadata, and auxiliary data
+  remain separate migration choices.
 - [Architecture](./architecture.md) — The shape of the whole project: how the crates
   fit together, why version knowledge is confined to one crate per protocol family,
   and the load-bearing constraints — physics parity, memory layout, renderer
   budgets, the browser target — that the rest of the tree is built around.
   Per-subsystem detail lives in the other docs; this is the map and the reasoning
   behind it.
+- [Asset object store](./asset-object-store.md) —
+  `lodestone_shell::asset_objects::AssetObjectStore` reads the launcher-style
+  content-addressed asset index and exposes the indexed bytes as a resource source.
+  `AssetObjectHash` represents the validated address used for each object's
+  two-character fanout directory and filename.
 - [Autonomous navigation: `lodestone-nav` + `lodestone-autopilot`](./autonomous-navigation.md) —
   Two crates under [`crates/plugins/`](../crates/plugins/) implementing a
   Baritone-class client-side pathfinder: `lodestone-nav` is a version-free search core
@@ -636,9 +669,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [WASM plugin intents](./wasm-plugin-intents.md) — The desktop WASM plugin host
   exposes copied local-player look, movement, block-breaking, and one-shot placement
   intents without giving a guest a world handle. A guest can install a yaw/pitch
-  target, override one tick's input axes and buttons, start or abort a block break, or
-  request a block placement while native systems retain simulation and network
-  ownership.
+  target, override one tick's input axes and buttons, start or abort a block break,
+  request a block placement, swap a live menu slot with a hotbar position, throw one
+  item or a complete stack from a live menu slot, or drop its carried cursor stack
+  while native systems retain simulation and network ownership.
 - [World events](./world-events.md) — Server-driven world state that is not tied to
   any one player: rain/thunder weather and lightning strikes, the regional-difficulty
   scalar that scales spawns and damage over time, Bad-Omen-triggered raids and
