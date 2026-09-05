@@ -9,7 +9,7 @@
 use std::fs;
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
-use lodestone_storage::{NativeStore, RecordKey, RecordKind, RecordWrite};
+use lodestone_storage::{ExtensionRegistration, NativeStore, RecordKey, RecordKind, RecordWrite};
 use lodestone_storage_schema::{
     ChunkRecord, ChunkSection, ExtensionValue, GeneralRecord, PlayerRecord, StorageRecord,
     generated::{general_record, storage_record},
@@ -96,6 +96,9 @@ fn dirty_save() -> Vec<RecordWrite> {
 
 fn seed_native(directory: &TempDir) -> NativeStore {
     let mut store = NativeStore::open(directory.path()).unwrap();
+    store
+        .register_extensions([ExtensionRegistration::new("benchmark", "player", 1)])
+        .unwrap();
     let records = (0..COLUMNS).map(|column| RecordWrite::new(chunk_key(column), chunk(column, column as u8)));
     store.write_transaction(records).unwrap();
     store
