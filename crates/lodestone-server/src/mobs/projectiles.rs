@@ -5,6 +5,7 @@
 
 use lodestone_entity::DamageFlags;
 use lodestone_entity::projectile::{Projectile, TrackedProjectile};
+use lodestone_data::potion::PotionId;
 use lodestone_model::{BlockPos, ResourceKey, Vec3};
 use uuid::Uuid;
 
@@ -54,10 +55,10 @@ struct PotionImpact {
     /// treating the impact as a point rather than moving that box to it is a
     /// disclosed simplification, not a different rule.
     location: Vec3,
-    /// The thrown stack's `minecraft:potion` registry id — see
+    /// The thrown stack's validated `minecraft:potion` identity — see
     /// [`ProjectileMeta::potion`]. `None` means nothing to apply (no resolved
     /// potion contents), the same "component absent" contract that field uses.
-    potion: Option<i32>,
+    potion: Option<PotionId>,
     /// The projectile margin at the moment of impact — the same value the
     /// entity-hit search above already computed for this tracked
     /// projectile, reused rather than recomputed from a `ticks_alive` this
@@ -234,7 +235,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// [`spawn_projectile_from`](Self::spawn_projectile_from) plus the thrown
-    /// stack's own `minecraft:potion` registry id, so
+    /// stack's validated `minecraft:potion` identity, so
     /// [`resolve_projectile_impacts`](Self::resolve_projectile_impacts) knows
     /// which effects a splash/lingering potion applies on impact — see
     /// [`ProjectileMeta::potion`]'s own doc. `potion` is `None` for a water
@@ -250,7 +251,7 @@ impl<'w> MobSim<'w> {
         entity_type: ResourceKey,
         projectile: Projectile,
         owner: Option<i32>,
-        potion: Option<i32>,
+        potion: Option<PotionId>,
     ) -> i32 {
         let id = self.spawn_projectile_from(entity_type, projectile, owner);
         if let Some(meta) = self.projectile_meta.get_mut(&id) {
@@ -1089,9 +1090,9 @@ mod tests {
     #[test]
     fn a_splash_potion_of_swiftness_scales_the_applied_duration_by_distance() {
         let swiftness = lodestone_data::potion::potion_id("minecraft:swiftness").expect("swiftness exists");
-        let potion_id = lodestone_data::potion::PotionId::from_registry_id(swiftness)
+        let swiftness = lodestone_data::potion::PotionId::from_registry_id(swiftness)
             .expect("generated potion id is valid");
-        let entries = lodestone_data::potion::potion_effect_entries(potion_id);
+        let entries = lodestone_data::potion::potion_effect_entries(swiftness);
         assert_eq!(entries.len(), 1, "swiftness carries exactly one built-in effect");
         let base_duration = f64::from(entries[0].duration_ticks);
         assert_eq!(base_duration, 3600.0, "swiftness's own base duration");
@@ -1160,6 +1161,8 @@ mod tests {
     #[test]
     fn a_splash_potion_of_harming_scales_instant_damage_by_distance() {
         let harming = lodestone_data::potion::potion_id("minecraft:harming").expect("harming exists");
+        let harming = lodestone_data::potion::PotionId::from_registry_id(harming)
+            .expect("generated potion id is valid");
         let mut mismatches: Vec<String> = Vec::new();
 
         // Direct hit: scale 1.0 -> floor(1.0 * 6 + 0.5) = 6.
@@ -1217,6 +1220,8 @@ mod tests {
     #[test]
     fn a_thrown_water_bottle_applies_no_effects_the_control() {
         let water = lodestone_data::potion::potion_id("minecraft:water").expect("water exists");
+        let water = lodestone_data::potion::PotionId::from_registry_id(water)
+            .expect("generated potion id is valid");
         let world = ChunkWorld::new(-4, 24);
         let mut sim = MobSim::new(&world);
         let target = spawn_target(&mut sim, Vec3::new(5.0, 1.0, 1.5));

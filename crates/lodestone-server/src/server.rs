@@ -71,7 +71,7 @@ use lodestone_model::{
     ResourceKey, ResourcePackResponseKind, Rotation, Text, TextContent, Vec3, Vec3f,
     WrittenBookContent,
 };
-use lodestone_data::{block::Block, block_items, item::Item};
+use lodestone_data::{block::Block, block_items, item::Item, potion::PotionId};
 use lodestone_net::{Connection, NetError, Transport};
 // Encryption half: the server-side RSA keypair/decrypt and the
 // verify-token generator. Native-only for the same reason `crate::access` is
@@ -9296,7 +9296,7 @@ fn apply_use_item(
     // identity here and nowhere else on the launch path, so without this the
     // thrown entity has no potion to apply on impact and the whole splash
     // implementation is unreachable from play.
-    let thrown_potion = stack.components.potion;
+    let thrown_potion = stack.components.potion.and_then(PotionId::from_registry_id);
 
     if let Some(intent) = launch_intent(&path) {
         // No tracked position means no launch origin, and guessing the origin
@@ -9524,6 +9524,7 @@ fn finish_drinking_potion(
     let effects = stack
         .components
         .potion
+        .and_then(PotionId::from_registry_id)
         .map(|id| crate::mob_effects::potion_splash_effects(id, 1.0, 1.0))
         .unwrap_or_default();
     if !consume_one(inventory, use_in_progress.native, game_mode) {
@@ -9649,7 +9650,7 @@ fn apply_release_use_item(
 /// regardless. Passing a player entity id here would silently exclude whichever
 /// *mob* happened to share that number, which is worse than passing nothing.
 ///
-/// `potion` is the thrown stack's `minecraft:potion` registry id, and is what
+/// `potion` is the thrown stack's validated `minecraft:potion` identity, and is what
 /// [`MobSim::resolve_potion_splash`] later reads to decide which effects the
 /// impact applies. It is `None` for every projectile that is not a splash or
 /// lingering potion, and also for a potion stack carrying no potion component —
@@ -9659,7 +9660,7 @@ fn spawn_player_projectile(
     projectile: &str,
     origin: Vec3,
     velocity: Vec3,
-    potion: Option<i32>,
+    potion: Option<PotionId>,
 ) {
     use lodestone_entity::projectile::Projectile;
     let Ok(key) = lodestone_model::ResourceKey::new("minecraft", projectile) else {
@@ -19616,6 +19617,28 @@ mod tests {
             finish_drinking_potion(&mut inv, &started, GameMode::Survival).expect("water must still finish");
         assert!(remainder.is_none());
         assert!(effects.is_empty());
+    }
+
+    /// An out-of-census component value remains a wire-boundary failure, not
+    /// an empty entry in the built-in potion table. The stack still finishes
+    /// consuming, but it cannot grant an arbitrary built-in effect.
+    #[test]
+    fn finish_drinking_potion_rejects_an_unknown_component_id() {
+        let mut invalid = stack("minecraft:potion", 1);
+        invalid.components.potion = Some(-1);
+        let mut inv = PlayerInventory::new();
+        inv.set_native(0, Some(invalid));
+        let started = ItemInUse {
+            native: 0,
+            item: "minecraft:potion".to_owned(),
+            finish_tick: 0,
+            last_effect_remaining: None,
+        };
+
+        let (_, remainder, effects) =
+            finish_drinking_potion(&mut inv, &started, GameMode::Survival).expect("the stack must finish");
+        assert!(remainder.is_none(), "the invalid component does not cancel consumption");
+        assert!(effects.is_empty(), "an unknown raw id cannot become a built-in effect");
     }
 
     /// **Control**: any other item, including food, must not be handled by

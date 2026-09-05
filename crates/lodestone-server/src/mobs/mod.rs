@@ -49,6 +49,7 @@ use std::sync::{Arc, Mutex};
 
 use lodestone_data::{
     block_states, collision_shapes, entity_dimensions, entity_type::EntityType, path_types,
+    potion::PotionId,
 };
 // `collide` and `CollisionView` are the item pass's swept resolve against the real
 // per-state shape census (see `ItemCollision`); `Vec3d` is the physics crate's own
@@ -3006,14 +3007,13 @@ struct ProjectileMeta {
     /// vanilla's own margin computation keeps the hitbox at zero inflation for the
     /// first two ticks — and this is the first half.
     owner: Option<i32>,
-    /// The thrown stack's raw `minecraft:potion` network id
-    /// (`lodestone_model::item::ItemComponents::potion`), for a splash or
-    /// lingering potion only — `None` for every other throwable, and `None` for
-    /// a potion whose stack carried no resolved `minecraft:potion_contents`
-    /// (a bare/uncomponented stack). [`MobSim::resolve_projectile_impacts`]
+    /// A built-in potion identity validated when the raw item component crosses
+    /// into this simulation, for a splash or lingering potion only. `None`
+    /// covers every other throwable, a stack with no potion component, and an
+    /// extension or malformed value. [`MobSim::resolve_projectile_impacts`]
     /// reads this to decide what [`crate::mob_effects::potion_splash_effects`]
     /// applies on impact.
-    potion: Option<i32>,
+    potion: Option<PotionId>,
 }
 
 /// Wire identity plus fall dynamics for one tracked dropped item.
