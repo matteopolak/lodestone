@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -112,6 +113,16 @@ class GateError(Exception):
     """A condition that makes the comparison meaningless rather than failed."""
 
 
+def is_finite_number(value: object) -> bool:
+    """Whether a JSON number can take part in an ordinary numeric comparison."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
+
 def repo_root() -> Path:
     """The directory holding this script's parent, i.e. the checkout root."""
     return Path(__file__).resolve().parent.parent
@@ -124,12 +135,17 @@ def load_results(path: Path) -> dict[tuple[str, str], dict]:
     most recent run that recorded it. Lines that do not parse, or that carry a
     null/non-numeric value, are skipped rather than crashing the gate -- a
     recorder that wrote `null` for a metric with no samples should not make an
-    unrelated metric's comparison impossible.
+    unrelated metric's comparison impossible. A numeric non-finite value is
+    different: JSON parsers commonly accept `NaN` and `Infinity` extensions,
+    but either makes a comparison meaningless, so it rejects the whole gate
+    input instead of falling back to an older value for that metric.
     """
     newest: dict[tuple[str, str], dict] = {}
     if not path.exists():
         return newest
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+    ):
         line = line.strip()
         if not line:
             continue
@@ -144,6 +160,11 @@ def load_results(path: Path) -> dict[tuple[str, str], dict]:
             continue
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             continue
+        if not is_finite_number(value):
+            raise GateError(
+                f"{path}:{line_number}: metric {metric!r} has a non-finite "
+                f"value {value!r}; a gate cannot compare NaN or infinity"
+            )
         newest[(scene, metric)] = obj
     return newest
 
@@ -157,7 +178,7 @@ def load_baseline(path: Path) -> dict:
 
 
 def validate_entries(path: Path, entries: list[object]) -> None:
-    """Reject malformed or duplicate baseline keys before counting results.
+    """Reject malformed, non-finite, or duplicate baseline entries.
 
     A duplicate `(scene, metric)` is not two observations: `load_results`
     deliberately collapses that key to its newest recorded value. Accepting
@@ -178,6 +199,26 @@ def validate_entries(path: Path, entries: list[object]) -> None:
         if not isinstance(metric, str) or not isinstance(scene, str):
             raise GateError(
                 f"{path}: baseline entry #{index} requires string 'metric' and 'scene'"
+            )
+        unit = entry["unit"]
+        if not isinstance(unit, str):
+            raise GateError(
+                f"{path}: baseline entry #{index} requires string 'unit'"
+            )
+        value = entry["value"]
+        if not is_finite_number(value):
+            raise GateError(
+                f"{path}: baseline entry #{index} requires a finite numeric 'value'"
+            )
+        tolerance = entry.get("tolerance_pct", 0.0)
+        if not is_finite_number(tolerance) or tolerance < 0:
+            raise GateError(
+                f"{path}: baseline entry #{index} requires a finite, non-negative "
+                "numeric 'tolerance_pct'"
+            )
+        if "required" in entry and not isinstance(entry["required"], bool):
+            raise GateError(
+                f"{path}: baseline entry #{index} requires boolean 'required'"
             )
         key = (scene, metric)
         previous = seen.get(key)
