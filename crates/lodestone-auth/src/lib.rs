@@ -82,6 +82,13 @@ pub mod chat_session;
 /// [`flow::PendingLogin::poll_once`] from its own browser-clock timer instead
 /// — `crates/lodestone-shell/src/menu/accounts.rs` is that caller.
 pub mod flow;
+/// Typed operations for the account-scoped Friends service.
+///
+/// The module accepts an already-resolved [`Session`] and never opens account
+/// storage or refreshes an access token. Its fixed production origin and
+/// redirect-free HTTP client keep that bearer token inside the trusted service
+/// boundary; see [`friends`] for the request and response contract.
+pub mod friends;
 /// Composing [`flow`] + [`store`] + [`metadata`] into an actual login.
 ///
 /// Not gated, for [`flow`]'s own reason: every piece it composes now has a

@@ -7,6 +7,12 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Permits a loopback-only Friends-service origin for downstream hermetic tests.
+# Production code has no configurable origin: a bearer token must never follow a
+# preference or environment value to an arbitrary host.
+friends-test-service = []
+
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
