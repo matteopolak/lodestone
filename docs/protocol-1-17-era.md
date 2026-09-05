@@ -84,6 +84,16 @@ registry-selected adapter and server and wait for that newly streamed chunk;
 the protocol tests also decode literal negative/fractional wire bodies so the
 server-side lift cannot be justified by a symmetric encoder round trip.
 
+They also decode the era's `block_place` body into `ServerBound::UseItemOn`:
+hand, packed position, face, three cursor floats, then `inside_block`. Both
+hosted revisions use that exact shape and predate the prediction sequence, so
+the host supplies sequence `0`; a client-side sequence must not be mistaken for
+wire data. Literal bodies exercise a negative position, an off-hand use and an
+invalid-face rejection, while a separate adapter-to-registry-host test proves
+the action reaches the integrated server's existing placement consumer. The
+consumer resolves the held item from its server-side inventory, rather than
+trusting a client-supplied stack.
+
 ### One block-state table and one entity table, which is not what the era below needs
 
 The 1.14 era needs three of each, because every release inserts blocks and
