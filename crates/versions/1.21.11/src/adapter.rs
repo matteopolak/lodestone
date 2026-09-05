@@ -37,7 +37,7 @@ use std::sync::{Arc, LockResult, Mutex, MutexGuard, PoisonError};
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_data::block_entity_types::block_entity_type;
-use lodestone_data::mob_effects::mob_effect_name;
+use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, ChatAckInfo, ChatKind, ChatMode,
     ChatSessionInfo, ChunkPos, ClientAction, ClientEvent, ClientSettings, ConnectionState,
@@ -1577,23 +1577,33 @@ impl V774Adapter {
         })])
     }
 
+    /// Resolves a validated effect id into the canonical event key.
+    fn mob_effect_key(effect_id: MobEffectId) -> Result<ResourceKey, AdapterError> {
+        let name = mob_effect_name_for(effect_id);
+        name.parse()
+            .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))
+    }
+
+    /// Validates this packet's zero-based built-in mob-effect id before any
+    /// canonical registry lookup.
+    fn modern_mob_effect_id(raw_id: i32) -> Result<MobEffectId, AdapterError> {
+        MobEffectId::from_registry_id(raw_id)
+            .ok_or_else(|| AdapterError::Decode(format!("unknown effect id {raw_id}")))
+    }
+
     /// `minecraft:update_mob_effect`.
     ///
     /// The effect id is the **zero-based** mob-effect registry id, not the
-    /// one-based legacy numbering the pre-1.20.5 eras send — so the shared
-    /// registry table is indexed directly, with no `- 1`. Applying the legacy
-    /// adjustment here would name the neighbouring effect for every potion.
+    /// one-based legacy numbering the pre-1.20.5 eras send. It is validated
+    /// before the shared registry table is indexed.
     fn handle_play_update_mob_effect(
         adapter: &V774Adapter,
         _world: &mut dyn WorldSink,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
         let body: UpdateMobEffect = adapter.decode_body(payload)?;
-        let name = mob_effect_name(body.effect_id)
-            .ok_or_else(|| AdapterError::Decode(format!("unknown effect id {}", body.effect_id)))?;
-        let effect: ResourceKey = name
-            .parse()
-            .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
+        let effect_id = Self::modern_mob_effect_id(body.effect_id)?;
+        let effect = Self::mob_effect_key(effect_id)?;
         Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
             entity_id: body.entity_id,
             effect,
@@ -1614,11 +1624,8 @@ impl V774Adapter {
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
         let body: RemoveMobEffect = adapter.decode_body_exact(payload)?;
-        let name = mob_effect_name(body.effect_id)
-            .ok_or_else(|| AdapterError::Decode(format!("unknown effect id {}", body.effect_id)))?;
-        let effect: ResourceKey = name
-            .parse()
-            .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
+        let effect_id = Self::modern_mob_effect_id(body.effect_id)?;
+        let effect = Self::mob_effect_key(effect_id)?;
         Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
             entity_id: body.entity_id,
             effect,
@@ -3576,6 +3583,96 @@ mod movement_tests {
         assert_eq!(no_collision.1[24], 0x01, "on ground, not colliding");
         assert_eq!(collision.0, adapter.ids().move_player_status_only);
         assert_eq!(collision.1, vec![0x03], "on ground and colliding");
+    }
+}
+
+#[cfg(test)]
+mod mob_effect_tests {
+    use super::*;
+    use lodestone_world::World;
+
+    fn encoded_update(adapter: &V774Adapter, effect_id: i32) -> Vec<u8> {
+        adapter
+            .encode_body(&UpdateMobEffect {
+                entity_id: 42,
+                effect_id,
+                amplifier: 0,
+                duration: 40,
+                flags: 0,
+            })
+            .expect("update mob effect encodes")
+    }
+
+    fn encoded_remove(adapter: &V774Adapter, effect_id: i32) -> Vec<u8> {
+        adapter
+            .encode_body(&RemoveMobEffect {
+                entity_id: 42,
+                effect_id,
+            })
+            .expect("remove mob effect encodes")
+    }
+
+    #[test]
+    fn modern_zero_based_speed_id_resolves_for_update_and_remove() {
+        let adapter = V774Adapter::new();
+        let mut world = World::new();
+        let applied = V774Adapter::handle_play_update_mob_effect(
+            &adapter,
+            &mut world,
+            &encoded_update(&adapter, 0),
+        )
+        .expect("known modern effect decodes");
+        let [Directive::Emit(ClientEvent::MobEffectApplied { effect, .. })] = applied.as_slice()
+        else {
+            panic!("known effect did not emit one application event: {applied:?}");
+        };
+        assert_eq!(effect.path(), "speed");
+
+        let removed = V774Adapter::handle_play_remove_mob_effect(
+            &adapter,
+            &mut world,
+            &encoded_remove(&adapter, 0),
+        )
+        .expect("known modern effect removal decodes");
+        let [Directive::Emit(ClientEvent::MobEffectRemoved { effect })] = removed.as_slice()
+        else {
+            panic!("known effect did not emit one removal event: {removed:?}");
+        };
+        assert_eq!(effect.path(), "speed");
+    }
+
+    #[test]
+    fn unknown_modern_effect_ids_are_rejected_at_packet_ingress() {
+        let unknown_ids = [-1, lodestone_data::mob_effects::MOB_EFFECT_COUNT as i32];
+        let adapter = V774Adapter::new();
+        for effect_id in unknown_ids {
+            let mut world = World::new();
+            let error = V774Adapter::handle_play_update_mob_effect(
+                &adapter,
+                &mut world,
+                &encoded_update(&adapter, effect_id),
+            )
+            .expect_err("unknown update effect must fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("unknown effect id {effect_id}")),
+                "update id {effect_id}: {error}"
+            );
+
+            let error = V774Adapter::handle_play_remove_mob_effect(
+                &adapter,
+                &mut world,
+                &encoded_remove(&adapter, effect_id),
+            )
+            .expect_err("unknown removal effect must fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("unknown effect id {effect_id}")),
+                "remove id {effect_id}: {error}"
+            );
+        }
     }
 }
 

@@ -17,6 +17,11 @@ beacon UI likewise resolve a validated id, so their table lookups are total.
 The 1.17 family applies the same boundary to both legacy packet forms: it
 converts their 1-based wire value to `MobEffectId` before producing an event,
 and rejects an unknown value without attempting a table lookup.
+The 1.19 family applies that checked 1-based conversion to its update and
+remove packets as well. The 1.20.6 and 1.21.11 families carry the zero-based
+wire id directly; both validate it before producing an event. Thus a legacy
+packet cannot shift the name by one, while an unknown modern or legacy value
+still fails at packet ingress.
 
 `MobEffectInstance` intentionally retains its raw `i32` id. It can arrive in
 an item component where the owning session or an extension has supplied a
@@ -28,9 +33,10 @@ model and simply has no built-in name, tooltip, or colour.
 
 Regenerate the mob-effect names and colours together when the canonical data
 version changes, then update the literal boundary controls in
-`lodestone_data::mob_effects`. New 26.2 packet paths should convert their raw
-VarInt with `MobEffectId::from_registry_id` once at decode or encode entry,
-then pass the typed value through table lookups. Do not change
+`lodestone_data::mob_effects`. Packet paths should convert their raw VarInt
+with `MobEffectId::from_registry_id` once at decode or encode entry, applying
+the era's one-based adjustment with checked arithmetic when required, then
+pass the typed value through table lookups. Do not change
 `MobEffectInstance` to reject an extension value unless the owning session's
 registry synchronization is also modeled.
 
