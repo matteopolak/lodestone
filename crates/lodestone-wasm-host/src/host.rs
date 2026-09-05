@@ -710,6 +710,16 @@ pub struct PluginHost {
     plugins: Vec<LoadedPlugin>,
 }
 
+impl Drop for PluginHost {
+    fn drop(&mut self) {
+        // Dependencies are initialized before their dependents. Pop the vector
+        // explicitly so replacement and ordinary shutdown release dependents
+        // before the plugins they rely on, independent of Vec's field-drop
+        // implementation details.
+        while self.plugins.pop().is_some() {}
+    }
+}
+
 impl fmt::Debug for PluginHost {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PluginHost")

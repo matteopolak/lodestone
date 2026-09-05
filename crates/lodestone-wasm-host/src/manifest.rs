@@ -19,12 +19,22 @@
 //! capabilities = ["log", "observe:chat", "act:chat"]
 //! ```
 //!
+//! Dependencies are declared in a typed table. Required dependencies must be
+//! present in the same discovery directory; optional dependencies affect order
+//! only when present.
+//!
+//! ```toml
+//! [dependencies]
+//! required = ["shared-state"]
+//! optional = ["metrics"]
+//! ```
+//!
 //! TOML rather than YAML: Cargo's own format and this codebase's preference. The
 //! *shape* is `plugin.yml`'s — Bukkit's `permissions` block is the nearest analogue —
 //! but Bukkit plugins do not declare capabilities in the sandbox sense at all,
 //! because the JVM's trust model has no concept of them for plugins.
 //!
-//! # Four ways a manifest is rejected, and why each is loud
+//! # Manifest and graph validation
 //!
 //! | case | error | why not a warning |
 //! |---|---|---|
@@ -32,6 +42,12 @@
 //! | a field the host does not recognise | [`ManifestError::Toml`], via `deny_unknown_fields` | the common case is a typo in a capability list or a priority, and a silently ignored `capabilties = […]` is a plugin running with none |
 //! | an ABI world this host does not speak | [`ManifestError::AbiMismatch`], naming both | the alternative is discovering it as an unresolved-import error at instantiation, which names an interface rather than a version |
 //! | a capability host policy withholds | [`crate::HostError::CapabilityDenied`], from the loader | this one is the operator's decision rather than the plugin's mistake, so it is the loader's error and not the manifest's |
+//!
+//! The directory planner also rejects duplicate plugin names, missing required
+//! dependencies, and dependency cycles. Optional edges are ignored when their
+//! target is absent, but participate in cycle detection when both plugins are
+//! present. A graph is ordered topologically; priority and name are stable
+//! tie-breakers among plugins that are ready to load.
 //!
 //! # The trust boundary, stated once
 //!
@@ -101,6 +117,23 @@ impl Priority {
     }
 }
 
+/// Dependencies declared by one plugin manifest.
+///
+/// The two lists are intentionally separate rather than a stringly typed
+/// `depends` field. Required edges gate loading; optional edges contribute an
+/// ordering constraint only when their target is installed. Names are matched
+/// against the manifest's authoritative `name`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dependencies {
+    /// Plugins that must be present and loadable in the same directory.
+    #[serde(default)]
+    pub required: Vec<String>,
+    /// Plugins that are ordered before this plugin when present, but may be absent.
+    #[serde(default)]
+    pub optional: Vec<String>,
+}
+
 /// Everything that can be wrong with a `plugin.toml`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -144,6 +177,16 @@ pub enum ManifestError {
         module: String,
         path: PathBuf,
     },
+    #[error("plugin `{plugin}` declares dependency `{dependency}` more than once")]
+    DuplicateDependency { plugin: String, dependency: String },
+    #[error("plugin `{plugin}` declares an empty {kind} dependency name")]
+    InvalidDependencyName { plugin: String, kind: &'static str },
+    #[error("multiple manifests declare plugin `{plugin}`")]
+    DuplicatePluginName { plugin: String },
+    #[error("plugin `{plugin}` requires missing dependency `{dependency}`")]
+    MissingRequiredDependency { plugin: String, dependency: String },
+    #[error("plugin dependency cycle: {plugins:?}")]
+    DependencyCycle { plugins: Vec<String> },
 }
 
 /// A parsed `plugin.toml`.
@@ -170,6 +213,9 @@ pub struct Manifest {
     /// gets a default grant.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Required and optional plugin edges used by directory discovery.
+    #[serde(default)]
+    pub dependencies: Dependencies,
 }
 
 impl Manifest {
@@ -190,6 +236,7 @@ impl Manifest {
         // Validated here rather than lazily at first use, so a typo is a load-time
         // error rather than a capability that turns out to be missing much later.
         manifest.requested_capabilities()?;
+        manifest.validate_dependencies()?;
         Ok(manifest)
     }
 
@@ -224,6 +271,30 @@ impl Manifest {
         Ok(set)
     }
 
+    fn validate_dependencies(&self) -> Result<(), ManifestError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for (kind, names) in [
+            ("required", &self.dependencies.required),
+            ("optional", &self.dependencies.optional),
+        ] {
+            for dependency in names {
+                if dependency.trim().is_empty() {
+                    return Err(ManifestError::InvalidDependencyName {
+                        plugin: self.name.clone(),
+                        kind,
+                    });
+                }
+                if !seen.insert(dependency) {
+                    return Err(ManifestError::DuplicateDependency {
+                        plugin: self.name.clone(),
+                        dependency: dependency.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Where the module is, given where the manifest was.
     pub fn module_path(&self, manifest_path: &Path) -> PathBuf {
         manifest_path
@@ -247,31 +318,22 @@ impl Manifest {
     }
 }
 
-/// Find every `*/plugin.toml` under `dir`, parse them, and return them sorted into
-/// load order: [`Priority`] first, then name.
+/// Find every `*/plugin.toml` under `dir`, parse them, and return them in a
+/// deterministic dependency-aware load order.
 ///
 /// # Why the name is the tiebreaker, and why that matters
 ///
-/// Directory iteration order is **not** stable across filesystems, so without a
-/// total order two plugins at the same priority would load in an order that varies
-/// by machine — and load order is the order the conductor drives them, which is
-/// observable in `ActionQueue` and therefore on the wire. A nondeterministic wire
-/// order across machines is precisely the kind of bug that reproduces nowhere.
+/// Directory iteration order is **not** stable across filesystems. Dependencies
+/// are therefore topologically sorted first, and [`Priority`] then name then
+/// manifest path provide a total order among ready plugins. Load order is the
+/// order the conductor drives guests, which is observable in `ActionQueue` and
+/// therefore on the wire.
 ///
 /// Errors are returned per-plugin rather than aborting the scan: one bad manifest in
 /// a plugins directory must not stop the other plugins loading, and the operator
 /// needs to see every problem rather than the alphabetically-first one. The
 /// [`Err`] variants carry the path, so the caller can log and continue.
 ///
-/// # What this deliberately does not do
-///
-/// **Dependency ordering.** `docs/plans/runtime-plugin-loading.md` suggests
-/// manifest-declared dependencies topologically sorted — Bukkit's shape — as a
-/// future extension of this format. There is no `depends` field here, and that is
-/// a decision rather than an omission: a field that is parsed and not enforced is
-/// worse than no field, because a plugin author reads it as a guarantee. A
-/// `depends` field should arrive together with the topological sort that honours
-/// it, not before.
 pub fn scan_directory(dir: &Path) -> Vec<Result<(PathBuf, Manifest), ManifestError>> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         // A missing plugins directory is the normal case for a fresh install, not an
@@ -295,16 +357,180 @@ pub fn scan_directory(dir: &Path) -> Vec<Result<(PathBuf, Manifest), ManifestErr
             Err(e) => found.push(Err(e)),
         }
     }
-    found.sort_by(|a, b| match (a, b) {
-        (Ok((pa, ma)), Ok((pb, mb))) => (ma.priority, &ma.name, pa).cmp(&(mb.priority, &mb.name, pb)),
-        // Errors last, in the order they were found: they are not going to load, so
-        // where they sit among the successes is irrelevant, and keeping them stable
-        // keeps the operator's log readable.
-        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
-        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
-        (Err(_), Err(_)) => std::cmp::Ordering::Equal,
+    order_entries(found)
+}
+
+/// Topologically order parsed manifests while retaining one result per discovered
+/// file. Invalid graph entries are returned as errors after the valid load order,
+/// which preserves startup's partial-discovery behavior. Transactional staging
+/// treats any such error as a rejection and never commits the partial candidate.
+fn order_entries(
+    entries: Vec<Result<(PathBuf, Manifest), ManifestError>>,
+) -> Vec<Result<(PathBuf, Manifest), ManifestError>> {
+    struct Node {
+        path: PathBuf,
+        manifest: Manifest,
+        error: Option<ManifestError>,
+    }
+
+    let mut nodes = Vec::new();
+    let mut parse_errors = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok((path, manifest)) => nodes.push(Node {
+                path,
+                manifest,
+                error: None,
+            }),
+            Err(error) => parse_errors.push(Err(error)),
+        }
+    }
+
+    let mut by_name = std::collections::BTreeMap::<String, Vec<usize>>::new();
+    for (index, node) in nodes.iter().enumerate() {
+        by_name
+            .entry(node.manifest.name.clone())
+            .or_default()
+            .push(index);
+    }
+    for (name, indexes) in by_name {
+        if indexes.len() > 1 {
+            for index in indexes {
+                nodes[index].error = Some(ManifestError::DuplicatePluginName {
+                    plugin: name.clone(),
+                });
+            }
+        }
+    }
+
+    // A dependency is available to the graph only when its own manifest is
+    // uniquely named and locally valid. A required edge to anything else is a
+    // missing usable dependency, which is the fail-closed result we want. The
+    // fixed point matters for A -> B -> missing: both A and B must be refused,
+    // rather than allowing A after only B is marked invalid.
+    loop {
+        let available: std::collections::BTreeSet<String> = nodes
+            .iter()
+            .filter(|node| node.error.is_none())
+            .map(|node| node.manifest.name.clone())
+            .collect();
+        let mut changed = false;
+        for node in &mut nodes {
+            if node.error.is_some() {
+                continue;
+            }
+            if let Some(dependency) = node
+                .manifest
+                .dependencies
+                .required
+                .iter()
+                .find(|dependency| !available.contains(*dependency))
+            {
+                node.error = Some(ManifestError::MissingRequiredDependency {
+                    plugin: node.manifest.name.clone(),
+                    dependency: dependency.clone(),
+                });
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let active: std::collections::BTreeSet<String> = nodes
+        .iter()
+        .filter(|node| node.error.is_none())
+        .map(|node| node.manifest.name.clone())
+        .collect();
+    let mut indegree = std::collections::BTreeMap::<String, usize>::new();
+    let mut dependents = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for node in nodes.iter().filter(|node| node.error.is_none()) {
+        let mut degree = 0;
+        for dependency in node
+            .manifest
+            .dependencies
+            .required
+            .iter()
+            .chain(node.manifest.dependencies.optional.iter())
+        {
+            if active.contains(dependency) {
+                degree += 1;
+                dependents
+                    .entry(dependency.clone())
+                    .or_default()
+                    .push(node.manifest.name.clone());
+            }
+        }
+        indegree.insert(node.manifest.name.clone(), degree);
+    }
+
+    let node_key = |name: &str| {
+        let node = nodes
+            .iter()
+            .find(|node| node.manifest.name == name)
+            .expect("active graph node has a manifest");
+        (node.manifest.priority, node.manifest.name.clone(), node.path.clone())
+    };
+    let mut ready = std::collections::BTreeSet::new();
+    for (name, degree) in &indegree {
+        if *degree == 0 {
+            ready.insert(node_key(name));
+        }
+    }
+    let mut ordered_names = Vec::with_capacity(active.len());
+    while let Some(key) = ready.iter().next().cloned() {
+        ready.remove(&key);
+        let name = key.1;
+        ordered_names.push(name.clone());
+        if let Some(children) = dependents.get(&name) {
+            for child in children {
+                let degree = indegree
+                    .get_mut(child)
+                    .expect("dependency graph child has an indegree");
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.insert(node_key(child));
+                }
+            }
+        }
+    }
+
+    if ordered_names.len() != active.len() {
+        let cycle: Vec<String> = active
+            .iter()
+            .filter(|name| !ordered_names.contains(name))
+            .cloned()
+            .collect();
+        for node in &mut nodes {
+            if node.error.is_none() && cycle.contains(&node.manifest.name) {
+                node.error = Some(ManifestError::DependencyCycle {
+                    plugins: cycle.clone(),
+                });
+            }
+        }
+    }
+
+    let mut output = Vec::with_capacity(nodes.len() + parse_errors.len());
+    for name in ordered_names {
+        let index = nodes
+            .iter()
+            .position(|node| node.error.is_none() && node.manifest.name == name)
+            .expect("ordered graph node has a manifest");
+        let node = nodes.swap_remove(index);
+        output.push(Ok((node.path, node.manifest)));
+    }
+    nodes.sort_by(|a, b| {
+        (a.manifest.priority, &a.manifest.name, &a.path)
+            .cmp(&(b.manifest.priority, &b.manifest.name, &b.path))
     });
-    found
+    output.extend(nodes.into_iter().map(|node| {
+        Err(node
+            .error
+            .expect("every un-ordered graph node has a validation error"))
+    }));
+    output.extend(parse_errors);
+    output
 }
 
 #[cfg(test)]
@@ -343,6 +569,7 @@ capabilities = ["log", "observe:chat", "act:chat"]
         let m = parse(GOOD).expect("must parse");
         assert_eq!(m.name, "chat-responder");
         assert_eq!(m.priority, Priority::Normal);
+        assert_eq!(m.dependencies, Dependencies::default());
         let caps = m.requested_capabilities().expect("capabilities");
         assert_eq!(caps.len(), 3);
         assert!(caps.contains(Capability::ObserveChat));
@@ -350,6 +577,33 @@ capabilities = ["log", "observe:chat", "act:chat"]
         // The one that matters: a manifest declaring three capabilities does not
         // quietly acquire a fourth.
         assert!(!caps.contains(Capability::FsRead));
+    }
+
+    #[test]
+    fn required_and_optional_dependencies_parse_as_typed_lists() {
+        let text = format!(
+            "{GOOD}\n[dependencies]\nrequired = [\"core\"]\noptional = [\"metrics\"]\n"
+        );
+        let manifest = parse(&text).expect("dependency table must parse");
+        assert_eq!(manifest.dependencies.required, vec!["core"]);
+        assert_eq!(manifest.dependencies.optional, vec!["metrics"]);
+    }
+
+    #[test]
+    fn duplicate_or_empty_dependency_names_are_rejected_at_parse_time() {
+        let duplicate = format!(
+            "{GOOD}\n[dependencies]\nrequired = [\"core\"]\noptional = [\"core\"]\n"
+        );
+        assert!(matches!(
+            parse(&duplicate),
+            Err(ManifestError::DuplicateDependency { .. })
+        ));
+
+        let empty = format!("{GOOD}\n[dependencies]\nrequired = [\"  \"]\n");
+        assert!(matches!(
+            parse(&empty),
+            Err(ManifestError::InvalidDependencyName { .. })
+        ));
     }
 
     /// A manifest requesting an unrecognised capability is rejected loudly by
@@ -496,6 +750,126 @@ capabilities = ["log", "observe:chat", "act:chat"]
             vec!["aaa", "bbb", "mmm", "zzz"],
             "lowest first, then the two `normal` tiers by name, then monitor last"
         );
+    }
+
+    #[test]
+    fn scan_directory_orders_dependencies_before_priority_tiebreakers() {
+        let root = scratch("manifest-dependency-order");
+        let _ = std::fs::remove_dir_all(&root);
+        let manifests = [
+            (
+                "child-dir",
+                "child",
+                "lowest",
+                Some(("base", "metrics")),
+            ),
+            ("base-dir", "base", "monitor", None),
+            ("metrics-dir", "metrics", "monitor", None),
+            ("independent-dir", "independent", "lowest", None),
+        ];
+        for (dir, name, priority, dependencies) in manifests {
+            let d = root.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            let mut text = GOOD
+                .replace(r#"name = "chat-responder""#, &format!("name = \"{name}\""))
+                .replace(r#"priority = "normal""#, &format!("priority = \"{priority}\""));
+            if let Some((required, optional)) = dependencies {
+                text.push_str(&format!(
+                    "\n[dependencies]\nrequired = [\"{required}\"]\noptional = [\"{optional}\"]\n"
+                ));
+            }
+            std::fs::write(d.join("plugin.toml"), text).unwrap();
+        }
+
+        let order: Vec<String> = scan_directory(&root)
+            .into_iter()
+            .map(|result| result.expect("all graph entries are valid").1.name)
+            .collect();
+        assert_eq!(
+            order,
+            vec!["independent", "base", "metrics", "child"],
+            "dependency edges win over priority, then priority/name orders ready plugins"
+        );
+    }
+
+    #[test]
+    fn a_missing_required_dependency_is_reported_but_unrelated_plugins_remain_usable() {
+        let root = scratch("manifest-missing-dependency");
+        let _ = std::fs::remove_dir_all(&root);
+        for (dir, name, dependency) in [
+            ("good-dir", "good", None),
+            ("broken-dir", "broken", Some("not-installed")),
+        ] {
+            let d = root.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            let mut text = GOOD
+                .replace(r#"name = "chat-responder""#, &format!("name = \"{name}\""));
+            if let Some(dependency) = dependency {
+                text.push_str(&format!(
+                    "\n[dependencies]\nrequired = [\"{dependency}\"]\n"
+                ));
+            }
+            std::fs::write(d.join("plugin.toml"), text).unwrap();
+        }
+
+        let results = scan_directory(&root);
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().ok())
+                .map(|(_, manifest)| manifest.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["good"]
+        );
+        let error = results
+            .iter()
+            .find_map(|result| result.as_ref().err())
+            .expect("the missing dependency must be reported");
+        assert!(matches!(
+            error,
+            ManifestError::MissingRequiredDependency {
+                plugin,
+                dependency
+            } if plugin == "broken" && dependency == "not-installed"
+        ));
+    }
+
+    #[test]
+    fn a_dependency_cycle_is_reported_for_every_member() {
+        let root = scratch("manifest-dependency-cycle");
+        let _ = std::fs::remove_dir_all(&root);
+        for (dir, name, dependencies) in [
+            ("a-dir", "a", ("b", "")),
+            ("b-dir", "b", ("", "a")),
+        ] {
+            let d = root.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            let mut text = GOOD.replace(
+                r#"name = "chat-responder""#,
+                &format!("name = \"{name}\""),
+            );
+            if dependencies.0.is_empty() {
+                text.push_str(&format!(
+                    "\n[dependencies]\noptional = [\"{}\"]\n",
+                    dependencies.1
+                ));
+            } else {
+                text.push_str(&format!(
+                    "\n[dependencies]\nrequired = [\"{}\"]\n",
+                    dependencies.0
+                ));
+            }
+            std::fs::write(d.join("plugin.toml"), text).unwrap();
+        }
+
+        let results = scan_directory(&root);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| matches!(
+            result,
+            Err(ManifestError::DependencyCycle { plugins })
+                if plugins == &vec!["a".to_owned(), "b".to_owned()]
+        )));
     }
 
     /// A bad manifest does not stop the good ones, and it is reported rather than
