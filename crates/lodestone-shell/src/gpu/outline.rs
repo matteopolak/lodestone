@@ -1,16 +1,18 @@
 //! The mining-crack target descriptor and the block-outline wireframe pass.
+use lodestone_data::block_states::StateId;
 use lodestone_model::math::BlockPos;
 use lodestone_render::{CAMERA_DEPTH_BIAS, DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 
 /// The block currently being mined, for the progressive crack overlay: its world
-/// position, vanilla state id (to resolve the block's real model geometry) and
-/// destruction stage `0..=9`. Passed to [`RenderState::render_with_crack`].
+/// position, validated built-in state id (to resolve the block's real model
+/// geometry) and destruction stage `0..=9`. Passed to
+/// [`RenderState::render_with_crack`].
 #[derive(Debug, Clone, Copy)]
 pub struct CrackTarget {
     /// World block position of the target.
     pub block: [i32; 3],
-    /// Vanilla state id, used to resolve the block's baked quads.
-    pub state_id: u32,
+    /// Validated built-in state id, used to resolve the block's baked quads.
+    pub state_id: StateId,
     /// Destruction stage `0..=9`; selects the `destroy_stage_N` sprite.
     pub stage: u8,
 }
@@ -27,18 +29,18 @@ pub struct CrackTarget {
 /// `crack_multi_target_pixels.rs` already covers and which cannot tell "the
 /// gather is wired" from "the pipeline can draw N targets". `Sim`'s own
 /// per-frame call is the thin, brokered wiring on top of this: resolve each
-/// overlay's block position to a state id (`resolve` — live `NetClient::
+/// overlay's block position to a validated state id (`resolve` — live `NetClient::
 /// block_at` or the offline demo world, mirroring `Sim::crack_target`'s own
 /// resolution) and hand the result here.
 ///
 /// A position `resolve` cannot answer (chunk not streamed in, e.g.) is
-/// dropped rather than drawn with a bogus state id — the same "no crack
+/// dropped rather than drawn with an unavailable state id — the same "no crack
 /// without real geometry" rule `Sim::crack_target` already follows for the
 /// local dig.
 pub fn gather_crack_targets(
     local: Option<CrackTarget>,
     overlays: impl Iterator<Item = (BlockPos, u8)>,
-    mut resolve: impl FnMut(BlockPos) -> Option<u32>,
+    mut resolve: impl FnMut(BlockPos) -> Option<StateId>,
 ) -> Vec<CrackTarget> {
     let mut out: Vec<CrackTarget> = Vec::new();
     out.extend(local);
@@ -71,6 +73,10 @@ mod gather_tests {
         BlockPos::new(x, y, z)
     }
 
+    fn state(raw: u32) -> StateId {
+        StateId::new(raw).expect("test state must be in the built-in census")
+    }
+
     /// The gather must fold a real `BlockDestructionOverlays` — built through
     /// its real `ClientEvent::BlockDestruction` production path, not a
     /// hand-built `Vec<CrackTarget>` — into one `CrackTarget` per active
@@ -93,32 +99,32 @@ mod gather_tests {
 
         let local = CrackTarget {
             block: [0, 0, 0],
-            state_id: 42,
+            state_id: state(42),
             stage: 3,
         };
         let mut resolved: Vec<BlockPos> = Vec::new();
         let targets = gather_crack_targets(Some(local), overlays.iter(), |p| {
             resolved.push(p);
-            Some(100)
+            Some(state(100))
         });
 
         assert_eq!(targets.len(), 3, "local + two other-player overlays");
         assert!(
             targets
                 .iter()
-                .any(|t| t.block == [0, 0, 0] && t.stage == 3 && t.state_id == 42),
+                .any(|t| t.block == [0, 0, 0] && t.stage == 3 && t.state_id == state(42)),
             "the local target must pass through unchanged"
         );
         assert!(
             targets
                 .iter()
-                .any(|t| t.block == [1, 0, 3] && t.stage == 9 && t.state_id == 100),
+                .any(|t| t.block == [1, 0, 3] && t.stage == 9 && t.state_id == state(100)),
             "entity 11's overlay must resolve to a CrackTarget"
         );
         assert!(
             targets
                 .iter()
-                .any(|t| t.block == [-2, 0, 3] && t.stage == 5 && t.state_id == 100),
+                .any(|t| t.block == [-2, 0, 3] && t.stage == 5 && t.state_id == state(100)),
             "entity 22's overlay must resolve to a CrackTarget"
         );
         assert_eq!(resolved.len(), 2, "resolve is called once per overlay, not per local target");
@@ -147,7 +153,7 @@ mod gather_tests {
     #[test]
     fn empty_input_gathers_nothing() {
         let overlays = BlockDestructionOverlays::new();
-        let targets = gather_crack_targets(None, overlays.iter(), |_| Some(1));
+        let targets = gather_crack_targets(None, overlays.iter(), |_| Some(state(1)));
         assert!(targets.is_empty());
     }
 }

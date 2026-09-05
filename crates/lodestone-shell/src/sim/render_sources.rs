@@ -48,6 +48,7 @@
 //! no need to enumerate any of it.
 
 use super::*;
+use lodestone_data::block_states::StateId;
 
 impl Sim {
     /// A `'static` sampler of the **outline** boxes of the block at a world
@@ -750,12 +751,13 @@ impl Sim {
             return None;
         }
         let block = self.target()?.block;
-        let state_id = if self.is_live() {
+        let raw_state_id = if self.is_live() {
             let pos = BlockPos::new(block[0], block[1], block[2]);
             self.net.as_ref()?.block_at(pos)?
         } else {
             self.block_at_world(block)
         };
+        let state_id = StateId::new(raw_state_id)?;
         Some(crate::gpu::CrackTarget {
             block,
             state_id,
@@ -791,11 +793,12 @@ impl Sim {
         });
         let is_live = self.is_live();
         crate::gpu::gather_crack_targets(self.crack_target(), overlays.iter(), |pos| {
-            if is_live {
+            let raw_state_id = if is_live {
                 self.net.as_ref()?.block_at(pos)
             } else {
                 Some(self.block_at_world([pos.x, pos.y, pos.z]))
-            }
+            }?;
+            StateId::new(raw_state_id)
         })
     }
 
