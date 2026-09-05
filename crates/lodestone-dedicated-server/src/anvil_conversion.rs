@@ -13,6 +13,10 @@ use lodestone_anvil::{
     level_dat, world_gen_settings,
 };
 use lodestone_server::{
+    anvil_player_storage::{
+        PlayerBatchImportReport, PlayerFileSelection, PlayerLossDecision, discover_player_files,
+        import_player_batch, preflight_player_batch,
+    },
     anvil_import::{import_world_properties, preflight_world_properties},
     anvil_world_export::{
         ChunkCoordinate, WorldExportInput, WorldExportLossDecision, WorldExportReport,
@@ -35,6 +39,10 @@ const USAGE: &str = concat!(
     "  lodestone-server anvil-convert import-metadata --source <anvil-world> ",
     "--destination <native-store> --native-path <native-store> ",
     "[--apply --acknowledge <review-token>]\n\n",
+    "  lodestone-server anvil-convert import-players --source <anvil-world> ",
+    "--destination <native-store> --native-path <native-store> ",
+    "(--player <uuid> [--player <uuid> ...] | --all-players) ",
+    "[--apply --acknowledge <review-token>]\n\n",
     "Without --apply this command only reports its payload-free preflight and refuses mutation. ",
     "A lossy --apply requires the exact review token printed by that preflight.",
 );
@@ -44,6 +52,7 @@ enum Direction {
     ImportTerrain,
     ExportTerrain,
     ImportMetadata,
+    ImportPlayers,
 }
 
 impl Direction {
@@ -52,6 +61,7 @@ impl Direction {
             Self::ImportTerrain => "import",
             Self::ExportTerrain => "export",
             Self::ImportMetadata => "import-metadata",
+            Self::ImportPlayers => "import-players",
         }
     }
 }
@@ -70,6 +80,8 @@ struct ConversionLaunch {
     game_time: Option<u64>,
     timestamp: Option<u32>,
     compression: Option<CompressionScheme>,
+    players: Vec<uuid::Uuid>,
+    all_players: bool,
     apply: bool,
     acknowledgement: Option<String>,
 }
@@ -90,10 +102,11 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
         Some("import") => Direction::ImportTerrain,
         Some("export") => Direction::ExportTerrain,
         Some("import-metadata") => Direction::ImportMetadata,
+        Some("import-players") => Direction::ImportPlayers,
         Some("--help") | Some("-h") | None => return Err(USAGE.to_owned()),
         Some(other) => {
             return Err(format!(
-                "anvil-convert expects import, export, or import-metadata, got {other:?}\n{USAGE}"
+                "anvil-convert expects import, export, import-metadata, or import-players, got {other:?}\n{USAGE}"
             ));
         }
     };
@@ -108,6 +121,8 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
     let mut game_time = None;
     let mut timestamp = None;
     let mut compression = None;
+    let mut players = Vec::new();
+    let mut all_players = false;
     let mut apply = false;
     let mut acknowledgement = None;
 
@@ -138,6 +153,12 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
             "--compression" => {
                 compression = Some(parse_compression(&next_arg("--compression", &mut args)?)?);
             }
+            "--player" => players.push(
+                next_arg("--player", &mut args)?
+                    .parse()
+                    .map_err(|_| "--player must be a canonical UUID".to_owned())?,
+            ),
+            "--all-players" => all_players = true,
             "--apply" => apply = true,
             "--acknowledge" => acknowledgement = Some(next_arg("--acknowledge", &mut args)?),
             "--help" | "-h" => return Err(USAGE.to_owned()),
@@ -158,6 +179,8 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
         game_time,
         timestamp,
         compression,
+        players,
+        all_players,
         apply,
         acknowledgement,
     };
@@ -170,7 +193,9 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
         return Err("--source and --destination must name different paths".to_owned());
     }
     let native_endpoint = match launch.direction {
-        Direction::ImportTerrain | Direction::ImportMetadata => &launch.destination,
+        Direction::ImportTerrain | Direction::ImportMetadata | Direction::ImportPlayers => {
+            &launch.destination
+        }
         Direction::ExportTerrain => &launch.source,
     };
     if native_endpoint != &launch.native_path {
@@ -178,7 +203,7 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
             "--native-path must exactly name the {} endpoint for {}",
             if matches!(
                 launch.direction,
-                Direction::ImportTerrain | Direction::ImportMetadata
+                Direction::ImportTerrain | Direction::ImportMetadata | Direction::ImportPlayers
             ) {
                 "destination"
             } else {
@@ -200,6 +225,8 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
                 || launch.game_time.is_some()
                 || launch.timestamp.is_some()
                 || launch.compression.is_some()
+                || !launch.players.is_empty()
+                || launch.all_players
             {
                 return Err("--chunk, --game-time, --timestamp, and --compression are export-only".to_owned());
             }
@@ -210,6 +237,9 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
             }
             if launch.dimension.is_some() {
                 return Err("--dimension is import-only; export is terrain-only".to_owned());
+            }
+            if !launch.players.is_empty() || launch.all_players {
+                return Err("--player and --all-players are import-players-only".to_owned());
             }
             if launch.all_terrain && !launch.chunks.is_empty() {
                 return Err("export accepts either --all-terrain or explicit --chunk values, not both".to_owned());
@@ -233,9 +263,33 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
                 || launch.game_time.is_some()
                 || launch.timestamp.is_some()
                 || launch.compression.is_some()
+                || !launch.players.is_empty()
+                || launch.all_players
             {
                 return Err(
                     "import-metadata accepts only --source, --destination, --native-path, --apply, and --acknowledge"
+                        .to_owned(),
+                );
+            }
+        }
+        Direction::ImportPlayers => {
+            if launch.min_y.is_some()
+                || launch.height.is_some()
+                || launch.dimension.is_some()
+                || !launch.chunks.is_empty()
+                || launch.all_terrain
+                || launch.game_time.is_some()
+                || launch.timestamp.is_some()
+                || launch.compression.is_some()
+            {
+                return Err(
+                    "import-players accepts only --source, --destination, --native-path, --player, --all-players, --apply, and --acknowledge"
+                        .to_owned(),
+                );
+            }
+            if launch.all_players == !launch.players.is_empty() {
+                return Err(
+                    "import-players requires exactly one selection mode: --all-players or one or more --player <uuid>"
                         .to_owned(),
                 );
             }
@@ -251,6 +305,7 @@ fn execute(launch: &ConversionLaunch) -> Result<String, String> {
         // passed every review gate.
         Direction::ImportTerrain => execute_import(launch),
         Direction::ImportMetadata => execute_metadata_import(launch),
+        Direction::ImportPlayers => execute_player_import(launch),
         Direction::ExportTerrain => {
             let storage = open_native_backend(launch)?;
             execute_export(launch, &storage)
@@ -319,6 +374,54 @@ fn execute_metadata_import(launch: &ConversionLaunch) -> Result<String, String> 
     writeln!(
         output,
         "Converted {records_written} typed world-properties record into {}.",
+        launch.destination.display()
+    )
+    .expect("write to String");
+    Ok(output)
+}
+
+fn execute_player_import(launch: &ConversionLaunch) -> Result<String, String> {
+    let selection = if launch.all_players {
+        PlayerFileSelection::All
+    } else {
+        PlayerFileSelection::Uuids(launch.players.clone())
+    };
+    let selected = discover_player_files(&launch.source, selection)
+        .map_err(|error| format!("player discovery failed: {error}"))?;
+    let plan = preflight_player_batch(&selected)
+        .map_err(|error| format!("player preflight failed: {error}"))?;
+    let token = review_token(launch, plan.report());
+    let mut output = format!(
+        "Selected {} player files.\n{}",
+        selected.len(),
+        format_review(Direction::ImportPlayers, plan.report(), &token)
+    );
+    require_apply(launch, plan.report(), &token, &mut output)?;
+    let authorization = plan
+        .report()
+        .decide(PlayerLossDecision::ProceedAndDiscardUnsupported);
+    let storage = open_native_backend(launch)?;
+    let result = import_player_batch(&storage, plan, Some(authorization))
+        .map_err(|error| format!("player import refused before committing conversion: {error}"))?;
+    drop(storage);
+
+    let reopened = open_native_backend(launch)?;
+    for player in result.report.players() {
+        if reopened
+            .load_player(*player.uuid.as_bytes())
+            .map_err(|error| format!("player import reopen failed: {error}"))?
+            .is_none()
+        {
+            return Err(format!(
+                "player import reopen found no locator for selected UUID {}",
+                player.uuid
+            ));
+        }
+    }
+    writeln!(
+        output,
+        "Converted {} player locators into {} and reopened every selected locator.",
+        result.records_written,
         launch.destination.display()
     )
     .expect("write to String");
@@ -399,6 +502,16 @@ impl ReviewReport for WorldExportReport {
     }
 }
 
+impl ReviewReport for PlayerBatchImportReport {
+    fn has_loss(&self) -> bool {
+        self.unsupported_count() != 0
+    }
+
+    fn has_blocker(&self) -> bool {
+        self.blocker_count() != 0
+    }
+}
+
 fn require_apply<T: ReviewReport>(
     launch: &ConversionLaunch,
     report: &T,
@@ -429,7 +542,7 @@ fn format_review<T: fmt::Debug>(direction: Direction, report: &T, token: &str) -
 
 fn review_token<T: fmt::Debug>(launch: &ConversionLaunch, report: &T) -> String {
     let reviewed = format!(
-        "v2|{:?}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+        "v2|{:?}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
         launch.direction,
         launch.source.display(),
         launch.destination.display(),
@@ -441,6 +554,8 @@ fn review_token<T: fmt::Debug>(launch: &ConversionLaunch, report: &T) -> String 
         launch.all_terrain,
         launch.game_time,
         launch.timestamp,
+        launch.players,
+        launch.all_players,
         report,
     );
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -495,6 +610,7 @@ mod tests {
 
     const SCRATCH: &str = "/private/tmp/lodestone-wave-storage-enum-711";
     const METADATA_SCRATCH: &str = "/private/tmp/lodestone-wave-storage-meta-711";
+    const PLAYER_SCRATCH: &str = "/private/tmp/lodestone-wave-storage-player-711";
     const LEVEL_DAT_FIXTURE: &[u8] =
         include_bytes!("../../lodestone-anvil/tests/support/level_dat_26_2_vanilla.dat");
     const WORLD_GEN_FIXTURE: &[u8] =
@@ -503,6 +619,8 @@ mod tests {
     struct Scratch;
 
     struct MetadataScratch;
+
+    struct PlayerScratch;
 
     impl Scratch {
         fn create() -> Self {
@@ -538,6 +656,25 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(METADATA_SCRATCH)
                 .expect("remove exact metadata CLI scratch path");
+        }
+    }
+
+    impl PlayerScratch {
+        fn create() -> Self {
+            let path = Path::new(PLAYER_SCRATCH);
+            assert!(
+                !path.exists(),
+                "player CLI scratch path must be absent before this test"
+            );
+            std::fs::create_dir(path).expect("create exact player CLI scratch path");
+            Self
+        }
+    }
+
+    impl Drop for PlayerScratch {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(PLAYER_SCRATCH)
+                .expect("remove exact player CLI scratch path");
         }
     }
 
@@ -671,6 +808,115 @@ mod tests {
         ])
         .expect_err("selection modes must remain unambiguous");
         assert!(mixed.contains("either --all-terrain or explicit --chunk"));
+    }
+
+    #[test]
+    fn player_command_discovers_preflights_authorizes_and_reopens_one_batch() {
+        let _scratch = PlayerScratch::create();
+        let root = Path::new(PLAYER_SCRATCH);
+        let source = root.join("anvil-source");
+        let native_destination = root.join("native-destination");
+        let first: uuid::Uuid = "00000000-0000-0002-0000-000000000002"
+            .parse()
+            .expect("canonical UUID");
+        let second: uuid::Uuid = "00000000-0000-0001-0000-000000000001"
+            .parse()
+            .expect("canonical UUID");
+        let player = lodestone_server::player_data::PlayerData::default();
+        let player_root = player.to_nbt().expect("encode supported player fixture");
+        let rejected_source = root.join("rejected-anvil-source");
+        let rejected_native = root.join("rejected-native-destination");
+        let valid_before_corrupt: uuid::Uuid = "00000000-0000-0001-0000-000000000003"
+            .parse()
+            .expect("canonical UUID");
+        let corrupt_after_valid: uuid::Uuid = "00000000-0000-0002-0000-000000000004"
+            .parse()
+            .expect("canonical UUID");
+        lodestone_anvil::player_dat::write_to_file(
+            &player_root,
+            &lodestone_anvil::player_dat::path_in(
+                &rejected_source,
+                &valid_before_corrupt.to_string(),
+            ),
+        )
+        .expect("write first selected player before corrupt fixture");
+        let corrupt_path = lodestone_anvil::player_dat::path_in(
+            &rejected_source,
+            &corrupt_after_valid.to_string(),
+        );
+        std::fs::write(&corrupt_path, b"not a gzip player file")
+            .expect("write later selected corrupt player fixture");
+        assert!(
+            run([
+                "import-players",
+                "--source",
+                rejected_source.to_str().expect("UTF-8 rejected source"),
+                "--destination",
+                rejected_native.to_str().expect("UTF-8 rejected destination"),
+                "--native-path",
+                rejected_native.to_str().expect("UTF-8 rejected native path"),
+                "--all-players",
+                "--apply",
+            ])
+            .expect_err("every selected player must preflight before native storage opens")
+            .contains("player preflight failed")
+        );
+        assert!(
+            !rejected_native.exists(),
+            "a later selected corrupt player cannot leave earlier locators committed"
+        );
+        for uuid in [first, second] {
+            let path = lodestone_anvil::player_dat::path_in(&source, &uuid.to_string());
+            lodestone_anvil::player_dat::write_to_file(&player_root, &path)
+                .expect("write selected Anvil player fixture");
+        }
+        let first_bytes = std::fs::read(lodestone_anvil::player_dat::path_in(
+            &source,
+            &first.to_string(),
+        ))
+        .expect("capture source player before conversion");
+
+        let command = [
+            "import-players",
+            "--source",
+            source.to_str().expect("UTF-8 Anvil source"),
+            "--destination",
+            native_destination.to_str().expect("UTF-8 native destination"),
+            "--native-path",
+            native_destination.to_str().expect("UTF-8 native path"),
+            "--all-players",
+        ];
+        let preview = run(command).expect_err("player preview reports and refuses mutation");
+        assert!(preview.contains("Selected 2 player files."));
+        assert!(preview.contains("Refusing mutation without --apply."));
+        assert!(
+            !native_destination.exists(),
+            "all selected players preflight before opening the native destination"
+        );
+
+        let mut unacknowledged = command.to_vec();
+        unacknowledged.push("--apply");
+        assert!(
+            run(unacknowledged)
+                .expect_err("lossy locators require the exact player review token")
+                .contains("Lossy conversion requires --acknowledge")
+        );
+        assert!(
+            !native_destination.exists(),
+            "an unacknowledged player batch cannot create a native destination"
+        );
+
+        let mut approved = command.to_vec();
+        approved.extend(["--apply", "--acknowledge", token(&preview)]);
+        let applied = run(approved).expect("acknowledged player import commits one typed batch");
+        assert!(applied.contains("Converted 2 player locators"));
+        assert!(applied.contains("reopened every selected locator"));
+        assert_eq!(
+            std::fs::read(lodestone_anvil::player_dat::path_in(&source, &first.to_string()))
+                .expect("re-read source player after conversion"),
+            first_bytes,
+            "native import never rewrites complete Anvil player data"
+        );
     }
 
     #[test]

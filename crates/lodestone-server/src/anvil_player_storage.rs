@@ -6,7 +6,11 @@
 //! it inventories every other player value before writing the native record.
 //! The Anvil file remains the authoritative complete player state.
 
-use std::path::Path;
+use std::{
+    collections::BTreeSet,
+    fmt,
+    path::{Path, PathBuf},
+};
 
 use lodestone_storage_schema::BuiltinDimension;
 
@@ -21,6 +25,94 @@ use crate::{
 /// producer. A record written by this module has one thousand units per block,
 /// so only a consumer that has selected the same contract may interpret it.
 pub const POSITION_UNITS_PER_BLOCK: f64 = 1_000.0;
+
+/// The explicitly selected player files a filesystem import may inspect.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlayerFileSelection {
+    /// Discover every canonical UUID `.dat` file in `players/data`.
+    All,
+    /// Discover exactly these canonical UUID `.dat` files in `players/data`.
+    Uuids(Vec<uuid::Uuid>),
+}
+
+/// One deterministic player-file discovery result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectedPlayerFile {
+    uuid: uuid::Uuid,
+    path: PathBuf,
+}
+
+impl SelectedPlayerFile {
+    /// UUID supplied by the canonical filename.
+    #[must_use]
+    pub const fn uuid(&self) -> uuid::Uuid {
+        self.uuid
+    }
+
+    /// Source file selected beneath the supplied Anvil world directory.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Discovers a deterministic, non-empty player-file selection beneath one
+/// Anvil world directory.
+///
+/// `All` accepts only canonical UUID `.dat` names and sorts by UUID, while
+/// `Uuids` sorts the explicit selection before deriving each canonical path.
+/// A malformed `.dat` name is an error rather than an ignored save, and a
+/// requested missing file is later refused during preflight.
+pub fn discover_player_files(
+    world_directory: &Path,
+    selection: PlayerFileSelection,
+) -> Result<Vec<SelectedPlayerFile>, Error> {
+    let mut uuids = BTreeSet::new();
+    match selection {
+        PlayerFileSelection::All => {
+            let directory = lodestone_anvil::player_dat::dir_in(world_directory);
+            for entry in std::fs::read_dir(&directory).map_err(Error::PlayerDirectory)? {
+                let entry = entry.map_err(Error::PlayerDirectory)?;
+                if !entry.file_type().map_err(Error::PlayerDirectory)?.is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                if path.extension().is_none_or(|extension| extension != "dat") {
+                    continue;
+                }
+                let stem = path.file_stem().and_then(|stem| stem.to_str()).ok_or_else(|| {
+                    Error::InvalidPlayerFilename {
+                        path: path.clone(),
+                    }
+                })?;
+                let uuid = uuid::Uuid::parse_str(stem).map_err(|_| Error::InvalidPlayerFilename {
+                    path: path.clone(),
+                })?;
+                if uuid.to_string() != stem {
+                    return Err(Error::InvalidPlayerFilename { path });
+                }
+                uuids.insert(uuid);
+            }
+        }
+        PlayerFileSelection::Uuids(selected) => {
+            for uuid in selected {
+                if !uuids.insert(uuid) {
+                    return Err(Error::DuplicatePlayerSelection(uuid));
+                }
+            }
+        }
+    }
+    if uuids.is_empty() {
+        return Err(Error::NoSelectedPlayers);
+    }
+    Ok(uuids
+        .into_iter()
+        .map(|uuid| SelectedPlayerFile {
+            path: lodestone_anvil::player_dat::path_in(world_directory, &uuid.to_string()),
+            uuid,
+        })
+        .collect())
+}
 
 /// A player value that the native locator cannot retain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,6 +205,130 @@ pub struct PlayerImportReport {
     blockers: Vec<PlayerImportBlocker>,
 }
 
+/// Payload-free preflight result for one discovered player file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerFileImportReport {
+    /// Identity taken from the selected canonical filename.
+    pub uuid: uuid::Uuid,
+    /// Loss and safety report for this one complete player root.
+    pub report: PlayerImportReport,
+}
+
+/// Payload-free aggregate preflight for one selected filesystem batch.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PlayerBatchImportReport {
+    players: Vec<PlayerFileImportReport>,
+}
+
+impl PlayerBatchImportReport {
+    /// Reports in deterministic UUID order.
+    #[must_use]
+    pub fn players(&self) -> &[PlayerFileImportReport] {
+        &self.players
+    }
+
+    /// Number of loss categories across the entire selected batch.
+    #[must_use]
+    pub fn unsupported_count(&self) -> usize {
+        self.players
+            .iter()
+            .map(|player| player.report.unsupported.len())
+            .sum()
+    }
+
+    /// Number of unsafe source values across the entire selected batch.
+    #[must_use]
+    pub fn blocker_count(&self) -> usize {
+        self.players
+            .iter()
+            .map(|player| player.report.blockers.len())
+            .sum()
+    }
+
+    /// Applies a single decision after every selected player has been reviewed.
+    #[must_use]
+    pub fn decide(&self, decision: PlayerLossDecision) -> PlayerBatchImportAuthorization {
+        if self.blocker_count() != 0 {
+            return PlayerBatchImportAuthorization::Blocked {
+                blockers: self.blocker_count(),
+            };
+        }
+        match decision {
+            PlayerLossDecision::Abort => PlayerBatchImportAuthorization::Aborted,
+            PlayerLossDecision::ProceedAndDiscardUnsupported if self.unsupported_count() == 0 => {
+                PlayerBatchImportAuthorization::Lossless
+            }
+            PlayerLossDecision::ProceedAndDiscardUnsupported => {
+                PlayerBatchImportAuthorization::LossAccepted {
+                    discarded_entries: self.unsupported_count(),
+                }
+            }
+        }
+    }
+}
+
+/// A prepared all-or-nothing filesystem player import.
+///
+/// The decoded player values stay private so callers cannot accidentally retain
+/// the full unsupported NBT payload after the typed locator transaction.
+pub struct PlayerBatchImportPlan {
+    report: PlayerBatchImportReport,
+    locators: Vec<NativePlayerRecord>,
+}
+
+impl fmt::Debug for PlayerBatchImportPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PlayerBatchImportPlan")
+            .field("report", &self.report)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PlayerBatchImportPlan {
+    /// The payload-free report to render for operator review.
+    #[must_use]
+    pub fn report(&self) -> &PlayerBatchImportReport {
+        &self.report
+    }
+}
+
+/// Batch authorization produced only after all selected player files were
+/// preflighted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use = "pass this to import_player_batch; selected player loss must not be implicit"]
+pub enum PlayerBatchImportAuthorization {
+    /// The operator declined the reviewed batch.
+    Aborted,
+    /// The entire batch is lossless.
+    Lossless,
+    /// The operator accepted every reported dropped category in the batch.
+    LossAccepted {
+        /// Aggregate number of dropped report entries.
+        discarded_entries: usize,
+    },
+    /// At least one selected player has unsafe data.
+    Blocked {
+        /// Aggregate number of blocking report entries.
+        blockers: usize,
+    },
+}
+
+impl PlayerBatchImportAuthorization {
+    fn permits_conversion(self) -> bool {
+        matches!(self, Self::Lossless | Self::LossAccepted { .. })
+    }
+}
+
+/// The aggregate report and committed locator count from a player batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerBatchImportResult {
+    /// The exact payload-free batch report that authorized the write.
+    pub report: PlayerBatchImportReport,
+    /// Number of locators committed in the one native transaction.
+    pub records_written: usize,
+}
+
 impl PlayerImportReport {
     /// Values a caller must explicitly accept before conversion.
     #[must_use]
@@ -195,6 +411,27 @@ pub struct PlayerImportResult {
 /// An error that prevents an Anvil player root becoming a native locator.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The selected world has no player files to preflight.
+    #[error("player import selected no player data files")]
+    NoSelectedPlayers,
+    /// A selected source directory could not be enumerated.
+    #[error("could not enumerate Anvil player-data directory: {0}")]
+    PlayerDirectory(#[source] std::io::Error),
+    /// An apparent player file does not have the canonical UUID filename.
+    #[error("Anvil player-data filename is not a canonical UUID .dat file: {}", path.display())]
+    InvalidPlayerFilename {
+        /// Invalid filesystem path.
+        path: PathBuf,
+    },
+    /// An explicit selection named one UUID more than once.
+    #[error("Anvil player import selected UUID {0} more than once")]
+    DuplicatePlayerSelection(uuid::Uuid),
+    /// A selected player file disappeared before it could be decoded.
+    #[error("selected Anvil player-data file is absent: {}", path.display())]
+    MissingSelectedPlayerFile {
+        /// Missing selected filesystem path.
+        path: PathBuf,
+    },
     /// Native-only conversion needs an explicit review of every discarded
     /// player value.
     #[error("Anvil player import requires an explicit PlayerImportAuthorization")]
@@ -215,6 +452,25 @@ pub enum Error {
         supplied: PlayerImportAuthorization,
         /// Authorization the current source requires.
         required: PlayerImportAuthorization,
+    },
+    /// The batch authorization was not supplied.
+    #[error("Anvil player batch import requires an explicit PlayerBatchImportAuthorization")]
+    MissingBatchAuthorization,
+    /// The caller did not authorize the selected batch.
+    #[error("Anvil player batch import authorization does not permit conversion: {authorization:?}")]
+    BatchAuthorizationDenied {
+        /// Authorization supplied by the caller.
+        authorization: PlayerBatchImportAuthorization,
+    },
+    /// The authorization does not match the complete preflighted batch.
+    #[error(
+        "Anvil player batch import authorization does not match the selected players: supplied {supplied:?}, required {required:?}"
+    )]
+    BatchAuthorizationMismatch {
+        /// Authorization supplied by the caller.
+        supplied: PlayerBatchImportAuthorization,
+        /// Authorization required by the current batch report.
+        required: PlayerBatchImportAuthorization,
     },
     /// The selected Anvil player file could not be decoded.
     #[error("Anvil player-data read error: {0}")]
@@ -295,6 +551,74 @@ pub fn preflight_player_file(path: &Path) -> Result<Option<PlayerImportReport>, 
     };
     let player = PlayerData::from_nbt(&root).map_err(Error::PlayerDat)?;
     Ok(Some(preflight_player(&player)))
+}
+
+/// Reads and preflights every discovered player before any native write opens.
+///
+/// The returned plan retains only the typed locator records required for its
+/// later one-transaction commit. Its public report contains no inventory,
+/// preserved NBT, or other unsupported source payload.
+pub fn preflight_player_batch(
+    selected: &[SelectedPlayerFile],
+) -> Result<PlayerBatchImportPlan, Error> {
+    if selected.is_empty() {
+        return Err(Error::NoSelectedPlayers);
+    }
+    let mut reports = Vec::with_capacity(selected.len());
+    let mut locators = Vec::with_capacity(selected.len());
+    for file in selected {
+        let Some(root) = lodestone_anvil::player_dat::read_from_file(&file.path)
+            .map_err(Error::PlayerDat)?
+        else {
+            return Err(Error::MissingSelectedPlayerFile {
+                path: file.path.clone(),
+            });
+        };
+        let player = PlayerData::from_nbt(&root).map_err(Error::PlayerDat)?;
+        let report = preflight_player(&player);
+        locators.push(locator_from_player_unchecked(file.uuid, &player));
+        reports.push(PlayerFileImportReport {
+            uuid: file.uuid,
+            report,
+        });
+    }
+    Ok(PlayerBatchImportPlan {
+        report: PlayerBatchImportReport { players: reports },
+        locators,
+    })
+}
+
+/// Commits every preflighted player locator in exactly one native transaction.
+///
+/// Any blocker, missing authorization, stale aggregate authorization, duplicate
+/// UUID, or compact-key collision fails before the transaction is appended.
+pub fn import_player_batch(
+    storage: &WorldStorage,
+    plan: PlayerBatchImportPlan,
+    authorization: Option<PlayerBatchImportAuthorization>,
+) -> Result<PlayerBatchImportResult, Error> {
+    let Some(authorization) = authorization else {
+        return Err(Error::MissingBatchAuthorization);
+    };
+    if !authorization.permits_conversion() {
+        return Err(Error::BatchAuthorizationDenied { authorization });
+    }
+    let required = plan
+        .report
+        .decide(PlayerLossDecision::ProceedAndDiscardUnsupported);
+    if authorization != required {
+        return Err(Error::BatchAuthorizationMismatch {
+            supplied: authorization,
+            required,
+        });
+    }
+    let records_written = storage
+        .write_dirty_players(plan.locators)
+        .map_err(Error::Storage)?;
+    Ok(PlayerBatchImportResult {
+        report: plan.report,
+        records_written,
+    })
 }
 
 /// Converts and commits one authorized player locator.
@@ -381,6 +705,18 @@ fn locator_from_player(uuid: uuid::Uuid, player: &PlayerData) -> NativePlayerRec
         uuid: *uuid.as_bytes(),
         dimension: builtin_dimension(&player.dimension)
             .expect("preflight authorization rejects unsupported player dimensions"),
+        x_fixed: round_to_i32(player.pos.x * POSITION_UNITS_PER_BLOCK),
+        y_fixed: round_to_i32(player.pos.y * POSITION_UNITS_PER_BLOCK),
+        z_fixed: round_to_i32(player.pos.z * POSITION_UNITS_PER_BLOCK),
+        yaw_millidegrees: round_to_i32(f64::from(player.rotation.yaw) * 1_000.0),
+        pitch_millidegrees: round_to_i32(f64::from(player.rotation.pitch) * 1_000.0),
+    }
+}
+
+fn locator_from_player_unchecked(uuid: uuid::Uuid, player: &PlayerData) -> NativePlayerRecord {
+    NativePlayerRecord {
+        uuid: *uuid.as_bytes(),
+        dimension: builtin_dimension(&player.dimension).unwrap_or(BuiltinDimension::Unspecified),
         x_fixed: round_to_i32(player.pos.x * POSITION_UNITS_PER_BLOCK),
         y_fixed: round_to_i32(player.pos.y * POSITION_UNITS_PER_BLOCK),
         z_fixed: round_to_i32(player.pos.z * POSITION_UNITS_PER_BLOCK),
