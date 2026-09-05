@@ -164,7 +164,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 20] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 21] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -227,6 +227,10 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 20] = [
     },
     NativeMethodSpec {
         name: "playerHandleForNameIgnoringCase",
+        descriptor: "(Ljava/lang/String;)J",
+    },
+    NativeMethodSpec {
+        name: "playerHandleForNamePrefix",
         descriptor: "(Ljava/lang/String;)J",
     },
     NativeMethodSpec {
@@ -794,6 +798,11 @@ fn method_id(
             jni_str!("playerHandleForNameIgnoringCase"),
             jni_sig!("(Ljava/lang/String;)J"),
         ),
+        ("playerHandleForNamePrefix", "(Ljava/lang/String;)J") => env.get_static_method_id(
+            class,
+            jni_str!("playerHandleForNamePrefix"),
+            jni_sig!("(Ljava/lang/String;)J"),
+        ),
         ("playerHandleForProfile", "(Ljava/lang/String;Ljava/lang/String;)J") => env
             .get_static_method_id(
                 class,
@@ -919,6 +928,14 @@ fn register_method(
         },
         ("playerHandleForNameIgnoringCase", "(Ljava/lang/String;)J") => {
             adapter::register_player_handle_for_name_ignoring_case_query(
+                env,
+                class,
+                method.name,
+                method.descriptor,
+            )
+        },
+        ("playerHandleForNamePrefix", "(Ljava/lang/String;)J") => {
+            adapter::register_player_handle_for_name_prefix_query(
                 env,
                 class,
                 method.name,
@@ -1140,6 +1157,10 @@ mod tests {
                     descriptor: "(Ljava/lang/String;)J",
                 },
                 NativeMethodSpec {
+                    name: "playerHandleForNamePrefix",
+                    descriptor: "(Ljava/lang/String;)J",
+                },
+                NativeMethodSpec {
                     name: "playerHandleForProfile",
                     descriptor: "(Ljava/lang/String;Ljava/lang/String;)J",
                 },
@@ -1334,6 +1355,7 @@ mod tests {
              public static native long playerHandleForUuid(String uuid); \
              public static native long playerHandleForName(String name); \
              public static native long playerHandleForNameIgnoringCase(String name); \
+             public static native long playerHandleForNamePrefix(String prefix); \
              public static native long playerHandleForProfile(String name, String uuid); \
              public static native long activePlayerHandleAt(int index); \
              public static native int activePlayerCount(); \
@@ -1423,6 +1445,7 @@ mod tests {
              public static native long playerHandleForUuid(String uuid); \
              public static native long playerHandleForName(String name); \
              public static native long playerHandleForNameIgnoringCase(String name); \
+             public static native long playerHandleForNamePrefix(String prefix); \
              public static native long playerHandleForProfile(String name, String uuid); \
              public static native long activePlayerHandleAt(int index); \
              public static native int activePlayerCount(); \

@@ -787,6 +787,14 @@ handle; neither reads a server registry. There is no additional environment
 variable or runtime toggle: the `jvm` feature and an operator-built shim
 containing the exact isolated declarations are the only prerequisites.
 
+`playerHandleForNamePrefix(String)` is a separate, case-sensitive convenience
+resolver over that same copied roster. Its exact JNI descriptor is
+`(Ljava/lang/String;)J`. Null and empty prefixes fail before the map is read,
+and a prefix that matches more than one active copied name fails rather than
+returning a hash-map winner. A successful result is the existing
+generation-checked handle, so disconnect and slot reuse invalidate the old
+value just as they do for complete-name lookup.
+
 `playerHandleForProfile(String, String)` is the explicit disambiguator. Its
 exact JNI descriptor is `(Ljava/lang/String;Ljava/lang/String;)J`: the first
 argument is the copied display name and the second is a 36-character hexadecimal UUID form.
@@ -860,7 +868,8 @@ block-state reads, validated resident block-state replacement, the current serve
 active retained entry's validated descriptor name and version. It also reconciles the server's
 value-only player roster into generation-checked handles: `playerHandleName(long)`,
 `playerHandleUuid(long)`, `playerHandleForUuid(String)`, `playerHandleForName(String)`,
-`playerHandleForNameIgnoringCase(String)`, `activePlayerHandleAt(int)`, `activePlayerCount()`, and
+`playerHandleForNameIgnoringCase(String)`, `playerHandleForNamePrefix(String)`,
+`activePlayerHandleAt(int)`, `activePlayerCount()`, and
 `playerHandleIsActive(long)` read that worker snapshot only. The dedicated host
 never hands a server object, connection, ECS entity, or world guard to Java.
 `AdapterHost::start_with_setup` mints the corresponding capability token only
@@ -1091,6 +1100,13 @@ cannot return the departed generation.
 profile names. Its controls reject null and non-ASCII input, reject case-fold
 collisions, and prove a disconnect removes the reverse mapping before a slot
 can be reused. It is a worker-local resolver, not a server-registry read.
+
+`playerHandleForNamePrefix(String)` also uses `(Ljava/lang/String;)J`, pinned
+by the generated shim and lifecycle fixtures. Its hermetic control rejects a
+null or empty prefix, proves a shared prefix fails instead of picking hash-map
+order, and then releases and reuses a matching player's slot. The returned
+handle is therefore only a bounded value from the reconciled worker roster,
+never a reference to a connection, ECS value, or world guard.
 
 The same composed caller exercises recursive Java-to-Rust-to-Java callbacks below and above the
 budget. Depth `2` returns `REENTRANT:OK:3`; depth `4` attempts one more callback and receives

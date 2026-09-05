@@ -535,6 +535,40 @@ fn active_player_handle_for_name_ignoring_case(
     })
 }
 
+/// Finds one active player by a non-empty copied display-name prefix.
+///
+/// Prefix lookup is useful only when it has one answer. It deliberately
+/// rejects every collision rather than letting the worker's hash-map order
+/// decide which active player Java receives.
+fn active_player_handle_for_name_prefix(prefix: &str) -> Result<ObjectRef, AdapterError> {
+    if prefix.is_empty() {
+        return Err(AdapterError::new(
+            "playerHandleForNamePrefix requires a non-empty player name prefix",
+        ));
+    }
+    ACTIVE_PLAYER_HANDLES.with(|slot| {
+        let active = slot.borrow();
+        let active = active.as_ref().ok_or_else(|| {
+            AdapterError::new("playerHandleForNamePrefix requires the adapter worker thread")
+        })?;
+        let mut matches = active
+            .iter()
+            .filter(|(player, _)| player.name().starts_with(prefix))
+            .map(|(_, handle)| *handle);
+        let Some(handle) = matches.next() else {
+            return Err(AdapterError::new(format!(
+                "playerHandleForNamePrefix: no active player whose name starts with {prefix:?}",
+            )));
+        };
+        if matches.next().is_some() {
+            return Err(AdapterError::new(format!(
+                "playerHandleForNamePrefix: multiple active players whose names start with {prefix:?}",
+            )));
+        }
+        Ok(handle)
+    })
+}
+
 /// Finds a connected player by the complete copied profile value.
 ///
 /// This is the disambiguating inverse for a roster that contains duplicate
@@ -668,6 +702,13 @@ fn resolve_active_player_name_ignoring_case(
         AdapterError::new("playerHandleForNameIgnoringCase requires a player name")
     })?;
     active_player_handle_for_name_ignoring_case(name)
+}
+
+fn resolve_active_player_name_prefix(value: Option<&str>) -> Result<ObjectRef, AdapterError> {
+    let prefix = value.ok_or_else(|| {
+        AdapterError::new("playerHandleForNamePrefix requires a player name prefix")
+    })?;
+    active_player_handle_for_name_prefix(prefix)
 }
 
 fn resolve_active_player_profile(
@@ -1844,6 +1885,28 @@ pub(crate) fn register_player_handle_for_name_ignoring_case_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_player_handle_for_name_prefix_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts one Java string and returns
+    // an opaque jlong. It searches only the worker-owned copied roster and
+    // rejects an empty or ambiguous prefix before returning a handle.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_player_handle_for_name_prefix as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_player_handle_for_profile_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -2169,6 +2232,26 @@ extern "system" fn native_player_handle_for_name_ignoring_case<'local>(
             })?)
         };
         resolve_active_player_name_ignoring_case(name.as_deref()).map(ObjectRef::to_bits)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_for_name_prefix<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    prefix: JString<'local>,
+) -> jlong {
+    env.with_env(|env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        let prefix = if prefix.is_null() {
+            None
+        } else {
+            Some(prefix.try_to_string(env).map_err(|error| {
+                AdapterError::new(format!("playerHandleForNamePrefix: {error}"))
+            })?)
+        };
+        resolve_active_player_name_prefix(prefix.as_deref()).map(ObjectRef::to_bits)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -3076,6 +3159,81 @@ mod tests {
         );
         assert!(release_active_player_handle(&identity, &first_player).is_some());
         assert!(release_active_player_handle(&identity, &second_player).is_some());
+        RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn player_name_prefix_resolver_is_bounded_unambiguous_and_generation_checked() {
+        let identity = lifecycle_identity("adapter", "adapter", "fixture.Adapter");
+        let alice = PlayerIdentity::new([12; 16], "Alice");
+        let alina = PlayerIdentity::new([13; 16], "Alina");
+        let bob = PlayerIdentity::new([14; 16], "Bob");
+        RESIDENT_OBJECT_HANDLES.with(|slot| {
+            *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(3));
+        });
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
+        let alice_handle = active_player_handle(&identity, &alice).expect("Alice handle");
+        active_player_handle(&identity, &alina).expect("Alina handle");
+        let bob_handle = active_player_handle(&identity, &bob).expect("Bob handle");
+
+        assert_eq!(
+            resolve_active_player_name_prefix(None),
+            Err(AdapterError::new(
+                "playerHandleForNamePrefix requires a player name prefix",
+            )),
+            "a null Java string must fail before roster lookup",
+        );
+        assert_eq!(
+            resolve_active_player_name_prefix(Some("")),
+            Err(AdapterError::new(
+                "playerHandleForNamePrefix requires a non-empty player name prefix",
+            )),
+            "an empty prefix must not turn the whole roster into an implicit query",
+        );
+        assert_eq!(
+            resolve_active_player_name_prefix(Some("Cara")),
+            Err(AdapterError::new(
+                "playerHandleForNamePrefix: no active player whose name starts with \"Cara\"",
+            )),
+            "an unknown prefix must not mint a handle",
+        );
+        assert_eq!(
+            resolve_active_player_name_prefix(Some("Ali")),
+            Err(AdapterError::new(
+                "playerHandleForNamePrefix: multiple active players whose names start with \"Ali\"",
+            )),
+            "a shared prefix must not select a hash-map iteration winner",
+        );
+        assert_eq!(
+            resolve_active_player_name_prefix(Some("Bo")),
+            Ok(bob_handle),
+            "the unique copied prefix resolves the existing worker handle",
+        );
+
+        assert_eq!(release_active_player_handle(&identity, &bob), Some(bob_handle));
+        assert_eq!(
+            resolve_active_player_name_prefix(Some("Bo")),
+            Err(AdapterError::new(
+                "playerHandleForNamePrefix: no active player whose name starts with \"Bo\"",
+            )),
+            "a disconnected profile must leave no stale prefix mapping",
+        );
+        let replacement = active_player_handle(&identity, &bob).expect("replacement handle");
+        assert_ne!(replacement, bob_handle, "slot reuse must advance generation");
+        assert_eq!(resolve_active_player_name_prefix(Some("Bo")), Ok(replacement));
+        assert_eq!(
+            resolve_resident_player_handle_name(bob_handle.to_bits()),
+            Err(AdapterError::new(
+                "playerHandleName: the referenced object no longer exists",
+            )),
+            "the old prefix result must fail generation validation after slot reuse",
+        );
+
+        assert!(release_active_player_handle(&identity, &alice).is_some());
+        assert!(release_active_player_handle(&identity, &alina).is_some());
+        assert!(release_active_player_handle(&identity, &bob).is_some());
+        assert_ne!(alice_handle, replacement);
         RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
         ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
     }
