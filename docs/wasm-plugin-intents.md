@@ -2,15 +2,15 @@
 
 ## What it is
 
-The desktop WASM plugin host exposes copied local-player look ownership through `set-look`. A guest can install a yaw/pitch target or pass `none` to return control to regular input without receiving a world handle.
+The desktop WASM plugin host exposes copied local-player look and movement intents without giving a guest a world handle. A guest can install a yaw/pitch target, or override one tick's input axes and buttons while native systems retain simulation and network ownership.
 
 ## How it works
 
-`lodestone:plugin@0.6.0` adds `action.set-look(option<look-intent>)`, guarded by the data-flow capability `act:look`. `lodestone_wasm_host::abi::lower_action` turns the guest value into `lodestone_ecs::player::LookIntent`; `WasmHostPlugin` applies the final guest request in load order during `TickSet::Intent`, before `apply_look_intent`.
+`lodestone:plugin@0.7.0` provides `action.set-look(option<look-intent>)`, guarded by `act:look`, and `action.set-movement(option<movement-intent>)`, guarded by `act:movement`. `lodestone_wasm_host::abi::lower_action` turns look into `lodestone_ecs::player::LookIntent`; the conductor applies the final look request in load order during `TickSet::Intent`, before `apply_look_intent`.
 
-The existing local-player pipeline then clamps pitch, commits the rotation to `PhysicsState`, derives movement relative to that facing, and produces the normal movement action. This is deliberately an intent rather than a raw packet: a guest cannot forge position, collision, or sequence state.
+For movement, the conductor runs after `lodestone_controller::ecs::compute_movement_intent` and before physics. It overwrites only copied axes and button state; item-use effects stay owned by the controller. Finite axes are clamped to `[-1, 1]`, and non-finite axes become neutral. Physics then resolves the request and the existing controller sends the ordinary movement and player-input actions. This is deliberately an intent rather than a raw packet: a guest cannot forge position, collision, or sequence state.
 
-The guest output list is ordered. If multiple guest actions set look in one tick, the last request wins; `none` removes the component and hands rotation back to normal input. The focused integration gate builds a separate guest artifact, asserts the changed `PhysicsState`, and verifies that the ordinary movement sender reports the same rotation in that tick.
+The guest output list is ordered. If multiple guest actions set look or set movement in one tick, the last request of each kind wins. `none` removes look ownership or leaves the normal controller input intact for movement. The focused integration gate builds separate guest artifacts, verifies a changed `PhysicsState`, and verifies that the ordinary movement sender reports the resulting look or input in that tick.
 
 ## How to change it
 
@@ -20,10 +20,10 @@ Any WIT change requires increasing `host::ABI_WORLD`, rebuilding guests, and upd
 
 ## Configuration
 
-The default host policy withholds `act:look`. An embedding host must grant `Capability::ActLook`, and the guest manifest must request `act:look`.
+The default host policy withholds `act:look` and `act:movement`. An embedding host must grant the corresponding capability, and the guest manifest must request it.
 
 ```toml
-capabilities = ["act:look"]
+capabilities = ["act:movement"]
 ```
 
 ## Dependencies

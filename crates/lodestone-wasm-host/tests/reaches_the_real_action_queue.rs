@@ -26,7 +26,7 @@ mod support;
 use lodestone_ecs::events::GameEvent;
 use lodestone_ecs::player::{ActionQueue, Egress, LocalPlayer, PhysicsState};
 use lodestone_ecs::{GameTick, app::App};
-use lodestone_model::{ClientAction, ClientEvent, Text};
+use lodestone_model::{ClientAction, ClientEvent, PlayerInput, Text};
 use lodestone_physics::{PlayerState, Vec3d};
 use lodestone_wasm_host::{Capability, CapabilitySet, PluginHost, WasmHostPlugin, WasmPlugins};
 
@@ -50,6 +50,16 @@ fn look_capabilities() -> CapabilitySet {
 fn look_host_policy() -> CapabilitySet {
     let mut policy = CapabilitySet::default_policy();
     policy.insert(Capability::ActLook);
+    policy
+}
+
+fn movement_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActMovement])
+}
+
+fn movement_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActMovement);
     policy
 }
 
@@ -280,5 +290,99 @@ fn a_wasm_look_intent_without_its_capability_is_refused_before_physics() {
         (state.0.yaw, state.0.pitch)
     };
     assert_eq!(rotation, (0.0, 0.0));
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+/// A separately-built guest overrides copied input only after the ordinary
+/// controller producer runs. The existing physics and controller egress then
+/// consume it; this does not test a component in isolation or let the guest
+/// manufacture a packet.
+#[test]
+fn a_wasm_movement_intent_reaches_the_existing_physics_and_egress_consumers() {
+    let wasm = support::build_example_plugin(&["movement"]);
+    let mut host = PluginHost::new(movement_host_policy()).expect("engine");
+    host.load_file("movement-owner", &wasm, &movement_capabilities())
+        .expect("the movement fixture must load");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(&mut app, PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
+    *app.world_mut().resource_mut::<Egress>() = Egress { in_world: true, live: true };
+    app.world_mut().run_schedule(GameTick);
+
+    let velocity = {
+        let world = app.world_mut();
+        let mut players = world.query_filtered::<&PhysicsState, bevy_ecs::query::With<LocalPlayer>>();
+        players.single(world).expect("one spawned local player").0.velocity
+    };
+    assert!(
+        velocity.x != 0.0 && velocity.z != 0.0,
+        "the normal physics step must consume the guest axes, got {velocity:?}"
+    );
+    let actions = action_queue(&app);
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            ClientAction::SetPlayerInput(PlayerInput {
+                forward: true,
+                backward: false,
+                left: false,
+                right: true,
+                jump: true,
+                shift: true,
+                sprint: true,
+            })
+        )),
+        "the normal controller egress must report the guest-owned input in this tick: {actions:?}"
+    );
+}
+
+/// The guest is loaded with the same action capability but returns no movement
+/// action. This negative control proves the conductor does not invent movement
+/// merely because a guest has permission to drive it.
+#[test]
+fn control_a_guest_with_movement_capability_but_no_movement_action_stays_idle() {
+    let wasm = support::build_example_plugin(&[]);
+    let mut host = PluginHost::new(movement_host_policy()).expect("engine");
+    host.load_file("chat-responder", &wasm, &movement_capabilities())
+        .expect("the quiet fixture must load");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(&mut app, PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
+    *app.world_mut().resource_mut::<Egress>() = Egress { in_world: true, live: true };
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        action_queue(&app)
+            .iter()
+            .any(|action| matches!(action, ClientAction::SetPlayerInput(PlayerInput::EMPTY))),
+        "the normal controller's idle input must remain intact when the guest returns no action"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// The same compiled movement guest is denied before it can overwrite the
+/// controller's intent. The empty input and refusal counter make this distinct
+/// from a guest that simply chose not to return an action.
+#[test]
+fn a_wasm_movement_intent_without_its_capability_is_refused_before_physics() {
+    let wasm = support::build_example_plugin(&["movement"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file("movement-owner", &wasm, &CapabilitySet::from_iter([Capability::Log]))
+        .expect("the guest remains valid when its data-flow grant is withheld");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(&mut app, PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
+    *app.world_mut().resource_mut::<Egress>() = Egress { in_world: true, live: true };
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        action_queue(&app)
+            .iter()
+            .any(|action| matches!(action, ClientAction::SetPlayerInput(PlayerInput::EMPTY))),
+        "without `act:movement` the guest must not replace the controller input"
+    );
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
 }

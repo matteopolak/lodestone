@@ -20,7 +20,7 @@ version = "0.1.0"
 # The WIT world this module was built against. The host refuses anything it does not
 # speak, naming both versions, rather than letting it fail later as an
 # unresolved-import error.
-abi = "lodestone:plugin@0.6.0"
+abi = "lodestone:plugin@0.7.0"
 
 # The module, relative to this file.
 module = "chat_responder.wasm"

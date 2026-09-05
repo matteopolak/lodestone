@@ -17,7 +17,7 @@
 //! |---|---|---|
 //! | `Text`, the styled component tree | a plain `String` | `Text` is recursive, with translation keys, hover/click events and per-node style. Lifting it faithfully means a recursive WIT variant plus a translation table the guest cannot resolve anyway. So [`lift_event`] flattens with `Text::to_plain_string`, and this is **lossy**: a guest cannot see colour, cannot see a translation key, and cannot distinguish a translated message from a literal one that happens to render the same. |
 //! | `ChatAckInfo` on `ClientEvent::Chat` | dropped | signed-chat acknowledgement is the *driver's* bookkeeping — a guest that echoed an `offset` back would fork a sequence counter the driver owns, which is clause 2 of the doctrine. Deliberately unreachable. |
-//! | intent components (`BreakIntent`, `PlaceIntent`, `MovementIntent`, `LookIntent`) and their outcome components | `set-look(option<look-intent>)` | look ownership now installs or removes the copied component before its existing consumer. Break, place, movement and outcome polling remain absent because each needs a distinct lifecycle and observability contract. See `docs/wasm-plugin-intents.md`. |
+//! | intent components (`BreakIntent`, `PlaceIntent`, `MovementIntent`, `LookIntent`) and their outcome components | `set-look(option<look-intent>)`, `set-movement(option<movement-intent>)` | look owns an optional component; movement overrides the normal controller's copied input for one tick, then flows through the existing physics and egress consumers. Break, place, and outcome polling remain absent because each needs a distinct lifecycle and observability contract. See `docs/wasm-plugin-intents.md`. |
 //! | ~110 `ClientEvent` variants | 3 | the curated subset. Not an oversight and not a TODO: a full mirror is the staleness factory `lodestone_ecs::events`'s own module doc refuses. |
 //!
 //! # The staleness question, and the honest answer to it
@@ -51,6 +51,29 @@ use crate::host::{
 pub enum IntentAction {
     /// Install a copied look target, or remove it and return ownership to input.
     Look(Option<lodestone_ecs::player::LookIntent>),
+    /// Override the normal controller's copied movement input for this tick.
+    Movement(Option<MovementOverride>),
+}
+
+/// A guest movement request after the boundary has enforced finite, digital axes.
+///
+/// `using_item` deliberately is not representable: the native controller owns that
+/// state and the conductor preserves it when it applies this copied input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MovementOverride {
+    pub forward: f32,
+    pub strafe: f32,
+    pub jump: bool,
+    pub sneak: bool,
+    pub sprint: bool,
+}
+
+fn axis(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// One capability-authorized guest result.
@@ -225,6 +248,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::SendChat(_) | Action::SendCommand(_) => Capability::ActChat,
         Action::SwingArm(_) => Capability::ActInteract,
         Action::SetLook(_) => Capability::ActLook,
+        Action::SetMovement(_) => Capability::ActMovement,
     }
 }
 
@@ -254,6 +278,17 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
                 pitch: look.pitch,
             }
         }))),
+        Action::SetMovement(movement) => {
+            LoweredAction::Intent(IntentAction::Movement(movement.map(|movement| {
+                MovementOverride {
+                    forward: axis(movement.forward),
+                    strafe: axis(movement.strafe),
+                    jump: movement.jump,
+                    sneak: movement.sneak,
+                    sprint: movement.sprint,
+                }
+            })))
+        }
     })
 }
 
@@ -403,6 +438,39 @@ mod tests {
         );
     }
 
+    /// Movement crosses as copied axes, not as a position or a protocol action.
+    /// The numeric control makes the boundary reject both a non-digital finite
+    /// axis and a NaN before either can reach physics.
+    #[test]
+    fn movement_actions_lower_onto_a_finite_digital_local_player_intent() {
+        let granted = CapabilitySet::from_iter([Capability::ActMovement]);
+        assert_eq!(
+            lower_action(
+                Action::SetMovement(Some(crate::host::MovementIntent {
+                    forward: 4.0,
+                    strafe: f32::NAN,
+                    jump: true,
+                    sneak: true,
+                    sprint: true,
+                })),
+                &granted,
+            ),
+            Ok(LoweredAction::Intent(IntentAction::Movement(Some(
+                MovementOverride {
+                    forward: 1.0,
+                    strafe: 0.0,
+                    jump: true,
+                    sneak: true,
+                    sprint: true,
+                }
+            ))))
+        );
+        assert_eq!(
+            lower_action(Action::SetMovement(None), &granted),
+            Ok(LoweredAction::Intent(IntentAction::Movement(None)))
+        );
+    }
+
     /// **The act-side capability, enforced, with the missing grant named.** The
     /// `Err` payload is what lets the conductor log something actionable.
     #[test]
@@ -427,6 +495,10 @@ mod tests {
             lower_action(Action::SetLook(None), &CapabilitySet::empty()),
             Err(Capability::ActLook)
         );
+        assert_eq!(
+            lower_action(Action::SetMovement(None), &CapabilitySet::empty()),
+            Err(Capability::ActMovement)
+        );
     }
 
     /// Every action variant is gated by something. Trivial-looking, and it is the
@@ -439,6 +511,7 @@ mod tests {
             Action::SendCommand(String::new()),
             Action::SwingArm(Hand::Main),
             Action::SetLook(None),
+            Action::SetMovement(None),
         ] {
             assert!(
                 lower_action(action.clone(), &CapabilitySet::empty()).is_err(),

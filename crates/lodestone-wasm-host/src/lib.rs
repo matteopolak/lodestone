@@ -110,7 +110,7 @@ pub mod host;
 pub mod manifest;
 
 pub use abi::{
-    IntentAction, LoweredAction, capability_for, lift_command_context, lift_event,
+    IntentAction, LoweredAction, MovementOverride, capability_for, lift_command_context, lift_event,
     lift_verdict_context, lower_action,
 };
 pub use capability::{Capability, CapabilitySet};
