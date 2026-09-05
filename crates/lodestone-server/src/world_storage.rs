@@ -12,9 +12,12 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use lodestone_core::{Reader, Writer, read_named_nbt, write_named_nbt};
-use lodestone_storage::{NativeStore, RecordKey, RecordWrite, StoreError};
+use lodestone_storage::{
+    ExtensionRegistration, NativeStore, RecordKey, RecordWrite, StoreError,
+};
 use lodestone_storage_schema::{
-    BiomeSection, ChunkRecord, ChunkSection, FORMAT_VERSION_V1, StorageRecord,
+    BiomeSection, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1, RegisteredExtension,
+    StorageRecord,
     generated::storage_record,
 };
 
@@ -279,6 +282,11 @@ impl std::error::Error for ChunkRecordError {}
 trait DirtyRecordStore: Send {
     fn write_transaction(&mut self, writes: Vec<RecordWrite>) -> Result<(), StoreError>;
     fn get(&mut self, key: RecordKey) -> Result<Option<StorageRecord>, StoreError>;
+    fn extension_table(&self) -> ExtensionTable;
+    fn register_extensions(
+        &mut self,
+        registrations: &[ExtensionRegistration],
+    ) -> Result<Vec<RegisteredExtension>, StoreError>;
 }
 
 impl DirtyRecordStore for NativeStore {
@@ -288,6 +296,17 @@ impl DirtyRecordStore for NativeStore {
 
     fn get(&mut self, key: RecordKey) -> Result<Option<StorageRecord>, StoreError> {
         NativeStore::get(self, key)
+    }
+
+    fn extension_table(&self) -> ExtensionTable {
+        NativeStore::extension_table(self).clone()
+    }
+
+    fn register_extensions(
+        &mut self,
+        registrations: &[ExtensionRegistration],
+    ) -> Result<Vec<RegisteredExtension>, StoreError> {
+        NativeStore::register_extensions(self, registrations.iter().cloned())
     }
 }
 
@@ -348,6 +367,40 @@ impl WorldStorage {
             .expect("world storage lock poisoned")
             .write_transaction(writes)?;
         Ok(count)
+    }
+
+    /// Returns the native extension table selected for this world.
+    ///
+    /// The Anvil backend has no typed extension-table sidecar, so treating it as
+    /// one is an error rather than an empty, unwired registration set.
+    pub fn native_extension_table(&self) -> Result<ExtensionTable, Error> {
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        Ok(native
+            .lock()
+            .expect("world storage lock poisoned")
+            .extension_table())
+    }
+
+    /// Registers named extension schemas in the selected native backend.
+    ///
+    /// Registration is durable before a record can reference the returned local
+    /// IDs. Callers must use those IDs in `ExtensionValue`; an unregistered ID
+    /// is rejected by the native store before it appends a transaction.
+    pub fn register_native_extensions(
+        &self,
+        registrations: impl IntoIterator<Item = ExtensionRegistration>,
+    ) -> Result<Vec<RegisteredExtension>, Error> {
+        let registrations: Vec<_> = registrations.into_iter().collect();
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        native
+            .lock()
+            .expect("world storage lock poisoned")
+            .register_extensions(&registrations)
+            .map_err(Into::into)
     }
 
     /// Saves one independently dirty server chunk through the native typed
@@ -865,6 +918,23 @@ mod tests {
 
         fn get(&mut self, _key: RecordKey) -> Result<Option<StorageRecord>, StoreError> {
             Ok(None)
+        }
+
+        fn extension_table(&self) -> ExtensionTable {
+            ExtensionTable {
+                table_version: FORMAT_VERSION_V1,
+                extensions: Vec::new(),
+            }
+        }
+
+        fn register_extensions(
+            &mut self,
+            _registrations: &[ExtensionRegistration],
+        ) -> Result<Vec<RegisteredExtension>, StoreError> {
+            Err(StoreError::Corrupt {
+                offset: 0,
+                reason: "recording store does not model extension registration".to_owned(),
+            })
         }
     }
 
