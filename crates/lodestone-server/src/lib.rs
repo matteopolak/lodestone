@@ -409,6 +409,10 @@ pub mod anvil_import;
 /// Conversion of one complete native chunk record into an Anvil chunk tree.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod anvil_export;
+/// Authorization-gated conversion of one complete Anvil player file into the
+/// deliberately smaller native player locator record.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod anvil_player_storage;
 /// [`live_save::LiveSaveSlot`] — the one piece of the player-save story that
 /// has to compile on every target. Deliberately **not** `cfg`-gated, unlike
 /// `player_data` above: `LiveSaveSlot` is threaded unconditionally through
