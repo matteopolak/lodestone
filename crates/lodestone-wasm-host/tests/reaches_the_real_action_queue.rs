@@ -38,7 +38,8 @@ use lodestone_world::{ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChun
 use lodestone::{config::Config, sim::Sim};
 use lodestone_wasm_host::{
     Capability, CapabilitySet, InventoryClickButton, InventoryClickIntent, InventoryClickMode,
-    InventoryThrowMode, PendingWasmMenuClicks, PluginHost, WasmHostPlugin, WasmPlugins,
+    InventoryThrowMode, PendingWasmMenuClicks, PendingWasmWorldMutations, PluginHost,
+    WasmHostPlugin, WasmPlugins,
 };
 
 #[derive(Resource, Default, Debug, PartialEq, Eq)]
@@ -93,6 +94,16 @@ fn world_read_capabilities() -> CapabilitySet {
 fn world_read_host_policy() -> CapabilitySet {
     let mut policy = CapabilitySet::default_policy();
     policy.insert(Capability::ReadWorld);
+    policy
+}
+
+fn world_write_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::WriteWorld])
+}
+
+fn world_write_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::WriteWorld);
     policy
 }
 
@@ -414,6 +425,44 @@ fn world_read_is_default_denied_before_guest_instantiation() {
         error.to_string().contains("world:read"),
         "the refusal must name the missing authority: {error}"
     );
+    assert!(host.is_empty(), "a denied guest must not remain loaded");
+}
+
+#[test]
+fn a_runtime_loaded_guest_reaches_the_authoritative_world_mutation_handoff() {
+    let wasm = support::build_example_plugin(&["world-write"]);
+    let mut host = PluginHost::new(world_write_host_policy()).expect("engine");
+    host.load_file("world-write", &wasm, &world_write_capabilities())
+        .expect("the explicit world-write grant must load the guest");
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+
+    app.world_mut().run_schedule(GameTick);
+
+    let requests = app
+        .world_mut()
+        .resource_mut::<PendingWasmWorldMutations>()
+        .take_requests();
+    assert_eq!(requests.len(), 1, "the conductor must retain one copied request");
+    let (plugin, request) = &requests[0];
+    assert_eq!(*plugin, 0, "the result route must retain guest identity");
+    assert_eq!(request.request_id, 1);
+    assert_eq!((request.pos.x, request.pos.y, request.pos.z), (2, 4, 3));
+    assert_eq!(request.state_id, 20);
+}
+
+#[test]
+fn world_write_is_default_denied_before_guest_instantiation() {
+    let wasm = support::build_example_plugin(&["world-write"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    let error = host
+        .load_file("world-write", &wasm, &world_write_capabilities())
+        .expect_err("authoritative world mutation must require an operator grant");
+    assert!(
+        matches!(error, lodestone_wasm_host::HostError::CapabilityDenied { .. }),
+        "the policy refusal must happen before a world-writing guest is instantiated: {error:?}"
+    );
+    assert!(error.to_string().contains("world:write"), "{error}");
     assert!(host.is_empty(), "a denied guest must not remain loaded");
 }
 

@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.25.0;
+package lodestone:plugin@0.26.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -269,6 +269,38 @@ interface types {
         z: s32,
     }
 
+    /// A copied request to replace one state in the host's authoritative
+    /// singleplayer world. `request-id` is guest-supplied only to correlate the
+    /// later finite outcome; it is never a server-side identity.
+    record resident-block-mutation {
+        request-id: u64,
+        pos: block-pos,
+        state-id: u32,
+    }
+
+    /// Every terminal answer to a resident-block request. These are stable
+    /// vocabulary, not source-specific error strings or a retained world handle.
+    enum block-mutation-refusal {
+        denied,
+        timed-out,
+        unavailable,
+        mismatched-action,
+        primary-world-unavailable,
+        column-not-resident,
+        out-of-bounds,
+        invalid-state-id,
+    }
+
+    variant block-mutation-status {
+        applied,
+        refused(block-mutation-refusal),
+    }
+
+    record resident-block-mutation-outcome {
+        request-id: u64,
+        status: block-mutation-status,
+    }
+
     /// One observation the host delivers. The variant set is the curated subset
     /// described in this file's header; each arm names the `ClientEvent` it is
     /// lifted from, and `crates/lodestone-wasm-host/src/abi.rs` is the one place
@@ -298,6 +330,9 @@ interface types {
         /// A newly resolved local-player placement — capability `observe:place`.
         /// The host emits it once per generation for each observing guest.
         place-outcome(place-outcome),
+        /// One finite response to a prior `set-resident-block` request —
+        /// capability `world:write`.
+        resident-block-mutation-outcome(resident-block-mutation-outcome),
     }
 
     /// Which hand — `lodestone_model::common::Hand`.
@@ -522,6 +557,11 @@ interface types {
         /// Drop one item or the complete selected stack through the normal
         /// client action queue — capability `act:drop-selected-item`.
         drop-selected-item(selected-item-drop-mode),
+        /// Ask the current singleplayer server to mutate an already-resident
+        /// block after its native-plugin proposal pass — capability `world:write`.
+        /// The host never writes the client replica; one finite outcome returns
+        /// in a later guest tick.
+        set-resident-block(resident-block-mutation),
     }
 
     /// A root command a guest wants the host to register. The host supplies one

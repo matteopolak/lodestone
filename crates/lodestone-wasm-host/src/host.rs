@@ -63,12 +63,13 @@ pub use crate::bindings::lodestone::plugin::types::{
     CommandPosition, CommandRotation, CommandSpec, EntityDamageVerdict, EntityEquipment,
     EntityEquipmentChanged, EntityHealthChanged, EntityIdentity, EntityMotion, EntityMoved,
     EntityRotation, EntitySpawned, EntityVelocity, EquipmentSlot, Event, Hand, Health,
-    BreakIntent, BreakOutcome, BreakRejection, BreakStatus, InventoryClick, InventoryClickButton,
-    InventoryHotbarSwap, InventoryThrow, InventoryThrowMode, SelectedItemDropMode,
-    InventoryClickVerdict, InventorySlotChanged, ItemStack, LogLevel, LookIntent,
+    BlockMutationRefusal, BlockMutationStatus, BreakIntent, BreakOutcome, BreakRejection,
+    BreakStatus, InventoryClick, InventoryClickButton, InventoryClickVerdict, InventoryHotbarSwap,
+    InventorySlotChanged, InventoryThrow, InventoryThrowMode, ItemStack, LogLevel, LookIntent,
     MovementIntent, PlaceIntent, PlaceOutcome, PlaceRejection, PlaceStatus, PlayerInteractVerdict,
     PlayerMoveVerdict, PlayerTeleported, PluginInfo, PluginVerdict,
-    SectionBlocksChanged, SectionPos, TeleportRelative, Vec3, VerdictContext,
+    ResidentBlockMutation, ResidentBlockMutationOutcome, SectionBlocksChanged, SectionPos,
+    SelectedItemDropMode, TeleportRelative, Vec3, VerdictContext,
 };
 
 /// The world version this host speaks. A guest's `init` must return this, and a
@@ -77,7 +78,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.25.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.26.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin

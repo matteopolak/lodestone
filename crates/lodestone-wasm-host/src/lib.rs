@@ -118,11 +118,12 @@ pub use abi::{
 };
 pub use capability::{Capability, CapabilitySet};
 pub use conductor::{
-    PendingWasmMenuClicks, WasmHostPlugin, WasmPlugins, WasmReloadError, drive_wasm_plugins,
-    reload_wasm_plugins,
+    PendingWasmMenuClicks, PendingWasmWorldMutations, WasmHostPlugin, WasmPlugins, WasmReloadError,
+    drive_wasm_plugins, reload_wasm_plugins,
 };
 pub use host::{
-    ABI_WORLD, Action, BlockFace, BlockOffset, BreakIntent, BreakOutcome, BreakRejection, BreakStatus,
+    ABI_WORLD, Action, BlockFace, BlockMutationRefusal, BlockMutationStatus, BlockOffset, BreakIntent,
+    BreakOutcome, BreakRejection, BreakStatus,
     ChatKind, ChatMessage, CommandAnchor, CommandContext,
     CommandEntity, CommandExecution, CommandOutcome, CommandPosition, CommandRotation, CommandSpec,
     DEFAULT_FUEL_PER_TICK, DEFAULT_FUEL_PER_VERDICT, DEFAULT_MEMORY_LIMIT,
@@ -132,7 +133,8 @@ pub use host::{
     HostError, InventoryHotbarSwap, InventoryThrow, LoadError, LoadedPlugin, LogLevel, LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,
     SelectedItemDropMode,
     PlaceRejection, PlaceStatus, PluginGrantPolicy, PluginHost, PluginIdentity, PluginInfo, SectionBlocksChanged, SectionPos,
-    PlayerTeleported, ReloadError, TeleportRelative, Vec3, VerdictDispatch,
+    PlayerTeleported, ReloadError, ResidentBlockMutation, ResidentBlockMutationOutcome,
+    TeleportRelative, Vec3, VerdictDispatch,
 };
 pub use manifest::{Dependencies, Manifest, ManifestError, Priority, scan_directory};
 
