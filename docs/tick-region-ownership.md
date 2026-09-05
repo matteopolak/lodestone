@@ -177,6 +177,14 @@ completion, including an extinguished or non-burning mob, and
 restores mob-vector slots before publishing counters, damage, vocalisations,
 and deaths. Cross-owner completion order therefore cannot move a burn hit or
 death relative to another mob.
+Leashes make the cross-owner read boundary explicit. The leashed mob's
+tick-start chunk owns the decision, while `MobSim::tick_leash_owner_batches`
+may read a holder snapshot from another chunk, a player, or a fence without
+mutating either side. One completion is retained for every tick-start leash,
+including a leash that stays within its elastic distance. The central
+`MobSim::apply_leash_owner_batches` restores mob-vector order before applying
+pulls and detachments or allocating lead-item ids, so a snapped leash in one
+owner cannot overtake another owner's earlier action.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
@@ -277,6 +285,12 @@ deferred damage value; they must not mutate health or publish vocalisations.
 Retain the independently predicted 20-to-19 counter and health transition, the
 interleaved reversed-completion comparison, and the missing and duplicate owner
 controls when extending this phase.
+
+Treat leash holders as read-only foreign-owner inputs during planning. A leash
+owner may return `Keep`, `Pull`, `Orphan`, or `Snap`, but it may not change the
+live mob or allocate the lead drop itself. Preserve completions for `Keep`, the
+tick-start mob slot, and central item allocation; otherwise a missing leash or
+reversed owner completion can silently change entity ids and publication order.
 
 Do not move the shared spawner RNG or entity creation into an owner worker.
 Keep `SpawnerTickBatchBuilder` on the existing registry traversal, return one
