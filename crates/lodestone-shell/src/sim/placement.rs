@@ -108,7 +108,10 @@ pub(crate) fn placement_facts(
     state_at: impl Fn(BlockPos) -> Option<u32>,
     intersects_player: impl Fn(BlockPos) -> bool,
 ) -> PlacementFacts {
-    let clicked_state = state_at(clicked);
+    // Chunk storage owns raw protocol values. This prediction only knows the
+    // built-in 26.2 census, so validate each external value as it enters the
+    // predicate layer; an unknown extension can only decline a local write.
+    let clicked_state = state_at(clicked).and_then(lodestone_data::block_states::StateId::new);
     let clicked_replaceable = clicked_state.is_some_and(is_air_state);
     // `resolve_target`'s rule, evaluated here because it is the same read: a
     // replaceable clicked cell is replaced in place, otherwise the placement
@@ -126,7 +129,9 @@ pub(crate) fn placement_facts(
         // An unloaded column reads `None` and therefore "not replaceable",
         // which declines the prediction — the same conservative direction as
         // every other unknown here.
-        target_replaceable: state_at(target).is_some_and(is_air_state),
+        target_replaceable: state_at(target)
+            .and_then(lodestone_data::block_states::StateId::new)
+            .is_some_and(is_air_state),
         target_obstructed: intersects_player(target),
     }
 }
@@ -163,10 +168,10 @@ pub(crate) fn block_intersects_player(bb: &Aabb, block: [i32; 3]) -> bool {
 /// behaviour, a one-round-trip wait — for the cases it excludes, and it is what
 /// makes the `waterlogged = false` rule in [`state_for_placement`] exact rather
 /// than assumed.
-pub(crate) fn is_air_state(state: u32) -> bool {
+pub(crate) fn is_air_state(state: lodestone_data::block_states::StateId) -> bool {
     matches!(
-        lodestone_data::block_states::block_name(state),
-        Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+        state.name(),
+        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
     )
 }
 
@@ -229,19 +234,13 @@ const INTERACTABLE_FRAGMENTS: &[&str] = &[
 ];
 
 /// Whether right-clicking this block state actuates it instead of placing.
-pub(crate) fn is_interactable_state(state: u32) -> bool {
-    if lodestone_data::block_states::StateId::new(state)
-        .and_then(lodestone_data::block_entity_types::block_entity_type)
-        .is_some()
-    {
+pub(crate) fn is_interactable_state(state: lodestone_data::block_states::StateId) -> bool {
+    if lodestone_data::block_entity_types::block_entity_type(state).is_some() {
         return true;
     }
-    let Some(name) = lodestone_data::block_states::block_name(state) else {
-        return false;
-    };
     INTERACTABLE_FRAGMENTS
         .iter()
-        .any(|fragment| name.contains(fragment))
+        .any(|fragment| state.name().contains(fragment))
 }
 
 /// Blocks whose `facing` is `getHorizontalDirection().getOpposite()` — vanilla's

@@ -525,13 +525,13 @@ impl Sim {
             (after.position.y - 0.2).floor() as i32,
             after.position.z.floor() as i32,
         ];
-        let state = self.block_at_world(below);
+        let Some(state) = lodestone_data::block_states::StateId::new(self.block_at_world(below))
+        else {
+            return;
+        };
         if is_air_state(state) {
             return;
         }
-        let Some(state) = lodestone_data::block_states::StateId::new(state) else {
-            return;
-        };
         let sound = lodestone_data::sound_types::sound_type(state);
         let Some(name) = lodestone_data::sound_types::step_sound_name(state) else {
             return;
@@ -581,7 +581,7 @@ impl Sim {
     /// right and silent — from an event already decoded, routed and handled. See
     /// `docs/sound-playback.md`.
     pub(crate) fn play_block_break_sound(&mut self, block: [i32; 3], state: BlockStateRef) {
-        let BlockStateRef::Canonical(state) = state else {
+        let Some(state) = canonical_sound_state(state) else {
             return;
         };
         self.play_block_surface_sound(block, state, lodestone_data::sound_types::break_sound_name);
@@ -594,7 +594,11 @@ impl Sim {
     /// exclusion: it plays only when `except == minecraft.player`.) Another
     /// player's placement arrives as an ordinary `SOUND` packet and is already
     /// audible through the [`NetUpdate::Sound`] arm.
-    pub(crate) fn play_block_place_sound(&mut self, block: [i32; 3], state: u32) {
+    pub(crate) fn play_block_place_sound(
+        &mut self,
+        block: [i32; 3],
+        state: lodestone_data::block_states::StateId,
+    ) {
         self.play_block_surface_sound(block, state, lodestone_data::sound_types::place_sound_name);
     }
 
@@ -622,15 +626,12 @@ impl Sim {
     fn play_block_surface_sound(
         &mut self,
         block: [i32; 3],
-        state: u32,
+        state: lodestone_data::block_states::StateId,
         pick: fn(lodestone_data::block_states::StateId) -> Option<&'static str>,
     ) {
         if is_air_state(state) {
             return;
         }
-        let Some(state) = lodestone_data::block_states::StateId::new(state) else {
-            return;
-        };
         let sound = lodestone_data::sound_types::sound_type(state);
         // `None` also covers `minecraft:intentionally_empty`, the sentinel vanilla
         // parks in a slot it does not want to fill (water, lava and bubble columns
@@ -678,6 +679,19 @@ impl Sim {
     fn block_sound_seed(&self, block: [i32; 3]) -> i64 {
         block_sound_seed(block, self.clock().ticks)
     }
+}
+
+/// Admits a state reference to the fixed 26.2 sound census.
+///
+/// Protocol-local values deliberately remain opaque here: their number may
+/// overlap a canonical row, but only their owning adapter can map it safely.
+fn canonical_sound_state(
+    state: BlockStateRef,
+) -> Option<lodestone_data::block_states::StateId> {
+    let BlockStateRef::Canonical(raw) = state else {
+        return None;
+    };
+    lodestone_data::block_states::StateId::new(raw)
 }
 
 /// The eleven `soundSource.*` slider values paired with the bus each one drives,
@@ -745,7 +759,7 @@ pub(crate) fn block_sound_seed(block: [i32; 3], ticks: u64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use lodestone_model::event::SoundCategory;
+    use lodestone_model::event::{BlockStateRef, SoundCategory};
 
     /// The eleven sliders reach the eleven buses, each one carrying **its own**
     /// value.
@@ -830,6 +844,29 @@ mod tests {
             of(SoundCategory::Ui),
             1.0,
             "NaN degrades to full volume, never to silence"
+        );
+    }
+
+    #[test]
+    fn block_surface_sounds_admit_only_valid_canonical_state_ids() {
+        let valid = BlockStateRef::canonical(0);
+        let invalid = BlockStateRef::canonical(lodestone_data::block_states::STATE_COUNT);
+        let local_overlap = BlockStateRef::protocol_local(0);
+
+        assert_eq!(
+            super::canonical_sound_state(valid).map(|state| state.raw()),
+            Some(0),
+            "a canonical built-in state reaches the total sound census"
+        );
+        assert_eq!(
+            super::canonical_sound_state(invalid),
+            None,
+            "an out-of-range canonical value must not index generated sound data"
+        );
+        assert_eq!(
+            super::canonical_sound_state(local_overlap),
+            None,
+            "a protocol-local zero must not masquerade as canonical air"
         );
     }
 }

@@ -1468,7 +1468,9 @@ impl Sim {
                 // the sound is the placed state's own sound type — a waterlogged or
                 // half-slab placement can be a different sound type from the
                 // block's default state.
-                self.play_block_place_sound([pos.x, pos.y, pos.z], state);
+                if let Some(state) = lodestone_data::block_states::StateId::new(state) {
+                    self.play_block_place_sound([pos.x, pos.y, pos.z], state);
+                }
             }
         }
 
