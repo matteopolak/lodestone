@@ -537,7 +537,48 @@ impl WindowApp {
         // `Sim` needed inside the closure) and keeps the two in lock-step —
         // see `RenderState::set_third_person_body_source`'s doc for why a
         // `None`/`Some` source *is* the camera-mode toggle.
-        let render_camera = self.sim.render_camera(aspect);
+        let mut render_camera = self.sim.render_camera(aspect);
+        let horizon_chunks = self.nav.options().horizon_distance_chunks;
+        let horizon_query = (horizon_chunks != 0
+            && self.sim.dimension().is_some_and(|dimension| {
+                dimension.namespace() == "minecraft" && dimension.path() == "overworld"
+            }))
+        .then(|| self.sim.net().and_then(|net| net.horizon_surface()))
+        .flatten();
+        if let Some(query) = horizon_query {
+            // Only the visual camera gets the longer projection. `camera`
+            // above remains the pick/audio eye, and neither the server view
+            // radius nor the normal chunk culler reads this option.
+            render_camera.far = render_camera
+                .far
+                .max(lodestone_render::Camera::far_for_render_distance(
+                    horizon_chunks,
+                    0,
+                ));
+            let camera_block = [
+                render_camera.position.x.floor() as i32,
+                render_camera.position.z.floor() as i32,
+            ];
+            match render.install_distant_terrain(device, camera_block) {
+                Ok(()) => {
+                    render.set_distant_terrain_outer_radius(horizon_chunks);
+                    render.recenter_distant_terrain(camera_block);
+                    render.set_distant_terrain_near_field(self.nav.options().render_distance);
+                    // Exactly one fixed 64-by-64 coarse tile may be queried
+                    // and uploaded per presented frame. The query never enters
+                    // the generated-column store or the server stream.
+                    render.populate_distant_terrain_one(queue, |x, z| query.sample(x, z));
+                }
+                Err(error) => {
+                    tracing::warn!(target: "render", ?error, "distant terrain unavailable");
+                }
+            }
+        } else {
+            // This restores the zero-allocation default when the option is
+            // turned off, the dimension changes, or the session is remote or
+            // backed by a custom source we cannot estimate faithfully.
+            render.disable_distant_terrain();
+        }
         let body_state = self.sim.third_person_body_state();
         render.set_third_person_body_source(move || body_state.clone());
         // This frame's arm-swing progress, for the first-person arm pass. Sampled

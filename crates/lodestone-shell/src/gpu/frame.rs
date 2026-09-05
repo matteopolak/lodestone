@@ -324,6 +324,10 @@ impl RenderState {
             update_model_shared_camera_buffer(queue, &model.shared_cam_buffer, view_proj, fog);
         }
 
+        if let Some(distant) = &self.distant_terrain {
+            distant.prepare(queue, view_proj, fog);
+        }
+
         // Outline vertices/uniform must be written before the pass opens.
         if let Some(block) = outline {
             let boxes = self.outline_shape.sample(block);
@@ -933,6 +937,9 @@ impl RenderState {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if let Some(distant) = &self.distant_terrain {
+                distant.draw(&mut pass);
+            }
             pass.set_pipeline(&self.pipeline.pipeline);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
             for (key, section) in &self.sections {

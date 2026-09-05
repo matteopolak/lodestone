@@ -1,5 +1,5 @@
-// Coarse distant terrain. The shell does not construct this pipeline yet; the
-// standalone shader-validation gate keeps the future vertex-pull contract live.
+// Coarse distant terrain. The shell constructs this pipeline only for an
+// eligible local Overworld with the separate Distant Horizon option enabled.
 struct Camera {
     view_proj: mat4x4<f32>,
     fog_eye: vec4<f32>,
@@ -12,7 +12,8 @@ struct Tile {
     atlas_origin: vec2<i32>,
     cell_blocks: u32,
     near_field_radius_blocks: f32,
-    _padding: vec2<u32>,
+    outer_radius_blocks: f32,
+    _padding: u32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -55,7 +56,10 @@ fn grid_corner(vertex_index: u32) -> vec2<u32> {
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
     let grid = grid_corner(vertex_index);
     let atlas = tile.atlas_origin + vec2<i32>(grid);
-    let height = textureLoad(heights_water, atlas, 0).x & 65535u;
+    let packed_height = textureLoad(heights_water, atlas, 0).x;
+    let terrain_height = packed_height & 65535u;
+    let water_height = packed_height >> 16u;
+    let height = select(terrain_height, water_height, water_height != 65535u);
     let cell = vec2<f32>(tile.origin_cell + vec2<i32>(grid));
     let world = vec3<f32>(cell.x * f32(tile.cell_blocks), f32(height) - 64.0, cell.y * f32(tile.cell_blocks));
     var out: VsOut;
@@ -67,7 +71,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    if (length((in.world - camera.fog_eye.xyz).xz) < tile.near_field_radius_blocks) {
+    let distance = length((in.world - camera.fog_eye.xyz).xz);
+    if (distance < tile.near_field_radius_blocks || distance > tile.outer_radius_blocks) {
         discard;
     }
     let packed = in.colour;

@@ -134,6 +134,9 @@ impl WindowApp {
                 crate::menu::friends::FriendsIntent::Mutate(mutation) => {
                     self.friends.mutate(mutation);
                 }
+                crate::menu::friends::FriendsIntent::SetPreferences(preferences) => {
+                    self.friends.set_preferences(preferences);
+                }
             }
         }
         self.friends

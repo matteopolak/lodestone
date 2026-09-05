@@ -12,11 +12,64 @@
 //! [`super::sky_clear_bytes`] is the shared sky reference every silhouette
 //! test classifies against; its doc records why it is derived rather than
 //! hardcoded.
-use lodestone_render::{Camera, HeadlessTarget, RenderTarget};
+use lodestone_render::{Camera, HeadlessTarget, HorizonCell, RenderTarget};
 
 use crate::entities::EntityDraw;
 
 use super::*;
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn distant_terrain_reaches_pixels_only_beyond_the_near_field() {
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect("headless adapter");
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (w, h) = (320, 240);
+    let mut target = HeadlessTarget::new(device, w, h, format);
+    let mut state = RenderState::new(device, queue, format, w, h, None);
+    let camera = Camera {
+        position: glam::Vec3::new(0.0, 96.0, -32.0),
+        yaw: 0.0,
+        pitch: 18.0,
+        fov_y_degrees: 70.0,
+        aspect: w as f32 / h as f32,
+        near: 0.05,
+        far: 1_024.0,
+    };
+    let frame = target.acquire().expect("empty frame");
+    state.render(device, queue, frame.view(), &camera, None, &[]);
+    let empty = target.read_texels(device, queue);
+
+    state
+        .install_distant_terrain(device, [0, 0])
+        .expect("fixed horizon");
+    state.set_distant_terrain_near_field(8);
+    state.set_distant_terrain_outer_radius(64);
+    assert!(state.populate_distant_terrain_one(queue, |_x, _z| HorizonCell {
+        terrain_y: 70 + 64,
+        water_y: HorizonCell::DRY,
+        surface_rgb565: 0x07E0,
+        flags: 0,
+    }));
+    // The first center-out upload is slot 40; slot 41 is deliberately absent.
+    assert!(
+        state.distant_terrain_rejects_unpopulated_submission(41),
+        "control: an unpopulated atlas slot must be rejected before draw"
+    );
+
+    let frame = target.acquire().expect("horizon frame");
+    state.render(device, queue, frame.view(), &camera, None, &[]);
+    let horizon = target.read_texels(device, queue);
+    let changed = diff_mask(&horizon, &empty)
+        .into_iter()
+        .filter(|changed| *changed)
+        .count();
+    assert!(
+        changed > 100,
+        "expected coarse terrain beyond the 8-chunk clip to change pixels, got {changed}"
+    );
+}
 
 /// Headless GPU test: generate a world, mesh + upload every section, render
 /// one frame, and read pixels back to prove terrain (not just sky) drew.

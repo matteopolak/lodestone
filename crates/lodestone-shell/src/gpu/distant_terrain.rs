@@ -12,7 +12,8 @@ use std::cell::RefCell;
 use bytemuck::{Pod, Zeroable};
 use lodestone_render::{
     DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT, DISTANT_TERRAIN_WGSL, DistantTerrain,
-    HORIZON_CELL_BLOCKS, HORIZON_TILE_CELLS, HORIZON_TILES_PER_AXIS, HorizonCell,
+    HORIZON_CELL_BLOCKS, HORIZON_TILE_BLOCKS, HORIZON_TILE_CELLS, HORIZON_TILES_PER_AXIS,
+    HorizonCell, HorizonTile,
     ModelSharedCameraUniform, fog::FogUniform,
     model_shared_camera_buffer_with_fog, update_model_shared_camera_buffer,
 };
@@ -47,7 +48,8 @@ struct TileUniform {
     atlas_origin: [i32; 2],
     cell_blocks: u32,
     near_field_radius_blocks: f32,
-    _padding: [u32; 2],
+    outer_radius_blocks: f32,
+    _padding: u32,
 }
 
 /// Tracks which fixed atlas slots contain real surface samples.
@@ -80,11 +82,11 @@ impl TileResidency {
         self.populated.get(slot).copied().unwrap_or(false)
     }
 
-    fn next_omitted(&self) -> Option<usize> {
+    fn next_omitted_where(&self, mut eligible: impl FnMut(usize) -> bool) -> Option<usize> {
         self.populated
             .iter()
             .enumerate()
-            .filter(|(_, populated)| !**populated)
+            .filter(|(slot, populated)| !**populated && eligible(*slot))
             .min_by_key(|(slot, _)| {
                 let x = *slot % HORIZON_TILES_PER_AXIS;
                 let z = *slot / HORIZON_TILES_PER_AXIS;
@@ -122,7 +124,9 @@ pub(crate) struct DistantTerrainRenderer {
     tile_bind_group: wgpu::BindGroup,
     tile_uniform_stride: u32,
     tile_uniform_bytes: RefCell<Vec<u8>>,
+    camera_block: [i32; 2],
     near_field_radius_blocks: f32,
+    outer_radius_blocks: f32,
     pipeline: wgpu::RenderPipeline,
 }
 
@@ -335,7 +339,9 @@ impl DistantTerrainRenderer {
                     * HORIZON_TILES_PER_AXIS
                     * HORIZON_TILES_PER_AXIS
             ]),
+            camera_block,
             near_field_radius_blocks: 0.0,
+            outer_radius_blocks: 0.0,
             pipeline,
         })
     }
@@ -345,6 +351,7 @@ impl DistantTerrainRenderer {
     pub(crate) fn recenter(&mut self, camera_block: [i32; 2]) {
         let before = self.terrain.centre();
         self.terrain.recenter(camera_block[0], camera_block[1]);
+        self.camera_block = camera_block;
         if self.terrain.centre() != before {
             self.residency.clear();
         }
@@ -359,6 +366,15 @@ impl DistantTerrainRenderer {
         self.near_field_radius_blocks = (chunks.min(256) * HORIZON_CELL_BLOCKS as u32) as f32;
     }
 
+    /// Limit the coarse pass independently from the real chunk radius.
+    ///
+    /// Population considers only tiles intersecting this circle. Already
+    /// populated tiles remain reusable when the option shrinks and grows, but
+    /// the shader clips them to the current radius.
+    pub(crate) fn set_outer_radius_chunks(&mut self, chunks: u32) {
+        self.outer_radius_blocks = (chunks.min(256) * HORIZON_CELL_BLOCKS as u32) as f32;
+    }
+
     /// Query and upload one still-empty tile. Returns false once the fixed
     /// window is fully populated.
     ///
@@ -370,7 +386,15 @@ impl DistantTerrainRenderer {
         queue: &wgpu::Queue,
         mut sample: impl FnMut(i32, i32) -> HorizonCell,
     ) -> bool {
-        let Some(slot) = self.residency.next_omitted() else {
+        let camera_block = self.camera_block;
+        let outer_radius_blocks = self.outer_radius_blocks;
+        let terrain = &self.terrain;
+        let Some(slot) = self.residency.next_omitted_where(|slot| {
+            terrain
+                .tiles()
+                .nth(slot)
+                .is_some_and(|tile| tile_intersects_radius(tile, camera_block, outer_radius_blocks))
+        }) else {
             return false;
         };
         let mut height_water = vec![0; HORIZON_TILE_CELLS * HORIZON_TILE_CELLS];
@@ -428,7 +452,8 @@ impl DistantTerrainRenderer {
                 atlas_origin: atlas_origin(slot),
                 cell_blocks: HORIZON_CELL_BLOCKS as u32,
                 near_field_radius_blocks: self.near_field_radius_blocks,
-                _padding: [0; 2],
+                outer_radius_blocks: self.outer_radius_blocks,
+                _padding: 0,
             };
             let start = slot * self.tile_uniform_stride as usize;
             bytes[start..start + TILE_UNIFORM_BYTES as usize]
@@ -441,7 +466,15 @@ impl DistantTerrainRenderer {
     /// pass. Normal chunks draw immediately afterwards and therefore occlude
     /// this coarse surface at the near-field boundary.
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
-        let submitted: Vec<_> = self.residency.submitted_slots().collect();
+        let submitted: Vec<_> = self
+            .residency
+            .submitted_slots()
+            .filter(|slot| {
+                self.terrain.tiles().nth(*slot).is_some_and(|tile| {
+                    tile_intersects_radius(tile, self.camera_block, self.outer_radius_blocks)
+                })
+            })
+            .collect();
         debug_assert!(self.residency.submitted_slots_are_complete(submitted.iter().copied()));
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.camera_bind_group, &[]);
@@ -512,6 +545,20 @@ fn atlas_origin(slot: usize) -> [i32; 2] {
     ]
 }
 
+fn tile_intersects_radius(tile: &HorizonTile, camera_block: [i32; 2], radius_blocks: f32) -> bool {
+    if radius_blocks <= 0.0 {
+        return false;
+    }
+    let (origin_x, origin_z) = tile.coord().block_origin();
+    let end_x = origin_x.saturating_add(HORIZON_TILE_BLOCKS);
+    let end_z = origin_z.saturating_add(HORIZON_TILE_BLOCKS);
+    let nearest_x = camera_block[0].clamp(origin_x, end_x);
+    let nearest_z = camera_block[1].clamp(origin_z, end_z);
+    let dx = i64::from(nearest_x) - i64::from(camera_block[0]);
+    let dz = i64::from(nearest_z) - i64::from(camera_block[1]);
+    (dx * dx + dz * dz) as f64 <= f64::from(radius_blocks) * f64::from(radius_blocks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,7 +596,19 @@ mod tests {
     #[test]
     fn first_query_tile_is_the_camera_tile_not_a_far_corner() {
         let residency = TileResidency::empty();
-        assert_eq!(residency.next_omitted(), Some(40));
+        assert_eq!(residency.next_omitted_where(|_| true), Some(40));
+    }
+
+    #[test]
+    fn configured_radius_bounds_population_tiles() {
+        let terrain = DistantTerrain::new(0, 0).expect("bounded grid");
+        let centre = terrain.tiles().nth(40).expect("centre tile");
+        let west = terrain.tiles().nth(36).expect("west edge tile");
+        let far_corner = terrain.tiles().next().expect("corner tile");
+        assert!(tile_intersects_radius(centre, [0, 0], 256.0));
+        assert!(!tile_intersects_radius(far_corner, [0, 0], 256.0));
+        assert!(tile_intersects_radius(west, [0, 0], 4096.0));
+        assert!(!tile_intersects_radius(far_corner, [0, 0], 4096.0));
     }
 
     #[test]
