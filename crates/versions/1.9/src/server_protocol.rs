@@ -23,9 +23,10 @@ use crate::packets::common::{
     KeepAliveRequest, KeepAliveRequestVarInt, KeepAliveResponse, KeepAliveResponseVarInt,
 };
 use crate::packets::game::{
-    BlockDig, BlockPlace, BlockPlaceByteCursor, ClientboundChat, ClientboundPositionLook, JoinGame,
-    ServerboundChat, ServerboundFlying, ServerboundLook, ServerboundPosition,
-    ServerboundPositionLook, TeleportConfirm,
+    Animation, BlockDig, BlockPlace, BlockPlaceByteCursor, ClientboundChat,
+    ClientboundPositionLook, JoinGame, ServerboundChat, ServerboundFlying, ServerboundLook,
+    ServerboundPosition,
+    ServerboundArmAnimation, ServerboundPositionLook, TeleportConfirm,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -75,6 +76,7 @@ struct ServerPacketIds {
     login_success: i32,
     block_dig: i32,
     block_place: i32,
+    arm_animation: i32,
     held_item_slot: i32,
     chat_serverbound: i32,
     teleport_confirm: i32,
@@ -90,6 +92,7 @@ struct ServerPacketIds {
     map_chunk: i32,
     block_change: i32,
     chat_clientbound: i32,
+    animation_clientbound: i32,
 }
 
 const IDS_340: ServerPacketIds = ServerPacketIds {
@@ -99,6 +102,7 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     login_success: login::clientbound::SUCCESS,
     block_dig: play::serverbound::BLOCK_DIG,
     block_place: play::serverbound::BLOCK_PLACE,
+    arm_animation: play::serverbound::ARM_ANIMATION,
     held_item_slot: play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: play::serverbound::CHAT,
     teleport_confirm: play::serverbound::TELEPORT_CONFIRM,
@@ -114,6 +118,7 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     map_chunk: play::clientbound::MAP_CHUNK,
     block_change: play::clientbound::BLOCK_CHANGE,
     chat_clientbound: play::clientbound::CHAT,
+    animation_clientbound: play::clientbound::ANIMATION,
 };
 
 const IDS_316: ServerPacketIds = ServerPacketIds {
@@ -123,6 +128,7 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     login_success: crate::packet_ids_316::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_316::play::serverbound::BLOCK_DIG,
     block_place: crate::packet_ids_316::play::serverbound::BLOCK_PLACE,
+    arm_animation: crate::packet_ids_316::play::serverbound::ARM_ANIMATION,
     held_item_slot: crate::packet_ids_316::play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: crate::packet_ids_316::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_316::play::serverbound::TELEPORT_CONFIRM,
@@ -138,6 +144,7 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     map_chunk: crate::packet_ids_316::play::clientbound::MAP_CHUNK,
     block_change: crate::packet_ids_316::play::clientbound::BLOCK_CHANGE,
     chat_clientbound: crate::packet_ids_316::play::clientbound::CHAT,
+    animation_clientbound: crate::packet_ids_316::play::clientbound::ANIMATION,
 };
 
 const IDS_210: ServerPacketIds = ServerPacketIds {
@@ -147,6 +154,7 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     login_success: crate::packet_ids_210::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_210::play::serverbound::BLOCK_DIG,
     block_place: crate::packet_ids_210::play::serverbound::BLOCK_PLACE,
+    arm_animation: crate::packet_ids_210::play::serverbound::ARM_ANIMATION,
     held_item_slot: crate::packet_ids_210::play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: crate::packet_ids_210::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_210::play::serverbound::TELEPORT_CONFIRM,
@@ -162,6 +170,7 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     map_chunk: crate::packet_ids_210::play::clientbound::MAP_CHUNK,
     block_change: crate::packet_ids_210::play::clientbound::BLOCK_CHANGE,
     chat_clientbound: crate::packet_ids_210::play::clientbound::CHAT,
+    animation_clientbound: crate::packet_ids_210::play::clientbound::ANIMATION,
 };
 
 const IDS_110: ServerPacketIds = ServerPacketIds {
@@ -171,6 +180,7 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     login_success: crate::packet_ids_110::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_110::play::serverbound::BLOCK_DIG,
     block_place: crate::packet_ids_110::play::serverbound::BLOCK_PLACE,
+    arm_animation: crate::packet_ids_110::play::serverbound::ARM_ANIMATION,
     held_item_slot: crate::packet_ids_110::play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: crate::packet_ids_110::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_110::play::serverbound::TELEPORT_CONFIRM,
@@ -186,6 +196,7 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     map_chunk: crate::packet_ids_110::play::clientbound::MAP_CHUNK,
     block_change: crate::packet_ids_110::play::clientbound::BLOCK_CHANGE,
     chat_clientbound: crate::packet_ids_110::play::clientbound::CHAT,
+    animation_clientbound: crate::packet_ids_110::play::clientbound::ANIMATION,
 };
 
 fn send<T: Encode>(packet_id: i32, packet: &T, ctx: Ctx, protocol: i32) -> ServerDirective {
@@ -615,6 +626,15 @@ fn decode_packet(
                     )
                 }
             }
+            State::Play if packet_id == ids.arm_animation => {
+                let Some(hand) = decode_full::<ServerboundArmAnimation>(payload, ctx)
+                    .and_then(|packet| u8::try_from(packet.hand).ok())
+                    .filter(|&hand| hand <= 1)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::Swing { hand }
+            }
             State::Play if packet_id == ids.held_item_slot => {
                 let Some(slot) = decode_full::<ServerboundHeldItemSlot>(payload, ctx)
                     .and_then(|packet| u8::try_from(packet.slot).ok())
@@ -850,6 +870,24 @@ fn encode_system_chat(
     )
 }
 
+fn encode_animate(
+    protocol: i32,
+    ids: ServerPacketIds,
+    ctx: Ctx,
+    entity_id: i32,
+    action: u8,
+) -> ServerDirective {
+    send(
+        ids.animation_clientbound,
+        &Animation {
+            entity_id,
+            animation: action,
+        },
+        ctx,
+        protocol,
+    )
+}
+
 macro_rules! impl_server_protocol {
     ($type:ty, $protocol:expr, $ids:expr, $ctx:expr) => {
         impl ServerProtocol for $type {
@@ -914,6 +952,10 @@ macro_rules! impl_server_protocol {
 
             fn encode_system_chat(&self, message: &str) -> ServerDirective {
                 encode_system_chat($protocol, $ids, $ctx, message)
+            }
+
+            fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+                encode_animate($protocol, $ids, $ctx, entity_id, action)
             }
 
             fn encode_block_update(

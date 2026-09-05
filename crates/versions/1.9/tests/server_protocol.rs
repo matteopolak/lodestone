@@ -2,12 +2,16 @@ use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
 use lodestone_model::{
-    BlockFace, BlockPos, ClientAction, ConnectionState, Vec3f, VersionAdapter,
+    AnimationAction, BlockFace, BlockPos, ClientAction, ClientEvent, ConnectionState, Directive,
+    Vec3f, VersionAdapter,
 };
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
-use lodestone_v1_9::{V110ServerProtocol, V210ServerProtocol, V316ServerProtocol, V340ServerProtocol};
+use lodestone_v1_9::{
+    V110ServerProtocol, V210ServerProtocol, V316ServerProtocol, V340Adapter, V340ServerProtocol,
+};
 use lodestone_v1_9::packet_ids::handshaking;
 use lodestone_v1_9::packets::handshake::SetProtocol;
+use lodestone_world::World;
 
 const CTX: Ctx = Ctx { version: 340 };
 const CTX_110: Ctx = Ctx { version: 110 };
@@ -702,4 +706,64 @@ fn projects_the_legacy_window_from_a_covering_canonical_column() {
 
     let too_short = ChunkColumn::new(-64, 319);
     assert!(protocol.try_encode_chunk(0, 0, &too_short).is_err());
+}
+
+#[test]
+fn registry_selected_protocol_340_lifts_literal_arm_swings_to_the_shared_broadcast() {
+    for (protocol_version, packet_id) in [(110, 26), (210, 26), (316, 26), (340, 29)] {
+        let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+            .expect("every hosted 1.9-era protocol must select a server adapter");
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &[0]),
+            ServerBound::Swing { hand: 0 },
+            "protocol {protocol_version} must use its own arm-animation id"
+        );
+    }
+
+    let protocol = lodestone_registry::server_protocol_for_protocol(340)
+        .expect("protocol 340 must resolve to its hosted server protocol");
+    let adapter = V340Adapter::new();
+
+    for (body, hand, animation, expected_action) in [
+        (&[0][..], 0, 0, AnimationAction::SwingMainHand),
+        (&[1][..], 1, 3, AnimationAction::SwingOffHand),
+    ] {
+        assert_eq!(
+            protocol.decode(State::Play, 29, body),
+            ServerBound::Swing { hand },
+            "the protocol-340 arm-animation body must reach the shared swing consumer"
+        );
+
+        let ServerDirective::Send { packet_id, payload } = protocol.encode_animate(321, animation)
+        else {
+            panic!("the hosted protocol must encode an animation broadcast");
+        };
+        assert_eq!(packet_id, 6);
+        let mut world = World::new();
+        assert_eq!(
+            adapter
+                .handle_packet(&mut world, ConnectionState::Play, packet_id, &payload)
+                .expect("the family client decodes the server animation"),
+            vec![Directive::Emit(ClientEvent::EntityAnimation {
+                entity_id: 321,
+                action: expected_action,
+            })]
+        );
+    }
+
+    assert_eq!(
+        protocol.decode(State::Play, 29, &[2]),
+        ServerBound::Ignored,
+        "a third hand ordinal must not become an arbitrary broadcast"
+    );
+    assert_eq!(
+        protocol.decode(State::Play, 29, &[0, 0]),
+        ServerBound::Ignored,
+        "a valid prefix with a trailing byte must be rejected"
+    );
+    assert_eq!(
+        protocol.decode(State::Login, 29, &[0]),
+        ServerBound::Ignored,
+        "the Play packet must not be accepted before Play"
+    );
 }
