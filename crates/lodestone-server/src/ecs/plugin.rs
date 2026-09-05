@@ -110,6 +110,7 @@ impl Plugin for ServerCorePlugin {
         app.init_resource::<ServerTick>();
         app.init_resource::<ServerTickWitness>();
         app.init_resource::<super::ServerTaskScheduler>();
+        app.add_plugins(super::ServerProposalPlugin);
 
         app.init_schedule(ServerBoot);
         app.add_systems(ServerBoot, advance_server_tick);
