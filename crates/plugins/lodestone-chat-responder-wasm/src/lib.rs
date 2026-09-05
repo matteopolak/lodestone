@@ -28,7 +28,7 @@ wit_bindgen::generate!({
 });
 
 use lodestone::plugin::logging::{log, LogLevel};
-use lodestone::plugin::types::CommandSpec;
+use lodestone::plugin::types::{CommandAnchor, CommandSpec};
 #[cfg(feature = "scheduler")]
 use lodestone::plugin::scheduler::{cancel, schedule_once, schedule_repeating};
 
@@ -65,7 +65,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.4.0".to_string(),
+            abi: "lodestone:plugin@0.5.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -136,10 +136,29 @@ impl Guest for ChatResponder {
         PluginVerdict::Allow
     }
 
-    fn on_command(input: String) -> CommandOutcome {
+    fn on_command(input: String, context: CommandContext) -> CommandOutcome {
         #[cfg(feature = "commands")]
-        if input == "wasm-ping" {
+        if input == "wasm-ping" && context.sender_name == "Console" && context.execution.is_none() {
             return CommandOutcome::Success(37);
+        }
+
+        #[cfg(feature = "commands")]
+        if input == "wasm-ping" && context.sender_name == "Alex" {
+            if let Some(execution) = context.execution {
+                if execution.entity.is_none()
+                    && execution.position.x == 12.5
+                    && execution.position.y == 64.0
+                    && execution.position.z == -3.25
+                    && execution.rotation.yaw == 90.0
+                    && execution.rotation.pitch == -15.0
+                    && execution.dimension == "minecraft:overworld"
+                    && execution.anchor == CommandAnchor::Eyes
+                    && execution.permission_level == 3
+                {
+                    return CommandOutcome::Success(61);
+                }
+            }
+            return CommandOutcome::Failure("context did not reach the guest intact".to_owned());
         }
 
         #[cfg(feature = "commands")]
@@ -147,7 +166,7 @@ impl Guest for ChatResponder {
             return CommandOutcome::Failure(format!("unexpected command input: {input}"));
         }
 
-        let _ = input;
+        let _ = (input, context);
         CommandOutcome::Failure("unknown command".to_owned())
     }
 }

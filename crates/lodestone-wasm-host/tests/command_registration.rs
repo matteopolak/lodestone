@@ -7,7 +7,13 @@
 
 mod support;
 
-use lodestone_ecs::commands::{CommandOutcome, CommandSource, dispatch};
+use std::str::FromStr;
+
+use lodestone_ecs::commands::{
+    CommandAnchor, CommandExecutionContext, CommandOutcome, CommandSource, dispatch,
+};
+use lodestone_ecs::permissions::PermissionSubject;
+use lodestone_model::{ResourceKey, Rotation, Vec3};
 use lodestone_wasm_host::{Capability, CapabilitySet, PluginHost, WasmHostPlugin};
 
 fn command_capabilities() -> CapabilitySet {
@@ -54,6 +60,33 @@ fn a_runtime_loaded_guest_registers_a_command_on_the_real_client_registry() {
         Ok(CommandOutcome::Failure(
             "unexpected command input: wasm-ping extra words".to_owned()
         ))
+    );
+}
+
+/// The context originates at the server-to-shell command sink, survives the
+/// native command registry's canonicalisation and permission gate, then reaches a
+/// separately-built guest. The guest's distinct non-round result means this is
+/// not a host-side reconstruction of the expected answer.
+#[test]
+fn a_contextual_command_reaches_the_guest_with_value_only_execution_state() {
+    let mut app = client_app_with_guest(true);
+    let source = CommandSource::contextual(
+        PermissionSubject::Console,
+        "Alex",
+        CommandExecutionContext {
+            entity: None,
+            position: Vec3::new(12.5, 64.0, -3.25),
+            rotation: Rotation::new(90.0, -15.0),
+            dimension: ResourceKey::from_str("minecraft:overworld").expect("resource key"),
+            anchor: CommandAnchor::Eyes,
+            permission_level: 3,
+        },
+    );
+
+    assert_eq!(
+        dispatch(app.world_mut(), &source, "/wp"),
+        Ok(CommandOutcome::Success(61)),
+        "the alias must be canonicalised before the guest sees the complete copied context"
     );
 }
 

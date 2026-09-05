@@ -109,11 +109,12 @@ pub mod conductor;
 pub mod host;
 pub mod manifest;
 
-pub use abi::{capability_for, lift_event, lift_verdict_context, lower_action};
+pub use abi::{capability_for, lift_command_context, lift_event, lift_verdict_context, lower_action};
 pub use capability::{Capability, CapabilitySet};
 pub use conductor::{WasmHostPlugin, WasmPlugins, drive_wasm_plugins};
 pub use host::{
-    ABI_WORLD, Action, BlockOffset, ChatKind, ChatMessage, CommandOutcome, CommandSpec,
+    ABI_WORLD, Action, BlockOffset, ChatKind, ChatMessage, CommandAnchor, CommandContext,
+    CommandEntity, CommandExecution, CommandOutcome, CommandPosition, CommandRotation, CommandSpec,
     DEFAULT_FUEL_PER_TICK, DEFAULT_FUEL_PER_VERDICT, DEFAULT_MEMORY_LIMIT, Event, Hand, Health,
     HostError, LoadError, LoadedPlugin, LogLevel, PluginHost, PluginInfo, SectionBlocksChanged,
     SectionPos, VerdictDispatch,

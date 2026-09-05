@@ -162,12 +162,16 @@ impl WasmHostPlugin {
 fn run_wasm_command(
     broker: &Arc<Mutex<PluginHost>>,
     plugin_index: usize,
-    input: String,
+    invocation: &lodestone_ecs::commands::CommandInvocation<'_>,
 ) -> CommandOutcome {
     let mut host = broker
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match host.command(plugin_index, input) {
+    match host.command(
+        plugin_index,
+        invocation.input.clone(),
+        abi::lift_command_context(&invocation.source),
+    ) {
         Ok(crate::host::CommandOutcome::Success(result)) => CommandOutcome::Success(result),
         Ok(crate::host::CommandOutcome::Failure(message)) => CommandOutcome::Failure(message),
         Err(error) => CommandOutcome::Failure(format!("WASM command handler failed: {error}")),
@@ -200,7 +204,7 @@ fn register_wasm_commands(app: &mut App, broker: &Arc<Mutex<PluginHost>>) {
         let root = command.root();
         let root_broker = Arc::clone(broker);
         command.on_execute(root, move |invocation| {
-            run_wasm_command(&root_broker, plugin_index, invocation.input.clone())
+            run_wasm_command(&root_broker, plugin_index, invocation)
         });
 
         let tail = command.argument(
@@ -210,7 +214,7 @@ fn register_wasm_commands(app: &mut App, broker: &Arc<Mutex<PluginHost>>) {
         );
         let tail_broker = Arc::clone(broker);
         command.on_execute(tail, move |invocation| {
-            run_wasm_command(&tail_broker, plugin_index, invocation.input.clone())
+            run_wasm_command(&tail_broker, plugin_index, invocation)
         });
 
         if let Err(error) = app.world_mut().resource_mut::<CommandRegistry>().register(command) {
