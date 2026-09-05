@@ -138,6 +138,49 @@ fn adapter_block_use_reaches_the_registry_selected_host_consumer() {
     );
 }
 
+#[test]
+fn adapter_non_breaking_player_actions_reach_the_registry_selected_host() {
+    let adapter = adapter_for(766);
+    let host = lodestone_registry::server_protocol_for_protocol(766)
+        .expect("protocol 766 must resolve to the hosted family");
+    let cases = [
+        (
+            ClientAction::DropSelectedItemStack,
+            lodestone_server::ServerBound::ItemDropped { whole_stack: true },
+        ),
+        (
+            ClientAction::DropSelectedItem,
+            lodestone_server::ServerBound::ItemDropped { whole_stack: false },
+        ),
+        (
+            ClientAction::ReleaseUseItem,
+            lodestone_server::ServerBound::ReleaseUseItem,
+        ),
+        (
+            ClientAction::SwapItemWithOffhand,
+            lodestone_server::ServerBound::SwapItemInHand,
+        ),
+    ];
+    for (action, expected) in cases {
+        let Some((packet_id, payload)) = adapter
+            .encode_action(ConnectionState::Play, &action)
+            .expect("the protocol-766 adapter must encode the player action")
+        else {
+            panic!("non-breaking player actions must have a serverbound packet");
+        };
+        assert_eq!(
+            host.decode(lodestone_core::State::Play, packet_id, &payload),
+            expected,
+            "the adapter and registry-selected host must agree on the action consumer"
+        );
+        assert_eq!(
+            host.decode(lodestone_core::State::Configuration, packet_id, &payload),
+            lodestone_server::ServerBound::Ignored,
+            "the action must remain unavailable before Play"
+        );
+    }
+}
+
 #[tokio::test]
 async fn registry_selected_protocol_766_reaches_play_and_confirms_a_block_break() {
     let protocol = lodestone_registry::server_protocol_for_protocol(766)

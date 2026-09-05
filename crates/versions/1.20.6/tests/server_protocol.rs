@@ -131,6 +131,69 @@ fn block_action_and_initial_chunk_batch_use_the_hosted_wire_shapes() {
 }
 
 #[test]
+fn non_breaking_block_dig_statuses_reach_their_server_consumers() {
+    let protocol = V766ServerProtocol;
+    // These are independently assembled protocol-766 `block_dig` bodies:
+    // status, eight-byte packed position, face, then prediction sequence.
+    // Unlike breaking statuses, the server consumer ignores the final three fields.
+    let body = |status| [vec![status], vec![0; 8], vec![0], vec![0]].concat();
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            packet_ids::play::serverbound::BLOCK_DIG,
+            &body(3),
+        ),
+        ServerBound::ItemDropped { whole_stack: true },
+        "DROP_ALL_ITEMS must reach the inventory/drop consumer"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            packet_ids::play::serverbound::BLOCK_DIG,
+            &body(4),
+        ),
+        ServerBound::ItemDropped { whole_stack: false },
+        "DROP_ITEM must reach the inventory/drop consumer"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            packet_ids::play::serverbound::BLOCK_DIG,
+            &body(5),
+        ),
+        ServerBound::ReleaseUseItem,
+        "RELEASE_USE_ITEM must reach the held-use consumer"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            packet_ids::play::serverbound::BLOCK_DIG,
+            &body(6),
+        ),
+        ServerBound::SwapItemInHand,
+        "SWAP_ITEM_WITH_OFFHAND must reach the inventory consumer"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            packet_ids::play::serverbound::BLOCK_DIG,
+            &body(7),
+        ),
+        ServerBound::Ignored,
+        "unknown player-action statuses must not reach a consumer"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Configuration,
+            packet_ids::play::serverbound::BLOCK_DIG,
+            &body(3),
+        ),
+        ServerBound::Ignored,
+        "the same drop bytes must not cross the configuration-to-Play boundary"
+    );
+}
+
+#[test]
 fn block_place_literal_reaches_the_server_use_on_consumer_shape() {
     let protocol = V766ServerProtocol;
     // This is a protocol-766 `use_item_on` body assembled from the wire fields,
