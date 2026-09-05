@@ -384,7 +384,10 @@ async fn registry_data_from_a_real_server_decodes_and_matches_mojangs_own_data()
 
     let holder_id = login_dimension_type.expect("login must report a dimension type holder id");
     let (name, resolved) = registries
-        .dimension_type(holder_id)
+        .dimension_type(
+            lodestone_v26_2::packets::registry::DimensionTypeHolderId::from_wire(holder_id)
+                .expect("login holder id is non-negative"),
+        )
         .expect("login's dimension_type id must resolve against the decoded registry");
     println!("login reported dimension_type holder {holder_id} = {name}");
     assert_eq!(
@@ -791,7 +794,12 @@ fn mojang_biome_sky_color(short_name: &str) -> Option<u32> {
 fn an_empty_registry_store_resolves_nothing() {
     let registries = ClientRegistries::default();
     assert!(registries.is_empty());
-    assert!(registries.dimension_type(0).is_none());
+    assert!(registries
+        .dimension_type(
+            lodestone_v26_2::packets::registry::DimensionTypeHolderId::from_wire(0)
+                .expect("holder id is non-negative"),
+        )
+        .is_none());
     assert!(registries.dimension_type_by_name("minecraft:overworld").is_none());
     assert!(registries.world_clock_id("minecraft:overworld").is_none());
     // An empty biome table must read as "no biome registry", which the

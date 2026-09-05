@@ -14,7 +14,9 @@
 //! transcription slip here cannot survive a live run.
 
 use lodestone_core::{Ctx, Decode, Reader};
-use lodestone_v26_2::packets::registry::{ClientRegistries, RegistryData};
+use lodestone_v26_2::packets::registry::{
+    ClientRegistries, DimensionTypeHolderId, RegistryData,
+};
 
 const CTX: Ctx = Ctx { version: 776 };
 
@@ -90,7 +92,9 @@ fn real_dimension_types_resolve_the_fields_that_were_hardcoded_before_288() {
 
     // Expected values from `.cache/mc/26.2/client-src/data/minecraft/dimension_type/overworld.json`.
     let (name, overworld) = registries
-        .dimension_type(0)
+        .dimension_type(
+            DimensionTypeHolderId::from_wire(0).expect("holder id is non-negative"),
+        )
         .expect("holder 0 must resolve — it is what `login` reports on a vanilla join");
     assert_eq!(name, "minecraft:overworld");
     assert!(overworld.has_skylight);
@@ -188,7 +192,11 @@ fn real_dimension_types_resolve_the_fields_that_were_hardcoded_before_288() {
 fn without_registry_data_nothing_resolves() {
     let registries = ClientRegistries::default();
     assert!(registries.is_empty());
-    assert!(registries.dimension_type(0).is_none());
+    assert!(registries
+        .dimension_type(
+            DimensionTypeHolderId::from_wire(0).expect("holder id is non-negative"),
+        )
+        .is_none());
     assert!(
         registries
             .dimension_type_by_name("minecraft:overworld")

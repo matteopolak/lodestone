@@ -95,7 +95,9 @@ use crate::packets::metadata::{
     MetadataClass, TrackedEntity, metadata_class, read_entity_metadata, read_update_attributes,
 };
 use crate::packets::player_info::{PlayerInfoRemove, PlayerInfoUpdate};
-use crate::packets::registry::{ClientRegistries, DimensionType, RegistryData};
+use crate::packets::registry::{
+    ClientRegistries, DimensionType, DimensionTypeHolderId, RegistryData,
+};
 use crate::packets::scoreboard::{
     self as sb, BossEvent, ResetScore, SetDisplayObjective, SetObjective, SetPlayerTeam, SetScore,
 };
@@ -417,7 +419,11 @@ impl V770Adapter {
     /// `minecraft:overworld` a 1024-tall custom type, and a name match gets both
     /// wrong. `ChunkShape::for_dimension`'s own doc comment already admitted
     /// this; it is the height half of the same class of bug filed for sky light.
-    fn enter_dimension(&self, holder_id: i32, level_name: &str) -> Option<DimensionTypeInfo> {
+    fn enter_dimension(
+        &self,
+        holder_id: DimensionTypeHolderId,
+        level_name: &str,
+    ) -> Option<DimensionTypeInfo> {
         let resolved = self
             .registries
             .lock()
@@ -460,6 +466,27 @@ impl V770Adapter {
             *holder = clock_holder;
         }
         dimension_type_info(&name, &dimension_type)
+    }
+
+    /// Validates the raw `login`/`respawn` holder id before it reaches the
+    /// per-connection registry lookup.
+    ///
+    /// A non-negative id may still be unknown because a data pack owns the
+    /// registry order. It follows [`Self::enter_dimension`]'s normal fallback;
+    /// only a negative wire integer is rejected at this boundary.
+    fn enter_dimension_from_wire(
+        &self,
+        raw_holder_id: i32,
+        level_name: &str,
+    ) -> Option<DimensionTypeInfo> {
+        let Some(holder_id) = DimensionTypeHolderId::from_wire(raw_holder_id) else {
+            self.set_dimension(level_name);
+            if let Ok(mut holder) = self.clock_holder.lock() {
+                *holder = None;
+            }
+            return None;
+        };
+        self.enter_dimension(holder_id, level_name)
     }
 
     /// The day-clock holder id the current dimension follows, if resolved.
@@ -1115,5 +1142,20 @@ mod tests {
                 .is_none()
         );
         assert!(adapter.tool_mining(None, u32::MAX).is_none());
+    }
+
+    #[test]
+    fn dimension_type_holder_validation_rejects_negative_wire_ids_before_lookup() {
+        let adapter = adapter();
+
+        // Neither input resolves without configuration registry data, but the
+        // negative control must take the explicit validation fallback instead
+        // of being cast into a huge registry index.
+        assert!(adapter
+            .enter_dimension_from_wire(-1, "minecraft:the_nether")
+            .is_none());
+        assert!(adapter
+            .enter_dimension_from_wire(i32::MAX, "mypack:custom")
+            .is_none());
     }
 }
