@@ -22,19 +22,18 @@ SPEC.loader.exec_module(RUNNER)
 def valid_stages(row: object) -> list[dict[str, object]]:
     return [
         {
-            "name": "configuration",
+            "name": "join",
             "observed": True,
-            "observation": "login flow completed",
-            "mode": row.configuration_mode,
+            "observation": "world entered",
+            "configuration_mode": row.configuration_mode,
         },
         {
-            "name": "chunk_batch_acknowledgement",
+            "name": "chunks",
             "observed": True,
             "observation": "initial chunk delivery observed",
-            "mode": row.chunk_batch_mode,
+            "batch_mode": row.chunk_batch_mode,
             "batch_count": 1 if row.chunk_batch_mode == "acknowledged" else 0,
         },
-        {"name": "join", "observed": True, "observation": "world entered"},
         {
             "name": "movement",
             "observed": True,
@@ -42,13 +41,15 @@ def valid_stages(row: object) -> list[dict[str, object]]:
             "movement_count": 1,
         },
         {
-            "name": "play_action",
+            "name": "break_place",
             "observed": True,
-            "observation": "block break result captured",
-            "kind": RUNNER.ACTION,
-            "action_count": 1,
-            "result_observed": True,
+            "observation": "break and place results captured",
+            "break_count": 1, "break_result_observed": True,
+            "place_count": 1, "place_result_observed": True,
         },
+        {"name": "chat", "observed": True, "observation": "message appeared", "message_count": 1, "result_observed": True},
+        {"name": "inventory_select", "observed": True, "observation": "slot changed", "selected_slot": 4, "result_observed": True},
+        {"name": "keepalive", "observed": True, "observation": "matched exchange", "exchange_count": 1, "id_matched": True},
         {
             "name": "disconnect",
             "observed": True,
@@ -98,11 +99,13 @@ class EvidenceContractTests(unittest.TestCase):
         self.assertEqual(
             RUNNER.STAGES,
             (
-                "configuration",
-                "chunk_batch_acknowledgement",
                 "join",
+                "chunks",
                 "movement",
-                "play_action",
+                "break_place",
+                "chat",
+                "inventory_select",
+                "keepalive",
                 "disconnect",
             ),
         )
@@ -121,43 +124,7 @@ class EvidenceContractTests(unittest.TestCase):
                     "schema": RUNNER.SCHEMA,
                     "protocol": row.protocol,
                     "release": row.release,
-                    "stages": [
-                        {
-                            "name": "configuration",
-                            "observed": True,
-                            "observation": "finish accepted",
-                            "mode": "configuration",
-                        },
-                        {
-                            "name": "chunk_batch_acknowledgement",
-                            "observed": True,
-                            "observation": "initial batch acknowledged",
-                            "mode": "acknowledged",
-                            "batch_count": 1,
-                        },
-                        {"name": "join", "observed": True, "observation": "world entered"},
-                        {
-                            "name": "movement",
-                            "observed": True,
-                            "observation": "one deliberate position update",
-                            "movement_count": 1,
-                        },
-                        {
-                            "name": "play_action",
-                            "observed": True,
-                            "observation": "block break result captured",
-                            "kind": RUNNER.ACTION,
-                            "action_count": 1,
-                            "result_observed": True,
-                        },
-                        {
-                            "name": "disconnect",
-                            "observed": True,
-                            "observation": "client closed the session and saw EOF",
-                            "clean": True,
-                            "initiated_by": "client",
-                        },
-                    ],
+                    "stages": valid_stages(row),
                     "provenance": {
                         "client_binary": "/Applications/Release.app",
                         "client_build": row.release,
@@ -170,8 +137,8 @@ class EvidenceContractTests(unittest.TestCase):
             result = RUNNER.validate_evidence(evidence, row, time.time() - 1)
             self.assertEqual(result["client_build"], row.release)
             self.assertEqual([stage["name"] for stage in result["stages"]], list(RUNNER.STAGES))
-            self.assertEqual(result["stages"][0]["mode"], "configuration")
-            self.assertEqual(result["stages"][1]["mode"], "acknowledged")
+            self.assertEqual(result["stages"][0]["configuration_mode"], "configuration")
+            self.assertEqual(result["stages"][1]["batch_mode"], "acknowledged")
             with self.assertRaisesRegex(RuntimeError, "no fresh evidence"):
                 RUNNER.validate_evidence(evidence, row, time.time() + 1)
             evidence_value = json.loads(evidence.read_text(encoding="utf-8"))
@@ -213,78 +180,17 @@ class EvidenceContractTests(unittest.TestCase):
         for protocol in (5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, 762):
             with self.subTest(protocol=protocol):
                 row = next(row for row in RUNNER.ROWS if row.protocol == protocol)
-                stages = [
-                    {
-                        "name": "configuration",
-                        "observed": True,
-                        "observation": "login transitioned directly to play",
-                        "mode": "login_to_play",
-                    },
-                    {
-                        "name": "chunk_batch_acknowledgement",
-                        "observed": True,
-                        "observation": "initial chunks arrived without batch framing",
-                        "mode": "unbatched",
-                        "batch_count": 0,
-                    },
-                    {"name": "join", "observed": True, "observation": "world entered"},
-                    {
-                        "name": "movement",
-                        "observed": True,
-                        "observation": "one deliberate position update",
-                        "movement_count": 1,
-                    },
-                    {
-                        "name": "play_action",
-                        "observed": True,
-                        "observation": "block break result captured",
-                        "kind": RUNNER.ACTION,
-                        "action_count": 1,
-                        "result_observed": True,
-                    },
-                    {
-                        "name": "disconnect",
-                        "observed": True,
-                        "observation": "client closed the session and saw EOF",
-                        "clean": True,
-                        "initiated_by": "client",
-                    },
-                ]
+                stages = valid_stages(row)
                 result = RUNNER.validate_stages(stages, row)
-                self.assertEqual(result[0]["mode"], "login_to_play")
-                self.assertEqual(result[1]["mode"], "unbatched")
+                self.assertEqual(result[0]["configuration_mode"], "login_to_play")
+                self.assertEqual(result[1]["batch_mode"], "unbatched")
                 self.assertEqual(result[1]["batch_count"], 0)
 
     def test_configuration_and_batch_modes_are_row_specific(self) -> None:
         row = next(row for row in RUNNER.ROWS if row.protocol == 762)
-        stages = [
-            {"name": "configuration", "observed": True, "observation": "direct play", "mode": "configuration"},
-            {
-                "name": "chunk_batch_acknowledgement",
-                "observed": True,
-                "observation": "chunks",
-                "mode": "unbatched",
-                "batch_count": 0,
-            },
-            {"name": "join", "observed": True, "observation": "world"},
-            {"name": "movement", "observed": True, "observation": "moved", "movement_count": 1},
-            {
-                "name": "play_action",
-                "observed": True,
-                "observation": "result",
-                "kind": RUNNER.ACTION,
-                "action_count": 1,
-                "result_observed": True,
-            },
-            {
-                "name": "disconnect",
-                "observed": True,
-                "observation": "client EOF",
-                "clean": True,
-                "initiated_by": "client",
-            },
-        ]
-        with self.assertRaisesRegex(RuntimeError, "configuration.mode must be 'login_to_play'"):
+        stages = valid_stages(row)
+        stages[0]["configuration_mode"] = "configuration"
+        with self.assertRaisesRegex(RuntimeError, "join.configuration_mode must be 'login_to_play'"):
             RUNNER.validate_stages(stages, row)
 
     def test_evidence_rejects_missing_session_stage(self) -> None:
@@ -296,39 +202,29 @@ class EvidenceContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             row = next(row for row in RUNNER.ROWS if row.protocol == 766)
-            with self.assertRaisesRegex(RuntimeError, "exactly 6 ordered entries"):
+            with self.assertRaisesRegex(RuntimeError, "exactly 8 ordered entries"):
                 RUNNER.validate_evidence(evidence, row, time.time() - 1)
 
-    def test_stage_contract_rejects_runner_forced_disconnect(self) -> None:
-        stages = [
-            {"name": "configuration", "observed": True, "observation": "finish accepted"},
-            {
-                "name": "chunk_batch_acknowledgement",
-                "observed": True,
-                "observation": "batch acknowledged",
-                "mode": "acknowledged",
-                "batch_count": 1,
-            },
-            {"name": "join", "observed": True, "observation": "world entered"},
-            {"name": "movement", "observed": True, "observation": "position update", "movement_count": 1},
-            {
-                "name": "play_action",
-                "observed": True,
-                "observation": "result captured",
-                "kind": RUNNER.ACTION,
-                "action_count": 1,
-                "result_observed": True,
-            },
-            {
-                "name": "disconnect",
-                "observed": True,
-                "observation": "runner stopped server",
-                "clean": True,
-                "initiated_by": "runner",
-            },
-        ]
+    def test_every_minimum_play_capability_is_enforced(self) -> None:
         row = next(row for row in RUNNER.ROWS if row.protocol == 766)
-        stages[0]["mode"] = row.configuration_mode
+        corruptions = (
+            (3, "place_count", 0, "exactly one observed place"),
+            (4, "message_count", 0, "exactly one observed message"),
+            (5, "selected_slot", 9, "must be in 0..=8"),
+            (6, "id_matched", False, "exactly one matched exchange"),
+        )
+        for index, field, value, error in corruptions:
+            with self.subTest(stage=RUNNER.STAGES[index], field=field):
+                stages = valid_stages(row)
+                stages[index][field] = value
+                with self.assertRaisesRegex(RuntimeError, error):
+                    RUNNER.validate_stages(stages, row)
+
+    def test_stage_contract_rejects_runner_forced_disconnect(self) -> None:
+        row = next(row for row in RUNNER.ROWS if row.protocol == 766)
+        stages = valid_stages(row)
+        stages[7]["observation"] = "runner stopped server"
+        stages[7]["initiated_by"] = "runner"
         with self.assertRaisesRegex(RuntimeError, "initiated_by must be 'client'"):
             RUNNER.validate_stages(stages, row)
 
