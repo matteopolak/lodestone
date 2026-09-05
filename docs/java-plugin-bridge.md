@@ -509,7 +509,9 @@ plugin descriptors, or implement its lifecycle.
 ### 4.4 Paper bootstrap plan and plugin discovery
 
 `paper::PaperBootstrapConfig` is the pre-JVM, host-callable intake boundary for an
-operator-supplied Paper server jar and a plugin directory. `discover` opens archives in place; it
+operator-supplied Paper server jar and a plugin directory. It is available through the default-off
+`paper-preflight` feature, which adds archive validation without linking or starting a JVM; `jvm`
+includes that feature for the dedicated host. `discover` opens archives in place; it
 never extracts an entry or permits an archive path to become a filesystem path. The server jar must
 carry both the expected Paper bootstrap class entry and the Paper manifest marker. Each top-level
 `.jar` in the plugin directory is sorted by path, subject to a default limit of 256, and must contain
@@ -518,13 +520,16 @@ instead of guessing which lifecycle it wanted.
 
 The descriptor reader is deliberately narrow and loud: it accepts top-level scalar `name`,
 `version`, and `main` fields, rejects duplicate fields, invalid Java binary names, control text, and
-duplicate plugin names (case-insensitively). Descriptor reads are capped at 64 KiB, so discovery
-cannot decompress an unbounded manifest. This admits the ordinary Paper and Bukkit descriptor
-shapes while making unsupported YAML constructs a named input error rather than an accidental
-partial plugin load.
+duplicate plugin names (case-insensitively). It then maps each valid binary name to its exact
+archive class entry, requires that entry exactly once, and checks its Java class-file magic before
+JVM startup. Descriptor reads are capped at 64 KiB; entry-point checking reads only the four-byte
+header, so discovery cannot decompress a plugin body merely to prove the future loader's input is
+unambiguous. This admits the ordinary Paper and Bukkit descriptor shapes while making unsupported
+YAML constructs, missing entry points, duplicate entries, and non-class payloads named input errors
+rather than accidental partial plugin loads.
 
-The resulting `PaperBootstrapPlan` records the validated plugin metadata but keeps plugin jars out
-of the server bootstrap classpath. Its `start_runtime` starts an empty-system-classpath JVM;
+The resulting `PaperBootstrapPlan` records the validated plugin metadata and exact entry surfaces
+but keeps plugin jars out of the server bootstrap classpath. Its `start_runtime` starts an empty-system-classpath JVM;
 `load_bootstrap` is the plan's real JVM consumer and supplies the ordered operator paths only to the
 isolated loader. It loads Paper's bootstrap class without initializing or invoking it. Plugins need
 distinct lifecycle class-loader policy, native shims, and event dispatch before any plugin entry
@@ -536,7 +541,7 @@ it:
 
 ```bash
 LODESTONE_PAPER_JAR=<local-paper-server.jar> \
-    cargo test -p lodestone-jvm-bridge --features jvm --lib \
+    cargo test -p lodestone-jvm-bridge --features paper-preflight --lib \
     paper::tests::local_paper_jar_is_discovered_without_extracting_it -- --ignored --exact
 ```
 
@@ -628,11 +633,12 @@ To add Paper bootstrap intake to that same worker, set `LODESTONE_PAPER_JAR` and
 `LODESTONE_PAPER_PLUGIN_DIRECTORY`; `LODESTONE_PAPER_SHIM_PATH` optionally names one shim directory
 or jar. The host discovers and retains a `PaperBootstrapPlan` before starting a JVM, then loads the
 Paper bootstrap class through its shim-first isolated loader before the adapter can report ready.
-Plugin jars are still descriptor inputs only: the host does **not** initialize Paper, create plugin
-class loaders, instantiate plugin classes, enable plugins, dispatch Paper events, or promise plugin
-compatibility. A malformed Paper configuration fails before startup and saves the world; a bootstrap
-load failure is terminal for a configured Paper run and likewise saves the world rather than quietly
-continuing without the requested operator input.
+Plugin jars are still preflight inputs only: the host validates each declared main-class archive
+surface, but does **not** initialize Paper, create plugin class loaders, load or instantiate plugin
+classes, enable plugins, dispatch Paper events, or promise plugin compatibility. A malformed Paper
+configuration fails before startup and saves the world; a bootstrap load failure is terminal for a
+configured Paper run and likewise saves the world rather than quietly continuing without the
+requested operator input.
 
 The admin loop services at most 64 block queries per 1 ms poll, using
 `IntegratedServer::resident_block_state_id`. That accessor reaches the live primary `ChunkStore`,

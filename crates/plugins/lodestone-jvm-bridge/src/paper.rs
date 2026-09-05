@@ -8,15 +8,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use jni::objects::JClass;
-use jni::Env;
 use zip::ZipArchive;
 
+#[cfg(feature = "jvm")]
+use jni::objects::JClass;
+#[cfg(feature = "jvm")]
+use jni::Env;
+#[cfg(feature = "jvm")]
 use crate::runtime::{JvmConfig, JvmRuntime};
 
+#[cfg(feature = "jvm")]
 const BOOTSTRAP_CLASS: &str = "io.papermc.paper.PaperBootstrap";
 const BOOTSTRAP_ENTRY: &str = "io/papermc/paper/PaperBootstrap.class";
 const PAPER_MANIFEST_TITLE: &str = "Implementation-Title: Paper";
@@ -24,6 +28,11 @@ const PAPER_DESCRIPTOR: &str = "paper-plugin.yml";
 const BUKKIT_DESCRIPTOR: &str = "plugin.yml";
 const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
 const DEFAULT_MAX_PLUGINS: usize = 256;
+const CLASS_MAGIC: [u8; 4] = [0xCA, 0xFE, 0xBA, 0xBE];
+const END_OF_CENTRAL_DIRECTORY_SIGNATURE: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
+const CENTRAL_DIRECTORY_SIGNATURE: [u8; 4] = [0x50, 0x4B, 0x01, 0x02];
+const END_OF_CENTRAL_DIRECTORY_BYTES: u64 = 22;
+const MAX_END_OF_CENTRAL_DIRECTORY_SEARCH: u64 = END_OF_CENTRAL_DIRECTORY_BYTES + u16::MAX as u64;
 
 /// Operator paths needed to inspect one Paper server jar and its plugin jars.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,6 +128,7 @@ impl PaperBootstrapPlan {
     /// Plugin jars stay out of this loader until a lifecycle host gives each
     /// plugin its own class-loader policy; discovery must not accidentally
     /// make one plugin's classes visible to another.
+    #[cfg(feature = "jvm")]
     fn bootstrap_loader_config(&self) -> JvmConfig {
         self.shim_paths.iter().chain(std::iter::once(&self.paper_jar)).fold(
             JvmConfig::new(),
@@ -131,6 +141,7 @@ impl PaperBootstrapPlan {
     /// [`Self::load_bootstrap`] supplies the ordered operator paths to the
     /// isolated loader instead. Keeping the system loader empty prevents an
     /// accidental system-loader lookup from defeating shim-first resolution.
+    #[cfg(feature = "jvm")]
     pub fn start_runtime(&self) -> Result<JvmRuntime, PaperBootstrapError> {
         JvmRuntime::start(&JvmConfig::new()).map_err(|error| {
             PaperBootstrapError::new(format!("could not start Paper JVM: {error}"))
@@ -142,6 +153,7 @@ impl PaperBootstrapPlan {
     /// This is the real host-callable consumer of the validated plan. Calling
     /// it is still not plugin enablement: the caller must install the native
     /// surface and lifecycle policy before invoking any Paper or plugin code.
+    #[cfg(feature = "jvm")]
     pub fn load_bootstrap<'local>(
         &self,
         runtime: &JvmRuntime,
@@ -163,6 +175,7 @@ pub struct PaperPluginDescriptor {
     name: String,
     version: String,
     main_class: String,
+    main_class_entry: String,
 }
 
 impl PaperPluginDescriptor {
@@ -189,6 +202,14 @@ impl PaperPluginDescriptor {
     /// Dotted Java binary name for the plugin entry class.
     pub fn main_class(&self) -> &str {
         &self.main_class
+    }
+
+    /// Archive entry selected as the future isolated-loader entry point.
+    ///
+    /// Discovery verifies this is one Java class file in the same operator jar;
+    /// it does not load, initialize, or invoke that class.
+    pub fn main_class_entry(&self) -> &str {
+        &self.main_class_entry
     }
 }
 
@@ -322,12 +343,15 @@ fn discover_plugin(jar: &Path) -> Result<PaperPluginDescriptor, PaperBootstrapEr
     validate_plugin_name(&plugin_name, name, jar)?;
     validate_scalar("version", &version, name, jar)?;
     validate_class_name(&main_class, name, jar)?;
+    let main_class_entry = class_entry_path(&main_class);
+    validate_main_class_entry(&mut archive, &main_class_entry, jar)?;
     Ok(PaperPluginDescriptor {
         jar: jar.to_owned(),
         kind,
         name: plugin_name,
         version,
         main_class,
+        main_class_entry,
     })
 }
 
@@ -341,20 +365,108 @@ fn open_jar(path: &Path) -> Result<ZipArchive<File>, PaperBootstrapError> {
 }
 
 fn entry_count(
-    archive: &mut ZipArchive<File>,
+    _archive: &mut ZipArchive<File>,
     name: &str,
     path: &Path,
 ) -> Result<usize, PaperBootstrapError> {
+    central_directory_entry_count(path, name)
+}
+
+/// `zip` indexes names for lookup, which makes a second identical central
+/// entry replace the first in its index. Count the central records directly so
+/// the exact-entry contract remains a property of the operator archive rather
+/// than of that lookup implementation.
+fn central_directory_entry_count(path: &Path, expected_name: &str) -> Result<usize, PaperBootstrapError> {
+    let mut file = File::open(path).map_err(|error| {
+        PaperBootstrapError::new(format!("could not inspect jar {}: {error}", path.display()))
+    })?;
+    let length = file.metadata().map_err(|error| {
+        PaperBootstrapError::new(format!("could not inspect jar {}: {error}", path.display()))
+    })?.len();
+    let search_length = length.min(MAX_END_OF_CENTRAL_DIRECTORY_SEARCH);
+    let search_start = length - search_length;
+    file.seek(SeekFrom::Start(search_start)).map_err(|error| {
+        PaperBootstrapError::new(format!("could not inspect jar {}: {error}", path.display()))
+    })?;
+    let mut tail = vec![0; usize::try_from(search_length).expect("ZIP search length fits usize")];
+    file.read_exact(&mut tail).map_err(|error| {
+        PaperBootstrapError::new(format!("could not inspect jar {}: {error}", path.display()))
+    })?;
+    let eocd_offset = tail.windows(END_OF_CENTRAL_DIRECTORY_SIGNATURE.len()).rposition(|window| {
+        window == END_OF_CENTRAL_DIRECTORY_SIGNATURE
+    }).filter(|offset| {
+        let end = offset + END_OF_CENTRAL_DIRECTORY_BYTES as usize;
+        end <= tail.len()
+            && end + usize::from(read_u16(&tail[*offset + 20..*offset + 22])) == tail.len()
+    }).ok_or_else(|| PaperBootstrapError::new(format!(
+        "jar {} has no valid ZIP end-of-central-directory record",
+        path.display()
+    )))?;
+    let eocd = &tail[eocd_offset..eocd_offset + END_OF_CENTRAL_DIRECTORY_BYTES as usize];
+    let entries = read_u16(&eocd[10..12]);
+    let directory_size = read_u32(&eocd[12..16]);
+    let directory_offset = read_u32(&eocd[16..20]);
+    if entries == u16::MAX || directory_size == u32::MAX || directory_offset == u32::MAX {
+        return Err(PaperBootstrapError::new(format!(
+            "jar {} uses ZIP64 central-directory metadata, which preflight cannot validate",
+            path.display()
+        )));
+    }
+    file.seek(SeekFrom::Start(u64::from(directory_offset))).map_err(|error| {
+        PaperBootstrapError::new(format!("could not inspect jar {}: {error}", path.display()))
+    })?;
+    let expected_name = expected_name.as_bytes();
     let mut count = 0;
-    for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(|error| {
+    let mut consumed = 0_u64;
+    for _ in 0..entries {
+        let mut header = [0; 46];
+        file.read_exact(&mut header).map_err(|error| {
             PaperBootstrapError::new(format!("could not inspect jar {}: {error}", path.display()))
         })?;
-        if entry.name() == name {
+        if header[..4] != CENTRAL_DIRECTORY_SIGNATURE {
+            return Err(PaperBootstrapError::new(format!(
+                "jar {} has an invalid central-directory entry",
+                path.display()
+            )));
+        }
+        let name_length = usize::from(read_u16(&header[28..30]));
+        let extra_length = u64::from(read_u16(&header[30..32]));
+        let comment_length = u64::from(read_u16(&header[32..34]));
+        let mut name = vec![0; name_length];
+        file.read_exact(&mut name).map_err(|error| {
+            PaperBootstrapError::new(format!("could not inspect jar {}: {error}", path.display()))
+        })?;
+        if name == expected_name {
             count += 1;
         }
+        let remaining = extra_length + comment_length;
+        file.seek(SeekFrom::Current(i64::try_from(remaining).expect("ZIP field lengths fit i64")))
+            .map_err(|error| PaperBootstrapError::new(format!(
+                "could not inspect jar {}: {error}", path.display()
+            )))?;
+        consumed += 46 + u64::try_from(name_length).expect("ZIP name length fits u64") + remaining;
+        if consumed > u64::from(directory_size) {
+            return Err(PaperBootstrapError::new(format!(
+                "jar {} has a central-directory entry beyond its declared size",
+                path.display()
+            )));
+        }
+    }
+    if consumed != u64::from(directory_size) {
+        return Err(PaperBootstrapError::new(format!(
+            "jar {} has a central-directory size that does not match its entries",
+            path.display()
+        )));
     }
     Ok(count)
+}
+
+fn read_u16(bytes: &[u8]) -> u16 {
+    u16::from_le_bytes([bytes[0], bytes[1]])
+}
+
+fn read_u32(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
 fn require_exact_entry(
@@ -502,6 +614,38 @@ fn validate_class_name(value: &str, descriptor: &str, jar: &Path) -> Result<(), 
     }
 }
 
+fn class_entry_path(binary_name: &str) -> String {
+    format!("{}.class", binary_name.replace('.', "/"))
+}
+
+fn validate_main_class_entry(
+    archive: &mut ZipArchive<File>,
+    entry_name: &str,
+    jar: &Path,
+) -> Result<(), PaperBootstrapError> {
+    require_exact_entry(archive, entry_name, jar)?;
+    let mut entry = archive.by_name(entry_name).map_err(|error| {
+        PaperBootstrapError::new(format!(
+            "could not read plugin entry {entry_name} from {}: {error}",
+            jar.display()
+        ))
+    })?;
+    let mut magic = [0; CLASS_MAGIC.len()];
+    entry.read_exact(&mut magic).map_err(|error| {
+        PaperBootstrapError::new(format!(
+            "plugin entry {entry_name} in {} is not a Java class file: {error}",
+            jar.display()
+        ))
+    })?;
+    if magic != CLASS_MAGIC {
+        return Err(PaperBootstrapError::new(format!(
+            "plugin entry {entry_name} in {} is not a Java class file",
+            jar.display()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +667,7 @@ mod tests {
         assert_eq!(plan.plugins().iter().map(PaperPluginDescriptor::name).collect::<Vec<_>>(), ["Alpha", "Zulu"]);
         assert_eq!(plan.plugins()[0].kind(), PaperPluginDescriptorKind::Paper);
         assert_eq!(plan.plugins()[1].kind(), PaperPluginDescriptorKind::Bukkit);
+        assert_eq!(plan.plugins()[0].main_class_entry(), "a/Main.class");
     }
 
     #[test]
@@ -542,8 +687,8 @@ mod tests {
         write_jar(
             &fixture.plugins_path().join("ambiguous.jar"),
             [
-                (PAPER_DESCRIPTOR, descriptor.as_str()),
-                (BUKKIT_DESCRIPTOR, descriptor.as_str()),
+                (PAPER_DESCRIPTOR, descriptor.as_bytes()),
+                (BUKKIT_DESCRIPTOR, descriptor.as_bytes()),
             ],
         );
         let error = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
@@ -572,9 +717,52 @@ mod tests {
     }
 
     #[test]
+    fn discovery_requires_one_java_class_at_each_declared_entry_point() {
+        let fixture = Fixture::new();
+        fixture.paper_jar();
+        let descriptor = valid_descriptor("Missing", "a.Main");
+        write_jar(
+            &fixture.plugins_path().join("missing.jar"),
+            [(BUKKIT_DESCRIPTOR, descriptor.as_bytes())],
+        );
+        let error = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
+            .discover()
+            .expect_err("a declared entry point must exist exactly once");
+        assert!(error.to_string().contains("a/Main.class"), "{error}");
+
+        let fixture = Fixture::new();
+        fixture.paper_jar();
+        let descriptor = valid_descriptor("Malformed", "a.Main");
+        write_jar(
+            &fixture.plugins_path().join("malformed.jar"),
+            [
+                (BUKKIT_DESCRIPTOR, descriptor.as_bytes()),
+                ("a/Main.class", b"not-a-class"),
+            ],
+        );
+        let error = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
+            .discover()
+            .expect_err("an arbitrary archive entry is not a Java class");
+        assert!(error.to_string().contains("not a Java class file"), "{error}");
+
+        let fixture = Fixture::new();
+        fixture.paper_jar();
+        let descriptor = valid_descriptor("Duplicate", "a.Main");
+        write_duplicate_entry_jar(
+            &fixture.plugins_path().join("duplicate.jar"),
+            descriptor.as_bytes(),
+            "a/Main.class",
+        );
+        let error = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
+            .discover()
+            .expect_err("duplicate entry points are ambiguous");
+        assert!(error.to_string().contains("exactly one a/Main.class"), "{error}");
+    }
+
+    #[test]
     fn paper_discovery_requires_the_expected_class_and_manifest_marker() {
         let fixture = Fixture::new();
-        write_jar(&fixture.paper_path(), [("META-INF/MANIFEST.MF", "Implementation-Title: Paper\n")]);
+        write_jar(&fixture.paper_path(), [("META-INF/MANIFEST.MF", b"Implementation-Title: Paper\n")]);
         let error = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
             .discover()
             .expect_err("missing bootstrap class must fail");
@@ -622,14 +810,24 @@ mod tests {
             write_jar(
                 &self.paper_path(),
                 [
-                    (BOOTSTRAP_ENTRY, "class bytes are not read during discovery"),
-                    ("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\nImplementation-Title: Paper\n"),
+                    (BOOTSTRAP_ENTRY, b"class bytes are not read during discovery"),
+                    ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\nImplementation-Title: Paper\n"),
                 ],
             );
         }
 
         fn plugin_jar(&self, name: &str, descriptor: &str, contents: impl AsRef<str>) {
-            write_jar(&self.plugins_path().join(name), [(descriptor, contents.as_ref())]);
+            let contents = contents.as_ref();
+            let main_class = contents.lines().find_map(|line| line.strip_prefix("main: "));
+            if let Some(main_class) = main_class {
+                let entry = class_entry_path(main_class);
+                write_jar(
+                    &self.plugins_path().join(name),
+                    [(descriptor, contents.as_bytes()), (entry.as_str(), &CLASS_MAGIC)],
+                );
+            } else {
+                write_jar(&self.plugins_path().join(name), [(descriptor, contents.as_bytes())]);
+            }
         }
     }
 
@@ -639,13 +837,95 @@ mod tests {
         }
     }
 
-    fn write_jar<const N: usize>(path: &Path, entries: [(&str, &str); N]) {
+    fn write_jar<const N: usize>(path: &Path, entries: [(&str, &[u8]); N]) {
         let file = File::create(path).expect("create fixture jar");
         let mut writer = zip::ZipWriter::new(file);
         for (name, contents) in entries {
             writer.start_file(name, zip::write::SimpleFileOptions::default()).expect("write fixture entry");
-            writer.write_all(contents.as_bytes()).expect("write fixture contents");
+            writer.write_all(contents).expect("write fixture contents");
         }
         writer.finish().expect("finish fixture jar");
+    }
+
+    /// `ZipWriter` prevents duplicate names, so this fixture writes the small
+    /// stored-entry archive directly to exercise discovery's hostile-jar path.
+    fn write_duplicate_entry_jar(path: &Path, descriptor: &[u8], duplicate_name: &str) {
+        let entries = [
+            (BUKKIT_DESCRIPTOR, descriptor),
+            (duplicate_name, CLASS_MAGIC.as_slice()),
+            (duplicate_name, CLASS_MAGIC.as_slice()),
+        ];
+        let mut file = File::create(path).expect("create duplicate-entry fixture jar");
+        let mut central = Vec::new();
+        let mut offset = 0_u32;
+        for (name, contents) in entries {
+            let name = name.as_bytes();
+            let size = u32::try_from(contents.len()).expect("fixture entry size");
+            let crc = crc32(contents);
+            write_u32(&mut file, 0x0403_4B50);
+            write_u16(&mut file, 20);
+            write_u16(&mut file, 0);
+            write_u16(&mut file, 0);
+            write_u16(&mut file, 0);
+            write_u16(&mut file, 0);
+            write_u32(&mut file, crc);
+            write_u32(&mut file, size);
+            write_u32(&mut file, size);
+            write_u16(&mut file, u16::try_from(name.len()).expect("fixture name length"));
+            write_u16(&mut file, 0);
+            file.write_all(name).expect("write fixture name");
+            file.write_all(contents).expect("write fixture contents");
+            central.push((name.to_vec(), crc, size, offset));
+            offset += 30 + u32::try_from(name.len()).expect("fixture name length") + size;
+        }
+        let central_offset = offset;
+        for (name, crc, size, local_offset) in central {
+            write_u32(&mut file, 0x0201_4B50);
+            write_u16(&mut file, 20);
+            write_u16(&mut file, 20);
+            write_u16(&mut file, 0);
+            write_u16(&mut file, 0);
+            write_u16(&mut file, 0);
+            write_u16(&mut file, 0);
+            write_u32(&mut file, crc);
+            write_u32(&mut file, size);
+            write_u32(&mut file, size);
+            write_u16(&mut file, u16::try_from(name.len()).expect("fixture name length"));
+            write_u16(&mut file, 0);
+            write_u16(&mut file, 0);
+            write_u16(&mut file, 0);
+            write_u16(&mut file, 0);
+            write_u32(&mut file, 0);
+            write_u32(&mut file, local_offset);
+            file.write_all(&name).expect("write central fixture name");
+            offset += 46 + u32::try_from(name.len()).expect("fixture name length");
+        }
+        write_u32(&mut file, 0x0605_4B50);
+        write_u16(&mut file, 0);
+        write_u16(&mut file, 0);
+        write_u16(&mut file, 3);
+        write_u16(&mut file, 3);
+        write_u32(&mut file, offset - central_offset);
+        write_u32(&mut file, central_offset);
+        write_u16(&mut file, 0);
+    }
+
+    fn write_u16(writer: &mut File, value: u16) {
+        writer.write_all(&value.to_le_bytes()).expect("write fixture u16");
+    }
+
+    fn write_u32(writer: &mut File, value: u32) {
+        writer.write_all(&value.to_le_bytes()).expect("write fixture u32");
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = u32::MAX;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 0 { crc >> 1 } else { (crc >> 1) ^ 0xEDB8_8320 };
+            }
+        }
+        !crc
     }
 }

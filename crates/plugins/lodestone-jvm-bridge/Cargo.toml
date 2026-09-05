@@ -29,7 +29,8 @@ license = "GPL-3.0-or-later"
 
 [features]
 default = []
-jvm = ["dep:jni", "dep:zip"]
+paper-preflight = ["dep:zip"]
+jvm = ["paper-preflight", "dep:jni"]
 
 [lints]
 workspace = true
