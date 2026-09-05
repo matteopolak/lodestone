@@ -40,6 +40,8 @@
 //! confusing failure a plugin API can produce, and the `refused` counter is what
 //! makes "the capability filter is doing something" observable from outside.
 
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use bevy_app::{App, Plugin};
@@ -61,7 +63,7 @@ use lodestone_ecs::{CorePlugin, GameTick, TickSet};
 use crate::abi;
 use crate::abi::{IntentAction, LoweredAction};
 use crate::capability::Capability;
-use crate::host::{Event, PluginHost};
+use crate::host::{CommandSpec, Event, PluginGrantPolicy, PluginHost, ReloadError};
 
 /// The loaded guests, as an ECS resource.
 ///
@@ -94,6 +96,27 @@ pub struct WasmPlugins {
 /// have.
 #[derive(Resource, Default, Debug)]
 pub struct PendingWasmIntents(Vec<IntentAction>);
+
+/// The command roots currently owned by the WASM conductor.
+///
+/// The native registry intentionally knows nothing about guest stores. Keeping
+/// this narrow ownership list here lets reload remove only handlers installed by
+/// this conductor, never a neighbouring native plugin's commands.
+#[derive(Resource, Default, Debug)]
+struct WasmCommandRoots(Vec<String>);
+
+/// A requested runtime replacement that cannot safely commit.
+#[derive(Debug, thiserror::Error)]
+pub enum WasmReloadError {
+    #[error("the app has no installed WASM host")]
+    MissingHost,
+    #[error("the app has no command registry for the WASM host")]
+    MissingCommandRegistry,
+    #[error(transparent)]
+    Reload(#[from] ReloadError),
+    #[error("the reloaded WASM command `{command}` conflicts with a command outside the WASM host")]
+    CommandConflict { command: String },
+}
 
 impl std::fmt::Debug for WasmPlugins {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -128,6 +151,20 @@ impl WasmPlugins {
 
     fn verdict_broker(&self) -> Arc<Mutex<PluginHost>> {
         Arc::clone(&self.host)
+    }
+
+    fn stage_reload(
+        &self,
+        directory: &Path,
+        grants: &PluginGrantPolicy,
+    ) -> Result<PluginHost, ReloadError> {
+        let guard = self.host.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.stage_directory_reload(directory, grants)
+    }
+
+    fn replace_host(&self, replacement: PluginHost) {
+        let mut guard = self.host.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = replacement;
     }
 }
 
@@ -206,12 +243,16 @@ fn run_wasm_command(
 /// but the host deliberately does not pretend that this is the native argument
 /// tree API: typed guest argument schemas and suggestions remain a later ABI
 /// extension.
-fn register_wasm_commands(app: &mut App, broker: &Arc<Mutex<PluginHost>>) {
+fn register_wasm_commands(
+    registry: &mut CommandRegistry,
+    broker: &Arc<Mutex<PluginHost>>,
+) -> Vec<String> {
     let specs = broker
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .command_specs();
 
+    let mut roots = Vec::new();
     for (plugin_index, spec) in specs {
         let mut command = PluginCommand::new(spec.name);
         command.description(spec.description);
@@ -238,10 +279,108 @@ fn register_wasm_commands(app: &mut App, broker: &Arc<Mutex<PluginHost>>) {
             run_wasm_command(&tail_broker, plugin_index, invocation)
         });
 
-        if let Err(error) = app.world_mut().resource_mut::<CommandRegistry>().register(command) {
-            tracing::error!(plugin_index, "refused WASM command registration: {error}");
+        match registry.register(command) {
+            Ok(()) => roots.push(root.to_lowercase()),
+            Err(error) => {
+                tracing::error!(plugin_index, "refused WASM command registration: {error}");
+            }
         }
     }
+    roots
+}
+
+fn command_claims(specs: &[(usize, CommandSpec)]) -> Result<BTreeSet<String>, WasmReloadError> {
+    let mut claims = BTreeSet::new();
+    for (_, spec) in specs {
+        for claim in std::iter::once(&spec.name).chain(spec.aliases.iter()) {
+            let claim = claim.to_lowercase();
+            if !claims.insert(claim.clone()) {
+                return Err(WasmReloadError::CommandConflict { command: claim });
+            }
+        }
+    }
+    Ok(claims)
+}
+
+fn retired_command_claims(registry: &CommandRegistry, roots: &[String]) -> BTreeSet<String> {
+    roots
+        .iter()
+        .filter_map(|root| registry.get(root))
+        .flat_map(|command| {
+            std::iter::once(command.name.to_lowercase())
+                .chain(command.aliases.iter().map(|alias| alias.to_lowercase()))
+        })
+        .collect()
+}
+
+/// Replace all guest stores with a revalidated directory snapshot.
+///
+/// This is an explicit embedding lifecycle operation, not a watcher. It first
+/// stages every manifest and module against the supplied grants, then checks
+/// that the candidate command roots will not shadow a native command. Only then
+/// does it drop the old stores and replace their command registrations. A failed
+/// policy parse should be kept outside this function: do not call it with a
+/// partial grant set after parsing fails.
+///
+/// The function also clears guest-owned, not-yet-applied intents. Those values
+/// belong to the unloaded stores; replaying them after a successful replacement
+/// would let an old guest act after it was removed. Fresh guest stores reset the
+/// bounded placement and break-outcome cursors at the same commit point.
+pub fn reload_wasm_plugins(
+    app: &mut App,
+    directory: &Path,
+    grants: &PluginGrantPolicy,
+) -> Result<(), WasmReloadError> {
+    let replacement = {
+        let Some(plugins) = app.world().get_resource::<WasmPlugins>() else {
+            return Err(WasmReloadError::MissingHost);
+        };
+        plugins.stage_reload(directory, grants)?
+    };
+    let specs = replacement.command_specs();
+    let candidate_claims = command_claims(&specs)?;
+    let current_roots = app
+        .world()
+        .get_resource::<WasmCommandRoots>()
+        .map_or_else(Vec::new, |roots| roots.0.clone());
+    {
+        let Some(registry) = app.world().get_resource::<CommandRegistry>() else {
+            return Err(WasmReloadError::MissingCommandRegistry);
+        };
+        let retired = retired_command_claims(registry, &current_roots);
+        if let Some(command) = candidate_claims
+            .iter()
+            .find(|command| registry.get(command).is_some() && !retired.contains(*command))
+        {
+            return Err(WasmReloadError::CommandConflict {
+                command: command.clone(),
+            });
+        }
+    }
+
+    let broker = app
+        .world()
+        .get_resource::<WasmPlugins>()
+        .expect("the host was checked above")
+        .verdict_broker();
+    {
+        let mut registry = app.world_mut().resource_mut::<CommandRegistry>();
+        for root in &current_roots {
+            let removed = registry.unregister(root);
+            debug_assert!(
+                removed.is_some(),
+                "a tracked WASM command root must still be registered"
+            );
+        }
+    }
+    app.world().resource::<WasmPlugins>().replace_host(replacement);
+    let roots = {
+        let mut registry = app.world_mut().resource_mut::<CommandRegistry>();
+        register_wasm_commands(&mut registry, &broker)
+    };
+    app.world_mut().insert_resource(WasmCommandRoots(roots));
+    app.world_mut().resource_mut::<PendingWasmIntents>().0.clear();
+    Ok(())
 }
 
 impl Plugin for WasmHostPlugin {
@@ -283,8 +422,12 @@ impl Plugin for WasmHostPlugin {
                 .resource_mut::<ActionVetoes>()
                 .register(*verb, "wasm-verdicts", 0, move |context| ask_wasm_verdict(&broker, context));
         }
-        register_wasm_commands(app, &verdict_broker);
         app.insert_resource(plugins);
+        let roots = {
+            let mut registry = app.world_mut().resource_mut::<CommandRegistry>();
+            register_wasm_commands(&mut registry, &verdict_broker)
+        };
+        app.insert_resource(WasmCommandRoots(roots));
         app.init_resource::<PendingWasmIntents>();
         app.add_systems(
             GameTick,

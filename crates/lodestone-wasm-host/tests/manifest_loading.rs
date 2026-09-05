@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use lodestone_ecs::EventPriority;
 use lodestone_wasm_host::{
     Action, CapabilitySet, ChatKind, ChatMessage, Event, LoadError, Manifest, ManifestError,
-    PluginHost, Priority,
+    PluginHost, Priority, ReloadError,
 };
 
 fn chat(text: &str) -> Event {
@@ -282,4 +282,39 @@ fn a_directory_with_one_broken_plugin_still_loads_the_good_one() {
     // The good one still works, which is the assertion that makes "does not abort"
     // mean something.
     assert_eq!(host.tick_all(&[chat("ping")]).len(), 1);
+}
+
+/// Startup discovery can retain a good sibling while reporting a bad one. A
+/// replacement has a different safety contract: it must retain the current
+/// running set rather than quietly turn a bad edit into an unload.
+#[test]
+fn a_rejected_reload_keeps_the_previous_working_guest_alive() {
+    let wasm = support::build_example_plugin(&[]);
+    let manifest = std::fs::read_to_string(shipped_manifest_path()).expect("read manifest");
+    let root = fresh_root("reload-rejected-keeps-old");
+    let manifest_path = install(&root, "chat-responder", &manifest, "chat_responder.wasm", &wasm);
+
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_directory(&root)
+        .into_iter()
+        .next()
+        .expect("one manifest")
+        .expect("initial guest must load");
+    assert_eq!(host.tick_all(&[chat("ping")]).len(), 1, "the initial guest is live");
+
+    std::fs::write(
+        &manifest_path,
+        manifest.replace("lodestone:plugin@0.9.0", "lodestone:plugin@9.9.9"),
+    )
+    .expect("make the replacement manifest invalid for this host");
+    let error = host
+        .stage_directory_reload(&root, &Default::default())
+        .expect_err("a malformed replacement must not stage");
+    assert!(matches!(error, ReloadError::Rejected { .. }), "{error:?}");
+    assert_eq!(host.plugins().len(), 1, "the active host must not be replaced");
+    assert_eq!(
+        host.tick_all(&[chat("ping")]),
+        vec![Action::SendChat("pong (chat messages seen: 2)".to_owned())],
+        "the old guest must keep serving after the rejected replacement"
+    );
 }

@@ -22,17 +22,19 @@ The shell reads the JSON file once, immediately before it asks `lodestone::wasm_
 
 `manifest_path` must be relative to the discovery root, end in `plugin.toml`, and contain no `.` or `..` segments. The configuration parser rejects unknown fields, duplicate `(manifest_path, name)` pairs, unreadable or malformed files, and every capability name that `lodestone_wasm_host::Capability::parse` does not recognise. It never silently drops a request or applies a partial configuration.
 
-The policy is not watched and it cannot alter an already-loaded guest. Editing the file requires an explicit new launch (or an embedding that creates a fresh `PluginHost` and calls `install_from_directory_with_grants` again). This prevents a changed file from changing a running plugin's authority without a deliberate reload boundary.
+The policy is not watched. The shipped desktop launcher reads it at startup, while a native embedding can deliberately call `lodestone::wasm_plugins::reload_from_directory_with_grant_file` to re-read the file and replace its installed guest stores. Each reload parses the complete file before staging any guest, then re-reads every manifest and module against that new policy. A malformed policy, denied capability, malformed manifest, invalid module, or command collision rejects the entire replacement and leaves the active guests in place. This prevents a changed file from changing a running plugin's authority without an explicit, revalidated reload boundary.
+
+At a successful reload, old guest stores are dropped and the staged stores take their place in the same deterministic priority/name order. The conductor removes only command roots that it previously installed, then registers the replacement roots; it never clears a neighbouring native plugin's command. Guest-owned pending intents are discarded at the commit boundary, and the new stores begin with empty placement/break outcome cursors, so no intent or cursor from an unloaded guest survives.
 
 ## How to change it
 
 Keep the persisted schema and `PluginGrantPolicy` matching rule in `lodestone::wasm_plugins` aligned. A grant identity must continue to include both the root-relative manifest path and manifest name; making either optional would widen a grant to a sibling plugin. Add capability names through `lodestone_wasm_host::Capability` first, then keep the parser's unknown-name rejection intact.
 
-The shell-facing flag belongs in `lodestone::config::Config::from_args`, and `app::runners::run_windowed_with_app` is the only shipped application point. Do not route the persisted file through a downstream app's pre-installed `WasmHostPlugin`: that host is intentionally authoritative and its embedding controls its own policy.
+The shell-facing flag belongs in `lodestone::config::Config::from_args`, and `app::runners::run_windowed_with_app` is the shipped startup point. An embedding that exposes a reload control must call `reload_from_directory_with_grant_file`, not cache a previous `PluginGrantPolicy` after the file changes. `lodestone_wasm_host::PluginHost::stage_directory_reload` is the lower-level all-or-nothing candidate builder for a non-file policy source. Do not route the persisted file through a downstream app's pre-installed `WasmHostPlugin`: that host is intentionally authoritative and its embedding controls its own policy.
 
 ## Configuration
 
-No grant file is loaded by default. Start the windowed client with `lodestone --plugin-grants /path/to/grants.json` to opt in; the flag is refused for headless and connect-only modes because neither installs the plugin host. The plugin discovery directory remains `plugins/` relative to the working directory; `manifest_path` is relative to that directory, not relative to the JSON file.
+No grant file is loaded by default. Start the windowed client with `lodestone --plugin-grants /path/to/grants.json` to opt in; the flag is refused for headless and connect-only modes because neither installs the plugin host. Reload is a native embedding API, not a browser feature or background file watcher. The plugin discovery directory remains `plugins/` relative to the working directory; `manifest_path` is relative to that directory, not relative to the JSON file.
 
 ## Dependencies
 
