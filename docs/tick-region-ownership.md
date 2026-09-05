@@ -32,6 +32,17 @@ non-striking thunder roll remain visible in a named workload. This makes the
 spatial plan a production-observed boundary without treating either counter as
 a timing result or a concurrency claim.
 
+`tests/tick_region_owner_parity.rs` is the finite single-thread parity gate for
+that random-tick owner sequence. It runs the live serial `TickRegionPlan`
+iteration over four seeded chunk columns whose selected grass cells produce
+client-visible dirt updates, then compares both update order and persisted
+watched states with an independent physical-region scheduler. The reference
+groups columns into two-cell Euclidean regions without reading `TickRegionPlan`
+and restores their original publication sequence at its central edge. Its
+swapped-visit and duplicated-visit controls must fail the same comparison, so
+the gate is not a counter check or a self-round-trip that accepts arbitrary
+owner scheduling.
+
 `TickRegionPlan::owner_workloads` reports the current real ownership (one
 single-chunk workload per selected column). `FollowArea::spawnable_chunks`
 consumes that report on the live tick path, so the count cannot become an
@@ -124,6 +135,13 @@ Keep `FollowArea` as the producer until the live tick loop obtains its work
 through another production-consumed boundary. Any new producer must remove
 duplicates before constructing a plan and preserve a deliberate visit order;
 bypassing that check makes duplicate random ticks possible.
+
+Run `cargo test -p lodestone-server --test tick_region_owner_parity -j2` after
+changing random-tick owner assignment or its central publication boundary. Keep
+the fixture finite and seeded: it is a deterministic scheduling discriminator,
+not a populated-world throughput profile. If a later worker changes how owners
+are grouped, retain an independently built reference schedule and controls that
+make swapped and duplicated ownership visibly diverge before accepting it.
 
 When extending entity ownership, do not publish from a chunk owner. Add a typed
 batch to `MobSim`, retain an explicit source position and old serial sequence,
