@@ -100,7 +100,7 @@ use uuid::Uuid;
 // rather than trusting a literal id.
 #[cfg(test)]
 use lodestone_data::block_states::{block_name, properties};
-use lodestone_data::entity_types::entity_type_id;
+use lodestone_data::entity_type::EntityType;
 use lodestone_data::menus::{MenuId, menu_id};
 use lodestone_data::mob_effects::{MobEffectId, mob_effect_id, mob_effect_name_for};
 use lodestone_data::sound_events::{SoundEventId, sound_event_id};
@@ -918,7 +918,9 @@ fn stat_wire_ids(key: &StatKey) -> Option<(i32, i32)> {
         | StatType::Broken
         | StatType::PickedUp
         | StatType::Dropped => item_registry_id_by_name(value)?,
-        StatType::Killed | StatType::KilledBy => entity_type_id(value)?,
+        StatType::Killed | StatType::KilledBy => {
+            i32::from(EntityType::from_name(value)?.registry_id())
+        }
         StatType::Custom => {
             // Custom stats are conventionally written bare (`play_time`) but the
             // registry key is namespaced, so accept either spelling.
@@ -2540,16 +2542,21 @@ fn encode_remove_mob_effect_body(entity_id: i32, effect_id: MobEffectId) -> Vec<
 /// that does not override `getAddEntityPacket` and silently wrong for the one that
 /// does: a falling block's imitated state travels here and nowhere else.
 ///
-/// An `entity_type` with no match in this version's registry (a typo, or a
-/// key from a version this table doesn't cover) falls back to network id `0`
-/// rather than failing the whole spawn — a wrong model is recoverable, a
-/// dropped connection is not.
+/// An `entity_type` with no match in this version's fixed registry (a typo, a
+/// custom key, or a key from a version this table does not cover) keeps the
+/// established recoverable fallback. The branch deliberately names
+/// [`EntityType::AcaciaBoat`] rather than treating `0` as an interchangeable
+/// integer: a session-synchronized/custom registry must remain a
+/// `ResourceKey` at the protocol seam, while this writer only accepts a
+/// validated built-in type at the final VarInt boundary.
 fn encode_add_entity_body(entity: &EntitySnapshot) -> Vec<u8> {
-    let type_id = entity_type_id(&entity.entity_type.to_string()).unwrap_or(0);
+    let type_id = EntityType::from_resource_key(&entity.entity_type)
+        .unwrap_or(EntityType::AcaciaBoat)
+        .registry_id();
     let mut w = Writer::default();
     w.var_i32(entity.id);
     w.uuid(entity.uuid);
-    w.var_i32(type_id);
+    w.var_i32(i32::from(type_id));
     w.f64(entity.position.x);
     w.f64(entity.position.y);
     w.f64(entity.position.z);

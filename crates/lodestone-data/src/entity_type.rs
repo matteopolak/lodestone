@@ -38,6 +38,7 @@
 
 use crate::generated_entity_type_enum as table;
 use crate::generated_entity_types::ENTITY_TYPE_NAMES;
+use lodestone_model::ResourceKey;
 
 pub use table::EntityType;
 
@@ -111,6 +112,20 @@ impl EntityType {
             })
             .ok()?;
         Some(table::TYPES_BY_REGISTRY_ID[ids[slot] as usize])
+    }
+
+    /// Resolves a parsed resource key to a built-in entity type.
+    ///
+    /// This is the allocation-free boundary for a version-neutral model value
+    /// entering a fixed 26.2 registry writer. A non-`minecraft` key remains a
+    /// miss: it may belong to a plugin or a synchronized dynamic registry, so
+    /// callers must not coerce it into a built-in discriminant.
+    #[must_use]
+    pub fn from_resource_key(key: &ResourceKey) -> Option<Self> {
+        if key.namespace() != BUILTIN_NAMESPACE {
+            return None;
+        }
+        Self::from_name(key.path())
     }
 
     /// Every entity type, in registration order.
