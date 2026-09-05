@@ -250,6 +250,9 @@ impl Sim {
         // session either, for the same reason `death_message` does not: a
         // quit-to-title and reconnect must start un-won.
         self.won = false;
+        // Server entity ids are connection-scoped, so a new session must not
+        // inherit an old subject whose id it may reuse.
+        self.camera_entity_id = None;
         // The pause menu must offer Open to LAN again on the next hosted
         // session — see `Self::lan_published`'s own field doc.
         self.lan_published = false;

@@ -1952,6 +1952,46 @@ fn the_accessors_and_the_world_are_the_same_store() {
     );
 }
 
+#[test]
+fn server_camera_subject_replaces_the_rendered_view_and_local_id_restores_it() {
+    use crate::net::NetUpdate;
+    use lodestone_ecs::entity::{EntityIndex, Position, Rotation};
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    ingest(&mut sim, login_event(7));
+
+    sim.write(|world| {
+        let target = world
+            .spawn((
+                Position(lodestone_model::Vec3::new(40.0, 72.0, -16.0)),
+                Rotation(lodestone_model::Rotation::new(123.0, -21.0)),
+            ))
+            .id();
+        world.resource_mut::<EntityIndex>().insert(99, target);
+    });
+
+    let local = sim.render_camera(1.0);
+    feed.send(NetUpdate::CameraSet { entity_id: 99 }).unwrap();
+    sim.poll_net();
+    let followed = sim.render_camera(1.0);
+    assert_eq!(followed.position.x, 40.0);
+    assert_eq!(followed.position.y, 73.62);
+    assert_eq!(followed.position.z, -16.0);
+    assert_eq!((followed.yaw, followed.pitch), (123.0, -21.0));
+    assert_ne!(
+        followed.position, local.position,
+        "the camera packet must change the rendered frame, not only retain an id"
+    );
+
+    feed.send(NetUpdate::CameraSet { entity_id: 7 }).unwrap();
+    sim.poll_net();
+    let restored = sim.render_camera(1.0);
+    assert_eq!(restored.position, local.position);
+    assert_eq!((restored.yaw, restored.pitch), (local.yaw, local.pitch));
+}
+
 /// **Stage 4's authority test at the shell level.** The `ChunkWorld` resource
 /// is the *only* chunk store, so a write through the handle a plugin would get
 /// (`sim.chunk_world()`, or `sim.ecs().resource::<ChunkWorld>()`) is what the

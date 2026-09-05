@@ -245,6 +245,11 @@ impl Sim {
                         }
                     });
                 }
+                NetUpdate::CameraSet { entity_id } => {
+                    // Keep the id, not a sampled pose: `Sim::camera` resolves
+                    // it every frame, so a moving subject stays followed.
+                    self.set_camera_entity(entity_id);
+                }
                 NetUpdate::BlockEvent { pos, b0, b1 } => {
                     // Chest lids. `ChestBlockEntity.triggerEvent`
                     // takes `b0 == 1` and `b1 > 0` as "somebody is looking in

@@ -426,6 +426,7 @@ impl Sim {
             prev_portal_effect_intensity: 0.0,
             // `CameraType::FIRST_PERSON`, vanilla's own `Options` default.
             camera_type: crate::camera_rig::CameraType::default(),
+            camera_entity_id: None,
             body_pose: EntityPose::new(feet[0], feet[2], player.yaw, false),
             // Seeded from the spawn pose so the very first frame does not ease up
             // from zero — vanilla's `Camera` is likewise aligned before its first
