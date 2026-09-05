@@ -257,6 +257,12 @@ than duplicating it: since chat's parser only recognises lines starting with `/`
 block's text never has a leading slash, the command-block code prepends a synthetic `/` before calling
 into the shared walker and shifts the resulting spans back afterward.
 
+The editor resolves the targeted chunk's raw state number into `StateId` once before asking
+`command_block_source` for its mode and conditional property. Out-of-census values cannot open the
+editor; a valid state that is not one of the three command-block variants also cannot open it. Once
+validated, the source helpers use total state-name/property access, so `None` means only
+"not a command block", never an invalid generated-table index.
+
 ## Dependencies
 
 - `crates/lodestone-shell/src/menu.rs` — the `Screen` enum and `UiState` state machine every screen

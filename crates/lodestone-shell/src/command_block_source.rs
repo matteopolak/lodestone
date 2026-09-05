@@ -53,6 +53,7 @@
 //! an editor, not a viewer, and refusing to open would be a dead control.
 
 use lodestone_core::Nbt;
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, CommandBlockMode};
 
 use crate::menu::command_block::CommandBlockOpen;
@@ -68,13 +69,13 @@ const COMMAND_BLOCKS: [(&str, CommandBlockMode); 3] = [
     ("minecraft:chain_command_block", CommandBlockMode::Sequence),
 ];
 
-/// The mode for `state_id`, or `None` if it is not a command block at all.
+/// The mode for `state`, or `None` if it is not a command block at all.
 ///
 /// # `block_name`, and why a block-type lookup here was a live bug
 ///
 /// [`block_name`](lodestone_data::block_states::block_name) is the accessor
 /// keyed by **block-state** id — the id space a chunk-section palette and
-/// `World::block_at` deal in, and the one `state_id` is. It already returns the
+/// `World::block_at` deal in, and the one `state` is. It already returns the
 /// block's own identifier rather than the state's, so it is stable across
 /// `facing`/`conditional`, which is the property the three-way match needs.
 ///
@@ -91,25 +92,25 @@ const COMMAND_BLOCKS: [(&str, CommandBlockMode); 3] = [
 /// command block (`Some(Redstone)`), while its second half additionally pins
 /// the false-positive direction, which no positive assertion can see.
 #[must_use]
-pub fn mode_for_state(state_id: u32) -> Option<CommandBlockMode> {
-    let name = lodestone_data::block_states::block_name(state_id)?;
+pub fn mode_for_state(state: StateId) -> Option<CommandBlockMode> {
+    let name = state.name();
     COMMAND_BLOCKS
         .iter()
         .find(|(id, _)| *id == name)
         .map(|(_, mode)| *mode)
 }
 
-/// Whether `state_id`'s `conditional` property is set —
+/// Whether `state`'s `conditional` property is set —
 /// vanilla's own conditional block-state property.
 ///
 /// Absent property reads `false`, matching
 /// vanilla's own command-block-entity is-conditional check's own fallback for a block that is not
 /// a command block.
 #[must_use]
-fn conditional_for_state(state_id: u32) -> bool {
-    lodestone_data::block_states::properties(state_id)
-        .into_iter()
-        .flatten()
+fn conditional_for_state(state: StateId) -> bool {
+    state
+        .properties()
+        .iter()
         .any(|(key, value)| *key == "conditional" && *value == "true")
 }
 
@@ -144,16 +145,17 @@ fn as_string(nbt: &Nbt) -> Option<&str> {
 }
 
 /// Build the screen's opening state from a command block's position, block
-/// state and raw block-entity NBT.
+/// state and raw block-entity NBT. `state` is validated at the chunk-snapshot
+/// boundary, before this source module receives it.
 ///
 /// Returns `None` only when `state_id` is not a command block — the one case
 /// where opening the screen would be wrong. Every *data* problem below that
 /// (no NBT at all, a malformed compound, a missing field, a wrongly-typed
 /// field) degrades to vanilla's own default for that field.
 #[must_use]
-pub fn command_block_open(pos: BlockPos, state_id: u32, nbt: &Nbt) -> Option<CommandBlockOpen> {
-    let mode = mode_for_state(state_id)?;
-    let conditional = conditional_for_state(state_id);
+pub fn command_block_open(pos: BlockPos, state: StateId, nbt: &Nbt) -> Option<CommandBlockOpen> {
+    let mode = mode_for_state(state)?;
+    let conditional = conditional_for_state(state);
 
     // `Nbt::End` is what `BlockEntity::nbt` holds for a block the server sent
     // no data for, which is the common case for one the player just placed.
@@ -219,20 +221,21 @@ mod tests {
     /// *precondition* species of vacuous test, green when it measured nothing.
     /// These are all vanilla blocks in a generated 26.2 table; absence is a
     /// broken table, not a case to skip.
-    fn state_of(name: &str) -> u32 {
+    fn state_of(name: &str) -> StateId {
         (0u32..lodestone_data::block_states::STATE_COUNT as u32)
             .find(|id| lodestone_data::block_states::block_name(*id).is_some_and(|n| n == name))
+            .and_then(StateId::new)
             .unwrap_or_else(|| panic!("the block-state table must contain {name}"))
     }
 
     /// A state id that is definitely not a command block, resolved from the
     /// real table rather than guessed — `0` happens to be air, but asserting
     /// that would be asserting a table detail this test does not care about.
-    fn non_command_block_state() -> u32 {
+    fn non_command_block_state() -> StateId {
         state_of("minecraft:stone")
     }
 
-    fn command_block_state() -> u32 {
+    fn command_block_state() -> StateId {
         state_of("minecraft:command_block")
     }
 
@@ -269,7 +272,7 @@ mod tests {
             let registry_id = lodestone_data::block::Block::from_name(name)
                 .unwrap_or_else(|| panic!("the block registry must contain {name}"))
                 .registry_id() as u32;
-            let as_a_state = lodestone_data::block_states::block_name(registry_id);
+            let as_a_state = StateId::new(registry_id).map(StateId::name);
             assert_ne!(
                 as_a_state,
                 Some(name),
@@ -277,7 +280,7 @@ mod tests {
                  its state ids, or this control cannot distinguish the two spaces"
             );
             assert_eq!(
-                mode_for_state(registry_id),
+                StateId::new(registry_id).and_then(mode_for_state),
                 None,
                 "control: {name}'s *registry* id {registry_id} is block-state id \
                  {as_a_state:?}, which is not a command block — reading a state id \
@@ -285,6 +288,28 @@ mod tests {
                  unopenable on real command blocks and openable on these"
             );
         }
+    }
+
+    /// The public helpers accept an already-validated state and remain total
+    /// with respect to its numeric range. A real but unrelated state still
+    /// answers `None`: that is the command-block classification result, not a
+    /// failed numeric lookup.
+    #[test]
+    fn command_block_helpers_require_validated_state_ids() {
+        let _: fn(StateId) -> Option<CommandBlockMode> = mode_for_state;
+        let _: fn(BlockPos, StateId, &Nbt) -> Option<CommandBlockOpen> = command_block_open;
+
+        let first = StateId::new(0).expect("the first generated state is valid");
+        let last = StateId::new(lodestone_data::block_states::STATE_COUNT - 1)
+            .expect("the final generated state is valid");
+        assert!(StateId::new(lodestone_data::block_states::STATE_COUNT).is_none());
+        assert!(StateId::new(u32::MAX).is_none());
+        assert!(mode_for_state(first).is_none(), "air is not a command block");
+        let expected_last = COMMAND_BLOCKS
+            .iter()
+            .find(|(name, _)| last.name() == *name)
+            .map(|(_, mode)| *mode);
+        assert_eq!(mode_for_state(last), expected_last);
     }
 
     /// **`TrackOutput` defaults to `true`, unlike every other flag here.**
