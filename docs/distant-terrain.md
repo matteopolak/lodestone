@@ -24,8 +24,9 @@ colour/flags (another 2,654,208 bytes on the GPU). The redraw path installs it o
 Horizon is enabled, recentres it around the camera, applies the configured outer radius, and uploads
 at most one 64×64-cell tile per redraw. The shader clips both the near streamed field and the outer
 horizon circle. Tile residency considers only tiles intersecting that circle, so a small setting
-does not gradually populate the full 9×9 atlas. Changing the configured radius clears residency,
-allowing a later increase to fill the newly visible area without growing the atlas.
+does not gradually populate the full 9×9 atlas. Shrinking the radius stops submitting outer tiles;
+growing it reuses resident inner tiles and fills newly eligible tiles without growing the atlas.
+Dry cells draw the terrain surface, while wet cells draw at their stored water-surface height.
 
 ## How to change it
 
@@ -46,8 +47,8 @@ submission for an unpopulated slot must fail.
 `MAX_HORIZON_DISTANCE_CHUNKS` (256), and defaults to `0` (OFF). The Video screen names it
 **Distant Horizon**, separate from **Render Distance**. It is deliberately independent of the real
 render-distance setting and does not alter server view radius, streamed chunks, mesh queues, or the
-fixed atlas allocation. Values are shown in chunks and the cycle control advances in 16-chunk coarse
-cells.
+fixed atlas size. The CPU/GPU atlases exist only while the option is nonzero in an eligible local
+Overworld session. Values are shown in chunks and the cycle control advances in 16-chunk coarse cells.
 
 ## Dependencies
 

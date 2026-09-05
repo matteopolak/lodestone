@@ -32,6 +32,7 @@ use glam::Vec3;
 
 use crate::particles::{ParticleInstance, ParticleRenderer};
 
+use super::distant_terrain::{DistantTerrainRenderer, HorizonGpuError};
 use super::first_person;
 use super::gpu_timing;
 use super::terrain::{
@@ -311,6 +312,10 @@ impl RenderState {
             uv_buffer,
             atlas_bind_group,
             depth,
+            // An explicit horizon setting installs this later; ordinary chunk
+            // rendering remains the default path and pays no distant-tier cost.
+            distant_terrain: None,
+            distant_terrain_failed: false,
             sections: HashMap::new(),
             packed_shared_cam_buffer,
             packed_cam_bind_group,
@@ -582,6 +587,66 @@ impl RenderState {
     pub fn set_fog(&mut self, fog: FogSettings, render_distance_chunks: u32) {
         self.fog = fog;
         self.render_distance_chunks = render_distance_chunks;
+    }
+
+    pub(crate) fn install_distant_terrain(
+        &mut self,
+        device: &wgpu::Device,
+        camera_block: [i32; 2],
+    ) -> Result<(), HorizonGpuError> {
+        if self.distant_terrain_failed {
+            return Ok(());
+        }
+        if self.distant_terrain.is_none() {
+            match DistantTerrainRenderer::new(device, self.color_format, camera_block) {
+                Ok(renderer) => self.distant_terrain = Some(renderer),
+                Err(error) => {
+                    self.distant_terrain_failed = true;
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn disable_distant_terrain(&mut self) {
+        self.distant_terrain = None;
+        self.distant_terrain_failed = false;
+    }
+
+    pub(crate) fn recenter_distant_terrain(&mut self, camera_block: [i32; 2]) {
+        if let Some(distant) = &mut self.distant_terrain {
+            distant.recenter(camera_block);
+        }
+    }
+
+    pub(crate) fn set_distant_terrain_near_field(&mut self, chunks: u32) {
+        if let Some(distant) = &mut self.distant_terrain {
+            distant.set_near_field_radius_chunks(chunks);
+        }
+    }
+
+    pub(crate) fn set_distant_terrain_outer_radius(&mut self, chunks: u32) {
+        if let Some(distant) = &mut self.distant_terrain {
+            distant.set_outer_radius_chunks(chunks);
+        }
+    }
+
+    pub(crate) fn populate_distant_terrain_one(
+        &mut self,
+        queue: &wgpu::Queue,
+        sample: impl FnMut(i32, i32) -> lodestone_render::HorizonCell,
+    ) -> bool {
+        self.distant_terrain
+            .as_mut()
+            .is_some_and(|distant| distant.populate_one(queue, sample))
+    }
+
+    #[cfg(test)]
+    pub(super) fn distant_terrain_rejects_unpopulated_submission(&self, slot: usize) -> bool {
+        self.distant_terrain
+            .as_ref()
+            .is_some_and(|distant| distant.rejects_unpopulated_submission(slot))
     }
 
     /// The colour format the three flat-colour world-text passes must target,

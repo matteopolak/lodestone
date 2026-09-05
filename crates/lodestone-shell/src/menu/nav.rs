@@ -2355,6 +2355,7 @@ impl MenuNav {
                 self.friends.view().snapshot.as_ref().map_or(0, |snapshot| match self.friends.tab() {
                     super::friends::FriendsTab::Friends => snapshot.friends.len(),
                     super::friends::FriendsTab::Pending => snapshot.incoming.len() + snapshot.outgoing.len(),
+                    super::friends::FriendsTab::Settings => 0,
                 }),
                 self.friends.scroll(),
             )),
@@ -5119,6 +5120,10 @@ impl MenuNav {
                 self.step_render_distance(1);
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::DistantHorizon) => {
+                self.step_horizon_distance(16);
+                MenuAction::None
+            }
             // The two Accessibility-page sliders whose consumers were already
             // live. Neither needs threading beyond the mutation here:
             // `app/redraw.rs` already reads `MenuNav::damage_tilt_strength` every
@@ -5545,6 +5550,23 @@ impl MenuNav {
         self.persist_options();
     }
 
+    /// Steps the coarse visual horizon in 16-chunk cells and persists it.
+    ///
+    /// This setting deliberately has no route to `Config::render_distance` or
+    /// the server view radius: it only bounds the fixed distant-terrain
+    /// representation the redraw path may populate. The 16-chunk quantum is
+    /// one coarse cell, so every reachable nonzero value has a meaningful
+    /// visual effect instead of paying for a fraction of a cell.
+    fn step_horizon_distance(&mut self, delta: i32) {
+        use crate::config::MAX_HORIZON_DISTANCE_CHUNKS;
+        const STEP: i32 = 16;
+        let buckets = MAX_HORIZON_DISTANCE_CHUNKS as i32 / STEP + 1;
+        let bucket = self.options.horizon_distance_chunks as i32 / STEP;
+        self.options.horizon_distance_chunks =
+            ((bucket + delta.div_euclid(STEP)).rem_euclid(buckets) * STEP) as u32;
+        self.persist_options();
+    }
+
     /// Set a live slider's value from a track fraction — the drag half of
     /// vanilla's `AbstractSliderButton` (`onClick`/`onDrag` both call
     /// `setValueFromMouse`).
@@ -5582,6 +5604,12 @@ impl MenuNav {
             match live {
                 LiveOption::RenderDistance => {
                     self.options.render_distance = value.max(0) as u32;
+                }
+                LiveOption::DistantHorizon => {
+                    self.options.horizon_distance_chunks = value.clamp(
+                        0,
+                        crate::config::MAX_HORIZON_DISTANCE_CHUNKS as i32,
+                    ) as u32;
                 }
                 LiveOption::SprintWindow => {
                     self.options.sprint_window_ticks = value.clamp(0, 255) as u8;

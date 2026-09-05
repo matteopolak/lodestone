@@ -33,6 +33,7 @@ use crate::particles::ParticleRenderer;
 
 mod block_entities;
 mod debug_lines;
+mod distant_terrain;
 // `pub(crate)` for one item only: `entity_texture_from_image`, which the
 // container screen's inventory avatar shares rather than copying — see that
 // function's own doc for why a second copy of the `Rgba8UnormSrgb` choice is a
@@ -281,6 +282,8 @@ pub struct RenderState {
     uv_buffer: wgpu::Buffer,
     atlas_bind_group: wgpu::BindGroup,
     depth: DepthBuffer,
+    distant_terrain: Option<distant_terrain::DistantTerrainRenderer>,
+    distant_terrain_failed: bool,
     sections: HashMap<SectionKey, SectionGpu>,
     /// The packed path's group-0 binding 0: this frame's view-projection (and,
     /// from that fix on, its fog), shared by every packed section and written
