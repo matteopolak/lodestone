@@ -1,0 +1,20 @@
+{
+  "scenario": "replace-with-a-live-rig-name",
+  "settle_ticks": 1,
+  "region": [
+    {
+      "pos": [20000, 200, 20000],
+      "candidates": ["minecraft:air", "minecraft:stone"]
+    }
+  ],
+  "steps": [
+    {
+      "tick": 0,
+      "action": {
+        "kind": "set_block",
+        "pos": [20000, 200, 20000],
+        "state": "minecraft:stone"
+      }
+    }
+  ]
+}
