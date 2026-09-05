@@ -6,13 +6,19 @@
 //! host capability and a separately predicted test, not an inventory of
 //! speculative compatibility methods.
 
+use std::cell::Cell;
+use std::ffi::c_void;
 use std::fmt;
 
 use jni::objects::{JClass, JObject};
+use jni::errors::ThrowRuntimeExAndDefault;
 use jni::{Env, jni_sig, jni_str};
+use jni::strings::JNIString;
+use jni::sys::jint;
 
 use crate::adapter;
 use crate::runtime::{JvmError, JvmRuntime};
+use crate::{CallbackDepthGuard};
 
 /// Binary name an operator-built isolated shim must use for this native seam.
 pub const ISOLATED_SHIM_CLASS: &str = "lodestone.bridge.IsolatedPaperShim";
@@ -39,6 +45,64 @@ pub struct NativeMethodSpec {
     pub descriptor: &'static str,
 }
 
+/// An operator-selected internal static value member to intercept.
+///
+/// The bridge deliberately carries no upstream class or member inventory.
+/// The operator supplies the one class and member being tested against their
+/// own compatible jar; this fixed `()I` contract makes the native ABI
+/// checkable without turning the bridge into a second API facade.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperatorValueMember {
+    class: String,
+    method: String,
+    value: i32,
+}
+
+impl OperatorValueMember {
+    /// Creates a zero-argument integer value interception contract.
+    pub fn new(
+        class: impl Into<String>,
+        method: impl Into<String>,
+        value: i32,
+    ) -> Result<Self, NativeSurfaceError> {
+        let class = class.into();
+        let method = method.into();
+        if !valid_binary_name(&class) {
+            return Err(NativeSurfaceError::InvalidOperatorMember {
+                detail: format!("invalid operator class {class:?}"),
+            });
+        }
+        if !valid_member_name(&method) {
+            return Err(NativeSurfaceError::InvalidOperatorMember {
+                detail: format!("invalid operator method {method:?}"),
+            });
+        }
+        Ok(Self { class, method, value })
+    }
+
+    /// The operator-selected binary class name.
+    pub fn class(&self) -> &str {
+        &self.class
+    }
+
+    /// The operator-selected static method name.
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+
+    /// The host-confirmed integer returned by the intercepted member.
+    pub const fn value(&self) -> i32 {
+        self.value
+    }
+}
+
+thread_local! {
+    /// One selected operation per resident adapter worker. A Java-created
+    /// thread never receives this value and therefore fails loudly instead of
+    /// observing a cross-thread world surrogate.
+    static OPERATOR_VALUE_MEMBER: Cell<Option<i32>> = const { Cell::new(None) };
+}
+
 /// One required constructor or accessor on the isolated descriptor value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IsolatedDescriptorMemberSpec {
@@ -57,7 +121,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 11] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 12] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -93,6 +157,10 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 11] = [
     NativeMethodSpec {
         name: "blockHandlePosition",
         descriptor: "(J)Ljava/lang/String;",
+    },
+    NativeMethodSpec {
+        name: "blockHandleStateId",
+        descriptor: "(J)I",
     },
     NativeMethodSpec {
         name: "currentPlayerHandle",
@@ -139,7 +207,7 @@ pub enum NativeRegistrationStep {
     Register(NativeMethodSpec),
 }
 
-const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 22] = [
+const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 24] = [
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[2]),
@@ -151,6 +219,7 @@ const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 22] = [
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[8]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[9]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[10]),
+    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[11]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[2]),
@@ -162,6 +231,7 @@ const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 22] = [
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[8]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[9]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[10]),
+    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[11]),
 ];
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -191,6 +261,33 @@ pub const fn isolated_resident_block_change_listener_methods() -> &'static [Isol
 /// A bounded failure while validating or registering the isolated native shim.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeSurfaceError {
+    /// The operator-selected class or member name is not a valid JVM binary
+    /// identifier. Refuse it before any loader sees an operator jar.
+    InvalidOperatorMember {
+        /// A bounded diagnostic naming the malformed input.
+        detail: String,
+    },
+    /// The selected value class did not resolve from the bootstrap loader.
+    OperatorMemberClassLoad {
+        /// Operator-provided binary class name.
+        class: String,
+        /// JVM loader error detail.
+        detail: String,
+    },
+    /// The selected member was absent or had a different static `()I` shape.
+    OperatorMemberMissing {
+        /// The supplied member contract.
+        member: OperatorValueMember,
+        /// JVM lookup error detail.
+        detail: String,
+    },
+    /// JNI rejected the selected member after its shape was validated.
+    OperatorMemberRegistration {
+        /// The supplied member contract.
+        member: OperatorValueMember,
+        /// JNI registration error detail.
+        detail: String,
+    },
     /// The shim did not declare the exact static native method the bridge owns.
     MissingMethod {
         class: &'static str,
@@ -244,6 +341,24 @@ pub enum NativeSurfaceError {
 impl fmt::Display for NativeSurfaceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidOperatorMember { detail } => {
+                write!(formatter, "invalid operator value-member interception: {detail}")
+            }
+            Self::OperatorMemberClassLoad { class, detail } => {
+                write!(formatter, "could not load operator value class {class}: {detail}")
+            }
+            Self::OperatorMemberMissing { member, detail } => write!(
+                formatter,
+                "operator value member {}.{}()I must be static native: {detail}",
+                member.class,
+                member.method,
+            ),
+            Self::OperatorMemberRegistration { member, detail } => write!(
+                formatter,
+                "could not register operator value member {}.{}()I: {detail}",
+                member.class,
+                member.method,
+            ),
             Self::MissingMethod { class, method, detail } => write!(
                 formatter,
                 "isolated shim {class} must declare static native {}{}: {detail}",
@@ -276,6 +391,102 @@ impl fmt::Display for NativeSurfaceError {
 }
 
 impl std::error::Error for NativeSurfaceError {}
+
+/// Installs one operator-selected static integer member in the bootstrap
+/// loader before any plugin child loader is created.
+///
+/// This is intentionally a single operation, not a generated compatibility
+/// catalogue. It lets a real already-compiled plugin reach a native-backed
+/// member through the production parent/child loader relationship while every
+/// upstream name remains operator input rather than committed bridge data.
+pub(crate) fn install_operator_value_member_in_loader<'local>(
+    runtime: &JvmRuntime,
+    env: &mut Env<'local>,
+    loader: &JObject<'local>,
+    member: &OperatorValueMember,
+) -> Result<(), NativeSurfaceError> {
+    let class = runtime
+        .load_class_from_loader(env, loader, member.class())
+        .map_err(|error| NativeSurfaceError::OperatorMemberClassLoad {
+            class: member.class.clone(),
+            detail: error.to_string(),
+        })?;
+    let name = JNIString::new(member.method());
+    env.get_static_method_id(&class, &name, jni_sig!("()I"))
+        .map_err(|error| NativeSurfaceError::OperatorMemberMissing {
+            member: member.clone(),
+            detail: error.to_string(),
+        })?;
+    // Store only a primitive value in worker-local state. The callback below
+    // cannot find a world, port, or mutable host pointer from this surface.
+    OPERATOR_VALUE_MEMBER.with(|slot| slot.set(Some(member.value())));
+    register_operator_value_member(env, &class, member).map_err(|error| {
+        OPERATOR_VALUE_MEMBER.with(|slot| slot.set(None));
+        NativeSurfaceError::OperatorMemberRegistration {
+            member: member.clone(),
+            detail: error.to_string(),
+        }
+    })
+}
+
+#[allow(unsafe_code)]
+fn register_operator_value_member(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    member: &OperatorValueMember,
+) -> jni::errors::Result<()> {
+    // SAFETY: validation above proves the sole supported ABI is static native
+    // `()I`, matching `native_operator_value_member` exactly. The callback
+    // returns only a copied primitive held on its resident worker.
+    unsafe {
+        let name = JNIString::new(member.method());
+        let signature = JNIString::new("()I");
+        let method = jni::NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_operator_value_member as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+extern "system" fn native_operator_value_member<'local>(
+    mut env: jni::EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| adapter::AdapterError::new(error.to_string()))?;
+        OPERATOR_VALUE_MEMBER.with(|slot| {
+            slot.get().ok_or_else(|| {
+                adapter::AdapterError::new(
+                    "operator value member requires the resident adapter worker thread",
+                )
+            })
+        })
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+fn valid_binary_name(class: &str) -> bool {
+    class.split('.').all(|segment| {
+        let mut chars = segment.chars();
+        chars.next().is_some_and(|character| {
+            character.is_ascii_alphabetic() || character == '_' || character == '$'
+        }) && chars.all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '$'
+        })
+    })
+}
+
+fn valid_member_name(member: &str) -> bool {
+    let mut chars = member.chars();
+    chars.next().is_some_and(|character| {
+        character.is_ascii_alphabetic() || character == '_' || character == '$'
+    }) && chars.all(|character| {
+        character.is_ascii_alphanumeric() || character == '_' || character == '$'
+    })
+}
 
 /// Validates declarations before installing native pointers on one class.
 ///
@@ -358,6 +569,9 @@ fn method_id(
             jni_str!("blockHandlePosition"),
             jni_sig!("(J)Ljava/lang/String;"),
         ),
+        ("blockHandleStateId", "(J)I") => {
+            env.get_static_method_id(class, jni_str!("blockHandleStateId"), jni_sig!("(J)I"))
+        }
         ("currentPlayerHandle", "()J") => {
             env.get_static_method_id(class, jni_str!("currentPlayerHandle"), jni_sig!("()J"))
         },
@@ -428,6 +642,12 @@ fn register_method(
                 method.descriptor,
             )
         }
+        ("blockHandleStateId", "(J)I") => adapter::register_block_handle_state_id_query(
+            env,
+            class,
+            method.name,
+            method.descriptor,
+        ),
         ("currentPlayerHandle", "()J") => adapter::register_current_player_handle_query(
             env,
             class,
@@ -606,6 +826,7 @@ mod tests {
                     name: "blockHandlePosition",
                     descriptor: "(J)Ljava/lang/String;",
                 },
+                NativeMethodSpec { name: "blockHandleStateId", descriptor: "(J)I" },
                 NativeMethodSpec {
                     name: "currentPlayerHandle",
                     descriptor: "()J",
@@ -637,6 +858,7 @@ mod tests {
                 NativeRegistrationStep::Validate(isolated_shim_methods()[8]),
                 NativeRegistrationStep::Validate(isolated_shim_methods()[9]),
                 NativeRegistrationStep::Validate(isolated_shim_methods()[10]),
+                NativeRegistrationStep::Validate(isolated_shim_methods()[11]),
                 NativeRegistrationStep::Register(block_state),
                 NativeRegistrationStep::Register(server_tick),
                 NativeRegistrationStep::Register(block_write),
@@ -648,6 +870,7 @@ mod tests {
                 NativeRegistrationStep::Register(isolated_shim_methods()[8]),
                 NativeRegistrationStep::Register(isolated_shim_methods()[9]),
                 NativeRegistrationStep::Register(isolated_shim_methods()[10]),
+                NativeRegistrationStep::Register(isolated_shim_methods()[11]),
             ],
             "a registration must never precede declaration validation",
         );
@@ -696,6 +919,23 @@ mod tests {
     }
 
     #[test]
+    fn operator_value_member_requires_a_single_checked_static_integer_shape() {
+        let member = OperatorValueMember::new("operator.fixture.Value", "read", 341)
+            .expect("valid operator value member");
+        assert_eq!(member.class(), "operator.fixture.Value");
+        assert_eq!(member.method(), "read");
+        assert_eq!(member.value(), 341);
+        for (class, method) in [
+            ("operator..Value", "read"),
+            ("operator.fixture.Value", "read-value"),
+        ] {
+            let error = OperatorValueMember::new(class, method, 0)
+                .expect_err("malformed operator input must fail before loading");
+            assert!(error.to_string().contains("invalid operator value-member"));
+        }
+    }
+
+    #[test]
     fn descriptor_contract_failure_names_the_missing_member() {
         let error = NativeSurfaceError::DescriptorMember {
             class: ISOLATED_PLUGIN_DESCRIPTOR_CLASS,
@@ -735,6 +975,7 @@ mod tests {
              public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
              public static native long currentBlockHandle(); \
              public static native String blockHandlePosition(long handle); \
+             public static native int blockHandleStateId(long handle); \
              public static native long currentPlayerHandle(); \
              public static native String playerHandleName(long handle); }",
         )
@@ -815,6 +1056,7 @@ mod tests {
              public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
              public static native long currentBlockHandle(); \
              public static native String blockHandlePosition(long handle); \
+             public static native int blockHandleStateId(long handle); \
              public static native long currentPlayerHandle(); \
              public static native String playerHandleName(long handle); }",
         )
