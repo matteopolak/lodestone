@@ -13,6 +13,7 @@ use lodestone_anvil::{
     level_dat, world_gen_settings,
 };
 use lodestone_server::{
+    anvil_player_export::export_all_players,
     anvil_native_entity_import::{
         EntityChunkSelection, EntityLossDecision, SelectedEntityChunk, discover_entity_chunks,
         import_entity_batch, preflight_entity_batch,
@@ -51,6 +52,8 @@ const USAGE: &str = concat!(
     "--destination <native-store> --native-path <native-store> --min-y <blocks> ",
     "--height <blocks> (--entity-chunk <x,z> [--entity-chunk <x,z> ...] | --all-entities) ",
     "[--apply --acknowledge <review-token>]\n\n",
+    "  lodestone-server anvil-convert export-players --source <native-store> ",
+    "--destination <anvil-world> --native-path <native-store> --apply\n\n",
     "Without --apply this command only reports its payload-free preflight and refuses mutation. ",
     "A lossy --apply requires the exact review token printed by that preflight.",
 );
@@ -62,6 +65,7 @@ enum Direction {
     ImportMetadata,
     ImportPlayers,
     ImportEntities,
+    ExportPlayers,
 }
 
 impl Direction {
@@ -72,6 +76,7 @@ impl Direction {
             Self::ImportMetadata => "import-metadata",
             Self::ImportPlayers => "import-players",
             Self::ImportEntities => "import-entities",
+            Self::ExportPlayers => "export-players",
         }
     }
 }
@@ -116,10 +121,11 @@ fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Conversion
         Some("import-metadata") => Direction::ImportMetadata,
         Some("import-players") => Direction::ImportPlayers,
         Some("import-entities") => Direction::ImportEntities,
+        Some("export-players") => Direction::ExportPlayers,
         Some("--help") | Some("-h") | None => return Err(USAGE.to_owned()),
         Some(other) => {
             return Err(format!(
-                "anvil-convert expects import, export, import-metadata, import-players, or import-entities, got {other:?}\n{USAGE}"
+                "anvil-convert expects import, export, import-metadata, import-players, import-entities, or export-players, got {other:?}\n{USAGE}"
             ));
         }
     };
@@ -224,7 +230,7 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
         | Direction::ImportEntities => {
             &launch.destination
         }
-        Direction::ExportTerrain => &launch.source,
+        Direction::ExportTerrain | Direction::ExportPlayers => &launch.source,
     };
     if native_endpoint != &launch.native_path {
         return Err(format!(
@@ -350,6 +356,33 @@ fn validate_shape(launch: &ConversionLaunch) -> Result<(), String> {
                 );
             }
         }
+        Direction::ExportPlayers => {
+            if launch.min_y.is_some()
+                || launch.height.is_some()
+                || launch.dimension.is_some()
+                || !launch.chunks.is_empty()
+                || launch.all_terrain
+                || launch.game_time.is_some()
+                || launch.timestamp.is_some()
+                || launch.compression.is_some()
+                || !launch.players.is_empty()
+                || launch.all_players
+                || !launch.entity_chunks.is_empty()
+                || launch.all_entities
+                || launch.acknowledgement.is_some()
+            {
+                return Err(
+                    "export-players accepts only --source, --destination, --native-path, and --apply"
+                        .to_owned(),
+                );
+            }
+            if !launch.apply {
+                return Err(
+                    "export-players requires --apply; it is lossless but mutates the Anvil destination"
+                        .to_owned(),
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -363,6 +396,16 @@ fn execute(launch: &ConversionLaunch) -> Result<String, String> {
         Direction::ImportMetadata => execute_metadata_import(launch),
         Direction::ImportPlayers => execute_player_import(launch),
         Direction::ImportEntities => execute_entity_import(launch),
+        Direction::ExportPlayers => {
+            let storage = open_native_backend(launch)?;
+            let result = export_all_players(&storage, &launch.destination)
+                .map_err(|error| format!("player export failed: {error}"))?;
+            Ok(format!(
+                "Converted {} typed native players into {}.\n",
+                result.players_exported,
+                launch.destination.display()
+            ))
+        }
         Direction::ExportTerrain => {
             let storage = open_native_backend(launch)?;
             execute_export(launch, &storage)
@@ -741,7 +784,10 @@ mod tests {
 
     use lodestone_server::{
         ChunkColumn, ScheduledTickHandle, TickPriority,
-        world_storage::{NativeDirtyChunkRecord, WorldStorage, WorldStorageBackend},
+        world_storage::{
+            NativeDirtyChunkRecord, NativePlayerData, NativePlayerRecord, WorldStorage,
+            WorldStorageBackend,
+        },
     };
 
     use super::*;
@@ -1222,5 +1268,54 @@ mod tests {
             properties.day_time == 0,
             "unsupported total-age metadata is reported and not retained"
         );
+    }
+
+    #[test]
+    fn player_export_command_publishes_the_native_snapshot() {
+        let scratch = tempfile::tempdir().expect("create isolated player-export CLI scratch");
+        let native = scratch.path().join("native");
+        let destination = scratch.path().join("anvil");
+        std::fs::create_dir(&destination).expect("create existing Anvil destination");
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: native.clone(),
+        })
+        .expect("open native player source");
+        let uuid = uuid::Uuid::from_bytes([0x71; 16]);
+        storage
+            .write_dirty_player_data(NativePlayerData {
+                locator: NativePlayerRecord {
+                    uuid: *uuid.as_bytes(),
+                    dimension: lodestone_storage_schema::BuiltinDimension::End,
+                    x_fixed: -1_250,
+                    y_fixed: 80_000,
+                    z_fixed: 2_500,
+                    yaw_millidegrees: 135_000,
+                    pitch_millidegrees: -30_000,
+                },
+                game_mode: Some(lodestone_model::GameMode::Spectator),
+            })
+            .expect("seed typed native player");
+        drop(storage);
+
+        let output = run([
+            "export-players",
+            "--source",
+            native.to_str().expect("UTF-8 native source"),
+            "--destination",
+            destination.to_str().expect("UTF-8 Anvil destination"),
+            "--native-path",
+            native.to_str().expect("UTF-8 native path"),
+            "--apply",
+        ])
+        .expect("run native player export command");
+        assert!(output.contains("Converted 1 typed native players"));
+        let exported = lodestone_server::player_data::PlayerDataStore::new(&destination)
+            .expect("open exported player directory")
+            .read(uuid)
+            .expect("decode exported player")
+            .expect("exported player exists");
+        assert_eq!(exported.dimension, "minecraft:the_end");
+        assert_eq!(exported.pos, lodestone_model::Vec3::new(-1.25, 80.0, 2.5));
+        assert_eq!(exported.game_mode, Some(lodestone_model::GameMode::Spectator));
     }
 }

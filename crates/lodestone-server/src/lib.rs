@@ -416,6 +416,7 @@ pub mod anvil_export;
 /// Deterministic, authorization-gated export of an explicit native terrain batch.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod anvil_world_export;
+pub mod anvil_player_export;
 /// Authorization-gated conversion of one complete Anvil player file into the
 /// deliberately smaller native player locator record.
 #[cfg(not(target_arch = "wasm32"))]

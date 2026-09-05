@@ -35,6 +35,15 @@ record for every key, and uses the native store's crash-safe replacement/reopen 
 segment is refused before opening storage, so a mistyped maintenance path cannot create an empty
 world.
 
+### Native player export
+
+`lodestone-server anvil-convert export-players --source <native-store> --destination <anvil-world>
+--native-path <native-store> --apply` exports every typed native player into an existing Anvil
+world. The command decodes one complete native general-record snapshot before touching the
+destination, writes below a same-filesystem staging root, and publishes the complete `players/data`
+directory with one rename. It refuses to merge with or replace existing player data. Typed locator
+and game-mode values are retained; fields absent from the native schema use new-player defaults.
+
 ### The tick loop
 
 A real 20Hz clock, independent of client traffic, driving the mob simulation and every registered
