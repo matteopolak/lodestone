@@ -65,6 +65,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--run-id",
         help="stable artifact suffix for automation; defaults to the current UTC timestamp",
     )
+    parser.add_argument(
+        "--validate-capture",
+        type=Path,
+        metavar="CAPTURE",
+        help="validate one saved capture and its sidecars without starting Samply or the server",
+    )
     args = parser.parse_args(argv)
     if not 1 <= args.scale <= MAX_ENTITY_SCALE:
         parser.error(
@@ -89,6 +95,20 @@ def paths_for(output_dir: Path, run_id: str) -> CapturePaths:
         symbols=capture.with_suffix(".syms.json"),
         scene=output_dir / f"{stem}.scene.json",
         runtime=output_dir / f"{stem}.runtime.jsonl",
+    )
+
+
+def paths_for_capture(capture: Path) -> CapturePaths:
+    """Recover the runner-owned sidecars for one saved Samply capture."""
+    capture = capture.resolve()
+    if capture.suffixes[-2:] != [".json", ".gz"]:
+        raise RuntimeError(f"heavy-server capture must end in .json.gz: {capture}")
+    stem = capture.with_suffix("").with_suffix("")
+    return CapturePaths(
+        capture=capture,
+        symbols=capture.with_suffix(".syms.json"),
+        scene=stem.with_suffix(".scene.json"),
+        runtime=stem.with_suffix(".runtime.jsonl"),
     )
 
 
@@ -156,6 +176,33 @@ def run_bounded(command: list[str], timeout_secs: int) -> subprocess.CompletedPr
     return result
 
 
+def validate_scene(paths: CapturePaths, seed: int | None = None, scale: int | None = None) -> dict:
+    """Require the immutable entity scene handoff to identify one bounded run."""
+    require_nonempty(paths.scene, "heavy-scene handoff")
+    try:
+        scene = json.loads(paths.scene.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"heavy-scene emitter wrote invalid JSON: {paths.scene}: {error}") from error
+    spec = scene.get("spec") if isinstance(scene, dict) else None
+    scene_hash = scene.get("scene_hash") if isinstance(scene, dict) else None
+    if (
+        not isinstance(spec, dict)
+        or scene.get("schema") != 1
+        or spec.get("scenario") != "entity"
+        or type(spec.get("seed")) is not int
+        or type(spec.get("scale")) is not int
+        or not 1 <= spec["scale"] <= MAX_ENTITY_SCALE
+        or set(spec) != {"scenario", "seed", "scale"}
+        or not isinstance(scene_hash, str)
+        or len(scene_hash) != 64
+        or any(character not in "0123456789abcdef" for character in scene_hash)
+        or (seed is not None and spec["seed"] != seed)
+        or (scale is not None and spec["scale"] != scale)
+    ):
+        raise RuntimeError(f"heavy-scene handoff has the wrong entity identity: {paths.scene}")
+    return scene
+
+
 def emit_scene(server: Path, paths: CapturePaths, seed: int, scale: int, timeout_secs: int) -> dict:
     run_bounded(
         [
@@ -164,16 +211,7 @@ def emit_scene(server: Path, paths: CapturePaths, seed: int, scale: int, timeout
         ],
         timeout_secs,
     )
-    require_nonempty(paths.scene, "heavy-scene handoff")
-    try:
-        scene = json.loads(paths.scene.read_text())
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"heavy-scene emitter wrote invalid JSON: {paths.scene}: {error}") from error
-    if scene.get("schema") != 1 or scene.get("spec") != {
-        "scenario": "entity", "seed": seed, "scale": scale,
-    }:
-        raise RuntimeError(f"heavy-scene emitter wrote the wrong scene identity: {scene.get('spec')!r}")
-    return scene
+    return validate_scene(paths, seed, scale)
 
 
 def validate_runtime(paths: CapturePaths, seed: int, scale: int, scene: dict) -> dict:
@@ -202,6 +240,21 @@ def validate_runtime(paths: CapturePaths, seed: int, scale: int, scene: dict) ->
             f"requested={requested!r}, consumed={consumed!r}, expected={expected_population}"
         )
     return record
+
+
+def validate_capture_artifact(capture_path: Path) -> tuple[CapturePaths, dict]:
+    """Validate a completed server capture without rerunning its production workload.
+
+    The compressed profile's format belongs to ``profile-cost-table.py``. This
+    cheap gate proves that the Samply output still has the scene and runtime
+    evidence which identify the production entity path that produced it.
+    """
+    paths = paths_for_capture(capture_path)
+    require_nonempty(paths.capture, "capture")
+    require_nonempty(paths.symbols, "presymbolication sidecar")
+    scene = validate_scene(paths)
+    spec = scene["spec"]
+    return paths, validate_runtime(paths, spec["seed"], spec["scale"], scene)
 
 
 def capture(args: argparse.Namespace) -> tuple[CapturePaths, dict]:
@@ -239,10 +292,20 @@ def capture(args: argparse.Namespace) -> tuple[CapturePaths, dict]:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        paths, record = capture(args)
+        if args.validate_capture is not None:
+            paths, record = validate_capture_artifact(args.validate_capture)
+        else:
+            paths, record = capture(args)
     except RuntimeError as error:
         print(f"samply heavy server capture failed: {error}", file=sys.stderr)
         return 1
+    if args.validate_capture is not None:
+        print(
+            "validated heavy server profile: "
+            f"capture={paths.capture} requested={record['requested']['entities_spawned']} "
+            f"consumed={record['consumed']['entities_extracted']}"
+        )
+        return 0
     print(f"capture: {paths.capture}")
     print(f"symbols: {paths.symbols}")
     print(f"scene: {paths.scene}")

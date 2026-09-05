@@ -355,6 +355,9 @@ samply-heavy-server-smoke:
     cargo build --release -p lodestone-server --example heavy-scene-server
     python3 scripts/samply-heavy-server.py --smoke --wall-deadline-secs 12
 
+validate-heavy-server-profile capture:
+    python3 scripts/samply-heavy-server.py --validate-capture {{capture}}
+
 profile-heavy-server capture:
     python3 scripts/profile-cost-table.py {{capture}}
 

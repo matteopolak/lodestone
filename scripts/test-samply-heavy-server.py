@@ -23,6 +23,23 @@ SPEC.loader.exec_module(MODULE)
 
 
 class SamplyHeavyServerTests(unittest.TestCase):
+    @staticmethod
+    def write_complete_artifact(paths, seed=1, scale=1):
+        scene_hash = "a" * 64
+        paths.capture.write_bytes(b"capture")
+        paths.symbols.write_text("symbols", encoding="utf-8")
+        paths.scene.write_text(json.dumps({
+            "schema": 1,
+            "spec": {"scenario": "entity", "seed": seed, "scale": scale},
+            "scene_hash": scene_hash,
+        }), encoding="utf-8")
+        paths.runtime.write_text(json.dumps({
+            "status": "complete", "scenario": "entity", "seed": seed, "scale": scale,
+            "scenario_hash": scene_hash,
+            "requested": {"entities_spawned": MODULE.ENTITY_COUNT_PER_SCALE * scale},
+            "consumed": {"entities_extracted": MODULE.ENTITY_COUNT_PER_SCALE * scale},
+        }) + "\n", encoding="utf-8")
+
     def test_paths_match_samply_sidecar_spelling(self):
         paths = MODULE.paths_for(Path("/tmp/profiles"), "fixed")
         self.assertEqual(paths.capture.name, "heavy-server-entity-fixed.json.gz")
@@ -48,12 +65,12 @@ class SamplyHeavyServerTests(unittest.TestCase):
                 scene_path.write_text(json.dumps({
                     "schema": 1,
                     "spec": {"scenario": "entity", "seed": 7, "scale": 1},
-                    "scene_hash": "scene",
+                    "scene_hash": "a" * 64,
                 }))
 
             with mock.patch.object(MODULE, "run_bounded", side_effect=fake_run) as run:
                 scene = MODULE.emit_scene(Path("/tmp/heavy-scene-server"), paths, 7, 1, 9)
-            self.assertEqual(scene["scene_hash"], "scene")
+            self.assertEqual(scene["scene_hash"], "a" * 64)
             self.assertEqual(run.call_args.args[0][0], "/tmp/heavy-scene-server")
             self.assertIn("--emit-scene", run.call_args.args[0])
 
@@ -62,19 +79,44 @@ class SamplyHeavyServerTests(unittest.TestCase):
             paths = MODULE.paths_for(Path(directory), "fixed")
             paths.runtime.write_text(json.dumps({
                 "status": "complete", "scenario": "entity", "seed": 1, "scale": 1,
-                "scenario_hash": "scene", "requested": {"entities_spawned": 1024},
+                "scenario_hash": "a" * 64, "requested": {"entities_spawned": 1024},
                 "consumed": {"entities_extracted": 1024},
             }) + "\n")
-            record = MODULE.validate_runtime(paths, 1, 1, {"scene_hash": "scene"})
+            record = MODULE.validate_runtime(paths, 1, 1, {"scene_hash": "a" * 64})
             self.assertEqual(record["status"], "complete")
             paths.runtime.write_text(paths.runtime.read_text().replace("1024", "0"))
             with self.assertRaisesRegex(RuntimeError, "population witness"):
-                MODULE.validate_runtime(paths, 1, 1, {"scene_hash": "scene"})
+                MODULE.validate_runtime(paths, 1, 1, {"scene_hash": "a" * 64})
             with self.assertRaisesRegex(RuntimeError, "capture"):
                 MODULE.require_nonempty(paths.capture, "capture")
             paths.capture.write_bytes(b"capture")
             with self.assertRaisesRegex(RuntimeError, "sidecar"):
                 MODULE.require_nonempty(paths.symbols, "sidecar")
+
+    def test_saved_capture_validator_checks_all_coherent_sidecars_without_launching(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = MODULE.paths_for(Path(directory), "fixed")
+            self.write_complete_artifact(paths, seed=9)
+            with mock.patch.object(MODULE, "capture") as capture:
+                self.assertEqual(MODULE.main(["--validate-capture", str(paths.capture)]), 0)
+            capture.assert_not_called()
+            actual_paths, record = MODULE.validate_capture_artifact(paths.capture)
+            self.assertEqual(actual_paths.capture, paths.capture.resolve())
+            self.assertEqual(actual_paths.scene, paths.scene.resolve())
+            self.assertEqual(actual_paths.runtime, paths.runtime.resolve())
+            self.assertEqual(record["consumed"]["entities_extracted"], 1024)
+
+    def test_saved_capture_validator_rejects_mismatched_runtime_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = MODULE.paths_for(Path(directory), "fixed")
+            self.write_complete_artifact(paths)
+            runtime = json.loads(paths.runtime.read_text(encoding="utf-8"))
+            runtime["scenario_hash"] = "b" * 64
+            paths.runtime.write_text(json.dumps(runtime) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "does not describe"):
+                MODULE.validate_capture_artifact(paths.capture)
+            with self.assertRaisesRegex(RuntimeError, "must end in .json.gz"):
+                MODULE.validate_capture_artifact(paths.capture.with_suffix(""))
 
     def test_macos_signature_control_requires_samply_debugger_entitlement(self):
         unsigned = subprocess.CompletedProcess(
@@ -111,10 +153,10 @@ class SamplyHeavyServerTests(unittest.TestCase):
                 "--seed", "9", "--scale", "1", "--wall-deadline-secs", "12", "--run-id", "fixed",
             ])
             paths = MODULE.paths_for(args.output_dir, "fixed")
-            scene = {"schema": 1, "spec": {"scenario": "entity", "seed": 9, "scale": 1}, "scene_hash": "scene"}
+            scene = {"schema": 1, "spec": {"scenario": "entity", "seed": 9, "scale": 1}, "scene_hash": "a" * 64}
             record = {
                 "status": "complete", "scenario": "entity", "seed": 9, "scale": 1,
-                "scenario_hash": "scene", "requested": {"entities_spawned": 1024},
+                "scenario_hash": "a" * 64, "requested": {"entities_spawned": 1024},
                 "consumed": {"entities_extracted": 1024},
             }
 
