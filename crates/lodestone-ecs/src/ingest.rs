@@ -500,7 +500,7 @@ pub fn apply_falling_block_state(
     for event in batch.events() {
         let ClientEvent::FallingBlockState {
             entity_id,
-            block_state_id,
+            block_state,
         } = event
         else {
             continue;
@@ -508,7 +508,7 @@ pub fn apply_falling_block_state(
         if let Some(entity) = index.get(*entity_id) {
             commands
                 .entity(entity)
-                .insert(FallingBlockState(*block_state_id));
+                .insert(FallingBlockState(*block_state));
         }
     }
 }
@@ -1596,8 +1596,8 @@ mod tests {
     // `Rotation` into scope, and the two must stay distinguishable here.
     use lodestone_model::Rotation as ReportedRotation;
     use lodestone_model::{
-        EntityEquipment, EntityMetadataUpdate, EquipmentSlot, ItemComponents, ItemStack, Text,
-        Vec3,
+        BlockStateRef, EntityEquipment, EntityMetadataUpdate, EquipmentSlot, ItemComponents,
+        ItemStack, Text, Vec3,
     };
 
     use super::*;
@@ -2811,12 +2811,12 @@ mod tests {
             &mut world,
             ClientEvent::FallingBlockState {
                 entity_id: 1,
-                block_state_id: 1234,
+                block_state: BlockStateRef::canonical(1234),
             },
         );
         assert_eq!(
             entity_for(&world, 1).get::<FallingBlockState>().map(|s| s.0),
-            Some(1234),
+            Some(BlockStateRef::canonical(1234)),
             "the state id must reach the component, or every falling block draws \
              whatever state id 0 resolves to"
         );
@@ -2831,13 +2831,13 @@ mod tests {
             .push(spawn_event(2, "minecraft:falling_block"));
         world.resource_mut::<IngestQueue>().push(ClientEvent::FallingBlockState {
             entity_id: 2,
-            block_state_id: 77,
+            block_state: BlockStateRef::protocol_local(77),
         });
         world.run_schedule(NetIngest);
         assert_eq!(
             entity_for(&world, 2).get::<FallingBlockState>().map(|s| s.0),
-            Some(77),
-            "a spawn and its Object Data in one batch must both land"
+            Some(BlockStateRef::protocol_local(77)),
+            "a spawn and its protocol-local Object Data in one batch must both land without being relabelled canonical"
         );
     }
 
@@ -3713,7 +3713,7 @@ mod tests {
         // the state ever travels on.
         assert!(handles_event(&ClientEvent::FallingBlockState {
             entity_id: 1,
-            block_state_id: 7,
+            block_state: BlockStateRef::canonical(7),
         }));
         // The other reading of the same spawn field. Routed to `ingest` for the
         // same reason and, like every row here, unreachable in production if the

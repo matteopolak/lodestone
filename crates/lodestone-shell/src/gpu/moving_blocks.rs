@@ -71,6 +71,7 @@
 //! concatenated into a single [`GpuModelMesh`] — one upload and one draw per frame
 //! however many moving blocks exist, versus one of each per block.
 
+use lodestone_model::BlockStateRef;
 use lodestone_render::{Camera, Frustum, GpuModelMesh, ModelMesh, mesh_moving_block_quads};
 
 use crate::display_entities::{BLOCK_DISPLAY_TYPE_PATH, placement_bounds};
@@ -421,7 +422,10 @@ impl RenderState {
             // `block_state`'s absence is the switch: an entity whose spawn packet
             // has not been folded yet draws nothing rather than a stand-in, exactly
             // as a drop with no reported stack does.
-            let Some(state_id) = draw.block_state else {
+            let Some(state) = draw.block_state else {
+                continue;
+            };
+            let Some(state_id) = built_in_state_id(state, "falling block") else {
                 continue;
             };
             // A full block plus a little slack, tested before any mesh work.
@@ -874,7 +878,10 @@ impl RenderState {
             // nothing rather than a stand-in. Vanilla reaches the same place by
             // a different route — its accessor default is air, whose
             // `RenderShape` is `INVISIBLE`.
-            let Some(state_id) = draw.block_state else {
+            let Some(state) = draw.block_state else {
+                continue;
+            };
+            let Some(state_id) = built_in_state_id(state, "block display") else {
                 continue;
             };
             let transform = draw.placement(camera.yaw, camera.pitch);
@@ -955,9 +962,63 @@ impl RenderState {
     }
 }
 
+/// Validates a source-tagged state at the built-in model-table boundary.
+///
+/// The model table only contains this build's canonical states. A
+/// protocol-local value can overlap its numeric range, so accepting it by raw
+/// value would render the wrong block; keep it opaque until a resolver for its
+/// source is installed.
+fn built_in_state_id(state: BlockStateRef, consumer: &str) -> Option<u32> {
+    let BlockStateRef::Canonical(raw) = state else {
+        tracing::debug!(
+            target: "moving_blocks",
+            raw = state.raw(),
+            "{consumer} has a protocol-local or custom block state; the built-in model resolver skipped it"
+        );
+        return None;
+    };
+    let Some(state) = lodestone_data::block_states::StateId::new(raw) else {
+        tracing::debug!(
+            target: "moving_blocks",
+            raw,
+            "{consumer} has an out-of-census canonical block state; the built-in model resolver skipped it"
+        );
+        return None;
+    };
+    Some(state.raw())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The built-in model resolver consumes only a canonical value that is in
+    /// its generated census. The protocol-local case deliberately uses the
+    /// exact same raw state as the control, proving the source tag rather than
+    /// range membership decides whether it can reach model lookup.
+    #[test]
+    fn the_model_resolver_accepts_only_in_census_canonical_block_states() {
+        let stone = lodestone_data::block_states::state_id("minecraft:stone")
+            .expect("stone must be in the generated block-state census");
+        assert_eq!(
+            built_in_state_id(BlockStateRef::protocol_local(stone), "test"),
+            None,
+            "a protocol-local number must not be mistaken for the built-in state with the same raw id"
+        );
+        assert_eq!(
+            built_in_state_id(
+                BlockStateRef::canonical(lodestone_data::block_states::STATE_COUNT),
+                "test",
+            ),
+            None,
+            "a canonical tag alone is not enough outside the generated census"
+        );
+        assert_eq!(
+            built_in_state_id(BlockStateRef::canonical(stone), "test"),
+            Some(stone),
+            "the canonical in-census control must still reach the moving-block renderer"
+        );
+    }
 
     /// The pose puts a falling block that has not moved yet **exactly over the
     /// cell it left**, and the two candidate readings of each axis are evaluated

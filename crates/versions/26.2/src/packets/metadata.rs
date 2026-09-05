@@ -74,8 +74,8 @@
 
 use lodestone_core::{Error, Reader, Result, Writer, read_network_nbt};
 use lodestone_model::{
-    BlockPos, EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate, EntityPose,
-    EntityVariant, Identifier, ItemStack, Quat, Reported, Text, Vec3f,
+    BlockPos, BlockStateRef, EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate,
+    EntityPose, EntityVariant, Identifier, ItemStack, Quat, Reported, Text, Vec3f,
 };
 
 use lodestone_data::attribute_types::{AttributeId, attribute_id, attribute_name};
@@ -1333,7 +1333,7 @@ pub fn read_entity_metadata(
             // 23 is also the cat class's own collar-color accessor, an unrelated `INT` — see
             // [`IDX_DISPLAY_VARIANT_PAYLOAD`].
             (IDX_DISPLAY_VARIANT_PAYLOAD, Value::Int(v)) if class == Some(MetadataClass::BlockDisplay) => {
-                md.display_block_state = Some(v as u32);
+                md.display_block_state = Some(BlockStateRef::canonical(v as u32));
             }
             // `the text-display class's own text accessor.
             (IDX_DISPLAY_VARIANT_PAYLOAD, Value::Text(text)) if class == Some(MetadataClass::TextDisplay) => {
@@ -1898,6 +1898,38 @@ mod tests {
         assert_eq!(
             md.display_block_state, None,
             "index 23's block-state arm must not also fire for an item_display"
+        );
+    }
+
+    /// A block display's `INT` state preserves its canonical source tag. The
+    /// item-display control above uses the same index with another serializer,
+    /// while this one proves that the block-state arm itself does not erase the
+    /// identity the renderer needs to choose a resolver.
+    #[test]
+    fn a_block_displays_state_arrives_with_a_canonical_source_tag() {
+        const STATE: i32 = 1234;
+        let mut bytes = Vec::new();
+        bytes.push(IDX_DISPLAY_VARIANT_PAYLOAD);
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(STATE));
+        bytes.push(EOF_MARKER);
+
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(
+            &mut reader,
+            TrackedEntity {
+                class: Some(MetadataClass::BlockDisplay),
+                living: false,
+                mob: false,
+            },
+        )
+        .expect("decode")
+        .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(
+            md.display_block_state,
+            Some(BlockStateRef::canonical(STATE as u32)),
+            "the 26.2 block-state numbering must remain labelled canonical"
         );
     }
 
