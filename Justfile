@@ -443,6 +443,23 @@ bench-client-lovelier:
 bench-client-lovelier-smoke:
     python3 scripts/client-frame-benchmark.py --workload lovelier --smoke
 
+# One low-density production-client run. It still requires every selected
+# render witness and writes only local scene evidence.
+bench-client-heavy-smoke:
+    python3 scripts/client-frame-benchmark.py --workload heavyweight --heavy-scenario mixed --smoke
+
+# Full local scene; this is profiler input, never a cross-machine timing gate.
+bench-client-heavy:
+    python3 scripts/client-frame-benchmark.py --workload heavyweight --heavy-scenario mixed
+
+# One bounded release-client Samply capture with a scene-record sidecar.
+profile-client-heavy:
+    python3 scripts/client-frame-benchmark.py --workload heavyweight --heavy-scenario mixed --samply
+
+# Turn a saved capture into CPU-delta-weighted inclusive and self-time tables.
+profile-cost-table capture:
+    python3 scripts/profile-cost-table.py {{capture}}
+
 # Live-oracle launchers — one recipe per canonical oracle. Each script
 # creates a fresh container and tears it down when it exits. See
 # docs/oracles-and-benchmarks.md and CLAUDE.md for the spawn contracts.

@@ -1060,6 +1060,13 @@ mod tests {
                 crate::gpu::gpu_timing::WorldSubphaseCounts {
                     packed_sections_visited: 137,
                     model_sections_visited: 911,
+                    opaque_sections_drawn: 23,
+                    water_sections_drawn: 29,
+                    translucent_sections_drawn: 31,
+                    entities_drawn: 37,
+                    block_entities_drawn: 41,
+                    sign_text_vertices: 43,
+                    particles_drawn: 47,
                 },
             );
             profiler.mark(FramePhase::WorldEncodeSubmit, t0 + Duration::from_millis(2));
@@ -1080,6 +1087,13 @@ mod tests {
         for (name, expected) in [
             ("world.packed_sections_visited", "137"),
             ("world.model_sections_visited", "911"),
+            ("world.opaque_sections_drawn", "23"),
+            ("world.water_sections_drawn", "29"),
+            ("world.translucent_sections_drawn", "31"),
+            ("world.entities_drawn", "37"),
+            ("world.block_entities_drawn", "41"),
+            ("world.sign_text_vertices", "43"),
+            ("world.particles_drawn", "47"),
             ("hud.chat_lines", "17"),
             ("hud.debug_lines", "29"),
             ("hud.menu_overlays_drawn", "3"),
@@ -1124,6 +1138,13 @@ mod tests {
             crate::gpu::gpu_timing::WorldSubphaseCounts {
                 packed_sections_visited: 613,
                 model_sections_visited: 208,
+                opaque_sections_drawn: 3,
+                water_sections_drawn: 5,
+                translucent_sections_drawn: 7,
+                entities_drawn: 11,
+                block_entities_drawn: 13,
+                sign_text_vertices: 17,
+                particles_drawn: 19,
             },
         );
 

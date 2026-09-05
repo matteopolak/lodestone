@@ -5,6 +5,7 @@ import importlib.util
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 
 RUNNER = pathlib.Path(__file__).with_name("client-frame-benchmark.py")
@@ -15,6 +16,73 @@ SPEC.loader.exec_module(MODULE)
 
 
 class SummaryTests(unittest.TestCase):
+    @staticmethod
+    def emitted_scene(**overrides):
+        scene = {
+            "schema": 1,
+            "spec": {"scenario": "mixed", "seed": 17, "scale": 2},
+            "commands": {
+                "setup": ["setblock 0 64 0 minecraft:stone"],
+                "after_join": [],
+                "mutation": ["setblock 0 64 0 minecraft:air"],
+            },
+            "witnesses": [{
+                "segment": "heavyweight.stationary",
+                "column": "world.entities_drawn",
+                "minimum": 1,
+            }],
+            "scene_hash": "0" * 64,
+        }
+        scene.update(overrides)
+        return scene
+
+    def test_emitter_consumer_forwards_identity_and_preserves_phase_order(self):
+        payload = self.emitted_scene()
+        completed = MODULE.subprocess.CompletedProcess([], 0, MODULE.json.dumps(payload), "")
+        with mock.patch.object(MODULE.subprocess, "run", return_value=completed) as run:
+            scene = MODULE._emit_heavy_scene(
+                pathlib.Path("/tmp/heavy-scene-server"), "mixed", 17, 2, "orbit"
+            )
+        self.assertEqual(scene["commands"]["mutation"], ["setblock 0 64 0 minecraft:air"])
+        self.assertIn("--emit-scene", run.call_args.args[0])
+
+    def test_emitter_consumer_rejects_schema_identity_phase_blank_and_witness_controls(self):
+        for scene, message in [
+            ({**self.emitted_scene(), "schema": 2}, "schema"),
+            ({**self.emitted_scene(), "spec": {"scenario": "mixed", "seed": 18, "scale": 2}}, "identity"),
+            ({**self.emitted_scene(), "commands": {"after_join": [], "setup": [], "mutation": []}}, "phases"),
+            ({**self.emitted_scene(), "commands": {"setup": [" "], "after_join": [], "mutation": []}}, "nonblank"),
+            ({**self.emitted_scene(), "witnesses": [{"segment": "heavyweight.stationary", "column": "world.entities_drawn", "minimum": 0}]}, "invalid"),
+        ]:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    MODULE._validate_emitted_scene(scene, "mixed", 17, 2)
+
+    def test_heavy_client_command_forwards_the_emitted_scene_and_mutation_duration(self):
+        command = MODULE._client_command(
+            pathlib.Path("/tmp/lodestone"), "heavyweight", 25570, (2, 7, 2, 3), "closed",
+            camera_plan="orbit", heavy_scene=self.emitted_scene(),
+        )
+        self.assertEqual(command[command.index("--heavy-scenario") + 1], "mixed")
+        self.assertEqual(command[command.index("--heavy-seed") + 1], "17")
+        self.assertEqual(command[command.index("--heavy-scale") + 1], "2")
+        self.assertEqual(command[command.index("--heavy-camera-plan") + 1], "orbit")
+        self.assertEqual(command[command.index("--benchmark-mutation") + 1], "7")
+
+    def test_heavy_witness_requires_a_real_maximum_and_record_keeps_scene_identity(self):
+        scene = self.emitted_scene()
+        with self.assertRaisesRegex(RuntimeError, "world.entities_drawn.*maximum 0"):
+            MODULE._validate_heavy_witnesses(
+                scene, {"heavyweight.stationary": {"workload_counts": {"world.entities_drawn": {"max": 0.0}}}}
+            )
+        with mock.patch.object(MODULE, "_git_sha", return_value="abc"):
+            record = MODULE._heavy_record(
+                "heavyweight", 1, pathlib.Path("/tmp/lodestone"), (2, 7, 2, 3), "closed",
+                3, scene, {"stationary": {}},
+            )
+        self.assertEqual(record["scene_hash"], "0" * 64)
+        self.assertEqual(record["requested_scale"], 3)
+        self.assertNotIn("p50_ms", record)
     @staticmethod
     def fullscreen_log(width=3024, height=1898):
         return (
@@ -132,6 +200,10 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(
             command[-4:],
             ["--", "/tmp/lodestone", "--benchmark", "megaworld"],
+        )
+        self.assertEqual(
+            MODULE._samply_sidecar_path(artifact).name,
+            "profile.json.syms.json",
         )
 
     def test_nearest_rank_percentile_uses_the_observed_tail(self):

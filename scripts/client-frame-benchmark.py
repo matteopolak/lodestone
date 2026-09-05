@@ -28,7 +28,19 @@ from typing import Iterable, Mapping
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "bench-results" / "live_frame_profile.jsonl"
+HEAVY_RESULTS = ROOT / "bench-results" / "heavyweight_scene.jsonl"
 SCENE = ROOT / "scripts" / "benchmark-scenes" / "showcase.txt"
+HEAVY_SCENE_EMITTER = ROOT / "target" / "release" / "examples" / "heavy-scene-server"
+HEAVY_COMMAND_PHASES = ("setup", "after_join", "mutation")
+HEAVY_SCENARIOS = (
+    "palette", "transparency", "light", "liquid", "sign", "block-entity", "entity", "scheduled", "mixed",
+)
+# The server's immutable-plan ceiling is intentionally larger for offline plan
+# inspection. The client runner is a foreground local profiler: keep its actual
+# resource envelope small enough for a shared development machine.
+MAX_HEAVY_SCALE = 2
+MAX_HEAVY_MUTATION_SECONDS = 10
+MAX_HEAVY_TOTAL_SECONDS = 120
 RCON_PASSWORD = "lodestone"
 RENDER_DISTANCE = 24
 SERVER_VIEW_DISTANCE = RENDER_DISTANCE + 1
@@ -36,6 +48,13 @@ METADATA_COLUMNS = {"frame", "frame_interval_ms", "segment"}
 COUNT_COLUMNS = {
     "world.packed_sections_visited",
     "world.model_sections_visited",
+    "world.opaque_sections_drawn",
+    "world.water_sections_drawn",
+    "world.translucent_sections_drawn",
+    "world.entities_drawn",
+    "world.block_entities_drawn",
+    "world.sign_text_vertices",
+    "world.particles_drawn",
     "hud.chat_lines",
     "hud.debug_lines",
     "hud.menu_overlays_drawn",
@@ -80,7 +99,66 @@ ORACLES = {
         "game_port": 25600,
         "rcon_port": 25601,
     },
+    "heavyweight": {
+        "script": ROOT / "scripts" / "live-oracles" / "creative.sh",
+        "world": ROOT / ".cache" / "mc" / "creative",
+        "game_port": 25570,
+        "rcon_port": 25571,
+    },
 }
+
+
+def _validate_emitted_scene(scene: object, scenario: str, seed: int, scale: int) -> None:
+    """Reject a malformed server handoff before it can alter a live oracle."""
+    if not isinstance(scene, dict) or tuple(scene) != (
+        "schema", "spec", "commands", "witnesses", "scene_hash"
+    ):
+        raise RuntimeError("heavy scene has an unexpected top-level shape or field order")
+    if scene["schema"] != 1:
+        raise RuntimeError(f"heavy scene schema must be 1, got {scene['schema']!r}")
+    spec = scene["spec"]
+    if not isinstance(spec, dict) or tuple(spec) != ("scenario", "seed", "scale"):
+        raise RuntimeError("heavy scene spec has an unexpected shape or field order")
+    if spec != {"scenario": scenario, "seed": seed, "scale": scale}:
+        raise RuntimeError(f"heavy scene identity mismatch: requested {(scenario, seed, scale)!r}, got {spec!r}")
+    commands = scene["commands"]
+    if not isinstance(commands, dict) or tuple(commands) != HEAVY_COMMAND_PHASES:
+        raise RuntimeError("heavy scene command phases must be setup, after_join, mutation in order")
+    for phase, batch in commands.items():
+        if not isinstance(batch, list) or any(not isinstance(command, str) or not command.strip() for command in batch):
+            raise RuntimeError(f"heavy scene {phase} commands must be nonblank strings")
+    witnesses = scene["witnesses"]
+    if not isinstance(witnesses, list) or not witnesses:
+        raise RuntimeError("heavy scene must declare at least one witness")
+    for witness in witnesses:
+        if not isinstance(witness, dict) or tuple(witness) != ("segment", "column", "minimum"):
+            raise RuntimeError("heavy scene witness has an unexpected shape or field order")
+        if (not isinstance(witness["segment"], str) or not witness["segment"]
+                or not isinstance(witness["column"], str) or not witness["column"]
+                or not isinstance(witness["minimum"], int) or isinstance(witness["minimum"], bool)
+                or witness["minimum"] <= 0):
+            raise RuntimeError(f"heavy scene witness is invalid: {witness!r}")
+    scene_hash = scene["scene_hash"]
+    if not isinstance(scene_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", scene_hash):
+        raise RuntimeError("heavy scene hash must be a lowercase SHA-256 hex string")
+
+
+def _emit_heavy_scene(
+    emitter: pathlib.Path, scenario: str, seed: int, scale: int, camera_plan: str
+) -> dict:
+    result = subprocess.run(
+        [str(emitter), "--emit-scene", "-", "--scenario", scenario, "--seed", str(seed),
+         "--scale", str(scale), "--camera-plan", camera_plan],
+        check=False, text=True, capture_output=True,
+    )
+    if result.returncode:
+        raise RuntimeError(f"heavy scene emitter failed ({result.returncode}): {result.stderr.strip()}")
+    try:
+        scene = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"heavy scene emitter returned invalid JSON: {error}") from error
+    _validate_emitted_scene(scene, scenario, seed, scale)
+    return scene
 
 
 def nearest_rank(values: Iterable[float], quantile: float) -> float:
@@ -332,15 +410,27 @@ def prepare_showcase(rcon_port: int) -> None:
             continue
         commands.append(command)
     print(f"installing {len(commands)} showcase RCON commands...", flush=True)
+    run_rcon_commands(rcon_port, "showcase", commands)
+
+
+def run_rcon_commands(rcon_port: int, phase: str, commands: list[str]) -> None:
+    """Submit a server-owned command batch in order and fail at its exact edge."""
     with RconClient(rcon_port) as rcon:
         for index, command in enumerate(commands, 1):
             reply = rcon.command(command)
             if _is_scene_error(command, reply):
                 raise RuntimeError(
-                    f"showcase command {index}/{len(commands)} failed:\n"
+                    f"{phase} command {index}/{len(commands)} failed:\n"
                     f"  {command}\n  {reply or '(empty response)'}"
                 )
-    print("showcase scene accepted by Java", flush=True)
+
+
+def prepare_heavy_scene(
+    rcon_port: int, emitter: pathlib.Path, scenario: str, seed: int, scale: int, camera_plan: str
+) -> dict:
+    scene = _emit_heavy_scene(emitter, scenario, seed, scale, camera_plan)
+    run_rcon_commands(rcon_port, "setup", scene["commands"]["setup"])
+    return scene
 
 
 def joined_player_commands(workload: str, username: str) -> list[str]:
@@ -387,11 +477,17 @@ def _client_command(
     binary: pathlib.Path,
     workload: str,
     game_port: int,
-    durations: tuple[int, int, int],
+    durations: tuple[int, ...],
     debug_overlay: str,
+    camera_plan: str | None = None,
+    heavy_scene: dict | None = None,
 ) -> list[str]:
-    warmup, stationary, moving = durations
-    return [
+    if heavy_scene is None:
+        warmup, stationary, moving = durations
+        mutation = None
+    else:
+        warmup, mutation, stationary, moving = durations
+    command = [
         str(binary),
         "--benchmark",
         workload,
@@ -412,6 +508,16 @@ def _client_command(
         "--render-distance",
         str(RENDER_DISTANCE),
     ]
+    if heavy_scene is not None:
+        spec = heavy_scene["spec"]
+        command.extend([
+            "--heavy-scenario", spec["scenario"],
+            "--heavy-seed", str(spec["seed"]),
+            "--heavy-scale", str(spec["scale"]),
+            "--heavy-camera-plan", camera_plan or "stationary",
+            "--benchmark-mutation", str(mutation),
+        ])
+    return command
 
 
 def _samply_command(client: list[str], artifact: pathlib.Path) -> list[str]:
@@ -427,6 +533,11 @@ def _samply_command(client: list[str], artifact: pathlib.Path) -> list[str]:
     ]
 
 
+def _samply_sidecar_path(artifact: pathlib.Path) -> pathlib.Path:
+    """Match Samply's `*.json.gz` presymbolication sidecar spelling."""
+    return artifact.with_suffix(".syms.json")
+
+
 def _unique_username(trial: int) -> str:
     suffix = int(time.time() * 1000) % 100_000
     return f"LdB{os.getpid():x}{trial}{suffix}"[:16]
@@ -437,9 +548,11 @@ def run_trial(
     trial: int,
     binary: pathlib.Path,
     oracle: dict,
-    durations: tuple[int, int, int],
+    durations: tuple[int, ...],
     debug_overlay: str,
     samply_artifact: pathlib.Path | None = None,
+    heavy_scene: dict | None = None,
+    camera_plan: str | None = None,
 ) -> dict:
     with tempfile.TemporaryDirectory(prefix=f"lodestone-{workload}-bench-") as temp_name:
         temp = pathlib.Path(temp_name)
@@ -453,7 +566,8 @@ def run_trial(
         )
 
         client = _client_command(
-            binary, workload, oracle["game_port"], durations, debug_overlay
+            binary, workload, oracle["game_port"], durations, debug_overlay,
+            camera_plan=camera_plan, heavy_scene=heavy_scene,
         )
         if samply_artifact is not None:
             command = _samply_command(client, samply_artifact)
@@ -472,6 +586,8 @@ def run_trial(
         deadline = time.monotonic() + total + 120
         rss_samples = []
         joined_configured = False
+        after_join_applied = False
+        mutation_applied = False
         timed_out = False
         print(
             f"trial {trial}: {workload}, debug_overlay={debug_overlay}, "
@@ -497,6 +613,19 @@ def run_trial(
                             workload, oracle["rcon_port"], username
                         )
                         joined_configured = True
+                        if heavy_scene is not None:
+                            run_rcon_commands(
+                                oracle["rcon_port"], "after_join", heavy_scene["commands"]["after_join"]
+                            )
+                            after_join_applied = True
+                if heavy_scene is not None and not mutation_applied:
+                    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                    if ('segment="heavyweight.mutation"' in log_text
+                            or "segment=heavyweight.mutation" in log_text):
+                        run_rcon_commands(
+                            oracle["rcon_port"], "mutation", heavy_scene["commands"]["mutation"]
+                        )
+                        mutation_applied = True
                 if time.monotonic() >= deadline:
                     timed_out = True
                     process.terminate()
@@ -515,8 +644,18 @@ def run_trial(
         if return_code != 0:
             tail = "\n".join(log_text.splitlines()[-40:])
             raise RuntimeError(f"client exited {return_code}:\n{tail}")
+        if samply_artifact is not None:
+            sidecar = _samply_sidecar_path(samply_artifact)
+            if not samply_artifact.is_file() or samply_artifact.stat().st_size == 0:
+                raise RuntimeError(f"samply exited without a nonempty capture: {samply_artifact}")
+            if not sidecar.is_file() or sidecar.stat().st_size == 0:
+                raise RuntimeError(f"samply exited without a nonempty symbol sidecar: {sidecar}")
         if not joined_configured:
             raise RuntimeError("client never reached a configurable joined warmup")
+        if heavy_scene is not None and not after_join_applied:
+            raise RuntimeError("heavyweight after_join phase was never observed")
+        if heavy_scene is not None and heavy_scene["commands"]["mutation"] and not mutation_applied:
+            raise RuntimeError("heavyweight mutation segment was never observed")
         if not csv_path.exists():
             raise RuntimeError("client exited without writing its frame CSV")
 
@@ -527,6 +666,14 @@ def run_trial(
             label = f"{workload}.{suffix}"
             segments[suffix] = summarize_rows(
                 [row for row in rows if row.get("segment") == label]
+            )
+        if heavy_scene is not None:
+            mutation_rows = [row for row in rows if row.get("segment") == "heavyweight.mutation"]
+            if mutation_rows:
+                segments["mutation"] = summarize_rows(mutation_rows)
+            _validate_heavy_witnesses(
+                heavy_scene,
+                {f"heavyweight.{name}": value for name, value in segments.items()},
             )
         rss = {
             "start": rss_samples[0] if rss_samples else 0,
@@ -543,6 +690,20 @@ def run_trial(
             "gpu_timestamp_ms": summarize_gpu_log(log_text),
             "log": log_text,
         }
+
+
+def _validate_heavy_witnesses(scene: dict, segments: dict[str, dict]) -> None:
+    """Require every emitter-owned witness to have appeared in its stated phase."""
+    for witness in scene["witnesses"]:
+        segment = segments.get(witness["segment"])
+        if segment is None:
+            raise RuntimeError(f"heavyweight witness segment missing: {witness['segment']}")
+        observed = segment["workload_counts"].get(witness["column"], {}).get("max", 0.0)
+        if observed < witness["minimum"]:
+            raise RuntimeError(
+                f"heavyweight witness {witness['column']} in {witness['segment']} "
+                f"requires {witness['minimum']}, maximum {observed:g}"
+            )
 
 
 def _git_sha() -> str:
@@ -627,6 +788,31 @@ def _append_records(
             handle.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
 
 
+def _heavy_record(
+    workload: str, trial: int, binary: pathlib.Path, durations: tuple[int, ...],
+    debug_overlay: str, requested_scale: int, scene: dict, segments: dict,
+) -> dict:
+    spec = scene["spec"]
+    return {
+        "schema": 1,
+        "workload": workload,
+        "trial": trial,
+        "profile": "release",
+        "git_sha": _git_sha(),
+        "machine": platform.platform(),
+        "arch": platform.machine(),
+        "binary": str(binary),
+        "scenario": spec["scenario"],
+        "seed": spec["seed"],
+        "requested_scale": requested_scale,
+        "scale": spec["scale"],
+        "scene_hash": scene["scene_hash"],
+        "debug_overlay": debug_overlay,
+        "durations_seconds": dict(zip(("warmup", "mutation", "stationary", "moving"), durations)),
+        "segments": segments,
+    }
+
+
 def _print_spread(workload: str, debug_overlay: str, results: list[dict]) -> None:
     if len(results) < 2:
         return
@@ -645,6 +831,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--samply", action="store_true")
+    parser.add_argument("--heavy-scenario", choices=HEAVY_SCENARIOS)
+    parser.add_argument("--heavy-seed", type=int, default=1)
+    parser.add_argument("--heavy-scale", type=int, default=2)
+    parser.add_argument("--heavy-camera-plan", choices=("stationary", "orbit"), default="orbit")
+    parser.add_argument("--heavy-mutation-seconds", type=int, default=7)
     parser.add_argument("--debug-overlay", choices=("closed", "open", "both"))
     parser.add_argument(
         "--binary", type=pathlib.Path, default=ROOT / "target" / "release" / "lodestone"
@@ -652,6 +843,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.trials < 1:
         parser.error("--trials must be at least 1")
+    if (args.workload == "heavyweight") != (args.heavy_scenario is not None):
+        parser.error("--heavy-scenario is required exactly with --workload heavyweight")
+    if args.heavy_seed < 0:
+        parser.error("--heavy-seed must be non-negative")
+    if not 1 <= args.heavy_scale <= MAX_HEAVY_SCALE:
+        parser.error(f"--heavy-scale must be in 1..={MAX_HEAVY_SCALE}")
+    if not 0 <= args.heavy_mutation_seconds <= MAX_HEAVY_MUTATION_SECONDS:
+        parser.error(
+            f"--heavy-mutation-seconds must be in 0..={MAX_HEAVY_MUTATION_SECONDS}"
+        )
     return args
 
 
@@ -668,10 +869,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.samply and shutil.which("samply") is None:
         raise SystemExit("--samply requested but samply is not on PATH")
 
-    durations = (2, 2, 3) if args.smoke else (
-        (45, 30, 60) if args.workload in ("megaworld", "lovelier") else (20, 30, 60)
-    )
-    trial_count = 1 if args.smoke or args.samply else args.trials
+    if args.workload == "heavyweight":
+        durations = (2, 1, 2, 3) if args.smoke else (20, args.heavy_mutation_seconds, 30, 60)
+        if sum(durations) > MAX_HEAVY_TOTAL_SECONDS:
+            parser.error(f"heavyweight duration must be at most {MAX_HEAVY_TOTAL_SECONDS}s")
+    else:
+        durations = (2, 2, 3) if args.smoke else (
+            (45, 30, 60) if args.workload in ("megaworld", "lovelier") else (20, 30, 60)
+        )
+    trial_count = 1 if args.smoke or args.samply or args.workload == "heavyweight" else args.trials
     arms = overlay_arms(args.workload, args.debug_overlay)
     if args.samply and len(arms) != 1:
         raise SystemExit(
@@ -680,6 +886,13 @@ def main(argv: list[str] | None = None) -> int:
     oracle = start_oracle(args.workload)
     if args.workload == "showcase":
         prepare_showcase(oracle["rcon_port"])
+    heavy_scene = None
+    emitted_scale = 1 if args.smoke else args.heavy_scale
+    if args.workload == "heavyweight":
+        heavy_scene = prepare_heavy_scene(
+            oracle["rcon_port"], HEAVY_SCENE_EMITTER, args.heavy_scenario,
+            args.heavy_seed, emitted_scale, args.heavy_camera_plan,
+        )
 
     profile_artifact = None
     if args.samply:
@@ -699,14 +912,34 @@ def main(argv: list[str] | None = None) -> int:
                 durations,
                 debug_overlay,
                 samply_artifact=profile_artifact,
+                heavy_scene=heavy_scene,
+                camera_plan=args.heavy_camera_plan if heavy_scene is not None else None,
             )
             _print_trial(args.workload, result)
-            if not args.samply:
+            if args.workload == "heavyweight":
+                record = _heavy_record(
+                    args.workload, trial, binary, durations, debug_overlay, args.heavy_scale,
+                    heavy_scene, result["segments"],
+                )
+                if profile_artifact is not None:
+                    sidecar = profile_artifact.with_suffix(".record.json")
+                    sidecar.write_text(
+                        json.dumps({**record, "capture": str(profile_artifact)}, separators=(",", ":"), sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    print(f"heavyweight capture record: {sidecar}")
+                else:
+                    HEAVY_RESULTS.parent.mkdir(parents=True, exist_ok=True)
+                    with HEAVY_RESULTS.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
+            elif not args.samply:
                 _append_records(args.workload, result, durations, binary)
                 results.append(result)
         _print_spread(args.workload, debug_overlay, results)
     if profile_artifact is not None:
         print(f"samply profile: {profile_artifact}")
+    elif args.workload == "heavyweight":
+        print(f"appended heavyweight scene evidence to {HEAVY_RESULTS}")
     else:
         print(f"appended comparable records to {RESULTS}")
     return 0

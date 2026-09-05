@@ -292,6 +292,7 @@ fn sky_fog(render_distance: u32) -> FogSettings {
 fn window_physical_size(config: &Config) -> Option<(u32, u32)> {
     config
         .benchmark
+        .as_ref()
         .map(|_| crate::config::BenchmarkConfig::PHYSICAL_SIZE)
 }
 
