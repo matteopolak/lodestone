@@ -43,6 +43,8 @@ use std::sync::{Arc, Mutex};
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::{IntoScheduleConfigs, MessageReader, ResMut, Resource};
+use lodestone_command::StringArgument;
+use lodestone_ecs::commands::{CommandOutcome, CommandRegistry, PluginCommand, PluginCommandsPlugin};
 use lodestone_ecs::events::{GameEvent, GameEventBusPlugin};
 use lodestone_ecs::player::ActionQueue;
 use lodestone_ecs::veto::{ActionVetoPlugin, ActionVetoes, Verdict};
@@ -157,6 +159,66 @@ impl WasmHostPlugin {
     }
 }
 
+fn run_wasm_command(
+    broker: &Arc<Mutex<PluginHost>>,
+    plugin_index: usize,
+    input: String,
+) -> CommandOutcome {
+    let mut host = broker
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match host.command(plugin_index, input) {
+        Ok(crate::host::CommandOutcome::Success(result)) => CommandOutcome::Success(result),
+        Ok(crate::host::CommandOutcome::Failure(message)) => CommandOutcome::Failure(message),
+        Err(error) => CommandOutcome::Failure(format!("WASM command handler failed: {error}")),
+    }
+}
+
+/// Register the roots the loaded guests declared during `init`.
+///
+/// The native registry owns parsing, alias rewriting, and permission checks. Each
+/// command gets one greedy tail so the guest receives the canonical whole line,
+/// but the host deliberately does not pretend that this is the native argument
+/// tree API: typed guest argument schemas and suggestions remain a later ABI
+/// extension.
+fn register_wasm_commands(app: &mut App, broker: &Arc<Mutex<PluginHost>>) {
+    let specs = broker
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .command_specs();
+
+    for (plugin_index, spec) in specs {
+        let mut command = PluginCommand::new(spec.name);
+        command.description(spec.description);
+        for alias in spec.aliases {
+            command.alias(alias);
+        }
+        if let Some(permission) = spec.permission {
+            command.permission(permission);
+        }
+
+        let root = command.root();
+        let root_broker = Arc::clone(broker);
+        command.on_execute(root, move |invocation| {
+            run_wasm_command(&root_broker, plugin_index, invocation.input.clone())
+        });
+
+        let tail = command.argument(
+            root,
+            "arguments",
+            Arc::new(StringArgument::greedy()),
+        );
+        let tail_broker = Arc::clone(broker);
+        command.on_execute(tail, move |invocation| {
+            run_wasm_command(&tail_broker, plugin_index, invocation.input.clone())
+        });
+
+        if let Err(error) = app.world_mut().resource_mut::<CommandRegistry>().register(command) {
+            tracing::error!(plugin_index, "refused WASM command registration: {error}");
+        }
+    }
+}
+
 impl Plugin for WasmHostPlugin {
     fn build(&self, app: &mut App) {
         // The guests read the event bus, which is off by default because every event
@@ -173,6 +235,9 @@ impl Plugin for WasmHostPlugin {
         }
         if !app.is_plugin_added::<ActionVetoPlugin>() {
             app.add_plugins(ActionVetoPlugin);
+        }
+        if !app.is_plugin_added::<PluginCommandsPlugin>() {
+            app.add_plugins(PluginCommandsPlugin);
         }
         app.init_resource::<ActionQueue>();
 
@@ -193,6 +258,7 @@ impl Plugin for WasmHostPlugin {
                 .resource_mut::<ActionVetoes>()
                 .register(*verb, "wasm-verdicts", 0, move |context| ask_wasm_verdict(&broker, context));
         }
+        register_wasm_commands(app, &verdict_broker);
         app.insert_resource(plugins);
         app.add_systems(GameTick, drive_wasm_plugins.in_set(TickSet::Predict));
     }

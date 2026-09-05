@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.3.0;
+package lodestone:plugin@0.4.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -185,6 +185,24 @@ interface types {
         swing-arm(hand),
     }
 
+    /// A root command a guest wants the host to register. The host supplies one
+    /// greedy tail argument so a command handler receives the canonical command
+    /// line, including every argument after this root.
+    record command-spec {
+        name: string,
+        description: string,
+        aliases: list<string>,
+        permission: option<string>,
+    }
+
+    /// The result of handling a plugin-owned command. A successful result is
+    /// the integer command result used by command chaining; a failure is shown
+    /// to the command sender.
+    variant command-outcome {
+        success(s32),
+        failure(string),
+    }
+
     /// What a guest says about itself at `init`. Cross-checked against the
     /// `plugin.toml` beside it: a mismatch is a load-time rejection, because a
     /// manifest that disagrees with the module it ships next to is exactly the
@@ -193,8 +211,11 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.3.0"`.
+        /// `"lodestone:plugin@0.4.0"`.
         abi: string,
+        /// Root commands this guest wants the host to register. The host only
+        /// installs them when the manifest grants `commands:register`.
+        commands: list<command-spec>,
     }
 
     enum log-level {
@@ -243,7 +264,7 @@ interface scheduler {
 }
 
 world plugin {
-    use types.{action, event, plugin-info, plugin-verdict, task-id, verdict-context};
+    use types.{action, command-outcome, event, plugin-info, plugin-verdict, task-id, verdict-context};
 
     import logging;
     import filesystem;
@@ -265,4 +286,10 @@ world plugin {
     /// Called synchronously at a typed action-veto point. Guests run in stable
     /// host load order; the first `deny` (or failed guest call) ends this ask.
     export on-verdict: func(context: verdict-context) -> plugin-verdict;
+
+    /// Handle one command this guest declared from `init`. `input` is canonical:
+    /// aliases have already been rewritten and a leading slash removed. This call
+    /// receives no world access or sender handle, so it remains safe while the
+    /// native dispatcher owns the world borrow.
+    export on-command: func(input: string) -> command-outcome;
 }

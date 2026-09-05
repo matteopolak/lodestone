@@ -65,6 +65,9 @@ scheduler = []
 # Verdict fixtures for the host's synchronous cancellation conformance test.
 verdict-deny = []
 verdict-trap = []
+# The command-registration conformance fixture. It declares a root and alias
+# from `init`, then returns a non-round-number result from `on-command`.
+commands = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is

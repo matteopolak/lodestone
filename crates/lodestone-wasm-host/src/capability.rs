@@ -74,6 +74,12 @@ pub enum Capability {
     /// This is data-flow gated at the synchronous host callback: a guest without
     /// it is never called at an action-veto point.
     VetoActions,
+    /// Register a guest-owned root command with the native command registry.
+    ///
+    /// This is data-flow gated while the host installs commands: a guest may
+    /// declare command specs, but it receives no handler unless this capability
+    /// was granted.
+    RegisterCommands,
     /// Read a file through the `lodestone:plugin/filesystem` interface.
     ///
     /// **Never in [`CapabilitySet::default_policy`].** This is the import-column
@@ -99,6 +105,7 @@ impl Capability {
         Self::ActChat,
         Self::ActInteract,
         Self::VetoActions,
+        Self::RegisterCommands,
         Self::FsRead,
         Self::ScheduleTasks,
     ];
@@ -114,6 +121,7 @@ impl Capability {
             Self::ActChat => "act:chat",
             Self::ActInteract => "act:interact",
             Self::VetoActions => "veto:actions",
+            Self::RegisterCommands => "commands:register",
             Self::FsRead => "fs:read",
             Self::ScheduleTasks => "schedule:tasks",
         }
@@ -143,7 +151,8 @@ impl Capability {
             | Self::ObserveBlocks
             | Self::ActChat
             | Self::ActInteract
-            | Self::VetoActions => false,
+            | Self::VetoActions
+            | Self::RegisterCommands => false,
         }
     }
 }
@@ -168,8 +177,9 @@ impl CapabilitySet {
         Self(BTreeSet::new())
     }
 
-    /// What the host grants unless an operator says otherwise: everything except
-    /// [`Capability::FsRead`] and [`Capability::ScheduleTasks`].
+    /// What the host grants unless an operator says otherwise: the ordinary
+    /// observe/act vocabulary, but not filesystem access, task scheduling, or
+    /// [`Capability::RegisterCommands`].
     ///
     /// The asymmetry is the whole policy, stated in one place. Observing chat and
     /// pushing a chat action are things a plugin is *for*; reading the user's
@@ -293,7 +303,7 @@ mod tests {
     }
 
     /// The policy asymmetry, asserted rather than described: the default grants
-    /// the observe/act vocabulary and withholds filesystem access.
+    /// the observe/act vocabulary and withholds opt-in capabilities.
     #[test]
     fn the_default_policy_withholds_import_capabilities() {
         let policy = CapabilitySet::default_policy();
@@ -301,6 +311,10 @@ mod tests {
         assert!(
             !policy.contains(Capability::ScheduleTasks),
             "schedule:tasks must not be granted by default"
+        );
+        assert!(
+            !policy.contains(Capability::RegisterCommands),
+            "commands:register must not be granted by default"
         );
         assert!(policy.contains(Capability::ObserveChat));
         assert!(policy.contains(Capability::ActChat));
@@ -311,6 +325,7 @@ mod tests {
         // `contains` always answering false.
         assert!(CapabilitySet::permissive().contains(Capability::FsRead));
         assert!(CapabilitySet::permissive().contains(Capability::ScheduleTasks));
+        assert!(CapabilitySet::permissive().contains(Capability::RegisterCommands));
     }
 
     /// `missing_from` reports every shortfall, not just the first.

@@ -395,7 +395,7 @@ loading mechanism, feature flag, or manifest format yet. `GameEventBusPlugin`, `
 absent.
 
 **WASM tier:** `PluginHost::new(policy)` takes a `CapabilitySet` (`default_policy()` withholds
-`fs:read` and `schedule:tasks`); `with_fuel(n)` bounds each guest's per-host-tick instruction budget —
+`fs:read`, `schedule:tasks`, and `commands:register`); `with_fuel(n)` bounds each guest's per-host-tick instruction budget —
 fuel rather than
 epoch-based preemption, since an epoch deadline needs a watchdog and a host without one has a deadline
 that never trips; `with_memory_limit(n)` bounds linear memory; `with_filesystem_root(p)` is required in

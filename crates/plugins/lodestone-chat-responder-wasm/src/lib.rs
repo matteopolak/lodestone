@@ -28,6 +28,7 @@ wit_bindgen::generate!({
 });
 
 use lodestone::plugin::logging::{log, LogLevel};
+use lodestone::plugin::types::CommandSpec;
 #[cfg(feature = "scheduler")]
 use lodestone::plugin::scheduler::{cancel, schedule_once, schedule_repeating};
 
@@ -64,7 +65,8 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.3.0".to_string(),
+            abi: "lodestone:plugin@0.4.0".to_string(),
+            commands: command_specs(),
         }
     }
 
@@ -133,6 +135,36 @@ impl Guest for ChatResponder {
         #[cfg(not(any(feature = "verdict-deny", feature = "verdict-trap")))]
         PluginVerdict::Allow
     }
+
+    fn on_command(input: String) -> CommandOutcome {
+        #[cfg(feature = "commands")]
+        if input == "wasm-ping" {
+            return CommandOutcome::Success(37);
+        }
+
+        #[cfg(feature = "commands")]
+        if input.starts_with("wasm-ping ") {
+            return CommandOutcome::Failure(format!("unexpected command input: {input}"));
+        }
+
+        let _ = input;
+        CommandOutcome::Failure("unknown command".to_owned())
+    }
+}
+
+fn command_specs() -> Vec<CommandSpec> {
+    #[cfg(feature = "commands")]
+    {
+        vec![CommandSpec {
+            name: "wasm-ping".to_owned(),
+            description: "Proves a guest-owned command reached the runtime host.".to_owned(),
+            aliases: vec!["wp".to_owned()],
+            permission: Some("wasm.command.use".to_owned()),
+        }]
+    }
+
+    #[cfg(not(feature = "commands"))]
+    Vec::new()
 }
 
 /// THE PREEMPTION FIXTURE. A native plugin doing this hangs the game with no

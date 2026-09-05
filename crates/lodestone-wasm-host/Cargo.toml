@@ -66,6 +66,7 @@ lodestone-model = { workspace = true }
 # therefore invisible to every crate below this one, which is what keeps the tier
 # additive rather than a second API.
 lodestone-ecs = { workspace = true }
+lodestone-command = { workspace = true }
 bevy_app = { workspace = true }
 bevy_ecs = { workspace = true }
 
