@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import dataclasses
 import json
 import math
 import os
@@ -44,6 +45,13 @@ MAX_HEAVY_SCALE_BY_SCENARIO = {"dense-mixed": 1}
 MAX_HEAVY_MUTATION_SECONDS = 10
 MAX_HEAVY_TOTAL_SECONDS = 120
 RCON_PASSWORD = "lodestone"
+RCON_COMMAND_TIMEOUT_SECONDS = 15
+# Dense scenes deliberately retain their complete 7,937-action setup even for
+# a smoke run. One deadline for the reload-plus-function transaction makes a
+# stalled local oracle fail predictably instead of multiplying the socket
+# timeout by every scene action.
+HEAVY_SETUP_DEADLINE_SECONDS = 90
+HEAVY_DATAPACK_FORMAT = 107
 RENDER_DISTANCE = 24
 SERVER_VIEW_DISTANCE = RENDER_DISTANCE + 1
 METADATA_COLUMNS = {"frame", "frame_interval_ms", "segment"}
@@ -352,14 +360,17 @@ def _read_response(sock: socket.socket) -> tuple[int, str]:
 class RconClient:
     """Small persistent Source-RCON client for one local oracle."""
 
-    def __init__(self, port: int):
+    def __init__(self, port: int, timeout_seconds: float = RCON_COMMAND_TIMEOUT_SECONDS):
         self.port = port
+        self.timeout_seconds = timeout_seconds
         self.sock: socket.socket | None = None
         self.request_id = 10
 
     def __enter__(self) -> "RconClient":
-        self.sock = socket.create_connection(("127.0.0.1", self.port), timeout=15)
-        self.sock.settimeout(15)
+        self.sock = socket.create_connection(
+            ("127.0.0.1", self.port), timeout=self.timeout_seconds
+        )
+        self.sock.settimeout(self.timeout_seconds)
         self.sock.sendall(_build_frame(1, 3, RCON_PASSWORD))
         response_id, _ = _read_response(self.sock)
         if response_id != 1:
@@ -371,9 +382,11 @@ class RconClient:
             self.sock.close()
             self.sock = None
 
-    def command(self, command: str) -> str:
+    def command(self, command: str, timeout_seconds: float | None = None) -> str:
         if self.sock is None:
             raise RuntimeError("RCON client is not connected")
+        if timeout_seconds is not None:
+            self.sock.settimeout(timeout_seconds)
         self.request_id += 1
         self.sock.sendall(_build_frame(self.request_id, 2, command))
         response_id, payload = _read_response(self.sock)
@@ -451,24 +464,160 @@ def prepare_showcase(rcon_port: int) -> None:
     run_rcon_commands(rcon_port, "showcase", commands)
 
 
-def run_rcon_commands(rcon_port: int, phase: str, commands: list[str]) -> None:
-    """Submit a server-owned command batch in order and fail at its exact edge."""
-    with RconClient(rcon_port) as rcon:
+def _rcon_deadline_remaining(phase: str, action: int, deadline: float | None) -> float:
+    if deadline is None:
+        return RCON_COMMAND_TIMEOUT_SECONDS
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"{phase} RCON deadline expired before action {action}")
+    return min(remaining, RCON_COMMAND_TIMEOUT_SECONDS)
+
+
+def run_rcon_commands(
+    rcon_port: int, phase: str, commands: list[str], deadline: float | None = None
+) -> list[str]:
+    """Submit a batch in order, optionally under one deadline for every request."""
+    replies = []
+    with RconClient(rcon_port, _rcon_deadline_remaining(phase, 0, deadline)) as rcon:
         for index, command in enumerate(commands, 1):
-            reply = rcon.command(command)
+            try:
+                reply = rcon.command(
+                    command, _rcon_deadline_remaining(phase, index, deadline)
+                )
+            except (socket.timeout, TimeoutError) as error:
+                raise TimeoutError(
+                    f"{phase} RCON deadline expired at action {index}/{len(commands)}"
+                ) from error
             if _is_scene_error(command, reply):
                 raise RuntimeError(
                     f"{phase} command {index}/{len(commands)} failed:\n"
                     f"  {command}\n  {reply or '(empty response)'}"
                 )
+            replies.append(reply)
+    return replies
+
+
+@dataclasses.dataclass
+class HeavySetupDatapack:
+    """One runner-owned function pack, removed after the local benchmark."""
+
+    root: pathlib.Path
+    function_id: str
+    objective: str
+
+    def cleanup(self) -> None:
+        shutil.rmtree(self.root)
+
+
+def _heavy_setup_function_lines(commands: list[str], objective: str) -> list[str]:
+    """Keep each producer command intact while proving the aggregate succeeded."""
+    lines = [
+        f"scoreboard objectives add {objective} dummy",
+        f"scoreboard players set #successful {objective} 0",
+    ]
+    successful_commands = 0
+    for command in commands:
+        # The plan's idempotent stale-entity cleanup is permitted to find no
+        # entities. Every scene producer, in contrast, must report success.
+        if command.startswith("kill @e[tag=lodestone_heavy_scene]"):
+            lines.append(command)
+            continue
+        successful_commands += 1
+        lines.extend((
+            f"execute store success score #last {objective} run {command}",
+            f"execute if score #last {objective} matches 1 run scoreboard players add #successful {objective} 1",
+        ))
+    lines.extend((
+        f"execute if score #successful {objective} matches {successful_commands} run return {successful_commands}",
+        "return 0",
+    ))
+    return lines
+
+
+def _write_heavy_setup_datapack(world: pathlib.Path, scene: dict) -> HeavySetupDatapack:
+    """Materialize the immutable setup list as one normal server function call."""
+    datapacks = world / "datapacks"
+    datapacks.mkdir(parents=True, exist_ok=True)
+    root = pathlib.Path(tempfile.mkdtemp(prefix="lodestone-heavy-", dir=datapacks))
+    nonce = root.name.rsplit("-", 1)[-1].replace("-", "_")
+    function_name = f"setup_{scene['scene_hash'][:16]}_{nonce}"
+    function_id = f"lodestone_heavy:{function_name}"
+    objective = f"lh{scene['scene_hash'][:12]}"
+    try:
+        (root / "pack.mcmeta").write_text(
+            json.dumps(
+                {
+                    "pack": {
+                        "description": "temporary Lodestone heavyweight benchmark setup",
+                        "min_format": [HEAVY_DATAPACK_FORMAT, 1],
+                        "max_format": HEAVY_DATAPACK_FORMAT,
+                    }
+                },
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        function = (
+            root / "data" / "lodestone_heavy" / "function" / f"{function_name}.mcfunction"
+        )
+        function.parent.mkdir(parents=True)
+        function.write_text(
+            "\n".join(_heavy_setup_function_lines(scene["commands"]["setup"], objective))
+            + "\n",
+            encoding="utf-8",
+        )
+    except BaseException:
+        shutil.rmtree(root)
+        raise
+    return HeavySetupDatapack(root, function_id, objective)
+
+
+def _function_success_count(reply: str) -> int | None:
+    match = re.search(r"returned\s+(\d+)", reply, re.IGNORECASE)
+    return int(match.group(1)) if match else None
 
 
 def prepare_heavy_scene(
-    rcon_port: int, emitter: pathlib.Path, scenario: str, seed: int, scale: int, camera_plan: str
-) -> dict:
+    rcon_port: int, world: pathlib.Path, emitter: pathlib.Path, scenario: str, seed: int,
+    scale: int, camera_plan: str,
+) -> tuple[dict, HeavySetupDatapack]:
     scene = _emit_heavy_scene(emitter, scenario, seed, scale, camera_plan)
-    run_rcon_commands(rcon_port, "setup", scene["commands"]["setup"])
-    return scene
+    datapack = _write_heavy_setup_datapack(world, scene)
+    deadline = time.monotonic() + HEAVY_SETUP_DEADLINE_SECONDS
+    function_called = False
+    try:
+        run_rcon_commands(rcon_port, "setup.reload", ["reload"], deadline)
+        # Mark this before waiting for the reply: a socket timeout can happen
+        # after the server has already created the temporary objective.
+        function_called = True
+        replies = run_rcon_commands(
+            rcon_port, "setup", [f"function {datapack.function_id}"], deadline
+        )
+        expected = sum(
+            not command.startswith("kill @e[tag=lodestone_heavy_scene]")
+            for command in scene["commands"]["setup"]
+        )
+        successful = _function_success_count(replies[0])
+        if successful != expected:
+            raise RuntimeError(
+                f"setup function reported {successful!r} successful producers, expected {expected}"
+            )
+        run_rcon_commands(
+            rcon_port, "setup.cleanup", [f"scoreboard objectives remove {datapack.objective}"], deadline
+        )
+    except BaseException:
+        if function_called:
+            with contextlib.suppress(Exception):
+                run_rcon_commands(
+                    rcon_port,
+                    "setup.cleanup",
+                    [f"scoreboard objectives remove {datapack.objective}"],
+                    deadline,
+                )
+        datapack.cleanup()
+        raise
+    return scene, datapack
 
 
 def joined_player_commands(workload: str, username: str) -> list[str]:
@@ -1086,62 +1235,67 @@ def main(argv: list[str] | None = None) -> int:
     if args.workload == "showcase":
         prepare_showcase(oracle["rcon_port"])
     heavy_scene = None
+    heavy_setup_datapack = None
     emitted_scale = 1 if args.smoke else args.heavy_scale
-    if args.workload == "heavyweight":
-        heavy_scene = prepare_heavy_scene(
-            oracle["rcon_port"], HEAVY_SCENE_EMITTER, args.heavy_scenario,
-            args.heavy_seed, emitted_scale, args.heavy_camera_plan,
-        )
-
-    profile_artifact = None
-    if args.samply:
-        profiles = ROOT / "bench-results" / "profiles"
-        profiles.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        profile_artifact = profiles / f"{args.workload}-{arms[0]}-{stamp}.json.gz"
-
-    for debug_overlay in arms:
-        results = []
-        for trial in range(1, trial_count + 1):
-            result = run_trial(
-                args.workload,
-                trial,
-                binary,
-                oracle,
-                durations,
-                debug_overlay,
-                samply_artifact=profile_artifact,
-                heavy_scene=heavy_scene,
-                camera_plan=args.heavy_camera_plan if heavy_scene is not None else None,
+    try:
+        if args.workload == "heavyweight":
+            heavy_scene, heavy_setup_datapack = prepare_heavy_scene(
+                oracle["rcon_port"], oracle["world"], HEAVY_SCENE_EMITTER,
+                args.heavy_scenario, args.heavy_seed, emitted_scale, args.heavy_camera_plan,
             )
-            _print_trial(args.workload, result)
-            if args.workload == "heavyweight":
-                record = _heavy_record(
-                    args.workload, trial, binary, durations, debug_overlay, args.heavy_scale,
-                    args.heavy_camera_plan, heavy_scene, result["segments"],
+
+        profile_artifact = None
+        if args.samply:
+            profiles = ROOT / "bench-results" / "profiles"
+            profiles.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            profile_artifact = profiles / f"{args.workload}-{arms[0]}-{stamp}.json.gz"
+
+        for debug_overlay in arms:
+            results = []
+            for trial in range(1, trial_count + 1):
+                result = run_trial(
+                    args.workload,
+                    trial,
+                    binary,
+                    oracle,
+                    durations,
+                    debug_overlay,
+                    samply_artifact=profile_artifact,
+                    heavy_scene=heavy_scene,
+                    camera_plan=args.heavy_camera_plan if heavy_scene is not None else None,
                 )
-                if profile_artifact is not None:
-                    record_path = _heavy_profile_record_path(profile_artifact)
-                    record_path.write_text(
-                        json.dumps({**record, "capture": str(profile_artifact)}, separators=(",", ":"), sort_keys=True) + "\n",
-                        encoding="utf-8",
+                _print_trial(args.workload, result)
+                if args.workload == "heavyweight":
+                    record = _heavy_record(
+                        args.workload, trial, binary, durations, debug_overlay, args.heavy_scale,
+                        args.heavy_camera_plan, heavy_scene, result["segments"],
                     )
-                    validate_heavy_profile_artifact(profile_artifact)
-                    print(f"heavyweight capture record: {record_path}")
-                else:
-                    HEAVY_RESULTS.parent.mkdir(parents=True, exist_ok=True)
-                    with HEAVY_RESULTS.open("a", encoding="utf-8") as handle:
-                        handle.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
-            elif not args.samply:
-                _append_records(args.workload, result, durations, binary)
-                results.append(result)
-        _print_spread(args.workload, debug_overlay, results)
-    if profile_artifact is not None:
-        print(f"samply profile: {profile_artifact}")
-    elif args.workload == "heavyweight":
-        print(f"appended heavyweight scene evidence to {HEAVY_RESULTS}")
-    else:
-        print(f"appended comparable records to {RESULTS}")
+                    if profile_artifact is not None:
+                        record_path = _heavy_profile_record_path(profile_artifact)
+                        record_path.write_text(
+                            json.dumps({**record, "capture": str(profile_artifact)}, separators=(",", ":"), sort_keys=True) + "\n",
+                            encoding="utf-8",
+                        )
+                        validate_heavy_profile_artifact(profile_artifact)
+                        print(f"heavyweight capture record: {record_path}")
+                    else:
+                        HEAVY_RESULTS.parent.mkdir(parents=True, exist_ok=True)
+                        with HEAVY_RESULTS.open("a", encoding="utf-8") as handle:
+                            handle.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
+                elif not args.samply:
+                    _append_records(args.workload, result, durations, binary)
+                    results.append(result)
+            _print_spread(args.workload, debug_overlay, results)
+        if profile_artifact is not None:
+            print(f"samply profile: {profile_artifact}")
+        elif args.workload == "heavyweight":
+            print(f"appended heavyweight scene evidence to {HEAVY_RESULTS}")
+        else:
+            print(f"appended comparable records to {RESULTS}")
+    finally:
+        if heavy_setup_datapack is not None:
+            heavy_setup_datapack.cleanup()
     return 0
 
 

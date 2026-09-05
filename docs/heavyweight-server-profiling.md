@@ -132,6 +132,17 @@ sidecar metadata; worker threads are part of the server work, so do not judge
 from the main thread alone. The workflow profiles the supported `entity --phase
 ready` slice and does not claim mutation or scheduled-tick coverage.
 
+The separate heavyweight *client* runner consumes the same immutable scene JSON.
+For its setup phase it wraps the plan's exact producer commands in a temporary
+datapack function in the selected local oracle world, issues `reload`, and calls
+that function through RCON. Each producer contributes to a temporary aggregate
+only when its normal command succeeds; the function returns the expected aggregate
+only when none was omitted or failed. It removes the runner-created directory and
+aggregate after the benchmark or a setup error. Reload and function execution share
+a 90-second setup deadline. The dense smoke profile retains all 7,937 setup
+actions while avoiding 7,937
+independent socket deadlines.
+
 ## Dependencies
 
 The harness relies on `lodestone-server::IntegratedServer`, its `ChunkSource`
