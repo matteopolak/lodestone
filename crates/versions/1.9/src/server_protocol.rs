@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
 use lodestone_server::{
     ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -23,9 +23,9 @@ use crate::packets::common::{
     KeepAliveRequest, KeepAliveRequestVarInt, KeepAliveResponse, KeepAliveResponseVarInt,
 };
 use crate::packets::game::{
-    BlockDig, ClientboundChat, ClientboundPositionLook, JoinGame, ServerboundChat,
-    ServerboundFlying, ServerboundLook, ServerboundPosition, ServerboundPositionLook,
-    TeleportConfirm,
+    BlockDig, BlockPlace, BlockPlaceByteCursor, ClientboundChat, ClientboundPositionLook, JoinGame,
+    ServerboundChat, ServerboundFlying, ServerboundLook, ServerboundPosition,
+    ServerboundPositionLook, TeleportConfirm,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -73,6 +73,7 @@ struct ServerPacketIds {
     compression: i32,
     login_success: i32,
     block_dig: i32,
+    block_place: i32,
     chat_serverbound: i32,
     teleport_confirm: i32,
     flying: i32,
@@ -95,6 +96,7 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     compression: login::clientbound::COMPRESS,
     login_success: login::clientbound::SUCCESS,
     block_dig: play::serverbound::BLOCK_DIG,
+    block_place: play::serverbound::BLOCK_PLACE,
     chat_serverbound: play::serverbound::CHAT,
     teleport_confirm: play::serverbound::TELEPORT_CONFIRM,
     flying: play::serverbound::FLYING,
@@ -117,6 +119,7 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_316::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_316::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_316::play::serverbound::BLOCK_DIG,
+    block_place: crate::packet_ids_316::play::serverbound::BLOCK_PLACE,
     chat_serverbound: crate::packet_ids_316::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_316::play::serverbound::TELEPORT_CONFIRM,
     flying: crate::packet_ids_316::play::serverbound::FLYING,
@@ -139,6 +142,7 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_210::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_210::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_210::play::serverbound::BLOCK_DIG,
+    block_place: crate::packet_ids_210::play::serverbound::BLOCK_PLACE,
     chat_serverbound: crate::packet_ids_210::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_210::play::serverbound::TELEPORT_CONFIRM,
     flying: crate::packet_ids_210::play::serverbound::FLYING,
@@ -161,6 +165,7 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     compression: crate::packet_ids_110::login::clientbound::COMPRESS,
     login_success: crate::packet_ids_110::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_110::play::serverbound::BLOCK_DIG,
+    block_place: crate::packet_ids_110::play::serverbound::BLOCK_PLACE,
     chat_serverbound: crate::packet_ids_110::play::serverbound::CHAT,
     teleport_confirm: crate::packet_ids_110::play::serverbound::TELEPORT_CONFIRM,
     flying: crate::packet_ids_110::play::serverbound::FLYING,
@@ -211,6 +216,53 @@ fn block_face(face: i8) -> Option<BlockFace> {
         5 => Some(BlockFace::East),
         _ => None,
     }
+}
+
+fn use_item_on(
+    location: Position,
+    direction: i32,
+    hand: i32,
+    cursor: Vec3f,
+) -> ServerBound {
+    let Some(hand) = u8::try_from(hand).ok().filter(|hand| *hand <= 1) else {
+        return ServerBound::Ignored;
+    };
+    if !cursor.x.is_finite()
+        || !cursor.y.is_finite()
+        || !cursor.z.is_finite()
+        || !(0.0..=1.0).contains(&cursor.x)
+        || !(0.0..=1.0).contains(&cursor.y)
+        || !(0.0..=1.0).contains(&cursor.z)
+    {
+        return ServerBound::Ignored;
+    }
+
+    if BlockPos::from(location) == BlockPos::new(-1, -1, -1) && direction == -1 {
+        // This era multiplexes use-in-air into `block_place`. The packet has
+        // no rotation, so retain its explicit absence as zeroes rather than
+        // borrowing state from an earlier movement packet.
+        return ServerBound::UseItem {
+            hand,
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+    }
+
+    let Some(face) = i8::try_from(direction).ok().and_then(block_face) else {
+        return ServerBound::Ignored;
+    };
+
+    ServerBound::UseItemOn {
+        pos: BlockPos::from(location),
+        face,
+        cursor,
+        sequence: 0,
+        hand,
+    }
+}
+
+fn byte_cursor(value: i8) -> Option<f32> {
+    (0..=15).contains(&value).then(|| f32::from(value) / 16.0)
 }
 
 fn uses_varint_keep_alive(protocol: i32) -> bool {
@@ -509,6 +561,52 @@ fn decode_packet(
                     pos,
                     face,
                     sequence: 0,
+                }
+            }
+            State::Play if packet_id == ids.block_place => {
+                if protocol >= PROTOCOL_1_11_2 {
+                    let Some(BlockPlace {
+                        location,
+                        direction,
+                        hand,
+                        cursor_x,
+                        cursor_y,
+                        cursor_z,
+                    }) = decode_full(payload, ctx)
+                    else {
+                        return ServerBound::Ignored;
+                    };
+                    use_item_on(
+                        location,
+                        direction,
+                        hand,
+                        Vec3f::new(cursor_x, cursor_y, cursor_z),
+                    )
+                } else {
+                    let Some(BlockPlaceByteCursor {
+                        location,
+                        direction,
+                        hand,
+                        cursor_x,
+                        cursor_y,
+                        cursor_z,
+                    }) = decode_full(payload, ctx)
+                    else {
+                        return ServerBound::Ignored;
+                    };
+                    let (Some(cursor_x), Some(cursor_y), Some(cursor_z)) = (
+                        byte_cursor(cursor_x),
+                        byte_cursor(cursor_y),
+                        byte_cursor(cursor_z),
+                    ) else {
+                        return ServerBound::Ignored;
+                    };
+                    use_item_on(
+                        location,
+                        direction,
+                        hand,
+                        Vec3f::new(cursor_x, cursor_y, cursor_z),
+                    )
                 }
             }
             State::Play if packet_id == ids.chat_serverbound => {

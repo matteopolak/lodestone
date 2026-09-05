@@ -79,6 +79,16 @@ in-memory protocol-340 control sends a quoted message and observes the rendered 
 the real client adapter's event stream, while a literal-body test covers all four id tables and
 trailing-byte rejection.
 
+Right-clicks share the older `block_place` packet. The decoder turns ordinary block targets into
+`ServerBound::UseItemOn`, which the shared server consumes for hand interactions and placements;
+the `(-1, -1, -1)`/direction `-1` sentinel instead becomes `ServerBound::UseItem` with the packet's
+explicit main/off-hand ordinal and zero rotation because this wire does not carry angles. Protocols
+110 and 210 encode the three hit coordinates as unsigned sixteenths, while 316 and 340 use three
+big-endian `f32`s. Both forms reject malformed hands, faces, cursor ranges, and trailing bytes.
+Literal controls pin all four tables and both body layouts, and in-memory 110 and 340 controls send
+a `UseItemOn` through their real family adapters to toggle a lever, proving the decoded action reaches
+the shared server's hand-use consumer and client block-update path.
+
 Unlike protocol 47, all four hosted 1.9-era tables put a teleport id on the
 clientbound position packet and accept a distinct `teleport_confirm` at
 serverbound id `0`. Their host decoders lift that reply to

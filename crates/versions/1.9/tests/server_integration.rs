@@ -6,6 +6,7 @@ use std::time::Duration;
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent, Rotation, Vec3,
+    Vec3f,
 };
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_9::adapter_for;
@@ -121,6 +122,61 @@ async fn assert_registry_selected_server_reaches_play_and_confirms_a_block_break
     server.shutdown().await;
 }
 
+async fn assert_registry_selected_server_consumes_block_use(protocol_version: i32) {
+    let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .expect("hosted legacy protocol must resolve");
+    let source = Arc::new(LegacyFixtureSource::new());
+    source.set_block(
+        TARGET.x,
+        TARGET.y,
+        TARGET.z,
+        "minecraft:lever[face=wall,facing=north,powered=false]",
+    );
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, _events) = ClientBuilder::new(
+        address(),
+        profile(),
+        Box::new(adapter_for(protocol_version)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(client_io);
+
+    handle.wait_for_spawn(Duration::from_secs(10)).await.expect("must join Play");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
+        .await
+        .expect("lever column must arrive");
+    let unpowered = lodestone_data::block_states::state_id(
+        "minecraft:lever[face=wall,facing=north,powered=false]",
+    )
+    .expect("unpowered lever state exists");
+    assert_eq!(handle.block_at(TARGET), Some(unpowered));
+
+    // This crosses the adapter's version-specific encoding, the server
+    // protocol decoder, and the shared server's hand-use world mutation.
+    handle
+        .send_action(ClientAction::UseItemOn {
+            hand: lodestone_model::Hand::Main,
+            pos: TARGET,
+            face: BlockFace::Up,
+            cursor: Vec3f::new(0.5, 0.5, 0.5),
+            inside_block: false,
+            sequence: 0,
+        })
+        .expect("joined client accepts block use");
+    let powered = lodestone_data::block_states::state_id(
+        "minecraft:lever[face=wall,facing=north,powered=true]",
+    )
+    .expect("powered lever state exists");
+    handle
+        .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(powered))
+        .await
+        .expect("the server must publish the hand-use lever mutation");
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
 async fn assert_teleport_confirmation_unblocks_movement(protocol_version: i32) {
     let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
         .expect("hosted legacy protocol must resolve");
@@ -207,6 +263,16 @@ async fn registry_selected_protocol_110_reaches_play_and_confirms_a_block_break(
 #[tokio::test]
 async fn registry_selected_protocol_316_reaches_play_and_confirms_a_block_break() {
     assert_registry_selected_server_reaches_play_and_confirms_a_block_break(316).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_110_consumes_byte_cursor_block_use() {
+    assert_registry_selected_server_consumes_block_use(110).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_340_consumes_float_cursor_block_use() {
+    assert_registry_selected_server_consumes_block_use(340).await;
 }
 
 #[tokio::test]
