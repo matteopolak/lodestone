@@ -3725,8 +3725,10 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::CLIENT_TICK_END => {
-                let _ = decode_full::<ClientTickEnd>(payload);
-                ServerBound::Ignored
+                match decode_full::<ClientTickEnd>(payload) {
+                    Some(_) => ServerBound::ClientTickEnded,
+                    None => ServerBound::Ignored,
+                }
             }
             // Vehicle movement lifts into a real variant consumed by the
             // server's vehicle registry. The client's authoritative boat
