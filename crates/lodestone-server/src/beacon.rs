@@ -67,6 +67,7 @@
 //! [`crate::crafting::EMBEDDED_ITEM_TAGS`] for the payment-item check.
 
 use crate::chunk::ChunkSource;
+use lodestone_data::mob_effects::{MobEffectId, mob_effect_id, mob_effect_name_for};
 
 /// `minecraft:beacon_base_blocks` — the five blocks one pyramid layer may be
 /// built from. See this module's own doc for why this is transcribed rather
@@ -89,6 +90,55 @@ pub const BEACON_EFFECT_TIERS: [&[&str]; 4] = [
     &["minecraft:strength"],
     &["minecraft:regeneration"],
 ];
+
+/// A built-in mob effect which the beacon menu can select.
+///
+/// The mob-effect registry has many entries that can never be beacon powers.
+/// This wrapper keeps that smaller six-entry domain distinct once a packet or
+/// saved NBT key has been validated. It is intentionally not constructible
+/// from a registry number: the wire and saved-data boundaries carry a name,
+/// and unknown or non-beacon names must be rejected there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BeaconPower(MobEffectId);
+
+impl BeaconPower {
+    /// Resolves a canonical built-in effect key when it is a legal beacon
+    /// power. Other mob effects and custom names are rejected.
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        mob_effect_id(key).and_then(Self::from_mob_effect)
+    }
+
+    fn from_mob_effect(effect: MobEffectId) -> Option<Self> {
+        BEACON_EFFECT_TIERS
+            .iter()
+            .any(|tier| tier.contains(&mob_effect_name_for(effect)))
+            .then_some(Self(effect))
+    }
+
+    /// The canonical key used by effect application and NBT persistence.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        mob_effect_name_for(self.0)
+    }
+
+    /// The minimum pyramid tier which unlocks this power.
+    #[must_use]
+    pub fn required_level(self) -> u8 {
+        let tier = BEACON_EFFECT_TIERS
+            .iter()
+            .position(|tier| tier.contains(&self.key()))
+            .expect("BeaconPower only holds a known beacon effect");
+        u8::try_from(tier + 1).expect("the beacon has four tiers")
+    }
+
+    /// The menu's shifted registry number (`0` remains its no-selection
+    /// sentinel).
+    #[must_use]
+    pub const fn menu_data_value(self) -> i32 {
+        self.0.registry_id() + 1
+    }
+}
 
 /// Strips a `[...]` block-state property suffix — the same convention this
 /// crate's other per-module private copies use (`fire.rs`, `growth_tick.rs`),
@@ -170,19 +220,6 @@ pub fn beam_unobstructed<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z:
     true
 }
 
-/// The pyramid tier `effect` requires — vanilla's real required-levels-for
-/// rule: the 1-based index of the [`BEACON_EFFECT_TIERS`] entry containing it, or
-/// `None` for anything not a beacon power at all (vanilla's own
-/// max-int fallback, restated as `None` here because this
-/// module has no sentinel level above `4`).
-#[must_use]
-pub fn required_levels_for(effect: &str) -> Option<u8> {
-    BEACON_EFFECT_TIERS
-        .iter()
-        .position(|tier| tier.contains(&effect))
-        .map(|i| u8::try_from(i + 1).unwrap_or(4))
-}
-
 /// Whether `primary`/`secondary` are a legal selection for a pyramid of
 /// `levels` tiers — vanilla's real validate-effects rule, every
 /// clause of its own body:
@@ -197,12 +234,16 @@ pub fn required_levels_for(effect: &str) -> Option<u8> {
 ///    identical to the primary (the same-effect amplifier-boost stack) —
 ///    never a *different* tier-1..3 power.
 #[must_use]
-pub fn validate_beacon_effects(primary: Option<&str>, secondary: Option<&str>, levels: u8) -> bool {
+pub fn validate_beacon_effects(
+    primary: Option<BeaconPower>,
+    secondary: Option<BeaconPower>,
+    levels: u8,
+) -> bool {
     if secondary.is_some() && levels < 4 {
         return false;
     }
-    let primary_level = primary.map_or(0, |e| required_levels_for(e).unwrap_or(u8::MAX));
-    let secondary_level = secondary.map_or(0, |e| required_levels_for(e).unwrap_or(u8::MAX));
+    let primary_level = primary.map_or(0, BeaconPower::required_level);
+    let secondary_level = secondary.map_or(0, BeaconPower::required_level);
     if primary_level > levels || secondary_level > levels {
         return false;
     }
@@ -216,8 +257,8 @@ pub fn validate_beacon_effects(primary: Option<&str>, secondary: Option<&str>, l
 /// ready for [`crate::mob_effects::ActiveEffects::apply`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeaconEffect {
-    /// The effect's canonical `minecraft:*` key.
-    pub effect: String,
+    /// The validated beacon power to apply.
+    pub effect: BeaconPower,
     /// `MobEffectInstance`'s amplifier (`0` = level I).
     pub amplifier: u32,
     /// Duration in game ticks.
@@ -237,7 +278,11 @@ pub struct BeaconEffect {
 /// gate; a beacon with no power selected applies nothing regardless of its
 /// pyramid tier.
 #[must_use]
-pub fn beacon_effects(levels: u8, primary: Option<&str>, secondary: Option<&str>) -> (f64, Vec<BeaconEffect>) {
+pub fn beacon_effects(
+    levels: u8,
+    primary: Option<BeaconPower>,
+    secondary: Option<BeaconPower>,
+) -> (f64, Vec<BeaconEffect>) {
     let levels_f = f64::from(levels);
     let range = levels_f.mul_add(10.0, 10.0);
     let duration_ticks = (9 + i32::from(levels) * 2) * 20;
@@ -247,7 +292,7 @@ pub fn beacon_effects(levels: u8, primary: Option<&str>, secondary: Option<&str>
     };
     let base_amp = u32::from(levels >= 4 && secondary == Some(primary));
     out.push(BeaconEffect {
-        effect: primary.to_owned(),
+        effect: primary,
         amplifier: base_amp,
         duration_ticks,
     });
@@ -265,24 +310,21 @@ pub fn beacon_effects(levels: u8, primary: Option<&str>, secondary: Option<&str>
 }
 
 /// The real beacon-menu encode-effect rule: the `container_set_data` wire form of an
-/// optional effect — `0` for `None`, else the `minecraft:mob_effect`
-/// registry id plus one (`0` is reserved as the "no effect" sentinel, so
-/// every real id shifts up by one).
+/// optional effect — `0` for `None`, else the validated beacon power's
+/// `minecraft:mob_effect` registry id plus one (`0` is reserved as the "no
+/// effect" sentinel, so every real id shifts up by one).
 #[must_use]
-pub fn encode_beacon_effect(effect: Option<&str>) -> i32 {
-    effect
-        .and_then(lodestone_data::mob_effects::mob_effect_id)
-        .map_or(0, |id| id.registry_id() + 1)
+pub fn encode_beacon_effect(effect: Option<BeaconPower>) -> i32 {
+    effect.map_or(0, BeaconPower::menu_data_value)
 }
 
 /// The real beacon-menu decode-effect rule, the inverse of [`encode_beacon_effect`].
 #[must_use]
-pub fn decode_beacon_effect(value: i32) -> Option<&'static str> {
+pub fn decode_beacon_effect(value: i32) -> Option<BeaconPower> {
     if value == 0 {
         None
     } else {
-        lodestone_data::mob_effects::MobEffectId::from_registry_id(value - 1)
-            .map(lodestone_data::mob_effects::mob_effect_name_for)
+        MobEffectId::from_registry_id(value - 1).and_then(BeaconPower::from_mob_effect)
     }
 }
 
@@ -330,6 +372,10 @@ mod tests {
 
     const MIN_Y: i32 = -64;
     const HEIGHT: i32 = 384;
+
+    fn power(key: &str) -> BeaconPower {
+        BeaconPower::from_key(key).expect("fixture names a beacon power")
+    }
 
     /// A `ChunkSource` that retains its edits — the same `Rig` shape
     /// `fire.rs`'s own test module already uses, duplicated per that
@@ -503,14 +549,21 @@ mod tests {
 
     #[test]
     fn required_levels_for_each_tier_matches_its_index_plus_one() {
-        assert_eq!(required_levels_for("minecraft:speed"), Some(1));
-        assert_eq!(required_levels_for("minecraft:haste"), Some(1));
-        assert_eq!(required_levels_for("minecraft:resistance"), Some(2));
-        assert_eq!(required_levels_for("minecraft:jump_boost"), Some(2));
-        assert_eq!(required_levels_for("minecraft:strength"), Some(3));
-        assert_eq!(required_levels_for("minecraft:regeneration"), Some(4));
-        assert_eq!(required_levels_for("minecraft:speed"), Some(1));
-        assert_eq!(required_levels_for("minecraft:not_a_beacon_power"), None);
+        assert_eq!(power("minecraft:speed").required_level(), 1);
+        assert_eq!(power("minecraft:haste").required_level(), 1);
+        assert_eq!(power("minecraft:resistance").required_level(), 2);
+        assert_eq!(power("minecraft:jump_boost").required_level(), 2);
+        assert_eq!(power("minecraft:strength").required_level(), 3);
+        assert_eq!(power("minecraft:regeneration").required_level(), 4);
+    }
+
+    /// External keys have two rejection cases: a known mob effect outside
+    /// the beacon's six-power domain, and a key absent from the fixed
+    /// registry. Neither can enter [`BeaconData`](crate::block_entities::BeaconData).
+    #[test]
+    fn beacon_power_key_boundary_rejects_non_power_and_unknown_effects() {
+        assert!(BeaconPower::from_key("minecraft:poison").is_none());
+        assert!(BeaconPower::from_key("example:custom_power").is_none());
     }
 
     /// The discriminating pyramid levels: a level-1 pyramid can select a
@@ -518,17 +571,25 @@ mod tests {
     /// tier-2/3 primary.
     #[test]
     fn a_level_one_pyramid_permits_only_a_tier_one_primary_with_no_secondary() {
-        assert!(validate_beacon_effects(Some("minecraft:speed"), None, 1));
-        assert!(!validate_beacon_effects(Some("minecraft:resistance"), None, 1));
-        assert!(!validate_beacon_effects(Some("minecraft:speed"), Some("minecraft:speed"), 1));
+        assert!(validate_beacon_effects(Some(power("minecraft:speed")), None, 1));
+        assert!(!validate_beacon_effects(Some(power("minecraft:resistance")), None, 1));
+        assert!(!validate_beacon_effects(
+            Some(power("minecraft:speed")),
+            Some(power("minecraft:speed")),
+            1
+        ));
     }
 
     /// A level-3 pyramid unlocks tier 1–3 primaries but still no secondary
     /// at all — the level-4 boundary is what unlocks secondaries, not tier 3.
     #[test]
     fn a_level_three_pyramid_permits_a_tier_three_primary_but_never_a_secondary() {
-        assert!(validate_beacon_effects(Some("minecraft:strength"), None, 3));
-        assert!(!validate_beacon_effects(Some("minecraft:strength"), Some("minecraft:strength"), 3));
+        assert!(validate_beacon_effects(Some(power("minecraft:strength")), None, 3));
+        assert!(!validate_beacon_effects(
+            Some(power("minecraft:strength")),
+            Some(power("minecraft:strength")),
+            3
+        ));
     }
 
     /// The level-4 secondary rule and the regeneration special case: a
@@ -537,11 +598,23 @@ mod tests {
     /// itself may never be regeneration.
     #[test]
     fn a_level_four_pyramid_permits_only_a_matching_or_regeneration_secondary() {
-        assert!(validate_beacon_effects(Some("minecraft:speed"), None, 4));
-        assert!(validate_beacon_effects(Some("minecraft:speed"), Some("minecraft:speed"), 4));
-        assert!(validate_beacon_effects(Some("minecraft:speed"), Some("minecraft:regeneration"), 4));
-        assert!(!validate_beacon_effects(Some("minecraft:speed"), Some("minecraft:strength"), 4));
-        assert!(!validate_beacon_effects(Some("minecraft:regeneration"), None, 4));
+        assert!(validate_beacon_effects(Some(power("minecraft:speed")), None, 4));
+        assert!(validate_beacon_effects(
+            Some(power("minecraft:speed")),
+            Some(power("minecraft:speed")),
+            4
+        ));
+        assert!(validate_beacon_effects(
+            Some(power("minecraft:speed")),
+            Some(power("minecraft:regeneration")),
+            4
+        ));
+        assert!(!validate_beacon_effects(
+            Some(power("minecraft:speed")),
+            Some(power("minecraft:strength")),
+            4
+        ));
+        assert!(!validate_beacon_effects(Some(power("minecraft:regeneration")), None, 4));
     }
 
     /// **Magnitude, not sign**: predict the exact range/duration/amplifier
@@ -553,7 +626,7 @@ mod tests {
         for (levels, expected_range, expected_duration) in
             [(1u8, 20.0, 220), (2, 30.0, 260), (3, 40.0, 300), (4, 50.0, 340)]
         {
-            let (range, effects) = beacon_effects(levels, Some("minecraft:speed"), None);
+            let (range, effects) = beacon_effects(levels, Some(power("minecraft:speed")), None);
             assert_eq!(range, expected_range, "range at level {levels}");
             assert_eq!(effects.len(), 1);
             assert_eq!(effects[0].duration_ticks, expected_duration, "duration at level {levels}");
@@ -565,11 +638,19 @@ mod tests {
     /// primary — the discriminating pair the doc names.
     #[test]
     fn a_stacked_secondary_boosts_the_primary_amplifier_only_at_level_four() {
-        let (_, effects) = beacon_effects(4, Some("minecraft:speed"), Some("minecraft:speed"));
+        let (_, effects) = beacon_effects(
+            4,
+            Some(power("minecraft:speed")),
+            Some(power("minecraft:speed")),
+        );
         assert_eq!(effects.len(), 1, "same effect twice collapses to one boosted application");
         assert_eq!(effects[0].amplifier, 1);
 
-        let (_, effects) = beacon_effects(3, Some("minecraft:speed"), Some("minecraft:speed"));
+        let (_, effects) = beacon_effects(
+            3,
+            Some(power("minecraft:speed")),
+            Some(power("minecraft:speed")),
+        );
         assert_eq!(effects[0].amplifier, 0, "the amplifier boost needs level 4, not just a match");
     }
 
@@ -577,11 +658,15 @@ mod tests {
     /// amplifier boost on either.
     #[test]
     fn a_distinct_secondary_applies_as_its_own_zero_amplifier_effect() {
-        let (_, effects) = beacon_effects(4, Some("minecraft:speed"), Some("minecraft:regeneration"));
+        let (_, effects) = beacon_effects(
+            4,
+            Some(power("minecraft:speed")),
+            Some(power("minecraft:regeneration")),
+        );
         assert_eq!(effects.len(), 2);
-        assert_eq!(effects[0].effect, "minecraft:speed");
+        assert_eq!(effects[0].effect.key(), "minecraft:speed");
         assert_eq!(effects[0].amplifier, 0);
-        assert_eq!(effects[1].effect, "minecraft:regeneration");
+        assert_eq!(effects[1].effect.key(), "minecraft:regeneration");
         assert_eq!(effects[1].amplifier, 0);
     }
 
@@ -595,13 +680,13 @@ mod tests {
     fn encode_beacon_effect_round_trips_through_decode() {
         assert_eq!(encode_beacon_effect(None), 0);
         assert_eq!(decode_beacon_effect(0), None);
-        let speed_encoded = encode_beacon_effect(Some("minecraft:speed"));
+        let speed_encoded = encode_beacon_effect(Some(power("minecraft:speed")));
         assert_ne!(speed_encoded, 0, "a real effect must not collide with the none sentinel");
-        assert_eq!(decode_beacon_effect(speed_encoded), Some("minecraft:speed"));
+        assert_eq!(decode_beacon_effect(speed_encoded), Some(power("minecraft:speed")));
         // A second, distinct effect must not collide with the first.
-        let strength_encoded = encode_beacon_effect(Some("minecraft:strength"));
+        let strength_encoded = encode_beacon_effect(Some(power("minecraft:strength")));
         assert_ne!(speed_encoded, strength_encoded);
-        assert_eq!(decode_beacon_effect(strength_encoded), Some("minecraft:strength"));
+        assert_eq!(decode_beacon_effect(strength_encoded), Some(power("minecraft:strength")));
     }
 
     #[test]

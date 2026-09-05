@@ -149,11 +149,11 @@ pub struct BeaconData {
     /// will not see the number change until the next such refresh — a real,
     /// minor divergence from vanilla's own 80-tick background recompute.
     pub levels: u8,
-    /// The selected primary power's canonical key, or `None` if unset.
-    pub primary_effect: Option<String>,
+    /// The selected primary power, or `None` if unset.
+    pub primary_effect: Option<crate::beacon::BeaconPower>,
     /// The selected secondary power's canonical key (level-4 pyramids only —
     /// see [`crate::beacon::validate_beacon_effects`]), or `None`.
-    pub secondary_effect: Option<String>,
+    pub secondary_effect: Option<crate::beacon::BeaconPower>,
     /// The single payment-slot item, if any. It is consumed one at a time by
     /// a successful `SET_BEACON` action.
     pub payment: Option<ItemStack>,
@@ -564,8 +564,8 @@ impl BlockEntity {
             // effect, in that order.
             BlockEntity::Beacon(b) => vec![
                 i32::from(b.levels),
-                crate::beacon::encode_beacon_effect(b.primary_effect.as_deref()),
-                crate::beacon::encode_beacon_effect(b.secondary_effect.as_deref()),
+                crate::beacon::encode_beacon_effect(b.primary_effect),
+                crate::beacon::encode_beacon_effect(b.secondary_effect),
             ],
             // Indices `0..9` are the per-slot enabled (`0`)/disabled (`1`)
             // flags; index `9` is the trigger flag — always `0` here, since nothing

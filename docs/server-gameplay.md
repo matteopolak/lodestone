@@ -63,6 +63,12 @@ outcomes swapped from what the keybind names would suggest, which is exactly the
 that produces a well-formed but backwards packet on both sides and is invisible without an explicit
 assertion on which outcome is which.
 
+Beacon power selection takes one further boundary step: packet and saved-NBT keys are resolved into
+the closed `BeaconPower` domain before they reach `BeaconData`. A built-in mob effect is not
+automatically a beacon power, so unsupported effects and custom keys are rejected at that boundary;
+the stored value, pyramid validation, menu encoding, and periodic effect application thereafter
+cannot accidentally treat an arbitrary string as a selectable power.
+
 ### Server-side crafting
 
 The server keeps its own crafting grid and resolves a result from the bundled real recipe corpus,
