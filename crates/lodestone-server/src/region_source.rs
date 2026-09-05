@@ -63,6 +63,9 @@
 //!   anything the tick owns, because it reads its own retained columns.
 //! - Marking a chunk dirty, which *is* on the mutation path, is a `HashSet`
 //!   insert behind a `Mutex` and nothing else. No I/O, no encoding.
+//! - An unload is only a bounded hand-off into a durable-save ledger. The
+//!   ledger's typed token is acknowledged after a successful region rewrite;
+//!   merely queueing the unload cannot release the authoritative edit.
 //!
 //! # How to change it, and the gotchas
 //!
@@ -426,6 +429,120 @@ pub struct PersistenceStats {
     pub region_bytes_read: AtomicU64,
 }
 
+/// One unload hand-off that is valid only for one coordinate and one source
+/// transition.
+///
+/// The generation prevents a delayed acknowledgement from an earlier cache
+/// eviction from completing a later eviction of the same chunk. Keeping the
+/// coordinate in the token also makes a cross-coordinate acknowledgement fail
+/// closed instead of relying on the caller to pair two parallel batches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DurableUnloadToken {
+    generation: u64,
+    chunk: (i32, i32),
+}
+
+/// The only acknowledgement phases a durable unload may occupy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableUnloadPhase {
+    /// `ChunkSource::unload` has queued the hand-off, but no successful save
+    /// has acknowledged it yet.
+    Queued,
+    /// The save that owns this token completed its required disk writes.
+    Durable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DurableUnloadEntry {
+    token: DurableUnloadToken,
+    phase: DurableUnloadPhase,
+}
+
+/// The bounded durable-save acknowledgement ledger for one world.
+///
+/// There is at most one current entry per chunk. A repeated unload supersedes
+/// its predecessor, making the predecessor stale by construction instead of
+/// retaining a process-wide acknowledgement history.
+#[derive(Debug, Default)]
+struct DurableUnloadLedger {
+    next_generation: u64,
+    pending: HashMap<(i32, i32), DurableUnloadEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableUnloadAckResult {
+    /// The queued token advanced to the durable phase.
+    Accepted,
+    /// The same token was already acknowledged.
+    Duplicate,
+    /// The token is absent, superseded, or names a different chunk.
+    Stale,
+}
+
+impl DurableUnloadLedger {
+    fn enqueue(&mut self, chunk: (i32, i32)) -> DurableUnloadToken {
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .expect("durable unload generation space exhausted");
+        let token = DurableUnloadToken {
+            generation: self.next_generation,
+            chunk,
+        };
+        self.pending.insert(
+            chunk,
+            DurableUnloadEntry {
+                token,
+                phase: DurableUnloadPhase::Queued,
+            },
+        );
+        token
+    }
+
+    fn tokens(&self) -> Vec<DurableUnloadToken> {
+        let mut tokens: Vec<_> = self.pending.values().map(|entry| entry.token).collect();
+        tokens.sort_unstable_by_key(|token| token.chunk);
+        tokens
+    }
+
+    fn durable_tokens(&self) -> Vec<DurableUnloadToken> {
+        let mut tokens: Vec<_> = self
+            .pending
+            .values()
+            .filter(|entry| entry.phase == DurableUnloadPhase::Durable)
+            .map(|entry| entry.token)
+            .collect();
+        tokens.sort_unstable_by_key(|token| token.chunk);
+        tokens
+    }
+
+    fn acknowledge(&mut self, token: DurableUnloadToken) -> DurableUnloadAckResult {
+        let Some(entry) = self.pending.get_mut(&token.chunk) else {
+            return DurableUnloadAckResult::Stale;
+        };
+        if entry.token != token {
+            return DurableUnloadAckResult::Stale;
+        }
+        match entry.phase {
+            DurableUnloadPhase::Queued => {
+                entry.phase = DurableUnloadPhase::Durable;
+                DurableUnloadAckResult::Accepted
+            }
+            DurableUnloadPhase::Durable => DurableUnloadAckResult::Duplicate,
+        }
+    }
+
+    fn release(&mut self, token: DurableUnloadToken) -> bool {
+        let Some(entry) = self.pending.get(&token.chunk) else {
+            return false;
+        };
+        if entry.token != token || entry.phase != DurableUnloadPhase::Durable {
+            return false;
+        }
+        self.pending.remove(&token.chunk).is_some()
+    }
+}
+
 /// The state a save needs, shared between the source and its save handle.
 #[derive(Debug)]
 struct WorldState {
@@ -444,10 +561,10 @@ struct WorldState {
     edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
     /// Chunks changed since the last successful save.
     dirty: Mutex<HashSet<(i32, i32)>>,
-    /// Chunks the cache above has evicted, which may therefore be dropped from
-    /// [`Self::edits`] once they are safely on disk. See
-    /// [`WorldSaveHandle::save`]'s unload sweep.
-    pending_unload: Mutex<HashSet<(i32, i32)>>,
+    /// Chunks the cache above has evicted. An entry stays here from queueing
+    /// through its durable acknowledgement and until the authoritative edit is
+    /// actually released. See [`WorldSaveHandle::save`]'s unload sweep.
+    pending_unload: Mutex<DurableUnloadLedger>,
     /// The world's live block entities — the same registry the tick loop and
     /// the connection task hold, not a copy.
     ///
@@ -806,7 +923,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
                 height,
                 edits: Mutex::new(HashMap::new()),
                 dirty: Mutex::new(HashSet::new()),
-                pending_unload: Mutex::new(HashSet::new()),
+                pending_unload: Mutex::new(DurableUnloadLedger::default()),
                 block_entities: BlockEntityHandle::default(),
                 scheduled: ScheduledTickHandle::default(),
                 stats: PersistenceStats::default(),
@@ -1141,15 +1258,16 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
     /// it once it is on disk.
     ///
     /// Nothing is dropped here: this runs on `ChunkStore`'s miss path, which is
-    /// frequently the tick thread, so it is a `HashSet` insert and nothing
-    /// else. The actual release happens inside [`WorldSaveHandle::save`],
-    /// which already runs on the blocking pool.
+    /// frequently the tick thread, so it is a bounded ledger insert and
+    /// nothing else. The new token is acknowledged only by
+    /// [`WorldSaveHandle::save`] after its region writes succeed; the actual
+    /// release happens after that acknowledgement on the blocking pool.
     fn unload(&self, cx: i32, cz: i32) {
         self.state
             .pending_unload
             .lock()
             .expect("world unload lock poisoned")
-            .insert((cx, cz));
+            .enqueue((cx, cz));
     }
 
     /// Forwarded to the wrapped generator (`self.inner`) — this wrapper has
@@ -1185,6 +1303,33 @@ impl WorldSaveHandle {
     #[must_use]
     pub fn stats(&self) -> &PersistenceStats {
         &self.state.stats
+    }
+
+    /// Snapshots the current unload hand-offs without removing them.
+    ///
+    /// Keeping the entries in the ledger until the region writes complete is
+    /// what makes a failed save retryable and lets an unload that arrives while
+    /// a save is running receive its own later acknowledgement.
+    fn pending_unload_tokens(&self) -> Vec<DurableUnloadToken> {
+        self.state
+            .pending_unload
+            .lock()
+            .expect("world unload lock poisoned")
+            .tokens()
+    }
+
+    /// Moves one queued unload into its durable phase.
+    ///
+    /// This is intentionally private: only [`Self::save`] can establish the
+    /// required fact that the affected region writes completed. A caller
+    /// cannot acknowledge a queued token merely because it observed the
+    /// source-side hand-off.
+    fn acknowledge_unload(&self, token: DurableUnloadToken) -> DurableUnloadAckResult {
+        self.state
+            .pending_unload
+            .lock()
+            .expect("world unload lock poisoned")
+            .acknowledge(token)
     }
 
     /// The set of chunks that currently hold at least one block entity.
@@ -1235,6 +1380,10 @@ impl WorldSaveHandle {
     /// On failure the affected chunks are put **back** into the dirty set, so
     /// a transient disk error costs a retry rather than the player's work.
     pub fn save(&self) -> Result<usize, Error> {
+        // A token remains queued while this save is in flight. A later unload
+        // of the same coordinate supersedes this snapshot and is rejected as
+        // stale below, leaving the current token for the next save.
+        let unload_tokens = self.pending_unload_tokens();
         let mut pending: HashSet<(i32, i32)> = {
             let mut dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
             dirty.drain().collect()
@@ -1266,6 +1415,9 @@ impl WorldSaveHandle {
             // whose evicted columns should be released, and an early return
             // here would mean memory is only ever reclaimed while the player
             // is placing blocks.
+            for token in unload_tokens {
+                let _ = self.acknowledge_unload(token);
+            }
             self.release_unloaded();
             return Ok(0);
         }
@@ -1299,7 +1451,11 @@ impl WorldSaveHandle {
             .columns_written
             .fetch_add(written as u64, Ordering::Relaxed);
         // After the writes, never before: the sweep's whole safety argument is
-        // that anything it drops is already on disk.
+        // that anything it drops is already on disk. A token replaced by a
+        // newer unload is stale and remains queued for that newer save.
+        for token in unload_tokens {
+            let _ = self.acknowledge_unload(token);
+        }
         self.release_unloaded();
         Ok(written)
     }
@@ -1326,17 +1482,15 @@ impl WorldSaveHandle {
     /// (`edits`, then `dirty`), which is what makes the not-dirty check
     /// exclude an edit that is mid-flight rather than merely unlikely.
     fn release_unloaded(&self) {
-        let candidates: Vec<(i32, i32)> = {
-            let mut pending = self
-                .state
-                .pending_unload
-                .lock()
-                .expect("world unload lock poisoned");
-            if pending.is_empty() {
-                return;
-            }
-            pending.drain().collect()
-        };
+        let candidates = self
+            .state
+            .pending_unload
+            .lock()
+            .expect("world unload lock poisoned")
+            .durable_tokens();
+        if candidates.is_empty() {
+            return;
+        }
 
         // Taken before `edits`, for the lock-order reason `save_region`
         // documents. Pending ticks join block entities in the "never release"
@@ -1347,11 +1501,12 @@ impl WorldSaveHandle {
         holds_block_entities.extend(self.state.scheduled.chunks_with_pending_ticks());
 
         let mut released = 0u64;
-        let mut deferred: Vec<(i32, i32)> = Vec::new();
+        let mut releasable: Vec<DurableUnloadToken> = Vec::new();
         {
             let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
             let dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
-            for key in candidates {
+            for token in candidates {
+                let key = token.chunk;
                 // **A chunk holding a block entity is never released**, and
                 // this is a correctness rule rather than a heuristic. The
                 // invariant that makes releasing lossless is "a column in
@@ -1365,35 +1520,36 @@ impl WorldSaveHandle {
                 // residency, so the memory ceiling unload-driven saving exists
                 // to impose still holds.
                 if holds_block_entities.contains(&key) {
-                    deferred.push(key);
                     continue;
                 }
                 if dirty.contains(&key) {
                     // Mutated again since the eviction, so it is not on disk in
                     // its current form. Dropping it now would lose that edit.
-                    deferred.push(key);
                     continue;
                 }
                 if edits.remove(&key).is_some() {
                     released += 1;
                 }
+                // Even an unedited/generated column has no authoritative edit
+                // to remove. Its durable token must still be retired, or the
+                // bounded ledger would retain a phantom unload forever.
+                releasable.push(token);
             }
         }
 
-        // Re-queued **after** both locks are released, never while holding
-        // them: the drain above takes `pending_unload` before `edits`, so
-        // taking it again underneath `edits` would invert the order against a
-        // concurrent sweep and could deadlock. Requeuing at all is what makes
-        // the skip above a deferral rather than a leak — a column skipped once
-        // would otherwise sit in the edit map until it happened to be evicted
-        // a second time.
-        if !deferred.is_empty() {
+        // Retire tokens **after** both locks are released, never while holding
+        // them. Entries skipped above remain in the durable phase and are
+        // retried by the next save, so a concurrent mutation or live container
+        // cannot turn a temporary deferral into a forgotten unload.
+        if !releasable.is_empty() {
             let mut pending = self
                 .state
                 .pending_unload
                 .lock()
                 .expect("world unload lock poisoned");
-            pending.extend(deferred);
+            for token in releasable {
+                let _ = pending.release(token);
+            }
         }
 
         self.state
@@ -1577,6 +1733,48 @@ mod tests {
     const MIN_Y: i32 = -64;
     const HEIGHT: i32 = 384;
     const MARKER: &str = "minecraft:diamond_block";
+
+    #[test]
+    fn durable_unload_tokens_are_bounded_and_reject_stale_or_mismatched_replies() {
+        let mut ledger = DurableUnloadLedger::default();
+        let first = ledger.enqueue((-3, 5));
+
+        assert_eq!(ledger.pending.len(), 1, "one coordinate owns one token");
+        assert_eq!(
+            ledger.acknowledge(DurableUnloadToken {
+                chunk: (-3, 6),
+                ..first
+            }),
+            DurableUnloadAckResult::Stale,
+            "a reply for a neighboring chunk cannot acknowledge this unload"
+        );
+        assert_eq!(
+            ledger.acknowledge(first),
+            DurableUnloadAckResult::Accepted,
+            "only the queued token can enter the durable phase"
+        );
+        assert_eq!(
+            ledger.acknowledge(first),
+            DurableUnloadAckResult::Duplicate,
+            "a durable acknowledgement cannot be consumed twice"
+        );
+
+        // A second eviction of the same coordinate replaces the first token,
+        // rather than extending a history that grows with every visit.
+        let second = ledger.enqueue((-3, 5));
+        assert_eq!(ledger.pending.len(), 1);
+        assert_eq!(
+            ledger.acknowledge(first),
+            DurableUnloadAckResult::Stale,
+            "an old coordinate token cannot complete a newer unload"
+        );
+        assert_eq!(
+            ledger.acknowledge(second),
+            DurableUnloadAckResult::Accepted
+        );
+        assert!(ledger.release(second));
+        assert!(ledger.pending.is_empty());
+    }
 
     #[derive(Debug)]
     struct Flat;
@@ -1763,10 +1961,11 @@ mod tests {
     /// moment of the sweep** is deferred, not dropped.
     ///
     /// Reached in production only when a `set_block` lands between a save's
-    /// write and its sweep — a genuine concurrent window, which is why it is
-    /// exercised by calling [`WorldSaveHandle::release_unloaded`] directly
-    /// rather than by racing two threads and hoping. A timing-dependent gate
-    /// for this would introduce a timing-dependent flake.
+    /// write and its durable acknowledgement/sweep — a genuine concurrent
+    /// window, which is why it is exercised by calling
+    /// [`WorldSaveHandle::release_unloaded`] directly rather than by racing two
+    /// threads and hoping. A timing-dependent gate for this would introduce a
+    /// timing-dependent flake.
     #[test]
     fn the_sweep_defers_a_column_that_is_dirty_when_it_runs() {
         let dir = tempdir("deferred");
@@ -1775,6 +1974,20 @@ mod tests {
 
         source.set_block(1, 70, 1, MARKER);
         source.unload(0, 0);
+
+        let token = source
+            .state
+            .pending_unload
+            .lock()
+            .expect("world unload lock poisoned")
+            .tokens()
+            .pop()
+            .expect("the unload must create one durable token");
+        assert_eq!(
+            handle.acknowledge_unload(token),
+            DurableUnloadAckResult::Accepted,
+            "the direct sweep test starts after the durable acknowledgement"
+        );
 
         // Dirty and unloaded at once: exactly the state a mutation between the
         // write and the sweep produces.
@@ -1790,7 +2003,7 @@ mod tests {
 
         // Deferred rather than forgotten: once it is genuinely on disk, the
         // next sweep releases it without needing a second eviction. Without
-        // the requeue this would read (1, 0) forever.
+        // retaining the durable token this would read (1, 0) forever.
         handle.save().expect("save");
         assert_eq!(
             (
