@@ -204,7 +204,8 @@ pub use player::{
     ActionQueue, AttackStrengthTicker, CameraOverride, CollisionSource, Dead, DebugLine,
     DebugLines, Egress, Flying, JumpTriggerTime, LastFlyingSent, LastPlayerInput,
     LastSprintingSent, LocalPlayer, LocalPlayerPlugin, LookIntent, MovementIntent, PhysicsState,
-    PlayerCollision, PrevPosition, Profile, SelectedSlot, SprintKeyHeld, Submersion, WasJumping,
+    PlayerCollision, PrevPosition, Profile, SelectSlotIntent, SelectedSlot, SprintKeyHeld,
+    Submersion, WasJumping,
     apply_creative_flight_input, apply_look_intent, cancel_flight_on_landing, clear_debug_lines,
     pin_passenger_to_vehicle, reset_local_player, spawn_local_player, tick_attack_strength,
 };
