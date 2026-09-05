@@ -105,6 +105,21 @@ The packed/demo path mirrors the same shape with its own (much smaller) origin a
 primarily so a future fog/sky-darken uniform has somewhere to live without re-opening
 the old per-section-write cost, not because the demo world's own frame time mattered.
 
+### Mining-crack texture sampling
+
+The mining-crack overlay reuses the block atlas texture and its mip pyramid, but not
+the terrain sampler. `CrackPipeline` owns a clamped sampler with nearest magnification,
+so each enlarged crack texel stays discrete; minification and mip transitions remain
+linear to avoid distant shimmer. Passing only the atlas `TextureView` into
+`CrackPipeline::atlas_bind_group` makes that separation structural: terrain can keep
+its linear magnification without silently blurring the overlay.
+
+To change the crack filtering, update `crack_sampler_descriptor` and its unit test in
+`lodestone-render::crack_pipeline`. The block atlas upload and resource-pack reload
+paths only need to provide the current texture view. There is no runtime configuration.
+This path depends on `GpuAtlas` for the resident texture and on `CrackResolver` for the
+stage UV rectangle and block-shaped overlay geometry.
+
 ### Translucency: culling and depth
 
 Two independent rules govern an interior face between two translucent blocks of the

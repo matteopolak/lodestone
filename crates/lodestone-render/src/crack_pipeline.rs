@@ -38,7 +38,6 @@ use wgpu::util::DeviceExt;
 use crate::block::{DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 use crate::crack::{CrackMesh, CrackVertex};
 use crate::model_pipeline::CAMERA_DEPTH_BIAS;
-use crate::texture::GpuAtlas;
 
 /// GPU-resident crack geometry: a vertex buffer, an index buffer and the index
 /// count.
@@ -101,6 +100,8 @@ pub struct CrackPipeline {
     pub camera_layout: wgpu::BindGroupLayout,
     /// Bind-group layout for the atlas texture + sampler (group 1).
     pub atlas_layout: wgpu::BindGroupLayout,
+    /// Nearest-magnification sampler that keeps crack texels crisp.
+    atlas_sampler: wgpu::Sampler,
 }
 
 impl CrackPipeline {
@@ -147,6 +148,7 @@ impl CrackPipeline {
                 },
             ],
         });
+        let atlas_sampler = device.create_sampler(&crack_sampler_descriptor());
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("lodestone-crack-layout"),
@@ -231,6 +233,7 @@ impl CrackPipeline {
             pipeline,
             camera_layout,
             atlas_layout,
+            atlas_sampler,
         }
     }
 
@@ -253,25 +256,42 @@ impl CrackPipeline {
         })
     }
 
-    /// Create the atlas bind group from a [`GpuAtlas`] (texture + sampler).
-    /// This is the same complete block atlas the model pass binds, so the
-    /// `destroy_stage` UVs from [`BlockModels::crack_stage_uv`] resolve directly.
+    /// Create the atlas bind group from the complete block-atlas texture view.
+    /// The crack pass supplies its own sampler so terrain's linear magnification
+    /// does not blur the discrete `destroy_stage` texels.
     #[must_use]
-    pub fn atlas_bind_group(&self, device: &wgpu::Device, atlas: &GpuAtlas) -> wgpu::BindGroup {
+    pub fn atlas_bind_group(
+        &self,
+        device: &wgpu::Device,
+        atlas_view: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lodestone-crack-atlas-bg"),
             layout: &self.atlas_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&atlas.view),
+                    resource: wgpu::BindingResource::TextureView(atlas_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&atlas.sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.atlas_sampler),
                 },
             ],
         })
+    }
+}
+
+fn crack_sampler_descriptor() -> wgpu::SamplerDescriptor<'static> {
+    wgpu::SamplerDescriptor {
+        label: Some("lodestone-crack-atlas-sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        ..Default::default()
     }
 }
 
@@ -286,5 +306,13 @@ mod tests {
         let layout = crack_vertex_layout();
         assert_eq!(layout.array_stride, 20);
         assert_eq!(layout.attributes.len(), 2);
+    }
+
+    #[test]
+    fn crack_sampler_keeps_magnified_texels_discrete() {
+        let descriptor = crack_sampler_descriptor();
+        assert_eq!(descriptor.mag_filter, wgpu::FilterMode::Nearest);
+        assert_eq!(descriptor.min_filter, wgpu::FilterMode::Linear);
+        assert_eq!(descriptor.mipmap_filter, wgpu::MipmapFilterMode::Linear);
     }
 }
