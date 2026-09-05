@@ -30,6 +30,7 @@
 use crate::generated_mob_effect_colors::MOB_EFFECT_COLORS;
 use crate::generated_potion_effect_ids::POTION_EFFECT_BASE_IDS;
 use crate::generated_potions::POTION_NAMES;
+use crate::mob_effects::MobEffectId;
 
 pub use crate::generated_potion_effects::POTION_EFFECTS;
 pub use crate::generated_potions::POTION_COUNT;
@@ -99,10 +100,8 @@ const fn opaque(rgb: u32) -> u32 {
 /// [`MOB_EFFECT_COLORS`]' range contributes nothing, matching a caller that could not
 /// resolve the effect either — silently dropping an unknown effect from the average
 /// rather than panicking or poisoning the whole mix.
-fn accumulate(effect_id: i32, amplifier: u8, red: &mut u32, green: &mut u32, blue: &mut u32, weight: &mut u32) {
-    let Some(color) = usize::try_from(effect_id).ok().and_then(|i| MOB_EFFECT_COLORS.get(i)).copied() else {
-        return;
-    };
+fn accumulate(effect_id: MobEffectId, amplifier: u8, red: &mut u32, green: &mut u32, blue: &mut u32, weight: &mut u32) {
+    let color = MOB_EFFECT_COLORS[effect_id.registry_id() as usize];
     let w = u32::from(amplifier) + 1;
     *red += w * ((color >> 16) & 0xFF);
     *green += w * ((color >> 8) & 0xFF);
@@ -136,12 +135,17 @@ pub fn potion_color(
     if let Some(id) = potion {
         let effects = &POTION_EFFECTS[id.index()];
         for &(effect_index, amplifier, _duration_ticks) in *effects {
-            let effect_id = i32::try_from(effect_index).unwrap_or(-1);
+            let effect_id = MobEffectId::from_registry_id(
+                i32::try_from(effect_index).expect("generated mob-effect index fits i32"),
+            )
+            .expect("generated potion table names a built-in mob effect");
             accumulate(effect_id, amplifier, &mut red, &mut green, &mut blue, &mut weight);
         }
     }
     for &(effect_id, amplifier) in custom_effects {
-        accumulate(effect_id, amplifier, &mut red, &mut green, &mut blue, &mut weight);
+        if let Some(effect_id) = MobEffectId::from_registry_id(effect_id) {
+            accumulate(effect_id, amplifier, &mut red, &mut green, &mut blue, &mut weight);
+        }
     }
     if weight == 0 {
         opaque(BASE_POTION_COLOR)
@@ -319,12 +323,21 @@ const EFFECT_DISPLAY_NAMES: &[(usize, &str, bool)] = &[
 
 /// English tooltip name and harmful category for a network mob-effect id.
 #[must_use]
-pub fn mob_effect_tooltip(effect_id: i32) -> Option<(&'static str, bool)> {
-    let effect_index = usize::try_from(effect_id).ok()?;
+pub fn mob_effect_tooltip_for(effect_id: MobEffectId) -> (&'static str, bool) {
+    let effect_index = effect_id.registry_id() as usize;
     EFFECT_DISPLAY_NAMES
         .iter()
         .find(|&&(index, _, _)| index == effect_index)
         .map(|&(_, name, harmful)| (name, harmful))
+        .expect("the display table covers every generated mob-effect id")
+}
+
+/// Resolves a raw item-component effect id to tooltip data when it belongs to
+/// the built-in census. Unknown extension values remain in the component but
+/// do not claim a built-in tooltip.
+#[must_use]
+pub fn mob_effect_tooltip(effect_id: i32) -> Option<(&'static str, bool)> {
+    MobEffectId::from_registry_id(effect_id).map(mob_effect_tooltip_for)
 }
 
 /// The raw `(mob_effect_index, amplifier, base_duration_ticks)` triples backing
@@ -351,8 +364,9 @@ pub fn potion_effect_entries(id: PotionId) -> Vec<PotionEffectEntry> {
     POTION_EFFECTS[id.index()]
         .iter()
         .map(|&(effect_index, amplifier, duration_ticks)| {
-            let (effect_name, harmful) = mob_effect_tooltip(effect_index as i32)
-                .unwrap_or(("", false));
+            let effect_id = MobEffectId::from_registry_id(effect_index as i32)
+                .expect("generated potion table names a built-in mob effect");
+            let (effect_name, harmful) = mob_effect_tooltip_for(effect_id);
             PotionEffectEntry { effect_name, amplifier, duration_ticks, harmful }
         })
         .collect()
@@ -400,9 +414,19 @@ pub fn mob_effect_attribute_modifiers(
     effect_id: i32,
     amplifier: u8,
 ) -> Vec<AttributeModifierEntry> {
-    let Ok(effect_index) = usize::try_from(effect_id) else {
+    let Some(effect_id) = MobEffectId::from_registry_id(effect_id) else {
         return Vec::new();
     };
+    mob_effect_attribute_modifiers_for(effect_id, amplifier)
+}
+
+/// Returns the built-in attribute modifiers for a validated mob effect.
+#[must_use]
+pub fn mob_effect_attribute_modifiers_for(
+    effect_id: MobEffectId,
+    amplifier: u8,
+) -> Vec<AttributeModifierEntry> {
+    let effect_index = effect_id.registry_id() as usize;
     EFFECT_ATTRIBUTE_MODIFIERS
         .iter()
         .filter(|&&(index, _, _, _)| index == effect_index)
@@ -424,7 +448,11 @@ pub fn potion_attribute_modifiers(id: PotionId) -> Vec<AttributeModifierEntry> {
     POTION_EFFECTS[id.index()]
         .iter()
         .flat_map(|&(effect_index, amplifier, _duration_ticks)| {
-            mob_effect_attribute_modifiers(effect_index as i32, amplifier)
+            mob_effect_attribute_modifiers_for(
+                MobEffectId::from_registry_id(effect_index as i32)
+                    .expect("generated potion table names a built-in mob effect"),
+                amplifier,
+            )
         })
         .collect()
 }

@@ -102,7 +102,7 @@ use uuid::Uuid;
 use lodestone_data::block_states::{block_name, properties};
 use lodestone_data::entity_types::entity_type_id;
 use lodestone_data::menus::{MenuId, menu_id};
-use lodestone_data::mob_effects::{mob_effect_id, mob_effect_name};
+use lodestone_data::mob_effects::{MobEffectId, mob_effect_id, mob_effect_name_for};
 use lodestone_data::sound_events::{SoundEventId, sound_event_id};
 use crate::entity_variants;
 use crate::packet_ids::{MINECRAFT_VERSION, configuration, handshaking, login, play, status};
@@ -1365,8 +1365,8 @@ fn read_optional_mob_effect(r: &mut Reader) -> Option<Option<&'static str>> {
     if !r.bool().ok()? {
         return Some(None);
     }
-    let id = r.var_i32().ok()?;
-    Some(Some(mob_effect_name(id)?))
+    let id = MobEffectId::from_registry_id(r.var_i32().ok()?)?;
+    Some(Some(mob_effect_name_for(id)))
 }
 
 /// Packs a block position into vanilla's vanilla's own block-position type's own as long form: `x` in the
@@ -2484,7 +2484,7 @@ fn encode_container_data_body(window_id: i32, property: i32, value: i32) -> Vec<
 #[allow(clippy::too_many_arguments)]
 fn encode_update_mob_effect_body(
     entity_id: i32,
-    effect_id: i32,
+    effect_id: MobEffectId,
     amplifier: u32,
     duration_ticks: i32,
     ambient: bool,
@@ -2494,7 +2494,7 @@ fn encode_update_mob_effect_body(
 ) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(entity_id);
-    w.var_i32(effect_id);
+    w.var_i32(effect_id.registry_id());
     w.var_i32(i32::try_from(amplifier).unwrap_or(i32::MAX));
     w.var_i32(duration_ticks);
     let mut flags = 0u8;
@@ -2518,10 +2518,10 @@ fn encode_update_mob_effect_body(
 /// (`ClientboundRemoveMobEffectPacket`), the exact mirror of
 /// `V770Adapter::handle_play_entity`'s `REMOVE_MOB_EFFECT` decode arm: VarInt
 /// entity id, VarInt `minecraft:mob_effect` registry id.
-fn encode_remove_mob_effect_body(entity_id: i32, effect_id: i32) -> Vec<u8> {
+fn encode_remove_mob_effect_body(entity_id: i32, effect_id: MobEffectId) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(entity_id);
-    w.var_i32(effect_id);
+    w.var_i32(effect_id.registry_id());
     w.into_vec()
 }
 

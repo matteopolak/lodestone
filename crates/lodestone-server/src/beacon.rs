@@ -272,7 +272,7 @@ pub fn beacon_effects(levels: u8, primary: Option<&str>, secondary: Option<&str>
 pub fn encode_beacon_effect(effect: Option<&str>) -> i32 {
     effect
         .and_then(lodestone_data::mob_effects::mob_effect_id)
-        .map_or(0, |id| id + 1)
+        .map_or(0, |id| id.registry_id() + 1)
 }
 
 /// The real beacon-menu decode-effect rule, the inverse of [`encode_beacon_effect`].
@@ -281,7 +281,8 @@ pub fn decode_beacon_effect(value: i32) -> Option<&'static str> {
     if value == 0 {
         None
     } else {
-        lodestone_data::mob_effects::mob_effect_name(value - 1)
+        lodestone_data::mob_effects::MobEffectId::from_registry_id(value - 1)
+            .map(lodestone_data::mob_effects::mob_effect_name_for)
     }
 }
 

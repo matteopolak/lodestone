@@ -57,7 +57,7 @@ use crate::chunk_batch::ChunkBatchSizeCalculator;
 use lodestone_data::data_component_types::{DataComponentTypeId, component_type_name};
 use lodestone_data::entity_types::entity_type_name;
 use lodestone_data::menus::{MenuId, menu_name};
-use lodestone_data::mob_effects::{mob_effect_id, mob_effect_name};
+use lodestone_data::mob_effects::{MobEffectId, mob_effect_id, mob_effect_name_for};
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use crate::packets::common::{

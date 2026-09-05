@@ -190,9 +190,10 @@ impl V770Adapter {
             let duration_ticks = reader.var_i32().map_err(dec_err)?;
             let flags = reader.u8().map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
-            let name = mob_effect_name(effect_id).ok_or_else(|| {
+            let effect_id = MobEffectId::from_registry_id(effect_id).ok_or_else(|| {
                 AdapterError::Decode(format!("unknown mob effect id {effect_id}"))
             })?;
+            let name = mob_effect_name_for(effect_id);
             return Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
                 entity_id,
                 effect: parse_key(name, "mob effect")?,
@@ -209,9 +210,10 @@ impl V770Adapter {
             let entity_id = reader.var_i32().map_err(dec_err)?;
             let effect_id = reader.var_i32().map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
-            let name = mob_effect_name(effect_id).ok_or_else(|| {
+            let effect_id = MobEffectId::from_registry_id(effect_id).ok_or_else(|| {
                 AdapterError::Decode(format!("unknown mob effect id {effect_id}"))
             })?;
+            let name = mob_effect_name_for(effect_id);
             return Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
                 entity_id,
                 effect: parse_key(name, "mob effect")?,
