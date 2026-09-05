@@ -65,6 +65,60 @@ use crate::wither as pure;
 use super::wither_pattern::{self, WitherPatternMatch};
 use super::{MobSim, TrackedWither};
 
+/// The tick-start chunk owner of one wither.
+///
+/// This is a deterministic hand-off boundary, not a worker assignment. The
+/// central application step retains the serial entity-id order before it
+/// changes live wither state, triggers an emergence blast, or fires a skull.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum WitherTickOwner {
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl WitherTickOwner {
+    fn for_position(position: Vec3) -> Self {
+        Self::Chunk {
+            cx: (position.x.floor() as i32).div_euclid(16),
+            cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+}
+
+/// One completed wither-owner batch.
+///
+/// The expected batch count and serial slots come from tick start. The central
+/// writer validates them before one owner can make an explosion or projectile
+/// visible ahead of an earlier entity-id slot.
+#[derive(Debug, Clone)]
+pub(crate) struct WitherTickOwnerBatch {
+    owner: WitherTickOwner,
+    expected_batch_count: usize,
+    effects: Vec<WitherTickEffect>,
+}
+
+impl WitherTickOwnerBatch {
+    #[cfg(test)]
+    fn owner(&self) -> WitherTickOwner {
+        self.owner
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WitherTickEffect {
+    owner: WitherTickOwner,
+    serial: usize,
+    id: i32,
+    wither: TrackedWither,
+    action: WitherTickAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WitherTickAction {
+    None,
+    EmergeBlast(Vec3),
+    FireSkull,
+}
+
 /// `WitherBoss.createAttributes`'s `Attributes.MAX_HEALTH`.
 pub const MAX_HEALTH: f32 = 300.0;
 
@@ -201,51 +255,83 @@ impl<'w> MobSim<'w> {
     /// One tick of every live wither: the emergence countdown (with its
     /// emergence blast on the tick it ends), heal ticks, and skull firing.
     pub fn tick_withers(&mut self) {
-        let ids: Vec<i32> = self.withers.keys().copied().collect();
-        for id in ids {
-            self.tick_one_wither(id);
-        }
+        let batches = self.tick_wither_owner_batches();
+        self.apply_wither_tick_owner_batches(batches);
     }
 
-    fn tick_one_wither(&mut self, id: i32) {
-        // The mutation pass is scoped so the `&mut TrackedWither` borrow ends
-        // before any call that needs `&mut self` as a whole (`self.explode`,
-        // `self.maybe_fire_skull`) — the same "copy out, drop the borrow,
-        // then act" shape `maybe_fire_skull` itself uses.
-        let Some((invulnerable_ticks, emerge_effect)) = ({
-            let Some(w) = self.withers.get_mut(&id) else {
-                return;
+    /// Produces independent wither-owner completions from cloned tick-start
+    /// state. No completion mutates the live map or fires an action; central
+    /// application restores serial entity-id order before either becomes live.
+    pub(crate) fn tick_wither_owner_batches(&self) -> Vec<WitherTickOwnerBatch> {
+        let mut ids: Vec<i32> = self.withers.keys().copied().collect();
+        ids.sort_unstable();
+        let mut batches = Vec::<WitherTickOwnerBatch>::new();
+        for (serial, id) in ids.into_iter().enumerate() {
+            let wither = self
+                .withers
+                .get(&id)
+                .cloned()
+                .expect("a tick-start wither id must remain live while planning");
+            let owner = WitherTickOwner::for_position(wither.position);
+            let (wither, action) = ticked_wither(wither);
+            let effect = WitherTickEffect {
+                owner,
+                serial,
+                id,
+                wither,
+                action,
             };
-            w.age += 1;
-            let age = w.age;
-
-            if w.invulnerable_ticks > 0 {
-                let (new_ticks, effect) = pure::invulnerable_tick(w.invulnerable_ticks);
-                w.invulnerable_ticks = new_ticks;
-                if pure::should_heal_while_invulnerable(age) && w.health < w.max_health {
-                    w.health = (w.health + pure::HEAL_AMOUNT_INVULNERABLE).min(w.max_health);
-                }
-                Some((new_ticks, effect))
+            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
+                batch.effects.push(effect);
             } else {
-                if pure::should_heal_while_active(age) && w.health < w.max_health {
-                    w.health = (w.health + pure::HEAL_AMOUNT_ACTIVE).min(w.max_health);
-                }
-                w.next_skull_tick -= 1;
-                None
+                batches.push(WitherTickOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects: vec![effect],
+                });
             }
-        }) else {
-            self.maybe_fire_skull(id);
-            return;
-        };
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
 
-        if invulnerable_ticks > 0 || emerge_effect != Some(pure::WitherEffect::EmergeBlast) {
+    /// Validates and centrally applies completed wither-owner batches.
+    ///
+    /// This is the only owner-batch path that writes the live wither map or
+    /// consumes the skull RNG. The serial slots keep projectile ids and blast
+    /// effects independent of the order in which owners complete.
+    pub(crate) fn apply_wither_tick_owner_batches(&mut self, batches: Vec<WitherTickOwnerBatch>) {
+        if batches.is_empty() {
             return;
         }
-        // The tick invulnerability just ended: the emergence blast.
-        let Some(emerge_pos) = self.withers.get(&id).map(|w| w.position) else {
-            return;
-        };
-        self.explode(emerge_pos, pure::EMERGE_EXPLOSION_POWER, lodestone_entity::DamageFlags::default());
+        let effects = merge_wither_tick_owner_batches(batches);
+        assert_eq!(
+            effects.len(),
+            self.withers.len(),
+            "wither owner completion must retain every live tick-start entity"
+        );
+        let mut ids = std::collections::HashSet::new();
+        for effect in effects {
+            assert!(
+                ids.insert(effect.id),
+                "wither owner completion may update one live entity only once"
+            );
+            assert!(
+                self.withers.contains_key(&effect.id),
+                "a wither owner completion may update only a live tick-start wither"
+            );
+            self.withers.insert(effect.id, effect.wither);
+            match effect.action {
+                WitherTickAction::None => {}
+                WitherTickAction::EmergeBlast(position) => {
+                    self.explode(position, pure::EMERGE_EXPLOSION_POWER, lodestone_entity::DamageFlags::default());
+                }
+                WitherTickAction::FireSkull => self.maybe_fire_skull(effect.id),
+            }
+        }
     }
 
     fn maybe_fire_skull(&mut self, id: i32) {
@@ -400,6 +486,70 @@ fn dist_sq(a: Vec3, b: Vec3) -> f64 {
     let dy = a.y - b.y;
     let dz = a.z - b.z;
     dx * dx + dy * dy + dz * dz
+}
+
+fn ticked_wither(mut wither: TrackedWither) -> (TrackedWither, WitherTickAction) {
+    wither.age += 1;
+    if wither.invulnerable_ticks > 0 {
+        let (new_ticks, emerge_effect) = pure::invulnerable_tick(wither.invulnerable_ticks);
+        wither.invulnerable_ticks = new_ticks;
+        if pure::should_heal_while_invulnerable(wither.age) && wither.health < wither.max_health {
+            wither.health = (wither.health + pure::HEAL_AMOUNT_INVULNERABLE).min(wither.max_health);
+        }
+        let action = if new_ticks == 0 && emerge_effect == Some(pure::WitherEffect::EmergeBlast) {
+            WitherTickAction::EmergeBlast(wither.position)
+        } else {
+            WitherTickAction::None
+        };
+        return (wither, action);
+    }
+
+    if pure::should_heal_while_active(wither.age) && wither.health < wither.max_health {
+        wither.health = (wither.health + pure::HEAL_AMOUNT_ACTIVE).min(wither.max_health);
+    }
+    wither.next_skull_tick -= 1;
+    (wither, WitherTickAction::FireSkull)
+}
+
+fn merge_wither_tick_owner_batches(
+    mut batches: Vec<WitherTickOwnerBatch>,
+) -> Vec<WitherTickEffect> {
+    let expected_batch_count = batches
+        .first()
+        .map(|batch| batch.expected_batch_count)
+        .expect("wither owner completion must contain every tick-start owner batch");
+    let mut owners = std::collections::HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.expected_batch_count, expected_batch_count,
+            "wither owner completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "wither owner completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "a wither owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "wither owner completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "wither owner completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
 }
 
 #[cfg(test)]
@@ -565,6 +715,76 @@ mod tests {
             sim.tick_withers();
         }
         assert!(sim.projectile_count() > before, "a nearby target must eventually draw skull fire");
+    }
+
+    fn owner_batch_fixture() -> MobSim<'static> {
+        let mut sim = sim();
+        for position in [Vec3::new(-0.5, 64.0, -0.5), Vec3::new(16.5, 64.0, 0.5)] {
+            let id = sim.spawn_wither_at(position);
+            let wither = sim.withers.get_mut(&id).expect("just spawned");
+            wither.invulnerable_ticks = 0;
+            wither.next_skull_tick = 0;
+        }
+        sim
+    }
+
+    #[test]
+    fn wither_owner_batches_restore_serial_state_after_reversed_completion() {
+        let mut completed = owner_batch_fixture();
+        let mut batches = completed.tick_wither_owner_batches();
+        assert_eq!(
+            batches.iter().map(WitherTickOwnerBatch::owner).collect::<Vec<_>>(),
+            vec![
+                WitherTickOwner::Chunk { cx: -1, cz: -1 },
+                WitherTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "tick-start wither positions must determine distinct negative and positive chunk owners"
+        );
+        let expected: Vec<_> = merge_wither_tick_owner_batches(batches.clone())
+            .into_iter()
+            .map(|effect| {
+                let next_skull_tick = match effect.action {
+                    WitherTickAction::FireSkull => IDLE_SKULL_COOLDOWN_TICKS,
+                    WitherTickAction::None | WitherTickAction::EmergeBlast(_) => effect.wither.next_skull_tick,
+                };
+                (effect.id, effect.wither.age, next_skull_tick)
+            })
+            .collect();
+        batches.reverse();
+        let projectiles_before = completed.projectile_count();
+        completed.apply_wither_tick_owner_batches(batches);
+
+        let actual: Vec<_> = expected
+            .iter()
+            .map(|(id, _, _)| {
+                let wither = completed.withers.get(id).expect("central owner merge retained wither");
+                (*id, wither.age, wither.next_skull_tick)
+            })
+            .collect();
+        assert_eq!(actual, expected, "reversed owners must restore tick-start entity-id state order");
+        assert_eq!(
+            completed.projectile_count(),
+            projectiles_before + 2,
+            "central application must consume both ready skull actions after restoring serial order"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "every tick-start owner batch exactly once")]
+    fn wither_owner_batch_merge_rejects_a_missing_owner() {
+        let mut sim = owner_batch_fixture();
+        let mut batches = sim.tick_wither_owner_batches();
+        batches.pop();
+        sim.apply_wither_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "one owner twice")]
+    fn wither_owner_batch_merge_rejects_a_duplicate_owner() {
+        let mut sim = owner_batch_fixture();
+        let mut batches = sim.tick_wither_owner_batches();
+        batches.push(batches.first().expect("two owner batches").clone());
+        sim.apply_wither_tick_owner_batches(batches);
     }
 
     #[test]
