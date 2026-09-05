@@ -164,7 +164,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 27] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 28] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -192,6 +192,10 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 27] = [
     NativeMethodSpec {
         name: "currentPluginDescriptor",
         descriptor: "()Llodestone/bridge/IsolatedPluginDescriptor;",
+    },
+    NativeMethodSpec {
+        name: "currentPluginLifecyclePhase",
+        descriptor: "()Ljava/lang/String;",
     },
     NativeMethodSpec {
         name: "subscribeResidentBlockStateChanges",
@@ -347,6 +351,7 @@ const ISOLATED_SHIM_REGISTRATION: &[NativeRegistrationStep] = registration_steps
     ISOLATED_SHIM_METHODS[24],
     ISOLATED_SHIM_METHODS[25],
     ISOLATED_SHIM_METHODS[26],
+    ISOLATED_SHIM_METHODS[27],
 );
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -776,6 +781,11 @@ fn method_id(
                 jni_str!("currentPluginDescriptor"),
                 jni_sig!("()Llodestone/bridge/IsolatedPluginDescriptor;"),
             ),
+        ("currentPluginLifecyclePhase", "()Ljava/lang/String;") => env.get_static_method_id(
+            class,
+            jni_str!("currentPluginLifecyclePhase"),
+            jni_sig!("()Ljava/lang/String;"),
+        ),
         (
             "subscribeResidentBlockStateChanges",
             "(Llodestone/bridge/ResidentBlockChangeListener;)V",
@@ -905,6 +915,14 @@ fn register_method(
         }
         ("currentPluginDescriptor", "()Llodestone/bridge/IsolatedPluginDescriptor;") => {
             adapter::register_lifecycle_plugin_descriptor_query(
+                env,
+                class,
+                method.name,
+                method.descriptor,
+            )
+        }
+        ("currentPluginLifecyclePhase", "()Ljava/lang/String;") => {
+            adapter::register_lifecycle_plugin_phase_query(
                 env,
                 class,
                 method.name,
@@ -1206,6 +1224,10 @@ mod tests {
                     descriptor: "()Llodestone/bridge/IsolatedPluginDescriptor;",
                 },
                 NativeMethodSpec {
+                    name: "currentPluginLifecyclePhase",
+                    descriptor: "()Ljava/lang/String;",
+                },
+                NativeMethodSpec {
                     name: "subscribeResidentBlockStateChanges",
                     descriptor: "(Llodestone/bridge/ResidentBlockChangeListener;)V",
                 },
@@ -1408,6 +1430,7 @@ mod tests {
              public static native String currentPluginVersion(); \
              public static native String currentPluginMainClass(); \
              public static native IsolatedPluginDescriptor currentPluginDescriptor(); \
+             public static native String currentPluginLifecyclePhase(); \
              public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
              public static native long currentBlockHandle(); \
              public static native String blockHandlePosition(long handle); \
@@ -1504,6 +1527,7 @@ mod tests {
              public static native String currentPluginVersion(); \
              public static native String currentPluginMainClass(); \
              public static native IsolatedPluginDescriptor currentPluginDescriptor(); \
+             public static native String currentPluginLifecyclePhase(); \
              public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
              public static native long currentBlockHandle(); \
              public static native String blockHandlePosition(long handle); \

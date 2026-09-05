@@ -986,6 +986,7 @@ impl PaperPluginConstructionPlan {
                 plugin.descriptor.name(),
                 plugin.descriptor.version(),
                 plugin.descriptor.main_class(),
+                crate::adapter::LifecycleScope::Construct,
                 || plugin.construct(env),
             ) {
                 Ok(instance) => {
@@ -1067,6 +1068,7 @@ impl PaperPluginEntryConstruction {
                 plugin.descriptor.name(),
                 plugin.descriptor.version(),
                 plugin.descriptor.main_class(),
+                crate::adapter::LifecycleScope::Enable,
                 || plugin.callback(env, "onEnable"),
             ) {
                 Ok(()) => {
@@ -1145,6 +1147,7 @@ impl PaperPluginEntryEnablement {
                 plugin.descriptor.name(),
                 plugin.descriptor.version(),
                 plugin.descriptor.main_class(),
+                crate::adapter::LifecycleScope::Disable,
                 || plugin.callback(env, "onDisable"),
             );
             crate::adapter::clear_resident_block_change_subscriptions(
