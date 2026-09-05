@@ -255,6 +255,13 @@ impl lodestone_server::CommandSink for EcsCommandSink {
 /// completes, same as `NetClient`'s own reads.
 pub type SharedHandle = Arc<OnceLock<Arc<ClientHandle>>>;
 
+/// The optional local, query-only Overworld horizon source for this session.
+///
+/// It is published only after the integrated world resolved its effective seed
+/// and source preset. The render thread reads it directly; it is not the
+/// server's `ChunkSource`, so it cannot expand normal chunk streaming.
+pub(crate) type SharedHorizonSurface = Arc<OnceLock<crate::horizon::HorizonSurfaceQuery>>;
+
 /// The connecting session's local player UUID, published as soon as the
 /// [`LoginProfile`] is built — before the handshake even starts, not just
 /// before login completes like [`SharedHandle`]. Same "publish once, read
@@ -1332,6 +1339,9 @@ pub struct NetClient {
     /// Published by the net thread once login completes; lets the render/mesh
     /// thread read the client-owned world lock-free of tokio.
     handle: SharedHandle,
+    /// Local coarse-horizon estimate, if this session owns a supported
+    /// Overworld generator. Remote and custom-source sessions leave it empty.
+    horizon_surface: SharedHorizonSurface,
     /// The world's rain/thunder levels and lightning count, folded by
     /// [`forward`]'s `WeatherChanged` arm. See [`WeatherCell`] for why this is a
     /// shared cell rather than a [`NetUpdate`].
@@ -1995,6 +2005,8 @@ impl NetClient {
         let stop_thread = Arc::clone(&stop);
         let handle: SharedHandle = Arc::new(OnceLock::new());
         let handle_thread = Arc::clone(&handle);
+        let horizon_surface: SharedHorizonSurface = Arc::new(OnceLock::new());
+        let horizon_surface_thread = Arc::clone(&horizon_surface);
         let weather: SharedWeather = Arc::new(WeatherCell::default());
         let weather_thread = Arc::clone(&weather);
         let biome_climates: SharedBiomeClimates = Arc::new(BiomeClimateCell::default());
@@ -2029,6 +2041,7 @@ impl NetClient {
                     publish_rx,
                     stop_thread,
                     handle_thread,
+                    horizon_surface_thread,
                     weather_thread,
                     biome_climates_thread,
                     biome_names_thread,
@@ -2065,6 +2078,7 @@ impl NetClient {
             action_rx,
             stop_thread,
             handle_thread,
+            horizon_surface_thread,
             weather_thread,
             biome_climates_thread,
             biome_names_thread,
@@ -2086,6 +2100,7 @@ impl NetClient {
             #[cfg(not(target_arch = "wasm32"))]
             thread: Some(thread),
             handle,
+            horizon_surface,
             weather,
             biome_climates,
             biome_names,
@@ -2383,6 +2398,15 @@ impl NetClient {
         Arc::clone(&self.handle)
     }
 
+    /// The local query-only Overworld surface estimate, when this is an
+    /// eligible integrated session. It is absent for remote, custom-source,
+    /// and non-Overworld rendering, so callers must simply skip the coarse
+    /// pass rather than falling back to chunk generation.
+    #[must_use]
+    pub(crate) fn horizon_surface(&self) -> Option<&crate::horizon::HorizonSurfaceQuery> {
+        self.horizon_surface.get()
+    }
+
     /// The local player's UUID, or `None` in the short window between thread
     /// spawn and the connecting [`LoginProfile`] being built (a handful of
     /// instructions — see [`SharedLocalUuid`]) or for a loopback client built
@@ -2463,6 +2487,7 @@ impl NetClient {
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
+            horizon_surface: Arc::new(OnceLock::new()),
             weather: Arc::new(WeatherCell::default()),
             biome_climates: Arc::new(BiomeClimateCell::default()),
             biome_names: Arc::new(BiomeNameCell::default()),
@@ -2539,6 +2564,7 @@ impl NetClient {
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
+            horizon_surface: Arc::new(OnceLock::new()),
             weather: Arc::new(WeatherCell::default()),
             biome_climates: Arc::new(BiomeClimateCell::default()),
             biome_names: Arc::new(BiomeNameCell::default()),
@@ -2863,6 +2889,7 @@ async fn run_async(
     #[cfg(not(target_arch = "wasm32"))] publish_rx: Receiver<u16>,
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
+    horizon_surface: SharedHorizonSurface,
     weather: SharedWeather,
     biome_climates: SharedBiomeClimates,
     biome_names: SharedBiomeNames,
@@ -3030,6 +3057,10 @@ async fn run_async(
                 };
                 #[cfg(target_arch = "wasm32")]
                 let stored: Option<(Arc<dyn lodestone_server::ChunkSource>, i32, i32)> = None;
+                // An override is a source whose local surface semantics we do
+                // not have a query for. Preserve that distinction instead of
+                // drawing a stock Overworld estimate over a custom world.
+                let use_local_horizon_query = stored.is_none();
                 let (source, min_y, height) = match stored {
                     Some(built) => built,
                     None => {
@@ -3048,6 +3079,17 @@ async fn run_async(
                         }
                     }
                 };
+                // This is purposefully a second, immutable estimate rather
+                // than a handle to `source`: the renderer lives on another
+                // thread and must never turn its coarse samples into normal
+                // chunk-generation or cache requests. Publishing only after
+                // `preset_chunk_source` succeeded prevents a failed launch
+                // from leaving a plausible query behind.
+                if use_local_horizon_query {
+                    if let Some(query) = crate::horizon::HorizonSurfaceQuery::for_preset(seed, world_type) {
+                        let _ = horizon_surface.set(query);
+                    }
+                }
                 // Open to LAN (scope 1). Taken before the
                 // in-memory constructors below because it is a *different
                 // server*: `IntegratedServer::open_to_lan` binds a TCP listener
@@ -3981,6 +4023,7 @@ fn run(
     publish_rx: Receiver<u16>,
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
+    horizon_surface: SharedHorizonSurface,
     weather: SharedWeather,
     biome_climates: SharedBiomeClimates,
     biome_names: SharedBiomeNames,
@@ -4011,6 +4054,7 @@ fn run(
         publish_rx,
         stop,
         shared_handle,
+        horizon_surface,
         weather,
         biome_climates,
         biome_names,
