@@ -88,6 +88,18 @@ a believable block click. The focused protocol test uses an independent
 literal body and also follows an adapter-emitted main-hand use through the
 same shared `UseItemOn` boundary that `lodestone_server::server` consumes.
 
+The same legacy `chat` frame now drives both hosted text and commands. Its
+only field is a length-prefixed string: ordinary text becomes unsigned
+`ServerBound::Chat` with explicit zero timestamp and salt, while a leading
+slash becomes `ServerBound::ChatCommand` after that prefix is removed. The
+shared server therefore owns the usual broadcast and command handling rather
+than a protocol-specific copy. Replies use the clientbound chat packet's JSON
+component string. Protocol 5 has no chat-position byte, so the client treats
+every reply as chat history rather than distinguishing system or action-bar
+output. Literal input and output bodies reject trailing bytes and anchor the
+single-string/JSON boundary; the in-memory control follows a sent chat action
+through the registry-selected server, reply frame, adapter, and `ClientEvent`.
+
 Hosted movement now lifts all four serverbound shapes into the shared server:
 `position` and `position_look` update the authoritative player sample,
 `look` updates rotation alone, and `flying` updates the grounded state alone.
@@ -112,6 +124,7 @@ Measured, not assumed. Each is documented where it is implemented.
 | Entity ids are `i32` everywhere except the four spawn packets | `packets::entity` | A varint decoder consumes the wrong number of bytes |
 | `keep_alive` is `i32`; food, experience and effect duration are `i16`; `entity_destroy` has a `u8` count; `custom_payload` has an `i16` length | throughout | Same class as above |
 | Movement carries a `bool on_ground`, not a relative-flags byte | `packets::game` | A 47-era decoder reads `true` as "relative x" |
+| Chat has **one string and no position byte** | `packets::game` | A leading slash selects a command; replies cannot be marked system or action-bar |
 | Item NBT is **gzip behind an `i16` length** | `packets::slot` | Later eras use a bare optional tag |
 | Custom entity name sits at data-watcher index **10**, not 2 | `entity_metadata` | |
 | **Two fixed-point scales in one protocol**: 32 per block for entities, 8 for sound positions | `adapter` | The same protocol, genuinely inconsistent |

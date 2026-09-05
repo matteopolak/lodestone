@@ -132,6 +132,55 @@ fn projects_the_legacy_window_and_decodes_break_actions() {
 }
 
 #[test]
+fn legacy_chat_uses_its_single_string_body_for_chat_commands_and_replies() {
+    let protocol = V5ServerProtocol;
+    // VarInt length 14, then the complete string body. This is deliberately
+    // literal rather than encoded by the packet type under test.
+    let chat = b"\x0elegacy \"chat\"\n";
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::CHAT, chat),
+        ServerBound::Chat {
+            message: "legacy \"chat\"\n".to_owned(),
+            timestamp_millis: 0,
+            salt: 0,
+            signature: None,
+        }
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::CHAT,
+            b"\x08/say one",
+        ),
+        ServerBound::ChatCommand {
+            command: "say one".to_owned(),
+        },
+        "a slash command is carried by the same legacy packet without its slash"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::CHAT,
+            b"\x0elegacy \"chat\"\n\0",
+        ),
+        ServerBound::Ignored,
+        "a chat prefix with a trailing byte must not be accepted as a message"
+    );
+
+    let ServerDirective::Send { packet_id, payload } =
+        protocol.encode_system_chat("legacy \"chat\"\n")
+    else {
+        panic!("legacy system text must produce a chat packet");
+    };
+    assert_eq!(packet_id, play::clientbound::CHAT);
+    assert_eq!(
+        payload,
+        b"\x1c{\"text\":\"legacy \\\"chat\\\"\\n\"}",
+        "the JSON component is length-prefixed once; the era has no position byte"
+    );
+}
+
+#[test]
 fn block_place_lifts_the_protocol_5_body_to_the_shared_placement_consumer() {
     let protocol = V5ServerProtocol;
     // x=258, y=64, z=-3, East face, empty inline stack, and cursor quarters.
