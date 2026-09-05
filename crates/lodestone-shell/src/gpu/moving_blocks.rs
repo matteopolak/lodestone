@@ -71,6 +71,7 @@
 //! concatenated into a single [`GpuModelMesh`] — one upload and one draw per frame
 //! however many moving blocks exist, versus one of each per block.
 
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockStateRef;
 use lodestone_render::{Camera, Frustum, GpuModelMesh, ModelMesh, mesh_moving_block_quads};
 
@@ -296,11 +297,10 @@ fn minecart_content_pose(feet: glam::Vec3, yaw_deg: f32, display_offset: i32) ->
 /// by `progress`) and a light sample, and nothing else.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct MovingBlock {
-    /// The global block-state id whose baked quads to draw. A state with no
-    /// geometry (air, vanilla's own invisible render-shape value) draws nothing, which is
-    /// vanilla's own falling-block renderer submit routine's own
-    /// `getRenderShape() == RenderShape.MODEL` guard reached by a different route.
-    pub state_id: u32,
+    /// The built-in census state whose baked quads to draw. The type prevents a
+    /// protocol-local or out-of-census id from reaching `CrackResolver` by
+    /// numeric coincidence. A state with no geometry draws nothing.
+    pub state_id: StateId,
     /// Block-local `0..1` space → world space. For a falling block this is a pure
     /// translation; for a piston head it will also carry the push offset.
     pub transform: glam::Mat4,
@@ -519,7 +519,7 @@ impl RenderState {
         combined: &mut ModelMesh,
         stats: &mut RenderStats,
     ) {
-        let Some(state_id) = lodestone_data::block_states::state_id("minecraft:tnt") else {
+        let Some(state_id) = StateId::from_state_str("minecraft:tnt") else {
             return;
         };
         for draw in entities {
@@ -585,7 +585,7 @@ impl RenderState {
             let Some((block, display_offset)) = default_minecart_contents(&draw.type_path) else {
                 continue;
             };
-            let Some(state_id) = lodestone_data::block_states::state_id(block) else {
+            let Some(state_id) = StateId::from_state_str(block) else {
                 continue;
             };
             if !frustum.intersects_aabb(
@@ -656,6 +656,14 @@ impl RenderState {
         stats: &mut RenderStats,
     ) {
         for spawn in self.moving_piston_source.pistons(eye) {
+            let Some(state_id) = StateId::new(spawn.state_id) else {
+                tracing::debug!(
+                    target: "moving_blocks",
+                    raw = spawn.state_id,
+                    "moving piston has an out-of-census state; the built-in model resolver skipped it"
+                );
+                continue;
+            };
             let cell = glam::Vec3::new(
                 spawn.pos[0] as f32,
                 spawn.pos[1] as f32,
@@ -668,7 +676,7 @@ impl RenderState {
             if self.merge_moving_block(
                 model,
                 MovingBlock {
-                    state_id: spawn.state_id,
+                    state_id,
                     transform: piston_head_pose(
                         spawn.pos,
                         spawn.direction,
@@ -685,7 +693,15 @@ impl RenderState {
             // of the bare cell corner is `piston_head_pose` with a zero offset, and
             // is written out rather than called with `progress = 1.0` so that a
             // future change to the offset rule cannot silently start moving it.
-            let Some(base_state_id) = spawn.base_state_id else {
+            let Some(base_raw) = spawn.base_state_id else {
+                continue;
+            };
+            let Some(base_state_id) = StateId::new(base_raw) else {
+                tracing::debug!(
+                    target: "moving_blocks",
+                    raw = base_raw,
+                    "moving piston has an out-of-census base state; the built-in model resolver skipped it"
+                );
                 continue;
             };
             if self.merge_moving_block(
@@ -901,7 +917,7 @@ impl RenderState {
                     invisibility_metadata = "not applicable to Display entities",
                     billboard = ?draw.billboard,
                     display_transform = ?draw.transform,
-                    block_state = state_id,
+                    block_state = state_id.raw(),
                     final_transform = ?transform.to_cols_array_2d(),
                     quad_plane = ?unit_quad_plane(transform),
                     quad_normal = ?unit_quad_normal(transform),
@@ -968,7 +984,7 @@ impl RenderState {
 /// protocol-local value can overlap its numeric range, so accepting it by raw
 /// value would render the wrong block; keep it opaque until a resolver for its
 /// source is installed.
-fn built_in_state_id(state: BlockStateRef, consumer: &str) -> Option<u32> {
+fn built_in_state_id(state: BlockStateRef, consumer: &str) -> Option<StateId> {
     let BlockStateRef::Canonical(raw) = state else {
         tracing::debug!(
             target: "moving_blocks",
@@ -985,7 +1001,7 @@ fn built_in_state_id(state: BlockStateRef, consumer: &str) -> Option<u32> {
         );
         return None;
     };
-    Some(state.raw())
+    Some(state)
 }
 
 #[cfg(test)]
@@ -1015,7 +1031,7 @@ mod tests {
         );
         assert_eq!(
             built_in_state_id(BlockStateRef::canonical(stone), "test"),
-            Some(stone),
+            StateId::new(stone),
             "the canonical in-census control must still reach the moving-block renderer"
         );
     }
@@ -1483,16 +1499,16 @@ mod tests {
             ("hopper_minecart", "minecraft:hopper", 1),
         ];
 
-        let ids: Vec<u32> = subtypes
+        let ids: Vec<StateId> = subtypes
             .iter()
             .map(|(_, block, _)| {
-                lodestone_data::block_states::state_id(block)
+                StateId::from_state_str(block)
                     .unwrap_or_else(|| panic!("{block} must resolve to a real state id"))
             })
             .collect();
-        let mut quads = vec![Vec::new(); ids.iter().copied().max().unwrap() as usize + 1];
+        let mut quads = vec![Vec::new(); ids.iter().map(|id| id.raw()).max().unwrap() as usize + 1];
         for &id in &ids {
-            quads[id as usize] = vec![synthetic_top_quad()];
+            quads[id.raw() as usize] = vec![synthetic_top_quad()];
         }
         let resolver = lodestone_render::crack_resolver::CrackResolver::new(
             quads,
@@ -1516,7 +1532,7 @@ mod tests {
                 continue;
             }
 
-            let state_id = lodestone_data::block_states::state_id(mapped_block).unwrap();
+            let state_id = StateId::from_state_str(mapped_block).unwrap();
             let src_quads = resolver.state_quads(state_id);
             let pose = minecart_content_pose(feet, yaw, mapped_offset);
             let mesh = mesh_moving_block_quads(src_quads, pose, 0xF0);
