@@ -4379,7 +4379,6 @@ pub fn route(event: &ClientEvent) -> Route {
         ClientEvent::ChunkCacheCenterChanged { .. }
         | ClientEvent::SimulationDistanceChanged { .. }
         | ClientEvent::ItemCooldown { .. }
-        | ClientEvent::CameraSet { .. }
         | ClientEvent::SoundStopped { .. }
         | ClientEvent::PlayerCombatEntered
         | ClientEvent::PlayerCombatEnded { .. }
@@ -4391,6 +4390,9 @@ pub fn route(event: &ClientEvent) -> Route {
         // is the existing camera, raycast, audio-listener, and movement-egress
         // consumer; retaining a second target record would reach none of them.
         ClientEvent::PlayerLookAt { .. } => SHELL,
+        // `net::forward` carries the selected entity id to `Sim`, which reads
+        // that entity's shared pose every frame to drive the rendered camera.
+        ClientEvent::CameraSet { .. } => SHELL,
         // The server's actual streamed radius, not the launcher's request.
         // `net::forward` carries it to `Sim::set_view_radius`, which sets the
         // loading screen's chunk-grid size and progress denominator.
@@ -4819,6 +4821,14 @@ mod route_tests {
         let route = route(&ClientEvent::ChunkCacheRadiusChanged { radius: 7 });
         assert!(route.shell, "the shell owns the loading-view radius");
         assert!(route.must_forward(), "the radius must cross net::forward");
+        assert!(!route.is_island());
+    }
+
+    #[test]
+    fn camera_set_is_routed_to_the_rendered_camera_consumer() {
+        let route = route(&ClientEvent::CameraSet { entity_id: 99 });
+        assert!(route.shell, "the shell resolves the selected camera entity");
+        assert!(route.must_forward(), "the id must cross net::forward");
         assert!(!route.is_island());
     }
 

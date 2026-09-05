@@ -884,6 +884,12 @@ pub enum NetUpdate {
         /// Absolute target position.
         target: Vec3,
     },
+    /// The server selected an entity for the client camera to follow. The
+    /// simulation resolves the id against shared entity state every frame.
+    CameraSet {
+        /// Server entity id selected as the camera subject.
+        entity_id: i32,
+    },
     /// A `block_event` (vanilla's `ClientboundBlockEventPacket`): two opaque
     /// parameter bytes for the block at `pos`.
     ///
@@ -5100,6 +5106,7 @@ fn forward(
             from_anchor,
             target,
         },
+        ClientEvent::CameraSet { entity_id } => NetUpdate::CameraSet { entity_id },
         // Block events, forwarded raw. Until this arm existed the
         // event reached the terminal `_ =>` below and was dropped, which is why
         // chest lids never moved. The two bytes are per-block-type and are
@@ -5999,6 +6006,28 @@ mod tests {
                 assert_eq!(forwarded, target);
             }
             other => panic!("expected PlayerLookAt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_preserves_the_server_camera_subject() {
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::CameraSet { entity_id: 2000 },
+        )
+        .expect("set-camera does not end the session");
+
+        match rx
+            .try_recv()
+            .expect("the selected camera subject must cross the NetUpdate channel")
+        {
+            NetUpdate::CameraSet { entity_id } => assert_eq!(entity_id, 2000),
+            other => panic!("expected CameraSet, got {other:?}"),
         }
     }
 

@@ -311,7 +311,7 @@ impl Sim {
     #[must_use]
     pub fn camera(&self, aspect: f32) -> Camera {
         let interp = self.interpolated_player();
-        build_camera(
+        let mut camera = build_camera(
             &interp,
             // The *camera's* eased eye, not `interp.eye_height` — see the field's
             // doc. Interpolating the entity's eye height would still snap, because
@@ -323,7 +323,45 @@ impl Sim {
             // Vanilla's FOV option, not the module constant `build_camera` used
             // to write itself — see [`Self::set_fov_y_degrees`].
             self.fov_y_degrees,
-        )
+        );
+        if let Some((position, yaw, pitch)) = self.camera_entity_pose() {
+            camera.position = position;
+            camera.yaw = yaw;
+            camera.pitch = pitch;
+        }
+        camera
+    }
+
+    /// The selected remote entity's live camera pose, when its shared state has
+    /// arrived. The local-player id deliberately uses the normal camera path.
+    ///
+    /// Entity-specific eye heights are not represented at this boundary yet, so
+    /// this uses the same standing-height fallback as other remote eye consumers.
+    fn camera_entity_pose(&self) -> Option<(glam::Vec3, f32, f32)> {
+        let entity_id = self.camera_entity_id?;
+        if self.server_entity_id() == Some(entity_id) {
+            return None;
+        }
+        self.read(|world| {
+            let entity = world.resource::<EntityIndex>().get(entity_id)?;
+            let position = world.get::<Position>(entity)?.0;
+            let rotation = world.get::<lodestone_ecs::entity::Rotation>(entity)?.0;
+            Some((
+                glam::Vec3::new(
+                    position.x as f32,
+                    position.y as f32 + lodestone_physics::player::DEFAULT_EYE_HEIGHT,
+                    position.z as f32,
+                ),
+                rotation.yaw,
+                rotation.pitch,
+            ))
+        })
+    }
+
+    /// Adopt the server-selected camera subject. Resolution stays lazy because
+    /// the set-camera packet may arrive before the target's entity spawn.
+    pub(crate) fn set_camera_entity(&mut self, entity_id: i32) {
+        self.camera_entity_id = Some(entity_id);
     }
 
     /// Push vanilla's **FOV** option ([`crate::config::Options::fov`]) down from
