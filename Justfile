@@ -489,6 +489,13 @@ oracle-lovelier:
 oracle-survival:
     ./scripts/live-oracles/survival.sh
 
+# Bounded, opt-in release-client acceptance matrix. The supplied driver must
+# operate an installed release client and write the external evidence contract;
+# this command never substitutes Lodestone's own client for that artifact.
+# Example: just external-client-acceptance --protocol 47 --output /private/tmp/lodestone-v47
+external-client-acceptance *args:
+    python3 scripts/live-oracles/external-client-acceptance.py {{args}}
+
 # Re-capture the README's in-game screenshots into docs/images/, by joining the
 # flat creative oracle with the real client and rendering one frame per scene.
 # Needs `just oracle-creative` up first, plus a GPU adapter and the vanilla
