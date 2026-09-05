@@ -86,13 +86,16 @@ what a count gate can do.
 
 - **Where it lives**: `bench-baselines/<bench>.json`, committed, one file per bench
   binary, keyed by `(scene, metric)`. Values sit beside their unit, a per-entry
-  `tolerance_pct`, and a `required` flag.
+  `tolerance_pct`, and a `required` flag. The `bench` identity must be unique
+  across the baseline directory; two files cannot alias one results log.
 - **Who updates it**: whoever writes the change that moves the number, in the same
   commit, via `just bench-baseline-update` (`scripts/bench-gate.py --update`). The
   update rewrites values only — tolerances and flags survive, so re-baselining can
   never quietly widen a band, and the control suite has a mutation proving that.
   Each `(scene, metric)` key must appear once per baseline; a duplicate is rejected
-  before it can inflate the coverage count.
+  before it can inflate the coverage count. A duplicate `bench` identity across
+  files is rejected for the same reason: one observation cannot satisfy coverage
+  twice.
 - **What happens on a legitimate improvement**: exactly the same thing. The band is
   **two-way**: an unexplained improvement fails too. That is deliberate. A one-way
   ratchet turns a baseline into noise, because the most common cause of a number
@@ -114,7 +117,7 @@ what a count gate can do.
 
 ## How the gate cannot pass vacuously
 
-Four separate guards, each with a check in the control suite and a mutation proving the
+Five separate guards, each with a check in the control suite and a mutation proving the
 check would notice its removal:
 
 1. **`--min-compared N`** — fewer than `N` metrics actually compared exits **2**, not 0.
@@ -129,6 +132,10 @@ check would notice its removal:
    observed record count more than once toward `--min-compared`. A duplicate or
    structurally malformed baseline entry is a gate-input failure, not evidence that
    the benchmark passed.
+5. **A duplicate `bench` identity across baseline files exits 2**, before two files
+   can read one results log and make its observations satisfy `--min-compared` twice.
+   Each bench has one baseline file; a split or renamed baseline is a gate-input
+   failure, not extra coverage.
 
 Exit status is `0` inside band, `1` drift or a required metric absent, `2` the gate did
 not really run. Read it directly. `cargo test --workspace | grep … | tail` once reported
@@ -138,7 +145,7 @@ success in this repo while cargo returned 101.
 
 `python3 scripts/test-bench-gate.py` — stdlib only, no pytest, the same shape as
 `scripts/test-profile-cost-table.py` and for the same reason (these are Python scripts
-and no crate owns them). 31 checks over synthetic fixtures in a temporary directory;
+and no crate owns them). 34 checks over synthetic fixtures in a temporary directory;
 nothing is written inside the checkout.
 
 The centre of it is a planted regression in the exact shape of the real one: a fixture
@@ -148,7 +155,7 @@ that moved, and must not implicate the one that did not. Its control is the iden
 fixture unplanted, which must exit 0 — without that pairing, a gate that always failed
 would satisfy every red-expecting check in the file.
 
-Every guard is then mutation-tested. Eight broken copies of `bench-gate.py` (via
+Every guard is then mutation-tested. Ten broken copies of `bench-gate.py` (via
 `BENCH_GATE_PATH`, which points the suite at a copy so nothing in the shared checkout is
 edited) each turn the suite red:
 
@@ -163,6 +170,7 @@ edited) each turn the suite red:
 | `--update` widens the tolerance | `--update` preserves the tolerance |
 | accept duplicate baseline keys | one observed record cannot satisfy coverage twice |
 | accept non-finite values | `Infinity` cannot widen a gate and `NaN` cannot revive a stale result |
+| accept duplicate baseline bench names | two files cannot make one results log satisfy coverage twice |
 
 Two of these were written *after* a mutation survived, which is the whole point of
 running the mutations rather than reasoning about them: the "unrun bench" check was
