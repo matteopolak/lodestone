@@ -94,14 +94,14 @@ rejects incomplete or duplicate owners and restores those slots before replacing
 the live hull states. Boat collision reads remain independent of other boats;
 the serial central writer is retained so completion order cannot change a
 client-visible transform.
-Primed explosives use the equivalent hand-off inside `MobSim::tick_tnt`, which
-the live tick loop already calls. `MobSim::tick_tnt_owner_batches` clones each
-tick-start state under its source chunk owner, and
-`MobSim::apply_tnt_tick_owner_batches` checks complete unique owners plus their
-old entity-id slots before it updates motion/fuses or queues a detonation. The
-existing `MobSim::take_detonations` drain remains the production consumer for
-the block-destruction and network effects, so a reversed owner completion
-cannot reorder visible explosions.
+Primed explosives use the equivalent hand-off at the live tick loop.
+`MobSim::tick_tnt_owner_batches` clones each tick-start state under its source
+chunk owner, and the tick loop passes every completion to
+`MobSim::apply_tnt_tick_owner_batches`, the sole writer to live TNT state. It
+checks complete unique owners plus their old entity-id slots before it updates
+motion/fuses or queues a detonation. The existing `MobSim::take_detonations`
+drain remains the production consumer for the block-destruction and network
+effects, so a reversed owner completion cannot reorder visible explosions.
 Minecart physics has the same boundary. The live tick loop obtains complete
 `MobSim::tick_minecart_owner_batches` results from cloned tick-start cart state
 and calls `MobSim::apply_minecart_tick_owner_batches` as the sole writer to the
@@ -241,10 +241,10 @@ stream and block-update order.
 Keep primed-explosive simulation behind `MobSim::tick_tnt_owner_batches` and
 `MobSim::apply_tnt_tick_owner_batches`. A completion must carry cloned
 tick-start state, its source owner, and an entity-id serial slot; do not update
-the live map or queue a detonation while selecting an owner. The central
-consumer must reject missing or duplicate owners and restore every serial slot
-before changing motion, fuses, or the detonation queue. The current live tick
-call remains `MobSim::tick_tnt`, so no extra tick-loop wiring is needed.
+the live map or queue a detonation while selecting an owner. The live tick loop
+is the central consumer: it must pass the complete plan to the apply method,
+which rejects missing or duplicate owners and restores every serial slot before
+changing motion, fuses, or the detonation queue.
 
 Keep wither simulation behind `MobSim::tick_wither_owner_batches` and
 `MobSim::apply_wither_tick_owner_batches`. A completion carries cloned
