@@ -360,6 +360,16 @@ What exists:
   key, proving the detector observes the production result rather than merely
   accepting generated input.
 
+- `tests/command_tree_redirect_model.rs` — a bounded fixed-ChaCha-seed model
+  check over `lodestone_model::command_tree::CommandTree::effective_children`,
+  the redirect expansion consumed by client chat completion. An independent
+  flat-graph walk covers child order, redirect chains, and cycles without
+  constructing a production tree for expected output. Three literal graphs
+  pin the no-redirect, chain, and cycle cases; generated graphs shrink their
+  child lists and redirects. A redirect-omission model is required to fail and
+  shrink with a redirected child still present, proving the consumer sees the
+  same-token redirect edge.
+
 - `tests/legacy_status_model.rs` — a bounded fixed-ChaCha-seed model check over
   `lodestone_net::parse_legacy_status`, the legacy server-list ping consumer.
   An independent UTF-16BE framer and field model cover both supported layouts,
