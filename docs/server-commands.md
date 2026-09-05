@@ -63,6 +63,14 @@ and a snapshot of the existing access-list result. `Some(0..=4)` overrides that 
 defers to it, and an invalid numeric level resolves to zero. The same effective level gates the
 advertised command tree, command execution, and administrative packets.
 
+For the local integrated-server bridge, that captured level also flows with
+`CommandCaller` into the ECS command sink. Immediately before resolving a
+plugin command, the sink writes it to that player's `Permissions` subject.
+This is the input that makes a plugin node with the ordinary `Op` default agree
+with the server's built-in command gates; plugin grants, groups, declarations,
+and installed permission resolvers remain in the ECS resource and are not
+replaced by the bridge.
+
 Handle clones share provider installation and removal. Provider callbacks run after both handle
 locks are released, so they may inspect stored access through `permission_level` or replace the
 provider. They must not block or recursively resolve the effective command level. Provider policy

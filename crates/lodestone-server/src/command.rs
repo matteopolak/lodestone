@@ -37,10 +37,11 @@
 //!
 //! # The vocabulary is deliberately version-free and ECS-free
 //!
-//! [`CommandCaller`] carries a `Uuid` and a `String`; [`CommandResponse`]
-//! carries `String`s. Nothing here names a protocol number, a packet id, a
-//! `World`, or a `Resource`. That is what lets the host implement
-//! [`CommandSink`] over `lodestone-ecs` without this crate ever seeing it.
+//! [`CommandCaller`] carries a `Uuid`, a `String`, and the already-resolved
+//! command level; [`CommandResponse`] carries `String`s. Nothing here names a
+//! protocol number, a packet id, a `World`, or a `Resource`. That is what lets
+//! the host implement [`CommandSink`] over `lodestone-ecs` without this crate
+//! ever seeing it.
 //!
 //! # Does this generalise to the other 42 stranded serverbound variants?
 //!
@@ -107,15 +108,41 @@ pub struct CommandCaller {
     pub uuid: Uuid,
     /// The username this connection logged in with.
     pub username: String,
+    /// The effective server command level resolved for this connection at its
+    /// Play handoff. A host bridge uses it to give plugin permission nodes the
+    /// same op/non-op answer as the server command tree.
+    pub permission_level: u8,
 }
 
 impl CommandCaller {
-    /// A caller with the given identity.
+    /// A caller with the given identity and no command privileges.
+    ///
+    /// Test and non-network callers that do not have an access-policy result
+    /// must start at level zero rather than accidentally becoming operators.
     #[must_use]
     pub fn new(uuid: Uuid, username: impl Into<String>) -> Self {
         Self {
             uuid,
             username: username.into(),
+            permission_level: 0,
+        }
+    }
+
+    /// A caller with the effective level from the server's authenticated Play
+    /// handoff. Invalid levels fail closed at zero, matching access-provider
+    /// resolution.
+    #[must_use]
+    pub fn with_permission_level(
+        uuid: Uuid,
+        username: impl Into<String>,
+        permission_level: u8,
+    ) -> Self {
+        Self {
+            uuid,
+            username: username.into(),
+            permission_level: matches!(permission_level, 0..=4)
+                .then_some(permission_level)
+                .unwrap_or(0),
         }
     }
 }
@@ -390,6 +417,13 @@ mod tests {
         CommandCaller::new(Uuid::from_u128(7), "tester")
     }
 
+    #[test]
+    fn caller_level_is_explicit_and_invalid_input_fails_closed() {
+        assert_eq!(caller().permission_level, 0);
+        assert_eq!(CommandCaller::with_permission_level(Uuid::nil(), "op", 3).permission_level, 3);
+        assert_eq!(CommandCaller::with_permission_level(Uuid::nil(), "invalid", 5).permission_level, 0);
+    }
+
     /// The security property this module exists to hold, at its own layer.
     #[test]
     fn a_dispatch_with_no_sink_refuses_rather_than_running() {
@@ -418,12 +452,13 @@ mod tests {
         use std::sync::Mutex;
 
         #[derive(Default)]
-        struct Recorder(Mutex<Vec<(Uuid, String, String)>>);
+        struct Recorder(Mutex<Vec<(Uuid, String, u8, String)>>);
         impl CommandSink for Recorder {
             fn run(&self, caller: &CommandCaller, command: &str) -> CommandResponse {
                 self.0.lock().unwrap().push((
                     caller.uuid,
                     caller.username.clone(),
+                    caller.permission_level,
                     command.to_owned(),
                 ));
                 CommandResponse::ran()
@@ -437,7 +472,12 @@ mod tests {
         let seen = recorder.0.lock().unwrap();
         assert_eq!(
             seen.as_slice(),
-            &[(Uuid::from_u128(7), "tester".to_owned(), "warp spawn".to_owned())]
+            &[(
+                Uuid::from_u128(7),
+                "tester".to_owned(),
+                0,
+                "warp spawn".to_owned(),
+            )]
         );
     }
 
