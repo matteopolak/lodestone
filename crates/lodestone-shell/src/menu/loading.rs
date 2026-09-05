@@ -214,9 +214,8 @@ pub enum ChunkCellStatus {
 }
 
 /// The loading screen's chunk-status grid: real per-column state for every
-/// column in the current view, meant to be centred on the chunk under the
-/// player — the same recentring `ChunkLoadStatusView::moveTo` does in
-/// vanilla.
+/// column in the current view, centred on the server's streamed-view chunk
+/// when one is known (otherwise the player chunk).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerrainChunkGrid {
     /// Half the grid's side length in chunks. The grid is [`Self::diameter`]
@@ -224,6 +223,10 @@ pub struct TerrainChunkGrid {
     /// squares for the progress bar's denominator, so the two can never
     /// disagree about the size of "the initial view".
     pub radius: u32,
+    /// World chunk at the grid's centre. The cell values are queried relative
+    /// to this coordinate, so it is the authoritative origin for a visible
+    /// loading view rather than cosmetic metadata.
+    pub center: (i32, i32),
     /// Row-major statuses, `x` fastest, [`Self::diameter`]`(radius)`² entries
     /// — matches `LevelLoadingScreen.extractChunksForRendering`'s own
     /// `for (x) { for (z) }` iteration order.
@@ -279,6 +282,18 @@ impl TerrainChunkGrid {
     #[must_use]
     pub const fn diameter(radius: u32) -> usize {
         radius as usize * 2 + 1
+    }
+
+    /// World chunk represented by the grid cell at offset `(x, z)`.
+    #[must_use]
+    pub fn chunk_at(&self, x: usize, z: usize) -> (i32, i32) {
+        let radius = i32::try_from(self.radius).unwrap_or(i32::MAX);
+        let x = i32::try_from(x).unwrap_or(i32::MAX);
+        let z = i32::try_from(z).unwrap_or(i32::MAX);
+        (
+            self.center.0.saturating_sub(radius).saturating_add(x),
+            self.center.1.saturating_sub(radius).saturating_add(z),
+        )
     }
 
     /// The status at grid offset `(x, z)`, each `0..diameter(self.radius)`.
@@ -682,6 +697,7 @@ mod tests {
         // that would collide under a transposed index.
         let grid = TerrainChunkGrid {
             radius: 1,
+            center: (0, 0),
             cells: vec![
                 ChunkCellStatus::Full, // (0, 0)
                 ChunkCellStatus::Empty,

@@ -841,6 +841,13 @@ pub enum NetUpdate {
         /// New streamed radius, in chunks.
         radius: i32,
     },
+    /// The server moved the center of its streamed chunk view.
+    ChunkCacheCenterChanged {
+        /// New center chunk X.
+        x: i32,
+        /// New center chunk Z.
+        z: i32,
+    },
     /// Blocks changed inside one already-loaded section (a break, a place,
     /// another player's edits). The client has applied them to its world;
     /// `blocks` carries only the section-relative coordinates, so a consumer can
@@ -5079,6 +5086,9 @@ fn forward(
         ClientEvent::ChunkCacheRadiusChanged { radius } => {
             NetUpdate::ChunkCacheRadiusChanged { radius }
         }
+        ClientEvent::ChunkCacheCenterChanged { x, z } => {
+            NetUpdate::ChunkCacheCenterChanged { x, z }
+        }
         ClientEvent::SectionBlocksChanged { section, blocks } => NetUpdate::SectionBlocks {
             x: section.x,
             y: section.y,
@@ -5974,6 +5984,28 @@ mod tests {
         {
             NetUpdate::ChunkCacheRadiusChanged { radius } => assert_eq!(radius, 13),
             other => panic!("expected ChunkCacheRadiusChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_preserves_the_server_chunk_cache_center() {
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::ChunkCacheCenterChanged { x: -4, z: 9 },
+        )
+        .expect("a cache-center update does not end the session");
+
+        match rx
+            .try_recv()
+            .expect("the cache center must cross the NetUpdate channel")
+        {
+            NetUpdate::ChunkCacheCenterChanged { x, z } => assert_eq!((x, z), (-4, 9)),
+            other => panic!("expected ChunkCacheCenterChanged, got {other:?}"),
         }
     }
 

@@ -495,6 +495,31 @@ impl Sim {
         self.expected_view_radius = Some(view_radius);
     }
 
+    /// Record the authoritative center of the server's streamed chunk view.
+    ///
+    /// Until the server sends this scalar, the loading grid falls back to the
+    /// local player's chunk. That fallback preserves the pre-packet behavior
+    /// for older protocol families which do not produce this event.
+    pub fn set_chunk_cache_center(&mut self, x: i32, z: i32) {
+        self.write_local(|world, local| {
+            world
+                .get_mut::<lodestone_ecs::ServerChunkCacheCenter>(local)
+                .expect("the local player always carries ServerChunkCacheCenter")
+                .0 = Some((x, z));
+        });
+    }
+
+    /// The server's streamed-view center when reported.
+    #[must_use]
+    fn chunk_cache_center(&self) -> Option<(i32, i32)> {
+        self.read(|world| {
+            world
+                .get::<lodestone_ecs::ServerChunkCacheCenter>(self.local)
+                .expect("the local player always carries ServerChunkCacheCenter")
+                .0
+        })
+    }
+
     /// How much of the initial view has landed, or `None` when there is no
     /// session or no declared view radius to divide by.
     ///
@@ -517,10 +542,10 @@ impl Sim {
     /// conditions [`Self::terrain_progress`] is — no session, or no declared
     /// view radius to size the grid from.
     ///
-    /// Centred on the chunk under the player, the same column math
-    /// [`Self::terrain_wait`] uses — the two must agree about which chunk
-    /// is "the player's own", or the grid's centre cell and the dismissal
-    /// predicate would be pointing at different columns.
+    /// Centred on the server's reported streamed-view center, falling back to
+    /// the chunk under the player before such a report. The loading grid is a
+    /// view of what the server is streaming, while [`Self::terrain_wait`]
+    /// intentionally remains about the local player's own column.
     ///
     /// Each cell reads [`crate::net::NetClient::is_chunk_loaded`] directly:
     /// real, per-position, client-observed state, never synthesised from the
@@ -540,8 +565,11 @@ impl Sim {
         let radius =
             crate::menu::loading::TerrainChunkGrid::view_radius(self.expected_view_radius?);
         let position = self.player().position;
-        let pcx = (position.x.floor() as i32).div_euclid(16);
-        let pcz = (position.z.floor() as i32).div_euclid(16);
+        let player_center = (
+            (position.x.floor() as i32).div_euclid(16),
+            (position.z.floor() as i32).div_euclid(16),
+        );
+        let (pcx, pcz) = self.chunk_cache_center().unwrap_or(player_center);
         let diameter = crate::menu::loading::TerrainChunkGrid::diameter(radius) as i32;
         let r = i32::try_from(radius).unwrap_or(i32::MAX);
         let mut cells = Vec::with_capacity((diameter * diameter).max(0) as usize);
@@ -558,7 +586,11 @@ impl Sim {
                 });
             }
         }
-        Some(crate::menu::loading::TerrainChunkGrid { radius, cells })
+        Some(crate::menu::loading::TerrainChunkGrid {
+            radius,
+            center: (pcx, pcz),
+            cells,
+        })
     }
 
     /// The coarse session phase, for the menu state machine.

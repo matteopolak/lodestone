@@ -4376,8 +4376,12 @@ pub fn route(event: &ClientEvent) -> Route {
         // absolute-versus-relative flags. A session scalar would compile and leave
         // the rendered view pointed at the old direction.
         ClientEvent::PlayerRotationSet { .. } => SHELL,
-        ClientEvent::ChunkCacheCenterChanged { .. }
-        | ClientEvent::SimulationDistanceChanged { .. }
+        // The server's stream center is distinct from the local player during
+        // the loading hand-off. `net::forward` carries it to the loading-grid
+        // producer, whose cell queries must follow the server's center rather
+        // than a predicted player position.
+        ClientEvent::ChunkCacheCenterChanged { .. } => SHELL,
+        ClientEvent::SimulationDistanceChanged { .. }
         | ClientEvent::ItemCooldown { .. }
         | ClientEvent::SoundStopped { .. }
         | ClientEvent::PlayerCombatEntered
@@ -4821,6 +4825,17 @@ mod route_tests {
         let route = route(&ClientEvent::ChunkCacheRadiusChanged { radius: 7 });
         assert!(route.shell, "the shell owns the loading-view radius");
         assert!(route.must_forward(), "the radius must cross net::forward");
+        assert!(!route.is_island());
+    }
+
+    /// The stream center is a separate scalar from the radius: the visible
+    /// loading grid must query the columns around the server's center, even
+    /// while the local player still names its previous chunk.
+    #[test]
+    fn cache_center_update_is_routed_to_the_shell() {
+        let route = route(&ClientEvent::ChunkCacheCenterChanged { x: -4, z: 9 });
+        assert!(route.shell, "the shell owns the loading-grid center");
+        assert!(route.must_forward(), "the center must cross net::forward");
         assert!(!route.is_island());
     }
 

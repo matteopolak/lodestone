@@ -245,6 +245,18 @@ pub struct SessionDebugFeeds(pub lodestone_game::debug_feeds::DebugFeedStore);
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct SessionServerInfo(pub lodestone_game::serverinfo::ServerInfoStore);
 
+/// The center of the chunk square the server is currently streaming.
+///
+/// This is deliberately separate from the local player's position. During a
+/// loading transition the server can move its stream center before local
+/// movement catches up; the loading grid must then ask about the columns the
+/// server is actually sending rather than draw an all-empty square around the
+/// old player chunk. `Sim::poll_net` is the sole writer, because this event
+/// crosses the shell's bounded update channel instead of the shared ingest
+/// fold.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerChunkCacheCenter(pub Option<(i32, i32)>);
+
 /// Tracked waypoints — vanilla's locator bar — from `ClientEvent::WaypointUpdated`.
 ///
 /// See [`lodestone_game::waypoints::WaypointStore`], and note the position is a
@@ -1208,6 +1220,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             SessionStatistics::default(),
             SessionDebugFeeds::default(),
             SessionServerInfo::default(),
+            ServerChunkCacheCenter::default(),
             SessionWaypoints::default(),
             SessionRegistryOrder::default(),
             SessionRecipeBook::default(),

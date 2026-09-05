@@ -7027,7 +7027,11 @@ fn the_chunk_grid_draws_two_real_statuses_at_two_different_cells() {
 
     let mut cells = vec![ChunkCellStatus::Empty; diameter * diameter];
     cells[0] = ChunkCellStatus::Full; // (x=0, z=0), row-major x-fastest
-    let grid = TerrainChunkGrid { radius, cells };
+    let grid = TerrainChunkGrid {
+        radius,
+        center: (0, 0),
+        cells,
+    };
 
     let progress = TerrainProgress { loaded: 1, expected: 9 };
     let frame = loading_frame_with_progress_and_grid("Loading terrain...", progress, Some(grid));
@@ -7088,6 +7092,7 @@ fn the_chunk_grid_draws_two_real_statuses_at_two_different_cells() {
     // real per-cell data, not a fixed two-colour pattern.
     let uniform = TerrainChunkGrid {
         radius,
+        center: (0, 0),
         cells: vec![ChunkCellStatus::Full; diameter * diameter],
     };
     let uniform_frame =
