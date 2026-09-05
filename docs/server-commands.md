@@ -63,7 +63,7 @@ and a snapshot of the existing access-list result. `Some(0..=4)` overrides that 
 defers to it, and an invalid numeric level resolves to zero. The same effective level gates the
 advertised command tree, command execution, and administrative packets.
 
-For the local integrated-server bridge, that captured level also flows with
+For the local integrated-server bridge, the effective level flows with
 `CommandCaller` into the ECS command sink. Immediately before resolving a
 plugin command, the sink writes it to that player's `Permissions` subject.
 This is the input that makes a plugin node with the ordinary `Op` default agree
@@ -75,9 +75,13 @@ Handle clones share provider installation and removal. Provider callbacks run af
 locks are released, so they may inspect stored access through `permission_level` or replace the
 provider. They must not block or recursively resolve the effective command level. Provider policy
 does not alter persisted ops, join bans, whitelist membership, or player-limit bypass. Removing a
-provider restores ordinary access-list resolution for future connections. Existing connections
-retain the level captured at their Play handoff; this API does not perform live privilege revocation.
-This is delegation of the five server levels, not a node/wildcard permission registry.
+provider restores ordinary access-list resolution for future connections. A direct, host-plugin
+command re-resolves the provider for its already-connected caller immediately before dispatch, so
+the next node-gated plugin command sees a grant or revocation without reconnecting. The callback is
+not polled by the tick loop and runs with neither access lock held. Built-in command gates, command
+tree visibility, and administrative packets retain their Play-handoff level until reconnect, so the
+refresh cannot make a command visible that the client was not originally sent. This is delegation
+of the five server levels, not a node/wildcard permission registry.
 
 Access control is vanilla's four JSON files (`ops.json`, `whitelist.json`, `banned-players.json`,
 `banned-ips.json`), read and written through one shared, cloneable handle every connection and the

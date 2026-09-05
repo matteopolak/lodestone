@@ -3814,6 +3814,8 @@ where
                         username.clone(),
                         permission_level,
                     ),
+                    #[cfg(not(target_arch = "wasm32"))]
+                    plugin_access: access.clone(),
                     permission_level,
                 };
                 // The server-authoritative advancement/statistics
@@ -11972,7 +11974,12 @@ where
                 // No built-in root matched: delegate the command to the host
                 // dispatcher.
                 None => {
-                    let response = commands.dispatch.run(&commands.caller, &command);
+                    let response = if commands.dispatch.is_installed() {
+                        let caller = commands.plugin_caller();
+                        commands.dispatch.run(&caller, &command)
+                    } else {
+                        commands.dispatch.run(&commands.caller, &command)
+                    };
                     for line in response.lines() {
                         apply(conn, state, proto.encode_system_chat(line)).await?;
                     }
