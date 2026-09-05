@@ -549,6 +549,9 @@ fn every_entry_is_in_range_and_every_id_resolves() {
     for id in 0..light_props::STATE_COUNT {
         let (dampening, emission) = props(id)
             .unwrap_or_else(|| panic!("id {id} did not resolve"));
+        let state = block_states::StateId::new(id).expect("census range is valid");
+        assert_eq!(light_props::dampening(state), dampening, "id {id} dampening");
+        assert_eq!(light_props::emission(state), emission, "id {id} emission");
         assert!(dampening <= 15, "id {id} dampening {dampening} > 15");
         assert!(emission <= 15, "id {id} emission {emission} > 15");
         if emission > 0 {

@@ -55,9 +55,12 @@ has no effect at all.
 Whether a block takes the AO path at all is gated by the model's own
 `"ambientocclusion"` JSON flag (default true, read once per block from the first
 resolved model of a possibly-multipart state) and, in vanilla, by the block's light
-emission being zero — **the emission half is not modelled** here (no per-block-state
-light-emission table exists anywhere in this codebase yet), so a light-emitting
-full-cube block still takes the smooth-AO path where vanilla would flatten it.
+emission being zero. The canonical per-state emission census now exists in
+`lodestone_data::light_props`, alongside dampening, and its scalar APIs require a
+validated `StateId`; callers carrying raw packet or snapshot ids validate once at
+their boundary. The renderer has not yet connected that emission value to its AO
+choice, so a light-emitting full-cube block still takes the smooth-AO path where
+vanilla would flatten it.
 
 The directional face shade multiplied into the same slot as AO is a fixed constant
 per face direction, not a diffuse dot product: `down 0.5, up 1.0, north/south 0.8,
@@ -272,6 +275,10 @@ frames instead of stalling one.
 - **Keep the AO census API keyed by `StateId`.** Raw ids belong at packet and
   snapshot boundaries, where they must be validated; an invalid snapshot id is open
   for AO rather than a candidate bitset index.
+- **Keep the light-props scalar APIs keyed by `StateId` too.** The injected
+  `LightProperties` seam remains raw because it is registry-independent, so each
+  protocol or snapshot adapter must validate the id and select its conservative
+  fallback there; do not add a raw lookup to `lodestone_data::light_props`.
 - **Which cell an AO/light ring centres on is a per-quad fork** (cullface vs.
   unculled-and-on-boundary vs. unculled-off-boundary), not a per-block rule — a fix
   aimed at "the AO ring" that ignores the light-position fork will leave cross-plant

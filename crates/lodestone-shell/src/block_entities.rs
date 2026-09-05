@@ -5857,7 +5857,8 @@ fn beacon_beam_scan(world: &World, pos: [i32; 3]) -> Vec<BeamSection> {
                 }
             }
         } else {
-            let opaque = lodestone_data::light_props::dampening(state) >= 15;
+            let opaque = lodestone_data::block_states::StateId::new(state)
+                .is_some_and(|state| lodestone_data::light_props::dampening(state) >= 15);
             let is_bedrock = path == Some("bedrock");
             if sections.is_empty() || (opaque && !is_bedrock) {
                 sections.clear();
@@ -6010,7 +6011,8 @@ fn end_gateway_faces_to_show(world: &World, pos: [i32; 3]) -> Vec<lodestone_asse
             let ny = pos[1] + dy;
             let nz = pos[2] + dz;
             match world.block_state_at(nx, ny, nz) {
-                Some(state) => lodestone_data::light_props::dampening(state) < 15,
+                Some(state) => lodestone_data::block_states::StateId::new(state)
+                    .is_none_or(|state| lodestone_data::light_props::dampening(state) < 15),
                 None => true,
             }
         })
