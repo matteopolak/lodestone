@@ -67,7 +67,7 @@ use lodestone_core::State;
 use lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE;
 use lodestone_entity::{DamageFlags, ItemLifecycle};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, EntityAttributeSnapshot, GameMode, ItemStack,
+    BlockActionKind, BlockFace, BlockPos, BundleItemSlot, EntityAttributeSnapshot, GameMode, HotbarSlot, ItemStack, MenuSlot,
     ResourceKey, ResourcePackResponseKind, Rotation, Text, TextContent, Vec3, Vec3f,
     WrittenBookContent,
 };
@@ -6518,9 +6518,11 @@ fn insert_into_brewing_stand(
                 _ => false,
             },
             BrewingSlot::Bottle(bottle) => {
-                for index in 0..3 {
-                    if stand.bottle(index).is_none() {
-                        stand.set_bottle(index, Some(bottle));
+                for raw in 0..lodestone_model::BrewingBottleSlot::COUNT {
+                    let index = lodestone_model::BrewingBottleSlot::new(raw)
+                        .expect("bounded bottle loop");
+                    if stand.bottle_at(index).is_none() {
+                        stand.set_bottle_at(index, Some(bottle));
                         return true;
                     }
                 }
@@ -8183,7 +8185,9 @@ where
 /// `PlayerInventory::set_selected_hotbar_slot`'s own doc comment for why it
 /// degrades instead of panicking).
 fn apply_carried_item_changed(inventory: &mut PlayerInventory, slot: u8) {
-    inventory.set_selected_hotbar_slot(slot);
+    if let Some(slot) = HotbarSlot::new(slot) {
+        inventory.select_hotbar_slot(slot);
+    }
 }
 
 /// Applies a `SET_CREATIVE_MODE_SLOT` write (`ServerBound::CreativeModeSlotSet`).
@@ -8199,7 +8203,9 @@ fn apply_creative_mode_slot_set(
     if !creative {
         return;
     }
-    inventory.apply_menu_slot_change(i32::from(slot), item);
+    if let Some(slot) = MenuSlot::from_raw(i32::from(slot)) {
+        inventory.apply_menu_slot(slot, item);
+    }
 }
 
 /// Reads one menu's slots in menu order, from whichever backing stores its
@@ -8513,7 +8519,11 @@ fn apply_container_clicked<P: ServerProtocol>(
     // The last nested-item selection for this menu slot. The right-click
     // extraction branch reads it to choose which nested item comes out; the
     // following pickup click performs the extraction.
-    let selected_bundle = |slot: usize| inventory.selected_bundle_item(slot);
+    let selected_bundle = |slot: usize| {
+        MenuSlot::from_index(slot)
+            .and_then(|slot| inventory.selected_bundle_item(slot))
+            .map(BundleItemSlot::index)
+    };
     let selected_bundle: Option<SelectedBundleIndex<'_>> = Some(&selected_bundle);
     let dropped = do_click_with(
         &layout,
@@ -11767,7 +11777,11 @@ where
         // (`selected_bundle_item`); the next empty-slot pickup reads that index
         // and extracts the selected item.
         ServerBound::SelectBundleItem { slot_id, selected_item_index } => {
-            inventory.set_selected_bundle_item(slot_id, selected_item_index);
+            let Some(slot) = MenuSlot::from_raw(slot_id) else {
+                return Ok(());
+            };
+            let selected = BundleItemSlot::from_wire(selected_item_index);
+            inventory.set_bundle_item_selection(slot, selected);
         }
         // Beacon configuration. See `apply_set_beacon`'s own doc for the gate.
         ServerBound::SetBeacon { primary, secondary } => {
@@ -11819,11 +11833,13 @@ where
                 .filter(|open| open.window_id == window_id)
                 .map(|open| open.pos);
             if let Some(pos) = matching_pos
-                && let Some(slot) = usize::try_from(slot_id).ok()
+                && let Some(slot) = u8::try_from(slot_id)
+                    .ok()
+                    .and_then(lodestone_model::CrafterSlot::new)
             {
                 block_entities.with(|reg| {
                     if let Some(entity) = reg.get_mut(pos) {
-                        entity.set_crafter_slot_state(slot, new_state);
+                        entity.set_crafter_slot_state_at(slot, new_state);
                     }
                 });
             }

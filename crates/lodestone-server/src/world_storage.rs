@@ -2510,11 +2510,12 @@ fn decode_player_inventory(
 ) -> Result<crate::inventory::PlayerInventory, PlayerRecordError> {
     let mut decoded = crate::inventory::PlayerInventory::new();
     let selected = u8::try_from(inventory.selected_hotbar_slot).unwrap_or(u8::MAX);
-    if !decoded.set_selected_hotbar_slot(selected) {
+    let Some(selected) = lodestone_model::HotbarSlot::new(selected) else {
         return Err(PlayerRecordError::UnsupportedItemComponents {
             slot: usize::from(selected),
         });
-    }
+    };
+    decoded.select_hotbar_slot(selected);
     for stored in inventory.occupied_slots {
         let item = stored
             .item_key

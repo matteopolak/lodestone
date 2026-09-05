@@ -48,6 +48,7 @@ use lodestone_assets::entity_models::{EntityModelEntry, entity_models};
 use lodestone_assets::equipment::{ArmourLayer, ArmourSlot, armour_item, humanoid_armour_model};
 use lodestone_assets::{BakedQuad, DisplaySlot, DisplayTransform, DisplayTransforms, GuiLight};
 use lodestone_data::entity_type::EntityType;
+use lodestone_model::{CampfireSlot, ShelfSlot};
 
 use crate::camera::Frustum;
 use crate::entity_anim::{AnimInput, HandPoseOverride, HumanoidArms, Skeleton};
@@ -3250,7 +3251,7 @@ pub fn campfire_item_mesh(
     fixed: &DisplayTransform,
     pos: [i32; 3],
     facing_yaw_deg: f32,
-    slot: usize,
+    slot: CampfireSlot,
     light: u8,
 ) -> ModelMesh {
     let pose = crate::block_entity::campfire_item_matrix(pos, facing_yaw_deg, slot)
@@ -3287,7 +3288,7 @@ pub fn shelf_item_mesh(
     on_shelf: &DisplayTransform,
     pos: [i32; 3],
     facing_yaw_deg: f32,
-    slot: usize,
+    slot: ShelfSlot,
     align_to_bottom: bool,
     light: u8,
 ) -> ModelMesh {

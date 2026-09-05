@@ -361,13 +361,31 @@ impl BrewingStand {
 
     #[must_use]
     pub fn bottle(&self, slot: usize) -> Option<&Bottle> {
-        self.bottles.get(slot).and_then(Option::as_ref)
+        let slot = u8::try_from(slot)
+            .ok()
+            .and_then(lodestone_model::BrewingBottleSlot::new)?;
+        self.bottle_at(slot)
+    }
+
+    /// Reads a bottle cell that was already range-checked at its boundary.
+    #[must_use]
+    pub fn bottle_at(&self, slot: lodestone_model::BrewingBottleSlot) -> Option<&Bottle> {
+        self.bottles.get(slot.index()).and_then(Option::as_ref)
     }
 
     pub fn set_bottle(&mut self, slot: usize, bottle: Option<Bottle>) {
-        if let Some(s) = self.bottles.get_mut(slot) {
-            *s = bottle;
-        }
+        let Some(slot) = u8::try_from(slot)
+            .ok()
+            .and_then(lodestone_model::BrewingBottleSlot::new)
+        else {
+            return;
+        };
+        self.set_bottle_at(slot, bottle);
+    }
+
+    /// Writes a bottle cell that was already range-checked at its boundary.
+    pub fn set_bottle_at(&mut self, slot: lodestone_model::BrewingBottleSlot, bottle: Option<Bottle>) {
+        self.bottles[slot.index()] = bottle;
     }
 
     #[must_use]

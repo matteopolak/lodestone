@@ -535,10 +535,26 @@ impl BlockEntity {
     /// changed, so a caller has an honest signal rather than a guaranteed
     /// no-op read as success.
     pub fn set_crafter_slot_state(&mut self, slot: usize, enabled: bool) -> bool {
+        let Some(slot) = u8::try_from(slot)
+            .ok()
+            .and_then(lodestone_model::CrafterSlot::new)
+        else {
+            return false;
+        };
+        self.set_crafter_slot_state_at(slot, enabled)
+    }
+
+    /// Changes a crafter cell that was already range-checked at a boundary.
+    pub fn set_crafter_slot_state_at(
+        &mut self,
+        slot: lodestone_model::CrafterSlot,
+        enabled: bool,
+    ) -> bool {
         let BlockEntity::Crafter { slots, disabled } = self else {
             return false;
         };
-        if slot >= 9 || slots[slot].is_some() {
+        let slot = slot.index();
+        if slots[slot].is_some() {
             return false;
         }
         let want_disabled = !enabled;
