@@ -20,6 +20,8 @@ use lodestone_storage_schema::{
 use prost::Message;
 
 const SEGMENT_NAME: &str = "world.ls";
+const COMPACTING_SEGMENT_NAME: &str = "world.ls.compacting";
+const PREVIOUS_SEGMENT_NAME: &str = "world.ls.previous";
 const EXTENSION_TABLE_NAME: &str = "extensions.ls";
 const FORMAT_VERSION: u16 = 1;
 const TRANSACTION_START_MAGIC: [u8; 4] = *b"LSTB";
@@ -165,6 +167,17 @@ pub struct Recovery {
     pub discarded_tail_bytes: u64,
 }
 
+/// Facts about one completed segment compaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Compaction {
+    /// Latest records retained in the replacement segment.
+    pub records: usize,
+    /// Bytes in the append segment before replacing obsolete records.
+    pub before_bytes: u64,
+    /// Bytes in the fully committed replacement segment.
+    pub after_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct IndexEntry {
     payload_offset: u64,
@@ -264,6 +277,7 @@ impl NativeStore {
     pub fn open(directory: impl AsRef<Path>) -> Result<Self, StoreError> {
         fs::create_dir_all(directory.as_ref())?;
         let path = directory.as_ref().join(SEGMENT_NAME);
+        recover_interrupted_compaction(directory.as_ref(), &path)?;
         let extension_table_path = directory.as_ref().join(EXTENSION_TABLE_NAME);
         let extension_table = read_extension_table(&extension_table_path)?;
         let mut file = OpenOptions::new()
@@ -438,6 +452,92 @@ impl NativeStore {
         self.recovery
     }
 
+    /// Replaces the append history with one transaction containing every latest record.
+    ///
+    /// The replacement is first written and synced as `world.ls.compacting`.
+    /// The active segment is then renamed to `world.ls.previous` before the
+    /// replacement becomes `world.ls`. Opening after an interruption either
+    /// keeps the already-published replacement or restores the previous
+    /// committed segment; it never treats an uncommitted replacement as data.
+    ///
+    /// The extension table is unchanged. Callers can use the returned byte
+    /// counts to decide whether a maintenance window reclaimed enough space.
+    pub fn compact(&mut self) -> Result<Compaction, StoreError> {
+        let directory = self
+            .path
+            .parent()
+            .expect("native segment has a parent")
+            .to_path_buf();
+        recover_interrupted_compaction(&directory, &self.path)?;
+        let compacting = directory.join(COMPACTING_SEGMENT_NAME);
+        let previous = directory.join(PREVIOUS_SEGMENT_NAME);
+        let before_bytes = self.file.metadata()?.len();
+
+        let keys = self.index.keys().copied().collect::<Vec<_>>();
+        let (body_len, body_checksum) = self.compacted_body_properties(&keys)?;
+        let record_count = u32::try_from(keys.len()).map_err(|_| StoreError::RecordTooLarge)?;
+        if record_count == 0 {
+            return Ok(Compaction {
+                records: 0,
+                before_bytes,
+                after_bytes: before_bytes,
+            });
+        }
+
+        let header = encode_transaction_header(
+            TRANSACTION_START_MAGIC,
+            record_count,
+            body_len,
+            body_checksum,
+        );
+        let commit = encode_transaction_header(
+            TRANSACTION_COMMIT_MAGIC,
+            record_count,
+            body_len,
+            body_checksum,
+        );
+        {
+            let mut replacement = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&compacting)?;
+            replacement.write_all(&header)?;
+            for key in &keys {
+                let payload = self.read_payload(*key)?;
+                write_record_frame(&mut replacement, *key, &payload)?;
+            }
+            replacement.sync_data()?;
+            replacement.write_all(&commit)?;
+            replacement.sync_data()?;
+        }
+        sync_directory(&directory)?;
+
+        fs::rename(&self.path, &previous)?;
+        sync_directory(&directory)?;
+        fs::rename(&compacting, &self.path)?;
+        sync_directory(&directory)?;
+
+        let mut replacement = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&self.path)?;
+        let (index, recovery) = scan_segment(&mut replacement)?;
+        debug_assert_eq!(recovery.transactions, 1);
+        debug_assert_eq!(recovery.records, keys.len());
+        let after_bytes = replacement.metadata()?.len();
+        self.file = replacement;
+        self.index = index;
+        self.recovery = recovery;
+
+        fs::remove_file(&previous)?;
+        sync_directory(&directory)?;
+        Ok(Compaction {
+            records: keys.len(),
+            before_bytes,
+            after_bytes,
+        })
+    }
+
     /// Returns this store's segment path for operational tooling and tests.
     pub fn segment_path(&self) -> &Path {
         &self.path
@@ -449,6 +549,107 @@ impl NativeStore {
         }
         Ok(())
     }
+
+    fn compacted_body_properties(
+        &mut self,
+        keys: &[RecordKey],
+    ) -> Result<(u64, u32), StoreError> {
+        let mut body_len = 0_u64;
+        let mut crc = !0_u32;
+        for key in keys {
+            let payload = self.read_payload(*key)?;
+            let payload_len =
+                u32::try_from(payload.len()).map_err(|_| StoreError::RecordTooLarge)?;
+            body_len = body_len
+                .checked_add(RECORD_HEADER_LEN as u64 + u64::from(payload_len))
+                .ok_or(StoreError::RecordTooLarge)?;
+            crc = crc32_continue(crc, &key.to_bytes());
+            crc = crc32_continue(crc, &payload_len.to_le_bytes());
+            crc = crc32_continue(crc, &crc32(&payload).to_le_bytes());
+            crc = crc32_continue(crc, &payload);
+        }
+        Ok((body_len, !crc))
+    }
+
+    fn read_payload(&mut self, key: RecordKey) -> Result<Vec<u8>, StoreError> {
+        let entry = self.index.get(&key).copied().expect("key came from index");
+        self.file.seek(SeekFrom::Start(entry.payload_offset))?;
+        let mut payload = vec![0; entry.payload_len as usize];
+        self.file.read_exact(&mut payload)?;
+        if crc32(&payload) != entry.checksum {
+            return Err(StoreError::corrupt(
+                entry.payload_offset,
+                "indexed payload checksum mismatch",
+            ));
+        }
+        let record = decode_record(&payload, entry.payload_offset)?;
+        validate_key_kind(key, &record)?;
+        validate_record_with_extensions(&record, &self.extension_table)
+            .map_err(StoreError::InvalidRecord)?;
+        Ok(payload)
+    }
+}
+
+fn recover_interrupted_compaction(directory: &Path, segment: &Path) -> Result<(), StoreError> {
+    let compacting = directory.join(COMPACTING_SEGMENT_NAME);
+    let previous = directory.join(PREVIOUS_SEGMENT_NAME);
+    match (
+        segment.try_exists()?,
+        compacting.try_exists()?,
+        previous.try_exists()?,
+    ) {
+        (true, false, false) | (false, false, false) => Ok(()),
+        // The old active segment still exists, so the replacement was never
+        // published and must not influence the recovered state.
+        (true, true, false) => {
+            fs::remove_file(compacting)?;
+            sync_directory(directory)
+        }
+        // The previous segment is the last known active value until the new
+        // name is published. Restoring it deliberately chooses the old atomic
+        // state rather than promoting an interrupted maintenance operation.
+        (false, true, true) => {
+            fs::rename(previous, segment)?;
+            fs::remove_file(compacting)?;
+            sync_directory(directory)
+        }
+        // The new segment name is published, so the old segment is only a
+        // recovery anchor left behind before cleanup.
+        (true, false, true) => {
+            fs::remove_file(previous)?;
+            sync_directory(directory)
+        }
+        (false, false, true) => {
+            fs::rename(previous, segment)?;
+            sync_directory(directory)
+        }
+        (false, true, false) => Err(StoreError::corrupt(
+            0,
+            "compaction replacement has no active or previous segment",
+        )),
+        (true, true, true) => Err(StoreError::corrupt(
+            0,
+            "compaction has active, replacement, and previous segments",
+        )),
+    }
+}
+
+fn sync_directory(directory: &Path) -> Result<(), StoreError> {
+    File::open(directory)?.sync_data()?;
+    Ok(())
+}
+
+fn write_record_frame(
+    file: &mut File,
+    key: RecordKey,
+    payload: &[u8],
+) -> Result<(), StoreError> {
+    let payload_len = u32::try_from(payload.len()).map_err(|_| StoreError::RecordTooLarge)?;
+    file.write_all(&key.to_bytes())?;
+    file.write_all(&payload_len.to_le_bytes())?;
+    file.write_all(&crc32(payload).to_le_bytes())?;
+    file.write_all(payload)?;
+    Ok(())
 }
 
 fn first_available_extension_id(used: &BTreeSet<u32>) -> Result<u32, StoreError> {
@@ -702,14 +903,17 @@ fn decode_record(payload: &[u8], offset: u64) -> Result<StorageRecord, StoreErro
 
 /// IEEE CRC-32 over exactly the persisted transaction or record bytes.
 fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = !0_u32;
+    !crc32_continue(!0_u32, bytes)
+}
+
+fn crc32_continue(mut crc: u32, bytes: &[u8]) -> u32 {
     for byte in bytes {
         crc ^= u32::from(*byte);
         for _ in 0..8 {
             crc = (crc >> 1) ^ (0xEDB8_8320 & (0_u32.wrapping_sub(crc & 1)));
         }
     }
-    !crc
+    crc
 }
 
 #[cfg(test)]
@@ -886,6 +1090,119 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_compaction_restores_the_pre_compaction_commit() {
+        let directory = tempdir().unwrap();
+        let path;
+        {
+            let mut store = NativeStore::open(directory.path()).unwrap();
+            store
+                .write_transaction([RecordWrite::new(key(), chunk(-12, 34, 1))])
+                .unwrap();
+            path = store.segment_path().to_owned();
+        }
+        let previous = directory.path().join(PREVIOUS_SEGMENT_NAME);
+        let replacement = directory.path().join(COMPACTING_SEGMENT_NAME);
+        fs::rename(&path, &previous).unwrap();
+        write_committed_segment_for_test(
+            &replacement,
+            &[RecordWrite::new(key(), chunk(-12, 34, 2))],
+        );
+
+        let mut reopened = NativeStore::open(directory.path()).unwrap();
+        assert_eq!(
+            reopened.get(key()).unwrap(),
+            Some(chunk(-12, 34, 1)),
+            "an unpublished maintenance replacement must not become a world commit"
+        );
+        assert!(!previous.exists());
+        assert!(!replacement.exists());
+    }
+
+    #[test]
+    fn compaction_recovery_discards_unpublished_or_superseded_artifacts() {
+        let unpublished_directory = tempdir().unwrap();
+        {
+            let mut store = NativeStore::open(unpublished_directory.path()).unwrap();
+            store
+                .write_transaction([RecordWrite::new(key(), chunk(-12, 34, 1))])
+                .unwrap();
+        }
+        let replacement = unpublished_directory.path().join(COMPACTING_SEGMENT_NAME);
+        write_committed_segment_for_test(
+            &replacement,
+            &[RecordWrite::new(key(), chunk(-12, 34, 2))],
+        );
+        let mut reopened = NativeStore::open(unpublished_directory.path()).unwrap();
+        assert_eq!(reopened.get(key()).unwrap(), Some(chunk(-12, 34, 1)));
+        assert!(
+            !replacement.exists(),
+            "the old active name proves that this replacement was not published"
+        );
+
+        let published_directory = tempdir().unwrap();
+        {
+            let mut store = NativeStore::open(published_directory.path()).unwrap();
+            store
+                .write_transaction([RecordWrite::new(key(), chunk(-12, 34, 2))])
+                .unwrap();
+        }
+        let previous = published_directory.path().join(PREVIOUS_SEGMENT_NAME);
+        write_committed_segment_for_test(
+            &previous,
+            &[RecordWrite::new(key(), chunk(-12, 34, 1))],
+        );
+        let mut reopened = NativeStore::open(published_directory.path()).unwrap();
+        assert_eq!(reopened.get(key()).unwrap(), Some(chunk(-12, 34, 2)));
+        assert!(
+            !previous.exists(),
+            "the new active name proves that publication completed before cleanup"
+        );
+    }
+
+    #[test]
+    fn compaction_reclaims_replaced_frames_and_keeps_each_latest_record() {
+        let directory = tempdir().unwrap();
+        let general_key = RecordKey::general(0, 0, 41);
+        let mut store = NativeStore::open(directory.path()).unwrap();
+        store
+            .write_transaction([
+                RecordWrite::new(key(), chunk(-12, 34, 1)),
+                RecordWrite::new(general_key, world_properties(10)),
+            ])
+            .unwrap();
+        store
+            .write_transaction([RecordWrite::new(key(), chunk(-12, 34, 2))])
+            .unwrap();
+
+        let compaction = store.compact().unwrap();
+        assert_eq!(compaction.records, 2);
+        assert!(
+            compaction.after_bytes < compaction.before_bytes,
+            "the superseded chunk frame must not remain in the compacted segment"
+        );
+        assert_eq!(store.get(key()).unwrap(), Some(chunk(-12, 34, 2)));
+        assert_eq!(
+            store.get(general_key).unwrap(),
+            Some(world_properties(10)),
+            "compaction must retain a latest record that was not replaced"
+        );
+        drop(store);
+
+        let mut reopened = NativeStore::open(directory.path()).unwrap();
+        assert_eq!(reopened.get(key()).unwrap(), Some(chunk(-12, 34, 2)));
+        assert_eq!(reopened.get(general_key).unwrap(), Some(world_properties(10)));
+        assert_eq!(
+            reopened.recovery(),
+            Recovery {
+                transactions: 1,
+                records: 2,
+                discarded_tail_bytes: 0,
+            },
+            "the replacement has one complete transaction, independent of append history"
+        );
+    }
+
+    #[test]
     fn completed_commit_with_corrupt_payload_refuses_to_open() {
         let directory = tempdir().unwrap();
         let path;
@@ -1030,5 +1347,26 @@ mod tests {
             body.extend_from_slice(&payload);
         }
         body
+    }
+
+    fn write_committed_segment_for_test(path: &Path, writes: &[RecordWrite]) {
+        let body = encode_body_for_test(writes);
+        let header = encode_transaction_header(
+            TRANSACTION_START_MAGIC,
+            writes.len() as u32,
+            body.len() as u64,
+            crc32(&body),
+        );
+        let commit = encode_transaction_header(
+            TRANSACTION_COMMIT_MAGIC,
+            writes.len() as u32,
+            body.len() as u64,
+            crc32(&body),
+        );
+        let mut file = File::create(path).unwrap();
+        file.write_all(&header).unwrap();
+        file.write_all(&body).unwrap();
+        file.write_all(&commit).unwrap();
+        file.sync_data().unwrap();
     }
 }
