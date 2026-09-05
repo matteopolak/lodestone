@@ -90,6 +90,7 @@
 //! checksum). No filesystem framework, no async runtime, no protocol crate.
 
 pub mod compression;
+pub mod import_preflight;
 mod lz4_block;
 pub mod level_dat;
 pub mod nbt_diff;
