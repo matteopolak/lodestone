@@ -81,17 +81,38 @@ target/release/examples/heavy-scene-server --emit-scene - --scenario mixed --see
 ```
 
 The `heavy-server-emit` and `samply-heavy-server` recipes stay foreground and
-write captures/results outside tracked source. `profile-heavy-server` invokes
-the existing `scripts/profile-cost-table.py` analyzer. The Samply recipe requires
-the compressed capture, its `heavy-server.json.syms.json` presymbolication
-sidecar, and the runtime JSONL record to be non-empty; a missing artifact fails
-the recipe. Samply 0.13.1 captures may be inspected with their `threadCPUDelta`
-data and sidecar metadata; worker threads are part of the server work, so do not
-judge from the main thread alone. The recipe currently profiles the supported
-`palette --phase ready` slice; the entity slice is available for bounded smoke
-runs, but the recipe does not claim mutation or scheduled-tick coverage.
-Recipe parameters are positional (`just samply-heavy-server palette 1 1`), as
-required by `just`; the three values are scenario, seed, and scale.
+write captures/results outside tracked source. `samply-heavy-server` first
+builds the release example, then runs `scripts/samply-heavy-server.py`. That
+runner invokes the example twice: once with `--emit-scene` to preserve the
+immutable handoff JSON, and once under Samply through the real integrated-server
+entity path. It only permits scale 1 or 2: that means 1,024 or 2,048 live
+entities, respectively, which matches the server harness's own population cap.
+Its server wall deadline is at most 60 seconds and Samply has a second process
+deadline, so a stalled profiler cannot become an open-ended run. It refuses to
+overwrite an artifact, and fails unless the compressed capture, its
+`*.json.syms.json` presymbolication sidecar, the emitted scene, and exactly one
+complete runtime JSONL record are non-empty and agree on scene identity and
+population. Use `just samply-heavy-server-smoke` for the 12-second local smoke
+capture; it is the appropriate verification run, not a long campaign.
+
+Each successful run prints its unique paths below `bench-results/profiles/`.
+Open the interactive flamegraph with the printed command, for example:
+
+```bash
+samply load bench-results/profiles/heavy-server-entity-20260905T010203Z.json.gz
+```
+
+Use the repository analyzer when a text symbol table is more useful than the
+interactive flamegraph:
+
+```bash
+python3 scripts/profile-cost-table.py bench-results/profiles/heavy-server-entity-20260905T010203Z.json.gz
+```
+
+Samply 0.13.1 captures may be inspected with their `threadCPUDelta` data and
+sidecar metadata; worker threads are part of the server work, so do not judge
+from the main thread alone. The workflow profiles the supported `entity --phase
+ready` slice and does not claim mutation or scheduled-tick coverage.
 
 ## Dependencies
 
