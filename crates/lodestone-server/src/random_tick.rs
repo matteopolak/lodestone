@@ -142,7 +142,9 @@ use crate::redstone_rail;
 use crate::redstone_torch;
 use crate::redstone_tripwire;
 use crate::redstone_wire;
-use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
+use crate::scheduled_tick::{ScheduledTickQueueAccess, TickPriority};
+#[cfg(test)]
+use crate::scheduled_tick::ScheduledTickQueue;
 use lodestone_model::BlockPos;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -608,13 +610,13 @@ impl RandomTickScheduler {
     /// schedule a delayed recheck — see that function's own doc comment.
     /// `tick::run_tick_loop` (the real caller) passes its own persistent
     /// `block_ticks` queue and `game_tick` counter; nothing here owns either.
-    pub fn tick_chunk(
+    pub fn tick_chunk<Q: ScheduledTickQueueAccess<String> + ?Sized>(
         &mut self,
         column: &mut crate::chunk::ChunkColumn,
         cx: i32,
         cz: i32,
         tick_speed: u32,
-        block_ticks: &mut ScheduledTickQueue<String>,
+        block_ticks: &mut Q,
         current_tick: u64,
         world: &dyn ChunkSource,
     ) -> Vec<RandomTickEvent> {
@@ -709,7 +711,7 @@ impl RandomTickScheduler {
     /// `blockState.randomTick(...)` virtual call fanning out to whichever
     /// `Block` subclass is actually at that position.
     #[allow(clippy::too_many_arguments)]
-    fn tick_randomly_ticking_block(
+    fn tick_randomly_ticking_block<Q: ScheduledTickQueueAccess<String> + ?Sized>(
         &mut self,
         column: &mut crate::chunk::ChunkColumn,
         min_x: i32,
@@ -719,7 +721,7 @@ impl RandomTickScheduler {
         y: i32,
         z: i32,
         state: &str,
-        block_ticks: &mut ScheduledTickQueue<String>,
+        block_ticks: &mut Q,
         current_tick: u64,
     ) -> Vec<RandomTickEvent> {
         let base = base_name(state);
@@ -795,7 +797,7 @@ impl RandomTickScheduler {
     /// RNG draws for that probe have already happened either way, so the stream
     /// stays aligned.
     #[allow(clippy::too_many_arguments)]
-    fn tick_lava(
+    fn tick_lava<Q: ScheduledTickQueueAccess<String> + ?Sized>(
         &mut self,
         column: &mut crate::chunk::ChunkColumn,
         min_x: i32,
@@ -803,7 +805,7 @@ impl RandomTickScheduler {
         x: i32,
         y: i32,
         z: i32,
-        block_ticks: &mut ScheduledTickQueue<String>,
+        block_ticks: &mut Q,
         current_tick: u64,
     ) -> Vec<RandomTickEvent> {
         let mut events = Vec::new();
@@ -1354,7 +1356,7 @@ pub(crate) fn react_at_placement(
 /// entry point, which is the only way the placement half of a circuit can be
 /// compared against a real server tick for tick.
 #[allow(clippy::too_many_arguments)]
-pub fn react_at_placement_with_entities(
+pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<String> + ?Sized>(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
@@ -1362,7 +1364,7 @@ pub fn react_at_placement_with_entities(
     x: i32,
     y: i32,
     z: i32,
-    block_ticks: &mut ScheduledTickQueue<String>,
+    block_ticks: &mut Q,
     current_tick: u64,
     block_entities: Option<&BlockEntityHandle>,
 ) -> Vec<RandomTickEvent> {
@@ -1586,7 +1588,7 @@ pub(crate) fn run_tripwire_recheck(
 /// this unconditionally on every removed block without a guard of its own —
 /// the same shape [`redstone::is_tripwire_hook`]'s placement counterpart is
 /// gated on inline rather than by the caller.
-pub(crate) fn react_at_removal(
+pub(crate) fn react_at_removal<Q: ScheduledTickQueueAccess<String> + ?Sized>(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
@@ -1595,7 +1597,7 @@ pub(crate) fn react_at_removal(
     y: i32,
     z: i32,
     wire_state_before_removal: &str,
-    block_ticks: &mut ScheduledTickQueue<String>,
+    block_ticks: &mut Q,
     current_tick: u64,
 ) -> Vec<RandomTickEvent> {
     let mut own = Vec::new();
@@ -1929,7 +1931,7 @@ pub(crate) fn propagate_and_react_with_entities(
 /// the only remaining boundary, and it is the real one — a circuit does not
 /// propagate into a chunk nobody is simulating (see [`RedstoneColumns`]).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn propagate_and_react_with_entities_across_chunks(
+pub(crate) fn propagate_and_react_with_entities_across_chunks<Q: ScheduledTickQueueAccess<String> + ?Sized>(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
@@ -1937,7 +1939,7 @@ pub(crate) fn propagate_and_react_with_entities_across_chunks(
     x: i32,
     y: i32,
     z: i32,
-    block_ticks: &mut ScheduledTickQueue<String>,
+    block_ticks: &mut Q,
     current_tick: u64,
     block_entities: Option<&BlockEntityHandle>,
 ) -> Vec<RandomTickEvent> {
@@ -1953,12 +1955,12 @@ pub(crate) fn propagate_and_react_with_entities_across_chunks(
 /// cross-chunk-capable depending only on which [`ChunkSource`] `columns`
 /// was built over.
 #[allow(clippy::too_many_arguments)]
-fn propagate_and_react_over(
+fn propagate_and_react_over<Q: ScheduledTickQueueAccess<String> + ?Sized>(
     columns: &RedstoneColumns<'_, '_>,
     x: i32,
     y: i32,
     z: i32,
-    block_ticks: &mut ScheduledTickQueue<String>,
+    block_ticks: &mut Q,
     current_tick: u64,
     block_entities: Option<&BlockEntityHandle>,
 ) -> Vec<RandomTickEvent> {
@@ -1996,10 +1998,10 @@ fn propagate_and_react_over(
 /// One neighbour notification's worth of reaction dispatch — the body of
 /// [`propagate_and_react`]'s `notify` closure, named so the seven centres a
 /// dust change fans out from can share it.
-fn react_to_notification(
+fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
     columns: &RedstoneColumns<'_, '_>,
     n: Notification,
-    block_ticks: &mut ScheduledTickQueue<String>,
+    block_ticks: &mut Q,
     current_tick: u64,
     events: &mut Vec<RandomTickEvent>,
     block_entities: Option<&BlockEntityHandle>,

@@ -393,6 +393,47 @@ pub trait ScheduledTickSink<T> {
     ) -> bool;
 }
 
+/// The scheduled-block-tick operations a reaction may need from the owner of
+/// the position it is changing.
+///
+/// Block reactions are allowed to schedule, inspect, and cancel pending work:
+/// the latter is how a reversing piston removes its own uncommitted arm while
+/// leaving the carried block's finish tick intact.  Keeping those operations
+/// behind this boundary lets the world queue route each record to its column
+/// without making redstone or piston code know which column owns it.
+///
+/// The world still assigns the insertion sequence.  A reaction therefore
+/// hands work back to this interface instead of retaining another column's
+/// queue or choosing a local order itself.
+pub trait ScheduledTickQueueAccess<T> {
+    /// Schedules one tick, returning `false` for the normal deduplication
+    /// case.
+    fn schedule(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: T,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool;
+
+    /// Whether `pos` owns a pending tick of `kind`.
+    fn has_scheduled(&self, pos: (i32, i32, i32), kind: &T) -> bool;
+
+    /// Finds a pending tick at `pos` without exposing its owner's whole queue.
+    fn matching_at(
+        &self,
+        pos: (i32, i32, i32),
+        matches: impl FnMut(&T) -> bool,
+    ) -> Option<&ScheduledTick<T>>;
+
+    /// Removes the first pending tick at `pos` whose kind matches.
+    fn take_matching(
+        &mut self,
+        pos: (i32, i32, i32),
+        matches: impl FnMut(&T) -> bool,
+    ) -> Option<ScheduledTick<T>>;
+}
+
 impl<T: Eq + Hash + Clone> ScheduledTickSink<T> for ScheduledTickQueue<T> {
     fn schedule_tick(
         &mut self,
@@ -402,6 +443,38 @@ impl<T: Eq + Hash + Clone> ScheduledTickSink<T> for ScheduledTickQueue<T> {
         priority: TickPriority,
     ) -> bool {
         self.schedule(pos, kind, trigger_tick, priority)
+    }
+}
+
+impl<T: Eq + Hash + Clone> ScheduledTickQueueAccess<T> for ScheduledTickQueue<T> {
+    fn schedule(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: T,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool {
+        Self::schedule(self, pos, kind, trigger_tick, priority)
+    }
+
+    fn has_scheduled(&self, pos: (i32, i32, i32), kind: &T) -> bool {
+        Self::has_scheduled(self, pos, kind)
+    }
+
+    fn matching_at(
+        &self,
+        pos: (i32, i32, i32),
+        mut matches: impl FnMut(&T) -> bool,
+    ) -> Option<&ScheduledTick<T>> {
+        self.iter().find(|tick| tick.pos == pos && matches(&tick.kind))
+    }
+
+    fn take_matching(
+        &mut self,
+        pos: (i32, i32, i32),
+        matches: impl FnMut(&T) -> bool,
+    ) -> Option<ScheduledTick<T>> {
+        Self::take_matching(self, pos, matches)
     }
 }
 
@@ -551,6 +624,41 @@ impl<T: Eq + Hash + Clone> ScheduledTickSink<T> for ChunkScheduledTickQueue<T> {
     }
 }
 
+impl<T: Eq + Hash + Clone> ScheduledTickQueueAccess<T> for ChunkScheduledTickQueue<T> {
+    fn schedule(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: T,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool {
+        Self::schedule(self, pos, kind, trigger_tick, priority)
+    }
+
+    fn has_scheduled(&self, pos: (i32, i32, i32), kind: &T) -> bool {
+        Self::has_scheduled(self, pos, kind)
+    }
+
+    fn matching_at(
+        &self,
+        pos: (i32, i32, i32),
+        mut matches: impl FnMut(&T) -> bool,
+    ) -> Option<&ScheduledTick<T>> {
+        self.queues
+            .get(&Self::chunk_for(pos))?
+            .iter()
+            .find(|tick| tick.pos == pos && matches(&tick.kind))
+    }
+
+    fn take_matching(
+        &mut self,
+        pos: (i32, i32, i32),
+        matches: impl FnMut(&T) -> bool,
+    ) -> Option<ScheduledTick<T>> {
+        Self::take_matching(self, pos, matches)
+    }
+}
+
 /// The world's two scheduled-tick queues, plus the game tick their
 /// `trigger_tick`s are measured against — shared, so the save path can read
 /// them.
@@ -622,8 +730,12 @@ pub struct StagedTick {
 /// per-world block-tick and fluid-tick queues.
 #[derive(Debug, Default)]
 pub struct ScheduledTickQueues {
-    /// The real per-world block-tick queue.
-    pub block: ScheduledTickQueue<String>,
+    /// Column-owned block ticks, merged in the one world-wide drain order.
+    ///
+    /// Reactions use [`ScheduledTickQueueAccess`] for their explicit hand-off
+    /// back to this owner, preserving piston cancellation as well as ordinary
+    /// redstone rescheduling across a column boundary.
+    pub block: ChunkScheduledTickQueue<String>,
     /// The real per-world fluid-tick queue.
     pub fluid: ChunkScheduledTickQueue<String>,
 }
@@ -990,5 +1102,49 @@ mod tests {
         let drained = q.drain_due(10, usize::MAX);
         let kinds: Vec<_> = drained.iter().map(|tick| tick.kind).collect();
         assert_eq!(kinds, ["high-second", "normal-first"]);
+    }
+
+    /// Block reactions can hand work to either side of a column boundary,
+    /// including across the negative-coordinate boundary, without selecting a
+    /// local order. The world sequence remains the final tiebreaker even
+    /// though the records are physically held by four different owners.
+    #[test]
+    fn cross_owner_block_handoff_keeps_global_order_on_both_sides_of_zero() {
+        let mut q: ChunkScheduledTickQueue<&'static str> = ChunkScheduledTickQueue::new();
+        assert_eq!(ChunkScheduledTickQueue::<&str>::chunk_for((16, 0, 0)), (1, 0));
+        assert_eq!(ChunkScheduledTickQueue::<&str>::chunk_for((-1, 0, 0)), (-1, 0));
+        assert_eq!(ChunkScheduledTickQueue::<&str>::chunk_for((-16, 0, 0)), (-1, 0));
+
+        assert!(q.schedule((16, 0, 0), "east-first", 10, TickPriority::Normal));
+        assert!(q.schedule((-1, 0, 0), "negative-second", 10, TickPriority::Normal));
+        assert!(q.schedule((-16, 0, 0), "negative-third", 10, TickPriority::Normal));
+        assert!(q.schedule((15, 0, 0), "home-fourth", 10, TickPriority::Normal));
+
+        let drained = q.drain_due(10, usize::MAX);
+        let kinds: Vec<_> = drained.iter().map(|tick| tick.kind).collect();
+        assert_eq!(kinds, ["east-first", "negative-second", "negative-third", "home-fourth"]);
+    }
+
+    /// Positive and negative controls for the cancellation half of the block
+    /// hand-off. A reversing piston removes only its matching pending arm from
+    /// its position's owner; an unmatched cancellation must not erase the
+    /// tick held by the neighbouring negative column.
+    #[test]
+    fn cross_owner_block_handoff_preserves_piston_cancellation_boundaries() {
+        let mut q: ChunkScheduledTickQueue<String> = ChunkScheduledTickQueue::new();
+        let arm = "redstone:piston_finish|east|true|true|x".to_string();
+        let neighbour = "redstone:repeater".to_string();
+        assert!(q.schedule((15, 5, 0), arm.clone(), 10, TickPriority::Normal));
+        assert!(q.schedule((-1, 5, 0), neighbour.clone(), 10, TickPriority::Normal));
+
+        assert!(q
+            .take_matching((15, 5, 0), |kind| kind.starts_with("redstone:piston_finish"))
+            .is_some());
+        assert!(q.has_scheduled((-1, 5, 0), &neighbour));
+        assert!(q
+            .take_matching((-1, 5, 0), |kind| kind.starts_with("redstone:piston_finish"))
+            .is_none());
+        assert!(q.has_scheduled((-1, 5, 0), &neighbour));
+        assert!(q.drain_due(10, usize::MAX).iter().all(|tick| tick.kind == neighbour));
     }
 }
