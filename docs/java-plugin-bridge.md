@@ -573,16 +573,20 @@ Construction is not safe to infer from a descriptor: it can execute arbitrary pl
 the server-owned API state that this bridge does not yet provide. The retained load is therefore
 immediately wrapped in `PaperPluginConstructionPlan`. Its descriptor-backed readiness snapshot keeps
 each plugin's validated name, version, kind, and main class beside the same worker-lifetime loader
-that resolved its entry. It reports `PaperServerFacadeState::Unavailable` when no native surface was
-installed, `PaperServerFacadeState::NativeServerSurface` when the narrow native state seam is installed, and
-`EntryLoadFailed` for an entry with no retained class. There is deliberately no ready-to-construct
-state and no Java constructor call: a later slice must install a real,
-server-owned facade through that retained loader before it may add one. Enablement, disabling, and
-event dispatch remain later lifecycle work. The unignored unit tests inject a loader to prove
-ordering, phase rules, bootstrap-terminal failure, isolated plugin failures, and that construction
-readiness preserves the descriptor while explicitly blocking every constructor. The runtime gate
-stays ignored because it needs a locally installed JDK; it uses stand-in archives only, not an
-operator Paper jar.
+that resolved its entry. On the isolated worker, it reads each loaded class's public constructor
+metadata and records whether a zero-argument constructor exists. This reflection does not initialize
+the class, instantiate it, or invoke any plugin callback. A missing or uninspectable constructor is
+reported as a construction blocker before facade state; `EntryLoadFailed` remains the result for an
+entry with no retained class. A structurally suitable entry still reports
+`PaperServerFacadeState::Unavailable` when no native surface was installed or
+`PaperServerFacadeState::NativeServerSurface` when only the narrow native state seam is installed.
+There is deliberately no ready-to-construct state and no Java constructor call: a later slice must
+install a real, server-owned facade through that retained loader before it may add one. Enablement,
+disabling, and event dispatch remain later lifecycle work. The unignored unit tests inject loader
+outcomes and constructor shapes to prove ordering, phase rules, bootstrap-terminal failure, isolated
+plugin failures, and blocking. The runtime gate stays ignored because it needs a locally installed
+JDK; it uses stand-in archives only, not an operator Paper jar, and proves reflection does not run a
+static initializer.
 
 ```bash
 cargo test -p lodestone-jvm-bridge --features jvm --test paper_lifecycle \
