@@ -27,7 +27,7 @@ use lodestone_model::{
     VersionAdapter,
 };
 use lodestone_v26_2::V770Adapter;
-use lodestone_data::data_component_types::component_type_name;
+use lodestone_data::data_component_types::component_type_id;
 use lodestone_data::item::Item;
 use lodestone_v26_2::packet_ids::play;
 use lodestone_world::World;
@@ -35,9 +35,7 @@ use lodestone_world::World;
 /// Resolves a data-component-type id from its canonical name via the generated
 /// table, so the test never hardcodes a numeric component id.
 fn component_id(name: &str) -> i32 {
-    (0..)
-        .find(|&id| component_type_name(id) == Some(name))
-        .expect("known component type")
+    component_type_id(name).expect("known component type").raw()
 }
 
 fn item_id(name: &str) -> Option<i32> {

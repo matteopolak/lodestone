@@ -1081,7 +1081,8 @@ fn read_component_patch(
 
     for _ in 0..added {
         let type_id = reader.var_i32().map_err(dec_err)?;
-        match component_type_name(type_id) {
+        let component_name = DataComponentTypeId::new(type_id).map(component_type_name);
+        match component_name {
             Some("minecraft:custom_name") => {
                 let nbt = read_network_nbt(reader).map_err(dec_err)?;
                 components.custom_name = Some(Text::from_nbt(&nbt));
@@ -1957,7 +1958,7 @@ fn read_component_patch(
         // opinion" would leave it at 8x. Every other modeled field defaults to
         // "absent" anyway, so consuming the id is enough for those.
         let type_id = reader.var_i32().map_err(dec_err)?;
-        match component_type_name(type_id) {
+        match DataComponentTypeId::new(type_id).map(component_type_name) {
             Some("minecraft:tool") => components.tool = ToolPatch::Removed,
             // A removal clears the component back to *nothing*, and vanilla's
             // own fallback with no `minecraft:max_stack_size` at all is **1**,
@@ -3555,7 +3556,7 @@ mod nesting_budget {
     //! unproven.
 
     use super::{Depth, MAX_ITEM_NESTING, Reader, read_component_patch};
-    use lodestone_data::data_component_types::component_type_name;
+    use lodestone_data::data_component_types::component_type_id;
     use lodestone_data::item::Item;
 
     fn var_i32(out: &mut Vec<u8>, mut value: i32) {
@@ -3573,9 +3574,9 @@ mod nesting_budget {
     /// Resolved from the registry rather than written as a literal: an id
     /// hand-copied here would be a second transcription of a generated table.
     fn component_id(name: &str) -> i32 {
-        (0..4096)
-            .find(|&id| component_type_name(id) == Some(name))
+        component_type_id(name)
             .unwrap_or_else(|| panic!("no data component type is named {name}"))
+            .raw()
     }
 
     /// A real item id for the nested templates at every level.

@@ -200,6 +200,17 @@ and therefore produces no made-up built-in id. The data suite checks lower and u
 literal furnace and merchant ids, while the packet fixture independently pins furnace's encoded
 VarInt.
 
+`lodestone_data::data_component_types::DataComponentTypeId` is the built-in
+data-component-type boundary. `DataComponentTypeId::new` validates an item
+patch's raw VarInt before `component_type_name` performs its total lookup;
+`component_type_id` provides the reverse path for outbound item writers.
+An added id outside the built-in census remains explicitly unknown/custom and
+makes the stack patch partial, because that payload has no generic length to
+skip. An unknown removal remains safe to consume because removals contain only
+the id. The table suite checks the entire domain and literal `custom_data = 0`,
+`tool = 28`, and `shulker/color = 110` controls; no raw public lookup may turn
+an invalid id into a built-in component name.
+
 ### `lodestone-data`: the crate these censuses live in
 
 Owns roughly twenty generated 26.2 game-data tables — block states, hardness, collision

@@ -297,9 +297,9 @@ fn write_advancement(w: &mut Writer, id: &str, title: &str, icon_component: Opti
 /// Resolves a data-component-type id from its canonical name, so no numeric
 /// component id is hardcoded here.
 fn component_id(name: &str) -> i32 {
-    (0..)
-        .find(|&id| lodestone_data::data_component_types::component_type_name(id) == Some(name))
+    lodestone_data::data_component_types::component_type_id(name)
         .expect("known component type")
+        .raw()
 }
 
 // ---------------------------------------------------------------------------
