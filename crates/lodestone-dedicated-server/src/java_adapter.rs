@@ -324,7 +324,8 @@ impl JavaAdapter {
         let available_block_change_events = MAX_PENDING_BLOCK_CHANGE_EVENTS
             .saturating_sub(self.pending_block_change_events.len());
         self.host.service_pending_block_state_write_batches(1, |batch| {
-            if batch.writes.len() > available_block_change_events {
+            let notify_listeners = batch.update_flags.notifies_resident_listeners();
+            if notify_listeners && batch.writes.len() > available_block_change_events {
                 return Err(format!(
                     "resident block-change queue has capacity for {available_block_change_events} replacements"
                 ));
@@ -347,7 +348,9 @@ impl JavaAdapter {
             for (write, state) in &writes {
                 server.set_resident_block_state_id(write.x, write.y, write.z, *state)?;
             }
-            self.pending_block_change_events.extend(writes.into_iter().map(|(write, _)| write));
+            if notify_listeners {
+                self.pending_block_change_events.extend(writes.into_iter().map(|(write, _)| write));
+            }
             Ok(())
         });
         let available_block_change_events = MAX_PENDING_BLOCK_CHANGE_EVENTS

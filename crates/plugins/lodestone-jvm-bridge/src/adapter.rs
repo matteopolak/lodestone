@@ -46,11 +46,46 @@ pub const MAX_BLOCK_STATE_BATCH_POSITIONS: usize = 4096;
 
 /// The largest number of replacements one batch request may carry.
 ///
-/// Every accepted replacement also produces one ordered resident-change
-/// callback. The write bound is therefore the callback backlog bound, not the
-/// read bound: it prevents a single Java call from creating an unserviceable
-/// observer queue after the host has already mutated terrain.
+/// A notifying replacement produces one ordered resident-change callback. The
+/// write bound is therefore the callback backlog bound, not the read bound: it
+/// prevents a single Java call from creating an unserviceable observer queue
+/// after the host has already mutated terrain.
 pub const MAX_BLOCK_STATE_BATCH_WRITES: usize = 64;
+
+/// Explicit observer-notification policy for a resident block replacement.
+///
+/// The bridge does not yet expose physics, neighbor propagation, packet, or
+/// block-entity update switches. Those bits are rejected before a request
+/// reaches the host rather than silently claiming a behavior the server does
+/// not provide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockUpdateFlags(u8);
+
+impl BlockUpdateFlags {
+    /// Apply the resident replacement without scheduling a Java observer callback.
+    pub const NONE: Self = Self(0);
+    /// Queue the established resident block-change callback after a successful replacement.
+    pub const NOTIFY_RESIDENT_LISTENERS: Self = Self(1);
+
+    fn from_jint(flags: jint) -> Result<Self, AdapterError> {
+        let flags = u32::try_from(flags).map_err(|_| {
+            AdapterError::new("setBlockStateIdsWithFlags requires non-negative update flags")
+        })?;
+        match flags {
+            0 => Ok(Self::NONE),
+            1 => Ok(Self::NOTIFY_RESIDENT_LISTENERS),
+            _ => Err(AdapterError::new(format!(
+                "setBlockStateIdsWithFlags does not support update flags 0x{flags:x}; supported bits: 0x01 notify resident listeners"
+            ))),
+        }
+    }
+
+    /// Whether a successful host write must queue the existing listener callback.
+    #[must_use]
+    pub const fn notifies_resident_listeners(self) -> bool {
+        self.0 & Self::NOTIFY_RESIDENT_LISTENERS.0 != 0
+    }
+}
 
 /// Several resident block-state reads carried by one bounded port request.
 ///
@@ -69,6 +104,7 @@ pub struct BlockStateBatchQuery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockStateBatchWrite {
     pub writes: Vec<BlockStateWrite>,
+    pub update_flags: BlockUpdateFlags,
 }
 
 /// A host must distinguish an unavailable position from a valid air state.
@@ -2022,6 +2058,27 @@ pub(crate) fn register_block_state_batch_write(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_block_state_batch_write_with_flags(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the generated surface validates the `int[], int -> int` ABI.
+    // Unsupported bits become a named Java error before any host request.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_block_state_ids_write_with_flags as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_lifecycle_plugin_name_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -2757,57 +2814,78 @@ extern "system" fn native_block_state_ids_write<'local>(
     _class: JClass<'local>,
     packed_writes: jintArray,
 ) -> jint {
-    env.with_env(|env| -> Result<jint, AdapterError> {
-        let _depth = CallbackDepthGuard::enter()
-            .map_err(|error| AdapterError::new(error.to_string()))?;
-        if packed_writes.is_null() {
-            return Err(AdapterError::new("setBlockStateIds requires a non-null int[] of x,y,z,state triples"));
-        }
-        // SAFETY: JNI passed the local `int[]` mandated by the validated ABI.
-        // This wrapper is its sole owner and remains in the current local frame.
-        let writes = unsafe { JIntArray::from_raw(env, packed_writes) };
-        let len = writes
-            .len(env)
-            .map_err(|error| AdapterError::new(format!("setBlockStateIds: {error}")))?;
-        if len % 4 != 0 {
-            return Err(AdapterError::new("setBlockStateIds requires an int[] whose length is divisible by 4"));
-        }
-        let count = len / 4;
-        if count > MAX_BLOCK_STATE_BATCH_WRITES {
-            return Err(AdapterError::new(format!(
-                "setBlockStateIds accepts at most {MAX_BLOCK_STATE_BATCH_WRITES} replacements"
-            )));
-        }
-        let mut packed = vec![0_i32; len];
-        writes
-            .get_region(env, 0, &mut packed)
-            .map_err(|error| AdapterError::new(format!("setBlockStateIds: {error}")))?;
-        let writes = packed
-            .chunks_exact(4)
-            .map(|values| {
-                let state_id = u32::try_from(values[3])
-                    .map_err(|_| AdapterError::new("setBlockStateIds requires non-negative state ids"))?;
-                Ok::<_, AdapterError>(BlockStateWrite {
-                    x: values[0],
-                    y: values[1],
-                    z: values[2],
-                    state_id,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if writes.is_empty() {
-            return Ok(0);
-        }
-        let port = BLOCK_BATCH_WRITE_PORT.with(|slot| slot.borrow().clone()).ok_or_else(|| {
-            AdapterError::new("setBlockStateIds requires the adapter worker thread")
-        })?;
-        port.request(BlockStateBatchWrite { writes })
-            .map_err(|error| AdapterError::new(format!("setBlockStateIds: {error}")))?
-            .map_err(|error| AdapterError::new(format!("setBlockStateIds: {error}")))?;
-        jint::try_from(count)
-            .map_err(|_| AdapterError::new("setBlockStateIds count exceeds Java int range"))
+    env.with_env(|env| block_state_ids_write(env, packed_writes, BlockUpdateFlags::NOTIFY_RESIDENT_LISTENERS))
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[allow(unsafe_code)]
+extern "system" fn native_block_state_ids_write_with_flags<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    packed_writes: jintArray,
+    flags: jint,
+) -> jint {
+    env.with_env(|env| {
+        let flags = BlockUpdateFlags::from_jint(flags)?;
+        block_state_ids_write(env, packed_writes, flags)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+#[allow(unsafe_code)]
+fn block_state_ids_write(
+    env: &mut Env<'_>,
+    packed_writes: jintArray,
+    update_flags: BlockUpdateFlags,
+) -> Result<jint, AdapterError> {
+    let _depth = CallbackDepthGuard::enter()
+        .map_err(|error| AdapterError::new(error.to_string()))?;
+    if packed_writes.is_null() {
+        return Err(AdapterError::new("setBlockStateIds requires a non-null int[] of x,y,z,state triples"));
+    }
+    // SAFETY: JNI passed the local `int[]` mandated by the validated ABI.
+    // This wrapper is its sole owner and remains in the current local frame.
+    let writes = unsafe { JIntArray::from_raw(env, packed_writes) };
+    let len = writes
+        .len(env)
+        .map_err(|error| AdapterError::new(format!("setBlockStateIds: {error}")))?;
+    if len % 4 != 0 {
+        return Err(AdapterError::new("setBlockStateIds requires an int[] whose length is divisible by 4"));
+    }
+    let count = len / 4;
+    if count > MAX_BLOCK_STATE_BATCH_WRITES {
+        return Err(AdapterError::new(format!(
+            "setBlockStateIds accepts at most {MAX_BLOCK_STATE_BATCH_WRITES} replacements"
+        )));
+    }
+    let mut packed = vec![0_i32; len];
+    writes
+        .get_region(env, 0, &mut packed)
+        .map_err(|error| AdapterError::new(format!("setBlockStateIds: {error}")))?;
+    let writes = packed
+        .chunks_exact(4)
+        .map(|values| {
+            let state_id = u32::try_from(values[3])
+                .map_err(|_| AdapterError::new("setBlockStateIds requires non-negative state ids"))?;
+            Ok::<_, AdapterError>(BlockStateWrite {
+                x: values[0],
+                y: values[1],
+                z: values[2],
+                state_id,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if writes.is_empty() {
+        return Ok(0);
+    }
+    let port = BLOCK_BATCH_WRITE_PORT.with(|slot| slot.borrow().clone()).ok_or_else(|| {
+        AdapterError::new("setBlockStateIds requires the adapter worker thread")
+    })?;
+    port.request(BlockStateBatchWrite { writes, update_flags })
+        .map_err(|error| AdapterError::new(format!("setBlockStateIds: {error}")))?
+        .map_err(|error| AdapterError::new(format!("setBlockStateIds: {error}")))?;
+    jint::try_from(count)
+        .map_err(|_| AdapterError::new("setBlockStateIds count exceeds Java int range"))
 }
 
 extern "system" fn native_lifecycle_plugin_name<'local>(
@@ -4460,7 +4538,10 @@ mod tests {
                 assert_ne!(std::thread::current().id(), host_thread);
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(
-                    batch_write_port.request(BlockStateBatchWrite { writes }).unwrap(),
+                    batch_write_port.request(BlockStateBatchWrite {
+                        writes,
+                        update_flags: BlockUpdateFlags::NOTIFY_RESIDENT_LISTENERS,
+                    }).unwrap(),
                     Ok(()),
                 );
             },
@@ -4473,12 +4554,43 @@ mod tests {
             calls += 1;
             assert_eq!(std::thread::current().id(), host_thread);
             assert_eq!(batch.writes, expected);
+            assert_eq!(
+                batch.update_flags,
+                BlockUpdateFlags::NOTIFY_RESIDENT_LISTENERS,
+            );
             Ok(())
         }) == 0 {
             assert!(Instant::now() < limit, "batch write did not reach the host");
             std::thread::yield_now();
         }
         assert_eq!(calls, 1, "one region replacement must become one port request");
+    }
+
+    #[test]
+    fn block_update_flags_make_notification_opt_in_and_name_unsupported_bits() {
+        assert_eq!(BlockUpdateFlags::from_jint(0), Ok(BlockUpdateFlags::NONE));
+        assert_eq!(
+            BlockUpdateFlags::from_jint(1),
+            Ok(BlockUpdateFlags::NOTIFY_RESIDENT_LISTENERS),
+        );
+        assert_eq!(
+            BlockUpdateFlags::from_jint(2),
+            Err(AdapterError::new(
+                "setBlockStateIdsWithFlags does not support update flags 0x2; supported bits: 0x01 notify resident listeners",
+            )),
+        );
+        assert_eq!(
+            BlockUpdateFlags::from_jint(256),
+            Err(AdapterError::new(
+                "setBlockStateIdsWithFlags does not support update flags 0x100; supported bits: 0x01 notify resident listeners",
+            )),
+        );
+        assert_eq!(
+            BlockUpdateFlags::from_jint(-1),
+            Err(AdapterError::new(
+                "setBlockStateIdsWithFlags requires non-negative update flags",
+            )),
+        );
     }
 
     #[test]

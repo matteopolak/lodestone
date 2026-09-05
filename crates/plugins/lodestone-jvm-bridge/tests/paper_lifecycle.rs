@@ -6,7 +6,9 @@ use std::process::Command;
 use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
-use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost, BlockStateWrite};
+use lodestone_jvm_bridge::adapter::{
+    AdapterEvent, AdapterHost, BlockStateWrite, BlockUpdateFlags,
+};
 use lodestone_jvm_bridge::native_surface::{
     OperatorBlockStateMember, OperatorLongValueMember, OperatorValueMember,
 };
@@ -55,6 +57,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native int blockStateId(int x, int y, int z); \
          public static native int[] blockStateIds(int[] positions); \
          public static native int setBlockStateIds(int[] writes); \
+         public static native int setBlockStateIdsWithFlags(int[] writes, int flags); \
          public static native long serverTickCount(); \
          public static native int setBlockStateId(int x, int y, int z, int stateId); \
          public static native String currentPluginName(); \
@@ -332,6 +335,7 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
          public static native int blockStateId(int x, int y, int z); \
          public static native int[] blockStateIds(int[] positions); \
          public static native int setBlockStateIds(int[] writes); \
+         public static native int setBlockStateIdsWithFlags(int[] writes, int flags); \
          public static native long serverTickCount(); \
          public static native int setBlockStateId(int x, int y, int z, int stateId); \
          public static native String currentPluginName(); \
@@ -449,7 +453,7 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
          log(\"state=\" + fixture.intercepted.BlockValue.state(handle)); \
          int[] states = lodestone.bridge.IsolatedPaperShim.blockStateIds(new int[] { x, y, z, 5, -12, 91 }); \
          log(\"batch=\" + states[0] + \",\" + states[1]); \
-         log(\"written=\" + lodestone.bridge.IsolatedPaperShim.setBlockStateIds(new int[] { x, y, z, 1234, 5, -12, 91, 17 })); } }); } \
+         log(\"written=\" + lodestone.bridge.IsolatedPaperShim.setBlockStateIdsWithFlags(new int[] { x, y, z, 1234, 5, -12, 91, 17 }, 0)); } }); } \
          public void onDisable() {} }",
     )
     .expect("plugin source");
@@ -505,6 +509,7 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
         .expect("dispatch resident block change");
     let completion_limit = Instant::now() + Duration::from_secs(5);
     let mut observed_writes = None;
+    let mut observed_update_flags = None;
     let mut batch_requests = 0;
     loop {
         host.service_pending(1, |query| {
@@ -523,6 +528,10 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
             Ok(vec![422, 17])
         });
         host.service_pending_block_state_write_batches(1, |batch| {
+            assert!(
+                observed_update_flags.replace(batch.update_flags).is_none(),
+                "one batch-write policy expected",
+            );
             assert!(observed_writes.replace(batch.writes).is_none(), "one batch write expected");
             Ok(())
         });
@@ -547,6 +556,11 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
             BlockStateWrite { x: -17, y: 64, z: 33, state_id: 1234 },
             BlockStateWrite { x: 5, y: -12, z: 91, state_id: 17 },
         ]),
+    );
+    assert_eq!(
+        observed_update_flags,
+        Some(BlockUpdateFlags::NONE),
+        "the flagged JNI surface must carry its no-callback policy to the host",
     );
     assert_eq!(batch_requests, 1, "two Java block reads must use one host batch request");
     assert_eq!(

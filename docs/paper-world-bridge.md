@@ -14,13 +14,15 @@ Scalar `blockStateId(int,int,int)` and `setBlockStateId(int,int,int,int)` cross 
 
 `setBlockStateIds(int[])` is the matching ordered bulk-write path. Its input is `(x,y,z,stateId)` quadruples and it returns the number of replacements applied. It accepts at most 64 replacements because each accepted replacement reserves one ordered change-observer callback. Before applying any replacement, the dedicated host validates every state ID and confirms every target is resident; an invalid state, unavailable position, or insufficient callback capacity rejects the whole batch without a partial mutation. A successful batch is then applied in input order and queues the same host-confirmed per-block notifications as scalar writes.
 
+`setBlockStateIdsWithFlags(int[],int)` makes that update policy explicit. Bit `0x01` queues the existing resident-change listener callback; `0` performs the same validated resident write without that Java observer notification. All other bits, including physics, neighbor propagation, packet, and block-entity update requests, raise a named error before the host receives the batch. The unflagged batch method is fixed to `0x01` for compatibility with the pre-existing callback behavior.
+
 The bridge never shares an ECS value, world object, lock guard, or pointer with Java. Java callbacks run on the dedicated adapter worker; the tick owner services copied request values. Block handles used by the change-listener subset are generation-checked worker-local values containing only owner identity and coordinates. A released or malformed handle fails before a host read or write is queued.
 
 ## How to change it
 
 Add a world-domain member by extending `native_surface::ISOLATED_SHIM_METHODS`, its validation and registration dispatch, and the matching adapter callback together. Add the public dedicated-host producer in `java_adapter::JavaAdapter::poll`; a bridge method with no producer is unsupported and must not be listed. Keep a hermetic `AdapterHost` test that proves ordering, bounds, and the number of port requests, plus an ignored fresh-process JDK fixture that compiles the precise Java declaration and calls it through JNI.
 
-For batch reads, retain the 4,096-position cap, input ordering, and exact response-length check. For batch writes, retain the 64-replacement observer-capacity limit and preflight the entire request before the first mutation. Do not turn a missing column into a load/generate request, and do not add a world or ECS handle to `WorldPort`.
+For batch reads, retain the 4,096-position cap, input ordering, and exact response-length check. For batch writes, retain the 64-replacement observer-capacity limit whenever notification flag `0x01` is selected and preflight the entire request before the first mutation. Add no update bit until the dedicated host has a public, observable producer for its exact behavior. Do not turn a missing column into a load/generate request, and do not add a world or ECS handle to `WorldPort`.
 
 ## Configuration
 
