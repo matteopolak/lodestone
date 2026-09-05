@@ -14,6 +14,7 @@
 //! ```text
 //! lodestone-server [--protocol <number>] [directory]
 //! lodestone-server anvil-convert <import|export> [options]
+//! lodestone-server native-compact --native-path <native-store>
 //! ```
 //!
 //! `directory` defaults to the current directory. It is created if missing.
@@ -39,6 +40,7 @@ use lodestone_server::{eula, parse_seed};
 #[cfg(feature = "jvm")]
 mod java_adapter;
 mod anvil_conversion;
+mod native_compaction;
 
 /// How often the world autosaves while running. Vanilla has no
 /// `server.properties` key for this (its own autosave cadence is
@@ -122,6 +124,16 @@ async fn main() {
     let arguments: Vec<_> = std::env::args().skip(1).collect();
     if arguments.first().is_some_and(|argument| argument == "anvil-convert") {
         match anvil_conversion::run(arguments.into_iter().skip(1)) {
+            Ok(output) => print!("{output}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+    if arguments.first().is_some_and(|argument| argument == "native-compact") {
+        match native_compaction::run(arguments.into_iter().skip(1)) {
             Ok(output) => print!("{output}"),
             Err(error) => {
                 eprintln!("{error}");

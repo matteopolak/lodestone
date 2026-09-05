@@ -2880,6 +2880,7 @@ dependencies = [
  "lodestone-model",
  "lodestone-registry",
  "lodestone-server",
+ "lodestone-storage-schema",
  "lodestone-world",
  "reqwest",
  "tempfile",
