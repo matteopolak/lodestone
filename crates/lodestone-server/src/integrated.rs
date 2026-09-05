@@ -2783,6 +2783,45 @@ impl IntegratedServer {
         storage.native_extension_table()
     }
 
+    /// Saves one independently dirty, bounded player locator through the selected native backend.
+    ///
+    /// The locator is an explicit producer-owned fixed-point value, rather
+    /// than a conversion of this server's floating-point live player snapshot.
+    /// It therefore does not join the disconnect or autosave path and cannot
+    /// replace the full Anvil player-data writer. The native reader rejects a
+    /// custom dimension or opaque extension payload rather than returning a
+    /// locator with data silently omitted.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_dirty_native_player(
+        &self,
+        player: crate::world_storage::NativePlayerRecord,
+    ) -> Result<(), crate::world_storage::Error> {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.write_dirty_player(player)
+    }
+
+    /// Loads one bounded player locator from the selected native backend.
+    ///
+    /// This is not a player join restore: live joins still use the complete
+    /// Anvil `.dat` model, including inventory and preserved opaque fields.
+    /// Missing locators return `None`; malformed UUIDs, custom dimensions,
+    /// extensions, and compact-key collisions return explicit errors.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_native_player(
+        &self,
+        uuid: [u8; 16],
+    ) -> Result<
+        Option<crate::world_storage::NativePlayerRecord>,
+        crate::world_storage::Error,
+    > {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.load_player(uuid)
+    }
+
     /// Saves one dirty terrain column through the selected native record backend.
     ///
     /// This is deliberately a narrow producer, not a switch of the live world
@@ -5431,6 +5470,119 @@ mod tests {
                 .extensions,
             assigned,
             "a fresh server must read the first server's durable extension IDs"
+        );
+        reopened.shutdown().await;
+        std::fs::remove_dir_all(&world_dir).expect("remove test world");
+    }
+
+    /// The server-level native player consumer: one explicitly typed locator
+    /// crosses the selected backend, then a fresh server sees it after restart.
+    /// A complete Anvil player save is deliberately written beside it and read
+    /// back unchanged, so this cannot pass if the locator path replaces full
+    /// player persistence with its bounded fields.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn persistent_server_reopens_native_player_without_replacing_anvil_data() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "lodestone-native-player-server-{}-{unique}",
+            std::process::id()
+        ));
+        let native_dir = world_dir.join("native");
+        let uuid = [
+            0x3c, 0x16, 0x72, 0x95, 0x2b, 0xd0, 0x41, 0x5a, 0x87, 0xef, 0x91, 0x44, 0xee,
+            0x77, 0x31, 0x09,
+        ];
+        let locator = crate::world_storage::NativePlayerRecord {
+            uuid,
+            dimension: lodestone_storage_schema::BuiltinDimension::Nether,
+            x_fixed: -12_345,
+            y_fixed: 2_048,
+            z_fixed: 98_765,
+            yaw_millidegrees: -179_999,
+            pitch_millidegrees: 89_999,
+        };
+        let anvil_data = crate::player_data::PlayerData {
+            pos: lodestone_model::Vec3::new(31.25, 64.5, -9.75),
+            motion: lodestone_model::Vec3::new(0.1, -0.2, 0.3),
+            rotation: lodestone_model::Rotation::new(12.5, -3.25),
+            health: 17.5,
+            dimension: "minecraft:overworld".to_owned(),
+            preserved: vec![(
+                "example:opaque".to_owned(),
+                lodestone_core::Nbt::String("must remain in Anvil data".to_owned()),
+            )],
+            ..crate::player_data::PlayerData::default()
+        };
+        let player_store = crate::player_data::PlayerDataStore::new(&world_dir)
+            .expect("open Anvil player store");
+        player_store
+            .write(Uuid::from_bytes(uuid), &anvil_data)
+            .expect("seed full Anvil player data");
+
+        let first_storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir.clone(),
+            },
+        )
+        .expect("open first native segment");
+        let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            Silent,
+            &world_dir,
+            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+            0,
+            16,
+            (0..=0, 0..=0),
+            (0, 0),
+            0,
+            0,
+            std::time::Duration::from_secs(3600),
+            first_storage,
+        )
+        .expect("open first persistent server");
+        server
+            .write_dirty_native_player(locator)
+            .expect("save typed native locator");
+        server.shutdown().await;
+        assert_eq!(
+            player_store.read(Uuid::from_bytes(uuid)).expect("read Anvil data"),
+            Some(anvil_data.clone()),
+            "the bounded native locator must not rewrite full Anvil player data"
+        );
+
+        let second_storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir,
+            },
+        )
+        .expect("reopen native segment");
+        let (reopened, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            Silent,
+            &world_dir,
+            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+            0,
+            16,
+            (0..=0, 0..=0),
+            (0, 0),
+            0,
+            0,
+            std::time::Duration::from_secs(3600),
+            second_storage,
+        )
+        .expect("open second persistent server");
+        assert_eq!(
+            reopened
+                .load_native_player(uuid)
+                .expect("read reopened native locator"),
+            Some(locator),
+            "the fresh server must read the first server's durable locator"
+        );
+        assert!(
+            reopened.load_native_player([0xff; 16]).unwrap().is_none(),
+            "a different UUID must not be served from the first server's memory"
         );
         reopened.shutdown().await;
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
