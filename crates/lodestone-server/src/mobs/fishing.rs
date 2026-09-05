@@ -73,6 +73,38 @@ pub(super) struct FishingBobber {
     pub lure_speed: i32,
 }
 
+/// The chunk containing a fishing bobber at the start of its tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum FishingTickOwner {
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl FishingTickOwner {
+    fn for_position(position: Vec3) -> Self {
+        Self::Chunk {
+            cx: (position.x.floor() as i32).div_euclid(16),
+            cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+}
+
+/// One completed fishing-bobber owner batch.
+#[derive(Debug, Clone)]
+pub(crate) struct FishingTickOwnerBatch {
+    owner: FishingTickOwner,
+    expected_batch_count: usize,
+    effects: Vec<FishingTickEffect>,
+}
+
+#[derive(Debug, Clone)]
+struct FishingTickEffect {
+    owner: FishingTickOwner,
+    serial: usize,
+    id: i32,
+    bobber: FishingBobber,
+    discard: bool,
+}
+
 /// One catch's proceeds: what [`MobSim::retrieve_fishing_bobber`] has
 /// already turned into real entities, plus the rod-damage tier the
 /// off-limits caller (durability lives on the connection's inventory) still
@@ -414,16 +446,99 @@ impl<'w> MobSim<'w> {
     /// (`shouldStopFishing`'s distance/held-item check, and hooking a
     /// world entity rather than only bobbing for fish).
     pub(super) fn tick_fishing_bobbers(&mut self) {
+        let batches = self.tick_fishing_owner_batches();
+        self.apply_fishing_tick_owner_batches(batches);
+    }
+
+    /// Produces owner completions from cloned tick-start bobber state.
+    ///
+    /// The fishing RNG remains serial in entity-id order because bobbing and
+    /// bite decisions share one stream. Owners return only changed copies;
+    /// the live map is written by the central apply step.
+    pub(crate) fn tick_fishing_owner_batches(&mut self) -> Vec<FishingTickOwnerBatch> {
         let world = self.world;
-        let ids: Vec<i32> = self.fishing_bobbers.keys().copied().collect();
-        let mut expired: Vec<i32> = Vec::new();
-        for id in ids {
-            let Some(b) = self.fishing_bobbers.get_mut(&id) else { continue };
+        let mut ids: Vec<i32> = self.fishing_bobbers.keys().copied().collect();
+        ids.sort_unstable();
+        let mut batches = Vec::<FishingTickOwnerBatch>::new();
+        for (serial, id) in ids.into_iter().enumerate() {
+            let mut bobber = self
+                .fishing_bobbers
+                .get(&id)
+                .cloned()
+                .expect("a tick-start fishing id must remain live while planning");
+            let owner = FishingTickOwner::for_position(bobber.position);
+            let discard = Self::tick_fishing_bobber(world, &mut self.fishing_rng, &mut bobber);
+            let effect = FishingTickEffect {
+                owner,
+                serial,
+                id,
+                bobber,
+                discard,
+            };
+            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
+                batch.effects.push(effect);
+            } else {
+                batches.push(FishingTickOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects: vec![effect],
+                });
+            }
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
+
+    /// Validates and centrally applies completed fishing-owner batches.
+    pub(crate) fn apply_fishing_tick_owner_batches(
+        &mut self,
+        batches: Vec<FishingTickOwnerBatch>,
+    ) {
+        if batches.is_empty() {
+            assert!(
+                self.fishing_bobbers.is_empty(),
+                "fishing owner completion must retain every live tick-start bobber"
+            );
+            return;
+        }
+        let effects = merge_fishing_tick_owner_batches(batches);
+        assert_eq!(
+            effects.len(),
+            self.fishing_bobbers.len(),
+            "fishing owner completion must retain every live tick-start bobber"
+        );
+        let mut ids = std::collections::HashSet::new();
+        for effect in &effects {
+            assert!(
+                ids.insert(effect.id),
+                "fishing owner completion may update one live bobber only once"
+            );
+            assert!(
+                self.fishing_bobbers.contains_key(&effect.id),
+                "fishing owner completion may update only a live tick-start bobber"
+            );
+        }
+        for effect in effects {
+            if effect.discard {
+                self.fishing_bobbers.remove(&effect.id);
+            } else {
+                self.fishing_bobbers.insert(effect.id, effect.bobber);
+            }
+        }
+    }
+
+    fn tick_fishing_bobber(
+        world: &ChunkWorld,
+        rng: &mut SpawnRng,
+        b: &mut FishingBobber,
+    ) -> bool {
             if b.on_ground {
                 b.life += 1;
                 if b.life >= HOOK_MAX_GROUND_LIFE {
-                    expired.push(id);
-                    continue;
+                    return true;
                 }
             } else {
                 b.life = 0;
@@ -457,7 +572,7 @@ impl<'w> MobSim<'w> {
                     if force.abs() < 0.01 {
                         force += force.signum() * 0.1;
                     }
-                    let damp_roll = self.fishing_rng.next_f32();
+                    let damp_roll = rng.next_f32();
                     b.velocity = Vec3::new(
                         movement.x * 0.9,
                         movement.y - force * f64::from(damp_roll) * 0.2,
@@ -473,11 +588,11 @@ impl<'w> MobSim<'w> {
                     if in_water {
                         b.out_of_water_time = (b.out_of_water_time - 1).max(0);
                         if b.biting {
-                            let r1 = f64::from(self.fishing_rng.next_f32());
-                            let r2 = f64::from(self.fishing_rng.next_f32());
+                            let r1 = f64::from(rng.next_f32());
+                            let r2 = f64::from(rng.next_f32());
                             b.velocity = Vec3::new(b.velocity.x, b.velocity.y - 0.1 * r1 * r2, b.velocity.z);
                         }
-                        catching_fish(b, &mut self.fishing_rng);
+                        catching_fish(b, rng);
                     } else {
                         b.out_of_water_time = (b.out_of_water_time + 1).min(MAX_OUT_OF_WATER_TIME);
                     }
@@ -532,11 +647,49 @@ impl<'w> MobSim<'w> {
                 b.velocity = Vec3::new(0.0, 0.0, 0.0);
             }
             b.velocity = Vec3::new(b.velocity.x * 0.92, b.velocity.y * 0.92, b.velocity.z * 0.92);
-        }
-        for id in expired {
-            self.fishing_bobbers.remove(&id);
-        }
+            false
     }
+}
+
+fn merge_fishing_tick_owner_batches(
+    mut batches: Vec<FishingTickOwnerBatch>,
+) -> Vec<FishingTickEffect> {
+    let expected_batch_count = batches
+        .first()
+        .map(|batch| batch.expected_batch_count)
+        .expect("fishing owner completion must contain every tick-start owner batch");
+    let mut owners = std::collections::HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.expected_batch_count, expected_batch_count,
+            "fishing owner completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "fishing owner completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "a fishing owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "fishing owner completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "fishing owner completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
 }
 
 /// `FishingHook.calculateOpenWater` — a 5×5 area at four Y layers
@@ -653,6 +806,95 @@ mod fishing_tests {
             }
         }
         world
+    }
+
+    fn owner_fixture() -> MobSim<'static> {
+        let world = Box::leak(Box::new(ChunkWorld::new(-64, 384)));
+        let mut sim = MobSim::new(world);
+        for (id, position) in [
+            (10, Vec3::new(-0.5, 20.0, 0.5)),
+            (11, Vec3::new(16.5, 20.0, 0.5)),
+            (12, Vec3::new(-0.25, 21.0, 0.5)),
+        ] {
+            sim.fishing_bobbers.insert(
+                id,
+                FishingBobber {
+                    uuid: Uuid::from_u128(id as u128),
+                    owner: id + 100,
+                    position,
+                    velocity: Vec3::new(0.0, -0.1, 0.0),
+                    state: FishHookState::Flying,
+                    life: 0,
+                    out_of_water_time: 0,
+                    nibble: 0,
+                    time_until_lured: 0,
+                    time_until_hooked: 0,
+                    fish_angle: 0.0,
+                    open_water: true,
+                    biting: false,
+                    on_ground: false,
+                    luck: 0,
+                    lure_speed: 0,
+                },
+            );
+        }
+        sim
+    }
+
+    fn bobber_states(sim: &MobSim<'_>) -> Vec<(i32, Vec3, Vec3)> {
+        let mut states: Vec<_> = sim
+            .fishing_bobbers
+            .iter()
+            .map(|(&id, bobber)| (id, bobber.position, bobber.velocity))
+            .collect();
+        states.sort_unstable_by_key(|(id, _, _)| *id);
+        states
+    }
+
+    #[test]
+    fn fishing_owner_batches_restore_entity_order_after_reversed_completion() {
+        let mut serial = owner_fixture();
+        let serial_batches = serial.tick_fishing_owner_batches();
+        assert_eq!(
+            serial_batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
+            [
+                FishingTickOwner::Chunk { cx: -1, cz: 0 },
+                FishingTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "negative fractional positions use Euclidean chunk ownership"
+        );
+        serial.apply_fishing_tick_owner_batches(serial_batches);
+        let expected = bobber_states(&serial);
+
+        let mut completed = owner_fixture();
+        let mut batches = completed.tick_fishing_owner_batches();
+        batches.reverse();
+        let raw_slots = batches
+            .iter()
+            .flat_map(|batch| batch.effects.iter())
+            .map(|effect| effect.serial)
+            .collect::<Vec<_>>();
+        assert_ne!(raw_slots, vec![0, 1, 2], "control must actually reorder completion slots");
+        completed.apply_fishing_tick_owner_batches(batches);
+        assert_eq!(bobber_states(&completed), expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "every tick-start owner batch exactly once")]
+    fn fishing_owner_batch_merge_rejects_a_missing_owner() {
+        let mut sim = owner_fixture();
+        let mut batches = sim.tick_fishing_owner_batches();
+        batches.pop();
+        let _ = merge_fishing_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not contain one owner twice")]
+    fn fishing_owner_batch_merge_rejects_a_duplicate_owner() {
+        let mut sim = owner_fixture();
+        let mut batches = sim.tick_fishing_owner_batches();
+        batches[1] = batches[0].clone();
+        let _ = merge_fishing_tick_owner_batches(batches);
     }
 
     /// **The three declared weights sum to 100 and split exactly as
