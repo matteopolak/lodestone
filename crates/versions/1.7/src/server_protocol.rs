@@ -9,7 +9,7 @@ use std::io::Write as _;
 use flate2::{Compression, write::ZlibEncoder};
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ResourceKey, Rotation, Vec3f};
 use lodestone_server::{
     ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -21,6 +21,7 @@ use crate::packets::game::{
     ClientboundChat, ClientboundPositionLook, JoinGame, KeepAliveRequest, KeepAliveResponse,
     EntityAction, ServerboundArmAnimation, ServerboundChat, ServerboundFlying,
     ServerboundLook, ServerboundPosition, ServerboundPositionLook,
+    ServerboundCustomPayload,
 };
 use crate::packets::entity::Animation;
 use crate::packets::handshake::SetProtocol;
@@ -124,6 +125,22 @@ fn block_face(face: i8) -> Option<BlockFace> {
 /// clamped into a plausible click location.
 fn cursor_coordinate(value: i8) -> Option<f32> {
     (0..=15).contains(&value).then_some(f32::from(value) / 16.0)
+}
+
+/// Resolves a protocol-5 plugin channel into the shared channel namespace.
+///
+/// The historical registration controls are bare uppercase strings rather
+/// than resource keys. All other channels must already be valid resource keys;
+/// the wire's arbitrary string field must not become an unchecked name in the
+/// shared plugin registry.
+fn legacy_plugin_channel(channel: &str) -> Option<ResourceKey> {
+    let channel = match channel {
+        "REGISTER" => "minecraft:register",
+        "UNREGISTER" => "minecraft:unregister",
+        "MC|Brand" => "minecraft:brand",
+        channel => channel,
+    };
+    channel.parse().ok()
 }
 
 fn legacy_composite(canonical: u32) -> Result<u32, ChunkEncodeError> {
@@ -435,6 +452,23 @@ impl ServerProtocol for V5ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 ServerBound::CarriedItemChanged { slot }
+            }
+            // This era permits arbitrary channel strings. Its two channel
+            // registration controls use their legacy bare spellings, so map
+            // those at the protocol boundary before the version-free channel
+            // registry interprets them. Invalid names and malformed bodies
+            // are ignored instead of entering that registry.
+            State::Play if packet_id == play::serverbound::CUSTOM_PAYLOAD => {
+                let Some(payload) = decode_full::<ServerboundCustomPayload>(payload) else {
+                    return ServerBound::Ignored;
+                };
+                let Some(channel) = legacy_plugin_channel(&payload.channel) else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::CustomPayload {
+                    channel,
+                    data: payload.data,
+                }
             }
             // Protocol 5 has no teleport-confirm packet. Its position and
             // position/look frames are both the teleport echo and ordinary

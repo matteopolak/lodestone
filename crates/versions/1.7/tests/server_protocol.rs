@@ -9,7 +9,9 @@ use lodestone_model::{
     AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
     ConnectionState, Directive, Hand, Vec3f, VersionAdapter,
 };
-use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
+use lodestone_server::{
+    ChunkColumn, ClientChannels, ServerBound, ServerDirective, ServerProtocol,
+};
 use lodestone_v1_7::{V5Adapter, V5ServerProtocol};
 use lodestone_v1_7::packet_ids::{handshaking, play};
 use lodestone_v1_7::packets::handshake::SetProtocol;
@@ -209,6 +211,66 @@ fn hosted_block_dig_item_actions_reach_registry_selected_shared_consumers() {
             "the registry-selected host must pass {action:?} to its shared consumer"
         );
     }
+}
+
+#[test]
+fn hosted_legacy_plugin_registration_reaches_the_shared_channel_consumer() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(5)
+        .expect("protocol 5 must resolve to its hosted server protocol");
+
+    // Literal protocol-5 body: `REGISTER` is an eight-byte channel string,
+    // followed by a big-endian i16 byte count and the registration payload.
+    // The era accepts bare channel names, while the shared registry requires
+    // resource keys, so this pins the boundary normalization as well as the
+    // fixed-width payload length.
+    let registration = b"\x08REGISTER\x00\x0amod:widget";
+    let expected_channel = "minecraft:register".parse().expect("valid resource key");
+    let expected_data = b"mod:widget".to_vec();
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::CUSTOM_PAYLOAD,
+            registration,
+        ),
+        ServerBound::CustomPayload {
+            channel: expected_channel,
+            data: expected_data,
+        },
+        "the registry-selected protocol must lift the legacy registration control"
+    );
+
+    let ServerBound::CustomPayload { channel, data } = protocol.decode(
+        State::Play,
+        play::serverbound::CUSTOM_PAYLOAD,
+        registration,
+    ) else {
+        panic!("the literal registration body must reach the shared channel consumer");
+    };
+    let mut channels = ClientChannels::default();
+    assert!(channels.apply_custom_payload(&channel, &data));
+    assert!(channels.supports(&"mod:widget".parse().expect("valid registered channel")));
+
+    for (body, description) in [
+        (&b"\x08REGISTER\x00\x0amod:widge"[..], "truncated channel payload"),
+        (&b"\x08REGISTER\x00\x0amod:widget\0"[..], "trailing payload byte"),
+        (&b"\x08MC|Brane\x00\x07vanilla"[..], "unmapped legacy channel"),
+        (&b"\x03BAD\x00\x00"[..], "invalid resource-key channel"),
+    ] {
+        assert_eq!(
+            protocol.decode(State::Play, play::serverbound::CUSTOM_PAYLOAD, body),
+            ServerBound::Ignored,
+            "{description} must not reach the shared channel consumer"
+        );
+    }
+    assert_eq!(
+        protocol.decode(
+            State::Login,
+            play::serverbound::CUSTOM_PAYLOAD,
+            registration,
+        ),
+        ServerBound::Ignored,
+        "custom payloads are accepted only in Play"
+    );
 }
 
 #[test]
