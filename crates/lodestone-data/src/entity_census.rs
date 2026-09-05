@@ -85,12 +85,10 @@
 use crate::generated_entity_census::{
     ENTITY_CAN_BE_COLLIDED_WITH, ENTITY_IS_LIVING, ENTITY_IS_MOB, ENTITY_PUSHES_PLAYERS,
 };
+use crate::entity_type::EntityType;
 pub use crate::generated_entity_census::TYPE_COUNT;
 
-/// Whether an entity of this network type id belongs to the game's
-/// living-entity hierarchy.
-///
-/// Returns `None` for ids outside `0..TYPE_COUNT`.
+/// Whether a built-in entity type belongs to the game's living-entity hierarchy.
 ///
 /// # This is not [`pushes_players`] and must not be derived from it
 ///
@@ -110,19 +108,12 @@ pub use crate::generated_entity_census::TYPE_COUNT;
 /// The disambiguation needs the entity's concrete *type*, which is what this
 /// table supplies.
 #[must_use]
-pub fn is_living(id: i32) -> Option<bool> {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| ENTITY_IS_LIVING.get(index).copied())
+pub fn is_living(entity_type: EntityType) -> bool {
+    ENTITY_IS_LIVING[usize::from(entity_type.registry_id())]
 }
 
-/// Whether an entity of this network type id belongs to the game's AI-mob
+/// Whether a built-in entity type belongs to the game's AI-mob
 /// subset of the living-entity hierarchy.
-///
-/// Returns `None` for ids outside `0..TYPE_COUNT`. An unrecognised id must be
-/// read as **not** a mob, for the same default-deny reason as everything else
-/// here: the consumer is a metadata guard, and guessing wrong surfaces a byte
-/// that means something else.
 ///
 /// # This is not [`is_living`], and index 15 is why
 ///
@@ -147,18 +138,12 @@ pub fn is_living(id: i32) -> Option<bool> {
 /// every metadata field in the game sorted by index so collisions are
 /// adjacent lines.
 #[must_use]
-pub fn is_mob(id: i32) -> Option<bool> {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| ENTITY_IS_MOB.get(index).copied())
+pub fn is_mob(entity_type: EntityType) -> bool {
+    ENTITY_IS_MOB[usize::from(entity_type.registry_id())]
 }
 
-/// Whether an entity of this network type id can shove the local player
+/// Whether a built-in entity type can shove the local player
 /// through the game's ordinary crowd-push pass.
-///
-/// Returns `None` for ids outside `0..TYPE_COUNT`. Callers that cannot
-/// distinguish "unknown id" from "not a pusher" should treat both as **not a
-/// pusher** — see the module docs on why the default is deny.
 ///
 /// This is a *type*-level capability: the per-instance refinements the real
 /// game layers on top (being alive, being a spectator, climbing something,
@@ -167,25 +152,20 @@ pub fn is_mob(id: i32) -> Option<bool> {
 /// it has them. The value here is the maximum over runtime state, so a `true`
 /// means "can, in some state", never "always does".
 #[must_use]
-pub fn pushes_players(id: i32) -> Option<bool> {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| ENTITY_PUSHES_PLAYERS.get(index).copied())
+pub fn pushes_players(entity_type: EntityType) -> bool {
+    ENTITY_PUSHES_PLAYERS[usize::from(entity_type.registry_id())]
 }
 
-/// Whether an entity of this network type can participate in another entity's
+/// Whether a built-in entity type can participate in another entity's
 /// hard movement collision.
 ///
 /// This is independent of [`pushes_players`]: boats are hard colliders but do
 /// not run the ordinary crowd-push pass, while ordinary mobs do the reverse.
 /// Per-instance predicates remain the consumer's responsibility (the shulker
-/// must be alive, and the happy ghast has its own state gate). Unknown ids
-/// return `None`, which callers must treat as default-deny.
+/// must be alive, and the happy ghast has its own state gate).
 #[must_use]
-pub fn can_be_collided_with(id: i32) -> Option<bool> {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| ENTITY_CAN_BE_COLLIDED_WITH.get(index).copied())
+pub fn can_be_collided_with(entity_type: EntityType) -> bool {
+    ENTITY_CAN_BE_COLLIDED_WITH[usize::from(entity_type.registry_id())]
 }
 
 /// Whether either type-level movement capability makes an entity a candidate.
@@ -198,10 +178,12 @@ fn movement_collision_candidate(pushes: bool, collidable: bool) -> bool {
     pushes || collidable
 }
 
-fn max_dimensions_matching(mut includes: impl FnMut(i32) -> bool) -> Option<(f32, f32)> {
-    (0..TYPE_COUNT as i32)
-        .filter(|&id| includes(id))
-        .filter_map(crate::entity_dimensions::base_dimensions)
+fn max_dimensions_matching(mut includes: impl FnMut(EntityType) -> bool) -> Option<(f32, f32)> {
+    EntityType::all()
+        .filter(|&entity_type| includes(entity_type))
+        .filter_map(|entity_type| {
+            crate::entity_dimensions::base_dimensions(i32::from(entity_type.registry_id()))
+        })
         .fold(None, |acc, dims| {
             Some(match acc {
                 Some((width, height)) => (width.max(dims.width), height.max(dims.height)),
@@ -226,8 +208,8 @@ fn max_dimensions_matching(mut includes: impl FnMut(i32) -> bool) -> Option<(f32
 pub fn movement_collision_max_dimensions() -> Option<(f32, f32)> {
     max_dimensions_matching(|id| {
         movement_collision_candidate(
-            pushes_players(id) == Some(true),
-            can_be_collided_with(id) == Some(true),
+            pushes_players(id),
+            can_be_collided_with(id),
         )
     })
 }
@@ -249,24 +231,27 @@ pub fn movement_collision_max_dimensions() -> Option<(f32, f32)> {
 /// 0.0)`.
 #[must_use]
 pub fn pusher_max_dimensions() -> Option<(f32, f32)> {
-    max_dimensions_matching(|id| pushes_players(id) == Some(true))
+    max_dimensions_matching(pushes_players)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entity_types::entity_type_id;
+    use crate::entity_type::EntityType;
 
     fn by_name(name: &str) -> bool {
-        let id = entity_type_id(name).unwrap_or_else(|| panic!("{name} is a real entity type"));
-        pushes_players(id).unwrap_or_else(|| panic!("{name} is inside the census"))
+        let entity_type = EntityType::from_name(name)
+            .unwrap_or_else(|| panic!("{name} is a real entity type"));
+        pushes_players(entity_type)
     }
 
     #[test]
-    fn out_of_range_ids_are_none() {
-        assert_eq!(pushes_players(-1), None);
-        assert_eq!(pushes_players(TYPE_COUNT as i32), None);
-        assert_eq!(pushes_players(i32::MAX), None);
+    fn public_census_accessors_require_a_validated_entity_type() {
+        let _: fn(EntityType) -> bool = is_living;
+        let _: fn(EntityType) -> bool = is_mob;
+        let _: fn(EntityType) -> bool = pushes_players;
+        let _: fn(EntityType) -> bool = can_be_collided_with;
+        assert!(EntityType::from_registry_id(EntityType::COUNT).is_none());
     }
 
     #[test]
@@ -276,8 +261,8 @@ mod tests {
         // is the dump's 93 living-hierarchy types minus the three that cannot
         // reach a player (armor_stand, bat, parrot): 90 pushers and 68
         // non-pushers out of 158.
-        let pushers = (0..TYPE_COUNT as i32)
-            .filter(|&id| pushes_players(id) == Some(true))
+        let pushers = EntityType::all()
+            .filter(|&entity_type| pushes_players(entity_type))
             .count();
         assert_eq!(pushers, 90, "unexpected pusher population");
         assert_eq!(TYPE_COUNT as usize - pushers, 68, "unexpected non-pusher population");
@@ -376,8 +361,9 @@ mod tests {
         use crate::entity_dimensions::base_dimensions;
         assert_eq!(TYPE_COUNT, crate::entity_dimensions::TYPE_COUNT);
         assert_eq!(TYPE_COUNT, crate::entity_types::TYPE_COUNT);
-        let zombie = entity_type_id("minecraft:zombie").expect("zombie is real");
-        let dims = base_dimensions(zombie).expect("zombie has dimensions");
+        let zombie = EntityType::from_name("minecraft:zombie").expect("zombie is real");
+        let dims = base_dimensions(i32::from(zombie.registry_id()))
+            .expect("zombie has dimensions");
         assert_eq!((dims.width, dims.height), (0.6, 1.95));
     }
 
@@ -393,8 +379,12 @@ mod tests {
         // radius.
         assert!(by_name("minecraft:ender_dragon"));
         assert!(by_name("minecraft:giant"));
-        let dragon = base_dimensions(entity_type_id("minecraft:ender_dragon").unwrap()).unwrap();
-        let giant = base_dimensions(entity_type_id("minecraft:giant").unwrap()).unwrap();
+        let dragon = EntityType::from_name("minecraft:ender_dragon").expect("dragon is real");
+        let giant = EntityType::from_name("minecraft:giant").expect("giant is real");
+        let dragon = base_dimensions(i32::from(dragon.registry_id()))
+            .expect("dragon has dimensions");
+        let giant = base_dimensions(i32::from(giant.registry_id()))
+            .expect("giant has dimensions");
         assert_eq!(dragon.width, 16.0, "ender_dragon is expected to be the widest pusher");
         assert_eq!(giant.height, 12.0, "giant is expected to be the tallest pusher");
 
@@ -425,10 +415,11 @@ mod tests {
     fn movement_collision_max_dimensions_uses_the_full_candidate_union() {
         use crate::entity_dimensions::base_dimensions;
 
-        let boat = entity_type_id("minecraft:oak_boat").expect("oak boat is real");
-        assert_eq!(pushes_players(boat), Some(false));
-        assert_eq!(can_be_collided_with(boat), Some(true));
-        let boat_dimensions = base_dimensions(boat).expect("oak boat has dimensions");
+        let boat = EntityType::from_name("minecraft:oak_boat").expect("oak boat is real");
+        assert!(!pushes_players(boat));
+        assert!(can_be_collided_with(boat));
+        let boat_dimensions = base_dimensions(i32::from(boat.registry_id()))
+            .expect("oak boat has dimensions");
 
         let maxima = movement_collision_max_dimensions()
             .expect("the movement collision census is non-empty");
