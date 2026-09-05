@@ -24,9 +24,17 @@ phase, timing, status, and failure metadata. A wall deadline bounds the run;
 peer, readiness, serialization, and output failures are returned instead of
 leaving a server task running.
 
-The currently supported runtime slice is deliberately `palette` in `ready`
-phase. It measures setup block placements and the resulting joined chunk wire
-traffic. Entity, scheduled, mutation, and other scenario names remain valid for
+The supported runtime slices are `palette` and `entity` in `ready` phase.
+Palette measures setup block placements and the resulting joined chunk wire
+traffic. Entity waits for the real mob-seeding handoff, inserts each bounded
+summon through `IntegratedServer::spawn_mob`, and counts the resulting
+population snapshots and add-entity packets after the integrated tick loop has
+published them. The wire reader also checks that every observed spawn lies in
+the planned entity region. An entity run with no producers disables natural
+spawning and must fail its entity witness despite still serving non-empty chunk
+payloads. Runtime entity populations are capped at 2,048; larger scales remain
+valid for immutable plan emission but are rejected before a live server starts.
+Scheduled, mutation, and other scenario names remain valid for
 immutable plan emission, but runtime mode rejects them until their real server
 producers and tick consumers are wired; they must not be treated as profiling
 results.
@@ -70,7 +78,8 @@ sidecar, and the runtime JSONL record to be non-empty; a missing artifact fails
 the recipe. Samply 0.13.1 captures may be inspected with their `threadCPUDelta`
 data and sidecar metadata; worker threads are part of the server work, so do not
 judge from the main thread alone. The recipe currently profiles the supported
-`palette --phase ready` slice; it does not claim mutation or tick coverage.
+`palette --phase ready` slice; the entity slice is available for bounded smoke
+runs, but the recipe does not claim mutation or scheduled-tick coverage.
 Recipe parameters are positional (`just samply-heavy-server palette 1 1`), as
 required by `just`; the three values are scenario, seed, and scale.
 
