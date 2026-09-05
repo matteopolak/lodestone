@@ -1732,6 +1732,7 @@ dependencies = [
  "png",
  "serde_json",
  "thiserror",
+ "url",
  "zip",
 ]
 
@@ -1867,6 +1868,7 @@ version = "0.1.0"
 dependencies = [
  "lodestone-core",
  "lodestone-world",
+ "smol_str",
  "thiserror",
  "uuid",
 ]
@@ -1927,7 +1929,9 @@ dependencies = [
  "lodestone-world",
  "lodestone-worldgen",
  "reqwest",
+ "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
  "tracing",
@@ -1952,6 +1956,7 @@ dependencies = [
  "lodestone-macros",
  "lodestone-model",
  "lodestone-protocol-common",
+ "lodestone-server",
  "lodestone-world",
  "tracing",
  "uuid",
@@ -1967,6 +1972,7 @@ dependencies = [
  "lodestone-macros",
  "lodestone-model",
  "lodestone-protocol-common",
+ "lodestone-server",
  "lodestone-world",
  "tracing",
  "uuid",
@@ -1982,6 +1988,7 @@ dependencies = [
  "lodestone-macros",
  "lodestone-model",
  "lodestone-protocol-common",
+ "lodestone-server",
  "lodestone-world",
  "tracing",
  "uuid",
