@@ -4390,7 +4390,10 @@ pub fn route(event: &ClientEvent) -> Route {
         ClientEvent::SimulationDistanceChanged { .. } => SESSION,
         ClientEvent::ServerDataReceived { .. } => SESSION,
         ClientEvent::MountScreenOpened { .. } => SESSION,
-        ClientEvent::PlayerCombatEntered | ClientEvent::PlayerCombatEnded { .. } => Route::NOWHERE,
+        // Combat tracking is a local-player session fact. The fold retains
+        // active versus ended and the exact end duration; the F3 HUD reads it
+        // rather than manufacturing a local combat timer.
+        ClientEvent::PlayerCombatEntered | ClientEvent::PlayerCombatEnded { .. } => SESSION,
         // A stop packet names a sound/category filter, while the mixer owns
         // live voices by opaque handles. `net::forward` carries the filters to
         // `ShellAudio`, which keeps the packet-created name/category-to-handle
@@ -4775,10 +4778,9 @@ mod route_tests {
         assert!(!r.ingest && !r.shell && !r.client);
         assert!(!r.is_island());
 
-        assert!(
-            route(&ClientEvent::PlayerCombatEntered).is_island(),
-            "control: combat enter still has no consumer and must not be claimed by this scalar fold"
-        );
+        let combat = route(&ClientEvent::PlayerCombatEntered);
+        assert!(combat.session, "combat enter reaches its session fold");
+        assert!(!combat.is_island());
     }
 
     /// Public server data is a server-owned session fact. The F3 overlay reads
@@ -4794,10 +4796,9 @@ mod route_tests {
         assert!(!r.ingest && !r.shell && !r.client);
         assert!(!r.is_island());
 
-        assert!(
-            route(&ClientEvent::PlayerCombatEntered).is_island(),
-            "control: combat enter still has no session menu consumer"
-        );
+        let combat = route(&ClientEvent::PlayerCombatEnded { duration_ticks: 240 });
+        assert!(combat.session, "combat end reaches its session fold");
+        assert!(!combat.is_island());
     }
 
     /// The mount-open packet has no companion `ScreenOpened`: it supplies both
@@ -4816,8 +4817,8 @@ mod route_tests {
         assert!(!r.is_island());
 
         assert!(
-            route(&ClientEvent::PlayerCombatEntered).is_island(),
-            "control: combat enter must not accidentally create a mount menu"
+            route(&ClientEvent::Ping { id: 7 }).client,
+            "control: an unrelated ping must stay out of the menu session"
         );
     }
 
@@ -4974,10 +4975,9 @@ mod route_tests {
         assert!(cooldown.session, "the hotbar cooldown veil reads the session fold");
         assert!(!cooldown.is_island());
 
-        assert!(
-            route(&ClientEvent::PlayerCombatEntered).is_island(),
-            "combat-entered really is decoded and consumed nowhere"
-        );
+        let combat = route(&ClientEvent::PlayerCombatEnded { duration_ticks: 240 });
+        assert!(combat.session, "the combat HUD reads the session fold");
+        assert!(!combat.is_island());
         assert_eq!(Route::NOWHERE, Route::default());
     }
 }

@@ -227,11 +227,11 @@ pub use runner::Runner;
 pub use scheduler::{SchedulerPlugin, TaskId, TaskScheduler, run_due_tasks};
 pub use schedules::{Extract, GameTick, NetIngest, Update};
 pub use session::{
-    Abilities, ActionBarOverlay, HudEffects, Phase, RespawnCount, Riding, ServerAlive,
+    Abilities, ActionBarOverlay, CombatSession, HudEffects, Phase, RespawnCount, Riding,
+    ServerAlive,
     ServerDifficulty, ServerDimension, ServerEntityId, ServerGameMode, ServerSimulationDistance,
-    SessionBlockDestruction,
-    SessionBossBars, SessionChat, SessionDebugFeeds, SessionEnd, SessionEndKind, SessionHudPlugin,
-    SessionItemCooldowns,
+    SessionBlockDestruction, SessionBossBars, SessionChat, SessionCombat, SessionDebugFeeds,
+    SessionEnd, SessionEndKind, SessionHudPlugin, SessionItemCooldowns,
     SessionMenus, SessionPhase,
     ServerChunkCacheCenter, SessionPlugin, SessionRecipeBook, SessionRegistryOrder,
     SessionScoreboard, SessionServerInfo, SessionSet, SessionStatistics, SessionTrades,

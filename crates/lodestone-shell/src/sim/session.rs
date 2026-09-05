@@ -1758,6 +1758,17 @@ impl Sim {
         })
     }
 
+    /// The local player's latest server-announced combat state. `None` means
+    /// the server has sent neither combat packet in this session.
+    #[must_use]
+    pub fn combat_session(&self) -> Option<CombatSession> {
+        self.read(|w| {
+            w.get::<SessionCombat>(self.local)
+                .expect("the local player always carries SessionCombat")
+                .0
+        })
+    }
+
     /// The server's own recipe-book panel state, as `RECIPE_BOOK_SETTINGS` (76)
     /// last reported it (`SessionRecipeBookSettings` island).
     ///
