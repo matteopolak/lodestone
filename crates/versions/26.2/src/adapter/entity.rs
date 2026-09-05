@@ -323,9 +323,13 @@ fn handle_add_entity(
     let data = reader.var_i32().map_err(dec_err)?;
     reader.ensure_empty().map_err(dec_err)?;
 
-    let name = entity_type_name(type_id).ok_or_else(|| {
+    let entity_type_id = u8::try_from(type_id)
+        .ok()
+        .and_then(lodestone_data::entity_type::EntityType::from_registry_id)
+        .ok_or_else(|| {
         AdapterError::Decode(format!("unknown entity-type id {type_id} in add_entity"))
     })?;
+    let name = entity_type_id.name();
     let entity_type = name.parse().map_err(|_| {
         AdapterError::Decode(format!(
             "entity-type id {type_id} is not a valid key: {name}"
@@ -341,13 +345,13 @@ fn handle_add_entity(
     // so it is still bounded to the mobs actually present rather than every
     // entity in render distance.
     //
-    // `is_living`/`is_mob` returning `None` for an id outside the census means "we
-    // cannot establish it", which fails closed to `false`: a missing pose is a
-    // visible gap, a wrongly-decoded flags byte is a silent lie.
+    // The raw wire id was resolved above. Custom or unknown ids cannot enter this
+    // built-in table, so the packet fails closed before a metadata byte can be
+    // misclassified.
     let tracked = TrackedEntity {
         class: metadata_class(name),
-        living: lodestone_data::entity_census::is_living(type_id).unwrap_or(false),
-        mob: lodestone_data::entity_census::is_mob(type_id).unwrap_or(false),
+        living: lodestone_data::entity_census::is_living(entity_type_id),
+        mob: lodestone_data::entity_census::is_mob(entity_type_id),
     };
     if tracked.is_tracked()
         && let Ok(mut map) = variants.lock()
@@ -744,4 +748,3 @@ fn handle_update_attributes(payload: &[u8]) -> Vec<Directive> {
         _ => Vec::new(),
     }
 }
-

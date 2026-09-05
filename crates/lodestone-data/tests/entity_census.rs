@@ -62,6 +62,12 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use lodestone_data::entity_census::{can_be_collided_with, is_mob, pushes_players, TYPE_COUNT};
+use lodestone_data::entity_type::EntityType;
+
+fn entity_type(id: usize) -> EntityType {
+    let id = u8::try_from(id).expect("entity census id fits the enum's u8 representation");
+    EntityType::from_registry_id(id).expect("committed entity census id resolves")
+}
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -466,8 +472,7 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
     let mut checked = 0usize;
     for row in &rows {
         let expected = classify(row);
-        let actual = pushes_players(row.id as i32)
-            .unwrap_or_else(|| panic!("id {} ({}) missing from table", row.id, row.name));
+        let actual = pushes_players(entity_type(row.id));
         assert_eq!(
             actual, expected,
             "push mismatch for {} (id {}): table {actual}, dump says {expected} \
@@ -475,8 +480,8 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
             row.name, row.id, row.living, row.push_entities_decl, row.do_push_decl
         );
         assert_eq!(
-            can_be_collided_with(row.id as i32),
-            Some(classify_hard_collision(row)),
+            can_be_collided_with(entity_type(row.id)),
+            classify_hard_collision(row),
             "hard-collision mismatch for {} (id {}, class {})",
             row.name,
             row.id,
@@ -502,16 +507,16 @@ fn hard_collision_is_a_separate_default_deny_capability() {
             .iter()
             .find(|row| row.name == name)
             .expect("known collider");
-        assert_eq!(can_be_collided_with(row.id as i32), Some(true), "{name}");
+        assert!(can_be_collided_with(entity_type(row.id)), "{name}");
     }
     for name in ["minecraft:player", "minecraft:zombie", "minecraft:item"] {
         let row = rows
             .iter()
             .find(|row| row.name == name)
             .expect("known control");
-        assert_eq!(can_be_collided_with(row.id as i32), Some(false), "{name}");
+        assert!(!can_be_collided_with(entity_type(row.id)), "{name}");
     }
-    assert_eq!(can_be_collided_with(TYPE_COUNT as i32), None);
+    assert!(EntityType::from_registry_id(TYPE_COUNT as u8).is_none());
 }
 
 #[test]
@@ -521,8 +526,7 @@ fn the_committed_is_mob_column_matches_the_dump_row_for_row() {
     let rows = parse_dump(DUMP);
     let mut mobs = 0usize;
     for row in &rows {
-        let actual = is_mob(row.id as i32)
-            .unwrap_or_else(|| panic!("id {} ({}) missing from table", row.id, row.name));
+        let actual = is_mob(entity_type(row.id));
         assert_eq!(
             actual, row.mob,
             "mob mismatch for {} (id {}): table {actual}, dump {} ({})",
@@ -537,8 +541,7 @@ fn the_committed_is_mob_column_matches_the_dump_row_for_row() {
         "{mobs} of {} types are mobs — implausible, the column is probably degenerate",
         rows.len()
     );
-    assert_eq!(is_mob(TYPE_COUNT as i32), None);
-    assert_eq!(is_mob(i32::MAX), None);
+    assert!(EntityType::from_registry_id(TYPE_COUNT as u8).is_none());
 }
 
 #[test]
@@ -669,10 +672,8 @@ fn the_reduction_is_default_deny() {
         "an unrecognised non-living type must default to not-a-pusher"
     );
 
-    // And the id space itself is closed: an id past the census is a miss, not a
-    // permissive `true`.
-    assert_eq!(pushes_players(TYPE_COUNT as i32), None);
-    assert_eq!(pushes_players(i32::MAX), None);
+    // The enum closes the id space before this total table is reached.
+    assert!(EntityType::from_registry_id(TYPE_COUNT as u8).is_none());
 }
 
 // ---------------------------------------------------------------------------

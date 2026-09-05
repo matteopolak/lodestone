@@ -666,12 +666,11 @@ impl Sim {
             let pos = w.get::<Position>(target)?;
             let kind = w.get::<EntityKind>(target)?;
             let facts = w.resource::<VersionData>().entity_facts(&kind.0)?;
-            let type_id = lodestone_data::entity_types::entity_type_id_parts(
-                kind.0.namespace(),
-                kind.0.path(),
-            )?;
-            lodestone_data::entity_census::is_living(type_id)
-                .unwrap_or(false)
+            if kind.0.namespace() != "minecraft" {
+                return None;
+            }
+            let entity_type = lodestone_data::entity_type::EntityType::from_name(kind.0.path())?;
+            lodestone_data::entity_census::is_living(entity_type)
                 .then_some((pos.0, facts.dimensions.width, facts.dimensions.height))
         }) else {
             return;

@@ -263,9 +263,8 @@ pub fn entity_type_can_be_picked(kind: &lodestone_model::ResourceKey) -> bool {
     if path == "ender_dragon" {
         return false;
     }
-    if lodestone_data::entity_types::entity_type_id_parts("minecraft", path)
-        .and_then(lodestone_data::entity_census::is_living)
-        == Some(true)
+    if lodestone_data::entity_type::EntityType::from_name(path)
+        .is_some_and(lodestone_data::entity_census::is_living)
     {
         return true;
     }

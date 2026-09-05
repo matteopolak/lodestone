@@ -975,14 +975,16 @@ impl VersionAdapter for V770Adapter {
         // consumer downstream of ingest still holds. Both lookups are indexed by
         // the same id, so resolving the key once serves both, and a type outside
         // either census misses whole rather than half-answering.
-        let id = lodestone_data::entity_types::entity_type_id_parts(
-            entity_type.namespace(),
-            entity_type.path(),
-        )?;
+        if entity_type.namespace() != "minecraft" {
+            return None;
+        }
+        let entity_type = lodestone_data::entity_type::EntityType::from_name(entity_type.path())?;
         Some(EntityFacts {
-            dimensions: lodestone_data::entity_dimensions::base_dimensions(id)?,
-            pushes_players: lodestone_data::entity_census::pushes_players(id)?,
-            collidable: lodestone_data::entity_census::can_be_collided_with(id)?,
+            dimensions: lodestone_data::entity_dimensions::base_dimensions(i32::from(
+                entity_type.registry_id(),
+            ))?,
+            pushes_players: lodestone_data::entity_census::pushes_players(entity_type),
+            collidable: lodestone_data::entity_census::can_be_collided_with(entity_type),
         })
     }
 

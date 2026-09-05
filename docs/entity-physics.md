@@ -56,6 +56,12 @@ The block-break hardness census follows the same rule: `hardness(StateId)` retur
 and the 26.2 adapter validate once at their input boundary and retain the typed id for the table
 read.
 
+The entity capability census similarly accepts `EntityType`, not a raw registry number, and each
+predicate is total. The 26.2 entity decoder converts its wire id once before storing metadata facts;
+key-based consumers resolve to the same enum and reject unknown or custom types rather than granting
+living, pushing, or collision capability. This keeps the census's default-deny policy at the
+resolution boundary instead of requiring every table reader to repeat it.
+
 ### Entity-versus-entity pushing and hard collision
 
 Two independent predicates decide what happens when two entity boxes overlap:
