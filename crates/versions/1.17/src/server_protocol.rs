@@ -6,7 +6,7 @@
 //! one by protocol range.
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, State, Writer, encode_body, write_named_nbt};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -17,7 +17,7 @@ use crate::canonical::{wire_state_for_756, wire_state_for_758};
 use crate::packet_ids::{handshaking, login, play};
 use crate::packet_ids_758::{handshaking as handshaking_758, login as login_758, play as play_758};
 use crate::packets::game::{
-    BlockDig, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
+    BlockDig, BlockPlace, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
     ServerboundPosition, ServerboundPositionLook,
 };
 use crate::packets::handshake::SetProtocol;
@@ -278,6 +278,42 @@ impl ServerProtocol for V756ServerProtocol {
                     pos,
                     face,
                     sequence: 0,
+                }
+            }
+            State::Play if packet_id == play::serverbound::BLOCK_PLACE => {
+                let Some(BlockPlace {
+                    hand,
+                    location: Position(pos),
+                    direction,
+                    cursor_x,
+                    cursor_y,
+                    cursor_z,
+                    inside_block: _,
+                }) = decode_full(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                let (Ok(hand), Ok(face)) = (u8::try_from(hand), i8::try_from(direction)) else {
+                    return ServerBound::Ignored;
+                };
+                let Some(face) = block_face(face) else {
+                    return ServerBound::Ignored;
+                };
+                if hand > 1 {
+                    return ServerBound::Ignored;
+                }
+                ServerBound::UseItemOn {
+                    pos,
+                    face,
+                    cursor: Vec3f {
+                        x: cursor_x,
+                        y: cursor_y,
+                        z: cursor_z,
+                    },
+                    // This era predates the block-prediction sequence, so the
+                    // consumer receives the only unambiguous sentinel.
+                    sequence: 0,
+                    hand,
                 }
             }
             // The four movement forms have distinct payloads.  In particular,
@@ -611,6 +647,40 @@ impl ServerProtocol for V758ServerProtocol {
                     pos,
                     face,
                     sequence: 0,
+                }
+            }
+            State::Play if packet_id == play_758::serverbound::BLOCK_PLACE => {
+                let Some(BlockPlace {
+                    hand,
+                    location: Position(pos),
+                    direction,
+                    cursor_x,
+                    cursor_y,
+                    cursor_z,
+                    inside_block: _,
+                }) = decode_full_758(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                let (Ok(hand), Ok(face)) = (u8::try_from(hand), i8::try_from(direction)) else {
+                    return ServerBound::Ignored;
+                };
+                let Some(face) = block_face(face) else {
+                    return ServerBound::Ignored;
+                };
+                if hand > 1 {
+                    return ServerBound::Ignored;
+                }
+                ServerBound::UseItemOn {
+                    pos,
+                    face,
+                    cursor: Vec3f {
+                        x: cursor_x,
+                        y: cursor_y,
+                        z: cursor_z,
+                    },
+                    sequence: 0,
+                    hand,
                 }
             }
             State::Play if packet_id == play_758::serverbound::POSITION => {

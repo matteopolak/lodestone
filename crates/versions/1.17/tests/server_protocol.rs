@@ -1,6 +1,6 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
 use lodestone_data::block_states;
-use lodestone_model::Rotation;
+use lodestone_model::{BlockFace, BlockPos, Rotation, Vec3f};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_17::{V756ServerProtocol, V758ServerProtocol};
 use lodestone_v1_17::packet_ids::handshaking;
@@ -91,6 +91,68 @@ fn protocol_758_lifts_literal_movement_bodies() {
         serverbound::POSITION_LOOK,
         serverbound::LOOK,
         serverbound::FLYING,
+    );
+}
+
+fn assert_block_place_lift<P: ServerProtocol>(protocol: &P, packet_id: i32) {
+    // This is a literal `block_place` body, assembled independently from the
+    // field layout: off hand, (5, -10, -7), south, cursor (0.25, 1.0, 0.75),
+    // and inside-block true. Neither 756 nor 758 has a prediction sequence.
+    let packed = ((5_i64 & 0x3ff_ffff) << 38)
+        | ((-7_i64 & 0x3ff_ffff) << 12)
+        | (-10_i64 & 0xfff);
+    let body = [
+        vec![0x01],
+        packed.to_be_bytes().to_vec(),
+        vec![0x03],
+        0.25_f32.to_be_bytes().to_vec(),
+        1.0_f32.to_be_bytes().to_vec(),
+        0.75_f32.to_be_bytes().to_vec(),
+        vec![0x01],
+    ]
+    .concat();
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &body),
+        ServerBound::UseItemOn {
+            pos: BlockPos::new(5, -10, -7),
+            face: BlockFace::South,
+            cursor: Vec3f {
+                x: 0.25,
+                y: 1.0,
+                z: 0.75,
+            },
+            sequence: 0,
+            hand: 1,
+        }
+    );
+
+    let mut invalid_face = body.clone();
+    invalid_face[9] = 0x06;
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &invalid_face),
+        ServerBound::Ignored,
+        "a direction outside the six block faces must not reach placement"
+    );
+    assert_eq!(
+        protocol.decode(State::Configuration, packet_id, &body),
+        ServerBound::Ignored,
+        "the Play action must not bypass the connection-state gate"
+    );
+}
+
+#[test]
+fn protocol_756_lifts_literal_block_place_body() {
+    assert_block_place_lift(
+        &V756ServerProtocol,
+        lodestone_v1_17::packet_ids::play::serverbound::BLOCK_PLACE,
+    );
+}
+
+#[test]
+fn protocol_758_lifts_literal_block_place_body() {
+    assert_block_place_lift(
+        &V758ServerProtocol,
+        lodestone_v1_17::packet_ids_758::play::serverbound::BLOCK_PLACE,
     );
 }
 
