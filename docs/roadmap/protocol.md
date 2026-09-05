@@ -68,6 +68,10 @@ completion rule: adapter decode produces a specific `ServerBound` value; the dis
 it; a server integration test drives the real serve loop. Chunk delivery already uses an
 acknowledged-batch gate so transmission pace follows client acknowledgement.
 
+Protocols 756 and 758 accept the signed 16-bit held-item selection packet only for hotbar slots
+0 through 8. The selected slot enters the shared `CarriedItemChanged` inventory consumer; malformed,
+out-of-range, trailing, and pre-Play inputs are ignored without mutating player state.
+
 ## Client compatibility roadmap
 
 - **Secure chat and sessions are wired.** The client obtains and announces a signing session,

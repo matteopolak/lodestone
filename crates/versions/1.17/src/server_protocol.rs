@@ -24,6 +24,7 @@ use crate::packets::game::{
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
+use crate::packets::window::ServerboundHeldItemSlot;
 
 const CTX: Ctx = Ctx {
     version: PROTOCOL_1_17_1,
@@ -375,6 +376,15 @@ impl ServerProtocol for V756ServerProtocol {
                     return ServerBound::Ignored;
                 }
                 ServerBound::Swing { hand }
+            }
+            State::Play if packet_id == play::serverbound::HELD_ITEM_SLOT => {
+                let Some(slot) = decode_full::<ServerboundHeldItemSlot>(payload)
+                    .and_then(|packet| u8::try_from(packet.slot).ok())
+                    .filter(|&slot| slot < 9)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::CarriedItemChanged { slot }
             }
             // The four movement forms have distinct payloads.  In particular,
             // only the first two carry a position, which is what drives the
@@ -779,6 +789,15 @@ impl ServerProtocol for V758ServerProtocol {
                     return ServerBound::Ignored;
                 }
                 ServerBound::Swing { hand }
+            }
+            State::Play if packet_id == play_758::serverbound::HELD_ITEM_SLOT => {
+                let Some(slot) = decode_full_758::<ServerboundHeldItemSlot>(payload)
+                    .and_then(|packet| u8::try_from(packet.slot).ok())
+                    .filter(|&slot| slot < 9)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::CarriedItemChanged { slot }
             }
             State::Play if packet_id == play_758::serverbound::POSITION => {
                 decode_full_758::<ServerboundPosition>(payload).map_or(

@@ -303,6 +303,64 @@ fn registry_selected_1_17_era_arm_animation_reaches_the_shared_swing_consumer() 
 }
 
 #[test]
+fn registry_selected_1_17_era_hotbar_selection_reaches_the_inventory_consumer() {
+    for (protocol_version, held_item_slot) in [
+        (
+            756,
+            lodestone_v1_17::packet_ids::play::serverbound::HELD_ITEM_SLOT,
+        ),
+        (
+            758,
+            lodestone_v1_17::packet_ids_758::play::serverbound::HELD_ITEM_SLOT,
+        ),
+    ] {
+        let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+            .expect("every hosted 1.17-era protocol must select a server protocol");
+
+        // The body is a signed big-endian i16. These literals are independent
+        // of the adapter encoder and pin both legal boundaries.
+        assert_eq!(
+            protocol.decode(State::Play, held_item_slot, &[0x00, 0x00]),
+            ServerBound::CarriedItemChanged { slot: 0 },
+        );
+        assert_eq!(
+            protocol.decode(State::Play, held_item_slot, &[0x00, 0x08]),
+            ServerBound::CarriedItemChanged { slot: 8 },
+        );
+        for body in [&[0xff, 0xff][..], &[0x00, 0x09], &[0x00], &[0x00, 0x08, 0x00]] {
+            assert_eq!(
+                protocol.decode(State::Play, held_item_slot, body),
+                ServerBound::Ignored,
+                "protocol {protocol_version} must reject an invalid hotbar body {body:?}",
+            );
+        }
+        assert_eq!(
+            protocol.decode(State::Login, held_item_slot, &[0x00, 0x08]),
+            ServerBound::Ignored,
+            "hotbar selection must not bypass the Play-state boundary",
+        );
+
+        let adapter = lodestone_v1_17::adapter_for(protocol_version);
+        let Some((packet_id, payload)) = adapter
+            .encode_action(
+                ConnectionState::Play,
+                &ClientAction::SetCarriedItem { slot: 3 },
+            )
+            .expect("the client adapter must encode hotbar selection")
+        else {
+            panic!("hotbar selection must produce a packet");
+        };
+        assert_eq!(packet_id, held_item_slot);
+        assert_eq!(payload, vec![0x00, 0x03]);
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &payload),
+            ServerBound::CarriedItemChanged { slot: 3 },
+            "the client action must reach the registry-selected hosted consumer",
+        );
+    }
+}
+
+#[test]
 fn protocol_756_uses_its_capture_ids_and_encodes_a_1_17_chunk() {
     let protocol = V756ServerProtocol;
     let captured_ids: Vec<i32> = include_str!("captures/join_1_17_1.txt")
