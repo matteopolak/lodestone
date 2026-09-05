@@ -413,6 +413,9 @@ pub mod anvil_world_import;
 /// Conversion of one complete native chunk record into an Anvil chunk tree.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod anvil_export;
+/// Deterministic, authorization-gated export of an explicit native terrain batch.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod anvil_world_export;
 /// Authorization-gated conversion of one complete Anvil player file into the
 /// deliberately smaller native player locator record.
 #[cfg(not(target_arch = "wasm32"))]
