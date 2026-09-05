@@ -4206,6 +4206,10 @@ pub fn route(event: &ClientEvent) -> Route {
         // Answered by `Driver::emit`, and the tick surrogate that flushes pending
         // chat acknowledgements.
         ClientEvent::KeepAlive { .. } => CLIENT,
+        // `Driver::emit` immediately turns the challenge into a pong action
+        // before the shell event loop runs, so this is a client-internal
+        // consumer rather than an island.
+        ClientEvent::Ping { .. } => CLIENT,
         // `SharedState::apply`'s own arm, ahead of both `handles_event` calls:
         // straight into the `WorldTime` resource.
         ClientEvent::TimeChanged { .. } => CLIENT,
@@ -4320,8 +4324,7 @@ pub fn route(event: &ClientEvent) -> Route {
         // Do not "fix" one by flipping a flag: the flag only says who is *asked*,
         // and a router that is asked but has no system for the event drops it just
         // as silently. Write the system, then the flag, in one commit.
-        ClientEvent::Ping { .. }
-        | ClientEvent::BlockChangedAck { .. }
+        ClientEvent::BlockChangedAck { .. }
         | ClientEvent::ChunkCacheCenterChanged { .. }
         | ClientEvent::ChunkCacheRadiusChanged { .. }
         | ClientEvent::SimulationDistanceChanged { .. }
