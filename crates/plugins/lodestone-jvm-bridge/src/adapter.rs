@@ -884,6 +884,28 @@ pub(crate) fn resident_block_handle_state_id(bits: i64) -> Result<jint, AdapterE
         .map_err(|_| AdapterError::new("blockHandleStateId exceeds Java int range"))
 }
 
+/// Replaces the state at a generation-checked block handle through the bounded port.
+///
+/// The handle's copied coordinates are resolved before the state is validated or a
+/// request is queued. A stale or wrong-kind handle consequently cannot mutate a
+/// reused position, and the host still decides whether that position is resident
+/// and whether the requested state ID is valid.
+fn resident_block_handle_state_write(bits: i64, state_id: jint) -> Result<jint, AdapterError> {
+    let (x, y, z) = resolve_resident_block_handle(bits, "setBlockHandleStateId")?;
+    let state_id = u32::try_from(state_id)
+        .map_err(|_| AdapterError::new("setBlockHandleStateId requires a non-negative state id"))?;
+    let port = BLOCK_WRITE_PORT.with(|slot| slot.borrow().clone()).ok_or_else(|| {
+        AdapterError::new("setBlockHandleStateId requires the adapter worker thread")
+    })?;
+    port.request(BlockStateWrite { x, y, z, state_id })
+        .map_err(|error| AdapterError::new(format!("setBlockHandleStateId: {error}")))?
+        .map_err(|error| {
+            AdapterError::new(format!("setBlockHandleStateId({x},{y},{z},{state_id}): {error}"))
+        })?;
+    jint::try_from(state_id)
+        .map_err(|_| AdapterError::new("setBlockHandleStateId exceeds Java int range"))
+}
+
 fn resolve_resident_player_handle(
     bits: i64,
     operation: &str,
@@ -1982,6 +2004,28 @@ pub(crate) fn register_block_handle_state_id_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_block_handle_state_write(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts a generation-checked block
+    // handle plus one jint state ID. The callback resolves the handle before
+    // making the bounded write-port request, and exposes no server pointer.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_block_handle_state_write as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_current_player_handle_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -2444,6 +2488,20 @@ extern "system" fn native_block_handle_state_id<'local>(
         let _depth = CallbackDepthGuard::enter()
             .map_err(|error| AdapterError::new(error.to_string()))?;
         resident_block_handle_state_id(bits)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_block_handle_state_write<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+    state_id: jint,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resident_block_handle_state_write(bits, state_id)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -4019,6 +4077,68 @@ mod tests {
                 "blockHandleStateId: the referenced object no longer exists",
             )),
             "a stale handle must fail before a host request is made",
+        );
+        worker.join().expect("worker joins");
+    }
+
+    #[test]
+    fn block_handle_state_write_uses_the_bounded_port_after_generation_check() {
+        let identity = lifecycle_identity("alpha", "one", "alpha.Main");
+        let change = BlockStateWrite {
+            x: 11,
+            y: 1,
+            z: 4,
+            state_id: 1234,
+        };
+        let (port, servicer) = channel(Duration::from_secs(1));
+        let (result_sender, result_receiver) = sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            RESIDENT_OBJECT_HANDLES.with(|slot| {
+                *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(1));
+            });
+            BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = Some(port));
+            let handle = resident_block_handle(&identity, change).expect("block handle");
+            let negative = resident_block_handle_state_write(handle.to_bits(), -1);
+            let result = resident_block_handle_state_write(handle.to_bits(), 422);
+            assert_eq!(release_resident_handles(&identity), 1);
+            let stale = resident_block_handle_state_write(handle.to_bits(), 422);
+            BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = None);
+            RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+            result_sender
+                .send((negative, result, stale))
+                .expect("write results");
+        });
+        let limit = Instant::now() + Duration::from_secs(1);
+        while servicer.service_all_pending(1, |write| {
+            assert_eq!(
+                write,
+                BlockStateWrite {
+                    x: 11,
+                    y: 1,
+                    z: 4,
+                    state_id: 422,
+                },
+            );
+            Ok(())
+        }) == 0 {
+            assert!(Instant::now() < limit, "worker did not request a block-state write");
+            std::thread::yield_now();
+        }
+        let (negative, result, stale) = result_receiver.recv().expect("write results");
+        assert_eq!(
+            negative,
+            Err(AdapterError::new(
+                "setBlockHandleStateId requires a non-negative state id",
+            )),
+            "an invalid state must fail before it reaches the host",
+        );
+        assert_eq!(result, Ok(422));
+        assert_eq!(
+            stale,
+            Err(AdapterError::new(
+                "setBlockHandleStateId: the referenced object no longer exists",
+            )),
+            "a stale handle must fail before a write request is made",
         );
         worker.join().expect("worker joins");
     }

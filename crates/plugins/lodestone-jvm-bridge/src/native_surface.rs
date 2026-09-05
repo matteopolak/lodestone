@@ -218,7 +218,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 28] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 29] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -278,6 +278,10 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 28] = [
     NativeMethodSpec {
         name: "blockHandleStateId",
         descriptor: "(J)I",
+    },
+    NativeMethodSpec {
+        name: "setBlockHandleStateId",
+        descriptor: "(JI)I",
     },
     NativeMethodSpec {
         name: "blockHandleIsRetained",
@@ -406,6 +410,7 @@ const ISOLATED_SHIM_REGISTRATION: &[NativeRegistrationStep] = registration_steps
     ISOLATED_SHIM_METHODS[25],
     ISOLATED_SHIM_METHODS[26],
     ISOLATED_SHIM_METHODS[27],
+    ISOLATED_SHIM_METHODS[28],
 );
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -975,6 +980,11 @@ fn method_id(
         ("blockHandleStateId", "(J)I") => {
             env.get_static_method_id(class, jni_str!("blockHandleStateId"), jni_sig!("(J)I"))
         }
+        ("setBlockHandleStateId", "(JI)I") => env.get_static_method_id(
+            class,
+            jni_str!("setBlockHandleStateId"),
+            jni_sig!("(JI)I"),
+        ),
         ("blockHandleIsRetained", "(J)Z") => env.get_static_method_id(
             class,
             jni_str!("blockHandleIsRetained"),
@@ -1132,6 +1142,12 @@ fn register_method(
             method.descriptor,
         ),
         ("blockHandleStateId", "(J)I") => adapter::register_block_handle_state_id_query(
+            env,
+            class,
+            method.name,
+            method.descriptor,
+        ),
+        ("setBlockHandleStateId", "(JI)I") => adapter::register_block_handle_state_write(
             env,
             class,
             method.name,
@@ -1404,6 +1420,7 @@ mod tests {
                 NativeMethodSpec { name: "blockHandleY", descriptor: "(J)I" },
                 NativeMethodSpec { name: "blockHandleZ", descriptor: "(J)I" },
                 NativeMethodSpec { name: "blockHandleStateId", descriptor: "(J)I" },
+                NativeMethodSpec { name: "setBlockHandleStateId", descriptor: "(JI)I" },
                 NativeMethodSpec { name: "blockHandleIsRetained", descriptor: "(J)Z" },
                 NativeMethodSpec {
                     name: "currentPlayerHandle",
@@ -1620,6 +1637,7 @@ mod tests {
              public static native int blockHandleY(long handle); \
              public static native int blockHandleZ(long handle); \
              public static native int blockHandleStateId(long handle); \
+             public static native int setBlockHandleStateId(long handle, int stateId); \
              public static native boolean blockHandleIsRetained(long handle); \
              public static native long currentPlayerHandle(); \
              public static native String playerHandleName(long handle); \
@@ -1717,6 +1735,7 @@ mod tests {
              public static native int blockHandleY(long handle); \
              public static native int blockHandleZ(long handle); \
              public static native int blockHandleStateId(long handle); \
+             public static native int setBlockHandleStateId(long handle, int stateId); \
              public static native boolean blockHandleIsRetained(long handle); \
              public static native long currentPlayerHandle(); \
              public static native String playerHandleName(long handle); \

@@ -793,6 +793,12 @@ lifecycle cleanup.
 `blockHandleStateId(long)` first generation-checks that same handle, then asks the host's bounded
 resident-block query port for the state at its copied coordinate. This preserves the distinction
 between air and an unavailable column, and a stale handle fails before a host query is sent.
+`setBlockHandleStateId(long, int)` is the matching bounded mutation seam. It resolves the opaque
+block handle before it accepts the non-negative state ID or enqueues the existing resident-column
+write request, so a stale or wrong-kind value cannot mutate a recycled position. The host retains
+authority to reject an unavailable column, invalid state ID, or out-of-height coordinate; the call
+does not load terrain and carries none of the physics, block-entity, packet, cancellation, or
+general event semantics of a complete server API.
 The generic registry separately reports wrong-kind use. A live player handle may
 also resolve through `playerHandleName(long)` and `playerHandleUuid(long)`. The
 latter returns a canonical lowercase UUID string from the fixed sixteen profile
