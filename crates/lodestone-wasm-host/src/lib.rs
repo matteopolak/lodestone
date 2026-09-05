@@ -126,7 +126,7 @@ pub use host::{
     PlaceRejection, PlaceStatus, PluginGrantPolicy, PluginHost, PluginIdentity, PluginInfo, SectionBlocksChanged, SectionPos,
     ReloadError, VerdictDispatch,
 };
-pub use manifest::{Manifest, ManifestError, Priority, scan_directory};
+pub use manifest::{Dependencies, Manifest, ManifestError, Priority, scan_directory};
 
 /// The default directory a host scans for plugins, relative to the working
 /// directory — `plugins/`, one subdirectory per plugin, matching what a Bukkit user

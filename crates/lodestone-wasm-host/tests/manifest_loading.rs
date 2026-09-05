@@ -318,3 +318,41 @@ fn a_rejected_reload_keeps_the_previous_working_guest_alive() {
         "the old guest must keep serving after the rejected replacement"
     );
 }
+
+/// Dependency validation is part of the replacement transaction: a cycle in a
+/// newly discovered graph cannot partially replace the currently running guest.
+#[test]
+fn a_dependency_cycle_rejects_reload_and_keeps_the_previous_guest_alive() {
+    let wasm = support::build_example_plugin(&[]);
+    let manifest = std::fs::read_to_string(shipped_manifest_path()).expect("read manifest");
+    let root = fresh_root("reload-cycle-keeps-old");
+    install(&root, "chat-responder", &manifest, "chat_responder.wasm", &wasm);
+
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_directory(&root)
+        .into_iter()
+        .next()
+        .expect("one manifest")
+        .expect("initial guest must load");
+    assert_eq!(host.tick_all(&[chat("ping")]).len(), 1, "the initial guest is live");
+
+    let a = manifest
+        .replace(r#"name = "chat-responder""#, r#"name = "a""#)
+        + "\n[dependencies]\nrequired = [\"b\"]\n";
+    let b = manifest
+        .replace(r#"name = "chat-responder""#, r#"name = "b""#)
+        + "\n[dependencies]\nrequired = [\"a\"]\n";
+    install(&root, "a", &a, "chat_responder.wasm", &wasm);
+    install(&root, "b", &b, "chat_responder.wasm", &wasm);
+
+    let error = host
+        .stage_directory_reload(&root, &Default::default())
+        .expect_err("a dependency cycle must not stage");
+    assert!(matches!(error, ReloadError::Rejected { .. }), "{error:?}");
+    assert_eq!(host.plugins().len(), 1, "the active host must not be replaced");
+    assert_eq!(
+        host.tick_all(&[chat("ping")]),
+        vec![Action::SendChat("pong (chat messages seen: 2)".to_owned())],
+        "the old guest must keep serving after a graph rejection"
+    );
+}
