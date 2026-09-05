@@ -306,9 +306,14 @@ fn jvm_support_is_explicitly_default_off() {
     );
     assert!(
         text.lines()
-            .any(|line| line.trim() == "jvm = [\"dep:jni\", \"dep:zip\"]"),
-        "JVM startup and operator-jar discovery must be reachable only through \
-         the named jvm feature"
+            .any(|line| line.trim() == "paper-preflight = [\"dep:zip\"]"),
+        "operator-jar preflight must stay behind its own named default-off feature"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.trim() == "jvm = [\"paper-preflight\", \"dep:jni\"]"),
+        "JVM startup must include archive preflight but keep JNI behind the \
+         named jvm feature"
     );
     let zip = text.lines().find(|line| line.trim_start().starts_with("zip ="));
     assert!(

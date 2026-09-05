@@ -251,11 +251,12 @@ adapter means no JVM startup or polling timer. A default build rejects Java conf
 An adapter run may also validate and load an operator-supplied Paper bootstrap class: set both
 `LODESTONE_PAPER_JAR` and `LODESTONE_PAPER_PLUGIN_DIRECTORY`, and optionally
 `LODESTONE_PAPER_SHIM_PATH` for one shim directory or jar that precedes the Paper jar in isolated
-resolution. Invalid paths or plugin descriptors stop cleanly before JVM startup. A bootstrap load
-failure also saves and stops the server, so a requested Paper intake cannot silently degrade into an
-ordinary adapter run. This is only bootstrap-class loading: it does not initialize Paper, load plugin
-classes, enable plugins, or provide Paper-plugin compatibility. See [Java plugin bridge](java-plugin-bridge.md)
-for its explicit boundary and live fixture.
+resolution. Invalid paths, plugin descriptors, or declared main-class archive entries stop cleanly
+before JVM startup. A bootstrap load failure also saves and stops the server, so a requested Paper
+intake cannot silently degrade into an ordinary adapter run. This is only bootstrap-class loading:
+the host does not initialize Paper, load plugin classes, enable plugins, or provide Paper-plugin
+compatibility. See [Java plugin bridge](java-plugin-bridge.md) for its explicit boundary and live
+fixture.
 
 Adapter callbacks observe the newest completed server tick while idle, coalescing intervening ticks;
 resident block reads never generate missing terrain. Callback errors without Paper bootstrap input are
