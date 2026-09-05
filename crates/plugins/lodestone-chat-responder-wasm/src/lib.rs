@@ -35,8 +35,12 @@ use lodestone::plugin::types::CommandAnchor;
 use lodestone::plugin::types::LookIntent;
 #[cfg(feature = "movement")]
 use lodestone::plugin::types::MovementIntent;
+#[cfg(any(feature = "place", feature = "break"))]
+use lodestone::plugin::types::{BlockFace, BlockPos};
 #[cfg(feature = "place")]
-use lodestone::plugin::types::{BlockFace, BlockPos, PlaceIntent, PlaceStatus};
+use lodestone::plugin::types::{PlaceIntent, PlaceStatus};
+#[cfg(feature = "break")]
+use lodestone::plugin::types::{BreakIntent, BreakStatus};
 #[cfg(feature = "scheduler")]
 use lodestone::plugin::scheduler::{cancel, schedule_once, schedule_repeating};
 
@@ -48,6 +52,8 @@ use lodestone::plugin::scheduler::{cancel, schedule_once, schedule_repeating};
 static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(feature = "place")]
 static PLACEMENT_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "break")]
+static BREAK_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "scheduler")]
 static REPEATS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(feature = "scheduler")]
@@ -75,7 +81,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.8.0".to_string(),
+            abi: "lodestone:plugin@0.9.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -109,7 +115,10 @@ impl Guest for ChatResponder {
         #[cfg(feature = "place")]
         return place_once_then_report(events);
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place")))]
+        #[cfg(feature = "break")]
+        return break_once_then_report(events);
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break")))]
         return respond(events);
     }
 
@@ -224,6 +233,34 @@ fn place_once_then_report(events: Vec<Event>) -> Vec<Action> {
             pos: BlockPos { x: 4, y: 64, z: 4 },
             face: BlockFace::Up,
         })];
+    }
+    Vec::new()
+}
+
+/// Start one persistent dig, observe the shell's bounded result, then explicitly
+/// release ownership. The fixture deliberately targets absent world data, so the
+/// shell's normal ray validation deterministically rejects it while still
+/// exercising the production consumer.
+#[cfg(feature = "break")]
+fn break_once_then_report(events: Vec<Event>) -> Vec<Action> {
+    for event in events {
+        if let Event::BreakOutcome(outcome) = event {
+            let status = match outcome.status {
+                BreakStatus::Idle => "idle",
+                BreakStatus::Progressing => "progressing",
+                BreakStatus::Rejected(_) => "rejected",
+            };
+            return vec![
+                Action::SetBreak(None),
+                Action::SendChat(format!("break: status={status}")),
+            ];
+        }
+    }
+    if !BREAK_STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return vec![Action::SetBreak(Some(BreakIntent {
+            pos: BlockPos { x: 4, y: 64, z: 4 },
+            face: BlockFace::Up,
+        }))];
     }
     Vec::new()
 }

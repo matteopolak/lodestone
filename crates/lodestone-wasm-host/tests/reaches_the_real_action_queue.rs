@@ -27,11 +27,13 @@ use std::sync::Arc;
 
 use lodestone_ecs::events::GameEvent;
 use lodestone_ecs::player::{
-    ActionQueue, CollisionSource, Egress, LocalPlayer, PhysicsState, PlayerCollision,
+    ActionQueue, BreakIntent, BreakOutcome, BreakStatus, CollisionSource, Egress, LocalPlayer,
+    PhysicsState, PlayerCollision,
 };
 use lodestone_ecs::{GameTick, app::App};
 use lodestone_model::{ClientAction, ClientEvent, PlayerInput, Text};
 use lodestone_physics::{Aabb, CollisionView, PlayerState, Vec3d};
+use lodestone::{config::Config, sim::Sim};
 use lodestone_wasm_host::{Capability, CapabilitySet, PluginHost, WasmHostPlugin, WasmPlugins};
 
 fn chat(text: &str) -> GameEvent {
@@ -64,6 +66,22 @@ fn movement_capabilities() -> CapabilitySet {
 fn movement_host_policy() -> CapabilitySet {
     let mut policy = CapabilitySet::default_policy();
     policy.insert(Capability::ActMovement);
+    policy
+}
+
+fn break_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([
+        Capability::Log,
+        Capability::ActChat,
+        Capability::ActBreak,
+        Capability::ObserveBreak,
+    ])
+}
+
+fn break_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActBreak);
+    policy.insert(Capability::ObserveBreak);
     policy
 }
 
@@ -406,4 +424,58 @@ fn a_wasm_movement_intent_without_its_capability_is_refused_before_physics() {
         "without `act:movement` the guest must not replace the controller input"
     );
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+/// A separately compiled guest owns a persistent mining target. The composed
+/// client reaches the real shell consumer, which rejects an absent-world target
+/// through its normal ray validation;
+/// the guest observes that finite state, releases the claim, and emits a chat
+/// action. This proves the host did not bypass validation or manufacture a dig
+/// packet just because a guest asked to break.
+#[test]
+fn a_wasm_break_lifecycle_reaches_the_shell_mining_consumer_and_returns_a_bounded_outcome() {
+    let wasm = support::build_example_plugin(&["break"]);
+    let mut host = PluginHost::new(break_host_policy()).expect("engine");
+    host.load_file("break-owner", &wasm, &break_capabilities())
+        .expect("the break fixture must load");
+
+    let mut app = Sim::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    let sim = Sim::from_app(app, Config::default());
+
+    {
+        let mut world = sim.ecs().write();
+        *world.resource_mut::<Egress>() = Egress { in_world: true, live: true };
+        world.run_schedule(GameTick);
+        let mut players = world.query_filtered::<(&BreakIntent, &BreakOutcome), bevy_ecs::query::With<LocalPlayer>>();
+        let (intent, outcome) = players.single(&world).expect("the guest must install one mining claim");
+        assert_eq!(intent.pos, lodestone_model::BlockPos::new(4, 64, 4));
+        assert_eq!(
+            outcome.0,
+            BreakStatus::Rejected(lodestone_ecs::player::BreakRejection::UnreachableOrObstructed),
+            "the shell must reject an absent-world target through its normal ray validation"
+        );
+    }
+
+    {
+        let mut world = sim.ecs().write();
+        world.run_schedule(GameTick);
+        let mut players = world.query_filtered::<(), bevy_ecs::query::With<BreakIntent>>();
+        assert!(
+            players.iter(&world).next().is_none(),
+            "the guest's explicit abort must release the persistent ownership claim"
+        );
+        assert!(
+            world
+                .resource::<ActionQueue>()
+                .0
+                .iter()
+                .any(|action| matches!(
+                    action,
+                    ClientAction::SendChat { text } if text == "break: status=rejected"
+                )),
+            "the changed shell outcome must reach the guest exactly as a bounded observation"
+        );
+        assert_eq!(world.resource::<WasmPlugins>().refused_actions(), 0);
+    }
 }

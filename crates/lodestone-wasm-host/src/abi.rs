@@ -17,7 +17,7 @@
 //! |---|---|---|
 //! | `Text`, the styled component tree | a plain `String` | `Text` is recursive, with translation keys, hover/click events and per-node style. Lifting it faithfully means a recursive WIT variant plus a translation table the guest cannot resolve anyway. So [`lift_event`] flattens with `Text::to_plain_string`, and this is **lossy**: a guest cannot see colour, cannot see a translation key, and cannot distinguish a translated message from a literal one that happens to render the same. |
 //! | `ChatAckInfo` on `ClientEvent::Chat` | dropped | signed-chat acknowledgement is the *driver's* bookkeeping — a guest that echoed an `offset` back would fork a sequence counter the driver owns, which is clause 2 of the doctrine. Deliberately unreachable. |
-//! | intent components (`BreakIntent`, `PlaceIntent`, `MovementIntent`, `LookIntent`) and their outcome components | `set-look(option<look-intent>)`, `set-movement(option<movement-intent>)`, `place-block(place-intent)`, and `place-outcome` | look owns an optional component; movement overrides the normal controller's copied input for one tick, then flows through the existing physics and egress consumers. A placement crosses as only a target and face, then the shell owns the existing lifecycle. Its generation-bounded outcome is an observation, not a world query. Break remains absent because its multi-tick lifecycle needs a separate ownership contract. See `docs/wasm-plugin-intents.md`. |
+//! | intent components (`BreakIntent`, `PlaceIntent`, `MovementIntent`, `LookIntent`) and their outcome components | `set-look(option<look-intent>)`, `set-movement(option<movement-intent>)`, `set-break(option<break-intent>)`, `place-block(place-intent)`, and bounded outcome events | look owns an optional component; movement overrides the normal controller's copied input for one tick, then flows through the existing physics and egress consumers. Break owns a persistent target until explicit release, while the shell owns validation, prediction and sequence. Placement crosses as only a target and face, then the shell owns its one-shot lifecycle. See `docs/wasm-plugin-intents.md`. |
 //! | ~110 `ClientEvent` variants | 3 | the curated subset. Not an oversight and not a TODO: a full mirror is the staleness factory `lodestone_ecs::events`'s own module doc refuses. |
 //!
 //! # The staleness question, and the honest answer to it
@@ -39,7 +39,8 @@ use lodestone_model::{ClientAction, ClientEvent};
 
 use crate::capability::{Capability, CapabilitySet};
 use crate::host::{
-    Action, BlockBreakVerdict, BlockFace, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
+    Action, BlockBreakVerdict, BlockFace, BlockOffset, BlockPlaceVerdict, BlockPos, BreakOutcome,
+    BreakRejection, BreakStatus, ChatKind, ChatMessage,
     CommandAnchor, CommandContext, CommandEntity, CommandExecution, CommandPosition,
     CommandRotation, EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict,
     PlaceOutcome, PlaceRejection, PlaceStatus, PlayerInteractVerdict, PlayerMoveVerdict,
@@ -56,6 +57,8 @@ pub enum IntentAction {
     Movement(Option<MovementOverride>),
     /// Submit one placement to the existing local-player lifecycle.
     Place(lodestone_ecs::player::PlaceIntent),
+    /// Install, retarget, or release the persistent mining intent.
+    Break(Option<lodestone_ecs::player::BreakIntent>),
 }
 
 /// A guest movement request after the boundary has enforced finite, digital axes.
@@ -273,6 +276,31 @@ pub fn lift_place_outcome(
     })
 }
 
+/// Copy a changed local-player mining state into the bounded guest vocabulary.
+/// `Idle` is meaningful here: it tells a guest that its explicit release has
+/// reached the lifecycle. The conductor suppresses repeated equal statuses.
+#[must_use]
+pub fn lift_break_outcome(outcome: &lodestone_ecs::player::BreakOutcome) -> BreakOutcome {
+    let status = match outcome.0 {
+        lodestone_ecs::player::BreakStatus::Idle => BreakStatus::Idle,
+        lodestone_ecs::player::BreakStatus::Progressing => BreakStatus::Progressing,
+        lodestone_ecs::player::BreakStatus::Rejected(rejection) => {
+            BreakStatus::Rejected(match rejection {
+                lodestone_ecs::player::BreakRejection::Dead => BreakRejection::Dead,
+                lodestone_ecs::player::BreakRejection::UnreachableOrObstructed => {
+                    BreakRejection::UnreachableOrObstructed
+                }
+                lodestone_ecs::player::BreakRejection::NoWorldData => BreakRejection::NoWorldData,
+                lodestone_ecs::player::BreakRejection::UnknownBlockState => {
+                    BreakRejection::UnknownBlockState
+                }
+                lodestone_ecs::player::BreakRejection::Vetoed => BreakRejection::Vetoed,
+            })
+        }
+    };
+    BreakOutcome { status }
+}
+
 /// Which capability an action needs, as a total function over the WIT `action`
 /// variants.
 ///
@@ -288,6 +316,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::SwingArm(_) => Capability::ActInteract,
         Action::SetLook(_) => Capability::ActLook,
         Action::SetMovement(_) => Capability::ActMovement,
+        Action::SetBreak(_) => Capability::ActBreak,
         Action::PlaceBlock(_) => Capability::ActPlace,
     }
 }
@@ -329,6 +358,19 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
                 }
             })))
         }
+        Action::SetBreak(intent) => LoweredAction::Intent(IntentAction::Break(intent.map(|intent| {
+            lodestone_ecs::player::BreakIntent {
+                pos: lodestone_model::BlockPos::new(intent.pos.x, intent.pos.y, intent.pos.z),
+                face: match intent.face {
+                    BlockFace::Down => lodestone_model::BlockFace::Down,
+                    BlockFace::Up => lodestone_model::BlockFace::Up,
+                    BlockFace::North => lodestone_model::BlockFace::North,
+                    BlockFace::South => lodestone_model::BlockFace::South,
+                    BlockFace::West => lodestone_model::BlockFace::West,
+                    BlockFace::East => lodestone_model::BlockFace::East,
+                },
+            }
+        }))),
         Action::PlaceBlock(intent) => LoweredAction::Intent(IntentAction::Place(
             lodestone_ecs::player::PlaceIntent {
                 pos: lodestone_model::BlockPos::new(intent.pos.x, intent.pos.y, intent.pos.z),
@@ -549,6 +591,50 @@ mod tests {
         );
     }
 
+    /// A break request owns only the copied target until the guest explicitly
+    /// releases it; the shell owns every packet/progress detail beneath it.
+    #[test]
+    fn break_actions_lower_onto_the_persistent_local_player_mining_lifecycle() {
+        let granted = CapabilitySet::from_iter([Capability::ActBreak]);
+        assert_eq!(
+            lower_action(
+                Action::SetBreak(Some(crate::host::BreakIntent {
+                    pos: BlockPos { x: -7, y: 64, z: 19 },
+                    face: BlockFace::West,
+                })),
+                &granted,
+            ),
+            Ok(LoweredAction::Intent(IntentAction::Break(Some(
+                lodestone_ecs::player::BreakIntent {
+                    pos: lodestone_model::BlockPos::new(-7, 64, 19),
+                    face: lodestone_model::BlockFace::West,
+                }
+            ))))
+        );
+        assert_eq!(
+            lower_action(Action::SetBreak(None), &granted),
+            Ok(LoweredAction::Intent(IntentAction::Break(None)))
+        );
+    }
+
+    /// The continuous lifecycle still crosses only a finite state vocabulary;
+    /// the conductor, not this lift, suppresses repeated equal states.
+    #[test]
+    fn break_outcomes_lift_without_world_handles_or_error_strings() {
+        assert_eq!(
+            lift_break_outcome(&lodestone_ecs::player::BreakOutcome(
+                lodestone_ecs::player::BreakStatus::Rejected(
+                    lodestone_ecs::player::BreakRejection::NoWorldData,
+                ),
+            )),
+            crate::host::BreakOutcome {
+                status: crate::host::BreakStatus::Rejected(
+                    crate::host::BreakRejection::NoWorldData,
+                ),
+            }
+        );
+    }
+
     /// The outcome vocabulary is finite and preserves the generation that makes
     /// a one-shot placement result distinguishable from an older result.
     #[test]
@@ -610,6 +696,10 @@ mod tests {
             ),
             Err(Capability::ActPlace)
         );
+        assert_eq!(
+            lower_action(Action::SetBreak(None), &CapabilitySet::empty()),
+            Err(Capability::ActBreak)
+        );
     }
 
     /// Every action variant is gated by something. Trivial-looking, and it is the
@@ -623,6 +713,7 @@ mod tests {
             Action::SwingArm(Hand::Main),
             Action::SetLook(None),
             Action::SetMovement(None),
+            Action::SetBreak(None),
             Action::PlaceBlock(PlaceIntent {
                 pos: BlockPos { x: 0, y: 0, z: 0 },
                 face: BlockFace::Up,

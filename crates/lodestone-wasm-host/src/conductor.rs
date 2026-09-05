@@ -51,7 +51,7 @@ use lodestone_command::StringArgument;
 use lodestone_ecs::commands::{CommandOutcome, CommandRegistry, PluginCommand, PluginCommandsPlugin};
 use lodestone_ecs::events::{GameEvent, GameEventBusPlugin};
 use lodestone_ecs::player::{
-    ActionQueue, LocalPlayer, LookIntent, MovementIntent, PlaceOutcome,
+    ActionQueue, BreakIntent, BreakOutcome, LocalPlayer, LookIntent, MovementIntent, PlaceOutcome,
 };
 use lodestone_ecs::veto::{ActionVetoPlugin, ActionVetoes, Verdict};
 // `TickSet` via the crate root, not `lodestone_ecs::sets::TickSet`: the `sets` module
@@ -294,7 +294,7 @@ impl Plugin for WasmHostPlugin {
         );
         app.add_systems(
             GameTick,
-            (apply_wasm_intents, apply_wasm_place_intents, ApplyDeferred)
+            (apply_wasm_intents, apply_wasm_break_intents, apply_wasm_place_intents, ApplyDeferred)
                 .chain()
                 .in_set(TickSet::Intent)
                 .before(lodestone_ecs::player::apply_look_intent),
@@ -321,13 +321,17 @@ pub fn drive_wasm_plugins(
     mut events: MessageReader<GameEvent>,
     mut queue: ResMut<ActionQueue>,
     mut intents: ResMut<PendingWasmIntents>,
-    players: Query<(Entity, &PlaceOutcome), With<LocalPlayer>>,
+    players: Query<(Entity, &BreakOutcome, &PlaceOutcome), With<LocalPlayer>>,
 ) {
     let batch: Vec<lodestone_model::ClientEvent> = events.read().map(|e| e.0.clone()).collect();
     let place_outcome = players
         .iter()
         .next()
-        .and_then(|(player, outcome)| abi::lift_place_outcome(outcome).map(|outcome| (player, outcome)));
+        .and_then(|(player, _, outcome)| abi::lift_place_outcome(outcome).map(|outcome| (player, outcome)));
+    let break_outcome = players
+        .iter()
+        .next()
+        .map(|(player, outcome, _)| (player, abi::lift_break_outcome(outcome)));
 
     let mut refused = 0_u64;
     let (lowered, lowered_intents) = plugins.with_host(|host| {
@@ -346,6 +350,12 @@ pub fn drive_wasm_plugins(
                 && plugin.observe_place_outcome(*player, outcome)
             {
                 lifted.push(Event::PlaceOutcome(outcome.clone()));
+            }
+            if granted.contains(Capability::ObserveBreak)
+                && let Some((player, outcome)) = &break_outcome
+                && plugin.observe_break_outcome(*player, outcome)
+            {
+                lifted.push(Event::BreakOutcome(outcome.clone()));
             }
             for action in plugin.tick(&lifted, fuel) {
                 match abi::lower_action(action, &granted) {
@@ -386,7 +396,7 @@ fn apply_wasm_intents(
 ) {
     let last = pending.0.iter().rev().find_map(|intent| match intent {
         IntentAction::Look(look) => Some(*look),
-        IntentAction::Movement(_) | IntentAction::Place(_) => None,
+        IntentAction::Movement(_) | IntentAction::Break(_) | IntentAction::Place(_) => None,
     });
     let Some(look) = last else {
         return;
@@ -400,6 +410,33 @@ fn apply_wasm_intents(
                 commands.entity(entity).remove::<LookIntent>();
             }
         };
+    }
+}
+
+/// Apply the final guest mining ownership update before `TickSet::Send` lets
+/// the shell drive its mining lifecycle. The shell remains the sole owner of
+/// validation, progress, prediction, sequence, and abort egress.
+fn apply_wasm_break_intents(
+    pending: Res<PendingWasmIntents>,
+    players: Query<Entity, With<LocalPlayer>>,
+    mut commands: Commands,
+) {
+    let break_intent = pending.0.iter().rev().find_map(|intent| match intent {
+        IntentAction::Break(break_intent) => Some(*break_intent),
+        IntentAction::Look(_) | IntentAction::Movement(_) | IntentAction::Place(_) => None,
+    });
+    let Some(break_intent) = break_intent else {
+        return;
+    };
+    for entity in &players {
+        match break_intent {
+            Some(break_intent) => {
+                commands.entity(entity).insert(break_intent);
+            }
+            None => {
+                commands.entity(entity).remove::<BreakIntent>();
+            }
+        }
     }
 }
 
@@ -418,7 +455,7 @@ fn apply_wasm_place_intents(
 ) {
     let place = pending.0.iter().rev().find_map(|intent| match intent {
         IntentAction::Place(place) => Some(*place),
-        IntentAction::Look(_) | IntentAction::Movement(_) => None,
+        IntentAction::Look(_) | IntentAction::Movement(_) | IntentAction::Break(_) => None,
     });
     let Some(place) = place else {
         return;
@@ -437,7 +474,7 @@ fn apply_wasm_movement_intents(
 ) {
     let movement = pending.0.iter().rev().find_map(|intent| match intent {
         IntentAction::Movement(movement) => Some(*movement),
-        IntentAction::Look(_) | IntentAction::Place(_) => None,
+        IntentAction::Look(_) | IntentAction::Break(_) | IntentAction::Place(_) => None,
     });
     pending.0.clear();
 

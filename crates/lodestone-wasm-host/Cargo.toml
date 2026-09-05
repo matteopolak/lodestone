@@ -81,4 +81,8 @@ bevy_ecs = { workspace = true }
 # that built its own schedules could not tell a correctly-wired conductor from one
 # anchored in a set the shipped client does not run.
 lodestone-app = { workspace = true }
+# The breaking conformance gate composes the shell's production interaction
+# systems. `lodestone-app` intentionally stays headless and does not include
+# the mining predictor or its validation/prediction consumer.
+lodestone-shell = { path = "../lodestone-shell" }
 lodestone-physics = { workspace = true }

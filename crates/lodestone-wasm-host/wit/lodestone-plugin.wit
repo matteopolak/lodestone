@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.8.0;
+package lodestone:plugin@0.9.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -164,6 +164,10 @@ interface types {
         health-changed(health),
         /// `ClientEvent::SectionBlocksChanged` — capability `observe:blocks`.
         blocks-changed(section-blocks-changed),
+        /// A changed local-player mining lifecycle state — capability `observe:break`.
+        /// The host suppresses unchanged states, so an ongoing dig does not become
+        /// an every-tick event stream.
+        break-outcome(break-outcome),
         /// A newly resolved local-player placement — capability `observe:place`.
         /// The host emits it once per generation for each observing guest.
         place-outcome(place-outcome),
@@ -211,6 +215,36 @@ interface types {
         face: block-face,
     }
 
+    /// A copied block-breaking target. The guest owns its lifetime through
+    /// `action.set-break`: `some` starts or continues the claim, and `none`
+    /// releases it so the shell emits its normal abort when needed. The guest
+    /// cannot provide progress, a state id, a hand, or a packet sequence.
+    record break-intent {
+        pos: block-pos,
+        face: block-face,
+    }
+
+    /// Why the shell did not advance a requested dig this tick. These are the
+    /// normal local-player legality outcomes, not host error strings.
+    enum break-rejection {
+        dead,
+        unreachable-or-obstructed,
+        no-world-data,
+        unknown-block-state,
+        vetoed,
+    }
+
+    /// The observable state of the persistent block-breaking lifecycle.
+    variant break-status {
+        idle,
+        progressing,
+        rejected(break-rejection),
+    }
+
+    record break-outcome {
+        status: break-status,
+    }
+
     /// The bounded reasons a requested placement did not reach the normal
     /// placement path. There is deliberately no world/error string here: the
     /// host reports only the existing lifecycle vocabulary, not engine internals.
@@ -253,6 +287,9 @@ interface types {
         /// Override this tick's copied movement intent — capability
         /// `act:movement`. `none` leaves the normal controller input intact.
         set-movement(option<movement-intent>),
+        /// Start, retarget, continue, or abort a block break through the normal
+        /// local-player mining lifecycle — capability `act:break`.
+        set-break(option<break-intent>),
         /// Request exactly one main-hand placement through the existing
         /// local-player lifecycle — capability `act:place`.
         place-block(place-intent),
@@ -325,7 +362,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.8.0"`.
+        /// `"lodestone:plugin@0.9.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.
