@@ -307,6 +307,14 @@ pub enum ChunkRecordError {
     UnexpectedLightSectionY { expected: i32, actual: i32 },
     /// A source column names a biome not available in this built-in census.
     UnsupportedBiome(String),
+    /// The production world source did not provide its complete derived
+    /// motion-blocking heightmap for a dirty column.
+    MissingMotionBlockingHeightmap,
+    /// The production source could not provide a pending column snapshot.
+    SourceSnapshot(String),
+    /// The configured protocol did not produce a light column for a pending
+    /// production chunk.
+    MissingComputedLight,
     /// A stored integer is not one of this format version's biome enum values.
     UnknownBuiltinBiome(i32),
     /// A stored numeric block-state ID is not in this build's registry.
@@ -414,6 +422,13 @@ impl fmt::Display for ChunkRecordError {
                 write!(formatter, "expected light section Y {expected}, found {actual}")
             }
             Self::UnsupportedBiome(name) => write!(formatter, "unsupported built-in biome {name}"),
+            Self::MissingMotionBlockingHeightmap => {
+                formatter.write_str("dirty production column has no motion-blocking heightmap")
+            }
+            Self::SourceSnapshot(error) => write!(formatter, "could not snapshot dirty column: {error}"),
+            Self::MissingComputedLight => {
+                formatter.write_str("protocol did not compute light for dirty production column")
+            }
             Self::UnknownBuiltinBiome(id) => write!(formatter, "unknown built-in biome ID {id}"),
             Self::UnknownBlockStateId(id) => write!(formatter, "unknown built-in block-state ID {id}"),
             Self::InvalidPackedStates(reason) => write!(formatter, "invalid packed block states: {reason}"),
@@ -880,27 +895,48 @@ impl WorldStorage {
     /// pending tick queues together. `Anvil` stays unchanged and refuses this
     /// method before inspecting or converting the supplied values.
     pub fn write_dirty_chunk(&self, dirty: NativeDirtyChunkRecord<'_>) -> Result<(), Error> {
+        self.write_dirty_chunks(std::iter::once(dirty)).map(|_| ())
+    }
+
+    /// Atomically saves a complete batch of dirty native chunk replacements.
+    ///
+    /// Conversion happens before the single native transaction, so one
+    /// incomplete column cannot leave a partially updated batch. The backend
+    /// check remains first: Anvil refuses the typed path without inspecting
+    /// or converting any input, preserving its established save behavior.
+    pub fn write_dirty_chunks<'a>(
+        &self,
+        dirty: impl IntoIterator<Item = NativeDirtyChunkRecord<'a>>,
+    ) -> Result<usize, Error> {
         let Some(native) = &self.native else {
             return Err(Error::AnvilDoesNotAcceptTypedRecords);
         };
-        let ticks = dirty
-            .scheduled
-            .snapshot_column(dirty.column_x, dirty.column_z);
-        let record = encode_chunk_with_light(
-            dirty.column_x,
-            dirty.column_z,
-            dirty.column,
-            dirty.light,
-            Some(ticks),
-        )?;
+        let mut writes = Vec::new();
+        for dirty in dirty {
+            let ticks = dirty
+                .scheduled
+                .snapshot_column(dirty.column_x, dirty.column_z);
+            let record = encode_chunk_with_light(
+                dirty.column_x,
+                dirty.column_z,
+                dirty.column,
+                dirty.light,
+                Some(ticks),
+            )?;
+            writes.push(RecordWrite::new(
+                RecordKey::chunk(dirty.column_x, dirty.column_z),
+                record,
+            ));
+        }
+        if writes.is_empty() {
+            return Ok(0);
+        }
+        let count = writes.len();
         native
             .lock()
             .expect("world storage lock poisoned")
-            .write_transaction(vec![RecordWrite::new(
-                RecordKey::chunk(dirty.column_x, dirty.column_z),
-                record,
-            )])?;
-        Ok(())
+            .write_transaction(writes)?;
+        Ok(count)
     }
 
     /// Reopens one complete typed native chunk record.

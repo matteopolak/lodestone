@@ -1287,6 +1287,22 @@ pub struct WorldSaveHandle {
     state: Arc<WorldState>,
 }
 
+/// An owned snapshot of one complete production column awaiting persistence.
+///
+/// The source is consulted for a column that is pending only because it owns a
+/// live block entity or scheduled tick and has not yet entered the edit map.
+/// That keeps the native producer complete without making the save handle own
+/// a generator or a cache.
+#[derive(Debug, Clone)]
+pub struct NativeDirtyChunkSnapshot {
+    /// The chunk's horizontal column X coordinate.
+    pub column_x: i32,
+    /// The chunk's horizontal column Z coordinate.
+    pub column_z: i32,
+    /// The complete retained or source-provided column.
+    pub column: ChunkColumn,
+}
+
 impl WorldSaveHandle {
     /// How many chunks are waiting to be written.
     #[must_use]
@@ -1303,6 +1319,64 @@ impl WorldSaveHandle {
     #[must_use]
     pub fn stats(&self) -> &PersistenceStats {
         &self.state.stats
+    }
+
+    /// Snapshots every column the established save path would write right now.
+    ///
+    /// This deliberately shares the Anvil save set: ordinary edits, live block
+    /// entities, and pending block/fluid ticks all reach the native producer.
+    /// A source fallback covers a tick or entity attached to a generated column
+    /// that has not also been edited. Live block entities replace the column's
+    /// copied list, matching [`Self::extras_for`] and preventing a stale disk
+    /// copy from winning over the running registry.
+    pub fn native_dirty_chunks(
+        &self,
+        source: &dyn ChunkSource,
+    ) -> Result<Vec<NativeDirtyChunkSnapshot>, Error> {
+        let mut pending = self
+            .state
+            .dirty
+            .lock()
+            .expect("world dirty lock poisoned")
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        pending.extend(self.block_entity_chunks());
+        pending.extend(self.state.scheduled.chunks_with_pending_ticks());
+
+        let mut pending = pending.into_iter().collect::<Vec<_>>();
+        pending.sort_unstable();
+        let mut snapshots = Vec::with_capacity(pending.len());
+        for (column_x, column_z) in pending {
+            let mut column = self
+                .state
+                .edits
+                .lock()
+                .expect("world edit lock poisoned")
+                .get(&(column_x, column_z))
+                .cloned();
+            if column.is_none() {
+                column = Some(source.column(column_x, column_z));
+            }
+            let mut column = column.expect("source column fallback always returns a column");
+            let entities = self.state.block_entities.with(|registry| {
+                registry
+                    .iter()
+                    .filter(|(pos, _)| chunk_of(**pos) == (column_x, column_z))
+                    .map(|(pos, entity)| (*pos, entity.clone()))
+                    .collect::<Vec<_>>()
+            });
+            // The live registry is authoritative, including when its list is
+            // empty: a removed container must not reappear from a stale column
+            // copy retained by the Anvil loader.
+            column.set_block_entities(entities);
+            snapshots.push(NativeDirtyChunkSnapshot {
+                column_x,
+                column_z,
+                column,
+            });
+        }
+        Ok(snapshots)
     }
 
     /// Snapshots the current unload hand-offs without removing them.
