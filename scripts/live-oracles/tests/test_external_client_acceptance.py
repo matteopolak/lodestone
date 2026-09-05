@@ -25,10 +25,13 @@ class EvidenceContractTests(unittest.TestCase):
         self.assertEqual(len(protocols), len(set(protocols)))
         self.assertEqual(protocols, sorted(protocols))
         self.assertIn(5, protocols)
+        self.assertIn(754, protocols)
+        self.assertIn(756, protocols)
+        self.assertIn(758, protocols)
         self.assertIn(766, protocols)
         self.assertIn(774, protocols)
         self.assertIn(776, protocols)
-        self.assertEqual(RUNNER.GATE_PROTOCOLS, (762, 766, 774, 776))
+        self.assertEqual(RUNNER.GATE_PROTOCOLS, (754, 756, 758, 762, 766, 774, 776))
         gated = {
             row.protocol: (row.release, row.configuration_mode, row.chunk_batch_mode)
             for row in RUNNER.ROWS
@@ -37,6 +40,9 @@ class EvidenceContractTests(unittest.TestCase):
         self.assertEqual(
             gated,
             {
+                754: ("1.16.5", "login_to_play", "unbatched"),
+                756: ("1.17.1", "login_to_play", "unbatched"),
+                758: ("1.18.2", "login_to_play", "unbatched"),
                 762: ("1.19.4", "login_to_play", "unbatched"),
                 766: ("1.20.6", "configuration", "acknowledged"),
                 774: ("1.21.11", "configuration", "acknowledged"),
@@ -128,48 +134,51 @@ class EvidenceContractTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "client_build must be '1.20.6'"):
                 RUNNER.validate_evidence(evidence, row, time.time() - 1)
 
-    def test_legacy_row_records_direct_play_and_unbatched_chunks(self) -> None:
-        row = next(row for row in RUNNER.ROWS if row.protocol == 762)
-        stages = [
-            {
-                "name": "configuration",
-                "observed": True,
-                "observation": "login transitioned directly to play",
-                "mode": "login_to_play",
-            },
-            {
-                "name": "chunk_batch_acknowledgement",
-                "observed": True,
-                "observation": "initial chunks arrived without batch framing",
-                "mode": "unbatched",
-                "batch_count": 0,
-            },
-            {"name": "join", "observed": True, "observation": "world entered"},
-            {
-                "name": "movement",
-                "observed": True,
-                "observation": "one deliberate position update",
-                "movement_count": 1,
-            },
-            {
-                "name": "play_action",
-                "observed": True,
-                "observation": "block break result captured",
-                "kind": RUNNER.ACTION,
-                "action_count": 1,
-                "result_observed": True,
-            },
-            {
-                "name": "disconnect",
-                "observed": True,
-                "observation": "client closed the session and saw EOF",
-                "clean": True,
-                "initiated_by": "client",
-            },
-        ]
-        result = RUNNER.validate_stages(stages, row)
-        self.assertEqual(result[0]["mode"], "login_to_play")
-        self.assertEqual(result[1]["batch_count"], 0)
+    def test_pre_configuration_rows_record_direct_play_and_unbatched_chunks(self) -> None:
+        for protocol in (754, 756, 758, 762):
+            with self.subTest(protocol=protocol):
+                row = next(row for row in RUNNER.ROWS if row.protocol == protocol)
+                stages = [
+                    {
+                        "name": "configuration",
+                        "observed": True,
+                        "observation": "login transitioned directly to play",
+                        "mode": "login_to_play",
+                    },
+                    {
+                        "name": "chunk_batch_acknowledgement",
+                        "observed": True,
+                        "observation": "initial chunks arrived without batch framing",
+                        "mode": "unbatched",
+                        "batch_count": 0,
+                    },
+                    {"name": "join", "observed": True, "observation": "world entered"},
+                    {
+                        "name": "movement",
+                        "observed": True,
+                        "observation": "one deliberate position update",
+                        "movement_count": 1,
+                    },
+                    {
+                        "name": "play_action",
+                        "observed": True,
+                        "observation": "block break result captured",
+                        "kind": RUNNER.ACTION,
+                        "action_count": 1,
+                        "result_observed": True,
+                    },
+                    {
+                        "name": "disconnect",
+                        "observed": True,
+                        "observation": "client closed the session and saw EOF",
+                        "clean": True,
+                        "initiated_by": "client",
+                    },
+                ]
+                result = RUNNER.validate_stages(stages, row)
+                self.assertEqual(result[0]["mode"], "login_to_play")
+                self.assertEqual(result[1]["mode"], "unbatched")
+                self.assertEqual(result[1]["batch_count"], 0)
 
     def test_configuration_and_batch_modes_are_row_specific(self) -> None:
         row = next(row for row in RUNNER.ROWS if row.protocol == 762)

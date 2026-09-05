@@ -26,10 +26,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 ACTION = "start_destroy_block"
 SCHEMA = 2
 
-# This is intentionally a small high-value host gate. The remaining hosted rows
-# stay in ROWS so `--list` remains a registry cross-check, but they are not
-# silently reported as passing this session contract.
-GATE_PROTOCOLS = (762, 766, 774, 776)
+# This is intentionally a bounded host gate. The remaining hosted rows stay in
+# ROWS so `--list` remains a registry cross-check, but they are not silently
+# reported as passing this session contract.
+GATE_PROTOCOLS = (754, 756, 758, 762, 766, 774, 776)
 STAGES = (
     "configuration",
     "chunk_batch_acknowledgement",
@@ -324,7 +324,8 @@ def main() -> int:
     unknown = set(selected_protocols) - set(GATE_PROTOCOLS)
     if unknown:
         parser.error(
-            f"not in the external-client gate: {sorted(unknown)}; choose 762, 766, 774, or 776"
+            "not in the external-client gate: "
+            f"{sorted(unknown)}; choose 754, 756, 758, 762, 766, 774, or 776"
         )
     selected = tuple(row for row in ROWS if row.protocol in selected_protocols)
     args.output.mkdir(parents=True)
