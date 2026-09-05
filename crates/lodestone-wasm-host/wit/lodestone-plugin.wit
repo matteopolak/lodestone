@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.4.0;
+package lodestone:plugin@0.5.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -203,6 +203,47 @@ interface types {
         failure(string),
     }
 
+    /// The player or server identity selected by command dispatch. This is a
+    /// display value, not a capability: native permission filtering completes
+    /// before a guest sees it.
+    record command-context {
+        sender-name: string,
+        execution: option<command-execution>,
+    }
+
+    /// The copied, value-only state supplied by a contextual command. Direct
+    /// command roots carry `none` in `command-context.execution`.
+    record command-execution {
+        entity: option<command-entity>,
+        position: command-position,
+        rotation: command-rotation,
+        dimension: string,
+        anchor: command-anchor,
+        permission-level: u8,
+    }
+
+    /// The selected entity's stable values, without an engine handle or UUID.
+    record command-entity {
+        entity-id: s32,
+        username: string,
+    }
+
+    record command-position {
+        x: f64,
+        y: f64,
+        z: f64,
+    }
+
+    record command-rotation {
+        yaw: f32,
+        pitch: f32,
+    }
+
+    enum command-anchor {
+        feet,
+        eyes,
+    }
+
     /// What a guest says about itself at `init`. Cross-checked against the
     /// `plugin.toml` beside it: a mismatch is a load-time rejection, because a
     /// manifest that disagrees with the module it ships next to is exactly the
@@ -211,7 +252,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.4.0"`.
+        /// `"lodestone:plugin@0.5.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.
@@ -264,7 +305,7 @@ interface scheduler {
 }
 
 world plugin {
-    use types.{action, command-outcome, event, plugin-info, plugin-verdict, task-id, verdict-context};
+    use types.{action, command-context, command-outcome, event, plugin-info, plugin-verdict, task-id, verdict-context};
 
     import logging;
     import filesystem;
@@ -289,7 +330,8 @@ world plugin {
 
     /// Handle one command this guest declared from `init`. `input` is canonical:
     /// aliases have already been rewritten and a leading slash removed. This call
-    /// receives no world access or sender handle, so it remains safe while the
-    /// native dispatcher owns the world borrow.
-    export on-command: func(input: string) -> command-outcome;
+    /// receives no world access or engine handle, so it remains safe while the
+    /// native dispatcher owns the world borrow. `context` is a copy-only
+    /// snapshot after native alias and permission resolution.
+    export on-command: func(input: string, context: command-context) -> command-outcome;
 }

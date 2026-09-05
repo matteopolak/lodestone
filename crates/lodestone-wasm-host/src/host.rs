@@ -54,9 +54,10 @@ use crate::capability::{Capability, CapabilitySet};
 /// named in `wit/lodestone-plugin.wit`.
 pub use crate::bindings::lodestone::plugin::types::{
     Action, BlockBreakVerdict, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
-    CommandOutcome, CommandSpec, EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict,
-    LogLevel, PlayerInteractVerdict, PlayerMoveVerdict, PluginInfo, PluginVerdict,
-    SectionBlocksChanged, SectionPos, VerdictContext,
+    CommandAnchor, CommandContext, CommandEntity, CommandExecution, CommandOutcome,
+    CommandPosition, CommandRotation, CommandSpec, EntityDamageVerdict, Event, Hand, Health,
+    InventoryClickVerdict, LogLevel, PlayerInteractVerdict, PlayerMoveVerdict, PluginInfo,
+    PluginVerdict, SectionBlocksChanged, SectionPos, VerdictContext,
 };
 
 /// The world version this host speaks. A guest's `init` must return this, and a
@@ -65,7 +66,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.4.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.5.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
@@ -334,7 +335,7 @@ pub struct LoadedPlugin {
     on_tick: TypedFunc<(Vec<Event>,), (Vec<Action>,)>,
     on_task: TypedFunc<(types::TaskId, u64), (Vec<Action>,)>,
     on_verdict: TypedFunc<(VerdictContext,), (PluginVerdict,)>,
-    on_command: TypedFunc<(String,), (CommandOutcome,)>,
+    on_command: TypedFunc<(String, CommandContext), (CommandOutcome,)>,
     failure: Option<String>,
 }
 
@@ -473,7 +474,12 @@ impl LoadedPlugin {
         }
     }
 
-    fn command(&mut self, input: String, fuel: u64) -> Result<CommandOutcome, String> {
+    fn command(
+        &mut self,
+        input: String,
+        context: CommandContext,
+        fuel: u64,
+    ) -> Result<CommandOutcome, String> {
         if let Some(failure) = &self.failure {
             return Err(failure.clone());
         }
@@ -482,7 +488,7 @@ impl LoadedPlugin {
             self.failure = Some(message.clone());
             return Err(message);
         }
-        match self.on_command.call(&mut self.store, (input,)) {
+        match self.on_command.call(&mut self.store, (input, context)) {
             Ok((outcome,)) => Ok(outcome),
             Err(e) => {
                 let message = format!("{e:?}");
@@ -673,12 +679,13 @@ impl PluginHost {
         &mut self,
         plugin_index: usize,
         input: String,
+        context: CommandContext,
     ) -> Result<CommandOutcome, String> {
         let fuel = self.verdict_fuel;
         let Some(plugin) = self.plugins.get_mut(plugin_index) else {
             return Err(format!("WASM plugin at index {plugin_index} is no longer loaded"));
         };
-        plugin.command(input, fuel)
+        plugin.command(input, context, fuel)
     }
 
     /// Load a plugin from a `.wasm` **file on disk**, granting it
@@ -842,7 +849,7 @@ impl PluginHost {
                 message: format!("{e:?}"),
             })?;
         let on_command = instance
-            .get_typed_func::<(String,), (CommandOutcome,)>(&mut store, "on-command")
+            .get_typed_func::<(String, CommandContext), (CommandOutcome,)>(&mut store, "on-command")
             .map_err(|e| HostError::MissingExport {
                 name: name.to_owned(),
                 export: "on-command".to_owned(),

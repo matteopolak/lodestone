@@ -40,9 +40,44 @@ use lodestone_model::{ClientAction, ClientEvent};
 use crate::capability::{Capability, CapabilitySet};
 use crate::host::{
     Action, BlockBreakVerdict, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
-    EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict, PlayerInteractVerdict,
-    PlayerMoveVerdict, SectionBlocksChanged, SectionPos, VerdictContext,
+    CommandAnchor, CommandContext, CommandEntity, CommandExecution, CommandPosition,
+    CommandRotation, EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict,
+    PlayerInteractVerdict, PlayerMoveVerdict, SectionBlocksChanged, SectionPos, VerdictContext,
 };
+
+/// Copy a command dispatcher source into the guest's value-only command context.
+///
+/// Permission checking is intentionally not repeated here: the native registry
+/// filters the root and its subtree before it calls the guest handler. The guest
+/// gets the result of that decision, never an authority it could use to bypass it.
+#[must_use]
+pub fn lift_command_context(source: &lodestone_ecs::commands::CommandSource) -> CommandContext {
+    let execution = source.execution.as_ref().map(|execution| CommandExecution {
+        entity: execution.entity.as_ref().map(|entity| CommandEntity {
+            entity_id: entity.entity_id,
+            username: entity.username.clone(),
+        }),
+        position: CommandPosition {
+            x: execution.position.x,
+            y: execution.position.y,
+            z: execution.position.z,
+        },
+        rotation: CommandRotation {
+            yaw: execution.rotation.yaw,
+            pitch: execution.rotation.pitch,
+        },
+        dimension: execution.dimension.to_string(),
+        anchor: match execution.anchor {
+            lodestone_ecs::commands::CommandAnchor::Feet => CommandAnchor::Feet,
+            lodestone_ecs::commands::CommandAnchor::Eyes => CommandAnchor::Eyes,
+        },
+        permission_level: execution.permission_level,
+    });
+    CommandContext {
+        sender_name: source.name.clone(),
+        execution,
+    }
+}
 
 /// Copy a native action-veto context into the synchronous guest vocabulary.
 ///

@@ -10,13 +10,25 @@ The native WASM host can expose a guest-owned root command through the same `lod
 
 Each registered root has an executable root and one executable greedy `arguments` child. That means both `/example` and `/example arbitrary tail` reach the guest; `on-command` receives the canonical input without a leading slash. The callback returns either `success(i32)`, preserving the normal command-result value, or `failure(string)`, which reaches the command sender as the usual command failure. The host gives the callback the same bounded synchronous fuel budget used for a veto callback. A trap permanently fails that guest and produces a command failure rather than unwinding through the command dispatcher.
 
-The callback receives only a string. It has no `World`, client ECS handle, command sender, or execution-context handle, so dispatching while the native command sink holds the client world write guard cannot re-enter that guard.
+The callback receives the canonical string and a copy-only `command-context`. `sender-name` is always
+present. A direct root has no execution value; a contextual command additionally carries the selected
+entity's numeric id and username, position, rotation, dimension, anchor, and resolved command level.
+The native registry has already rewritten aliases and checked the declared permission before this data
+crosses the boundary. It deliberately carries no `World`, ECS handle, UUID, or callback, so dispatching
+while the native command sink holds the client world write guard cannot re-enter that guard.
 
 ## How to change it
 
-Add WIT command fields or callback context in `lodestone-wasm-host/wit/lodestone-plugin.wit`, then update the generated type handling in `lodestone_wasm_host::host::LoadedPlugin` and the bridge in `lodestone_wasm_host::conductor::register_wasm_commands`. Changing WIT changes the ABI world string and requires guests to rebuild.
+Add WIT command fields in `lodestone-wasm-host/wit/lodestone-plugin.wit`, then update
+`lodestone_wasm_host::abi::lift_command_context`, the generated type handling in
+`lodestone_wasm_host::host::LoadedPlugin`, and the bridge in
+`lodestone_wasm_host::conductor::register_wasm_commands`. Changing WIT changes the ABI world string
+and requires guests to rebuild.
 
-Keep `CommandRegistry` as the parser and permission owner. In particular, do not let a guest install a closure that has direct `World` access. Typed WIT argument schemas, suggestions, and sender/context data are intentionally not represented yet; the single greedy tail is a narrow real command path, not a substitute for the native command-tree API.
+Keep `CommandRegistry` as the parser and permission owner. In particular, do not let a guest install a
+closure that has direct `World` access. Typed WIT argument schemas and suggestions are intentionally
+not represented yet; the single greedy tail is a narrow real command path, not a substitute for the
+native command-tree API.
 
 Validate new declaration data before `WasmHostPlugin` calls `PluginCommand::new`: guest-returned strings are untrusted and must not reach an assertion or register silently unusable roots. Cross-plugin duplicate roots are refused by `CommandRegistry` and logged while other guests continue installing.
 
