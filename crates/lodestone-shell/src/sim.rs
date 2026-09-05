@@ -646,6 +646,12 @@ pub struct Sim {
     ///
     /// [`RenderState::set_third_person_body_source`]: crate::gpu::RenderState::set_third_person_body_source
     camera_type: crate::camera_rig::CameraType,
+    /// The server-selected camera subject, if it differs from the local player.
+    ///
+    /// This holds an entity id rather than a copied pose: [`Sim::camera`]
+    /// resolves it from shared entity state each frame, so a moving subject
+    /// moves the rendered camera too.
+    camera_entity_id: Option<i32>,
     /// The local player's own walk/head-look/**arm-swing** animation clock,
     /// driven once per physics tick from its real position/orientation exactly the
     /// way `entities.rs` drives an [`EntityPose`] for a tracked network entity
