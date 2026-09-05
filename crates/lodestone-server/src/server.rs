@@ -8558,7 +8558,9 @@ fn apply_container_clicked<P: ServerProtocol>(
         block_entities.with(|reg| {
             if let Some(entity) = reg.get_mut(pos) {
                 for (index, item) in &own_writes {
-                    entity.set_container_slot(*index, item.clone());
+                    if let Some(index) = entity.container_slot(*index) {
+                        entity.set_container_slot_at(index, item.clone());
+                    }
                 }
             }
         });
