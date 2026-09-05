@@ -283,7 +283,7 @@ impl Sim {
             // the offline mirror of that; the live predicted break is still
             // silent because its emit lives in `interact.rs`'s ECS system, which
             // has no audio handle (see `docs/sound-playback.md`).
-            self.play_block_break_sound(hit.block, broken);
+            self.play_block_break_sound(hit.block, BlockStateRef::canonical(broken));
             self.remesh_around(hit.block);
             self.set_target(None);
             true
