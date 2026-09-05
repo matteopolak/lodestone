@@ -66,11 +66,13 @@ region file are re-emitted as their original compressed bytes rather than being 
 re-encoded, since the region-file format has no incremental single-chunk update and always rewrites
 a whole file in one pass. An evicted column's unload is a bounded, coordinate-scoped token in the
 `RegionChunkSource` ledger. The world owner captures it in a single-use `WorldSaveJob` before
-dispatching a blocking writer; that job acknowledges the token only after its region rewrites
-succeed. The authoritative edit remains retained when a save fails, and a duplicate, superseded,
-or cross-coordinate token cannot release it. Neither generation nor saving is allowed to run on
-the world's own tick thread; both are pushed onto a blocking thread pool, since a synchronous disk
-write there is exactly the same class of stall as a synchronous chunk generation would be.
+dispatching a blocking writer; that job partitions its deterministic dirty snapshot by physical
+region-file owner and runs at most two independent rewrites at once. Results are consumed in
+canonical owner order: every failed owner is requeued and no token is acknowledged until every
+selected owner succeeds. The authoritative edit remains retained when a save fails, and a duplicate,
+superseded, or cross-coordinate token cannot release it. Neither generation nor saving is allowed to
+run on the world's own tick thread; both are pushed onto a blocking thread pool, since a synchronous
+disk write there is exactly the same class of stall as a synchronous chunk generation would be.
 
 ### The world's own scalars: game rules, difficulty, and the clock
 

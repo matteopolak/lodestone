@@ -122,6 +122,16 @@ use crate::dimension::Dimension;
 /// repository reads.
 const SCHEME: CompressionScheme = CompressionScheme::Zlib;
 
+/// The most independent physical region rewrites one save worker may execute
+/// at once.
+///
+/// This is deliberately a small fixed bound instead of a per-save fan-out:
+/// autosave already runs on Tokio's blocking pool, and an unbounded dirty set
+/// must not turn one world into an unbounded source of native threads. Region
+/// assignments are still selected and their results consumed in canonical
+/// order; this limit affects only how many independent files may be in flight.
+const MAX_CONCURRENT_REGION_SAVES: usize = 2;
+
 /// What can go wrong saving or loading a world.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -1304,9 +1314,9 @@ pub(crate) struct WorldSaveJob {
 /// The physical region file responsible for a bounded save assignment.
 ///
 /// A world save first snapshots its global dirty selection, then gives every
-/// selected column to exactly one file owner. The current worker executes
-/// these owners serially, but making the ownership explicit keeps a later
-/// per-region scheduler from reconstructing it from an unordered dirty set.
+/// selected column to exactly one file owner. The blocking writer can execute
+/// independent owners in bounded batches without reconstructing them from an
+/// unordered dirty set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SaveRegionOwner {
     region: (i32, i32),
@@ -1351,8 +1361,21 @@ impl WorldSaveRegionPlan {
         Self { assignments }
     }
 
-    fn into_assignments(self) -> impl Iterator<Item = SaveRegionAssignment> {
-        self.assignments.into_iter()
+    /// Splits the canonical owner sequence into bounded dispatch batches.
+    ///
+    /// The batches preserve the plan's order. That lets a concurrent writer
+    /// choose a reproducible first error after every owner in a batch has
+    /// completed, while limiting its active native workers.
+    fn into_dispatch_batches(
+        self,
+        max_workers: usize,
+    ) -> impl Iterator<Item = Vec<SaveRegionAssignment>> {
+        assert!(max_workers > 0, "a save region worker limit must be nonzero");
+        let mut assignments = self.assignments.into_iter();
+        std::iter::from_fn(move || {
+            let batch = assignments.by_ref().take(max_workers).collect::<Vec<_>>();
+            (!batch.is_empty()).then_some(batch)
+        })
     }
 }
 
@@ -1598,23 +1621,59 @@ impl WorldSaveHandle {
         }
 
         let mut written = 0usize;
-        for assignment in WorldSaveRegionPlan::from_chunks(taken).into_assignments() {
-            let (rx, rz) = assignment.owner.region;
-            match self.save_region(rx, rz, &assignment.chunks) {
-                Ok(n) => {
-                    written += n;
-                    self.state
-                        .stats
-                        .regions_written
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                Err(err) => {
-                    // Re-dirty everything this region owned before bailing.
-                    let mut dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
-                    dirty.extend(assignment.chunks);
-                    return Err(err);
+        let mut first_error = None;
+        for batch in WorldSaveRegionPlan::from_chunks(taken)
+            .into_dispatch_batches(MAX_CONCURRENT_REGION_SAVES)
+        {
+            // `save_region` only touches the assignment's physical file. The
+            // shared state it does read is independently synchronised, and
+            // each worker has a distinct temp-file name for its owner.
+            let results = std::thread::scope(|scope| {
+                let workers = batch
+                    .iter()
+                    .map(|assignment| {
+                        let (rx, rz) = assignment.owner.region;
+                        let chunks = &assignment.chunks;
+                        scope.spawn(move || self.save_region(rx, rz, chunks))
+                    })
+                    .collect::<Vec<_>>();
+                workers
+                    .into_iter()
+                    .map(|worker| worker.join().expect("save region worker panicked"))
+                    .collect::<Vec<_>>()
+            });
+
+            // Join and consume in canonical plan order, not completion order.
+            // A failed owner is re-dirtied, while independent owners in this
+            // and later batches still get their own result. That makes retry
+            // complete instead of silently dropping work that a serial early
+            // return had not reached yet.
+            for (assignment, result) in batch.into_iter().zip(results) {
+                match result {
+                    Ok(count) => {
+                        written += count;
+                        self.state
+                            .stats
+                            .regions_written
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(err) => {
+                        self.state
+                            .dirty
+                            .lock()
+                            .expect("world dirty lock poisoned")
+                            .extend(assignment.chunks);
+                        if first_error.is_none() {
+                            first_error = Some(err);
+                        }
+                    }
                 }
             }
+        }
+        if let Some(err) = first_error {
+            // The durable token snapshot stays queued until every owner has
+            // written successfully; a retry gets a fresh snapshot.
+            return Err(err);
         }
         self.state
             .stats
@@ -1994,6 +2053,72 @@ mod tests {
             ],
             "the global selection must become one deterministic assignment per file owner"
         );
+
+        let batches = plan
+            .clone()
+            .into_dispatch_batches(MAX_CONCURRENT_REGION_SAVES)
+            .collect::<Vec<_>>();
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.len() <= MAX_CONCURRENT_REGION_SAVES),
+            "a save must never fan an unbounded dirty set into native workers"
+        );
+        assert_eq!(
+            batches.into_iter().flatten().collect::<Vec<_>>(),
+            plan.assignments,
+            "dispatch batches must retain every owner in the canonical plan order"
+        );
+    }
+
+    /// A failed owner batch must requeue every selected owner and leave its
+    /// unload token unacknowledged. The temporary replacement is a filesystem
+    /// failure the writer cannot avoid, so this proves retry from the actual
+    /// region-save boundary instead of a hand-written error result.
+    #[test]
+    fn a_failed_region_owner_batch_requeues_all_work_and_defers_durable_acknowledgement() {
+        let dir = tempdir("region-owner-retry");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("open world");
+        let handle = source.save_handle();
+
+        // `(0, 0)` and `(32, 0)` have separate physical file owners and
+        // therefore land together in the two-owner dispatch batch.
+        source.set_block(1, 70, 1, MARKER);
+        source.set_block(32 * 16 + 1, 70, 1, "minecraft:gold_block");
+        source.unload(0, 0);
+
+        let region_dir = source.state.region_dir.clone();
+        std::fs::remove_dir_all(&region_dir).expect("remove region directory for failure fixture");
+        std::fs::write(&region_dir, b"not a directory").expect("replace region directory with file");
+
+        assert!(handle.save().is_err(), "both owner writes must observe the forced failure");
+        assert_eq!(
+            handle.dirty_count(),
+            2,
+            "every failed owner must be requeued, not only the first canonical owner"
+        );
+        assert_eq!(
+            handle.stats().unloaded.load(Ordering::Relaxed),
+            0,
+            "a failed owner batch must not acknowledge and release its unload"
+        );
+
+        std::fs::remove_file(&region_dir).expect("remove failure fixture");
+        std::fs::create_dir_all(&region_dir).expect("restore region directory");
+
+        assert_eq!(handle.save().expect("retry after restoring region directory"), 2);
+        assert_eq!(
+            (
+                handle.dirty_count(),
+                source.retained_columns(),
+                handle.stats().unloaded.load(Ordering::Relaxed),
+            ),
+            (0, 1, 1),
+            "the retry must persist both owners, then acknowledge only the matching unload"
+        );
+        assert_eq!(source.block_state(1, 70, 1), MARKER);
+        assert_eq!(source.block_state(32 * 16 + 1, 70, 1), "minecraft:gold_block");
     }
 
     /// A blocking save job must carry its token snapshot from the world owner

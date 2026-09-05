@@ -76,8 +76,12 @@ acknowledges each token only after its owned region writes succeed, and
 releases the source's authoritative edit only from the durable phase. A failed
 save leaves the token queued for retry; a newer unload of the same coordinate
 supersedes the old token, so a delayed worker reply is stale rather than able
-to release the wrong ownership. This is still a serial hand-off, not an unload
-worker, storage-format change, or I/O change.
+to release the wrong ownership. The blocking writer may run at most two
+independent physical region-file owners at once. It joins each bounded batch
+and consumes results in canonical owner order; any failed owner is re-dirtied,
+and no durable token is acknowledged until every selected owner succeeds. This
+does not make unload a worker, change storage format, or permit cross-owner
+mutation.
 Entities outside this ambient-effect hand-off, natural-spawn planning, world
 border, game rules, time, weather and other cross-column work remain global.
 For a named populated scene,
@@ -145,10 +149,12 @@ the source-side acknowledgement as disk completion.
 
 The save job also turns its global dirty-column snapshot into a bounded
 `WorldSaveRegionPlan`: each column belongs to its physical region-file owner,
-with canonical region and within-region chunk order. The current worker still
-executes those assignments serially. This is a scheduling boundary, not a
-claim that region-file writes are independently safe to parallelise; a future
-executor must retain the same per-owner assignment and durable-token result.
+with canonical region and within-region chunk order. `WorldSaveHandle` splits
+that plan into batches of at most two owners and writes each batch concurrently;
+the owners have separate region and temporary-file paths. This is deliberately
+not a general scheduler: a later executor must retain the same per-owner
+assignment, canonical result selection, failure requeue, and durable-token
+result before raising the bound or introducing cross-owner messages.
 
 When recording a candidate report, name the populated scene and the explicit
 edge passed to `candidate_region_workload`. Compare total chunks, the number of
