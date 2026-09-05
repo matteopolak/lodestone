@@ -385,20 +385,17 @@ fn attribute_key(key: &str) -> Option<ResourceKey> {
 /// Scanning for the first populated metadata is family-safe, since any
 /// populated value names the same block.
 fn block_family_key(block_id: u8) -> ResourceKey {
-    let state = (0u8..16)
+    let block = (0u8..16)
         .find_map(|meta| match canonical::resolve(block_id, meta) {
-            CanonicalBlockState::Resolved(state) => Some(state),
+            CanonicalBlockState::Resolved(state) => block_states::StateId::new(state),
             _ => None,
         })
-        .unwrap_or_else(canonical::air_state_id);
-    block_states::block_name(state)
-        .unwrap_or("minecraft:air")
+        .unwrap_or_else(block_states::air_state)
+        .block();
+    block
+        .name()
         .parse()
-        .unwrap_or_else(|_| {
-            "minecraft:air"
-                .parse()
-                .expect("minecraft:air is a valid key")
-        })
+        .expect("built-in block names are valid resource keys")
 }
 
 fn unpack_degrees(packed: i8) -> f32 {
@@ -2656,6 +2653,18 @@ mod tests {
             CanonicalBlockState::Resolved(_)
         ));
         assert_eq!(block_family_key(CHEST_ID).to_string(), "minecraft:chest");
+    }
+
+    /// The opposite control: an entirely unassigned legacy block type must
+    /// reach the typed air fallback rather than a plausible neighbouring block.
+    #[test]
+    fn an_unassigned_block_family_uses_typed_air() {
+        const UNASSIGNED_ID: u8 = 253;
+        assert!((0u8..16).all(|meta| !matches!(
+            canonical::resolve(UNASSIGNED_ID, meta),
+            CanonicalBlockState::Resolved(_)
+        )));
+        assert_eq!(block_family_key(UNASSIGNED_ID).to_string(), "minecraft:air");
     }
 
     /// The first move must carry a full position even when the caller starts

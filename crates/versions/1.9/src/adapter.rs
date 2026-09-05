@@ -1983,21 +1983,19 @@ impl V340Adapter {
         // taking the first `Resolved` slot is family-only-safe (any
         // meta the table does populate names the same block) and
         // correct for every id this packet has been observed to carry.
-        let state = (0u8..16)
+        let block = (0u8..16)
             .find_map(|meta| match canonical::resolve(block_id, meta) {
-                canonical::CanonicalBlockState::Resolved(state) => Some(state),
+                canonical::CanonicalBlockState::Resolved(state) => {
+                    block_states::StateId::new(state)
+                }
                 _ => None,
             })
-            .unwrap_or_else(canonical::air_state_id);
-        let key: ResourceKey = block_states::block_name(state)
-            .unwrap_or("minecraft:air")
+            .unwrap_or_else(block_states::air_state)
+            .block();
+        let key: ResourceKey = block
+            .name()
             .parse()
-            .map_err(|_| {
-                AdapterError::Decode(format!(
-                    "resolved block name for legacy block_action id {block_id} is not a \
-                     valid resource key"
-                ))
-            })?;
+            .expect("built-in block names are valid resource keys");
         return Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
             pos: body.location.0,
             b0: body.byte1,

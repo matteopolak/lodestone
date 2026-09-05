@@ -115,6 +115,14 @@ in-process built-in-state boundary, resolve text with `StateId::from_state_str` 
 writes the global state id. A dynamic plugin or data-pack state that does not resolve must stay
 text in its owning registry or import path, rather than being substituted with a built-in state
 merely to obtain this type.
+
+The legacy `block_action` packets are a useful in-process canonical boundary: the
+wire carries a legacy block *type* without metadata, so the adapter scans the fixed legacy table
+for one resolved canonical `StateId`, falls back to `block_states::air_state`, and immediately
+uses `StateId::block`. The resulting `Block::name` becomes the event's `ResourceKey`; no raw
+26.2 state id enters that path. A legacy table miss is static import data, not a dynamic registry
+key, so air is the established packet-family fallback and no plugin or data-pack identifier is
+discarded there.
 The raw block-state table keeps its first field as the alphabetical block index required by
 the name-keyed state report, but it does **not** carry a second block-name column: lookup
 resolves that field through `generated_block_enum::REGISTRY_IDS_BY_NAME` into the one
