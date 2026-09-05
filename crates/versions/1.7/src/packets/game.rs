@@ -332,7 +332,8 @@ pub struct EntityAction {
     /// Sender's entity id.
     pub entity_id: i32,
     /// Action ordinal: `1` crouch, `2` uncrouch, `3` leave bed, `4` start
-    /// sprinting, `5` stop sprinting.
+    /// sprinting, `5` stop sprinting, `6` start riding jump, `7` opens the
+    /// ridden inventory.
     pub action_id: i8,
     /// Jump boost for a horse, `0` otherwise.
     pub jump_boost: i32,

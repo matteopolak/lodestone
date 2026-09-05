@@ -2470,11 +2470,13 @@ impl VersionAdapter for V5Adapter {
             }
             ClientAction::PlayerCommand { entity_id, command } => {
                 let (action_id, jump_boost) = match command {
-                    PlayerCommand::StopSleeping => (2, 0),
-                    PlayerCommand::StartSprinting => (3, 0),
-                    PlayerCommand::StopSprinting => (4, 0),
-                    PlayerCommand::StartRidingJump { boost } => (5, *boost),
-                    PlayerCommand::OpenInventory => (6, 0),
+                    // Protocol 5 starts these ordinals at one for sneaking,
+                    // unlike the later zero-based frames.
+                    PlayerCommand::StopSleeping => (3, 0),
+                    PlayerCommand::StartSprinting => (4, 0),
+                    PlayerCommand::StopSprinting => (5, 0),
+                    PlayerCommand::StartRidingJump { boost } => (6, *boost),
+                    PlayerCommand::OpenInventory => (7, 0),
                     PlayerCommand::StopRidingJump => {
                         return Err(AdapterError::Unsupported(
                             "protocol 5 has no stop-riding-jump entity action".to_owned(),
