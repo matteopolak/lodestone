@@ -194,13 +194,56 @@ impl AmbientSounds {
     }
 }
 
-/// A sampled block's light levels, as vanilla's own brightness accessor reports them.
+/// A brightness level in either light layer, constrained to the `0..=15` range.
+///
+/// The mood arithmetic has a meaningful break at block light `1`, and sky light
+/// uses `15` as its divisor. Keeping the range at the sample boundary prevents a
+/// caller from smuggling an unrelated integer into either calculation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LightLevel(u8);
+
+impl LightLevel {
+    /// No light in a layer.
+    pub const ZERO: Self = Self(0);
+
+    /// The brightest representable light level.
+    pub const MAX: Self = Self(15);
+
+    /// Validates a light-layer brightness.
+    pub const fn new(raw: u8) -> Option<Self> {
+        if raw <= Self::MAX.0 {
+            Some(Self(raw))
+        } else {
+            None
+        }
+    }
+
+    /// Returns the validated numeric level.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// A sampled block's light levels, as the world light reader reports them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LightSample {
-    /// Vanilla's own SKY light layer's brightness at the sampled block, `0..=15`.
-    pub sky: i32,
-    /// Vanilla's own BLOCK light layer's brightness, `0..=15`.
-    pub block: i32,
+    /// Sky light at the sampled block.
+    pub sky: LightLevel,
+    /// Block light at the sampled block.
+    pub block: LightLevel,
+}
+
+impl LightSample {
+    /// Makes a sample from already-validated light levels.
+    pub const fn new(sky: LightLevel, block: LightLevel) -> Self {
+        Self { sky, block }
+    }
+
+    /// Splits the standard packed light byte into its sky and block nibbles.
+    pub const fn from_packed_nibbles(packed: u8) -> Self {
+        // Each masked nibble is necessarily within LightLevel's 0..=15 range.
+        Self::new(LightLevel((packed >> 4) & 0x0F), LightLevel(packed & 0x0F))
+    }
 }
 
 /// A mood sound the caller should play, with the position already computed.
@@ -288,12 +331,12 @@ impl MoodAccumulator {
         );
 
         let light = probe(sample);
-        if light.sky > 0 {
-            self.moodiness -= light.sky as f32 / MAX_LIGHT * SKY_MOOD_RECOVERY_RATE;
+        if light.sky != LightLevel::ZERO {
+            self.moodiness -= f32::from(light.sky.get()) / MAX_LIGHT * SKY_MOOD_RECOVERY_RATE;
         } else {
             // Integer subtraction *then* float divide, as vanilla writes it
             // in its own biome-ambient-sounds tick routine. At block light 0 this ADDS 1/tick_delay.
-            self.moodiness -= (light.block - 1) as f32 / mood.tick_delay as f32;
+            self.moodiness -= (i32::from(light.block.get()) - 1) as f32 / mood.tick_delay as f32;
         }
 
         if self.moodiness >= 1.0 {

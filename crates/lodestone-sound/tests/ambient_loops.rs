@@ -8,8 +8,9 @@
 use glam::{DVec3, IVec3, Vec3};
 use lodestone_audio::JavaRandom;
 use lodestone_sound::ambient::{
-    AmbientAdditionsSettings, AmbientMoodSettings, AmbientSounds, AmbientLoops, LightSample,
-    LoopAction, LoopFade, LOOP_SOUND_CROSS_FADE_TIME, MoodAccumulator, SKY_MOOD_RECOVERY_RATE,
+    AmbientAdditionsSettings, AmbientMoodSettings, AmbientSounds, AmbientLoops, LightLevel,
+    LightSample, LoopAction, LoopFade, LOOP_SOUND_CROSS_FADE_TIME, MoodAccumulator,
+    SKY_MOOD_RECOVERY_RATE,
 };
 use lodestone_sound::biome_ambient::{
     ambient_sounds_at, biome_ambient, dimension_ambient, table_len,
@@ -21,7 +22,18 @@ use lodestone_sound::predict::{
 
 /// Light levels for a block in total darkness — the only condition that accumulates
 /// moodiness.
-const PITCH_DARK: LightSample = LightSample { sky: 0, block: 0 };
+const PITCH_DARK: LightSample = LightSample::new(LightLevel::ZERO, LightLevel::ZERO);
+
+#[test]
+fn light_levels_accept_each_packed_nibble_and_reject_the_next_value() {
+    assert_eq!(LightLevel::new(0), Some(LightLevel::ZERO));
+    assert_eq!(LightLevel::new(15), Some(LightLevel::MAX));
+    assert_eq!(LightLevel::new(16), None, "16 is not a light-layer level");
+
+    let sample = LightSample::from_packed_nibbles(0xA4);
+    assert_eq!(sample.sky.get(), 10);
+    assert_eq!(sample.block.get(), 4);
+}
 
 // ---------------------------------------------------------------------------
 // 1. The two-layer attribute lookup
@@ -233,14 +245,18 @@ fn block_light_one_is_the_break_even_point_and_brighter_drains() {
     let mut acc = MoodAccumulator::new();
     acc.set_moodiness(0.5);
     let mut rng = JavaRandom::new(1);
-    acc.tick(&mood, eye, &mut rng, &mut |_| LightSample { sky: 0, block: 1 });
+    acc.tick(&mood, eye, &mut rng, &mut |_| {
+        LightSample::new(LightLevel::ZERO, LightLevel::new(1).unwrap())
+    });
     assert_eq!(acc.moodiness(), 0.5, "block light 1 must be break-even");
 
     // Light 8: drains by 7/6000 per tick.
     let mut acc = MoodAccumulator::new();
     acc.set_moodiness(0.5);
     let mut rng = JavaRandom::new(1);
-    acc.tick(&mood, eye, &mut rng, &mut |_| LightSample { sky: 0, block: 8 });
+    acc.tick(&mood, eye, &mut rng, &mut |_| {
+        LightSample::new(LightLevel::ZERO, LightLevel::new(8).unwrap())
+    });
     let expected = 0.5 - 7.0 / 6_000.0;
     assert!(
         (acc.moodiness() - expected).abs() < 1e-6,
@@ -255,7 +271,9 @@ fn block_light_one_is_the_break_even_point_and_brighter_drains() {
     let deep = DVec3::new(0.5, -40.0, 0.5);
     for _ in 0..60_000 {
         assert!(
-            acc.tick(&mood, deep, &mut rng, &mut |_| LightSample { sky: 0, block: 15 })
+            acc.tick(&mood, deep, &mut rng, &mut |_| {
+                LightSample::new(LightLevel::ZERO, LightLevel::MAX)
+            })
                 .is_none(),
             "a lit space must never produce cave ambience, even at Y=-40"
         );
@@ -279,7 +297,9 @@ fn sky_light_drains_at_the_recovery_rate() {
     acc.set_moodiness(0.5);
     let mut rng = JavaRandom::new(3);
 
-    acc.tick(&mood, eye, &mut rng, &mut |_| LightSample { sky: 15, block: 0 });
+    acc.tick(&mood, eye, &mut rng, &mut |_| {
+        LightSample::new(LightLevel::MAX, LightLevel::ZERO)
+    });
     let expected = 0.5 - 15.0 / 15.0 * SKY_MOOD_RECOVERY_RATE;
     assert!((acc.moodiness() - expected).abs() < 1e-6);
     assert_eq!(SKY_MOOD_RECOVERY_RATE, 0.001);
@@ -290,7 +310,9 @@ fn sky_light_drains_at_the_recovery_rate() {
     let mut acc = MoodAccumulator::new();
     acc.set_moodiness(0.5);
     let mut rng = JavaRandom::new(3);
-    acc.tick(&mood, eye, &mut rng, &mut |_| LightSample { sky: 1, block: 0 });
+    acc.tick(&mood, eye, &mut rng, &mut |_| {
+        LightSample::new(LightLevel::new(1).unwrap(), LightLevel::ZERO)
+    });
     assert!(
         acc.moodiness() < 0.5,
         "any sky light must drain, not accumulate"
@@ -313,7 +335,7 @@ fn the_sample_cube_and_the_position_offset_match_the_jar() {
     for _ in 0..20_000 {
         acc.tick(&mood, eye, &mut rng, &mut |p| {
             sampled.push(p);
-            LightSample { sky: 0, block: 15 } // never fires, so the run is uniform
+            LightSample::new(LightLevel::ZERO, LightLevel::MAX) // never fires, so the run is uniform
         });
     }
     let lo = IVec3::new(
