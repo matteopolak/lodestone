@@ -99,6 +99,7 @@ use std::sync::{Arc, Mutex};
 use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
 use crate::mobs::ChunkWorld;
+use crate::tick_region::{TickOwner, TickRegionPlan};
 
 /// One player's position as the world tick loop needs it: which dimension they
 /// are in and which chunk column they are standing in.
@@ -191,7 +192,7 @@ pub struct FollowArea {
     /// The square used when no anchor names this loop's dimension. See the module
     /// doc for why this is not simply "nothing".
     fallback: Vec<(i32, i32)>,
-    chunks: Vec<(i32, i32)>,
+    plan: TickRegionPlan,
     /// Scratch, reused across ticks so a per-tick recompute allocates nothing
     /// after the first.
     scratch: Vec<(i32, i32)>,
@@ -215,7 +216,7 @@ impl FollowArea {
             .collect();
         Self {
             follow,
-            chunks: fallback.clone(),
+            plan: TickRegionPlan::global(fallback.clone()),
             fallback,
             scratch: Vec::new(),
         }
@@ -250,18 +251,22 @@ impl FollowArea {
             self.scratch.sort_unstable();
             self.scratch.dedup();
         }
-        if self.scratch == self.chunks {
+        if self.scratch == self.plan.chunks() {
             return false;
         }
-        self.chunks.clear();
-        self.chunks.extend_from_slice(&self.scratch);
+        self.plan = TickRegionPlan::global(std::mem::take(&mut self.scratch));
         true
     }
 
     /// The columns to simulate this tick.
     #[must_use]
     pub fn chunks(&self) -> &[(i32, i32)] {
-        &self.chunks
+        debug_assert_eq!(
+            self.plan.owner(),
+            TickOwner::Global,
+            "the current tick loop has exactly one chunk-work owner"
+        );
+        self.plan.chunks()
     }
 
     /// The column count, as vanilla's own spawnable-chunk-count for the spawn-cap
@@ -274,7 +279,7 @@ impl FollowArea {
     /// why growing the radius raises the mob cap as a side effect.
     #[must_use]
     pub fn spawnable_chunks(&self) -> i32 {
-        i32::try_from(self.chunks.len()).unwrap_or(i32::MAX)
+        i32::try_from(self.plan.chunks().len()).unwrap_or(i32::MAX)
     }
 
     /// Snapshots this area's terrain out of `source` into the view the natural
@@ -292,7 +297,7 @@ impl FollowArea {
     #[must_use]
     pub fn snapshot_terrain<S: ChunkSource + ?Sized>(&self, source: &S) -> Arc<ChunkWorld> {
         Arc::new(ChunkWorld::from_columns(
-            self.chunks
+            self.chunks()
                 .iter()
                 .map(|&(cx, cz)| ((cx, cz), source.column(cx, cz))),
         ))
