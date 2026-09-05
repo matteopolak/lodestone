@@ -11,7 +11,7 @@
 use lodestone_core::State;
 use lodestone_model::command_tree::{CommandSuggestionsResponse, CommandTree};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode, Hand,
+    BlockActionKind, BlockFace, BlockPos, CommandBlockMode, Difficulty, EntityAttributeSnapshot, GameMode, Hand,
     ItemStack, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation, SoundCategory,
     Text, Vec3, Vec3f,
 };
@@ -1681,12 +1681,8 @@ pub enum ServerBound {
         pos: BlockPos,
         /// The command text to store, unfiltered.
         command: String,
-        /// Vanilla's own command-block-entity mode enum's wire ordinal — see
-        /// `crate::command_block::base_name_for_mode_ordinal`'s own doc for
-        /// the mapping; kept raw here rather than resolved in the protocol
-        /// crate, matching every other packet-shaped variant's "wire shape
-        /// only" convention.
-        mode: i32,
+        /// Validated command-block execution mode.
+        mode: CommandBlockMode,
         /// `COMMAND_BLOCK_FLAG_TRACK_OUTPUT`.
         track_output: bool,
         /// `COMMAND_BLOCK_FLAG_CONDITIONAL`.

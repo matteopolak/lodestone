@@ -96,23 +96,7 @@ pub fn is_command_block_family(state: &str) -> bool {
     matches!(base_name(state), COMMAND_BLOCK | CHAIN_COMMAND_BLOCK | REPEATING_COMMAND_BLOCK)
 }
 
-/// `CommandBlockEntity.Mode` — derived from the **block type**, not stored
-/// (`CommandBlockEntity.getMode`): a command block's mode changes the instant
-/// its block is swapped for one of the other two, with no separate flag to
-/// keep in sync.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandBlockMode {
-    /// `minecraft:chain_command_block` — runs only when chained into from a
-    /// predecessor, never on its own redstone edge.
-    Sequence,
-    /// `minecraft:repeating_command_block` — reschedules itself every tick
-    /// while powered or "Always Active".
-    Auto,
-    /// `minecraft:command_block` — runs once per redstone rising edge.
-    /// `CommandBlockEntity.getMode`'s own fallback for anything that is
-    /// neither of the other two, matched here.
-    Redstone,
-}
+pub use lodestone_model::CommandBlockMode;
 
 /// `CommandBlockEntity.getMode`.
 #[must_use]
@@ -368,11 +352,11 @@ pub fn chain_link_should_run(powered: bool, always_active: bool) -> bool {
 /// [`COMMAND_BLOCK`] for any other ordinal, matching that `switch`'s own
 /// `default` arm.
 #[must_use]
-pub fn base_name_for_mode_ordinal(mode: i32) -> &'static str {
+pub fn base_name_for_mode(mode: CommandBlockMode) -> &'static str {
     match mode {
-        0 => CHAIN_COMMAND_BLOCK,
-        1 => REPEATING_COMMAND_BLOCK,
-        _ => COMMAND_BLOCK,
+        CommandBlockMode::Sequence => CHAIN_COMMAND_BLOCK,
+        CommandBlockMode::Auto => REPEATING_COMMAND_BLOCK,
+        CommandBlockMode::Redstone => COMMAND_BLOCK,
     }
 }
 
@@ -615,11 +599,10 @@ mod tests {
     }
 
     #[test]
-    fn base_name_for_mode_ordinal_matches_command_block_entity_mode_declaration_order() {
-        assert_eq!(base_name_for_mode_ordinal(0), CHAIN_COMMAND_BLOCK, "0 is SEQUENCE");
-        assert_eq!(base_name_for_mode_ordinal(1), REPEATING_COMMAND_BLOCK, "1 is AUTO");
-        assert_eq!(base_name_for_mode_ordinal(2), COMMAND_BLOCK, "2 is REDSTONE");
-        assert_eq!(base_name_for_mode_ordinal(99), COMMAND_BLOCK, "an unknown ordinal falls back like the switch's default");
+    fn base_name_for_mode_matches_each_semantic_mode() {
+        assert_eq!(base_name_for_mode(CommandBlockMode::Sequence), CHAIN_COMMAND_BLOCK);
+        assert_eq!(base_name_for_mode(CommandBlockMode::Auto), REPEATING_COMMAND_BLOCK);
+        assert_eq!(base_name_for_mode(CommandBlockMode::Redstone), COMMAND_BLOCK);
     }
 
     #[test]
