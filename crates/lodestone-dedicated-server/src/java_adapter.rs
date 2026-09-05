@@ -7,6 +7,7 @@ use std::time::Duration;
 use lodestone_jvm_bridge::adapter::{
     AdapterEvent, AdapterHost, BlockStateWrite, PlayerIdentity,
 };
+use lodestone_jvm_bridge::native_surface::OperatorBlockStateMember;
 use lodestone_jvm_bridge::paper::{
     PaperBootstrapConfig, PaperBootstrapPlan, PaperPluginConstructionBlocker,
     PaperPluginConstructionReadiness, PaperServerFacadeInput,
@@ -99,7 +100,20 @@ impl JavaAdapter {
         let paper_jar = std::env::var_os("LODESTONE_PAPER_JAR");
         let plugins_directory = std::env::var_os("LODESTONE_PAPER_PLUGIN_DIRECTORY");
         let shim_path = std::env::var_os("LODESTONE_PAPER_SHIM_PATH");
-        Self::from_values(class, classpath, deadline, paper_jar, plugins_directory, shim_path)
+        let operator_block_state_class =
+            std::env::var_os("LODESTONE_PAPER_OPERATOR_BLOCK_STATE_CLASS");
+        let operator_block_state_method =
+            std::env::var_os("LODESTONE_PAPER_OPERATOR_BLOCK_STATE_METHOD");
+        Self::from_values(
+            class,
+            classpath,
+            deadline,
+            paper_jar,
+            plugins_directory,
+            shim_path,
+            operator_block_state_class,
+            operator_block_state_method,
+        )
     }
 
     fn from_values(
@@ -109,6 +123,8 @@ impl JavaAdapter {
         paper_jar: Option<std::ffi::OsString>,
         plugins_directory: Option<std::ffi::OsString>,
         shim_path: Option<std::ffi::OsString>,
+        operator_block_state_class: Option<std::ffi::OsString>,
+        operator_block_state_method: Option<std::ffi::OsString>,
     ) -> Result<Option<Self>, String> {
         let configuration = JavaAdapterConfig::from_values(
             class,
@@ -117,6 +133,8 @@ impl JavaAdapter {
             paper_jar,
             plugins_directory,
             shim_path,
+            operator_block_state_class,
+            operator_block_state_method,
         )?;
         let Some(configuration) = configuration else {
             return Ok(None);
@@ -216,7 +234,10 @@ impl JavaAdapter {
                         .plugins()
                         .iter()
                         .filter(|plugin| {
-                            matches!(plugin.blocker(), PaperPluginConstructionBlocker::EntryLoadFailed)
+                            matches!(
+                                plugin.blocker(),
+                                Some(PaperPluginConstructionBlocker::EntryLoadFailed)
+                            )
                         })
                         .count();
                     for plugin in construction
@@ -242,7 +263,7 @@ impl JavaAdapter {
                         .plugins()
                         .iter()
                         .filter(|plugin| {
-                            plugin.blocker() != PaperPluginConstructionBlocker::EntryLoadFailed
+                            plugin.blocker() != Some(PaperPluginConstructionBlocker::EntryLoadFailed)
                         })
                         .count();
                     tracing::info!(
@@ -268,7 +289,11 @@ impl JavaAdapter {
             Some(AdapterEvent::PlayerDisconnectedCompleted { player, handle }) => {
                 tracing::debug!(?player, ?handle, "Java adapter player disconnect callback completed");
             }
-            Some(AdapterEvent::BlockStateChangedCompleted { change, listener_failures }) => {
+            Some(AdapterEvent::BlockStateChangedCompleted {
+                change,
+                listener_failures,
+                ..
+            }) => {
                 tracing::debug!(?change, listeners = listener_failures.len(), "Java adapter block-change callback completed");
                 for failure in listener_failures {
                     tracing::warn!(
@@ -352,6 +377,8 @@ impl JavaAdapterConfig {
         paper_jar: Option<std::ffi::OsString>,
         plugins_directory: Option<std::ffi::OsString>,
         shim_path: Option<std::ffi::OsString>,
+        operator_block_state_class: Option<std::ffi::OsString>,
+        operator_block_state_method: Option<std::ffi::OsString>,
     ) -> Result<Option<Self>, String> {
         if [
             class.as_ref(),
@@ -360,6 +387,8 @@ impl JavaAdapterConfig {
             paper_jar.as_ref(),
             plugins_directory.as_ref(),
             shim_path.as_ref(),
+            operator_block_state_class.as_ref(),
+            operator_block_state_method.as_ref(),
         ].iter().all(Option::is_none) {
             return Ok(None);
         }
@@ -374,8 +403,15 @@ impl JavaAdapterConfig {
                 .ok_or("LODESTONE_JAVA_DEADLINE_MS must be a positive integer")?,
             None => 5000,
         };
+        let operator_block_state_member = operator_block_state_member(
+            operator_block_state_class,
+            operator_block_state_method,
+        )?;
         let paper = match (paper_jar, plugins_directory, shim_path) {
-            (None, None, None) => None,
+            (None, None, None) if operator_block_state_member.is_none() => None,
+            (None, None, None) => return Err(
+                "LODESTONE_PAPER_JAR must name an operator-supplied Paper server jar when selecting an operator block-state member".to_owned(),
+            ),
             (Some(paper_jar), Some(plugins_directory), shim_path) => {
                 if paper_jar.is_empty() {
                     return Err("LODESTONE_PAPER_JAR must name an operator-supplied Paper server jar".to_owned());
@@ -389,6 +425,13 @@ impl JavaAdapterConfig {
                         return Err("LODESTONE_PAPER_SHIM_PATH must name a shim directory or jar when set".to_owned());
                     }
                     config = config.with_shim_path(shim_path).with_isolated_native_shim();
+                } else if operator_block_state_member.is_some() {
+                    return Err(
+                        "LODESTONE_PAPER_SHIM_PATH is required when selecting an operator block-state member".to_owned(),
+                    );
+                }
+                if let Some(member) = operator_block_state_member {
+                    config = config.with_operator_block_state_member(member);
                 }
                 Some(config)
             }
@@ -403,22 +446,53 @@ impl JavaAdapterConfig {
     }
 }
 
+/// Parses the one opaque block-handle member that an operator may select for
+/// registration in the bootstrap loader. The registered callback resolves its
+/// handle and reaches the host only through the adapter's bounded world port.
+fn operator_block_state_member(
+    class: Option<std::ffi::OsString>,
+    method: Option<std::ffi::OsString>,
+) -> Result<Option<OperatorBlockStateMember>, String> {
+    match (class, method) {
+        (None, None) => Ok(None),
+        (Some(class), Some(method)) => {
+            let class = class.into_string().map_err(|_| {
+                "LODESTONE_PAPER_OPERATOR_BLOCK_STATE_CLASS must be valid UTF-8".to_owned()
+            })?;
+            let method = method.into_string().map_err(|_| {
+                "LODESTONE_PAPER_OPERATOR_BLOCK_STATE_METHOD must be valid UTF-8".to_owned()
+            })?;
+            OperatorBlockStateMember::new(class, method)
+                .map(Some)
+                .map_err(|error| format!(
+                    "invalid LODESTONE_PAPER_OPERATOR_BLOCK_STATE_CLASS or LODESTONE_PAPER_OPERATOR_BLOCK_STATE_METHOD: {error}"
+                ))
+        }
+        (Some(_), None) => Err(
+            "LODESTONE_PAPER_OPERATOR_BLOCK_STATE_METHOD must accompany LODESTONE_PAPER_OPERATOR_BLOCK_STATE_CLASS".to_owned(),
+        ),
+        (None, Some(_)) => Err(
+            "LODESTONE_PAPER_OPERATOR_BLOCK_STATE_CLASS must accompany LODESTONE_PAPER_OPERATOR_BLOCK_STATE_METHOD".to_owned(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn absent_java_config_does_not_start_a_worker() {
-        assert!(JavaAdapterConfig::from_values(None, None, None, None, None, None).unwrap().is_none());
+        assert!(JavaAdapterConfig::from_values(None, None, None, None, None, None, None, None).unwrap().is_none());
     }
 
     #[test]
     fn partial_and_invalid_java_config_fail_before_startup() {
-        assert!(JavaAdapterConfig::from_values(Some("a.B".into()), None, None, None, None, None).is_err());
-        assert!(JavaAdapterConfig::from_values(None, Some("classes".into()), None, None, None, None).is_err());
+        assert!(JavaAdapterConfig::from_values(Some("a.B".into()), None, None, None, None, None, None, None).is_err());
+        assert!(JavaAdapterConfig::from_values(None, Some("classes".into()), None, None, None, None, None, None).is_err());
         for value in ["0", "-1", "bad"] {
             assert!(JavaAdapterConfig::from_values(Some("a.B".into()), Some("classes".into()),
-                Some(value.into()), None, None, None).is_err());
+                Some(value.into()), None, None, None, None, None).is_err());
         }
     }
 
@@ -427,15 +501,15 @@ mod tests {
         let class = Some("a.B".into());
         let classpath = Some("classes".into());
         let missing_jar = JavaAdapterConfig::from_values(
-            class.clone(), classpath.clone(), None, None, Some("plugins".into()), None,
+            class.clone(), classpath.clone(), None, None, Some("plugins".into()), None, None, None,
         ).unwrap_err();
         assert!(missing_jar.contains("LODESTONE_PAPER_JAR"));
         let missing_plugins = JavaAdapterConfig::from_values(
-            class.clone(), classpath.clone(), None, Some("paper.jar".into()), None, None,
+            class.clone(), classpath.clone(), None, Some("paper.jar".into()), None, None, None, None,
         ).unwrap_err();
         assert!(missing_plugins.contains("LODESTONE_PAPER_PLUGIN_DIRECTORY"));
         let shim_only = JavaAdapterConfig::from_values(
-            class, classpath, None, None, None, Some("shims".into()),
+            class, classpath, None, None, None, Some("shims".into()), None, None,
         ).unwrap_err();
         assert!(shim_only.contains("LODESTONE_PAPER_JAR"));
     }
@@ -449,21 +523,78 @@ mod tests {
             Some("paper.jar".into()),
             Some("plugins".into()),
             Some("shims".into()),
+            None,
+            None,
         ).unwrap().expect("configured adapter");
         assert_eq!(config.classpath, std::ffi::OsString::from("adapter-classes"));
         assert!(config.paper.is_some());
     }
 
     #[test]
+    fn operator_block_state_member_is_paired_and_requires_the_bootstrap_shim_path() {
+        let missing_method = operator_block_state_member(Some("fixture.Value".into()), None)
+            .expect_err("a class without its selected native method must fail");
+        assert!(missing_method.contains("LODESTONE_PAPER_OPERATOR_BLOCK_STATE_METHOD"));
+        let member = operator_block_state_member(
+            Some("fixture.Value".into()),
+            Some("stateForHandle".into()),
+        )
+        .expect("a valid selected member")
+        .expect("both environment values select one member");
+        assert_eq!(member.class(), "fixture.Value");
+        assert_eq!(member.method(), "stateForHandle");
+
+        let without_paper = JavaAdapterConfig::from_values(
+            Some("a.B".into()),
+            Some("adapter-classes".into()),
+            None,
+            None,
+            None,
+            None,
+            Some("fixture.Value".into()),
+            Some("stateForHandle".into()),
+        )
+        .expect_err("a selected member must not be dropped without a Paper bootstrap plan");
+        assert!(without_paper.contains("LODESTONE_PAPER_JAR"));
+
+        let without_shim = JavaAdapterConfig::from_values(
+            Some("a.B".into()),
+            Some("adapter-classes".into()),
+            None,
+            Some("paper.jar".into()),
+            Some("plugins".into()),
+            None,
+            Some("fixture.Value".into()),
+            Some("stateForHandle".into()),
+        )
+        .expect_err("a selected bootstrap member cannot resolve without a shim path");
+        assert!(without_shim.contains("LODESTONE_PAPER_SHIM_PATH"));
+
+        let configured = JavaAdapterConfig::from_values(
+            Some("a.B".into()),
+            Some("adapter-classes".into()),
+            None,
+            Some("paper.jar".into()),
+            Some("plugins".into()),
+            Some("shims".into()),
+            Some("fixture.Value".into()),
+            Some("stateForHandle".into()),
+        )
+        .expect("complete host configuration")
+        .expect("complete configuration starts one adapter");
+        assert!(configured.paper.is_some());
+    }
+
+    #[test]
     fn empty_paper_values_are_rejected_before_filesystem_discovery() {
         let error = JavaAdapterConfig::from_values(
             Some("a.B".into()), Some("classes".into()), None,
-            Some("".into()), Some("plugins".into()), None,
+            Some("".into()), Some("plugins".into()), None, None, None,
         ).unwrap_err();
         assert!(error.contains("LODESTONE_PAPER_JAR"));
         let error = JavaAdapterConfig::from_values(
             Some("a.B".into()), Some("classes".into()), None,
-            Some("paper.jar".into()), Some("plugins".into()), Some("".into()),
+            Some("paper.jar".into()), Some("plugins".into()), Some("".into()), None, None,
         ).unwrap_err();
         assert!(error.contains("LODESTONE_PAPER_SHIM_PATH"));
     }
@@ -479,6 +610,8 @@ mod tests {
             None,
             Some(fixture.path().join("missing-paper.jar").into_os_string()),
             Some(plugins.into_os_string()),
+            None,
+            None,
             None,
         ).expect_err("missing Paper jar must not start a worker");
         assert!(error.contains("invalid Paper bootstrap configuration"), "{error}");

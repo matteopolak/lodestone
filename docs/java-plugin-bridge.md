@@ -818,6 +818,16 @@ A malformed Paper configuration or bootstrap Load failure saves the world before
 can continue. A plugin-entry Load failure is instead retained as disabled descriptor status, rather
 than silently removing the operator input or preventing the later isolated entries from being checked.
 
+A host operator can additionally select one static native `(long): int` block-state member from that
+same shim path by setting both `LODESTONE_PAPER_OPERATOR_BLOCK_STATE_CLASS` and
+`LODESTONE_PAPER_OPERATOR_BLOCK_STATE_METHOD`. The dedicated host rejects a partial selection, an
+invalid binary/member name, or a selection without `LODESTONE_PAPER_SHIM_PATH` before it starts the
+worker. During bootstrap loading it registers the chosen declaration before any plugin child loader
+exists; its callback accepts only an opaque resident block handle, validates the generation on the
+worker, copies the block coordinates, and sends the existing bounded state query to the host. It
+does not expose a world object, retain an ECS lock across the JVM boundary, or define a second plugin
+API.
+
 The admin loop services at most 64 block queries, 64 block writes, and 64 server-tick queries per 1 ms poll. Block
 queries use `IntegratedServer::resident_block_state_id`, which reaches the live primary `ChunkStore`,
 checks presence, and reads the cell under one cache lock. It never invokes generation, reads disk,
