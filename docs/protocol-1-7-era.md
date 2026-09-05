@@ -100,6 +100,17 @@ output. Literal input and output bodies reject trailing bytes and anchor the
 single-string/JSON boundary; the in-memory control follows a sent chat action
 through the registry-selected server, reply frame, adapter, and `ClientEvent`.
 
+Arm swings use protocol 5's distinct `arm_animation` body: a fixed-width
+sender entity id followed by animation ordinal `1`. The hosted decoder checks
+that ordinal and discards the untrusted id before emitting the shared
+`ServerBound::Swing { hand: 0 }` consumer; malformed, non-swing, trailing, and
+wrong-state bodies are ignored. Broadcast animation replies carry a varint
+entity id and raw action byte. Because this client has no off-hand animation,
+the shared off-hand action (`3`) is degraded to the era's main-hand swing
+(`0`) rather than rendered as the era's unrelated critical-hit animation. The
+focused control follows both adapter directions through the registry-selected
+host and back to `ClientEvent::EntityAnimation`.
+
 Hosted movement now lifts all four serverbound shapes into the shared server:
 `position` and `position_look` update the authoritative player sample,
 `look` updates rotation alone, and `flying` updates the grounded state alone.
