@@ -120,6 +120,8 @@ fn an_unknown_type_misses_rather_than_guessing() {
     );
     // A vanilla *path* under a foreign namespace must not resolve either.
     assert!(adapter.entity_facts(&key("someplugin:zombie")).is_none());
+    assert!(adapter.entity_dimensions(-1).is_none());
+    assert!(adapter.entity_dimensions(158).is_none());
 }
 
 #[test]

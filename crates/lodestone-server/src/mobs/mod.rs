@@ -47,7 +47,9 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use lodestone_data::{block_states, collision_shapes, entity_dimensions, entity_types, path_types};
+use lodestone_data::{
+    block_states, collision_shapes, entity_dimensions, entity_type::EntityType, path_types,
+};
 // `collide` and `CollisionView` are the item pass's swept resolve against the real
 // per-state shape census (see `ItemCollision`); `Vec3d` is the physics crate's own
 // vector, which `Vec3` (this crate's) is converted to at that seam rather than
@@ -410,8 +412,10 @@ fn baby_speed_multiplier(entity_type: &ResourceKey) -> f64 {
 fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool) -> MobShape {
     let scale = attr(attrs, "scale") as f32;
     let step_height = attr(attrs, "step_height") as f32;
-    let base = entity_types::entity_type_id_parts(entity_type.namespace(), entity_type.path())
-        .and_then(entity_dimensions::base_dimensions);
+    let base = (entity_type.namespace() == "minecraft")
+        .then(|| EntityType::from_name(entity_type.path()))
+        .flatten()
+        .map(entity_dimensions::base_dimensions);
     let (width, height) = if is_baby {
         baby_dimensions(entity_type).unwrap_or_else(|| {
             let (w, h) = base.map_or((0.6, 1.95), |d| (d.width, d.height));
@@ -4339,7 +4343,7 @@ impl<'w> MobSim<'w> {
     ///
     /// * **Shape** comes from the 26.2 dimension census
     ///   ([`lodestone_data::entity_dimensions`], keyed by
-    ///   [`lodestone_data::entity_types::entity_type_id_parts`]) folded with the
+    ///   [`lodestone_data::entity_type::EntityType::from_name`]) folded with the
     ///   type's `SCALE`/`STEP_HEIGHT` attributes — the same math
     ///   [`crate::resolve_mob_shape`] uses for a version-aware caller, read
     ///   directly here since `MobSim` already depends on `lodestone_data` for

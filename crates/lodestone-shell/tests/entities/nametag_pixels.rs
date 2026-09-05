@@ -100,8 +100,8 @@ fn project(view_proj: glam::Mat4, world: glam::Vec3, w: u32, h: u32) -> (f32, f3
 /// up as a location mismatch instead of being silently absorbed by two
 /// copies of one guess agreeing with each other.
 fn expected_anchor(type_path: &str, feet: glam::Vec3, scale: f32) -> glam::Vec3 {
-    let height = lodestone_data::entity_types::entity_type_id_parts("minecraft", type_path)
-        .and_then(lodestone_data::entity_dimensions::base_dimensions)
+    let height = lodestone_data::entity_type::EntityType::from_name(type_path)
+        .map(lodestone_data::entity_dimensions::base_dimensions)
         .map(|dims| dims.height)
         .filter(|h| *h > 0.0)
         .unwrap_or(1.8);

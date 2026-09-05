@@ -41,6 +41,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use lodestone_data::entity_dimensions::{base_dimensions, TYPE_COUNT};
+use lodestone_data::entity_type::EntityType;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -161,8 +162,11 @@ fn committed_table_matches_the_committed_dump_bit_for_bit() {
     );
     let mut checked = 0usize;
     for row in &rows {
-        let dims = base_dimensions(row.id as i32)
-            .unwrap_or_else(|| panic!("id {} ({}) missing from table", row.id, row.name));
+        let entity_type = EntityType::from_registry_id(
+            u8::try_from(row.id).unwrap_or_else(|_| panic!("id {} does not fit u8", row.id)),
+        )
+        .unwrap_or_else(|| panic!("id {} ({}) is absent from EntityType", row.id, row.name));
+        let dims = base_dimensions(entity_type);
         assert_eq!(
             dims.width.to_bits(),
             row.width_bits,

@@ -32,8 +32,9 @@
 //! # Where the expected value comes from
 //!
 //! Not from this crate. The hitbox is
-//! `lodestone_data::entity_dimensions::base_dimensions_for`, a generated table
-//! keyed by registry id, and the drawn box is `EntityInstance::aabb_min/max` —
+//! `lodestone_data::entity_dimensions::base_dimensions`, a generated table
+//! selected by a validated registry type, and the drawn box is
+//! `EntityInstance::aabb_min/max` —
 //! the same world AABB the frustum cull reads. The two are independent
 //! constructions, so agreement between them is evidence rather than a round trip
 //! through one belief.
@@ -75,7 +76,7 @@
 
 use glam::Vec3;
 use lodestone_assets::entity_models::entity_models;
-use lodestone_data::entity_dimensions::base_dimensions_for;
+use lodestone_data::entity_dimensions::base_dimensions;
 use lodestone_data::entity_type::EntityType;
 use lodestone_render::entity::{EntityInstance, EntityMesh, EntityModelSet};
 use lodestone_render::entity_anim::AnimInput;
@@ -137,7 +138,7 @@ fn every_newly_rigged_type_draws_inside_its_own_hitbox() {
     for path in NEWLY_RIGGED {
         let entity_type = EntityType::from_name(path)
             .unwrap_or_else(|| panic!("{path} is not a registry entity type"));
-        let dims = base_dimensions_for(entity_type);
+        let dims = base_dimensions(entity_type);
         let instance = instance_for(&models, path);
 
         let coverage = vertical_coverage(instance.aabb_min.y, instance.aabb_max.y, dims.height);
@@ -199,7 +200,7 @@ fn the_three_wrong_placements_all_fall_under_the_threshold() {
 
     // 1. The giant with no mesh scale: the plain humanoid rig its 6× mesh is
     //    built from, measured against the giant's own twelve-block box.
-    let giant_box = base_dimensions_for(EntityType::Giant);
+    let giant_box = base_dimensions(EntityType::Giant);
     let unscaled = instance_for(&models, "zombie");
     let c1 = vertical_coverage(unscaled.aabb_min.y, unscaled.aabb_max.y, giant_box.height);
     measured.push(format!("  giant at 1x scale           coverage {c1:.3}"));
@@ -218,7 +219,7 @@ fn the_three_wrong_placements_all_fall_under_the_threshold() {
         1.0,
         &AnimInput::REST,
     );
-    let knot_box = base_dimensions_for(EntityType::LeashKnot);
+    let knot_box = base_dimensions(EntityType::LeashKnot);
     let c2 = vertical_coverage(mob_placed.aabb_min.y, mob_placed.aabb_max.y, knot_box.height);
     measured.push(format!(
         "  leash knot on the mob path  coverage {c2:.3}  (drawn y [{:.3}, {:.3}])",
@@ -246,7 +247,7 @@ fn the_three_wrong_placements_all_fall_under_the_threshold() {
         1.0,
         &AnimInput::REST,
     );
-    let cube_box = base_dimensions_for(EntityType::SulfurCube);
+    let cube_box = base_dimensions(EntityType::SulfurCube);
     // The adult is size 2, so its live box is the base row doubled — the same
     // factor its rig already carries, read off the registry rather than assumed.
     let cube_height = cube_box.height * 2.0;
@@ -285,7 +286,7 @@ fn the_sulfur_cube_shell_overhangs_its_box_by_the_ratio_its_root_pose_predicts()
     let models = EntityModelSet::load();
     let instance = instance_for(&models, "sulfur_cube");
     let drawn = instance.aabb_max.y - instance.aabb_min.y;
-    let adult_height = base_dimensions_for(EntityType::SulfurCube).height * 2.0;
+    let adult_height = base_dimensions(EntityType::SulfurCube).height * 2.0;
     let ratio = drawn / adult_height;
     // 18 texels of box at the 0.999 the renderer's two scale steps leave behind,
     // over a 0.98-block adult box: 1.124 / 0.98.
@@ -335,7 +336,7 @@ fn every_newly_drawn_projectile_lands_on_its_own_entity() {
     for path in NEWLY_DRAWN_PROJECTILES {
         let entity_type = EntityType::from_name(path)
             .unwrap_or_else(|| panic!("{path} is not a registry entity type"));
-        let dims = base_dimensions_for(entity_type);
+        let dims = base_dimensions(entity_type);
         let instance = instance_for(&models, path);
         let mesh = mesh_named(&models, instance.model);
 
@@ -412,7 +413,7 @@ fn the_mob_placement_pushes_every_projectile_rig_off_its_own_entity() {
         ("wither_skull", "wither_skull"),
         ("llama_spit", "llama_spit"),
     ] {
-        let dims = base_dimensions_for(EntityType::from_name(path).expect("a registry type"));
+        let dims = base_dimensions(EntityType::from_name(path).expect("a registry type"));
         let real = instance_for(&models, path);
         let wrong = EntityInstance::new(
             rig,

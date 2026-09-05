@@ -1111,7 +1111,7 @@ impl EntityDraw {
     ///
     /// A separate accessor rather than rewriting `type_path` at the fold, and
     /// that distinction is load-bearing: `type_path` is also what
-    /// `gpu/nametag.rs` feeds to `entity_dimensions::base_dimensions` to place
+    /// `gpu/nametag.rs` resolves through `entity_dimensions::base_dimensions` to place
     /// the tag above the head, and `"player_slim"` is **not** an entity-type
     /// registry path — it would miss, fall back to `FALLBACK_HEIGHT`, and put
     /// every slim player's nametag at the wrong height. `world_items.rs`,

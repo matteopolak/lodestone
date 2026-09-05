@@ -144,11 +144,8 @@ pub(crate) fn entity_hitbox_vertices_with_states(
         if draw.invisible {
             continue;
         }
-        let Some(dims) = lodestone_data::entity_types::entity_type_id_parts(
-            "minecraft",
-            &draw.type_path,
-        )
-        .and_then(lodestone_data::entity_dimensions::base_dimensions)
+        let Some(dims) = lodestone_data::entity_type::EntityType::from_name(&draw.type_path)
+            .map(lodestone_data::entity_dimensions::base_dimensions)
         else {
             continue;
         };

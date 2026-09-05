@@ -8,6 +8,12 @@ The path from "the server says there is an entity at (x, y, z)" to a posed, text
 
 ### Type path → model → texture
 
+The jar-derived dimensions table takes a validated
+`lodestone_data::entity_type::EntityType`, never an unchecked registry integer.
+The wire adapter and render-side type-path consumers resolve their external id or
+path before that lookup; an unknown or plugin type remains a miss and follows
+the caller's existing fallback instead of borrowing a built-in hitbox.
+
 `canonical_model_name(type_path)` maps a registry path to a `lodestone_assets::entity_models` corpus entry. **The corpus is the source of truth**: a type path that *is* a corpus entry name resolves directly; only a few need an explicit alias (`player`/`mannequin` → `player_wide`, `bogged` → `skeleton`, pending its own mesh). Gotcha: an alias onto a nearby mesh must be *written down* the moment the real mesh lands, or it silently survives as a wrong-but-plausible mob once the real one is ported.
 
 `entity_texture_candidates(model_name)` returns in-jar paths in priority order, **derived from each corpus entry's own `EntityTexture`**, never hand-listed. A flat-hue fallback means the sheet wasn't found; the *wrong* mob means resolution picked the wrong entry — different bugs.

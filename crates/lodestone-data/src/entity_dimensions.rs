@@ -34,60 +34,45 @@
 //!
 //! # Memory design
 //!
-//! Pure rodata, zero heap, O(1) by id: a `[(f32, f32); TYPE_COUNT]` of
-//! `(width, height)` indexed by the network entity-type registry id — the same
-//! id space as [`crate::entity_types`]. `f32` is the game's own storage width
-//! for these fields, so this is lossless versus vanilla.
+//! Pure rodata, zero heap, O(1) from a validated [`EntityType`]: a
+//! `[(f32, f32); TYPE_COUNT]` of `(width, height)` indexed by that type's
+//! registry id. `f32` is the game's own storage width for these fields, so this
+//! is lossless versus the source data.
 
 use lodestone_model::EntityBaseDimensions;
 
+use crate::entity_type::EntityType;
 use crate::generated_entity_dimensions::ENTITY_DIMENSIONS;
 pub use crate::generated_entity_dimensions::TYPE_COUNT;
 
-/// Resolves a network entity-type id to its **base** `(width, height)` hitbox.
+/// Resolves a validated built-in entity type to its **base** `(width, height)`
+/// hitbox.
 ///
-/// Returns `None` for ids outside `0..TYPE_COUNT`, so a malformed or
-/// future-version id surfaces as an explicit miss rather than a guessed box.
-/// The values are base dimensions — see the module docs on why `step_height`
-/// and `scale` are the consumer's responsibility.
+/// `EntityType` is constructed at the registry boundary from the raw wire id
+/// or resource key. That makes this array access total: a custom, malformed,
+/// or future-version type cannot be used accidentally as an index. The values
+/// are base dimensions — see the module docs on why `step_height` and `scale`
+/// are the consumer's responsibility.
 #[must_use]
-pub fn base_dimensions(id: i32) -> Option<EntityBaseDimensions> {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| ENTITY_DIMENSIONS.get(index).copied())
-        .map(|(width, height)| EntityBaseDimensions { width, height })
-}
-
-/// The typed sibling of [`base_dimensions`], for a caller already holding a
-/// [`crate::entity_type::EntityType`] — the one real consumer
-/// `docs/registry-types.md`'s Stage 1 asks for.
-///
-/// Infallible: an [`crate::entity_type::EntityType`] and this table's
-/// `0..TYPE_COUNT` are the same `minecraft:entity_type` registry (both
-/// generated from `tests/support/entity_census_jvm.txt`), so every valid
-/// `EntityType` indexes a real row — the `Option` moves to one construction
-/// site instead of sitting at every call site.
-#[must_use]
-pub fn base_dimensions_for(entity_type: crate::entity_type::EntityType) -> EntityBaseDimensions {
-    base_dimensions(i32::from(entity_type.registry_id())).unwrap_or_else(|| {
-        panic!(
-            "EntityType::{entity_type:?} (registry id {}) has no row in the generated \
-             entity-dimensions table",
-            entity_type.registry_id()
-        )
-    })
+pub fn base_dimensions(entity_type: EntityType) -> EntityBaseDimensions {
+    let (width, height) = ENTITY_DIMENSIONS[entity_type.registry_id() as usize];
+    EntityBaseDimensions { width, height }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entity_types::entity_type_id;
+    use crate::entity_type::{CustomEntityTypeId, EntityTypeRef};
 
     #[test]
-    fn out_of_range_ids_are_none() {
-        assert_eq!(base_dimensions(-1), None);
-        assert_eq!(base_dimensions(TYPE_COUNT as i32), None);
-        assert_eq!(base_dimensions(i32::MAX), None);
+    fn invalid_registry_ids_are_rejected_before_lookup() {
+        // The raw wire boundary owns validation. This API cannot receive a
+        // custom or out-of-range type, so no lookup caller can accidentally
+        // turn either into a plausible built-in hitbox.
+        assert_eq!(EntityType::from_registry_id(u8::MAX), None);
+        assert_eq!(EntityType::from_name("not_a_real_entity"), None);
+        let custom = EntityTypeRef::custom(CustomEntityTypeId::from_index(0));
+        assert_eq!(custom.builtin_or_none().map(base_dimensions), None);
     }
 
     #[test]
@@ -98,28 +83,27 @@ mod tests {
         // `interaction`, `marker`, and `lightning_bolt` have no physical box —
         // so this asserts validity, not positivity; the bit-exact check against
         // the server dump is what catches a transposed or truncated table.
-        for id in 0..TYPE_COUNT as i32 {
-            let dims = base_dimensions(id).expect("id within TYPE_COUNT resolves");
+        for entity_type in EntityType::all() {
+            let dims = base_dimensions(entity_type);
             assert!(
                 dims.width >= 0.0 && dims.width.is_finite(),
-                "id {id} has an invalid width {}",
+                "{entity_type:?} has an invalid width {}",
                 dims.width
             );
             assert!(
                 dims.height >= 0.0 && dims.height.is_finite(),
-                "id {id} has an invalid height {}",
+                "{entity_type:?} has an invalid height {}",
                 dims.height
             );
         }
     }
 
     #[test]
-    fn base_dimensions_for_agrees_with_the_id_form_for_every_type() {
-        use crate::entity_type::EntityType;
+    fn dimensions_cover_every_generated_entity_type() {
+        assert_eq!(u32::from(EntityType::COUNT), TYPE_COUNT);
         for entity_type in EntityType::all() {
-            let by_id = base_dimensions(i32::from(entity_type.registry_id()))
-                .expect("every generated EntityType has a row");
-            assert_eq!(base_dimensions_for(entity_type), by_id);
+            let dims = base_dimensions(entity_type);
+            assert!(dims.width.is_finite() && dims.height.is_finite());
         }
     }
 
@@ -128,8 +112,7 @@ mod tests {
         // The dimension table and the id->name table share one id space; the
         // player's box is the canonical anchor (0.6 x 1.8, constant across
         // versions), so a misaligned table fails here.
-        let player = entity_type_id("minecraft:player").expect("player is a real type");
-        let dims = base_dimensions(player).expect("player has dimensions");
+        let dims = base_dimensions(EntityType::Player);
         assert_eq!(dims.width, 0.6);
         assert_eq!(dims.height, 1.8);
     }

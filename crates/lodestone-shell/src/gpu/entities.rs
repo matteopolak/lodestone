@@ -460,20 +460,13 @@ impl EntityRenderer {
         // One baked mesh per entity type with a known base hitbox, built
         // eagerly for the same reason `gpu_models` above is: `prepare_flame`
         // (gpu.rs) only ever *reads* this map, never builds into it, so every
-        // entry has to exist before the first frame. `lodestone_data::
-        // entity_types::TYPE_COUNT` is ~160 — trivial to build in full rather
+        // entry has to exist before the first frame. `EntityType::COUNT` is
+        // ~160 — trivial to build in full rather
         // than lazily keying on which types are ever actually seen on fire.
         let mut flame_gpu_models: HashMap<String, GpuEntityModel> = HashMap::new();
-        for id in 0..i32::try_from(lodestone_data::entity_types::TYPE_COUNT).unwrap_or(0) {
-            let Some(name) = lodestone_data::entity_types::entity_type_name(id) else {
-                continue;
-            };
-            let Some(path) = name.strip_prefix("minecraft:") else {
-                continue;
-            };
-            let Some(dims) = lodestone_data::entity_dimensions::base_dimensions(id) else {
-                continue;
-            };
+        for entity_type in lodestone_data::entity_type::EntityType::all() {
+            let path = entity_type.path();
+            let dims = lodestone_data::entity_dimensions::base_dimensions(entity_type);
             let (vertices, indices) = flame_mesh(dims.width, dims.height);
             if let Some(gpu) = GpuEntityModel::upload_parts(
                 device,
