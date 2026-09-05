@@ -904,6 +904,18 @@ impl OverworldGenerator {
         self.sea_level
     }
 
+    /// Returns the low-detail preliminary terrain-surface estimate at block
+    /// coordinates `(x, z)` without generating a chunk.
+    ///
+    /// This is for a distant heightfield's silhouette and is intentionally not
+    /// the post-carve, post-decoration top block that [`Self::column`] returns.
+    /// Callers that need collision, an editable block, or a packet-ready
+    /// column must generate the real column instead.
+    #[must_use]
+    pub fn preliminary_surface_level(&self, x: i32, z: i32) -> i32 {
+        self.surface.preliminary_surface_level(x, z)
+    }
+
     /// Distinct chunks currently held in the staged store. **Diagnostics and
     /// gates only** — nothing in generation may branch on it.
     ///
