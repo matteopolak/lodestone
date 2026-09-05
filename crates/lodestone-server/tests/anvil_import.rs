@@ -178,7 +178,7 @@ fn anvil_backend_is_not_redirected_into_native_conversion() {
 
 #[test]
 fn checked_in_anvil_chunk_maps_supported_terrain_and_reports_dropped_payloads() {
-    let (chunk, authorization, expected_report) = chunk_source();
+    let (_chunk, authorization, expected_report) = chunk_source();
     let directory = scratch("chunk");
     let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
         directory: directory.clone(),
@@ -225,7 +225,10 @@ fn checked_in_anvil_chunk_maps_supported_terrain_and_reports_dropped_payloads() 
         .load_chunk(6, 12, -64, 384)
         .expect("load imported chunk")
         .expect("imported chunk exists");
-    assert_eq!(loaded.column.block_state(1, -59, 7), "minecraft:blast_furnace");
+    assert_eq!(
+        loaded.column.block_state(1, -59, 7),
+        "minecraft:blast_furnace[facing=south,lit=false]"
+    );
     assert!(
         loaded.column.motion_blocking().is_some(),
         "MOTION_BLOCKING from the checked-in chunk must reach the native record"

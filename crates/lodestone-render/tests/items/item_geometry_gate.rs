@@ -155,8 +155,10 @@ fn grass_block_item_shares_the_block_tint_palette_slot() {
         .find_map(|q| q.tint_index)
         .expect("the grass_block item has a tinted face");
 
-    let state = find_state(reg.as_ref(), "minecraft:grass_block", &[("snowy", "false")])
-        .expect("grass_block state");
+    let state = state_id(
+        find_state(reg.as_ref(), "minecraft:grass_block", &[("snowy", "false")])
+            .expect("grass_block state"),
+    );
     let block_tint = models
         .quads(state)
         .iter()
@@ -230,7 +232,9 @@ fn a_posed_item_lands_inside_its_slot_and_keeps_its_winding() {
         ..Camera::default()
     };
     let south = models
-        .quads(find_state(reg.as_ref(), "minecraft:stone", &[]).expect("stone state"))
+        .quads(state_id(
+            find_state(reg.as_ref(), "minecraft:stone", &[]).expect("stone state"),
+        ))
         .iter()
         .find(|q| q.direction == lodestone_assets::Direction::South)
         .expect("stone has a south face")

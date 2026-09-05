@@ -2675,7 +2675,7 @@ mod tests {
         let removed = adapter
             .handle_play_remove_entity_effect(&mut world, &encoded_remove(1))
             .expect("known legacy effect removal decodes");
-        let [Directive::Emit(ClientEvent::MobEffectRemoved { effect })] = removed.as_slice()
+        let [Directive::Emit(ClientEvent::MobEffectRemoved { effect, .. })] = removed.as_slice()
         else {
             panic!("known effect did not emit one removal event: {removed:?}");
         };

@@ -60,6 +60,7 @@ use lodestone::display_entities::{
 };
 use lodestone::gpu::RenderState;
 use lodestone::resources::BlockResources;
+use lodestone_model::BlockStateRef;
 use lodestone_render::display::{BillboardMode, DisplayTransformation};
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
 
@@ -221,7 +222,7 @@ fn a_block_display_and_an_item_display_reach_pixels() {
 
     // Arm 1: a `block_display` showing stone.
     let mut block = blank_draw(1, BLOCK_DISPLAY_TYPE_PATH);
-    block.block_state = Some(state_id);
+    block.block_state = Some(BlockStateRef::canonical(state_id));
     let (block_px, block_count) = shoot(vec![block]);
     let block_diff = diff(&block_px, &empty);
     assert_eq!(
@@ -329,7 +330,7 @@ fn a_block_displays_transformation_scale_changes_what_is_drawn() {
     let empty = shoot(Vec::new());
 
     let mut unit = blank_draw(1, BLOCK_DISPLAY_TYPE_PATH);
-    unit.block_state = Some(state_id);
+    unit.block_state = Some(BlockStateRef::canonical(state_id));
     let mut doubled = unit.clone();
     doubled.transform.scale = glam::Vec3::splat(2.0);
 

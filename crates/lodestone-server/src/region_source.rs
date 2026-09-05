@@ -1321,6 +1321,16 @@ impl WorldSaveHandle {
         &self.state.stats
     }
 
+    /// The persistent world's scheduled-tick queues.
+    ///
+    /// Native snapshot encoding and reopen staging use the same handle as the
+    /// running tick loop, so a save cannot silently omit or restore into a
+    /// private queue.
+    #[must_use]
+    pub fn scheduled_ticks(&self) -> ScheduledTickHandle {
+        self.state.scheduled.clone()
+    }
+
     /// Snapshots every column the established save path would write right now.
     ///
     /// This deliberately shares the Anvil save set: ordinary edits, live block

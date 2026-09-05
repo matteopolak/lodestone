@@ -3418,7 +3418,7 @@ mod mob_effect_tests {
             &encoded_remove(&adapter, 1),
         )
         .expect("known legacy effect removal decodes");
-        let [Directive::Emit(ClientEvent::MobEffectRemoved { effect })] = removed.as_slice()
+        let [Directive::Emit(ClientEvent::MobEffectRemoved { effect, .. })] = removed.as_slice()
         else {
             panic!("known effect did not emit one removal event: {removed:?}");
         };
