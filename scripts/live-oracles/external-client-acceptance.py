@@ -153,7 +153,7 @@ def validate_stages(value: Any) -> list[dict[str, Any]]:
     if action.get("kind") != ACTION:
         raise RuntimeError(f"evidence stage play_action.kind must be {ACTION!r}")
     action_count = action.get("action_count")
-    if action_count != 1:
+    if isinstance(action_count, bool) or not isinstance(action_count, int) or action_count != 1:
         raise RuntimeError("evidence stage play_action.action_count must be exactly 1")
     if action.get("result_observed") is not True:
         raise RuntimeError("evidence stage play_action.result_observed must be true")
@@ -191,6 +191,11 @@ def validate_evidence(evidence: pathlib.Path, row: Row, started_at: float) -> di
     for key in ("client_binary", "client_build", "capture_method"):
         if not isinstance(provenance.get(key), str) or not provenance[key]:
             raise RuntimeError(f"evidence provenance.{key} must be a non-empty string")
+    if provenance["client_build"] != row.release:
+        raise RuntimeError(
+            f"evidence provenance.client_build must be {row.release!r}, "
+            f"got {provenance['client_build']!r}"
+        )
     capture = artifact(provenance.get("capture"), evidence, "capture")
     client_log = artifact(provenance.get("client_log"), evidence, "client_log")
     return {
