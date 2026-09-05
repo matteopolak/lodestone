@@ -1,5 +1,6 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body, read_named_nbt};
 use lodestone_data::block_states;
+use lodestone_model::Rotation;
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_14::{V498ServerProtocol, V578ServerProtocol, V754ServerProtocol};
 use lodestone_v1_14::packet_ids;
@@ -11,6 +12,111 @@ use lodestone_v1_14::packets::handshake::SetProtocol;
 
 const CTX: Ctx = Ctx { version: 578 };
 const PLAINS_BIOME_BYTES: [u8; 4] = 1_i32.to_be_bytes();
+
+/// Literal 1.14-era Play bodies for the four ordinary movement forms. The
+/// fractional and negative values prove the server decoder independently of
+/// the client-side encoder.
+const POSITION_BODY: [u8; 25] = [
+    0xbf, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // x = -1.5
+    0x40, 0x50, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, // y = 64.25
+    0x40, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // z = 32.0
+    0x01, // on_ground = true
+];
+const POSITION_LOOK_BODY: [u8; 33] = [
+    0x40, 0x30, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, // x = 16.5
+    0x40, 0x51, 0xa0, 0x00, 0x00, 0x00, 0x00, 0x00, // y = 70.5
+    0xc0, 0x40, 0xa0, 0x00, 0x00, 0x00, 0x00, 0x00, // z = -33.25
+    0x42, 0xb4, 0x00, 0x00, // yaw = 90.0
+    0xc2, 0x34, 0x00, 0x00, // pitch = -45.0
+    0x00, // on_ground = false
+];
+
+fn assert_movement_lift<P: ServerProtocol>(
+    protocol: &P,
+    position: i32,
+    position_look: i32,
+    look: i32,
+    flying: i32,
+) {
+    assert_eq!(
+        protocol.decode(State::Play, position, &POSITION_BODY),
+        ServerBound::PlayerMoved {
+            x: -1.5,
+            y: 64.25,
+            z: 32.0,
+            rotation: None,
+            on_ground: true,
+        }
+    );
+    assert_eq!(
+        protocol.decode(State::Play, position_look, &POSITION_LOOK_BODY),
+        ServerBound::PlayerMoved {
+            x: 16.5,
+            y: 70.5,
+            z: -33.25,
+            rotation: Some(Rotation {
+                yaw: 90.0,
+                pitch: -45.0,
+            }),
+            on_ground: false,
+        }
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            look,
+            &[0x40, 0x20, 0x00, 0x00, 0xc1, 0xa0, 0x00, 0x00, 0x01],
+        ),
+        ServerBound::PlayerRotated {
+            yaw: 2.5,
+            pitch: -20.0,
+            on_ground: true,
+        }
+    );
+    assert_eq!(
+        protocol.decode(State::Play, flying, &[0]),
+        ServerBound::PlayerStatusOnly { on_ground: false }
+    );
+}
+
+#[test]
+fn protocol_498_lifts_literal_movement_bodies() {
+    use packet_ids_498::play::serverbound;
+
+    assert_movement_lift(
+        &V498ServerProtocol,
+        serverbound::POSITION,
+        serverbound::POSITION_LOOK,
+        serverbound::LOOK,
+        serverbound::FLYING,
+    );
+}
+
+#[test]
+fn protocol_578_lifts_literal_movement_bodies() {
+    use lodestone_v1_14::packet_ids_578::play::serverbound;
+
+    assert_movement_lift(
+        &V578ServerProtocol,
+        serverbound::POSITION,
+        serverbound::POSITION_LOOK,
+        serverbound::LOOK,
+        serverbound::FLYING,
+    );
+}
+
+#[test]
+fn protocol_754_lifts_literal_movement_bodies() {
+    use packet_ids::play::serverbound;
+
+    assert_movement_lift(
+        &V754ServerProtocol,
+        serverbound::POSITION,
+        serverbound::POSITION_LOOK,
+        serverbound::LOOK,
+        serverbound::FLYING,
+    );
+}
 
 #[test]
 fn protocol_498_accepts_its_handshake_and_emits_legacy_join() {
