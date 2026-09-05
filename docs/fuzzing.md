@@ -378,6 +378,15 @@ What exists:
   shrink with a redirected child still present, proving the consumer sees the
   same-token redirect edge.
 
+- `tests/player_input_packet_model.rs` — a bounded fixed-ChaCha-seed model
+  check over the 26.2 `ClientAction::SetPlayerInput` encode path. It constructs
+  canonical movement booleans, drives `V770Adapter::encode_action`, and
+  compares its play-state packet id and one-byte payload with an independent
+  seven-bit layout. The detector model puts sprint in bit seven rather than bit
+  six and must fail on a literal sprint-only witness, proving that the test
+  observes the emitted serverbound byte. This covers client action lowering;
+  it does not simulate movement physics or validate a server's response.
+
 - `tests/legacy_status_model.rs` — a bounded fixed-ChaCha-seed model check over
   `lodestone_net::parse_legacy_status`, the legacy server-list ping consumer.
   An independent UTF-16BE framer and field model cover both supported layouts,
