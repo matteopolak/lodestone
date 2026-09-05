@@ -339,6 +339,8 @@ impl JavaAdapter {
                     x: player.position.x,
                     y: player.position.y,
                     z: player.position.z,
+                    yaw: player.rotation.yaw,
+                    pitch: player.rotation.pitch,
                 })
                 .ok_or_else(|| format!("player {uuid} is not connected"))
         });

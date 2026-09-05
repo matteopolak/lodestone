@@ -799,12 +799,12 @@ write request, so a stale or wrong-kind value cannot mutate a recycled position.
 authority to reject an unavailable column, invalid state ID, or out-of-height coordinate; the call
 does not load terrain and carries none of the physics, block-entity, packet, cancellation, or
 general event semantics of a complete server API.
-The three player-handle coordinate methods resolve the same copied,
+The player-handle coordinate and rotation methods resolve the same copied,
 generation-checked player identity before requesting its current position through a dedicated
 bounded host port. The dedicated host matches the UUID against its live player snapshot after
 world servicing has returned; disconnect, stale-generation, and non-finite-coordinate cases fail
 by name rather than becoming an origin position. Each component is a fresh live read, so callers
-that require an atomic three-component snapshot need a later object-shaped API.
+that require an atomic pose snapshot need a later object-shaped API.
 The generic registry separately reports wrong-kind use. A live player handle may
 also resolve through `playerHandleName(long)` and `playerHandleUuid(long)`. The
 latter returns a canonical lowercase UUID string from the fixed sixteen profile

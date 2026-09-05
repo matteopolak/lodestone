@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use jni::errors::ThrowRuntimeExAndDefault;
 use jni::objects::{Global, JClass, JObject, JString};
 use jni::strings::JNIString;
-use jni::sys::{jboolean, jdouble, jint, jlong, jobject, jstring};
+use jni::sys::{jboolean, jdouble, jfloat, jint, jlong, jobject, jstring};
 use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
 
 use crate::runtime::{JvmConfig, JvmRuntime};
@@ -107,6 +107,8 @@ pub struct PlayerPosition {
     pub x: f64,
     pub y: f64,
     pub z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
 }
 
 /// A disconnected player must remain distinct from a valid origin position.
@@ -988,6 +990,27 @@ fn resolve_resident_player_position(bits: i64, axis: usize, operation: &str) -> 
         Ok(value)
     } else {
         Err(AdapterError::new(format!("{operation}: host returned a non-finite coordinate")))
+    }
+}
+
+fn resolve_resident_player_rotation(bits: i64, axis: usize, operation: &str) -> Result<jfloat, AdapterError> {
+    let player = resolve_resident_player_handle(bits, operation)?;
+    let port = PLAYER_POSITION_PORT.with(|slot| slot.borrow().clone()).ok_or_else(|| {
+        AdapterError::new(format!("{operation} requires the adapter worker thread"))
+    })?;
+    let position = port
+        .request(PlayerPositionQuery { uuid: player.uuid() })
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?;
+    let value = match axis {
+        0 => position.yaw,
+        1 => position.pitch,
+        _ => return Err(AdapterError::new(format!("{operation}: invalid rotation axis"))),
+    };
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(AdapterError::new(format!("{operation}: host returned a non-finite rotation")))
     }
 }
 
@@ -2348,6 +2371,8 @@ pub(crate) fn register_player_handle_position_query(
         "playerHandleX" => native_player_handle_x as *mut c_void,
         "playerHandleY" => native_player_handle_y as *mut c_void,
         "playerHandleZ" => native_player_handle_z as *mut c_void,
+        "playerHandleYaw" => native_player_handle_yaw as *mut c_void,
+        "playerHandlePitch" => native_player_handle_pitch as *mut c_void,
         _ => unreachable!("validated player coordinate member"),
     };
     // SAFETY: each validated native accepts one opaque handle and returns one
@@ -2646,6 +2671,32 @@ extern "system" fn native_player_handle_z<'local>(
         resolve_resident_player_position(bits, 2, "playerHandleZ")
     })
         .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_yaw<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jfloat {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resolve_resident_player_rotation(bits, 0, "playerHandleYaw")
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_pitch<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jfloat {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resolve_resident_player_rotation(bits, 1, "playerHandlePitch")
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 extern "system" fn native_player_handle_name<'local>(
@@ -4286,6 +4337,7 @@ mod tests {
             PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = Some(port));
             let handle = resident_player_handle(&identity, &player).expect("player handle");
             let result = resolve_resident_player_position(handle.to_bits(), 2, "playerHandleZ");
+            let yaw = resolve_resident_player_rotation(handle.to_bits(), 0, "playerHandleYaw");
             let non_finite =
                 resolve_resident_player_position(handle.to_bits(), 0, "playerHandleX");
             assert_eq!(release_resident_handles(&identity), 1);
@@ -4293,27 +4345,32 @@ mod tests {
             PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = None);
             RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
             sender
-                .send((result, non_finite, stale))
+                .send((result, yaw, non_finite, stale))
                 .expect("position results");
         });
         let limit = Instant::now() + Duration::from_secs(1);
         let mut requests = 0;
-        while requests < 2 {
+        while requests < 3 {
             requests += servicer.service_all_pending(1, |query| {
                 assert_eq!(query, PlayerPositionQuery { uuid: [7; 16] });
-                if requests == 0 {
-                    Ok(PlayerPosition { x: 12.5, y: 64.0, z: -9.25 })
+                if requests < 2 {
+                    Ok(PlayerPosition {
+                        x: 12.5, y: 64.0, z: -9.25, yaw: 45.0, pitch: -12.0,
+                    })
                 } else {
-                    Ok(PlayerPosition { x: f64::NAN, y: 64.0, z: -9.25 })
+                    Ok(PlayerPosition {
+                        x: f64::NAN, y: 64.0, z: -9.25, yaw: 45.0, pitch: -12.0,
+                    })
                 }
             });
-            if requests < 2 {
+            if requests < 3 {
                 assert!(Instant::now() < limit, "worker did not request a player position");
                 std::thread::yield_now();
             }
         }
-        let (result, non_finite, stale) = receiver.recv().expect("position results");
+        let (result, yaw, non_finite, stale) = receiver.recv().expect("position results");
         assert_eq!(result, Ok(-9.25));
+        assert_eq!(yaw, Ok(45.0));
         assert_eq!(
             non_finite,
             Err(AdapterError::new(
