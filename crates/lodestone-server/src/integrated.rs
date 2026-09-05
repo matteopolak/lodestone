@@ -2815,6 +2815,51 @@ impl IntegratedServer {
         self.world_source.as_ref()?.resident_block_state_id(x, y, z)
     }
 
+    /// Replaces one block in an already-resident primary-world column.
+    ///
+    /// The method never generates or loads a column. The validated state is
+    /// rendered back to the canonical name-plus-sorted-properties form used by
+    /// [`ChunkSource::set_block`], so the native plugin bridge cannot inject a
+    /// malformed state string or confuse a block-state id with another registry.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_resident_block_state_id(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: lodestone_data::block_states::StateId,
+    ) -> Result<(), String> {
+        let source = self
+            .world_source
+            .as_ref()
+            .ok_or_else(|| "primary world source is unavailable".to_string())?;
+        let column_x = x.div_euclid(16);
+        let column_z = z.div_euclid(16);
+        let column = source
+            .resident_column(column_x, column_z)
+            .ok_or_else(|| format!("column ({column_x}, {column_z}) is not resident"))?;
+        if !column.contains_y(y) {
+            return Err(format!("y coordinate {y} is outside the resident column extent"));
+        }
+
+        let mut canonical = state.name().to_string();
+        let properties = state.properties();
+        if !properties.is_empty() {
+            canonical.push('[');
+            for (index, (name, value)) in properties.iter().enumerate() {
+                if index != 0 {
+                    canonical.push(',');
+                }
+                canonical.push_str(name);
+                canonical.push('=');
+                canonical.push_str(value);
+            }
+            canonical.push(']');
+        }
+        source.set_block(x, y, z, &canonical);
+        Ok(())
+    }
+
     /// This world's shared player registry, for a host that wants RCON or an
     /// admin console to see and target real connections rather than nobody.
     ///

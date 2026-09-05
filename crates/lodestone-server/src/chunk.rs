@@ -908,6 +908,16 @@ impl ChunkColumn {
         self.write_block_id(x, y, z, id);
     }
 
+    /// Whether `y` lies inside this column's stored vertical extent.
+    ///
+    /// Callers that mutate a retained column use this before [`Self::set_block`]
+    /// so an out-of-height request is rejected rather than indexing a section
+    /// that does not exist.
+    #[must_use]
+    pub fn contains_y(&self, y: i32) -> bool {
+        (self.min_y..self.min_y.saturating_add(self.height)).contains(&y)
+    }
+
     /// [`set_block`](Self::set_block) minus the string→id resolution: writes an
     /// already-interned column-wide palette `id` at a local `(x, z)` in `0..16`
     /// and world `y`.
