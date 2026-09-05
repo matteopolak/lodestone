@@ -168,16 +168,10 @@ impl MapStore {
         true
     }
 
-    /// One map's contents, if the server has sent any.
-    #[must_use]
-    pub fn get(&self, map_id: i32) -> Option<&MapState> {
-        self.get_by_id(MapId::new(map_id)?)
-    }
-
     /// The contents for an already validated saved-map id, if the server has
     /// sent any.
     #[must_use]
-    pub fn get_by_id(&self, map_id: MapId) -> Option<&MapState> {
+    pub fn get(&self, map_id: MapId) -> Option<&MapState> {
         self.maps.get(&map_id)
     }
 
@@ -194,8 +188,8 @@ impl MapStore {
     }
 
     /// Every known map id, ascending.
-    pub fn ids(&self) -> impl Iterator<Item = i32> + '_ {
-        self.maps.keys().map(|id| id.raw())
+    pub fn ids(&self) -> impl Iterator<Item = MapId> + '_ {
+        self.maps.keys().copied()
     }
 }
 
@@ -225,13 +219,28 @@ mod tests {
         }
     }
 
+    fn map_id(raw: i32) -> MapId {
+        MapId::new(raw).expect("test map id is non-negative")
+    }
+
+    #[test]
+    fn map_store_readers_require_validated_map_ids() {
+        const _: for<'a> fn(&'a MapStore, MapId) -> Option<&'a MapState> = MapStore::get;
+
+        let mut store = MapStore::default();
+        store.apply(&event(17, None, Some(patch(0, 0, 1, 1, 99))));
+        let ids: Vec<MapId> = store.ids().collect();
+        assert_eq!(ids, vec![map_id(17)]);
+        assert_eq!(store.get(ids[0]).unwrap().color_at(0, 0), 99);
+    }
+
     /// A patch lands at its offset and touches nothing outside it — the whole
     /// point of keeping the grid rather than the last patch.
     #[test]
     fn a_patch_blits_at_its_offset_only() {
         let mut store = MapStore::default();
         assert!(store.apply(&event(7, None, Some(patch(10, 20, 3, 2, 44)))));
-        let map = store.get(7).expect("map 7 was sent");
+        let map = store.get(map_id(7)).expect("map 7 was sent");
         assert_eq!(map.color_at(10, 20), 44);
         assert_eq!(map.color_at(12, 21), 44);
         assert_eq!(map.color_at(13, 21), 0, "one column past the patch");
@@ -240,7 +249,7 @@ mod tests {
 
         // A second, disjoint patch must not clear the first.
         store.apply(&event(7, None, Some(patch(0, 0, 1, 1, 9))));
-        let map = store.get(7).expect("map 7 is still there");
+        let map = store.get(map_id(7)).expect("map 7 is still there");
         assert_eq!(map.color_at(0, 0), 9);
         assert_eq!(map.color_at(10, 20), 44, "the earlier patch survived");
     }
@@ -260,12 +269,12 @@ mod tests {
         store.apply(&event(1, Some(vec![marker.clone()]), None));
         store.apply(&event(1, None, Some(patch(0, 0, 2, 2, 1))));
         assert_eq!(
-            store.get(1).unwrap().decorations,
+            store.get(map_id(1)).unwrap().decorations,
             vec![marker],
             "a pixel-only update must leave the icons alone"
         );
         store.apply(&event(1, Some(Vec::new()), None));
-        assert!(store.get(1).unwrap().decorations.is_empty());
+        assert!(store.get(map_id(1)).unwrap().decorations.is_empty());
     }
 
     #[test]
@@ -276,8 +285,8 @@ mod tests {
 
         assert!(Arc::ptr_eq(&store.maps, &snapshot.maps));
         assert!(Arc::ptr_eq(
-            &store.get(7).unwrap().colors,
-            &snapshot.get(7).unwrap().colors,
+            &store.get(map_id(7)).unwrap().colors,
+            &snapshot.get(map_id(7)).unwrap().colors,
         ));
     }
 
@@ -292,8 +301,7 @@ mod tests {
         assert!(store.is_empty(), "an invalid id must not allocate map state");
 
         assert!(store.apply(&event(17, None, Some(patch(0, 0, 1, 1, 99)))));
-        assert_eq!(store.get_by_id(id).unwrap().color_at(0, 0), 99);
-        assert_eq!(store.get(-1), None, "raw readers retain the same boundary");
+        assert_eq!(store.get(id).unwrap().color_at(0, 0), 99);
     }
 
     #[test]
@@ -304,12 +312,12 @@ mod tests {
 
         store.apply(&event(7, None, Some(patch(0, 0, 1, 1, 44))));
 
-        assert_eq!(snapshot.get(7).unwrap().color_at(0, 0), 9);
-        assert_eq!(store.get(7).unwrap().color_at(0, 0), 44);
+        assert_eq!(snapshot.get(map_id(7)).unwrap().color_at(0, 0), 9);
+        assert_eq!(store.get(map_id(7)).unwrap().color_at(0, 0), 44);
         assert!(!Arc::ptr_eq(&store.maps, &snapshot.maps));
         assert!(!Arc::ptr_eq(
-            &store.get(7).unwrap().colors,
-            &snapshot.get(7).unwrap().colors,
+            &store.get(map_id(7)).unwrap().colors,
+            &snapshot.get(map_id(7)).unwrap().colors,
         ));
     }
 
@@ -317,32 +325,32 @@ mod tests {
     fn color_revision_changes_only_when_map_pixels_are_patched() {
         let mut store = MapStore::default();
         store.apply(&event(7, None, None));
-        let initial = store.get(7).expect("map state exists").color_revision;
+        let initial = store.get(map_id(7)).expect("map state exists").color_revision;
 
         store.apply(&event(7, Some(Vec::new()), None));
         assert_eq!(
-            store.get(7).expect("map state exists").color_revision,
+            store.get(map_id(7)).expect("map state exists").color_revision,
             initial,
             "decoration-only packets do not change the texture"
         );
 
         store.apply(&event(7, None, Some(patch(0, 0, 1, 1, 44))));
         assert_eq!(
-            store.get(7).expect("map state exists").color_revision,
+            store.get(map_id(7)).expect("map state exists").color_revision,
             initial + 1,
             "a map-pixel patch invalidates just this map texture"
         );
 
         store.apply(&event(7, None, Some(patch(0, 0, 1, 1, 44))));
         assert_eq!(
-            store.get(7).expect("map state exists").color_revision,
+            store.get(map_id(7)).expect("map state exists").color_revision,
             initial + 1,
             "a repeated patch with identical pixels preserves the retained texture"
         );
 
         store.apply(&event(8, None, Some(patch(0, 0, 1, 1, 3))));
         assert_eq!(
-            store.get(7).expect("original map exists").color_revision,
+            store.get(map_id(7)).expect("original map exists").color_revision,
             initial + 1,
             "a different map's patch cannot invalidate this map"
         );

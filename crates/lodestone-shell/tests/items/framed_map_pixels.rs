@@ -50,6 +50,7 @@ use lodestone::entities::EntityDraw;
 use lodestone::gpu::{MapPicture, RenderState};
 use lodestone::resources::BlockResources;
 use lodestone_assets::ResourceLocation;
+use lodestone_game::maps::MapId;
 use lodestone_render::{AnimInput, Camera, GpuContext, HeadlessTarget, RenderTarget};
 
 const W: u32 = 320;
@@ -58,6 +59,10 @@ const H: u32 = 240;
 const ITEM: &str = "minecraft:filled_map";
 const SUBJECT_ID: i32 = 9201;
 const TEST_MAP_ID: i32 = 17;
+
+fn test_map_id() -> MapId {
+    MapId::new(TEST_MAP_ID).expect("the fixture map id is non-negative")
+}
 
 /// Where the frame entity sits. `ItemFrame.createBoundingBox` puts that behind
 /// the centre of the block it hangs in; the render chain steps `0.46875` forward
@@ -280,7 +285,7 @@ fn a_filled_map_in_an_item_frame_reaches_pixels_on_every_wall() {
     let transparent_pixels = std::sync::Arc::new(vec![0u8; 128 * 128]);
     state.set_map_source(move |_, _| {
         Some(MapPicture::new(
-            TEST_MAP_ID,
+            test_map_id(),
             0,
             std::sync::Arc::clone(&transparent_pixels),
         ))
@@ -293,7 +298,7 @@ fn a_filled_map_in_an_item_frame_reaches_pixels_on_every_wall() {
     let painted_pixels = std::sync::Arc::new(grass_grid());
     state.set_map_source(move |_, _| {
         Some(MapPicture::new(
-            TEST_MAP_ID,
+            test_map_id(),
             1,
             std::sync::Arc::clone(&painted_pixels),
         ))
@@ -415,7 +420,7 @@ fn a_framed_map_remains_visible_from_oblique_room_facing_views() {
     let opaque_pixels = std::sync::Arc::new(grass_grid());
     state.set_map_source(move |_, _| {
         Some(MapPicture::new(
-            TEST_MAP_ID,
+            test_map_id(),
             0,
             std::sync::Arc::clone(&opaque_pixels),
         ))
@@ -502,7 +507,7 @@ fn invisible_framed_map_at_large_coordinates_survives_fixed_pose_fov_changes() {
     let opaque_pixels = std::sync::Arc::new(grass_grid());
     state.set_map_source(move |_, _| {
         Some(MapPicture::new(
-            TEST_MAP_ID,
+            test_map_id(),
             0,
             std::sync::Arc::clone(&opaque_pixels),
         ))
@@ -872,7 +877,7 @@ fn a_framed_map_survives_the_depth_test_against_its_attachment_wall() {
         let painted = std::sync::Arc::new(grass_grid());
         state.set_map_source(move |_, _| {
             Some(MapPicture::new(
-                TEST_MAP_ID,
+                test_map_id(),
                 1,
                 std::sync::Arc::clone(&painted),
             ))
@@ -991,7 +996,7 @@ fn only_a_glow_framed_map_lights_itself_in_an_unlit_room() {
     let painted = std::sync::Arc::new(grass_grid());
     state.set_map_source(move |_, _| {
         Some(MapPicture::new(
-            TEST_MAP_ID,
+            test_map_id(),
             1,
             std::sync::Arc::clone(&painted),
         ))
@@ -1359,7 +1364,7 @@ fn a_board_of_framed_maps_survives_the_depth_test_while_the_camera_turns() {
         let painted = std::sync::Arc::new(grass_grid());
         state.set_map_source(move |_, _| {
             Some(MapPicture::new(
-                TEST_MAP_ID,
+                test_map_id(),
                 1,
                 std::sync::Arc::clone(&painted),
             ))

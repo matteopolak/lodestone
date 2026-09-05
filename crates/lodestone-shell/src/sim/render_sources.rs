@@ -692,9 +692,12 @@ impl Sim {
         let store = self.maps();
         let frame_ids = self.read(crate::entities::entity_map_ids);
         Some(move |id: Option<i32>, frame_entity: Option<i32>| {
-            let id = id
+            let id = match id
                 .or_else(|| frame_entity.and_then(|entity| frame_ids.get(&entity).copied()))
-                .or_else(|| store.ids().next())?;
+            {
+                Some(raw) => lodestone_game::maps::MapId::new(raw)?,
+                None => store.ids().next()?,
+            };
             let map = store.get(id)?;
             Some(crate::gpu::MapPicture::new(
                 id,
