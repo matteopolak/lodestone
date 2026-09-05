@@ -85,15 +85,18 @@ impl AdapterHost {
     /// The setup runs after the JVM starts but before the adapter class loads.
     /// It receives no world state and must not invoke arbitrary operator code;
     /// it exists for a lifecycle host to load and validate an operator bootstrap
-    /// class in the same JVM that will own the adapter.
-    pub fn start_with_setup<F>(
+    /// class in the same JVM that will own the adapter. A successful result
+    /// remains on that worker until the adapter stops, so setup can retain
+    /// loader-owned JVM state without publishing it to the tick thread.
+    pub fn start_with_setup<F, S>(
         config: JvmConfig,
         class: &str,
         deadline: Duration,
         setup: F,
     ) -> Result<Self, AdapterError>
     where
-        F: for<'local> FnOnce(&JvmRuntime, &mut Env<'local>) -> Result<(), String> + Send + 'static,
+        F: for<'local> FnOnce(&JvmRuntime, &mut Env<'local>) -> Result<S, String> + Send + 'static,
+        S: Send + 'static,
     {
         validate_class(class)?;
         if deadline.is_zero() {
@@ -230,13 +233,13 @@ fn validate_class(class: &str) -> Result<(), AdapterError> {
     }
 }
 
-fn run_java(
+fn run_java<S>(
     config: JvmConfig,
     class_name: &str,
     commands: Receiver<u64>,
     events: &Events,
     port: BlockPort,
-    setup: impl for<'local> FnOnce(&JvmRuntime, &mut Env<'local>) -> Result<(), String>,
+    setup: impl for<'local> FnOnce(&JvmRuntime, &mut Env<'local>) -> Result<S, String>,
 ) -> Result<(), AdapterError> {
     // Operator paths are supplied only to isolated loaders below. Putting
     // either the adapter or a Paper jar on the system loader would let its
@@ -245,7 +248,7 @@ fn run_java(
         .map_err(|error| AdapterError::new(format!("adapter {class_name}: {error}")))?;
     runtime.with_attached_thread(|env| {
         let result = (|| {
-            setup(&runtime, env).map_err(|error| AdapterError::new(format!(
+            let setup_state = setup(&runtime, env).map_err(|error| AdapterError::new(format!(
                 "adapter {class_name} setup: {error}"
             )))?;
             let class = runtime.load_isolated_class(env, &config, class_name)
@@ -269,6 +272,7 @@ fn run_java(
                     break;
                 }
             }
+            drop(setup_state);
             Ok(())
         })();
         CALLBACK_PORT.with(|slot| *slot.borrow_mut() = None);

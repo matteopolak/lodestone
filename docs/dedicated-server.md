@@ -257,9 +257,11 @@ resolution. When a shim path is set it must contain the operator-built
 host validates and registers it in every fresh loader before that loader sees a lifecycle entry.
 Invalid paths, declarations, plugin descriptors, or declared main-class archive entries stop cleanly
 before readiness. Each plugin entry gets a fresh shim-first isolated loader that sees only the shim,
-server, and that plugin jar. A lifecycle-load failure also saves and stops the server, so a requested
-Paper intake cannot silently degrade into an ordinary adapter run. These loads do not initialize
-Paper, retain a plugin loader, instantiate or enable a plugin, or provide Paper-plugin compatibility.
+server, and that plugin jar. The Java adapter worker retains those loaders until it stops, preserving
+their class definitions and shim-native registrations. A lifecycle-load failure also saves and stops
+the server, so a requested Paper intake cannot silently degrade into an ordinary adapter run. These
+loads do not initialize Paper, retain an entry class or plugin object, instantiate or enable a plugin,
+or provide Paper-plugin compatibility.
 See [Java plugin bridge](java-plugin-bridge.md) for its explicit boundary and live
 fixture.
 

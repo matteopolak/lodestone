@@ -51,6 +51,8 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
     assert!(archive.status.success(), "jar: {}", String::from_utf8_lossy(&archive.stderr));
     let setup_ran = Arc::new(AtomicBool::new(false));
     let setup_observed = Arc::clone(&setup_ran);
+    let setup_dropped = Arc::new(AtomicBool::new(false));
+    let setup_drop_observed = Arc::clone(&setup_dropped);
     let mut host = AdapterHost::start_with_setup(
         JvmConfig::new().with_classpath(&adapter_jar),
         "lodestone.fixture.BridgeAdapter",
@@ -58,7 +60,7 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
         move |_, env| {
             env.find_class(jni_str!("java/lang/Object")).map_err(|error| error.to_string())?;
             setup_observed.store(true, Ordering::SeqCst);
-            Ok(())
+            Ok(SetupState(setup_drop_observed))
         },
     ).expect("worker startup");
     let mut ready = false;
@@ -79,6 +81,7 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
             Ok(Some(AdapterEvent::Ready)) => {
                 assert!(!ready);
                 assert!(setup_ran.load(Ordering::SeqCst), "setup must finish before readiness");
+                assert!(!setup_dropped.load(Ordering::SeqCst), "setup state must survive readiness");
                 ready = true;
                 host.dispatch_tick(37).unwrap();
             }
@@ -98,6 +101,15 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
     assert!(failure.contains("onTick(J)V"), "{failure}");
     assert!(failure.contains("RuntimeException"), "{failure}");
     assert!(failure.contains("blockStateId(-19,5,23): fixture chunk unavailable"), "{failure}");
+    assert!(setup_dropped.load(Ordering::SeqCst), "setup state must drop after the worker stops");
     drop(host);
     std::fs::remove_dir_all(&root).expect("remove generated fixture directory");
+}
+
+struct SetupState(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for SetupState {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }

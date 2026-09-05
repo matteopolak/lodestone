@@ -59,8 +59,9 @@ fn lifecycle_entries_load_without_initialization() {
         .expect("discover stand-in lifecycle inputs");
     let runtime = plan.start_runtime().expect("start JVM");
     runtime.with_attached_thread(|env| {
-        plan.load_lifecycle_entries_in_runtime(&runtime, env)
+        let lifecycle = plan.load_lifecycle_entries_in_runtime(&runtime, env)
             .expect("load classes without running static initializers");
+        assert_eq!(lifecycle.loader_count(), 2, "retain bootstrap and plugin loaders");
         Ok(())
     })
     .expect("attach fixture JVM thread");
