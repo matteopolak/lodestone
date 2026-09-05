@@ -25,6 +25,7 @@ use lodestone_auth::friends::{
 pub(super) struct FriendsApp {
     account: Option<FriendsAccount>,
     activity: Option<PresenceStatus>,
+    overlay_open: bool,
     view: FriendsView,
     #[cfg(not(target_arch = "wasm32"))]
     worker: NativeFriendsWorker,
@@ -37,6 +38,7 @@ impl FriendsApp {
         Self {
             account: None,
             activity: None,
+            overlay_open: false,
             view: FriendsView::default(),
             #[cfg(not(target_arch = "wasm32"))]
             worker: NativeFriendsWorker::new(),
@@ -79,7 +81,10 @@ impl FriendsApp {
     }
 
     pub(super) fn set_overlay_open(&mut self, open: bool) {
-        self.worker.submit(FriendsCommand::Overlay(open));
+        if self.overlay_open != open {
+            self.overlay_open = open;
+            self.worker.submit(FriendsCommand::Overlay(open));
+        }
     }
 
     pub(super) fn mutate(&mut self, mutation: FriendMutation) {
@@ -123,7 +128,19 @@ impl WindowApp {
                 profile_id: account.profile_id,
                 display_name: account.username,
             });
-        self.friends.sync(account, friends_activity(&self.ui, self.sim.session_phase()));
+        for intent in self.nav.take_friends_intents() {
+            match intent {
+                crate::menu::friends::FriendsIntent::Refresh => self.friends.request_refresh(),
+                crate::menu::friends::FriendsIntent::Mutate(mutation) => {
+                    self.friends.mutate(mutation);
+                }
+            }
+        }
+        self.friends
+            .set_overlay_open(self.ui.screen() == crate::menu::Screen::Friends);
+        self.friends
+            .sync(account, friends_activity(&self.ui, self.sim.session_phase()));
+        self.nav.refresh_friends_view(self.friends_view().clone());
     }
 
     /// The one menu-facing Friends read. Its return type makes bearer-token
@@ -519,4 +536,3 @@ mod tests {
         assert!(!format!("{view:?}").contains("must-not-leave-worker"));
     }
 }
-

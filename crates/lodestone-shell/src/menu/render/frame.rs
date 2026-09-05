@@ -1039,6 +1039,7 @@ pub fn owns_frame(screen: super::Screen) -> bool {
             | Screen::Connecting
             | Screen::Error
             | Screen::Credits
+            | Screen::Friends
             | Screen::Social
             | Screen::Statistics
             | Screen::CreateWorld

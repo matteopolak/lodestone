@@ -2579,6 +2579,14 @@ impl WindowApp {
             menu_overlays_drawn += 1;
         }
 
+        if let Some(friends_frame) =
+            crate::menu::nav::friends_overlay_frame(&self.ui, &self.nav)
+            && let Some(menu) = self.menu.as_mut()
+        {
+            menu.render_overlay(device, queue, frame.view(), &friends_frame, w, h);
+            menu_overlays_drawn += 1;
+        }
+
         // Social Interactions is the third screen of this exact shape, and it
         // had the same defect Statistics did: `frame_for` returns `None`, so
         // without this block it draws *nothing*.

@@ -592,6 +592,8 @@ pub fn frame_for<'a>(
         // still wants Social treated as a menu-row screen. See
         // `frame_for_defers_to_an_overlay_for_social` for the coverage the
         // general `owns_frame`/`frame_for` sweep cannot give this one screen.
+        Screen::Friends if !ui.friends_in_world() => Some(super::friends::frame(nav.friends())),
+        Screen::Friends => None,
         Screen::Social => None,
         // Statistics is **always** in-world — `UiState::open_statistics_from_pause`
         // only opens it from `Screen::Paused`, and there is no title-screen
@@ -711,4 +713,3 @@ pub fn stamp_canvas_facts(
     // check for a row kind carrying a hover overlay.
     f.cursor = nav.menu_cursor();
 }
-
