@@ -234,8 +234,10 @@ mod items;
 // `MobSim::new` reads it directly as `orbs::ORB_BEHAVIOR_SEED`.
 mod orbs;
 
-// No re-export: every method here was already `pub`.
+// The merge is crate-visible so only the tick loop can consume owner results.
+// The simulation methods themselves remain on `MobSim`.
 mod falling_blocks;
+pub(crate) use falling_blocks::merge_falling_block_tick_effect_batches;
 
 // No re-export: every `impl MobSim` method here was already `pub`;
 // `VehicleCollision` stays private, used only within this file's own

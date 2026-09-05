@@ -70,6 +70,13 @@ Effects carry that original sequence because entities from two chunks may be
 interleaved; the central publisher restores it rather than changing behavior to
 owner-major order. Negative positions use `floor` followed by Euclidean chunk
 division, so an entity at `x = -0.5` belongs to chunk `-1`, not chunk `0`.
+Falling blocks use the same completion discipline at their landing hand-off:
+`MobSim::tick_falling_block_owner_batches` snapshots every live block's chunk
+owner before its serial motion step and returns one batch per owner, including
+owners whose blocks remain airborne. The tick loop is the only central consumer
+and validates the complete, unique batch set before restoring the prior
+entity-id effect sequence. A landing's placement and discard therefore cannot
+move relative to another landing merely because its chunk owner completes first.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
@@ -157,6 +164,13 @@ are interleaved in the serial simulation list, applying all of one owner's
 effects before another's changes observable packet order. Add both a
 negative-coordinate control and an interleaved-owner order control before a
 future executor is allowed to run owners separately.
+
+Falling-block motion remains serial. Keep its tick-start owner snapshot and
+empty completions even when a block stays airborne, and route every landing
+through `merge_falling_block_tick_effect_batches` before calling the world
+writer. A falling block's placement and discard are separate visible effects,
+so coalescing them or publishing an owner-major batch would change the entity
+stream and block-update order.
 
 Do not drain a scheduled queue directly from a future owner worker. Keep the
 world-wide queue comparator as the tick-start selector, return one completion
