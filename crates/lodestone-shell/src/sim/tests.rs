@@ -1380,6 +1380,50 @@ fn player_rotation_set_reaches_the_drawn_camera_with_relative_flags() {
     );
 }
 
+/// A real routed look target changes the visible camera from the selected
+/// anchor. The feet control has the same target and horizontal direction but a
+/// distinct vertical origin, so it catches an implementation that accepts the
+/// packet yet silently ignores `from_anchor`.
+#[test]
+fn player_look_at_reaches_the_camera_and_respects_the_origin_anchor() {
+    use crate::net::NetUpdate;
+
+    fn directed_pitch(from_anchor: lodestone_model::event::LookAnchor) -> (f32, f32) {
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        sim.player_mut(|player| {
+            player.position = Vec3d::new(1.0, 64.0, 2.0);
+            player.yaw = -73.0;
+            player.pitch = 11.0;
+        });
+        // From the standing eye at y=65.62 this is the exact 3-up, 4-forward
+        // triangle. From feet it is 4.62-up, so the two routes cannot agree.
+        feed.send(NetUpdate::PlayerLookAt {
+            from_anchor,
+            target: lodestone_client::Vec3::new(1.0, 68.62, 6.0),
+        })
+        .expect("loopback accepts the server-directed look target");
+        sim.poll_net();
+        let camera = sim.camera(1.0);
+        (camera.yaw, camera.pitch)
+    }
+
+    let eyes = directed_pitch(lodestone_model::event::LookAnchor::Eyes);
+    let feet = directed_pitch(lodestone_model::event::LookAnchor::Feet);
+
+    assert!(eyes.0.abs() < 1.0e-4, "the target lies directly along +Z: {eyes:?}");
+    assert!(
+        (eyes.1 - -36.869_896).abs() < 1.0e-4,
+        "eyes must use the exact 3:4 look triangle, got {eyes:?}"
+    );
+    assert!(
+        (feet.1 - eyes.1).abs() > 5.0,
+        "control: a feet anchor must produce a visibly steeper pitch than eyes; \
+         eyes={eyes:?}, feet={feet:?}"
+    );
+}
+
 /// The server, rather than the launcher, owns the streamed view radius. Its
 /// update reaches the exact value the loading screen turns into both a progress
 /// denominator and a chunk-status grid side length.

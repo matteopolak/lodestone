@@ -58,7 +58,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**11 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**10 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -68,6 +68,14 @@ exhaustive match itself proves complete, the numerator from arms whose right-han
 exactly `Route::NOWHERE`, excluding the `..Route::NOWHERE` struct-update spread used inside arms
 that set other flags) and fails if this line drifts from the real count — update the number and
 the source together whenever a variant is added or wired.
+
+The current terminal routes are `ChunkCacheCenterChanged`, `SimulationDistanceChanged`,
+`ItemCooldown`, `CameraSet`, `SoundStopped`, `PlayerCombatEntered`, `PlayerCombatEnded`,
+`ProjectilePowerChanged`, `MountScreenOpened`, and `ServerDataReceived`. `PlayerLookAt` is no
+longer in this ledger: `net::forward` carries its resolved target and local anchor to
+`Sim::poll_net`, which derives the view direction and writes the existing `PhysicsState` pose.
+That pose is already the visible camera, interaction ray, audio listener, and outgoing movement
+source; no duplicate target state is retained.
 
 A few variants are deliberately left `Route::NOWHERE` as **negative controls** for exactly this
 table — e.g. one world-state scalar in the same subsystem family as several that were wired,
