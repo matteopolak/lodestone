@@ -11,8 +11,8 @@ struct Tile {
     origin_cell: vec2<i32>,
     atlas_origin: vec2<i32>,
     cell_blocks: u32,
-    _padding0: u32,
-    _padding1: vec2<u32>,
+    near_field_radius_blocks: f32,
+    _padding: vec2<u32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -67,6 +67,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    if (length((in.world - camera.fog_eye.xyz).xz) < tile.near_field_radius_blocks) {
+        discard;
+    }
     let packed = in.colour;
     let r = f32((packed >> 11u) & 31u) / 31.0;
     let g = f32((packed >> 5u) & 63u) / 63.0;

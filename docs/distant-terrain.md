@@ -28,7 +28,8 @@ any one changes the fixed memory budget and coverage. Maintain the floor-divisio
 the world origin. The first screen-visible integration must store this renderer as an optional
 `RenderState` field, populate one tile per redraw from the query source, and submit it before
 normal chunk meshes in the same depth-tested pass. Do not add it to `TerrainCull` or expand the
-normal camera far plane. The pixel gate must prove pixels beyond the real chunk field and include
+normal camera far plane. Set its near-field clip from the real chunk radius so the coarse pass
+cannot paint inside the streamed disk. The pixel gate must prove pixels beyond the real chunk field and include
 the supplied omitted-tile detector control: a synthetic draw submission for an unpopulated slot
 must fail.
 
