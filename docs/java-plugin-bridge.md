@@ -548,7 +548,8 @@ does not stop the host from checking later isolated entries. When the operator
 also requests the isolated native shim, the shared bootstrap loader first resolves
 `lodestone.bridge.IsolatedPaperShim`, verifies its exact static native
 `blockStateId(int, int, int): int`, `serverTickCount(): long`, and
-`setBlockStateId(int, int, int, int): int` declarations, then registers all three Rust callbacks
+`setBlockStateId(int, int, int, int): int`, `currentPluginName(): String`, and
+`currentPluginVersion(): String` declarations, then registers all five Rust callbacks
 before it loads the bootstrap or plugin entry. Each plugin child inherits that one
 registration and definition, preventing the same Java API type from being separately defined for
 each plugin loader.
@@ -579,6 +580,12 @@ for each preflighted entry on that same worker, then retains the resulting Java 
 defining loader. It supplies **no** server object, plugin metadata object, callback surface, event
 system, or compatibility contract. It exists to prove the retained-object and failure-isolation
 mechanics, not to make an ordinary plugin usable.
+The native-surface input permits that same bounded construction path after its shim is installed.
+Its two descriptor queries return the validated name and version only while the matching entry's
+constructor, `onEnable`, or `onDisable` is executing on the adapter worker. They read a worker-local
+stack, not a JVM property, field, world port, or server object; outside one of those calls they fail
+with a Java error. This gives a retained entry a truthful identity without implying a Bukkit/Paper
+metadata or server facade.
 `construct_entries` attempts eligible entries in discovery order; a constructor exception changes only
 that entry to `Failed` with a `Construct` diagnostic and later eligible entries still run. The status
 sequence can continue through the equally narrow retained-object callbacks: `enable_entries` calls
@@ -590,10 +597,9 @@ only that descriptor to `Failed` with an `Enable` or `Disable` diagnostic; later
 earlier reverse-order disable attempts still run. The final retained state keeps every enabled
 instance alive until the worker exits, including one whose disable callback failed. These are
 explicit method names on the experimental entry object, not Bukkit/Paper lifecycle semantics, a
-server facade, plugin metadata, or an event system. The ordinary `Unavailable` input and the narrow
-`NativeServerSurface` input both remain construction blockers. A future server-facing construction
-path must add a real facade through the retained loader rather than treating this entry-only
-experiment as a partial API.
+server facade, plugin metadata, or an event system. The ordinary `Unavailable` input remains a
+construction blocker. A future server-facing construction path must add a real facade through the
+retained loader rather than treating the identity query or entry-only experiment as a partial API.
 
 The unignored unit tests inject loader outcomes and constructor shapes to prove ordering, phase
 rules, bootstrap-terminal failure, isolated plugin failures, callback-failure isolation, and blocking.
@@ -725,19 +731,19 @@ bootstrap loader sees shim paths and the server jar; each plugin child sees only
 inherits those shared definitions. The worker also snapshots each
 descriptor's construction prerequisite. Without `LODESTONE_PAPER_SHIM_PATH`, no facade is available.
 With it, the dedicated host supplies one Java-facing, loader-local native state surface: resident
-block-state reads, validated resident block-state replacement, and the current server tick.
+block-state reads, validated resident block-state replacement, the current server tick, and the
+active retained entry's validated descriptor name and version.
 `AdapterHost::start_with_setup` mints the corresponding capability token only
 from its worker's request ports; consuming it keeps that token with the retained loader state, and the
 dedicated `JavaAdapter::poll` call is the matching live producer through
 `IntegratedServer::resident_block_state_id`, `IntegratedServer::set_resident_block_state_id`, and
 `IntegratedServer::server_tick_count`. A lifecycle caller
-cannot claim that seam with an enum value while no request producer exists. It is not a Bukkit `Server`,
-a plugin loader, or a construction permit: loaded entries remain blocked from construction with a named
-insufficient-facade result. These
+cannot claim that seam with an enum value while no request producer exists. It is not a Bukkit `Server`
+or a plugin loader. It permits only the isolated retained-entry construction and callback experiment
+described above; it is not a general construction permit or plugin compatibility claim. These
 are non-initializing class loads: the host does **not**
-initialize Paper, construct or enable plugins, dispatch Paper events, or promise plugin
-compatibility. Successfully loaded entries are retained but blocked from construction rather than
-receiving a fake partial API. A failed plugin entry is logged with its descriptor and stays disabled;
+initialize Paper, dispatch Paper events, or promise plugin compatibility. A failed plugin entry is
+logged with its descriptor and stays disabled;
 a failed Paper bootstrap remains terminal for the configured run.
 A malformed Paper configuration or bootstrap Load failure saves the world before the configured run
 can continue. A plugin-entry Load failure is instead retained as disabled descriptor status, rather
