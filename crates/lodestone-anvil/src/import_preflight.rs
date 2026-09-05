@@ -245,6 +245,23 @@ impl PreflightReport {
             },
         }
     }
+
+    /// Combines reports in the caller's supplied order.
+    ///
+    /// A world-scale caller uses this to make one authorization cover every
+    /// selected source member. The entries stay payload-free and retain their
+    /// original source locations, so the combined report is still suitable
+    /// for presenting a precise repair or data-loss decision.
+    #[must_use]
+    pub fn combine(reports: impl IntoIterator<Item = Self>) -> Self {
+        let mut combined = Self::default();
+        for report in reports {
+            combined.supported.extend(report.supported);
+            combined.unsupported.extend(report.unsupported);
+            combined.blockers.extend(report.blockers);
+        }
+        combined
+    }
 }
 
 /// Incrementally builds a [`PreflightReport`] while an Anvil walker decodes a

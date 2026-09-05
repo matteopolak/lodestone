@@ -406,6 +406,10 @@ pub mod world_storage;
 /// the selected native record backend.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod anvil_import;
+/// Deterministic, authorization-gated terrain import across every canonical
+/// region file in one selected Anvil world directory.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod anvil_world_import;
 /// Conversion of one complete native chunk record into an Anvil chunk tree.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod anvil_export;
