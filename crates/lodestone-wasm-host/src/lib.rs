@@ -110,7 +110,8 @@ pub mod host;
 pub mod manifest;
 
 pub use abi::{
-    IntentAction, InventoryClickButton, InventoryClickIntent, LoweredAction, MovementOverride,
+    IntentAction, InventoryClickButton, InventoryClickIntent, InventoryClickMode, LoweredAction,
+    MovementOverride,
     capability_for, lift_break_outcome, lift_command_context, lift_event, lift_place_outcome,
     lift_verdict_context, lower_action,
 };

@@ -35,8 +35,8 @@ use lodestone_model::{ClientAction, ClientEvent, PlayerInput, Text};
 use lodestone_physics::{Aabb, CollisionView, PlayerState, Vec3d};
 use lodestone::{config::Config, sim::Sim};
 use lodestone_wasm_host::{
-    Capability, CapabilitySet, InventoryClickButton, InventoryClickIntent, PendingWasmMenuClicks,
-    PluginHost, WasmHostPlugin, WasmPlugins,
+    Capability, CapabilitySet, InventoryClickButton, InventoryClickIntent, InventoryClickMode,
+    PendingWasmMenuClicks, PluginHost, WasmHostPlugin, WasmPlugins,
 };
 
 fn chat(text: &str) -> GameEvent {
@@ -113,6 +113,16 @@ fn inventory_click_capabilities() -> CapabilitySet {
 fn inventory_click_host_policy() -> CapabilitySet {
     let mut policy = CapabilitySet::default_policy();
     policy.insert(Capability::ActInventoryClick);
+    policy
+}
+
+fn inventory_quick_move_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActInventoryQuickMove])
+}
+
+fn inventory_quick_move_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActInventoryQuickMove);
     policy
 }
 
@@ -686,7 +696,7 @@ fn a_wasm_inventory_click_reaches_the_bounded_shell_handoff() {
             .take(),
         vec![InventoryClickIntent {
             slot: 36,
-            button: InventoryClickButton::Left,
+            mode: InventoryClickMode::Pickup(InventoryClickButton::Left),
         }],
         "the guest must reach the shell handoff as bounded copied input, not a packet"
     );
@@ -717,7 +727,7 @@ fn a_wasm_inventory_click_keeps_the_invalid_slot_bounded_until_shell_validation(
             .take(),
         vec![InventoryClickIntent {
             slot: u16::MAX,
-            button: InventoryClickButton::Right,
+            mode: InventoryClickMode::Pickup(InventoryClickButton::Right),
         }],
         "the host must preserve the ABI boundary and leave live menu range validation to the shell"
     );
@@ -743,6 +753,93 @@ fn a_wasm_inventory_click_is_default_denied_before_the_shell_handoff() {
             .take()
             .is_empty(),
         "an ungranted click must not reach the shell handoff"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+/// A separately compiled guest reaches the same bounded handoff with only a
+/// slot. Its separately granted capability keeps a pickup/place grant from
+/// becoming permission to move an entire stack.
+#[test]
+fn a_wasm_inventory_quick_move_reaches_the_bounded_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-quick-move"]);
+    let mut host = PluginHost::new(inventory_quick_move_host_policy()).expect("engine");
+    host.load_file(
+        "inventory-quick-move",
+        &wasm,
+        &inventory_quick_move_capabilities(),
+    )
+    .expect("the explicitly granted quick-move fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take(),
+        vec![InventoryClickIntent {
+            slot: 36,
+            mode: InventoryClickMode::QuickMove,
+        }],
+        "the guest must hand off only the quick-move slot, never a menu or packet"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// The maximal copied slot reaches shell validation unchanged, so the shell's
+/// live-menu check—not a duplicate host-side menu cache—decides whether it can
+/// enter prediction.
+#[test]
+fn a_wasm_inventory_quick_move_keeps_the_invalid_slot_bounded_until_shell_validation() {
+    let wasm = support::build_example_plugin(&["inventory-quick-move-invalid"]);
+    let mut host = PluginHost::new(inventory_quick_move_host_policy()).expect("engine");
+    host.load_file(
+        "inventory-quick-move-invalid",
+        &wasm,
+        &inventory_quick_move_capabilities(),
+    )
+    .expect("the explicitly granted invalid quick-move fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take(),
+        vec![InventoryClickIntent {
+            slot: u16::MAX,
+            mode: InventoryClickMode::QuickMove,
+        }]
+    );
+}
+
+/// The granted integration control above proves this empty handoff means the
+/// default-denied capability gate ran rather than that the guest was inert.
+#[test]
+fn a_wasm_inventory_quick_move_is_default_denied_before_the_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-quick-move"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "inventory-quick-move",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log]),
+    )
+    .expect("a data-flow action may be withheld after the guest loads");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take()
+            .is_empty(),
+        "an ungranted quick move must not reach the shell handoff"
     );
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
 }

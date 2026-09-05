@@ -73,10 +73,19 @@ pub enum IntentAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InventoryClickIntent {
     pub slot: u16,
-    pub button: InventoryClickButton,
+    pub mode: InventoryClickMode,
 }
 
-/// The only two buttons on the initial inventory-click surface.
+/// A copied inventory operation the shell must resolve against the live menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryClickMode {
+    /// A normal primary or secondary pickup/place click.
+    Pickup(InventoryClickButton),
+    /// A shift-click transfer with shell-owned target ordering.
+    QuickMove,
+}
+
+/// The two buttons supported by [`InventoryClickMode::Pickup`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InventoryClickButton {
     Left,
@@ -353,6 +362,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::PlaceBlock(_) => Capability::ActPlace,
         Action::SelectSlot(_) => Capability::ActSelectSlot,
         Action::InventoryClick(_) => Capability::ActInventoryClick,
+        Action::InventoryQuickMove(_) => Capability::ActInventoryQuickMove,
     }
 }
 
@@ -423,10 +433,16 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
         Action::InventoryClick(click) => {
             LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent {
                 slot: click.slot,
-                button: match click.button {
+                mode: InventoryClickMode::Pickup(match click.button {
                     crate::host::InventoryClickButton::Left => InventoryClickButton::Left,
                     crate::host::InventoryClickButton::Right => InventoryClickButton::Right,
-                },
+                }),
+            }))
+        }
+        Action::InventoryQuickMove(slot) => {
+            LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent {
+                slot,
+                mode: InventoryClickMode::QuickMove,
             }))
         }
     })
@@ -582,9 +598,9 @@ mod tests {
         );
     }
 
-    /// Inventory actions cross as only a bounded slot and a two-value button;
-    /// there is no cursor, state id, changed-slot list, or hand-built wire action
-    /// for a guest to forge.
+    /// Inventory pickup/place crosses as only a bounded slot and a two-value
+    /// button; there is no cursor, state id, changed-slot list, or hand-built
+    /// wire action for a guest to forge.
     #[test]
     fn inventory_click_lowers_onto_the_shell_owned_menu_predictor() {
         let click = crate::host::InventoryClick {
@@ -599,7 +615,7 @@ mod tests {
             Ok(LoweredAction::Intent(IntentAction::InventoryClick(
                 InventoryClickIntent {
                     slot: 36,
-                    button: InventoryClickButton::Left,
+                    mode: InventoryClickMode::Pickup(InventoryClickButton::Left),
                 }
             )))
         );
@@ -607,6 +623,32 @@ mod tests {
             lower_action(Action::InventoryClick(click), &CapabilitySet::default_policy()),
             Err(Capability::ActInventoryClick),
             "inventory control must prove the default policy, not guest behaviour, stopped it"
+        );
+    }
+
+    /// Quick move is deliberately a different permission from pickup/place:
+    /// permitting one does not silently grant a guest the wider bulk transfer.
+    #[test]
+    fn inventory_quick_move_lowers_onto_the_shell_owned_menu_predictor() {
+        assert_eq!(
+            lower_action(
+                Action::InventoryQuickMove(36),
+                &CapabilitySet::from_iter([Capability::ActInventoryQuickMove]),
+            ),
+            Ok(LoweredAction::Intent(IntentAction::InventoryClick(
+                InventoryClickIntent {
+                    slot: 36,
+                    mode: InventoryClickMode::QuickMove,
+                }
+            )))
+        );
+        assert_eq!(
+            lower_action(
+                Action::InventoryQuickMove(36),
+                &CapabilitySet::from_iter([Capability::ActInventoryClick]),
+            ),
+            Err(Capability::ActInventoryQuickMove),
+            "pickup/place authority must not also grant quick moves"
         );
     }
 
@@ -799,6 +841,10 @@ mod tests {
             lower_action(Action::SelectSlot(6), &CapabilitySet::empty()),
             Err(Capability::ActSelectSlot)
         );
+        assert_eq!(
+            lower_action(Action::InventoryQuickMove(6), &CapabilitySet::empty()),
+            Err(Capability::ActInventoryQuickMove)
+        );
     }
 
     /// Every action variant is gated by something. Trivial-looking, and it is the
@@ -818,6 +864,11 @@ mod tests {
                 face: BlockFace::Up,
             }),
             Action::SelectSlot(6),
+            Action::InventoryClick(crate::host::InventoryClick {
+                slot: 0,
+                button: crate::host::InventoryClickButton::Left,
+            }),
+            Action::InventoryQuickMove(0),
         ] {
             assert!(
                 lower_action(action.clone(), &CapabilitySet::empty()).is_err(),

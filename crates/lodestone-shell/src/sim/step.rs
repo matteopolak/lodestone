@@ -1053,9 +1053,14 @@ fn submit_wasm_menu_clicks(
             tracing::warn!(slot, "refused a WASM inventory click outside the active menu");
             continue;
         }
-        let click = match request.button {
-            lodestone_wasm_host::InventoryClickButton::Left => Click::left(slot),
-            lodestone_wasm_host::InventoryClickButton::Right => Click::right(slot),
+        let click = match request.mode {
+            lodestone_wasm_host::InventoryClickMode::Pickup(
+                lodestone_wasm_host::InventoryClickButton::Left,
+            ) => Click::left(slot),
+            lodestone_wasm_host::InventoryClickMode::Pickup(
+                lodestone_wasm_host::InventoryClickButton::Right,
+            ) => Click::right(slot),
+            lodestone_wasm_host::InventoryClickMode::QuickMove => Click::shift(slot),
         };
         let _ = handle.menu_click(click, PlayerCtx::survival());
     }
@@ -1069,9 +1074,9 @@ mod wasm_menu_click_tests {
         ClientAction, ClientBuilder, ConnectionState, Directive, LoginProfile, ServerAddress,
         VersionAdapter,
     };
-    use lodestone_model::AdapterError;
+    use lodestone_model::{AdapterError, ContainerClickType};
     use lodestone_net::{Connection, memory_pair};
-    use lodestone_wasm_host::{InventoryClickButton, InventoryClickIntent};
+    use lodestone_wasm_host::{InventoryClickIntent, InventoryClickMode};
     use lodestone_world::WorldSink;
     use uuid::Uuid;
 
@@ -1126,14 +1131,22 @@ mod wasm_menu_click_tests {
                     state_id,
                     slot,
                     button,
+                    click_type,
                     ..
-                } => Ok(Some((
-                    CONTAINER_CLICK_PACKET,
-                    [*window_id, *state_id, *slot, *button]
-                        .into_iter()
-                        .flat_map(i32::to_be_bytes)
-                        .collect(),
-                ))),
+                } => {
+                    assert_eq!(
+                        *click_type,
+                        ContainerClickType::QuickMove,
+                        "the shell must choose the quick-move mode rather than a pickup"
+                    );
+                    Ok(Some((
+                        CONTAINER_CLICK_PACKET,
+                        [*window_id, *state_id, *slot, *button]
+                            .into_iter()
+                            .flat_map(i32::to_be_bytes)
+                            .collect(),
+                    )))
+                }
                 ClientAction::KeepAliveResponse { id } => {
                     Ok(Some((BARRIER_PACKET, id.to_be_bytes().to_vec())))
                 }
@@ -1164,11 +1177,11 @@ mod wasm_menu_click_tests {
             vec![
                 InventoryClickIntent {
                     slot: 36,
-                    button: InventoryClickButton::Left,
+                    mode: InventoryClickMode::QuickMove,
                 },
                 InventoryClickIntent {
                     slot: u16::MAX,
-                    button: InventoryClickButton::Right,
+                    mode: InventoryClickMode::QuickMove,
                 },
             ],
         );
@@ -1188,7 +1201,7 @@ mod wasm_menu_click_tests {
                 .into_iter()
                 .flat_map(i32::to_be_bytes)
                 .collect::<Vec<_>>(),
-            "the real predictor supplies the player window, its live state id, and the left-click button"
+            "the real predictor supplies the player window, its live state id, and the quick-move button"
         );
 
         let second = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
