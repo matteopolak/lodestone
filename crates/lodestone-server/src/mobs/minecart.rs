@@ -129,6 +129,53 @@ use crate::redstone::{base_name, get_bool_property, get_str_property, is_redston
 
 use super::{Detonation, MobSim, TrackedMinecart, block_state_id};
 
+/// The tick-start chunk owner of one minecart.
+///
+/// The live tick task still completes these owners serially. This type makes
+/// the future hand-off explicit without giving a collision query to an owner
+/// other than the cart's source chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MinecartTickOwner {
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl MinecartTickOwner {
+    fn for_position(position: Vec3d) -> Self {
+        Self::Chunk {
+            cx: (position.x.floor() as i32).div_euclid(16),
+            cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+}
+
+/// One completed minecart-owner batch.
+///
+/// Both the expected batch count and the serial slot come from the tick-start
+/// plan, so the central writer can reject an incomplete or substituted result
+/// before changing a cart or consuming the explosion RNG.
+#[derive(Debug, Clone)]
+pub(crate) struct MinecartTickOwnerBatch {
+    owner: MinecartTickOwner,
+    expected_batch_count: usize,
+    effects: Vec<MinecartTickEffect>,
+}
+
+impl MinecartTickOwnerBatch {
+    #[cfg(test)]
+    fn owner(&self) -> MinecartTickOwner {
+        self.owner
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MinecartTickEffect {
+    owner: MinecartTickOwner,
+    serial: usize,
+    id: i32,
+    minecart: TrackedMinecart,
+    detonation: Option<(Vec3, f32)>,
+}
+
 /// `minecraft:rail` — the one rail block not already named as a constant
 /// somewhere in this crate (`crate::redstone_rail::{POWERED_RAIL,
 /// ACTIVATOR_RAIL}`, `crate::redstone::DETECTOR_RAIL}`).
@@ -669,6 +716,97 @@ impl<'w> MobSim<'w> {
     /// spawn-time snapshot, so a driver with the real `ChunkSource` supplies
     /// the answer instead (`tick::run_tick_loop`).
     pub fn tick_minecarts(&mut self, block_state: &dyn Fn(i32, i32, i32) -> String) {
+        self.clear_disconnected_minecart_riders();
+        let mut ids: Vec<i32> = self.minecarts.keys().copied().collect();
+        ids.sort_unstable();
+        let mut detonated = Vec::new();
+        for id in ids {
+            let Some(cart) = self.minecarts.get_mut(&id) else {
+                continue;
+            };
+            if let Some(detonation) = tick_one_minecart(cart, block_state) {
+                detonated.push((id, detonation));
+            }
+        }
+        self.apply_minecart_detonations(detonated);
+    }
+
+    /// Executes minecart physics as independent chunk-owner completions.
+    ///
+    /// A completion owns cloned tick-start cart state, so no owner mutates the
+    /// live map or consumes the shared TNT explosion stream. The central
+    /// writer restores the serial slots before it does either.
+    pub(crate) fn tick_minecart_owner_batches(
+        &mut self,
+        block_state: &dyn Fn(i32, i32, i32) -> String,
+    ) -> Vec<MinecartTickOwnerBatch> {
+        self.clear_disconnected_minecart_riders();
+        let mut ids: Vec<i32> = self.minecarts.keys().copied().collect();
+        ids.sort_unstable();
+        let mut batches = Vec::<MinecartTickOwnerBatch>::new();
+
+        for (serial, id) in ids.into_iter().enumerate() {
+            let minecart = self
+                .minecarts
+                .get(&id)
+                .cloned()
+                .expect("a tick-start minecart id must remain live while planning");
+            let owner = MinecartTickOwner::for_position(minecart.motion.position);
+            let mut ticked = minecart;
+            let detonation = tick_one_minecart(&mut ticked, block_state);
+            let effect = MinecartTickEffect {
+                owner,
+                serial,
+                id,
+                minecart: ticked,
+                detonation,
+            };
+            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
+                batch.effects.push(effect);
+            } else {
+                batches.push(MinecartTickOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects: vec![effect],
+                });
+            }
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
+
+    /// Validates and centrally applies completed minecart-owner batches.
+    ///
+    /// This is the only owner-batch path that writes `minecarts` or advances
+    /// the TNT explosion stream. Restoring entity-id slots before those writes
+    /// preserves transforms, detonation order, and later random decisions
+    /// when independent owners complete in another order.
+    pub(crate) fn apply_minecart_tick_owner_batches(
+        &mut self,
+        batches: Vec<MinecartTickOwnerBatch>,
+    ) {
+        if batches.is_empty() {
+            return;
+        }
+        let effects = merge_minecart_tick_owner_batches(batches);
+        let mut detonated = Vec::new();
+        for effect in effects {
+            assert!(
+                self.minecarts.contains_key(&effect.id),
+                "a minecart owner completion may update only a live tick-start minecart"
+            );
+            self.minecarts.insert(effect.id, effect.minecart);
+            if let Some(detonation) = effect.detonation {
+                detonated.push((effect.id, detonation));
+            }
+        }
+        self.apply_minecart_detonations(detonated);
+    }
+
+    fn clear_disconnected_minecart_riders(&mut self) {
         // The disconnect self-heal, identical in shape to `tick_vehicles`'
         // own: a rider whose connection vanished without an explicit
         // dismount must not freeze forever with a phantom occupant. Guarded
@@ -688,88 +826,10 @@ impl<'w> MobSim<'w> {
                 }
             }
         }
+    }
 
-        let view = MinecartCollision { block_state };
-        let profile = PhysicsProfile::default();
-        let mut ids: Vec<i32> = self.minecarts.keys().copied().collect();
-        ids.sort_unstable();
-
-        let mut detonated: Vec<(i32, Vec3, f32)> = Vec::new();
-
-        for id in ids {
-            let Some(cart) = self.minecarts.get_mut(&id) else {
-                continue;
-            };
-            let prev_position = cart.motion.position;
-
-            // `applyGravity()` — `getDefaultGravity()` depends on
-            // `isInWater()`, read before gravity is applied (matches
-            // vanilla: `isInWater` consults the entity's *current*, not
-            // post-gravity, position — gravity has not moved it yet).
-            let wet = in_water(&view, cart.motion.position);
-            cart.motion.velocity.y -= if wet { GRAVITY_WATER } else { GRAVITY_LAND };
-
-            let pos = current_block_pos_or_rail_below(&view, cart.motion.position);
-            let state = view.state_at(pos.x, pos.y, pos.z);
-            let on_rails = is_rail_block(&state);
-
-            if on_rails {
-                move_along_track(cart, pos, &state, &view, &profile, wet);
-                if base_name(&state) == crate::redstone_rail::ACTIVATOR_RAIL {
-                    let active = get_bool_property(&state, "powered").unwrap_or(false);
-                    apply_activation(cart, active);
-                }
-            } else {
-                come_off_track(cart, &view, &profile, wet);
-            }
-
-            // The yaw/flip bookkeeping — `OldMinecartBehavior.tick`'s tail,
-            // after `moveAlongTrack`/`comeOffTrack`. `prev_position` stands
-            // in for vanilla's `xo`/`zo` (the position at the top of this
-            // tick), which is exactly what changed between then and now.
-            let x_diff = prev_position.x - cart.motion.position.x;
-            let z_diff = prev_position.z - cart.motion.position.z;
-            if x_diff * x_diff + z_diff * z_diff > 0.001 {
-                let mut yaw = (z_diff.atan2(x_diff) * 180.0 / std::f64::consts::PI) as f32;
-                if cart.flipped {
-                    yaw += 180.0;
-                }
-                cart.yaw = yaw;
-            }
-            let rot_diff = wrap_degrees_f32(cart.yaw - cart.yaw_o);
-            if rot_diff < -170.0 || rot_diff >= 170.0 {
-                cart.yaw += 180.0;
-                cart.flipped = !cart.flipped;
-            }
-            cart.yaw %= 360.0;
-            cart.yaw_o = cart.yaw;
-
-            // `MinecartFurnace.tick`'s own independent fuel countdown — runs
-            // every tick regardless of on/off rail, exactly as vanilla's
-            // does (it lives in `AbstractMinecart.tick`'s subclass override,
-            // not inside the behaviour's rail-following branch).
-            if cart.kind.is_furnace() {
-                if cart.fuel > 0 {
-                    cart.fuel -= 1;
-                }
-                if cart.fuel <= 0 {
-                    cart.push = Vec3d::ZERO;
-                }
-            }
-
-            // `MinecartTNT.tick`'s own fuse/collision-triggered detonation.
-            let speed_sqr = cart.motion.velocity.x * cart.motion.velocity.x + cart.motion.velocity.z * cart.motion.velocity.z;
-            if cart.fuse > 0 {
-                cart.fuse -= 1;
-            } else if cart.fuse == 0 {
-                detonated.push((id, Vec3::new(cart.motion.position.x, cart.motion.position.y, cart.motion.position.z), speed_sqr as f32));
-                cart.fuse = -1;
-            } else if cart.motion.horizontal_collision && speed_sqr >= 0.01 {
-                detonated.push((id, Vec3::new(cart.motion.position.x, cart.motion.position.y, cart.motion.position.z), speed_sqr as f32));
-            }
-        }
-
-        for (id, centre, speed_sqr) in detonated {
+    fn apply_minecart_detonations(&mut self, detonated: Vec<(i32, (Vec3, f32))>) {
+        for (id, (centre, speed_sqr)) in detonated {
             self.minecarts.remove(&id);
             // `MinecartTNT.explode` — `explosionPowerBase +
             // explosionSpeedFactor * random * 1.5 * min(sqrt(speedSqr), 5.0)`.
@@ -782,6 +842,117 @@ impl<'w> MobSim<'w> {
             self.explode(centre, power, DamageFlags::default());
             self.pending_detonations.push(Detonation { centre, radius: power });
         }
+    }
+}
+
+fn merge_minecart_tick_owner_batches(
+    mut batches: Vec<MinecartTickOwnerBatch>,
+) -> Vec<MinecartTickEffect> {
+    let expected_batch_count = batches
+        .first()
+        .map(|batch| batch.expected_batch_count)
+        .expect("minecart owner completion must contain every tick-start owner batch");
+    let mut owners = std::collections::HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.expected_batch_count, expected_batch_count,
+            "minecart owner completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "minecart owner completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "a minecart owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "minecart owner completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "minecart owner completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
+}
+
+fn tick_one_minecart(
+    cart: &mut TrackedMinecart,
+    block_state: &dyn Fn(i32, i32, i32) -> String,
+) -> Option<(Vec3, f32)> {
+    let view = MinecartCollision { block_state };
+    let profile = PhysicsProfile::default();
+    let prev_position = cart.motion.position;
+
+    let wet = in_water(&view, cart.motion.position);
+    cart.motion.velocity.y -= if wet { GRAVITY_WATER } else { GRAVITY_LAND };
+
+    let pos = current_block_pos_or_rail_below(&view, cart.motion.position);
+    let state = view.state_at(pos.x, pos.y, pos.z);
+    if is_rail_block(&state) {
+        move_along_track(cart, pos, &state, &view, &profile, wet);
+        if base_name(&state) == crate::redstone_rail::ACTIVATOR_RAIL {
+            let active = get_bool_property(&state, "powered").unwrap_or(false);
+            apply_activation(cart, active);
+        }
+    } else {
+        come_off_track(cart, &view, &profile, wet);
+    }
+
+    let x_diff = prev_position.x - cart.motion.position.x;
+    let z_diff = prev_position.z - cart.motion.position.z;
+    if x_diff * x_diff + z_diff * z_diff > 0.001 {
+        let mut yaw = (z_diff.atan2(x_diff) * 180.0 / std::f64::consts::PI) as f32;
+        if cart.flipped {
+            yaw += 180.0;
+        }
+        cart.yaw = yaw;
+    }
+    let rot_diff = wrap_degrees_f32(cart.yaw - cart.yaw_o);
+    if rot_diff < -170.0 || rot_diff >= 170.0 {
+        cart.yaw += 180.0;
+        cart.flipped = !cart.flipped;
+    }
+    cart.yaw %= 360.0;
+    cart.yaw_o = cart.yaw;
+
+    if cart.kind.is_furnace() {
+        if cart.fuel > 0 {
+            cart.fuel -= 1;
+        }
+        if cart.fuel <= 0 {
+            cart.push = Vec3d::ZERO;
+        }
+    }
+
+    let speed_sqr = cart.motion.velocity.x * cart.motion.velocity.x
+        + cart.motion.velocity.z * cart.motion.velocity.z;
+    if cart.fuse > 0 {
+        cart.fuse -= 1;
+        None
+    } else if cart.fuse == 0 {
+        cart.fuse = -1;
+        Some((
+            Vec3::new(cart.motion.position.x, cart.motion.position.y, cart.motion.position.z),
+            speed_sqr as f32,
+        ))
+    } else if cart.motion.horizontal_collision && speed_sqr >= 0.01 {
+        Some((
+            Vec3::new(cart.motion.position.x, cart.motion.position.y, cart.motion.position.z),
+            speed_sqr as f32,
+        ))
+    } else {
+        None
     }
 }
 
@@ -1026,6 +1197,88 @@ mod tests {
     fn sim() -> MobSim<'static> {
         let world: &'static ChunkWorld = Box::leak(Box::new(ChunkWorld::new(-64, 384)));
         MobSim::new(world)
+    }
+
+    fn owner_batch_fixture() -> MobSim<'static> {
+        let mut sim = sim();
+        for position in [
+            Vec3::new(-7.5, 70.0, 0.5),
+            Vec3::new(24.5, 70.0, 0.5),
+            Vec3::new(-6.5, 70.0, 2.5),
+        ] {
+            sim.spawn_minecart(MinecartKind::Plain, position);
+        }
+        sim
+    }
+
+    fn flat_world() -> impl Fn(i32, i32, i32) -> String {
+        |_x, y, _z| {
+            if y <= 60 {
+                "minecraft:stone".to_owned()
+            } else {
+                "minecraft:air".to_owned()
+            }
+        }
+    }
+
+    #[test]
+    fn minecart_owner_batches_restore_serial_state_after_reversed_completion() {
+        let mut serial = owner_batch_fixture();
+        let mut completed = owner_batch_fixture();
+
+        // The serial pass is intentionally independent: it neither constructs
+        // owner batches nor calls their merge path.
+        serial.tick_minecarts(&flat_world());
+        let public_state = |sim: &MobSim<'_>| {
+            sim.snapshots()
+                .into_iter()
+                .map(|snapshot| {
+                    (
+                        snapshot.id,
+                        snapshot.position,
+                        snapshot.velocity,
+                        snapshot.metadata,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let serial_state = public_state(&serial);
+
+        let mut batches = completed.tick_minecart_owner_batches(&flat_world());
+        assert_eq!(
+            batches.iter().map(MinecartTickOwnerBatch::owner).collect::<Vec<_>>(),
+            vec![
+                MinecartTickOwner::Chunk { cx: -1, cz: 0 },
+                MinecartTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "the fixture must interleave serial minecarts across two owners"
+        );
+        batches.reverse();
+        completed.apply_minecart_tick_owner_batches(batches);
+
+        assert_eq!(
+            public_state(&completed),
+            serial_state,
+            "the central consumer must restore entity-id order after reversed owner completion"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "every tick-start owner batch exactly once")]
+    fn minecart_owner_batch_merge_rejects_a_missing_owner() {
+        let mut sim = owner_batch_fixture();
+        let mut batches = sim.tick_minecart_owner_batches(&flat_world());
+        batches.pop();
+        sim.apply_minecart_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not contain one owner twice")]
+    fn minecart_owner_batch_merge_rejects_a_duplicate_owner() {
+        let mut sim = owner_batch_fixture();
+        let mut batches = sim.tick_minecart_owner_batches(&flat_world());
+        batches.push(batches[0].clone());
+        sim.apply_minecart_tick_owner_batches(batches);
     }
 
     /// A flat stone floor at `y = 60`, plain rail at `y = 61` running

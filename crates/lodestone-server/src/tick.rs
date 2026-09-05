@@ -3719,7 +3719,10 @@ async fn run_tick_loop_with_weather_impl<W>(
         // `MobSim::pending_detonations` exactly as primed TNT's does, so it
         // reaches the `take_detonations` drain above on the tick after this
         // one, the same accepted one-tick latency.
-        mobs.with(|sim| sim.tick_minecarts(&|x, y, z| world.block_state(x, y, z)));
+        let minecart_batches = mobs.with(|sim| {
+            sim.tick_minecart_owner_batches(&|x, y, z| world.block_state(x, y, z))
+        });
+        mobs.with(|sim| sim.apply_minecart_tick_owner_batches(minecart_batches));
 
         // The ender dragon's phase machine and its crystals' healing proc.
         // Unlike its neighbours above this needs no block reads: every input
