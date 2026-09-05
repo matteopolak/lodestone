@@ -56,6 +56,7 @@ fn chunk(column: i32, seed: u8) -> StorageRecord {
             block_scheduled_ticks: vec![],
             extensions: vec![],
             fluid_scheduled_ticks: vec![],
+            light_sections: vec![],
         })),
     }
 }

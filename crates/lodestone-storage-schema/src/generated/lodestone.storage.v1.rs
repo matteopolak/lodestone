@@ -59,6 +59,42 @@ pub struct ChunkRecord {
     pub extensions: ::prost::alloc::vec::Vec<ExtensionValue>,
     #[prost(message, repeated, tag = "11")]
     pub fluid_scheduled_ticks: ::prost::alloc::vec::Vec<ScheduledTick>,
+    /// The complete canonical light column, including one section below and one
+    /// section above the block range. An absent repeated field means this record
+    /// predates native light persistence; when present it must contain the full
+    /// contiguous light-section range for the requested dimension.
+    #[prost(message, repeated, tag = "12")]
+    pub light_sections: ::prost::alloc::vec::Vec<LightSection>,
+}
+/// Sky and block light for one canonical light-section coordinate. The section
+/// coordinate is independent of ChunkSection: light section zero sits below
+/// the world's lowest block section.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LightSection {
+    #[prost(sint32, tag = "1")]
+    pub section_y: i32,
+    #[prost(message, optional, tag = "2")]
+    pub sky_light: ::core::option::Option<LightData>,
+    #[prost(message, optional, tag = "3")]
+    pub block_light: ::core::option::Option<LightData>,
+}
+/// A light layer uses no `data` member for Missing, a compact uniform value for
+/// common all-zero/full sections, or exactly 2048 packed nibbles for Values.
+/// The adapter validates the 0..15 uniform range and exact array length.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LightData {
+    #[prost(oneof = "light_data::Data", tags = "1, 2")]
+    pub data: ::core::option::Option<light_data::Data>,
+}
+/// Nested message and enum types in `LightData`.
+pub mod light_data {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Data {
+        #[prost(uint32, tag = "1")]
+        Uniform(u32),
+        #[prost(bytes, tag = "2")]
+        Values(::prost::alloc::vec::Vec<u8>),
+    }
 }
 /// Only built-in server actions have a native representation. Custom actions
 /// have no lossless decoder in this format and must be rejected by its adapter.

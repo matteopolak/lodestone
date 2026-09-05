@@ -716,8 +716,8 @@ fn crc32(bytes: &[u8]) -> u32 {
 mod tests {
     use super::*;
     use lodestone_storage_schema::{
-        ExtensionValue, ChunkRecord, ChunkSection, GeneralRecord, WorldProperties,
-        generated::{general_record, storage_record},
+        ChunkRecord, ChunkSection, ExtensionValue, GeneralRecord, LightData, LightSection,
+        WorldProperties, generated::{general_record, light_data, storage_record},
     };
     use tempfile::tempdir;
 
@@ -743,12 +743,60 @@ mod tests {
                 block_scheduled_ticks: vec![],
                 extensions: vec![],
                 fluid_scheduled_ticks: vec![],
+                light_sections: vec![],
             })),
         }
     }
 
     fn key() -> RecordKey {
         RecordKey::chunk(-12, 34)
+    }
+
+    #[test]
+    fn typed_light_chunk_survives_transactional_reopen_compactly() {
+        let directory = tempdir().unwrap();
+        let mut record = chunk(-12, 34, 1);
+        let Some(Record::Chunk(body)) = &mut record.record else {
+            panic!("test chunk has a chunk body");
+        };
+        body.light_sections = vec![
+            LightSection {
+                section_y: -1,
+                sky_light: Some(LightData {
+                    data: Some(light_data::Data::Uniform(15)),
+                }),
+                block_light: Some(LightData {
+                    data: Some(light_data::Data::Uniform(0)),
+                }),
+            },
+            LightSection {
+                section_y: 0,
+                sky_light: Some(LightData {
+                    data: Some(light_data::Data::Values(
+                        (0..2048).map(|index| (index as u8).wrapping_mul(5)).collect(),
+                    )),
+                }),
+                // An absent oneof is the canonical Missing layer.
+                block_light: None,
+            },
+            LightSection {
+                section_y: 1,
+                sky_light: None,
+                block_light: None,
+            },
+        ];
+        let expected_bytes = record.encode_to_vec().len();
+        assert!(expected_bytes < 2800, "uniform and missing layers must stay compact");
+
+        {
+            let mut store = NativeStore::open(directory.path()).unwrap();
+            store
+                .write_transaction([RecordWrite::new(key(), record.clone())])
+                .unwrap();
+        }
+        let mut reopened = NativeStore::open(directory.path()).unwrap();
+        assert_eq!(reopened.get(key()).unwrap(), Some(record));
+        assert_eq!(reopened.recovery().transactions, 1);
     }
 
     fn world_properties(seed: i64) -> StorageRecord {
