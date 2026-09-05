@@ -21,7 +21,7 @@ use crate::packets::game::{
     ClientboundChat, ClientboundPositionLook, JoinGame, KeepAliveRequest, KeepAliveResponse,
     EntityAction, ServerboundArmAnimation, ServerboundChat, ServerboundFlying,
     ServerboundLook, ServerboundPosition, ServerboundPositionLook,
-    ServerboundCustomPayload,
+    ServerboundCustomPayload, UpdateHealth,
 };
 use crate::packets::entity::Animation;
 use crate::packets::handshake::SetProtocol;
@@ -603,6 +603,26 @@ impl ServerProtocol for V5ServerProtocol {
         send(
             play::clientbound::KEEP_ALIVE,
             &KeepAliveRequest { keep_alive_id },
+        )
+    }
+
+    /// Re-sends the authoritative vitals after damage or respawn. Protocol 5
+    /// stores food as a fixed-width signed short, unlike the later VarInt
+    /// shape, so this cannot reuse a neighbouring era's packet definition.
+    fn encode_set_health(
+        &self,
+        health: f32,
+        food: i32,
+        saturation: f32,
+    ) -> ServerDirective {
+        send(
+            play::clientbound::UPDATE_HEALTH,
+            &UpdateHealth {
+                health: health.clamp(0.0, 20.0),
+                food: i16::try_from(food.clamp(0, 20))
+                    .expect("a clamped protocol-5 food level fits i16"),
+                food_saturation: saturation.clamp(0.0, 20.0),
+            },
         )
     }
 
