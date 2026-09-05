@@ -228,7 +228,8 @@ pub use scheduler::{SchedulerPlugin, TaskId, TaskScheduler, run_due_tasks};
 pub use schedules::{Extract, GameTick, NetIngest, Update};
 pub use session::{
     Abilities, ActionBarOverlay, HudEffects, Phase, RespawnCount, Riding, ServerAlive,
-    ServerDifficulty, ServerDimension, ServerEntityId, ServerGameMode, SessionBlockDestruction,
+    ServerDifficulty, ServerDimension, ServerEntityId, ServerGameMode, ServerSimulationDistance,
+    SessionBlockDestruction,
     SessionBossBars, SessionChat, SessionDebugFeeds, SessionEnd, SessionEndKind, SessionHudPlugin,
     SessionItemCooldowns,
     SessionMenus, SessionPhase,

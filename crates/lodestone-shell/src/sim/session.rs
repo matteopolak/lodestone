@@ -1727,6 +1727,20 @@ impl Sim {
         })
     }
 
+    /// The simulation distance the server last reported, in chunks.
+    ///
+    /// This is not [`Self::set_view_radius`]'s streamed-view radius: a server
+    /// can send columns farther away than it advances them. The F3 entity line
+    /// reads this session component to show that server-owned distinction.
+    #[must_use]
+    pub fn simulation_distance(&self) -> Option<i32> {
+        self.read(|w| {
+            w.get::<ServerSimulationDistance>(self.local)
+                .expect("the local player always carries ServerSimulationDistance")
+                .0
+        })
+    }
+
     /// The server's own recipe-book panel state, as `RECIPE_BOOK_SETTINGS` (76)
     /// last reported it (`SessionRecipeBookSettings` island).
     ///

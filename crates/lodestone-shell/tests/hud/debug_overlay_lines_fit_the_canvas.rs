@@ -118,6 +118,7 @@ fn realistic_stats() -> DebugStats {
         weather_rain_columns: 121,
         status: "local world".into(),
         difficulty: Some((lodestone_model::Difficulty::Normal, false)),
+        simulation_distance: Some(11),
         light: Some((15, 4)),
         adapter: vec![
             "Apple M5 (IntegratedGpu)".into(),
