@@ -2753,6 +2753,36 @@ impl IntegratedServer {
         storage.write_dirty(writes)
     }
 
+    /// Registers native extension schemas for records written through this
+    /// server's selected typed backend.
+    ///
+    /// The live Anvil save path remains untouched. This only establishes the
+    /// durable local-ID table that a later native producer must use before it
+    /// can submit extension payloads; an unwired or Anvil-backed server refuses
+    /// the request instead of pretending its table is empty.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn register_native_extensions(
+        &self,
+        registrations: impl IntoIterator<Item = lodestone_storage::ExtensionRegistration>,
+    ) -> Result<Vec<lodestone_storage_schema::RegisteredExtension>, crate::world_storage::Error>
+    {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.register_native_extensions(registrations)
+    }
+
+    /// Returns the selected native backend's durable extension table.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn native_extension_table(
+        &self,
+    ) -> Result<lodestone_storage_schema::ExtensionTable, crate::world_storage::Error> {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.native_extension_table()
+    }
+
     /// Saves one dirty terrain column through the selected native record backend.
     ///
     /// This is deliberately a narrow producer, not a switch of the live world
@@ -4469,6 +4499,18 @@ mod tests {
                 columns: Arc::new(Mutex::new(columns)),
             }
         }
+
+        fn unlit_torch_in_next_column() -> Self {
+            let source = Self::water_at_east_edge();
+            source
+                .columns
+                .lock()
+                .expect("fluid fixture columns poisoned")
+                .get_mut(&(1, 0))
+                .expect("the next-column fixture is retained")
+                .set_block(0, 1, 0, "minecraft:redstone_torch[lit=false]");
+            source
+        }
     }
 
     impl ChunkSource for FluidFixtureSource {
@@ -4550,6 +4592,51 @@ mod tests {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "the integrated tick loop reached {:?} ticks without moving the scheduled water into chunk (1, 0)",
+                server.tick_stats().map(|stats| stats.tick_count),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The live `IntegratedServer` consumes a scheduled redstone tick held by
+    /// column `(1, 0)`. This is the production consumer for the block half of
+    /// the column-owned queue; the queue controls separately prove that a
+    /// cross-owner callback retains its insertion order and cancellation
+    /// boundary before reaching this drain.
+    #[tokio::test]
+    async fn integrated_server_consumes_a_column_owned_redstone_tick() {
+        let source = FluidFixtureSource::unlit_torch_in_next_column();
+        let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
+            Silent,
+            source,
+            (0..=0, 0..=0),
+            (8, 8),
+            0,
+            2,
+        );
+        let mut pending = crate::scheduled_tick::ScheduledTickQueue::new();
+        assert!(pending.schedule(
+            (16, 1, 0),
+            crate::redstone::TICK_TORCH.to_owned(),
+            1,
+            crate::scheduled_tick::TickPriority::Normal,
+        ));
+        server
+            .block_ticks()
+            .expect("a ticking integrated server exposes its inbound tick feed")
+            .request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if server.resident_block_state_id(16, 1, 0).is_some_and(|state| {
+                state.name() == "minecraft:redstone_torch"
+                    && state.properties().contains(&("lit", "true"))
+            }) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the integrated tick loop reached {:?} ticks without consuming the scheduled torch in column (1, 0)",
                 server.tick_stats().map(|stats| stats.tick_count),
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -5185,6 +5272,89 @@ mod tests {
             "only the submitted dirty record may have produced a transaction"
         );
         drop(reopened);
+        std::fs::remove_dir_all(&world_dir).expect("remove test world");
+    }
+
+    /// Extension IDs are a native-store identity, not transient server state:
+    /// the second server must see the same compact IDs after the first handle
+    /// has stopped. This exercises the selected backend through
+    /// `IntegratedServer`, while leaving the Anvil terrain path in place.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn persistent_server_reopens_native_extension_table() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "lodestone-native-extensions-server-{}-{unique}",
+            std::process::id()
+        ));
+        let native_dir = world_dir.join("native");
+        let first_storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir.clone(),
+            },
+        )
+        .expect("open first native segment");
+        let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            Silent,
+            &world_dir,
+            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+            0,
+            16,
+            (0..=0, 0..=0),
+            (0, 0),
+            0,
+            0,
+            std::time::Duration::from_secs(3600),
+            first_storage,
+        )
+        .expect("open first persistent server");
+        let assigned = server
+            .register_native_extensions([
+                lodestone_storage::ExtensionRegistration::new("example", "weather", 2),
+                lodestone_storage::ExtensionRegistration::new("example", "claims", 1),
+            ])
+            .expect("register extension schemas");
+        assert_eq!(
+            assigned
+                .iter()
+                .map(|entry| (entry.local_id, entry.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, "claims"), (2, "weather")]
+        );
+        server.shutdown().await;
+
+        let second_storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir,
+            },
+        )
+        .expect("reopen native segment");
+        let (reopened, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            Silent,
+            &world_dir,
+            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+            0,
+            16,
+            (0..=0, 0..=0),
+            (0, 0),
+            0,
+            0,
+            std::time::Duration::from_secs(3600),
+            second_storage,
+        )
+        .expect("open second persistent server");
+        assert_eq!(
+            reopened
+                .native_extension_table()
+                .expect("selected native table")
+                .extensions,
+            assigned,
+            "a fresh server must read the first server's durable extension IDs"
+        );
+        reopened.shutdown().await;
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
     }
 

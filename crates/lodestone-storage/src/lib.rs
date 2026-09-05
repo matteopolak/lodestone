@@ -13,10 +13,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use lodestone_storage_schema::{generated::storage_record::Record, validate_record, StorageRecord};
+use lodestone_storage_schema::{
+    ExtensionTable, RegisteredExtension, StorageRecord, generated::storage_record::Record,
+    validate_extension_table, validate_record, validate_record_with_extensions,
+};
 use prost::Message;
 
 const SEGMENT_NAME: &str = "world.ls";
+const EXTENSION_TABLE_NAME: &str = "extensions.ls";
 const FORMAT_VERSION: u16 = 1;
 const TRANSACTION_START_MAGIC: [u8; 4] = *b"LSTB";
 const TRANSACTION_COMMIT_MAGIC: [u8; 4] = *b"LSTC";
@@ -102,6 +106,33 @@ pub struct RecordWrite {
     pub record: StorageRecord,
 }
 
+/// One named extension schema a native store can register.
+///
+/// The store assigns compact IDs in a stable order and retains that assignment
+/// in its extension-table sidecar. Records then carry only the assigned ID and
+/// their payload; neither a chunk nor a general record repeats these strings.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ExtensionRegistration {
+    /// Extension namespace, such as `example`.
+    pub namespace: String,
+    /// Schema name within `namespace`.
+    pub name: String,
+    /// The extension's non-zero payload schema version.
+    pub schema_version: u32,
+}
+
+impl ExtensionRegistration {
+    /// Builds one requested extension schema.
+    #[must_use]
+    pub fn new(namespace: impl Into<String>, name: impl Into<String>, schema_version: u32) -> Self {
+        Self {
+            namespace: namespace.into(),
+            name: name.into(),
+            schema_version,
+        }
+    }
+}
+
 impl RecordWrite {
     pub const fn new(key: RecordKey, record: StorageRecord) -> Self {
         Self { key, record }
@@ -132,6 +163,14 @@ struct IndexEntry {
 pub enum StoreError {
     Io(io::Error),
     InvalidRecord(lodestone_storage_schema::ValidationError),
+    InvalidExtensionTable(lodestone_storage_schema::ValidationError),
+    ExtensionSchemaConflict {
+        namespace: String,
+        name: String,
+        existing_version: u32,
+        requested_version: u32,
+    },
+    ExtensionIdExhausted,
     EmptyTransaction,
     DuplicateKey(RecordKey),
     RecordTooLarge,
@@ -152,6 +191,20 @@ impl fmt::Display for StoreError {
         match self {
             Self::Io(error) => write!(formatter, "storage I/O failed: {error}"),
             Self::InvalidRecord(error) => write!(formatter, "invalid storage record: {error}"),
+            Self::InvalidExtensionTable(error) => {
+                write!(formatter, "invalid native extension table: {error}")
+            }
+            Self::ExtensionSchemaConflict {
+                namespace,
+                name,
+                existing_version,
+                requested_version,
+            } => write!(
+                formatter,
+                "extension {namespace}:{name} is already registered at schema version \
+                 {existing_version}, not requested version {requested_version}"
+            ),
+            Self::ExtensionIdExhausted => formatter.write_str("native extension IDs are exhausted"),
             Self::EmptyTransaction => formatter.write_str("storage transaction has no records"),
             Self::DuplicateKey(key) => write!(formatter, "storage transaction repeats key {key:?}"),
             Self::RecordTooLarge => formatter.write_str("storage record exceeds u32 length"),
@@ -182,6 +235,8 @@ impl From<io::Error> for StoreError {
 pub struct NativeStore {
     file: File,
     path: PathBuf,
+    extension_table_path: PathBuf,
+    extension_table: ExtensionTable,
     index: BTreeMap<RecordKey, IndexEntry>,
     recovery: Recovery,
 }
@@ -194,6 +249,8 @@ impl NativeStore {
     pub fn open(directory: impl AsRef<Path>) -> Result<Self, StoreError> {
         fs::create_dir_all(directory.as_ref())?;
         let path = directory.as_ref().join(SEGMENT_NAME);
+        let extension_table_path = directory.as_ref().join(EXTENSION_TABLE_NAME);
+        let extension_table = read_extension_table(&extension_table_path)?;
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -205,12 +262,16 @@ impl NativeStore {
             file.set_len(retained_len)?;
             file.sync_data()?;
         }
-        Ok(Self {
+        let mut store = Self {
             file,
             path,
+            extension_table_path,
+            extension_table,
             index,
             recovery,
-        })
+        };
+        store.validate_index_extensions()?;
+        Ok(store)
     }
 
     /// Appends and commits one atomic set of validated envelope replacements.
@@ -232,7 +293,8 @@ impl NativeStore {
         let mut changes = Vec::with_capacity(writes.len());
 
         for write in writes {
-            validate_record(&write.record).map_err(StoreError::InvalidRecord)?;
+            validate_record_with_extensions(&write.record, &self.extension_table)
+                .map_err(StoreError::InvalidRecord)?;
             validate_key_kind(write.key, &write.record)?;
             if !seen.insert(write.key) {
                 return Err(StoreError::DuplicateKey(write.key));
@@ -294,7 +356,66 @@ impl NativeStore {
         }
         let record = decode_record(&payload, entry.payload_offset)?;
         validate_key_kind(key, &record)?;
+        validate_record_with_extensions(&record, &self.extension_table)
+            .map_err(StoreError::InvalidRecord)?;
         Ok(Some(record))
+    }
+
+    /// Returns the compact-ID table that resolves extension values in this store.
+    #[must_use]
+    pub fn extension_table(&self) -> &ExtensionTable {
+        &self.extension_table
+    }
+
+    /// Registers extension schemas and persists their compact IDs before any
+    /// record may reference them.
+    ///
+    /// Requests are sorted and deduplicated before IDs are assigned, so one
+    /// registration batch has one result independent of its caller's ordering.
+    /// Existing schemas keep their IDs forever; reusing a name at a different
+    /// schema version is refused rather than silently reinterpreting old bytes.
+    pub fn register_extensions(
+        &mut self,
+        registrations: impl IntoIterator<Item = ExtensionRegistration>,
+    ) -> Result<Vec<RegisteredExtension>, StoreError> {
+        let requested: BTreeSet<_> = registrations.into_iter().collect();
+        let mut next = self.extension_table.clone();
+        let mut assigned = Vec::with_capacity(requested.len());
+        let mut used: BTreeSet<_> = next.extensions.iter().map(|entry| entry.local_id).collect();
+
+        for registration in requested {
+            if let Some(existing) = next.extensions.iter().find(|entry| {
+                entry.namespace == registration.namespace && entry.name == registration.name
+            }) {
+                if existing.schema_version != registration.schema_version {
+                    return Err(StoreError::ExtensionSchemaConflict {
+                        namespace: registration.namespace,
+                        name: registration.name,
+                        existing_version: existing.schema_version,
+                        requested_version: registration.schema_version,
+                    });
+                }
+                assigned.push(existing.clone());
+                continue;
+            }
+            let local_id = first_available_extension_id(&used)?;
+            let entry = RegisteredExtension {
+                local_id,
+                namespace: registration.namespace,
+                name: registration.name,
+                schema_version: registration.schema_version,
+            };
+            used.insert(local_id);
+            assigned.push(entry.clone());
+            next.extensions.push(entry);
+        }
+        next.extensions.sort_by_key(|entry| entry.local_id);
+        validate_extension_table(&next).map_err(StoreError::InvalidExtensionTable)?;
+        if next != self.extension_table {
+            write_extension_table(&self.extension_table_path, &next)?;
+            self.extension_table = next;
+        }
+        Ok(assigned)
     }
 
     /// Returns the recovery result captured during [`Self::open`].
@@ -306,6 +427,46 @@ impl NativeStore {
     pub fn segment_path(&self) -> &Path {
         &self.path
     }
+
+    fn validate_index_extensions(&mut self) -> Result<(), StoreError> {
+        for key in self.index.keys().copied().collect::<Vec<_>>() {
+            let _ = self.get(key)?;
+        }
+        Ok(())
+    }
+}
+
+fn first_available_extension_id(used: &BTreeSet<u32>) -> Result<u32, StoreError> {
+    (1..=u32::MAX)
+        .find(|id| !used.contains(id))
+        .ok_or(StoreError::ExtensionIdExhausted)
+}
+
+fn read_extension_table(path: &Path) -> Result<ExtensionTable, StoreError> {
+    if !path.exists() {
+        return Ok(ExtensionTable {
+            table_version: 1,
+            extensions: Vec::new(),
+        });
+    }
+    let bytes = fs::read(path)?;
+    let table = ExtensionTable::decode(bytes.as_slice()).map_err(|error| {
+        StoreError::corrupt(0, format!("invalid extension table protobuf: {error}"))
+    })?;
+    validate_extension_table(&table).map_err(StoreError::InvalidExtensionTable)?;
+    Ok(table)
+}
+
+fn write_extension_table(path: &Path, table: &ExtensionTable) -> Result<(), StoreError> {
+    let temporary = path.with_extension("ls.new");
+    {
+        let mut file = File::create(&temporary)?;
+        file.write_all(&table.encode_to_vec())?;
+        file.sync_data()?;
+    }
+    fs::rename(&temporary, path)?;
+    File::open(path.parent().expect("extension table has a parent"))?.sync_data()?;
+    Ok(())
 }
 
 fn validate_key_kind(key: RecordKey, record: &StorageRecord) -> Result<(), StoreError> {
@@ -540,8 +701,8 @@ fn crc32(bytes: &[u8]) -> u32 {
 mod tests {
     use super::*;
     use lodestone_storage_schema::{
+        ExtensionValue, ChunkRecord, ChunkSection, GeneralRecord, WorldProperties,
         generated::{general_record, storage_record},
-        ChunkRecord, ChunkSection, GeneralRecord, WorldProperties,
     };
     use tempfile::tempdir;
 
@@ -723,6 +884,75 @@ mod tests {
             Some(world_properties(123_456))
         );
         assert_eq!(general_key.to_bytes().len(), 13);
+    }
+
+    #[test]
+    fn extension_registration_is_sorted_durable_and_required_by_record_writes() {
+        let directory = tempdir().unwrap();
+        let mut store = NativeStore::open(directory.path()).unwrap();
+        let assigned = store
+            .register_extensions([
+                ExtensionRegistration::new("example", "weather", 2),
+                ExtensionRegistration::new("example", "claims", 1),
+            ])
+            .unwrap();
+        assert_eq!(
+            assigned
+                .iter()
+                .map(|entry| (entry.local_id, entry.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, "claims"), (2, "weather")],
+            "one batch must receive the same local IDs regardless of request order"
+        );
+
+        let mut rejected = chunk(-12, 34, 1);
+        let Some(Record::Chunk(body)) = &mut rejected.record else {
+            panic!("test chunk has a chunk body");
+        };
+        body.extensions = vec![ExtensionValue {
+            local_id: 3,
+            payload: vec![1, 2, 3],
+        }];
+        assert!(matches!(
+            store.write_transaction([RecordWrite::new(key(), rejected)]),
+            Err(StoreError::InvalidRecord(
+                lodestone_storage_schema::ValidationError::UnregisteredExtensionId(3)
+            ))
+        ));
+
+        let mut accepted = chunk(-12, 34, 2);
+        let Some(Record::Chunk(body)) = &mut accepted.record else {
+            panic!("test chunk has a chunk body");
+        };
+        body.extensions = vec![ExtensionValue {
+            local_id: 1,
+            payload: vec![4, 5, 6],
+        }];
+        store
+            .write_transaction([RecordWrite::new(key(), accepted.clone())])
+            .unwrap();
+        drop(store);
+
+        let mut reopened = NativeStore::open(directory.path()).unwrap();
+        assert_eq!(reopened.extension_table().extensions, assigned);
+        assert_eq!(reopened.get(key()).unwrap(), Some(accepted));
+    }
+
+    #[test]
+    fn extension_registration_refuses_a_schema_version_reinterpretation() {
+        let directory = tempdir().unwrap();
+        let mut store = NativeStore::open(directory.path()).unwrap();
+        store
+            .register_extensions([ExtensionRegistration::new("example", "claims", 1)])
+            .unwrap();
+        assert!(matches!(
+            store.register_extensions([ExtensionRegistration::new("example", "claims", 2)]),
+            Err(StoreError::ExtensionSchemaConflict {
+                existing_version: 1,
+                requested_version: 2,
+                ..
+            })
+        ));
     }
 
     fn encode_body_for_test(writes: &[RecordWrite]) -> Vec<u8> {
