@@ -177,6 +177,38 @@ impl Sim {
                     self.reconcile_predictions(x, y, z, &blocks);
                     self.remesh_changed_blocks(x, y, z, &blocks);
                 }
+                NetUpdate::BlockChangedAck { sequence } => {
+                    // The adapter has already installed the authoritative block
+                    // writes before this acknowledgement reaches the shell. The
+                    // sequence is therefore a ledger-retirement signal, not a
+                    // second world write: `Placement` clears every prediction the
+                    // server has processed through this value.
+                    self.settle_placement_predictions(sequence);
+                }
+                NetUpdate::PlayerRotationSet {
+                    y_rot,
+                    relative_y,
+                    x_rot,
+                    relative_x,
+                } => {
+                    // `PhysicsState` is the one pose that drives the rendered
+                    // camera, interaction ray, audio listener, and the next
+                    // outbound move. Keep the correction here rather than in a
+                    // passive session component: all four consumers must observe
+                    // the same absolute-or-relative result this frame.
+                    self.player_mut(|player| {
+                        player.yaw = if relative_y {
+                            player.yaw + y_rot
+                        } else {
+                            y_rot
+                        };
+                        player.pitch = if relative_x {
+                            player.pitch + x_rot
+                        } else {
+                            x_rot
+                        };
+                    });
+                }
                 NetUpdate::BlockEvent { pos, b0, b1 } => {
                     // Chest lids. `ChestBlockEntity.triggerEvent`
                     // takes `b0 == 1` and `b1 > 0` as "somebody is looking in

@@ -850,6 +850,24 @@ pub enum NetUpdate {
         /// Section-relative `(x, y, z)`, each `0..16`, of every changed cell.
         blocks: Vec<[u8; 3]>,
     },
+    /// The server processed every predicted block change through `sequence`.
+    /// The simulation uses this acknowledgement to retire matching prediction
+    /// snapshots without carrying block payloads through the network queue.
+    BlockChangedAck {
+        /// Highest processed prediction sequence.
+        sequence: i32,
+    },
+    /// An authoritative correction to the local player's yaw and pitch.
+    PlayerRotationSet {
+        /// Absolute yaw or relative yaw delta, in degrees.
+        y_rot: f32,
+        /// Whether `y_rot` is relative to the current yaw.
+        relative_y: bool,
+        /// Absolute pitch or relative pitch delta, in degrees.
+        x_rot: f32,
+        /// Whether `x_rot` is relative to the current pitch.
+        relative_x: bool,
+    },
     /// A `block_event` (vanilla's `ClientboundBlockEventPacket`): two opaque
     /// parameter bytes for the block at `pos`.
     ///
@@ -5041,6 +5059,18 @@ fn forward(
             y: section.y,
             z: section.z,
             blocks,
+        },
+        ClientEvent::BlockChangedAck { sequence } => NetUpdate::BlockChangedAck { sequence },
+        ClientEvent::PlayerRotationSet {
+            y_rot,
+            relative_y,
+            x_rot,
+            relative_x,
+        } => NetUpdate::PlayerRotationSet {
+            y_rot,
+            relative_y,
+            x_rot,
+            relative_x,
         },
         // Block events, forwarded raw. Until this arm existed the
         // event reached the terminal `_ =>` below and was dropped, which is why

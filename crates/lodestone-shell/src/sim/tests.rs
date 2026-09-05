@@ -1344,6 +1344,42 @@ fn teleport_relative_rotation_differs_from_absolute_rotation() {
     );
 }
 
+/// The player-rotation packet changes the pose the visible camera is built
+/// from, without relocating the player. Pairwise-distinct values prove both
+/// relative flags are respected rather than accidentally copied from teleport
+/// handling or treated as absolute.
+#[test]
+fn player_rotation_set_reaches_the_drawn_camera_with_relative_flags() {
+    use crate::net::NetUpdate;
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    sim.player_mut(|player| {
+        player.yaw = 10.0;
+        player.pitch = 5.0;
+    });
+    let before_position = sim.player().position;
+
+    feed.send(NetUpdate::PlayerRotationSet {
+        y_rot: 20.0,
+        relative_y: true,
+        x_rot: -15.0,
+        relative_x: false,
+    })
+    .expect("loopback accepts a rotation correction");
+    sim.poll_net();
+
+    let camera = sim.camera(1.0);
+    assert_eq!(camera.yaw, 30.0, "relative yaw adds to the live camera pose");
+    assert_eq!(camera.pitch, -15.0, "absolute pitch replaces the live camera pose");
+    assert_eq!(
+        sim.player().position,
+        before_position,
+        "a rotation-only packet must not move the local player"
+    );
+}
+
 #[test]
 fn move_is_withheld_until_connected() {
     // A sim that is merely Connecting (attached, not yet logged in) must send
@@ -5062,6 +5098,82 @@ fn give_main_hand_item(sim: &mut Sim, item: &str) {
             });
         }
     });
+}
+
+/// Builds two predictions through the real placement state machine rather than
+/// seeding its private ledger. The acknowledgements below must therefore prove
+/// the packet clears the state a real right-click writes, not a test-only copy.
+fn two_pending_placements() -> Placement {
+    let clicked = BlockPos::new(12, 70, -9);
+    let context = UseOnContext {
+        hand: Hand::Main,
+        clicked,
+        face: BlockFace::Up,
+        cursor: Vec3f::new(0.5, 0.5, 0.5),
+        inside_block: false,
+        rotation: Rotation::new(0.0, 0.0),
+        sneaking: false,
+        has_item_in_hand: true,
+        placing: Some("minecraft:stone".parse().expect("valid block id")),
+        orientation: OrientationKind::Fixed,
+    };
+    let facts = PlacementFacts {
+        clicked,
+        target: clicked,
+        clicked_replaceable: true,
+        clicked_interactable: false,
+        target_replaceable: true,
+        target_obstructed: false,
+    };
+    let mut placement = Placement::new();
+    for expected_sequence in [1, 2] {
+        let decision = placement.use_on(&context, &facts);
+        assert!(matches!(
+            decision,
+            UseOnDecision::Place {
+                prediction: lodestone_game::placement::PlacePrediction { sequence, .. },
+                ..
+            } if sequence == expected_sequence
+        ));
+    }
+    placement
+}
+
+#[test]
+fn block_changed_ack_retires_only_the_predictions_the_server_has_processed() {
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    sim.write(|world| {
+        world.insert_resource(PlacementPredictor(two_pending_placements()));
+    });
+
+    feed.send(NetUpdate::BlockChangedAck { sequence: 1 })
+        .expect("loopback accepts the server acknowledgement");
+    sim.poll_net();
+    assert_eq!(
+        sim.read(|world| world.resource::<PlacementPredictor>().0.pending().len()),
+        1,
+        "acknowledging sequence 1 must retain the newer sequence 2 prediction"
+    );
+
+    // A stale acknowledgement cannot retire the still-pending newer prediction.
+    feed.send(NetUpdate::BlockChangedAck { sequence: 0 })
+        .expect("loopback accepts a stale acknowledgement");
+    sim.poll_net();
+    assert_eq!(
+        sim.read(|world| world.resource::<PlacementPredictor>().0.pending().len()),
+        1,
+        "a stale acknowledgement must not clear sequence 2"
+    );
+
+    feed.send(NetUpdate::BlockChangedAck { sequence: 2 })
+        .expect("loopback accepts the final acknowledgement");
+    sim.poll_net();
+    assert!(
+        sim.read(|world| world.resource::<PlacementPredictor>().0.pending().is_empty()),
+        "the matching acknowledgement must retire the remaining prediction"
+    );
 }
 
 /// Installs one toggleable `PlayerInteract` veto and records every context the
