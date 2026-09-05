@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.18.0;
+package lodestone:plugin@0.19.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -353,6 +353,9 @@ interface types {
         /// `ClientAction::SwapItemWithOffhand` — capability `act:swap-offhand`.
         /// The live client owns both inventory stacks and the protocol egress.
         swap-item-with-offhand,
+        /// `ClientAction::ReleaseUseItem` — capability `act:release-use-item`.
+        /// The live client owns its held-use lifecycle and protocol egress.
+        release-use-item,
         /// Install or remove the local player's look intent — capability
         /// `act:look`.  `none` returns rotation ownership to normal input.
         set-look(option<look-intent>),
@@ -468,7 +471,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.18.0"`.
+        /// `"lodestone:plugin@0.19.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.

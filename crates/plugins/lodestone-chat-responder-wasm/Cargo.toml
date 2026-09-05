@@ -119,6 +119,9 @@ drop-selected-item = []
 # A one-shot main/off-hand swap through the normal client action queue. The host
 # owns both live stacks and the protocol encoding.
 swap-offhand = []
+# A one-shot held-use release through the normal client action queue. The host
+# owns the held-use lifecycle and protocol encoding.
+release-use-item = []
 # A denied-by-default filesystem write import. The fixture writes one file inside
 # the configured root and attempts one path outside it for the confinement gate.
 fs-write = []
