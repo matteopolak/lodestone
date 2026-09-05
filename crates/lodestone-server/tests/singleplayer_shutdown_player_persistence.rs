@@ -46,8 +46,8 @@ use lodestone_model::{GameMode, Vec3};
 use lodestone_net::Connection;
 use lodestone_server::player_data::{PlayerData, PlayerDataStore};
 use lodestone_server::world_storage::{
-    Error as WorldStorageError, NativePlayerData, NativePlayerRecord, PlayerRecordError,
-    WorldStorage, WorldStorageBackend,
+    Error as WorldStorageError, NativePlayerData, NativePlayerRecord, NativePlayerRuntimeState,
+    PlayerRecordError, WorldStorage, WorldStorageBackend,
 };
 use lodestone_server::{
     ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective, ServerProtocol,
@@ -672,6 +672,11 @@ async fn native_game_mode_survives_join_and_cancelled_shutdown() {
             pitch_millidegrees: -1_000,
         },
         game_mode: Some(GameMode::Adventure),
+        runtime: Some(NativePlayerRuntimeState {
+            health: 13.5,
+            air_supply: 240,
+            experience: lodestone_server::experience::PlayerExperience::restored(7, 0.25, 341),
+        }),
     };
     let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
         directory: native_dir.clone(),
@@ -709,14 +714,17 @@ async fn native_game_mode_survives_join_and_cancelled_shutdown() {
         directory: native_dir,
     })
     .expect("reopen native game-mode store");
-    assert_eq!(
-        reopened
-            .load_player_data(uuid_bytes)
-            .expect("read native game mode")
-            .map(|data| data.game_mode),
-        Some(Some(GameMode::Creative)),
-        "the cancelled session must publish its latest native game mode"
-    );
+    let restored = reopened
+        .load_player_data(uuid_bytes)
+        .expect("read native player state")
+        .expect("cancelled session must publish native player state");
+    assert_eq!(restored.game_mode, Some(GameMode::Creative));
+    let runtime = restored.runtime.expect("native runtime group survives shutdown");
+    assert_eq!(runtime.health, 13.5);
+    assert!((240..=300).contains(&runtime.air_supply));
+    assert_eq!(runtime.experience.level(), 7);
+    assert_eq!(runtime.experience.progress(), 0.25);
+    assert_eq!(runtime.experience.total(), 341);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -754,6 +762,7 @@ async fn native_locator_without_game_mode_keeps_the_world_default() {
                         yaw_millidegrees: 0,
                         pitch_millidegrees: 0,
                         game_mode: 0,
+                        runtime_state: None,
                     })),
                 })),
             },
@@ -830,6 +839,7 @@ async fn anvil_game_mode_overrides_native_game_mode_on_join() {
                 pitch_millidegrees: 0,
             },
             game_mode: Some(GameMode::Adventure),
+            runtime: None,
         })
         .expect("seed native mode sidecar");
 
@@ -1023,6 +1033,7 @@ async fn corrupt_native_locator_is_not_overwritten_on_cancelled_shutdown() {
                 yaw_millidegrees: 4_000,
                 pitch_millidegrees: -2_000,
                 game_mode: 0,
+                runtime_state: None,
             })),
         })),
     };

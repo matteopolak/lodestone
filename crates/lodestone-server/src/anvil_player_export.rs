@@ -111,6 +111,7 @@ pub fn export_all_players(
 fn to_anvil_player(player: NativePlayerData) -> PlayerData {
     let locator = player.locator;
     let units = POSITION_UNITS_PER_BLOCK;
+    let runtime = player.runtime;
     PlayerData {
         pos: Vec3::new(
             f64::from(locator.x_fixed) / units,
@@ -131,6 +132,12 @@ fn to_anvil_player(player: NativePlayerData) -> PlayerData {
         }
         .to_owned(),
         game_mode: player.game_mode,
+        health: runtime.map_or(20.0, |state| state.health),
+        air_supply: runtime.map_or(300, |state| state.air_supply),
+        experience: runtime.map_or_else(
+            crate::experience::PlayerExperience::default,
+            |state| state.experience,
+        ),
         ..PlayerData::default()
     }
 }
@@ -165,6 +172,11 @@ mod tests {
                 pitch_millidegrees: 45_002,
             },
             game_mode: Some(lodestone_model::GameMode::Creative),
+            runtime: Some(crate::world_storage::NativePlayerRuntimeState {
+                health: 11.5,
+                air_supply: 222,
+                experience: crate::experience::PlayerExperience::restored(4, 0.75, 57),
+            }),
         }
     }
 
@@ -203,6 +215,10 @@ mod tests {
             assert_eq!(actual.rotation, to_anvil_player(expected).rotation);
             assert_eq!(actual.dimension, to_anvil_player(expected).dimension);
             assert_eq!(actual.game_mode, expected.game_mode);
+            let runtime = expected.runtime.expect("fixture carries runtime state");
+            assert_eq!(actual.health, runtime.health);
+            assert_eq!(actual.air_supply, runtime.air_supply);
+            assert_eq!(actual.experience, runtime.experience);
             assert!(anvil.path_for(uuid).is_file());
             assert_ne!(locator.dimension, BuiltinDimension::Unspecified);
         }

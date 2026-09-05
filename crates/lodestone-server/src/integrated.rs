@@ -5954,6 +5954,83 @@ mod tests {
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
     }
 
+    /// Bounded opt-in measurement over genuinely generated terrain. Ordinary
+    /// CI excludes it because generation and filesystem timings are host data,
+    /// not correctness assertions.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    #[ignore = "manual generated native-storage measurement"]
+    async fn measure_generated_mutation_heavy_native_save() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "lodestone-native-generated-measurement-{}-{unique}",
+            std::process::id()
+        ));
+        let native_dir = world_dir.join("native");
+        let storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir.clone(),
+            },
+        )
+        .expect("open measurement storage");
+        let source = crate::overworld_chunk_source(0x711);
+        let mut columns = Vec::new();
+        for cz in -1..=1 {
+            for cx in -1..=1 {
+                let mut column = source.column(cx, cz);
+                let _consumed_generation_candidates = column.take_generation_spawns();
+                for offset in 0..64 {
+                    column.set_block(offset % 8, 64, offset / 8, "minecraft:gold_block");
+                }
+                let pos = lodestone_model::BlockPos::new(cx * 16 + 8, 65, cz * 16 + 8);
+                column.set_block_entities(vec![(
+                    pos,
+                    crate::block_entities::BlockEntity::Beacon(Default::default()),
+                )]);
+                columns.push((cx, cz, column));
+            }
+        }
+        let scheduled = crate::scheduled_tick::ScheduledTickHandle::default();
+        scheduled.with(|queues| {
+            for (cx, cz, _) in &columns {
+                assert!(queues.block.schedule(
+                    (cx * 16 + 8, 65, cz * 16 + 8),
+                    "redstone:torch".to_owned(),
+                    1_000_000,
+                    crate::scheduled_tick::TickPriority::Normal,
+                ));
+            }
+        });
+        let lights: Vec<_> = columns
+            .iter()
+            .map(|(_, _, column)| lodestone_world::ColumnLight::new(column.section_count()))
+            .collect();
+
+        let started = std::time::Instant::now();
+        let records = storage
+            .write_dirty_chunks(columns.iter().zip(&lights).map(|((cx, cz, column), light)| {
+                crate::world_storage::NativeDirtyChunkRecord::new(
+                    *cx, *cz, column, light, &scheduled,
+                )
+            }))
+            .expect("save generated mutations");
+        let elapsed = started.elapsed();
+        drop(storage);
+        let bytes: u64 = std::fs::read_dir(&native_dir)
+            .expect("read native measurement directory")
+            .map(|entry| entry.expect("read native file").metadata().expect("stat native file").len())
+            .sum();
+        eprintln!(
+            "generated-native-save columns=9 block_mutations=576 block_entities=9 scheduled_ticks=9 records={records} elapsed_micros={} bytes={bytes}",
+            elapsed.as_micros(),
+        );
+        assert_eq!(records, 9);
+        std::fs::remove_dir_all(&world_dir).expect("remove measurement world");
+    }
+
     /// Extension IDs are a native-store identity, not transient server state:
     /// the second server must see the same compact IDs after the first handle
     /// has stopped. This exercises the selected backend through

@@ -10,8 +10,8 @@ pub mod generated {
 pub use generated::{
     BiomeSection, BuiltinBiome, BuiltinDimension, ChunkRecord, ChunkSection, EntityRecord,
     ExtensionTable, ExtensionValue, GameMode, GeneralRecord, LightData, LightSection,
-    PlayerRecord, RegisteredExtension, ScheduledTick, ScheduledTickKind, ScheduledTickPriority,
-    StorageRecord, WorldProperties,
+    PlayerRecord, PlayerRuntimeState, RegisteredExtension, ScheduledTick, ScheduledTickKind,
+    ScheduledTickPriority, StorageRecord, WorldProperties,
 };
 
 /// The only storage-record format understood by the initial schema.
@@ -261,6 +261,21 @@ fn validate_player(player: &PlayerRecord) -> Result<(), ValidationError> {
     if GameMode::try_from(player.game_mode).is_err() {
         return Err(ValidationError::UnknownPlayerGameMode(player.game_mode));
     }
+    if let Some(runtime) = &player.runtime_state {
+        if !runtime.health.is_finite() || !(0.0..=20.0).contains(&runtime.health) {
+            return Err(ValidationError::InvalidPlayerHealth);
+        }
+        if !(-20..=300).contains(&runtime.air_supply) {
+            return Err(ValidationError::InvalidPlayerAirSupply(runtime.air_supply));
+        }
+        if runtime.experience_level < 0
+            || runtime.experience_total < 0
+            || !runtime.experience_progress.is_finite()
+            || !(0.0..1.0).contains(&runtime.experience_progress)
+        {
+            return Err(ValidationError::InvalidPlayerExperience);
+        }
+    }
     Ok(())
 }
 
@@ -303,6 +318,9 @@ pub enum ValidationError {
     NonFiniteEntityRotation,
     UnknownBuiltinDimension(i32),
     UnknownPlayerGameMode(i32),
+    InvalidPlayerHealth,
+    InvalidPlayerAirSupply(i32),
+    InvalidPlayerExperience,
     ZeroExtensionId,
     DuplicateExtensionId(u32),
     UnregisteredExtensionId(u32),
@@ -384,6 +402,11 @@ impl std::fmt::Display for ValidationError {
             Self::UnknownPlayerGameMode(mode) => {
                 write!(formatter, "unknown player game mode {mode}")
             }
+            Self::InvalidPlayerHealth => formatter.write_str("invalid player health"),
+            Self::InvalidPlayerAirSupply(air) => {
+                write!(formatter, "invalid player air supply {air}")
+            }
+            Self::InvalidPlayerExperience => formatter.write_str("invalid player experience"),
             Self::ZeroExtensionId => formatter.write_str("extension local ID zero is reserved"),
             Self::DuplicateExtensionId(id) => write!(formatter, "duplicate extension local ID {id}"),
             Self::UnregisteredExtensionId(id) => {

@@ -69,12 +69,22 @@ pub struct NativePlayerRecord {
 /// [`NativePlayerRecord`] so existing locator producers keep their exact
 /// contract, while an importer with a complete player root can persist this
 /// independently consumable value in the same atomic record replacement.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NativePlayerData {
     /// The durable player identity and locator.
     pub locator: NativePlayerRecord,
     /// The saved game mode, or `None` for locator-only records.
     pub game_mode: Option<lodestone_model::GameMode>,
+    /// Live scalar state that the server can both restore and mutate.
+    pub runtime: Option<NativePlayerRuntimeState>,
+}
+
+/// The complete non-inventory player state owned by the live server loop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativePlayerRuntimeState {
+    pub health: f32,
+    pub air_supply: i32,
+    pub experience: crate::experience::PlayerExperience,
 }
 
 impl From<NativePlayerRecord> for NativePlayerData {
@@ -82,6 +92,7 @@ impl From<NativePlayerRecord> for NativePlayerData {
         Self {
             locator,
             game_mode: None,
+            runtime: None,
         }
     }
 }
@@ -2187,6 +2198,15 @@ fn encode_player(player: NativePlayerData) -> Result<StorageRecord, PlayerRecord
                 yaw_millidegrees: player.locator.yaw_millidegrees,
                 pitch_millidegrees: player.locator.pitch_millidegrees,
                 game_mode: encode_player_game_mode(player.game_mode),
+                runtime_state: player.runtime.map(|runtime| {
+                    lodestone_storage_schema::PlayerRuntimeState {
+                        health: runtime.health,
+                        air_supply: runtime.air_supply,
+                        experience_level: runtime.experience.level(),
+                        experience_progress: runtime.experience.progress(),
+                        experience_total: runtime.experience.total(),
+                    }
+                }),
             })),
             extensions: Vec::new(),
         })),
@@ -2233,6 +2253,15 @@ fn decode_player(
             pitch_millidegrees: player.pitch_millidegrees,
         },
         game_mode: decode_player_game_mode(player.game_mode)?,
+        runtime: player.runtime_state.map(|runtime| NativePlayerRuntimeState {
+            health: runtime.health,
+            air_supply: runtime.air_supply,
+            experience: crate::experience::PlayerExperience::restored(
+                runtime.experience_level,
+                runtime.experience_progress,
+                runtime.experience_total,
+            ),
+        }),
     })
 }
 
@@ -2783,6 +2812,7 @@ mod tests {
             Some(NativePlayerData {
                 locator: player,
                 game_mode: None,
+                runtime: None,
             }),
             "a locator-only writer must reopen with every locator field and no invented game mode"
         );
@@ -2920,6 +2950,11 @@ mod tests {
                 pitch_millidegrees: 5,
             },
             game_mode: Some(lodestone_model::GameMode::Adventure),
+            runtime: Some(NativePlayerRuntimeState {
+                health: 13.5,
+                air_supply: 87,
+                experience: crate::experience::PlayerExperience::restored(9, 0.375, 144),
+            }),
         };
         let record = encode_player(player).expect("typed game mode encodes");
         assert_eq!(
@@ -3078,6 +3113,7 @@ mod tests {
                 pitch_millidegrees: -55,
             },
             game_mode: Some(lodestone_model::GameMode::Creative),
+            runtime: None,
         };
         let entity = NativeEntityRecord {
             uuid: [2; 16],
@@ -3137,6 +3173,7 @@ mod tests {
                 pitch_millidegrees: 0,
             },
             game_mode: None,
+            runtime: None,
         };
         let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
             directory: directory.clone(),
