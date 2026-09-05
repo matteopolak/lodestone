@@ -696,6 +696,12 @@ agreement or disagreement.
   `ReplayCase::replay_generated_with`, which validates the scenario, probe
   lane, action kind, positions and state alphabet before invoking the same
   resettable evaluator used by generated and shrink candidates.
+  Search rejects a zero-case budget before evaluating any candidate. Search
+  and replay both require a nonempty probe region and at least one candidate
+  state per probe, so missing coverage cannot produce a successful comparison.
+  These structural guards do not replace the scenario's independent read
+  discriminator: an oracle that always returns `None` still needs a control
+  proving that it can observe a known state.
 - **Run the historical fluid-reversion control** with a separately started
   `./scripts/live-oracles/creative.sh`, then `just
   fuzz-historical-fluid-reversion`. The wrapper starts from committed `HEAD`
