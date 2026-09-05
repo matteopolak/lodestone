@@ -4,13 +4,14 @@
 //! typed native world-properties record, and leaves the existing Anvil codec
 //! usable for the same source bytes.
 
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use lodestone_core::{Nbt, Reader, read_named_nbt};
 use lodestone_anvil::import_preflight::{ImportAuthorization, LossDecision, PreflightReport};
-use lodestone_anvil::{level_dat, world_gen_settings};
+use lodestone_anvil::{CompressionScheme, level_dat, region, world_gen_settings};
 use lodestone_server::anvil_import::{
-    Error, WORLD_PROPERTIES_KEY, import_chunk_bytes, import_world_properties, preflight_chunk,
+    Error, WORLD_PROPERTIES_KEY, import_chunk_bytes, import_region_file, import_world_properties,
+    preflight_chunk, preflight_region_file,
 };
 use lodestone_server::world_storage::{WorldStorage, WorldStorageBackend};
 use lodestone_storage::NativeStore;
@@ -65,6 +66,66 @@ fn chunk_source() -> (Nbt, ImportAuthorization, PreflightReport) {
     let authorization = report.decide(LossDecision::ProceedAndDiscardUnsupported);
     assert!(authorization.permits_conversion());
     (chunk, authorization, report)
+}
+
+fn chunk_at(column_x: i32, column_z: i32) -> Nbt {
+    let (mut chunk, _, _) = chunk_source();
+    let Nbt::Compound(fields) = &mut chunk else {
+        panic!("checked-in chunk fixture must have a compound root");
+    };
+    for (name, value) in fields {
+        match name.as_str() {
+            "xPos" => *value = Nbt::Int(column_x),
+            "zPos" => *value = Nbt::Int(column_z),
+            _ => {}
+        }
+    }
+    chunk
+}
+
+fn with_invalid_in_range_block_palette(mut chunk: Nbt) -> Nbt {
+    let Nbt::Compound(root) = &mut chunk else {
+        panic!("checked-in chunk fixture must have a compound root");
+    };
+    let Some((_, Nbt::List { elements, .. })) = root
+        .iter_mut()
+        .find(|(name, _)| name == "sections")
+    else {
+        panic!("checked-in chunk fixture must have sections");
+    };
+    for section in elements {
+        let Nbt::Compound(fields) = section else {
+            continue;
+        };
+        let y = fields
+            .iter()
+            .find(|(name, _)| name == "Y")
+            .and_then(|(_, value)| match value {
+                Nbt::Byte(y) => Some(i32::from(*y)),
+                _ => None,
+            });
+        if !y.is_some_and(|y| (-4..20).contains(&y)) {
+            continue;
+        }
+        if let Some((_, block_states)) = fields
+            .iter_mut()
+            .find(|(name, _)| name == "block_states")
+        {
+            *block_states = Nbt::Compound(Vec::new());
+            return chunk;
+        }
+    }
+    panic!("fixture must contain one in-range section with block states");
+}
+
+fn write_region(chunks: &BTreeMap<(i32, i32), Nbt>) -> (PathBuf, PathBuf) {
+    let directory = scratch("region-source");
+    let built = region::build_region_from_nbt(chunks, CompressionScheme::Zlib, 1)
+        .expect("build checked-in chunks into an Anvil region");
+    assert!(built.external.is_empty(), "small fixture chunks stay inline");
+    let path = directory.join("r.0.0.mca");
+    std::fs::write(&path, built.bytes).expect("write source region");
+    (directory, path)
 }
 
 #[test]
@@ -301,4 +362,158 @@ fn chunk_authorization_and_anvil_backend_are_fail_closed() {
         ))
     ));
     let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn region_file_import_uses_one_aggregate_loss_authorization_and_one_native_batch() {
+    let mut chunks = BTreeMap::new();
+    chunks.insert((6, 12), chunk_at(6, 12));
+    chunks.insert((7, 12), chunk_at(7, 12));
+    let (source_directory, region_path) = write_region(&chunks);
+    let report = preflight_region_file("minecraft:overworld", 0, 0, &region_path)
+        .expect("walk source region into one aggregate preflight");
+    assert!(report.blockers().is_empty(), "both fixture chunks are importable");
+    let (_one_chunk, _one_chunk_authorization, one_chunk_report) = chunk_source();
+    assert_eq!(
+        report.supported().len(),
+        one_chunk_report.supported().len() * 2,
+        "both region entries must contribute their typed fields to the aggregate report"
+    );
+    assert_eq!(
+        report.unsupported().len(),
+        one_chunk_report.unsupported().len() * 2,
+        "loss acknowledgement must cover every dropped field in both region members"
+    );
+    let authorization = report.decide(LossDecision::ProceedAndDiscardUnsupported);
+    let ImportAuthorization::LossAccepted { discarded_entries } = authorization else {
+        panic!("fixture region deliberately has dropped block-entity and tick payloads");
+    };
+    assert_eq!(discarded_entries, report.unsupported().len());
+
+    let native_directory = scratch("region-native");
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_directory.clone(),
+    })
+    .expect("open native backend");
+    let result = import_region_file(
+        &storage,
+        "minecraft:overworld",
+        0,
+        0,
+        &region_path,
+        -64,
+        384,
+        Some(authorization),
+    )
+    .expect("aggregate authorization imports both source chunks");
+    assert_eq!(result.report, report);
+    assert_eq!(result.chunks_seen, 2);
+    assert_eq!(result.records_written, 2);
+    drop(storage);
+
+    let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_directory.clone(),
+    })
+    .expect("reopen native backend");
+    for (column_x, column_z) in [(6, 12), (7, 12)] {
+        let loaded = reopened
+            .load_chunk(column_x, column_z, -64, 384)
+            .expect("load imported region member")
+            .expect("every present region member becomes a native record");
+        assert_eq!(
+            loaded.column.block_state(1, -59, 7),
+            "minecraft:blast_furnace[facing=south,lit=false]"
+        );
+        assert!(loaded.column.block_entities().is_empty());
+    }
+
+    let _ = std::fs::remove_dir_all(source_directory);
+    let _ = std::fs::remove_dir_all(native_directory);
+}
+
+#[test]
+fn region_import_rejects_one_chunk_authorization_before_writing_any_member() {
+    let mut chunks = BTreeMap::new();
+    chunks.insert((6, 12), chunk_at(6, 12));
+    chunks.insert((7, 12), chunk_at(7, 12));
+    let (source_directory, region_path) = write_region(&chunks);
+    let (_one_chunk, one_chunk_authorization, _report) = chunk_source();
+    let native_directory = scratch("region-stale-authorization");
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_directory.clone(),
+    })
+    .expect("open native backend");
+
+    assert!(matches!(
+        import_region_file(
+            &storage,
+            "minecraft:overworld",
+            0,
+            0,
+            &region_path,
+            -64,
+            384,
+            Some(one_chunk_authorization),
+        ),
+        Err(Error::AuthorizationMismatch { .. })
+    ));
+    assert_eq!(
+        std::fs::metadata(native_directory.join("world.ls"))
+            .expect("native backend creates an empty segment on open")
+            .len(),
+        0,
+        "a non-aggregate authorization must fail before either region member is written"
+    );
+
+    drop(storage);
+    let _ = std::fs::remove_dir_all(source_directory);
+    let _ = std::fs::remove_dir_all(native_directory);
+}
+
+#[test]
+fn region_import_prepares_every_member_before_starting_the_native_batch() {
+    let mut chunks = BTreeMap::new();
+    chunks.insert((6, 12), chunk_at(6, 12));
+    chunks.insert(
+        (7, 12),
+        with_invalid_in_range_block_palette(chunk_at(7, 12)),
+    );
+    let (source_directory, region_path) = write_region(&chunks);
+    let report = preflight_region_file("minecraft:overworld", 0, 0, &region_path)
+        .expect("the coarse field preflight can classify both compound block-state fields");
+    assert!(
+        report.blockers().is_empty(),
+        "the conversion control must reach preparation after aggregate authorization"
+    );
+    let authorization = report.decide(LossDecision::ProceedAndDiscardUnsupported);
+    let native_directory = scratch("region-prepare-failure");
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_directory.clone(),
+    })
+    .expect("open native backend");
+
+    assert!(matches!(
+        import_region_file(
+            &storage,
+            "minecraft:overworld",
+            0,
+            0,
+            &region_path,
+            -64,
+            384,
+            Some(authorization),
+        ),
+        Err(Error::Chunk(_))
+    ));
+    assert_eq!(
+        std::fs::metadata(native_directory.join("world.ls"))
+            .expect("native backend creates an empty segment on open")
+            .len(),
+        0,
+        "a bad later region member must not leave its already-prepared predecessor committed"
+    );
+
+    drop(storage);
+    let _ = std::fs::remove_dir_all(source_directory);
+    let _ = std::fs::remove_dir_all(native_directory);
 }
