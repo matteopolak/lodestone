@@ -110,6 +110,16 @@ pub struct PlayerSnapshot {
     pub z: f64,
     pub yaw: f32,
     pub pitch: f32,
+    pub game_mode: PlayerGameMode,
+}
+
+/// The closed game-mode vocabulary carried across the host port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayerGameMode {
+    Survival,
+    Creative,
+    Adventure,
+    Spectator,
 }
 
 /// A disconnected player must remain distinct from a valid origin position.
@@ -1025,6 +1035,25 @@ fn resolve_resident_player_entity_id(bits: i64) -> Result<jint, AdapterError> {
         .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?
         .map(|snapshot| snapshot.entity_id)
         .map_err(|error| AdapterError::new(format!("{operation}: {error}")))
+}
+
+fn resolve_resident_player_game_mode(bits: i64) -> Result<jint, AdapterError> {
+    let operation = "playerHandleGameMode";
+    let player = resolve_resident_player_handle(bits, operation)?;
+    let port = PLAYER_POSITION_PORT.with(|slot| slot.borrow().clone()).ok_or_else(|| {
+        AdapterError::new(format!("{operation} requires the adapter worker thread"))
+    })?;
+    let mode = port
+        .request(PlayerSnapshotQuery { uuid: player.uuid() })
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?
+        .game_mode;
+    Ok(match mode {
+        PlayerGameMode::Survival => 0,
+        PlayerGameMode::Creative => 1,
+        PlayerGameMode::Adventure => 2,
+        PlayerGameMode::Spectator => 3,
+    })
 }
 
 /// Reports whether a live player handle's copied profile is in the worker's
@@ -2387,6 +2416,7 @@ pub(crate) fn register_player_handle_position_query(
         "playerHandleYaw" => native_player_handle_yaw as *mut c_void,
         "playerHandlePitch" => native_player_handle_pitch as *mut c_void,
         "playerHandleEntityId" => native_player_handle_entity_id as *mut c_void,
+        "playerHandleGameMode" => native_player_handle_game_mode as *mut c_void,
         _ => unreachable!("validated player coordinate member"),
     };
     // SAFETY: each validated native accepts one opaque handle and returns one
@@ -2722,6 +2752,19 @@ extern "system" fn native_player_handle_entity_id<'local>(
         let _depth = CallbackDepthGuard::enter()
             .map_err(|error| AdapterError::new(error.to_string()))?;
         resolve_resident_player_entity_id(bits)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_game_mode<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resolve_resident_player_game_mode(bits)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -4366,6 +4409,7 @@ mod tests {
             let result = resolve_resident_player_position(handle.to_bits(), 2, "playerHandleZ");
             let yaw = resolve_resident_player_rotation(handle.to_bits(), 0, "playerHandleYaw");
             let entity_id = resolve_resident_player_entity_id(handle.to_bits());
+            let game_mode = resolve_resident_player_game_mode(handle.to_bits());
             let non_finite =
                 resolve_resident_player_position(handle.to_bits(), 0, "playerHandleX");
             assert_eq!(release_resident_handles(&identity), 1);
@@ -4373,36 +4417,39 @@ mod tests {
             PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = None);
             RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
             sender
-                .send((result, yaw, entity_id, non_finite, stale))
+                .send((result, yaw, entity_id, game_mode, non_finite, stale))
                 .expect("position results");
         });
         let limit = Instant::now() + Duration::from_secs(1);
         let mut requests = 0;
-        while requests < 4 {
+        while requests < 5 {
             requests += servicer.service_all_pending(1, |query| {
                 assert_eq!(query, PlayerSnapshotQuery { uuid: [7; 16] });
-                if requests < 3 {
+                if requests < 4 {
                     Ok(PlayerSnapshot {
                         entity_id: 91,
                         x: 12.5, y: 64.0, z: -9.25, yaw: 45.0, pitch: -12.0,
+                        game_mode: PlayerGameMode::Adventure,
                     })
                 } else {
                     Ok(PlayerSnapshot {
                         entity_id: 91,
                         x: f64::NAN, y: 64.0, z: -9.25, yaw: 45.0, pitch: -12.0,
+                        game_mode: PlayerGameMode::Adventure,
                     })
                 }
             });
-            if requests < 4 {
+            if requests < 5 {
                 assert!(Instant::now() < limit, "worker did not request a player position");
                 std::thread::yield_now();
             }
         }
-        let (result, yaw, entity_id, non_finite, stale) =
+        let (result, yaw, entity_id, game_mode, non_finite, stale) =
             receiver.recv().expect("position results");
         assert_eq!(result, Ok(-9.25));
         assert_eq!(yaw, Ok(45.0));
         assert_eq!(entity_id, Ok(91));
+        assert_eq!(game_mode, Ok(2));
         assert_eq!(
             non_finite,
             Err(AdapterError::new(

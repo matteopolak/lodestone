@@ -5,7 +5,7 @@ use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Duration;
 
 use lodestone_jvm_bridge::adapter::{
-    AdapterEvent, AdapterHost, BlockStateWrite, PlayerIdentity, PlayerSnapshot,
+    AdapterEvent, AdapterHost, BlockStateWrite, PlayerGameMode, PlayerIdentity, PlayerSnapshot,
 };
 use lodestone_jvm_bridge::native_surface::OperatorBlockStateMember;
 use lodestone_jvm_bridge::paper::{
@@ -330,18 +330,23 @@ impl JavaAdapter {
                 .players()
                 .and_then(|registry| {
                     registry
-                        .view(None)
-                        .entities
+                        .candidates()
                         .into_iter()
                         .find(|player| player.uuid == uuid)
                 })
                 .map(|player| PlayerSnapshot {
-                    entity_id: player.id,
+                    entity_id: player.entity_id,
                     x: player.position.x,
                     y: player.position.y,
                     z: player.position.z,
                     yaw: player.rotation.yaw,
                     pitch: player.rotation.pitch,
+                    game_mode: match player.game_mode {
+                        lodestone_model::GameMode::Survival => PlayerGameMode::Survival,
+                        lodestone_model::GameMode::Creative => PlayerGameMode::Creative,
+                        lodestone_model::GameMode::Adventure => PlayerGameMode::Adventure,
+                        lodestone_model::GameMode::Spectator => PlayerGameMode::Spectator,
+                    },
                 })
                 .ok_or_else(|| format!("player {uuid} is not connected"))
         });

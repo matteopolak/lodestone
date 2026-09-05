@@ -86,7 +86,8 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native double playerHandleZ(long handle); \
          public static native float playerHandleYaw(long handle); \
          public static native float playerHandlePitch(long handle); \
-         public static native int playerHandleEntityId(long handle); }",
+         public static native int playerHandleEntityId(long handle); \
+         public static native int playerHandleGameMode(long handle); }",
     )
     .expect("shim source");
     let intercepted_package = shim_sources.join("fixture/intercepted");
@@ -358,7 +359,8 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
          public static native double playerHandleZ(long handle); \
          public static native float playerHandleYaw(long handle); \
          public static native float playerHandlePitch(long handle); \
-         public static native int playerHandleEntityId(long handle); }",
+         public static native int playerHandleEntityId(long handle); \
+         public static native int playerHandleGameMode(long handle); }",
     )
     .expect("shim source");
     let descriptor_source = shim_package.join("IsolatedPluginDescriptor.java");

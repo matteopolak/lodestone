@@ -72,6 +72,7 @@ lodestone-registry = { workspace = true }
 # crate for the identical reason it is a plain dependency (not target-gated)
 # here: this whole binary is native-only.
 lodestone-auth = { workspace = true }
+lodestone-model = { workspace = true }
 # `OnlineModeConfig::new` takes a `reqwest::Client` by value — the same
 # workspace entry `lodestone-server` itself builds `OnlineModeConfig` against,
 # so no new TLS/feature configuration enters the graph.
@@ -85,7 +86,6 @@ tracing-subscriber = { workspace = true }
 bevy_app = { workspace = true }
 bevy_ecs = { workspace = true }
 lodestone-world = { workspace = true }
-lodestone-model = { workspace = true }
 lodestone-storage-schema = { path = "../lodestone-storage-schema" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
