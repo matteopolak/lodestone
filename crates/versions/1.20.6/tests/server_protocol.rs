@@ -105,7 +105,7 @@ fn chunk_framing_and_exact_state_rejection() {
 }
 
 #[test]
-fn block_action_sequence_and_batch_ack_reach_the_server_vocabulary() {
+fn block_action_and_initial_chunk_batch_use_the_hosted_wire_shapes() {
     let protocol = V766ServerProtocol;
     let body = encode_body(&BlockDig {
         status: 0, location: Position::new(3, 101, 5), face: 1, sequence: 17,
@@ -115,8 +115,18 @@ fn block_action_sequence_and_batch_ack_reach_the_server_vocabulary() {
             action: BlockActionKind::StartDestroy,
             pos: BlockPos::new(3, 101, 5), face: BlockFace::Up, sequence: 17,
         });
-    assert_eq!(protocol.decode(State::Play, packet_ids::play::serverbound::CHUNK_BATCH_RECEIVED,
-        &3.5_f32.to_be_bytes()),
+    // External protocol-766 play ids: start=0x0d, finished=0x0c,
+    // serverbound acknowledgement=0x08. The acknowledgement body is the
+    // externally specified big-endian f32 3.5, not a local encoder round trip.
+    assert_eq!(protocol.begin_chunk_batch(), ServerDirective::Send {
+        packet_id: 0x0d,
+        payload: Vec::new(),
+    });
+    assert_eq!(protocol.end_chunk_batch(9), ServerDirective::Send {
+        packet_id: 0x0c,
+        payload: vec![0x09],
+    });
+    assert_eq!(protocol.decode(State::Play, 0x08, &[0x40, 0x60, 0x00, 0x00]),
         ServerBound::ChunkBatchAcknowledged { desired_chunks_per_tick: 3.5 });
 }
 
