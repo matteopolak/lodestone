@@ -8486,13 +8486,13 @@ fn a_real_text_display_folded_through_ingest_and_extract_reaches_sim_display_dra
 /// constants and the packet, not from our implementation.
 #[test]
 fn the_border_warning_strength_matches_vanillas_hand_computed_value() {
-    use lodestone_game::worldborder::{BorderExtent, WorldBorder};
+    use lodestone_game::worldborder::{BorderExtent, WarningBlocks, WorldBorder};
 
     let border = WorldBorder {
         center_x: 0.0,
         center_z: 0.0,
         extent: BorderExtent::Static { size: 100.0 },
-        warning_blocks: 5,
+        warning_blocks: WarningBlocks::from_wire(5),
         ..WorldBorder::default()
     };
 
@@ -8539,11 +8539,11 @@ fn the_border_warning_strength_matches_vanillas_hand_computed_value() {
 /// which lands inside a 5-block warning band at all.
 #[test]
 fn the_border_warning_rejects_the_radius_and_diameter_hypotheses() {
-    use lodestone_game::worldborder::{BorderExtent, WorldBorder};
+    use lodestone_game::worldborder::{BorderExtent, WarningBlocks, WorldBorder};
 
     let border = WorldBorder {
         extent: BorderExtent::Static { size: 100.0 },
-        warning_blocks: 5,
+        warning_blocks: WarningBlocks::from_wire(5),
         ..WorldBorder::default()
     };
     let (dist, _, _) = super::session::border_warning(&border, 47.0, 0.0, 0.0);
