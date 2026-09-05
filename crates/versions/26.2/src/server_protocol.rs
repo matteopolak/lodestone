@@ -4112,7 +4112,7 @@ impl ServerProtocol for V770ServerProtocol {
                     Some(SetCommandBlock { pos, command, mode, flags }) => ServerBound::SetCommandBlock {
                         pos: unpack_block_pos(pos),
                         command,
-                        mode,
+                        mode: lodestone_model::CommandBlockMode::from_wire_ordinal(mode),
                         track_output: flags & COMMAND_BLOCK_FLAG_TRACK_OUTPUT != 0,
                         conditional: flags & COMMAND_BLOCK_FLAG_CONDITIONAL != 0,
                         automatic: flags & COMMAND_BLOCK_FLAG_AUTOMATIC != 0,

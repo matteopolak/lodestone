@@ -920,6 +920,52 @@ pub enum CommandBlockMode {
     Redstone,
 }
 
+impl CommandBlockMode {
+    /// Resolves the command-block mode ordinal used by the update packet.
+    /// Unknown ordinals use the impulse/redstone mode.
+    #[must_use]
+    pub const fn from_wire_ordinal(ordinal: i32) -> Self {
+        match ordinal {
+            0 => Self::Sequence,
+            1 => Self::Auto,
+            _ => Self::Redstone,
+        }
+    }
+
+    /// Returns the update-packet ordinal for this mode.
+    #[must_use]
+    pub const fn wire_ordinal(self) -> i32 {
+        match self {
+            Self::Sequence => 0,
+            Self::Auto => 1,
+            Self::Redstone => 2,
+        }
+    }
+}
+
+#[cfg(test)]
+mod command_block_mode_tests {
+    use super::CommandBlockMode;
+
+    #[test]
+    fn every_defined_mode_round_trips_through_its_wire_ordinal() {
+        for mode in [
+            CommandBlockMode::Sequence,
+            CommandBlockMode::Auto,
+            CommandBlockMode::Redstone,
+        ] {
+            assert_eq!(CommandBlockMode::from_wire_ordinal(mode.wire_ordinal()), mode);
+        }
+    }
+
+    #[test]
+    fn unknown_wire_ordinals_use_the_redstone_fallback() {
+        assert_eq!(CommandBlockMode::from_wire_ordinal(-1), CommandBlockMode::Redstone);
+        assert_eq!(CommandBlockMode::from_wire_ordinal(3), CommandBlockMode::Redstone);
+        assert_eq!(CommandBlockMode::from_wire_ordinal(i32::MAX), CommandBlockMode::Redstone);
+    }
+}
+
 /// A cardinal block face.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlockFace {

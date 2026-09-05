@@ -17,6 +17,11 @@ to an array read and a branch for inert cells.
 
 ## The model, as it is
 
+Command-block update packets resolve their numeric mode once at protocol
+ingress into `lodestone_model::CommandBlockMode`. The integrated-server event,
+block-state selection, and execution logic retain that enum; unknown ordinals
+use the impulse/redstone fallback before entering gameplay code.
+
 Redstone work enters from three event-shaped places. **Nothing scans the world
 for redstone on a tick.**
 

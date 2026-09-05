@@ -11597,7 +11597,7 @@ where
             if is_command_block {
                 let current_state = source.get().block_state(pos.x, pos.y, pos.z);
                 let facing = crate::command_block::facing(&current_state);
-                let base = crate::command_block::base_name_for_mode_ordinal(mode);
+                let base = crate::command_block::base_name_for_mode(mode);
                 let new_state = crate::command_block::state_with(base, facing, conditional);
                 if new_state != current_state {
                     source.get().set_block(pos.x, pos.y, pos.z, &new_state);
