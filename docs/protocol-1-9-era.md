@@ -88,6 +88,14 @@ in-memory protocol-340 control sends a quoted message and observes the rendered 
 the real client adapter's event stream, while a literal-body test covers all four id tables and
 trailing-byte rejection.
 
+Arm animation now takes the same table-selected hosted path. The serverbound packet carries a
+single VarInt hand ordinal (`0` main, `1` off); each decoder lifts only those values to
+`ServerBound::Swing`, which appends a broadcast for the shared server's tracking connections. The
+clientbound animation uses action `0` for the main hand and `3` for the off hand. The
+protocol-340 control uses literal packet id `29` and literal bodies, rejects a third ordinal,
+trailing bytes, and the wrong connection state, then has the registry-selected host encode the
+broadcast that the in-memory family client observes as `ClientEvent::EntityAnimation`.
+
 Right-clicks share the older `block_place` packet. The decoder turns ordinary block targets into
 `ServerBound::UseItemOn`, which the shared server consumes for hand interactions and placements;
 the `(-1, -1, -1)`/direction `-1` sentinel instead becomes `ServerBound::UseItem` with the packet's
