@@ -105,6 +105,19 @@ shape; truncated, trailing-byte, unknown-status, and wrong-state controls are
 ignored. The test separately routes the three adapter actions through the
 registry-selected protocol-5 host.
 
+Protocol 5 plugin messages now reach the shared channel registry as
+`ServerBound::CustomPayload`. Its `custom_payload` frame is a channel string
+followed by a big-endian `i16` byte count and raw data. The legacy `REGISTER`
+and `UNREGISTER` control strings are normalized to the shared
+`minecraft:register` and `minecraft:unregister` keys before the registry
+interprets them; `MC|Brand` likewise normalizes to `minecraft:brand`. Other
+channels must already parse as resource keys. Truncated bodies, length/body
+mismatches, trailing bytes, invalid channel names, and non-Play frames are
+ignored, so malformed traffic cannot alter a connection's channel set. The
+focused family test sends a literal registration frame through the
+registry-selected protocol and observes `ClientChannels` record the declared
+channel.
+
 The same legacy `chat` frame now drives both hosted text and commands. Its
 only field is a length-prefixed string: ordinary text becomes unsigned
 `ServerBound::Chat` with explicit zero timestamp and salt, while a leading
@@ -168,7 +181,7 @@ Measured, not assumed. Each is documented where it is implemented.
 | **Two fixed-point scales in one protocol**: 32 per block for entities, 8 for sound positions | `adapter` | The same protocol, genuinely inconsistent |
 | Mob-effect ids are **one-based** | `adapter` | |
 | Attribute keys are dotted camelCase, which is not a valid `Identifier` at all | `adapter` | Needs an explicit translation table, not a namespace prefix |
-| Plugin channel names contain `|` and uppercase | `adapter` | Cannot be represented as an `Identifier`; these channels are in `IGNORED` |
+| Plugin channel controls are bare uppercase strings, while brand uses `|` | `server_protocol` | Controls normalize at the seam before shared `ResourceKey` validation |
 | All minecart variants share object type 10 | `generated/entity_types` | The variant travels in entity metadata |
 | Objects and mobs are numbered in **two separate id spaces** | `generated/entity_types` | An id means nothing without knowing which spawn packet carried it |
 
