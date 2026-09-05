@@ -14,7 +14,13 @@ use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
 #[cfg(feature = "jvm")]
+use std::marker::PhantomData;
+#[cfg(feature = "jvm")]
+use std::rc::Rc;
+#[cfg(feature = "jvm")]
 use jni::objects::{Global, IntoAuto, JClass, JObject, JObjectArray, JString};
+#[cfg(feature = "jvm")]
+use jni::strings::JNIString;
 #[cfg(feature = "jvm")]
 use jni::{Env, jni_sig, jni_str};
 #[cfg(feature = "jvm")]
@@ -179,10 +185,11 @@ impl PaperLifecycleLoadRequest {
 
 /// The only lifecycle operations a server-owned Java-plugin host may perform.
 ///
-/// A descriptor first becomes `Loaded`; only a loaded plugin may later be
-/// enabled, and only an enabled plugin may later be disabled. The bridge does
-/// not expose enable or disable callbacks yet: invoking either would run
-/// arbitrary plugin code before the compatible server API exists.
+/// A descriptor first becomes `Loaded`, then may become `Constructed`; only a
+/// constructed entry may later be enabled, and only an enabled entry may later
+/// be disabled. The callback transition is available solely through the
+/// worker-owned, entry-only retained-object state; it does not provide a
+/// compatible server API.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaperPluginLifecycleStep {
     Load,
@@ -237,6 +244,20 @@ impl PaperPluginLifecycleFailure {
         }
     }
 
+    fn enable(message: impl Into<String>) -> Self {
+        Self {
+            step: PaperPluginLifecycleStep::Enable,
+            message: message.into(),
+        }
+    }
+
+    fn disable(message: impl Into<String>) -> Self {
+        Self {
+            step: PaperPluginLifecycleStep::Disable,
+            message: message.into(),
+        }
+    }
+
     /// The operation that failed.
     pub fn step(&self) -> PaperPluginLifecycleStep {
         self.step
@@ -276,7 +297,6 @@ impl PaperPluginLifecycleStatus {
         self.failure = Some(PaperPluginLifecycleFailure::load(message));
     }
 
-    #[cfg(feature = "jvm")]
     fn constructed(&mut self) {
         debug_assert!(self.phase.accepts(PaperPluginLifecycleStep::Construct));
         self.phase = PaperPluginLifecyclePhase::Constructed;
@@ -286,6 +306,28 @@ impl PaperPluginLifecycleStatus {
         debug_assert!(self.phase.accepts(PaperPluginLifecycleStep::Construct));
         self.phase = PaperPluginLifecyclePhase::Failed;
         self.failure = Some(PaperPluginLifecycleFailure::construct(message));
+    }
+
+    fn enabled(&mut self) {
+        debug_assert!(self.phase.accepts(PaperPluginLifecycleStep::Enable));
+        self.phase = PaperPluginLifecyclePhase::Enabled;
+    }
+
+    fn failed_to_enable(&mut self, message: impl Into<String>) {
+        debug_assert!(self.phase.accepts(PaperPluginLifecycleStep::Enable));
+        self.phase = PaperPluginLifecyclePhase::Failed;
+        self.failure = Some(PaperPluginLifecycleFailure::enable(message));
+    }
+
+    fn disabled(&mut self) {
+        debug_assert!(self.phase.accepts(PaperPluginLifecycleStep::Disable));
+        self.phase = PaperPluginLifecyclePhase::Disabled;
+    }
+
+    fn failed_to_disable(&mut self, message: impl Into<String>) {
+        debug_assert!(self.phase.accepts(PaperPluginLifecycleStep::Disable));
+        self.phase = PaperPluginLifecyclePhase::Failed;
+        self.failure = Some(PaperPluginLifecycleFailure::disable(message));
     }
 
     /// The validated descriptor that supplies this entry's identity.
@@ -329,13 +371,28 @@ impl PaperPluginLifecycleStatusSet {
         self.plugins[index].failed_to_load(message);
     }
 
-    #[cfg(feature = "jvm")]
     fn constructed(&mut self, index: usize) {
         self.plugins[index].constructed();
     }
 
     fn failed_to_construct(&mut self, index: usize, message: impl Into<String>) {
         self.plugins[index].failed_to_construct(message);
+    }
+
+    fn enabled(&mut self, index: usize) {
+        self.plugins[index].enabled();
+    }
+
+    fn failed_to_enable(&mut self, index: usize, message: impl Into<String>) {
+        self.plugins[index].failed_to_enable(message);
+    }
+
+    fn disabled(&mut self, index: usize) {
+        self.plugins[index].disabled();
+    }
+
+    fn failed_to_disable(&mut self, index: usize, message: impl Into<String>) {
+        self.plugins[index].failed_to_disable(message);
     }
 
     /// Statuses in deterministic descriptor discovery order.
@@ -614,6 +671,9 @@ pub struct PaperLifecycleLoad {
     plugins: Vec<PaperLoadedPlugin>,
     status: PaperPluginLifecycleStatusSet,
     native_shim: bool,
+    // `Rc` makes retained JNI state statically worker-owned. The adapter setup
+    // closure keeps it on the dedicated JVM worker until that worker stops.
+    _worker: PhantomData<Rc<()>>,
 }
 
 /// Retained lifecycle classes plus the construction prerequisites that govern them.
@@ -630,10 +690,35 @@ pub struct PaperPluginConstructionPlan {
 /// Retained plugin entry instances constructed by the narrow entry-only mode.
 ///
 /// This keeps the loaders and classes that define every instance alive. It has
-/// no callback API: construction is the whole experimental boundary, not an
-/// implementation of a plugin lifecycle or server facade.
+/// only the ownership-consuming callback transitions below: those experimental
+/// entry-object methods are not an implementation of a plugin lifecycle or
+/// server facade.
 #[cfg(feature = "jvm")]
 pub struct PaperPluginEntryConstruction {
+    lifecycle: PaperLifecycleLoad,
+    readiness: PaperPluginConstructionReadiness,
+    plugins: Vec<PaperConstructedPlugin>,
+}
+
+/// Retained entries whose enable callbacks have completed successfully.
+///
+/// This is an ownership transition, not a command queue: consuming the
+/// constructed state makes each retained instance eligible for exactly one
+/// synchronous callback attempt on the worker that owns its JNI references.
+#[cfg(feature = "jvm")]
+pub struct PaperPluginEntryEnablement {
+    lifecycle: PaperLifecycleLoad,
+    readiness: PaperPluginConstructionReadiness,
+    plugins: Vec<PaperConstructedPlugin>,
+}
+
+/// Retained entries after their one disable callback attempt.
+///
+/// Both successful and failed disable attempts retain their Java object until
+/// the worker exits. A failure is recorded on its descriptor and does not
+/// suppress reverse-order attempts for earlier enabled entries.
+#[cfg(feature = "jvm")]
+pub struct PaperPluginEntryDisablement {
     lifecycle: PaperLifecycleLoad,
     readiness: PaperPluginConstructionReadiness,
     plugins: Vec<PaperConstructedPlugin>,
@@ -644,6 +729,7 @@ pub struct PaperPluginEntryConstruction {
 pub struct PaperConstructedPlugin {
     descriptor: PaperPluginDescriptor,
     instance: Global<JObject<'static>>,
+    status_index: usize,
 }
 
 /// One successfully loaded plugin entry, kept with its identity and loader.
@@ -698,6 +784,30 @@ impl fmt::Debug for PaperPluginEntryConstruction {
             .debug_struct("PaperPluginEntryConstruction")
             .field("loader_count", &self.lifecycle.loader_count())
             .field("constructed_plugins", &self.plugins.len())
+            .field("status", &self.lifecycle.status)
+            .finish()
+    }
+}
+
+#[cfg(feature = "jvm")]
+impl fmt::Debug for PaperPluginEntryEnablement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PaperPluginEntryEnablement")
+            .field("loader_count", &self.lifecycle.loader_count())
+            .field("enabled_plugins", &self.plugins.len())
+            .field("status", &self.lifecycle.status)
+            .finish()
+    }
+}
+
+#[cfg(feature = "jvm")]
+impl fmt::Debug for PaperPluginEntryDisablement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PaperPluginEntryDisablement")
+            .field("loader_count", &self.lifecycle.loader_count())
+            .field("retained_plugins", &self.plugins.len())
             .field("status", &self.lifecycle.status)
             .finish()
     }
@@ -825,6 +935,7 @@ impl PaperPluginConstructionPlan {
                     entries.push(PaperConstructedPlugin {
                         descriptor: plugin.descriptor.clone(),
                         instance,
+                        status_index: index,
                     });
                 }
                 Err(error) => self.lifecycle.status.failed_to_construct(
@@ -870,6 +981,125 @@ impl PaperPluginEntryConstruction {
     pub fn loader_count(&self) -> usize {
         self.lifecycle.loader_count()
     }
+
+    /// Calls the experimental zero-argument `onEnable` method once per constructed entry.
+    ///
+    /// Attempts are synchronous and ordered by descriptor discovery. A missing
+    /// method or a Java exception fails only that descriptor; later constructed
+    /// entries are still attempted. This consumes the constructed state, so a
+    /// retained instance cannot receive a second enable callback through this
+    /// lifecycle owner. It is a narrow retained-object experiment, not a
+    /// Bukkit/Paper lifecycle or compatibility contract.
+    pub fn enable_entries(mut self, env: &mut Env<'_>) -> PaperPluginEntryEnablement {
+        let mut entries = Vec::with_capacity(self.plugins.len());
+        for plugin in self.plugins {
+            let index = plugin.status_index;
+            debug_assert_eq!(
+                self.lifecycle.status.plugins()[index].phase(),
+                PaperPluginLifecyclePhase::Constructed,
+            );
+            match plugin.callback(env, "onEnable") {
+                Ok(()) => {
+                    self.lifecycle.status.enabled(index);
+                    entries.push(plugin);
+                }
+                Err(error) => self.lifecycle.status.failed_to_enable(
+                    index,
+                    format!(
+                        "could not enable plugin {:?} entry class {}: {error}",
+                        plugin.descriptor.name(),
+                        plugin.descriptor.main_class(),
+                    ),
+                ),
+            }
+        }
+        PaperPluginEntryEnablement {
+            lifecycle: self.lifecycle,
+            readiness: self.readiness,
+            plugins: entries,
+        }
+    }
+}
+
+#[cfg(feature = "jvm")]
+impl PaperPluginEntryEnablement {
+    /// The original construction prerequisite snapshot for these entries.
+    pub fn readiness(&self) -> &PaperPluginConstructionReadiness {
+        &self.readiness
+    }
+
+    /// Per-descriptor lifecycle outcomes after isolated enable attempts.
+    pub fn status(&self) -> &PaperPluginLifecycleStatusSet {
+        &self.lifecycle.status
+    }
+
+    /// Successfully enabled entries in deterministic descriptor order.
+    pub fn plugins(&self) -> &[PaperConstructedPlugin] {
+        &self.plugins
+    }
+
+    /// Number of retained bootstrap and plugin loaders.
+    pub fn loader_count(&self) -> usize {
+        self.lifecycle.loader_count()
+    }
+
+    /// Calls the experimental zero-argument `onDisable` method for enabled entries.
+    ///
+    /// Attempts run synchronously in reverse successful-enable order. This
+    /// consumes the enabled state, making a second disable impossible through
+    /// this lifecycle owner. A Java exception changes only its descriptor to
+    /// `Failed` with a `Disable` failure; earlier enabled entries are still
+    /// attempted and every instance stays retained until the worker exits.
+    /// No server facade, event system, or Bukkit/Paper compatibility is
+    /// supplied by this callback seam.
+    pub fn disable_entries(mut self, env: &mut Env<'_>) -> PaperPluginEntryDisablement {
+        for plugin in self.plugins.iter().rev() {
+            let index = plugin.status_index;
+            debug_assert_eq!(
+                self.lifecycle.status.plugins()[index].phase(),
+                PaperPluginLifecyclePhase::Enabled,
+            );
+            match plugin.callback(env, "onDisable") {
+                Ok(()) => self.lifecycle.status.disabled(index),
+                Err(error) => self.lifecycle.status.failed_to_disable(
+                    index,
+                    format!(
+                        "could not disable plugin {:?} entry class {}: {error}",
+                        plugin.descriptor.name(),
+                        plugin.descriptor.main_class(),
+                    ),
+                ),
+            }
+        }
+        PaperPluginEntryDisablement {
+            lifecycle: self.lifecycle,
+            readiness: self.readiness,
+            plugins: self.plugins,
+        }
+    }
+}
+
+#[cfg(feature = "jvm")]
+impl PaperPluginEntryDisablement {
+    /// The original construction prerequisite snapshot for these entries.
+    pub fn readiness(&self) -> &PaperPluginConstructionReadiness {
+        &self.readiness
+    }
+
+    /// Per-descriptor lifecycle outcomes after reverse-order disable attempts.
+    pub fn status(&self) -> &PaperPluginLifecycleStatusSet {
+        &self.lifecycle.status
+    }
+
+    /// Entries retained until the worker stops, including a failed disable callback.
+    pub fn plugins(&self) -> &[PaperConstructedPlugin] {
+        &self.plugins
+    }
+
+    /// Number of retained bootstrap and plugin loaders.
+    pub fn loader_count(&self) -> usize {
+        self.lifecycle.loader_count()
+    }
 }
 
 #[cfg(feature = "jvm")]
@@ -883,6 +1113,20 @@ impl PaperConstructedPlugin {
     pub fn retains_instance(&self) -> bool {
         let _ = &self.instance;
         true
+    }
+
+    fn callback(&self, env: &mut Env<'_>, method: &str) -> Result<(), String> {
+        let result = env.with_local_frame(16, |env| {
+            let instance = env.new_local_ref(self.instance.as_obj())?;
+            env.call_method(
+                &instance,
+                JNIString::from(method),
+                jni_sig!("()V"),
+                &[],
+            )
+            .map(|_| ())
+        });
+        result.map_err(|error| lifecycle_callback_error(env, error))
     }
 }
 
@@ -947,13 +1191,13 @@ impl PaperLoadedPlugin {
         });
         match result {
             Ok(instance) => Ok(instance),
-            Err(error) => Err(construction_error(env, error)),
+            Err(error) => Err(lifecycle_callback_error(env, error)),
         }
     }
 }
 
 #[cfg(feature = "jvm")]
-fn construction_error(env: &mut Env<'_>, error: jni::errors::Error) -> String {
+fn lifecycle_callback_error(env: &mut Env<'_>, error: jni::errors::Error) -> String {
     let description = env.exception_occurred().and_then(|exception| {
         env.exception_clear();
         let description = env.call_method(
@@ -1080,7 +1324,9 @@ impl PaperBootstrapPlan {
     /// bridge's native server-state members in that *same* fresh loader. It
     /// retains
     /// the non-initialized entry class with its loader and descriptor. Plugin
-    /// construction, enablement, and event dispatch are later lifecycle work.
+    /// Construction and the experimental retained-object callbacks are later
+    /// worker-owned lifecycle work; event dispatch and API compatibility are
+    /// outside this boundary.
     #[cfg(feature = "jvm")]
     pub fn load_lifecycle_entries_in_runtime<'local>(
         &self,
@@ -1133,6 +1379,7 @@ impl PaperBootstrapPlan {
             plugins,
             status,
             native_shim: self.native_shim,
+            _worker: PhantomData,
         })
     }
 
@@ -2049,6 +2296,40 @@ mod tests {
         assert_eq!(failure.step(), PaperPluginLifecycleStep::Construct);
         assert_eq!(failure.message(), "fixture constructor threw");
         assert_eq!(status.plugins()[1].phase(), PaperPluginLifecyclePhase::Loaded);
+    }
+
+    #[test]
+    fn callback_failures_are_isolated_and_leave_only_enabled_entries_for_disable() {
+        let fixture = Fixture::new();
+        fixture.paper_jar();
+        fixture.plugin_jar("a.jar", PAPER_DESCRIPTOR, valid_descriptor("Alpha", "a.Main"));
+        fixture.plugin_jar("b.jar", PAPER_DESCRIPTOR, valid_descriptor("Bravo", "b.Main"));
+        fixture.plugin_jar("c.jar", PAPER_DESCRIPTOR, valid_descriptor("Charlie", "c.Main"));
+        let plan = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
+            .discover()
+            .expect("discover callback fixture");
+        let mut status = PaperPluginLifecycleStatusSet::discovered(plan.plugins());
+        for index in 0..status.plugins().len() {
+            status.loaded(index);
+            status.constructed(index);
+        }
+        status.enabled(0);
+        status.failed_to_enable(1, "fixture enable threw");
+        status.enabled(2);
+        status.failed_to_disable(2, "fixture disable threw");
+        status.disabled(0);
+
+        assert_eq!(status.plugins()[0].phase(), PaperPluginLifecyclePhase::Disabled);
+        assert_eq!(status.plugins()[1].phase(), PaperPluginLifecyclePhase::Failed);
+        assert_eq!(
+            status.plugins()[1].failure().expect("enable failure").step(),
+            PaperPluginLifecycleStep::Enable,
+        );
+        assert_eq!(status.plugins()[2].phase(), PaperPluginLifecyclePhase::Failed);
+        assert_eq!(
+            status.plugins()[2].failure().expect("disable failure").step(),
+            PaperPluginLifecycleStep::Disable,
+        );
     }
 
     #[test]

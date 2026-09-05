@@ -540,12 +540,11 @@ without initialization. Its returned
 `PaperLifecycleLoad` keeps the bootstrap loader, then every successfully loaded plugin's descriptor,
 loader, and non-initialized entry class together for the Java adapter worker's lifetime. Its
 `PaperPluginLifecycleStatusSet` records each descriptor's Load result separately. The lifecycle
-order is explicit: a discovered descriptor may Load, a loaded descriptor may Enable, and an enabled
-descriptor may Disable. This slice implements and records Load only. It deliberately exposes no
-enable or disable callback because either could run arbitrary plugin code before the compatible
-server-owned API state exists. A bootstrap Load failure remains terminal; a plugin Load failure is
-isolated, reported against that descriptor, and does not stop the host from checking later isolated
-entries. When the operator
+order is explicit: a discovered descriptor may Load, a loaded descriptor may Construct, a constructed
+descriptor may Enable, and an enabled descriptor may Disable. Loading records only Load; the separate entry-only construction seam below
+owns its experimental callbacks and is not a compatible server-owned API state. A bootstrap Load
+failure remains terminal; a plugin Load failure is isolated, reported against that descriptor, and
+does not stop the host from checking later isolated entries. When the operator
 also requests the isolated native shim, the shared bootstrap loader first resolves
 `lodestone.bridge.IsolatedPaperShim`, verifies its exact static native
 `blockStateId(int, int, int): int`, `serverTickCount(): long`, and
@@ -582,22 +581,31 @@ system, or compatibility contract. It exists to prove the retained-object and fa
 mechanics, not to make an ordinary plugin usable.
 `construct_entries` attempts eligible entries in discovery order; a constructor exception changes only
 that entry to `Failed` with a `Construct` diagnostic and later eligible entries still run. The status
-sequence is consequently `Discovered → Loaded → Constructed`; `Enable` and `Disable` remain
-unimplemented future operations, and no callback is exposed. The ordinary `Unavailable` input and
-the narrow `NativeServerSurface` input both remain construction blockers. A future server-facing
-construction path must add a real facade through the retained loader rather than treating this
-entry-only experiment as a partial API.
+sequence can continue through the equally narrow retained-object callbacks: `enable_entries` calls
+the zero-argument instance method named `onEnable` once for every constructed entry in discovery
+order, then `disable_entries` calls `onDisable` once for every successfully enabled entry in reverse
+order. These ownership-consuming state transitions are synchronous on the adapter worker and cannot
+be sent to, retried from, or overlapped by another thread. A missing method or Java exception changes
+only that descriptor to `Failed` with an `Enable` or `Disable` diagnostic; later enable attempts and
+earlier reverse-order disable attempts still run. The final retained state keeps every enabled
+instance alive until the worker exits, including one whose disable callback failed. These are
+explicit method names on the experimental entry object, not Bukkit/Paper lifecycle semantics, a
+server facade, plugin metadata, or an event system. The ordinary `Unavailable` input and the narrow
+`NativeServerSurface` input both remain construction blockers. A future server-facing construction
+path must add a real facade through the retained loader rather than treating this entry-only
+experiment as a partial API.
 
 The unignored unit tests inject loader outcomes and constructor shapes to prove ordering, phase
-rules, bootstrap-terminal failure, isolated plugin failures, and blocking. The runtime gate stays
-ignored because it needs a locally installed JDK; it builds stand-in archives only, runs both a
-successful and a deliberately failing constructor on the one adapter worker, and checks the retained
-per-descriptor `Construct` outcomes. It does not use an operator Paper jar or establish plugin
-compatibility.
+rules, bootstrap-terminal failure, isolated plugin failures, callback-failure isolation, and blocking.
+The runtime gate stays ignored because it needs a locally installed JDK; it builds stand-in archives
+only, constructs four retained entries on the one adapter worker, and records the enable and disable
+callback sequence. One enable failure leaves later entries eligible; one disable failure leaves the
+earlier reverse-order callback eligible. It checks the final per-descriptor `Enable`/`Disable` status
+and a callback log, but does not use an operator Paper jar or establish plugin compatibility.
 
 ```bash
 cargo test -p lodestone-jvm-bridge --features jvm --test paper_lifecycle \
-    lifecycle_entries_construct_on_the_adapter_worker -- --ignored --exact
+    lifecycle_entries_run_callbacks_on_the_adapter_worker -- --ignored --exact
 ```
 
 The ignored local-jar gate uses a locally materialized server jar and does not download or extract
