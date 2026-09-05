@@ -25,6 +25,16 @@ version-free build (`--no-default-features`) still compiles and correctly report
 family" instead of silently refusing every join. Only `v26-2` (protocol 776, MC 26.2) implements
 `ServerProtocol` today — joinable and hostable are different sets.
 
+### Native-store compaction
+
+`lodestone-server native-compact --native-path <native-store>` is the explicit maintenance path for
+an existing native `world.ls` segment. It must run only after every integrated or dedicated server
+using that store has stopped: the command coordinates its own handle but cannot lock out another
+process. It reports retained-record and before/after byte counts, preserves the latest committed
+record for every key, and uses the native store's crash-safe replacement/reopen logic. A missing
+segment is refused before opening storage, so a mistyped maintenance path cannot create an empty
+world.
+
 ### The tick loop
 
 A real 20Hz clock, independent of client traffic, driving the mob simulation and every registered

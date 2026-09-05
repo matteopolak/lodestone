@@ -14,7 +14,7 @@ use std::sync::Mutex;
 
 use lodestone_core::{Reader, Writer, read_named_nbt, write_named_nbt};
 use lodestone_storage::{
-    ExtensionRegistration, NativeChunkCoordinate, NativeStore, RecordKey, RecordWrite,
+    Compaction, ExtensionRegistration, NativeChunkCoordinate, NativeStore, RecordKey, RecordWrite,
     StoreError,
 };
 use lodestone_storage_schema::{
@@ -857,6 +857,7 @@ impl std::error::Error for EntityRecordError {}
 
 trait DirtyRecordStore: Send {
     fn write_transaction(&mut self, writes: Vec<RecordWrite>) -> Result<(), StoreError>;
+    fn compact(&mut self) -> Result<Compaction, StoreError>;
     fn get(&mut self, key: RecordKey) -> Result<Option<StorageRecord>, StoreError>;
     fn committed_chunk_coordinates(&self) -> Vec<NativeChunkCoordinate>;
     fn committed_general_keys(&self) -> Vec<RecordKey>;
@@ -870,6 +871,10 @@ trait DirtyRecordStore: Send {
 impl DirtyRecordStore for NativeStore {
     fn write_transaction(&mut self, writes: Vec<RecordWrite>) -> Result<(), StoreError> {
         NativeStore::write_transaction(self, writes)
+    }
+
+    fn compact(&mut self) -> Result<Compaction, StoreError> {
+        NativeStore::compact(self)
     }
 
     fn get(&mut self, key: RecordKey) -> Result<Option<StorageRecord>, StoreError> {
@@ -953,6 +958,25 @@ impl WorldStorage {
             .expect("world storage lock poisoned")
             .write_transaction(writes)?;
         Ok(count)
+    }
+
+    /// Compacts the selected native segment at an explicit maintenance point.
+    ///
+    /// The caller must ensure no other process has the store open. This method
+    /// serializes Lodestone handles through the backend mutex, but it cannot
+    /// establish a cross-process maintenance window. Compaction preserves the
+    /// recovered latest value for every key in one replacement transaction and
+    /// returns the measured segment sizes. The Anvil backend rejects this
+    /// native-only operation without touching compatibility files.
+    pub fn compact_native(&self) -> Result<Compaction, Error> {
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        native
+            .lock()
+            .expect("world storage lock poisoned")
+            .compact()
+            .map_err(Into::into)
     }
 
     /// Returns the native extension table selected for this world.
@@ -2543,6 +2567,13 @@ mod tests {
             Ok(())
         }
 
+        fn compact(&mut self) -> Result<Compaction, StoreError> {
+            Err(StoreError::Corrupt {
+                offset: 0,
+                reason: "recording store does not model compaction".to_owned(),
+            })
+        }
+
         fn get(&mut self, _key: RecordKey) -> Result<Option<StorageRecord>, StoreError> {
             Ok(None)
         }
@@ -2676,6 +2707,10 @@ mod tests {
         ));
         assert!(matches!(
             storage.native_general_records(),
+            Err(Error::AnvilDoesNotAcceptTypedRecords)
+        ));
+        assert!(matches!(
+            storage.compact_native(),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
         assert!(matches!(
