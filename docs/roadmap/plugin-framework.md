@@ -37,7 +37,7 @@ insert-to-take-control/remove-to-release convention for plugin movement control.
 | Priority and monitor phase | done (native), bounded | `EventPriority` chains all public schedules. Monitor rejects mutable `World` access; deferred `Commands` mutation remains the boundary to document and test. |
 | Plugin-defined events | partial | Define a convention and provide a worked example; a bevy `Message` already works for statically linked plugins. |
 | Delayed and repeating tasks | done (native) | `TaskScheduler::{schedule_once, schedule_repeating, cancel}` runs exactly from `run_due_tasks` in `TickSet::Input`. |
-| Off-tick work with hand-back | done (native) | `AsyncTaskPool::{spawn, spawn_with_handback}` is the common API and executes inline on `wasm32`. |
+| Off-tick work with hand-back | done (native) | Client plugins use `AsyncTaskPool::{spawn, spawn_with_handback}` (inline on `wasm32`); native server plugins use `ServerTaskScheduler::spawn_with_handback` with bounded hand-back admission. |
 
 ### Commands and permissions
 

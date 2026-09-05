@@ -86,7 +86,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | priority order across plugins | **done** — `EventPriority::{Lowest..Monitor}` chained into all four schedules | partial — manifest `priority` orders guests; nothing else | **gap** |
 | `MONITOR` read-only | **done** — checked against bevy's per-system access set; blind to deferred `Commands` | **gap** | **gap** |
 | sync delayed/repeating tasks | **done** — `TaskScheduler::{schedule_once, schedule_repeating, cancel}` | **done** — `scheduler::{schedule-once, schedule-repeating, cancel}` returns guest-local handles and dispatches `on-task` on host ticks | **done, native** — `ServerTaskScheduler::{schedule_once, schedule_repeating, cancel}`, drained by `ServerCorePlugin` on the production primary world's `GameTick` |
-| async task + main-thread hand-back | **done** — `AsyncTaskPool::{spawn, spawn_with_handback}`; inline on wasm32 | **ceiling** — single-threaded guest by design | **gap** |
+| async task + main-thread hand-back | **done** — `AsyncTaskPool::{spawn, spawn_with_handback}`; inline on wasm32 | **ceiling** — single-threaded guest by design | **done, native** — `ServerTaskScheduler::spawn_with_handback` returns `Send` values through a bounded hand-back queue drained on the primary `GameTick` owner |
 | register a command | **done** — `CommandRegistry`/`PluginCommand`, `PluginCommandsPlugin` in `Sim::client_app`, reached from the wire through the shell's `EcsCommandSink` | partial — `send-command` invokes; nothing registers | partial — `CommandSink` seam exists; the dedicated server installs `CommandDispatch::none()`, so every plugin command is refused there |
 | tab completion / argument types | **done** — `lodestone-command` argument types, `commands::suggest` | **gap** | as above |
 | permission nodes, wildcards, defaults, groups, delegation | **done** — `PermissionStore`, `PermissionRegistry`, `PermissionResolver`, `Permissions` resource | **gap** | partial — native `AccessHandle::set_permission_provider` delegates the five connection levels by UUID before Play; node/wildcard permissions remain client-side through the sink, and existing connections retain their resolved level |
@@ -218,7 +218,9 @@ Callbacks receive the tick task's own `&mut World` and an opaque cancellation ha
 no second world lock is exposed). Delays exclude `ServerBoot`, zero delay/period normalize to one,
 and equal deadlines run in registration order. A callback can cancel another due callback, stop its
 own repetition, or enqueue work for a later tick. The scheduler remains a resource throughout
-dispatch. Native async hand-back remains absent; the synchronous scheduler does not create threads.
+dispatch. `spawn_with_handback` admits bounded parameterless worker work and runs its result closure
+on that same tick owner before due synchronous callbacks. `cancel_async` discards a pending result;
+shutdown rejects new work and leaves running work with no callback route into a stopped world.
 
 ### Commands and permissions
 

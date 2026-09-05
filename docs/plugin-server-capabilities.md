@@ -54,7 +54,7 @@ queue, so a tick does not scan callbacks whose deadlines are still in the future
 tick or the calling task itself, preventing its next repetition. The scheduler resource stays in
 the world while callbacks run; work registered inside a callback starts no earlier than the next
 pass. One-shot handles expire after execution. Tasks are transient and dropped with the world;
-there is no persistence, runtime plugin unloading, async worker pool, or panic isolation.
+there is no persistence or runtime plugin unloading.
 
 ```rust,ignore
 ServerApp::bootstrap_with(|app| {
@@ -64,6 +64,39 @@ ServerApp::bootstrap_with(|app| {
             let _ = world.resource_mut::<ServerTaskScheduler>().cancel(id);
         });
 })
+```
+
+### Native off-tick hand-back
+
+`ServerTaskScheduler::spawn_with_handback(work, hand_back)` extends that same scheduler surface
+without exposing another `World` access path. `work` is parameterless and must return a `Send` value;
+on native targets it runs on a named worker thread. Its `hand_back(value, &mut World)` closure is
+queued for the primary tick task and runs from `run_server_tasks` in `TickSet::Drain`, after message
+maintenance and before due delayed/repeating callbacks. The exact arrival tick is intentionally
+nondeterministic, but the mutation site is not: only the tick owner receives `&mut World`.
+
+The scheduler admits a default maximum of 64 jobs across both work still running and results waiting
+to hand back. `spawn_with_handback` returns `ServerAsyncTaskError::Full` rather than growing a work
+or completion queue, so a plugin must retry later or discard its own request. A completion keeps its
+reservation until the tick owner has run or discarded its closure; consequently a worker never waits
+behind an unbounded result backlog. `ServerTaskScheduler::with_async_hand_back_capacity` is useful
+for an embedder that needs a smaller or larger explicit limit.
+
+`cancel_async(id)` guarantees a result that has not reached its hand-back will not mutate the world;
+it cannot forcibly interrupt native work already executing. `shutdown_async_tasks()` rejects new work,
+marks outstanding jobs cancelled, and drops queued completions. Running workers finish and release
+their reservations without a world callback. Scheduler drop invokes the same shutdown, so a stopped
+world has no return route from a worker. A panicking work closure is discarded. On `wasm32`, where
+there are no worker threads, work executes inline but its result still uses the next scheduler pass
+and the same bounded hand-back queue.
+
+```rust,ignore
+let result = app.world_mut().resource_mut::<ServerTaskScheduler>()
+    .spawn_with_handback(
+        || load_plugin_owned_data(),
+        |data, world| world.insert_resource(data),
+    );
+// `Full` is backpressure, not a request to block the tick thread.
 ```
 
 ### The client's doctrine, restated as five questions
