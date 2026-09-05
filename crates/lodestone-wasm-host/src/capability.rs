@@ -80,6 +80,20 @@ pub enum Capability {
     /// The guest cannot construct a position or packet: physics consumes the
     /// copied intent and the controller remains the sole egress producer.
     ActMovement,
+    /// Request one local-player block placement through the shell-owned
+    /// placement lifecycle.
+    ///
+    /// This does not grant a block-state, hand, prediction sequence, or packet
+    /// constructor. The guest supplies only the target cell and face; the shell
+    /// applies its normal reach, inventory, collision, veto, prediction, and
+    /// egress checks.
+    ActPlace,
+    /// Receive a generation-bounded outcome after a WASM or native placement
+    /// attempt resolves.
+    ///
+    /// The event exposes the normal finite status/rejection vocabulary rather
+    /// than a world handle or an unbounded error string.
+    ObservePlace,
     /// Decide whether the client may commit one of its typed player actions.
     ///
     /// This is data-flow gated at the synchronous host callback: a guest without
@@ -117,6 +131,8 @@ impl Capability {
         Self::ActInteract,
         Self::ActLook,
         Self::ActMovement,
+        Self::ActPlace,
+        Self::ObservePlace,
         Self::VetoActions,
         Self::RegisterCommands,
         Self::FsRead,
@@ -135,6 +151,8 @@ impl Capability {
             Self::ActInteract => "act:interact",
             Self::ActLook => "act:look",
             Self::ActMovement => "act:movement",
+            Self::ActPlace => "act:place",
+            Self::ObservePlace => "observe:place",
             Self::VetoActions => "veto:actions",
             Self::RegisterCommands => "commands:register",
             Self::FsRead => "fs:read",
@@ -168,6 +186,8 @@ impl Capability {
             | Self::ActInteract
             | Self::ActLook
             | Self::ActMovement
+            | Self::ActPlace
+            | Self::ObservePlace
             | Self::VetoActions
             | Self::RegisterCommands => false,
         }

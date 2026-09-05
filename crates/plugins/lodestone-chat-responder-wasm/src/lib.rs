@@ -35,6 +35,8 @@ use lodestone::plugin::types::CommandAnchor;
 use lodestone::plugin::types::LookIntent;
 #[cfg(feature = "movement")]
 use lodestone::plugin::types::MovementIntent;
+#[cfg(feature = "place")]
+use lodestone::plugin::types::{BlockFace, BlockPos, PlaceIntent, PlaceStatus};
 #[cfg(feature = "scheduler")]
 use lodestone::plugin::scheduler::{cancel, schedule_once, schedule_repeating};
 
@@ -43,8 +45,9 @@ use lodestone::plugin::scheduler::{cancel, schedule_once, schedule_repeating};
 /// An `AtomicU64` rather than a `static mut` because the workspace denies
 /// `unsafe_code`; a wasm guest is single-threaded, so the atomicity costs nothing
 /// and buys the borrow checker's approval.
-#[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement")))]
 static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "place")]
+static PLACEMENT_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "scheduler")]
 static REPEATS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(feature = "scheduler")]
@@ -72,7 +75,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.7.0".to_string(),
+            abi: "lodestone:plugin@0.8.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -103,7 +106,10 @@ impl Guest for ChatResponder {
             sprint: true,
         }))];
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement")))]
+        #[cfg(feature = "place")]
+        return place_once_then_report(events);
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place")))]
         return respond(events);
     }
 
@@ -192,6 +198,34 @@ impl Guest for ChatResponder {
         let _ = (input, context);
         CommandOutcome::Failure("unknown command".to_owned())
     }
+}
+
+/// Request one placement, then turn the finite next-tick lifecycle result into
+/// an ordinary action. The fixture target deliberately has no loaded world in
+/// its host-side gate, making `no-world-data` a stable control for the complete
+/// host → ECS → shell → host observation path.
+#[cfg(feature = "place")]
+fn place_once_then_report(events: Vec<Event>) -> Vec<Action> {
+    for event in events {
+        if let Event::PlaceOutcome(outcome) = event {
+            let status = match outcome.status {
+                PlaceStatus::Predicted => "predicted",
+                PlaceStatus::SentUnpredicted => "sent-unpredicted",
+                PlaceStatus::Rejected(_) => "rejected",
+            };
+            return vec![Action::SendChat(format!(
+                "place: generation={} status={status}",
+                outcome.generation
+            ))];
+        }
+    }
+    if !PLACEMENT_SENT.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return vec![Action::PlaceBlock(PlaceIntent {
+            pos: BlockPos { x: 4, y: 64, z: 4 },
+            face: BlockFace::Up,
+        })];
+    }
+    Vec::new()
 }
 
 fn command_specs() -> Vec<CommandSpec> {

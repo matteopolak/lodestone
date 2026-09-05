@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 
 use wasmtime::component::{Component, Linker, TypedFunc};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
+use bevy_ecs::entity::Entity;
 
 use crate::bindings::lodestone::plugin::{filesystem, logging, scheduler, types};
 use crate::capability::{Capability, CapabilitySet};
@@ -53,11 +54,12 @@ use crate::capability::{Capability, CapabilitySet};
 /// back; the rest are their payload records. Each mirrors a `lodestone_model` type
 /// named in `wit/lodestone-plugin.wit`.
 pub use crate::bindings::lodestone::plugin::types::{
-    Action, BlockBreakVerdict, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
+    Action, BlockBreakVerdict, BlockFace, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
     CommandAnchor, CommandContext, CommandEntity, CommandExecution, CommandOutcome,
     CommandPosition, CommandRotation, CommandSpec, EntityDamageVerdict, Event, Hand, Health,
-    InventoryClickVerdict, LogLevel, LookIntent, PlayerInteractVerdict, PlayerMoveVerdict,
-    PluginInfo, PluginVerdict, SectionBlocksChanged, SectionPos, VerdictContext,
+    InventoryClickVerdict, LogLevel, LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,
+    PlaceRejection, PlaceStatus, PlayerInteractVerdict, PlayerMoveVerdict, PluginInfo, PluginVerdict,
+    SectionBlocksChanged, SectionPos, VerdictContext,
 };
 
 /// The world version this host speaks. A guest's `init` must return this, and a
@@ -66,7 +68,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.7.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.8.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
@@ -337,6 +339,11 @@ pub struct LoadedPlugin {
     on_verdict: TypedFunc<(VerdictContext,), (PluginVerdict,)>,
     on_command: TypedFunc<(String, CommandContext), (CommandOutcome,)>,
     failure: Option<String>,
+    /// The last placement outcome this guest observed. The player identity is
+    /// part of the cursor because a session reset restarts the lifecycle
+    /// generation at zero; comparing only the number would hide the first
+    /// result after reconnecting.
+    last_place_outcome: Option<(Entity, u64)>,
 }
 
 impl fmt::Debug for LoadedPlugin {
@@ -354,6 +361,24 @@ impl LoadedPlugin {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether `outcome` is new for this guest's current local-player session.
+    ///
+    /// This cursor belongs to the host rather than the guest so an observing
+    /// guest receives one bounded lifecycle result per generation instead of a
+    /// repeated copy on every tick until another placement happens.
+    pub(crate) fn observe_place_outcome(
+        &mut self,
+        player: Entity,
+        outcome: &crate::host::PlaceOutcome,
+    ) -> bool {
+        let cursor = (player, outcome.generation);
+        if self.last_place_outcome == Some(cursor) {
+            return false;
+        }
+        self.last_place_outcome = Some(cursor);
+        true
     }
 
     #[must_use]
@@ -886,6 +911,7 @@ impl PluginHost {
             on_verdict,
             on_command,
             failure: None,
+            last_place_outcome: None,
         });
         Ok(self.plugins.len() - 1)
     }

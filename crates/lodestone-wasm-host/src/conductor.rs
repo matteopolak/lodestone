@@ -44,12 +44,15 @@ use std::sync::{Arc, Mutex};
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::{
-    Commands, Entity, IntoScheduleConfigs, MessageReader, Query, ResMut, Resource, With,
+    Commands, Entity, IntoScheduleConfigs, MessageReader, Query, Res, ResMut, Resource, With,
 };
+use bevy_ecs::schedule::ApplyDeferred;
 use lodestone_command::StringArgument;
 use lodestone_ecs::commands::{CommandOutcome, CommandRegistry, PluginCommand, PluginCommandsPlugin};
 use lodestone_ecs::events::{GameEvent, GameEventBusPlugin};
-use lodestone_ecs::player::{ActionQueue, LocalPlayer, LookIntent, MovementIntent};
+use lodestone_ecs::player::{
+    ActionQueue, LocalPlayer, LookIntent, MovementIntent, PlaceOutcome,
+};
 use lodestone_ecs::veto::{ActionVetoPlugin, ActionVetoes, Verdict};
 // `TickSet` via the crate root, not `lodestone_ecs::sets::TickSet`: the `sets` module
 // itself is private and only its re-exports are public.
@@ -57,6 +60,7 @@ use lodestone_ecs::{CorePlugin, GameTick, TickSet};
 
 use crate::abi;
 use crate::abi::{IntentAction, LoweredAction};
+use crate::capability::Capability;
 use crate::host::{Event, PluginHost};
 
 /// The loaded guests, as an ECS resource.
@@ -84,7 +88,10 @@ pub struct WasmPlugins {
 /// the local-player systems own validation, simulation, and packet production.
 /// The vector preserves guest/load order. Look and movement are independently
 /// last-wins, so one guest can set both in one output list without one action
-/// accidentally erasing the other.
+/// accidentally erasing the other. Placement is one-shot and also last-wins:
+/// one local player has one `PlaceIntent` component, so selecting any other
+/// policy would need a second owner or a queue the production lifecycle does not
+/// have.
 #[derive(Resource, Default, Debug)]
 pub struct PendingWasmIntents(Vec<IntentAction>);
 
@@ -287,7 +294,8 @@ impl Plugin for WasmHostPlugin {
         );
         app.add_systems(
             GameTick,
-            apply_wasm_intents
+            (apply_wasm_intents, apply_wasm_place_intents, ApplyDeferred)
+                .chain()
                 .in_set(TickSet::Intent)
                 .before(lodestone_ecs::player::apply_look_intent),
         );
@@ -313,8 +321,13 @@ pub fn drive_wasm_plugins(
     mut events: MessageReader<GameEvent>,
     mut queue: ResMut<ActionQueue>,
     mut intents: ResMut<PendingWasmIntents>,
+    players: Query<(Entity, &PlaceOutcome), With<LocalPlayer>>,
 ) {
     let batch: Vec<lodestone_model::ClientEvent> = events.read().map(|e| e.0.clone()).collect();
+    let place_outcome = players
+        .iter()
+        .next()
+        .and_then(|(player, outcome)| abi::lift_place_outcome(outcome).map(|outcome| (player, outcome)));
 
     let mut refused = 0_u64;
     let (lowered, lowered_intents) = plugins.with_host(|host| {
@@ -327,6 +340,13 @@ pub fn drive_wasm_plugins(
                 .iter()
                 .filter_map(|e| abi::lift_event(e, &granted))
                 .collect();
+            let mut lifted = lifted;
+            if granted.contains(Capability::ObservePlace)
+                && let Some((player, outcome)) = &place_outcome
+                && plugin.observe_place_outcome(*player, outcome)
+            {
+                lifted.push(Event::PlaceOutcome(outcome.clone()));
+            }
             for action in plugin.tick(&lifted, fuel) {
                 match abi::lower_action(action, &granted) {
                     Ok(LoweredAction::Client(client_action)) => out.push(client_action),
@@ -366,7 +386,7 @@ fn apply_wasm_intents(
 ) {
     let last = pending.0.iter().rev().find_map(|intent| match intent {
         IntentAction::Look(look) => Some(*look),
-        IntentAction::Movement(_) => None,
+        IntentAction::Movement(_) | IntentAction::Place(_) => None,
     });
     let Some(look) = last else {
         return;
@@ -383,6 +403,31 @@ fn apply_wasm_intents(
     }
 }
 
+/// Submit the final guest placement request through the already-installed
+/// local-player lifecycle. This system is chained to `apply_deferred` inside
+/// `TickSet::Intent`, so the insert is visible before `TickSet::Send`, where
+/// the shell consumes `PlaceIntent`.
+///
+/// The host never manufactures a `ClientAction`: the shell validates the copied
+/// target against its current world and inventory, owns prediction/sequence
+/// state, then emits the normal action or a bounded `PlaceOutcome`.
+fn apply_wasm_place_intents(
+    pending: Res<PendingWasmIntents>,
+    players: Query<Entity, With<LocalPlayer>>,
+    mut commands: Commands,
+) {
+    let place = pending.0.iter().rev().find_map(|intent| match intent {
+        IntentAction::Place(place) => Some(*place),
+        IntentAction::Look(_) | IntentAction::Movement(_) => None,
+    });
+    let Some(place) = place else {
+        return;
+    };
+    for entity in &players {
+        commands.entity(entity).insert(place);
+    }
+}
+
 /// Override the normal controller's copied input after it writes and before
 /// physics reads it. `using_item` is deliberately retained from that controller
 /// output, because a guest has no authority to forge item-use state.
@@ -392,7 +437,7 @@ fn apply_wasm_movement_intents(
 ) {
     let movement = pending.0.iter().rev().find_map(|intent| match intent {
         IntentAction::Movement(movement) => Some(*movement),
-        IntentAction::Look(_) => None,
+        IntentAction::Look(_) | IntentAction::Place(_) => None,
     });
     pending.0.clear();
 

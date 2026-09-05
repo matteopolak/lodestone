@@ -333,7 +333,7 @@ Two independent enforcement mechanisms have very different guarantees. An **impo
 simply absent, so a guest
 referencing it without the grant fails to instantiate at all, structurally unforgeable. A **data-flow**
 capability (e.g. `observe:chat`, `act:chat`) is enforced by the host's own conductor code — events are
-never lifted to an ungranted guest and its actions are silently dropped, which means the manifest is a
+never lifted to an ungranted guest and its actions are refused, counted, and logged, which means the manifest is a
 *declaration*, not the enforcement, and anything genuinely dangerous (filesystem, network, subprocess)
 must be modelled as an import rather than trusted as data-flow.
 
@@ -345,14 +345,15 @@ stops dispatch. A trap, fuel exhaustion, or future native context this ABI canno
 current action, unloads the failing guest where applicable, and lets later actions be considered by
 the remaining guests. The `veto:actions` data-flow capability gates delivery to the export.
 
-Not in the ABI yet: the intent half of the doctrine (`BreakIntent`/`PlaceIntent`/`MovementIntent`/
-`LookIntent`) — a guest can chat and observe but cannot yet mine, place, or steer, since an
-install/remove-shaped component needs paired ABI calls plus an outcome poll, a bigger surface than one
-value-shaped tick crossing. Command registration/invocation, async equivalents, `Monitor`-tier
-enforcement for a guest, and declared load-order dependencies are all named gaps. The native windowed
-client installs the WASM conductor before `WindowApp` adopts its `App` and scans the cwd-relative
-`plugins/` directory through `PluginHost::load_directory`. Browser plugin support is out of scope:
-`wasmtime` cannot itself run inside a wasm32 guest.
+The ABI includes copied look and movement intent plus one-shot placement: the guest cannot provide a
+world handle, block state, held item, prediction sequence, or raw packet. Placement returns a finite,
+generation-bounded result only to a guest granted `observe:place`; a multi-tick break claim remains
+outside the ABI because it needs a separate cancellation and ownership contract. Command
+registration/invocation, async equivalents, `Monitor`-tier enforcement for a guest, and declared
+load-order dependencies are all named gaps. The native windowed client installs the WASM conductor
+before `WindowApp` adopts its `App` and scans the cwd-relative `plugins/` directory through
+`PluginHost::load_directory`. Browser plugin support is out of scope: `wasmtime` cannot itself run
+inside a wasm32 guest.
 
 ## How to change it, and the gotchas
 
@@ -395,7 +396,8 @@ loading mechanism, feature flag, or manifest format yet. `GameEventBusPlugin`, `
 absent.
 
 **WASM tier:** `PluginHost::new(policy)` takes a `CapabilitySet` (`default_policy()` withholds
-`fs:read`, `schedule:tasks`, and `commands:register`); `with_fuel(n)` bounds each guest's per-host-tick instruction budget —
+`fs:read`, `schedule:tasks`, `commands:register`, `act:look`, `act:movement`, `act:place`, and
+`observe:place`); `with_fuel(n)` bounds each guest's per-host-tick instruction budget —
 fuel rather than
 epoch-based preemption, since an epoch deadline needs a watchdog and a host without one has a deadline
 that never trips; `with_memory_limit(n)` bounds linear memory; `with_filesystem_root(p)` is required in
