@@ -80,7 +80,7 @@ insert-to-take-control/remove-to-release convention for plugin movement control.
 | Internal version-crate access | done, deliberately version-locked | A native plugin may depend on a version leaf crate directly. This is a compile-time compatibility choice, not a dynamic plugin API. |
 | World-space drawing | partial | `ExtractSet::Debug` and `DebugLines` are a precedent, not a general drawing API. |
 | Input interception | done (native) | `PluginKeybinds` supports Consume and Observe modes; open UI takes priority. |
-| Camera control | partial | Verify that a plugin can drive, not only observe, a cinematic pose. |
+| Camera control | done (native) | `CameraOverride` replaces only the drawn frame; `lodestone-key-toggle::CameraTogglePlugin` drives and releases a fixed pose through the composed `Sim` path, with a real `Sim::render_camera` control. |
 | Render-pipeline replacement | ceiling | `lodestone-render` has no bevy dependency and plugins do not receive a `wgpu::Device`; renderer constraints remain renderer-owned. |
 | Native manifest, dependencies, and load order | gap | Define ordering and soft-dependency conventions; static installation remains a Cargo dependency plus rebuild. |
 | Native failure isolation | open design | A caught panic can leave `World` partially mutated. Decide whether fully trusted native plugins fail the process or provide a transaction-safe boundary. |
