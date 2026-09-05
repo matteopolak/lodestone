@@ -737,10 +737,19 @@ After a host-confirmed change, the adapter invokes its existing callback and the
 listeners. A listener exception is cleared and recorded in the completion's
 `listener_failures` list with its stable registration number, descriptor name, and bounded detail;
 later listeners still run, the applied change is not rolled back, and the adapter remains usable.
-The callback still uses the existing one-slot worker command queue, and any world read or write
-from a listener must use the bounded `WorldPort` request/response seam rather than reaching an ECS
-guard. There is no additional environment variable or runtime toggle: the `jvm` feature and an
-operator-built shim containing the exact isolated declarations are the only prerequisites.
+During each listener call, `IsolatedPaperShim.currentBlockHandle()` returns the opaque `jlong`
+for that listener's changed block. The value is a generation-checked slot reference whose payload
+is only the owner identity and block coordinates; no ECS pointer or world guard can cross the JNI
+boundary. The call fails outside a resident block-change callback. Handles are interned per owner
+and position, the registry has a 1,024-live-handle bound, and disabling or failing an entry releases
+all of that entry's handles before the slot can be reused. The callback still uses the existing
+one-slot worker command queue, and any world read or write from a listener must use the bounded
+`WorldPort` request/response seam rather than reaching an ECS guard. The
+`IsolatedPaperShim.blockHandlePosition(long)` resolver returns a copied coordinate string while the
+handle is live; stale, forged, out-of-range, and worker-off-thread calls fail as named Java errors.
+The generic registry separately reports wrong-kind use. There is no additional
+environment variable or runtime toggle: the `jvm` feature and an operator-built shim containing
+the exact isolated declarations are the only prerequisites.
 
 To extend this event subset, update the source-of-truth declarations and validation in
 `native_surface`, the JNI registration and worker dispatch in `adapter`, and the lifecycle cleanup
@@ -912,17 +921,21 @@ Three details that are decisions rather than implementation:
 - **One object has exactly one live handle.** Bukkit plugins compare entity references for identity;
   two live handles to one entity would break `equals` in a way that presents as a plugin bug.
 
-Still open: JNI **global refs** for the Java-side objects, and the `DeleteGlobalRef` discipline that
-pairs with `release()`. That needs a JVM to develop against.
+`ObjectRegistry` is generic over a host-owned, value-like payload and carries the expected
+`ObjectKind` (`World`, `Player`, `Block`, and the remaining object categories) beside each opaque
+reference. `try_handle_for` is the fallible path used at native boundaries, so a full registry is
+reported rather than growing or returning a default. The first production callback consumer is the
+resident block-change listener described in §4.5: it exposes block handles only during the callback
+and invalidates them on entry failure, disable, or worker cleanup. World and player handles have the
+generation machinery but still need live server registries and producer callbacks.
 
-The composed fixture now exercises the handle boundary without claiming to close that global-ref
-work. A Java caller obtains an opaque `jlong` for block position `(11,1,4)`, retains it across
-separate `WorldPort` service turns, and reads `BLOCK:11,1,4`. A negative control flips the generation
-bit and must report `STALE-HANDLE:the referenced object no longer exists`; releasing the original
-handle then makes the same read report the same bounded stale result. The registry performs the
-validation and invalidation on the Rust service side, so slot reuse cannot make the old Java-held
-value address a later object. The live runner asserts the complete
-`HANDLE-LIFETIME:live=... forged=... released=1 after=...` line.
+Hermetic registry tests force slot reuse after release, exercise kind mismatch and capacity
+exhaustion, and verify that `clear` advances every live generation before reuse. The adapter's
+worker-local callback test also obtains a block handle, checks that it is available only while the
+listener is running, releases the owner, and proves the old bits resolve as stale. The ignored JVM
+fixtures validate the declaration and callback ABI separately; they do not claim complete Paper
+object compatibility. A typed world/player resolver still waits on corresponding live registries
+and producer callbacks.
 
 The same composed caller exercises recursive Java-to-Rust-to-Java callbacks below and above the
 budget. Depth `2` returns `REENTRANT:OK:3`; depth `4` attempts one more callback and receives
@@ -960,6 +973,9 @@ counter while unwinding, so the over-limit control cannot poison later callbacks
 - `lodestone_jvm_bridge::callback::DEFAULT_CALLBACK_DEPTH_LIMIT` — the maximum nested
   Java/Rust callback depth before the boundary reports an error; a host may use
   `CallbackDepthGuard::enter_with_limit` when its policy needs a different bound.
+- `lodestone_jvm_bridge::adapter::MAX_RESIDENT_BLOCK_HANDLES` — the worker-wide bound for opaque
+  block handles retained by resident block-change listeners. World and player handle producers are
+  not configured yet; they remain gated on live registries and lifecycle callbacks.
 - `lodestone_jni_invocation_spike::REQUEST_DEADLINE` — the prototype's 150 ms deadline, chosen to
   make the silent servicer control fast while the runner's outer 15-second timeout remains an
   independent hang gate.
