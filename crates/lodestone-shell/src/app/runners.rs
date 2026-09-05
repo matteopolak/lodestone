@@ -19,10 +19,17 @@ pub(super) fn run_windowed_with_app(
     config: Config,
 ) -> anyhow::Result<()> {
     #[cfg(not(target_arch = "wasm32"))]
-    crate::wasm_plugins::install_from_directory(
-        &mut plugin_app,
-        std::path::Path::new(lodestone_wasm_host::DEFAULT_PLUGIN_DIR),
-    )?;
+    {
+        let grants = match config.plugin_grants_path.as_deref() {
+            Some(path) => crate::wasm_plugins::load_grants_from_file(path)?,
+            None => lodestone_wasm_host::PluginGrantPolicy::default(),
+        };
+        crate::wasm_plugins::install_from_directory_with_grants(
+            &mut plugin_app,
+            std::path::Path::new(lodestone_wasm_host::DEFAULT_PLUGIN_DIR),
+            &grants,
+        )?;
+    }
 
     // `EventLoop::<ShellEvent>::with_user_event().build()` rather than
     // `EventLoop::new()`: the two are identical when `ShellEvent = ()`

@@ -1971,6 +1971,13 @@ pub struct Config {
     /// Whether argv actually named `--render-distance`/`--rd`. See
     /// [`Self::sensitivity_given`].
     pub render_distance_given: bool,
+    /// An explicit JSON file containing per-instance additions to the
+    /// fail-closed WASM plugin policy. `None` means discovery receives only its
+    /// baseline policy; the shell never searches for grants implicitly.
+    ///
+    /// This is a path rather than parsed state so the native-only WASM host and
+    /// its configuration parser remain outside the browser dependency graph.
+    pub plugin_grants_path: Option<PathBuf>,
     /// Opt-in deterministic live frame benchmark. `None` for ordinary play.
     pub benchmark: Option<BenchmarkConfig>,
 }
@@ -1989,6 +1996,7 @@ impl Default for Config {
             sensitivity: DEFAULT_SENSITIVITY,
             sensitivity_given: false,
             render_distance_given: false,
+            plugin_grants_path: None,
             benchmark: None,
         }
     }
@@ -2003,8 +2011,8 @@ impl Config {
     /// Recognised flags:
     /// `--headless`, `--connect`, `--window`, `--host <h>`, `--port <p>`,
     /// `--protocol <n>`, `--render-distance <n>`, `--live` (connect while
-    /// windowed), `--seconds <n>`, `--sensitivity <f>`, the benchmark options,
-    /// and `--help`/`-h`.
+    /// windowed), `--seconds <n>`, `--sensitivity <f>`, `--plugin-grants <file>`,
+    /// the benchmark options, and `--help`/`-h`.
     #[must_use]
     pub fn from_args<I: IntoIterator<Item = String>>(args: I) -> CliOutcome {
         let mut cfg = Config::default();
@@ -2065,6 +2073,15 @@ impl Config {
                         cfg.sensitivity = v;
                         cfg.sensitivity_given = true;
                     }
+                }
+                "--plugin-grants" => {
+                    let Some(path) = it.next() else {
+                        return CliOutcome::Error("--plugin-grants requires a JSON file path".into());
+                    };
+                    if path.is_empty() {
+                        return CliOutcome::Error("--plugin-grants requires a non-empty JSON file path".into());
+                    }
+                    cfg.plugin_grants_path = Some(PathBuf::from(path));
                 }
                 "--benchmark" => {
                     benchmark_option_seen = true;
@@ -2257,6 +2274,11 @@ impl Config {
                 moving: benchmark_moving,
             });
         }
+        if cfg.plugin_grants_path.is_some() && cfg.mode != Mode::Window {
+            return CliOutcome::Error(
+                "--plugin-grants applies only to the windowed plugin host; use --window".into(),
+            );
+        }
         CliOutcome::Run(cfg)
     }
 
@@ -2327,6 +2349,10 @@ RENDER / INPUT:
     --render-distance <N>    Render distance in chunks (default: 8); also --rd
     --sensitivity <F>        Mouse-look sensitivity, 0..1 (default: 0.5)
 
+WASM PLUGINS:
+    --plugin-grants <FILE>   Apply explicit per-manifest capability additions
+                             from a JSON grant file at startup
+
 LIVE FRAME BENCHMARK:
     --benchmark <WORKLOAD>   terrain, showcase, megaworld, lovelier, or heavyweight; forces a windowed run
     --benchmark-debug-overlay <STATE>
@@ -2380,6 +2406,27 @@ mod tests {
             CliOutcome::Run(c) => c,
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn plugin_grants_are_opt_in_and_require_a_path() {
+        assert_eq!(parse(&[]).plugin_grants_path, None);
+        assert_eq!(
+            parse(&["--plugin-grants", "policy.json"]).plugin_grants_path,
+            Some(PathBuf::from("policy.json"))
+        );
+        assert!(matches!(
+            Config::from_args(["--plugin-grants".to_owned()]),
+            CliOutcome::Error(message) if message.contains("requires a JSON file path")
+        ));
+        assert!(matches!(
+            Config::from_args([
+                "--headless".to_owned(),
+                "--plugin-grants".to_owned(),
+                "policy.json".to_owned()
+            ]),
+            CliOutcome::Error(message) if message.contains("only to the windowed plugin host")
+        ));
     }
 
     #[test]

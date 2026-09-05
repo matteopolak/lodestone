@@ -224,6 +224,46 @@ fn discovery_grants_default_denied_placement_only_to_the_configured_manifest_ins
     );
 }
 
+/// The persisted grant file is not merely a parser: its exact path-and-name
+/// identity reaches the production discovery loader. The trusted copy obtains
+/// the import/data-flow exception while the byte-identical sibling remains
+/// denied, proving a saved policy cannot accidentally widen to every plugin
+/// that declares the same capability.
+#[test]
+fn persisted_grants_file_allows_only_the_exact_discovered_plugin() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("shipped-persisted-plugin-grant-directory-{}", std::process::id()));
+    let wasm = build_example_plugin(&["place"]);
+    let requested = "\"log\", \"act:chat\", \"act:place\", \"observe:place\"";
+    install_fixture_named(&root, "trusted", "placement-owner", &wasm, requested);
+    install_fixture_named(&root, "untrusted", "placement-owner", &wasm, requested);
+    let grants_file = root.join("grants.json");
+    std::fs::write(
+        &grants_file,
+        r#"{
+  "grants": [
+    {
+      "manifest_path": "trusted/plugin.toml",
+      "name": "placement-owner",
+      "capabilities": ["act:place", "observe:place"]
+    }
+  ]
+}"#,
+    )
+    .expect("write explicit persisted grant policy");
+    let grants = lodestone::wasm_plugins::load_grants_from_file(&grants_file)
+        .expect("the explicit persisted policy must parse before application");
+    let sim = client_sim_with_grants(&root, &grants);
+    assert_eq!(
+        sim.ecs()
+            .read()
+            .resource::<WasmPlugins>()
+            .with_host(|host| host.plugins().len()),
+        1,
+        "only the exact persisted identity may enter production discovery"
+    );
+}
+
 /// A separately-built guest reaches the shell's real placement system without a
 /// world handle or packet constructor. Its target is intentionally outside the
 /// live placement context, so the established production rejection path produces
