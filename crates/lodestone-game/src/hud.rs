@@ -22,7 +22,7 @@ use crate::bossbar::{BossBar, BossBarSet};
 use crate::effect::{ActiveEffects, StatusEffect};
 use crate::item::ItemStack;
 use crate::menu::Menu;
-use crate::player_state::{ActionBar, HudState, TitleState};
+use crate::player_state::{ActionBar, HotbarSlot, HudState, TitleState};
 use crate::scoreboard::{DisplaySlot, NumberFormat, RenderType, Scoreboard};
 use crate::tablist::{PlayerListEntry, TabList};
 
@@ -32,8 +32,8 @@ const SIDEBAR_MAX_LINES: usize = 15;
 /// The nine hotbar slots plus which one is selected.
 #[derive(Debug, Clone)]
 pub struct HotbarView<'a> {
-    /// Selected hotbar index, `0..=8`.
-    pub selected: u8,
+    /// Selected hotbar position.
+    pub selected: HotbarSlot,
     /// Hotbar contents, index `0..=8` left-to-right.
     pub slots: [Option<&'a ItemStack>; 9],
 }
@@ -42,7 +42,7 @@ impl HotbarView<'_> {
     /// The stack in the currently selected hotbar slot, if any.
     #[must_use]
     pub fn held(&self) -> Option<&ItemStack> {
-        self.slots[self.selected as usize % 9]
+        self.slots[self.selected.index()]
     }
 }
 

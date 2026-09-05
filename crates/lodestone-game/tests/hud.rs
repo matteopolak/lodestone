@@ -1,7 +1,7 @@
 //! HUD state, title/action-bar timing, boss bar, advancement and statistics tests.
 
 use lodestone_game::bossbar::{BossBar, BossBarColor, BossBarOverlay, BossBarSet};
-use lodestone_game::player_state::{ActionBar, HudState, TitlePhase, TitleState, TitleTimes};
+use lodestone_game::player_state::{ActionBar, HotbarSlot, HudState, TitlePhase, TitleState, TitleTimes};
 use lodestone_game::progress::{
     AddedAdvancement, AdvancementProgress, Advancements, AdvancementsUpdate, StatKey, Statistics,
 };
@@ -37,10 +37,10 @@ fn game_mode_change_records_previous() {
 #[test]
 fn select_slot_rejects_out_of_range() {
     let mut hud = HudState::new();
-    hud.select_slot(8);
-    assert_eq!(hud.selected_slot, 8);
-    hud.select_slot(9);
-    assert_eq!(hud.selected_slot, 8, "out-of-range ignored");
+    let last = HotbarSlot::new(8).expect("the last hotbar slot is valid");
+    hud.select_slot(last);
+    assert_eq!(hud.selected_slot, last);
+    assert_eq!(HotbarSlot::new(9), None, "there is no tenth hotbar slot");
 }
 
 #[test]

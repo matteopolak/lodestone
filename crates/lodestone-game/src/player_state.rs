@@ -7,6 +7,41 @@
 
 use lodestone_model::{ClientEvent, Difficulty, GameMode, Identifier, Text, TextSpan};
 
+/// One of the nine selectable hotbar positions.
+///
+/// Construct this at the boundary that receives a raw slot number. Once the
+/// value is a `HotbarSlot`, it can index the nine-slot HUD view without a
+/// modulo fallback or another range check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HotbarSlot(u8);
+
+impl HotbarSlot {
+    /// The number of selectable hotbar positions.
+    pub const COUNT: u8 = 9;
+
+    /// Validates a native hotbar index in `0..`[`Self::COUNT`].
+    #[must_use]
+    pub const fn new(raw: u8) -> Option<Self> {
+        if raw < Self::COUNT {
+            Some(Self(raw))
+        } else {
+            None
+        }
+    }
+
+    /// This slot's native hotbar index, for a wire or UI boundary.
+    #[must_use]
+    pub const fn raw(self) -> u8 {
+        self.0
+    }
+
+    /// This slot's index into a nine-element hotbar array.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// Player vitals and progression shown on the HUD.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HudState {
@@ -25,8 +60,8 @@ pub struct HudState {
     pub xp_progress: f32,
     /// Total experience points collected.
     pub xp_total: i32,
-    /// Selected hotbar slot, `0..=8`.
-    pub selected_slot: u8,
+    /// Selected hotbar slot.
+    pub selected_slot: HotbarSlot,
     /// Current game mode.
     pub game_mode: GameMode,
     /// Previous game mode (vanilla tracks this for the F3+N toggle); `None`
@@ -52,7 +87,7 @@ impl Default for HudState {
             xp_level: 0,
             xp_progress: 0.0,
             xp_total: 0,
-            selected_slot: 0,
+            selected_slot: HotbarSlot(0),
             game_mode: GameMode::Survival,
             previous_game_mode: None,
             difficulty: Difficulty::Normal,
@@ -104,11 +139,9 @@ impl HudState {
         }
     }
 
-    /// Selects a hotbar slot; out-of-range values are ignored.
-    pub fn select_slot(&mut self, slot: u8) {
-        if slot < 9 {
-            self.selected_slot = slot;
-        }
+    /// Selects a validated hotbar slot.
+    pub fn select_slot(&mut self, slot: HotbarSlot) {
+        self.selected_slot = slot;
     }
 
     /// Resets vitals to defaults on respawn and clears the dead flag. Keeps the
@@ -152,10 +185,12 @@ impl HudState {
             } => self.set_experience(*progress, *level, *total),
             ClientEvent::GameModeChanged { game_mode } => self.set_game_mode(*game_mode),
             ClientEvent::HeldSlotChanged { slot } => {
-                // The wire value is an i32; `select_slot` drops anything `>= 9`,
-                // so mapping out-of-range values (negative, or `> u8::MAX`) to
-                // `u8::MAX` lets it reject them without a panicking cast.
-                self.select_slot(u8::try_from(*slot).unwrap_or(u8::MAX));
+                // This is the only raw slot-number boundary in this fold. A
+                // negative, oversized, or ninth-or-later wire value leaves the
+                // current selection unchanged.
+                if let Some(slot) = u8::try_from(*slot).ok().and_then(HotbarSlot::new) {
+                    self.select_slot(slot);
+                }
             }
             ClientEvent::DifficultyChanged { difficulty, locked } => {
                 self.difficulty = *difficulty;
@@ -594,11 +629,12 @@ mod fold_tests {
     fn held_slot_fold_rejects_out_of_range() {
         let mut hud = HudState::new();
         assert!(hud.apply(&ClientEvent::HeldSlotChanged { slot: 3 }));
-        assert_eq!(hud.selected_slot, 3);
+        let selected = HotbarSlot::new(3).expect("wire slot 3 is valid");
+        assert_eq!(hud.selected_slot, selected);
         // Out-of-range values (>= 9, negative, or > u8::MAX) leave it unchanged.
         for bad in [9_i32, -1, 300, i32::MAX] {
             assert!(hud.apply(&ClientEvent::HeldSlotChanged { slot: bad }));
-            assert_eq!(hud.selected_slot, 3);
+            assert_eq!(hud.selected_slot, selected);
         }
     }
 
