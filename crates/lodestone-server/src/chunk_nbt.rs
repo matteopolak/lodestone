@@ -1406,7 +1406,7 @@ fn bottle_kind_for_item(id: &str) -> Option<BottleKind> {
 /// re-saves loses its contents, because we drop it here and then write a chunk
 /// without it. Closing that needs a passthrough for unmodelled entries, not a
 /// change to this function.
-fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)> {
+pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)> {
     let id = string_field(nbt, "id")?;
     let pos = BlockPos::new(
         int_field(nbt, "x")?,

@@ -11,6 +11,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use lodestone_core::{Reader, Writer, read_named_nbt, write_named_nbt};
 use lodestone_storage::{NativeStore, RecordKey, RecordWrite, StoreError};
 use lodestone_storage_schema::{
     BiomeSection, ChunkRecord, ChunkSection, FORMAT_VERSION_V1, StorageRecord,
@@ -78,11 +79,13 @@ impl From<ChunkRecordError> for Error {
 ///
 /// Every `true` flag means a caller must retain the existing Anvil path (or a
 /// later native schema revision) rather than turn a save into a terrain-only
-/// replacement. The flags deliberately describe data, not the source that
-/// happened to create it, so a plugin-created column gets the same protection.
+/// replacement. Resident block entities are represented as lossless named-NBT
+/// roots in the version-1 record; the remaining flags deliberately describe
+/// data, not the source that happened to create it, so a plugin-created column
+/// gets the same protection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct UnsupportedChunkFields {
-    /// The column has block-entity state.
+    /// The column has block-entity state this adapter cannot retain.
     pub block_entities: bool,
     /// The column has structure starts or references.
     pub structures: bool,
@@ -149,6 +152,30 @@ pub enum ChunkRecordError {
     UnknownBlockStateId(u32),
     /// Packed local palette data is structurally invalid.
     InvalidPackedStates(&'static str),
+    /// A persisted block-entity NBT root is malformed or cannot be interpreted.
+    InvalidBlockEntityNbt { index: usize, reason: String },
+    /// A block entity belongs to a different horizontal column than its record.
+    BlockEntityOutsideColumn {
+        index: usize,
+        x: i32,
+        z: i32,
+        expected_x: i32,
+        expected_z: i32,
+    },
+    /// A block entity's absolute Y coordinate is outside the requested extent.
+    BlockEntityOutsideExtent { index: usize, y: i32, min_y: i32, height: i32 },
+    /// A source entity's tuple position and lossless NBT root disagree.
+    BlockEntityNbtPositionMismatch {
+        index: usize,
+        expected_x: i32,
+        expected_y: i32,
+        expected_z: i32,
+        actual_x: i32,
+        actual_y: i32,
+        actual_z: i32,
+    },
+    /// More than one persisted entity claims one absolute block position.
+    DuplicateBlockEntityPosition { x: i32, y: i32, z: i32 },
 }
 
 impl fmt::Display for ChunkRecordError {
@@ -204,6 +231,45 @@ impl fmt::Display for ChunkRecordError {
             Self::UnknownBuiltinBiome(id) => write!(formatter, "unknown built-in biome ID {id}"),
             Self::UnknownBlockStateId(id) => write!(formatter, "unknown built-in block-state ID {id}"),
             Self::InvalidPackedStates(reason) => write!(formatter, "invalid packed block states: {reason}"),
+            Self::InvalidBlockEntityNbt { index, reason } => {
+                write!(formatter, "invalid block entity NBT at index {index}: {reason}")
+            }
+            Self::BlockEntityOutsideColumn {
+                index,
+                x,
+                z,
+                expected_x,
+                expected_z,
+            } => write!(
+                formatter,
+                "block entity {index} at ({x}, {z}) is outside chunk ({expected_x}, {expected_z})"
+            ),
+            Self::BlockEntityOutsideExtent {
+                index,
+                y,
+                min_y,
+                height,
+            } => write!(
+                formatter,
+                "block entity {index} at Y {y} is outside [{min_y}, {})",
+                min_y.saturating_add(*height)
+            ),
+            Self::BlockEntityNbtPositionMismatch {
+                index,
+                expected_x,
+                expected_y,
+                expected_z,
+                actual_x,
+                actual_y,
+                actual_z,
+            } => write!(
+                formatter,
+                "block entity {index} tuple position ({expected_x}, {expected_y}, {expected_z}) \
+                 does not match its NBT position ({actual_x}, {actual_y}, {actual_z})"
+            ),
+            Self::DuplicateBlockEntityPosition { x, y, z } => {
+                write!(formatter, "duplicate block entity at ({x}, {y}, {z})")
+            }
         }
     }
 }
@@ -288,9 +354,10 @@ impl WorldStorage {
     /// record path.
     ///
     /// The adapter is intentionally bounded: it stores block-state sections,
-    /// built-in biome grids, and the optional motion-blocking heightmap, while
-    /// refusing a column carrying any other state it cannot preserve. `Anvil`
-    /// stays unchanged and refuses this method just as it
+    /// built-in biome grids, the optional motion-blocking heightmap, and
+    /// complete resident block-entity NBT roots, while refusing a column
+    /// carrying any other state it cannot preserve. `Anvil` stays unchanged
+    /// and refuses this method just as it
     /// refuses [`Self::write_dirty`].
     pub fn write_dirty_chunk(
         &self,
@@ -307,7 +374,8 @@ impl WorldStorage {
     ///
     /// `min_y` and `height` remain an explicit dimension contract because the
     /// version-1 record stores section coordinates, not a dimension definition.
-    /// A mismatch, a future data version, extensions, or light bytes is an
+    /// A mismatch, a future data version, extensions, light bytes, malformed
+    /// block-entity NBT, or block entities outside this record's extent is an
     /// error rather than a partial load.
     pub fn load_chunk(
         &self,
@@ -395,6 +463,45 @@ fn encode_chunk(
             })
         })
         .collect::<Result<Vec<_>, ChunkRecordError>>()?;
+    let mut block_entity_nbt = Vec::with_capacity(column.block_entities().len());
+    let mut block_entity_positions = Vec::with_capacity(column.block_entities().len());
+    for (index, (pos, entity)) in column.block_entities().iter().enumerate() {
+        validate_block_entity_position(index, *pos, column_x, column_z, column.min_y, column.height)?;
+        let nbt = crate::chunk_nbt::block_entity_to_nbt(*pos, entity);
+        let (nbt_pos, _) = crate::chunk_nbt::block_entity_from_nbt(&nbt).ok_or_else(|| {
+            ChunkRecordError::InvalidBlockEntityNbt {
+                index,
+                reason: "source entity does not encode as a block-entity compound with id and absolute coordinates".to_owned(),
+            }
+        })?;
+        if nbt_pos != *pos {
+            return Err(ChunkRecordError::BlockEntityNbtPositionMismatch {
+                index,
+                expected_x: pos.x,
+                expected_y: pos.y,
+                expected_z: pos.z,
+                actual_x: nbt_pos.x,
+                actual_y: nbt_pos.y,
+                actual_z: nbt_pos.z,
+            });
+        }
+        if block_entity_positions.contains(pos) {
+            return Err(ChunkRecordError::DuplicateBlockEntityPosition {
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+            });
+        }
+        let mut writer = Writer::default();
+        write_named_nbt(&mut writer, "", &nbt).map_err(|error| {
+            ChunkRecordError::InvalidBlockEntityNbt {
+                index,
+                reason: error.to_string(),
+            }
+        })?;
+        block_entity_nbt.push(writer.into_vec());
+        block_entity_positions.push(*pos);
+    }
     let surface_biome_ids = column
         .biome_quarts()
         .iter()
@@ -414,6 +521,7 @@ fn encode_chunk(
                 .motion_blocking()
                 .map(|heights| heights.iter().map(|&height| u32::from(height)).collect())
                 .unwrap_or_default(),
+            block_entity_nbt,
             extensions: Vec::new(),
         })),
     })
@@ -547,12 +655,76 @@ fn decode_chunk(
             .map_err(|_| ChunkRecordError::InvalidMotionBlockingHeightCount { actual })?;
         column.set_motion_blocking(heights);
     }
+    let mut block_entities = Vec::with_capacity(chunk.block_entity_nbt.len());
+    for (index, bytes) in chunk.block_entity_nbt.iter().enumerate() {
+        let mut reader = Reader::new(bytes);
+        let (name, nbt) = read_named_nbt(&mut reader).map_err(|error| {
+            ChunkRecordError::InvalidBlockEntityNbt {
+                index,
+                reason: error.to_string(),
+            }
+        })?;
+        if !name.is_empty() {
+            return Err(ChunkRecordError::InvalidBlockEntityNbt {
+                index,
+                reason: "root name is not empty".to_owned(),
+            });
+        }
+        reader.ensure_empty().map_err(|error| ChunkRecordError::InvalidBlockEntityNbt {
+            index,
+            reason: error.to_string(),
+        })?;
+        let (pos, entity) = crate::chunk_nbt::block_entity_from_nbt(&nbt).ok_or_else(|| {
+            ChunkRecordError::InvalidBlockEntityNbt {
+                index,
+                reason: "root is not a block-entity compound with id and absolute coordinates".to_owned(),
+            }
+        })?;
+        validate_block_entity_position(index, pos, expected_x, expected_z, min_y, height)?;
+        if block_entities.iter().any(|(other, _)| *other == pos) {
+            return Err(ChunkRecordError::DuplicateBlockEntityPosition {
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+            });
+        }
+        block_entities.push((pos, entity));
+    }
+    column.set_block_entities(block_entities);
     Ok(column)
+}
+
+fn validate_block_entity_position(
+    index: usize,
+    pos: lodestone_model::BlockPos,
+    column_x: i32,
+    column_z: i32,
+    min_y: i32,
+    height: i32,
+) -> Result<(), ChunkRecordError> {
+    if (pos.x.div_euclid(16), pos.z.div_euclid(16)) != (column_x, column_z) {
+        return Err(ChunkRecordError::BlockEntityOutsideColumn {
+            index,
+            x: pos.x,
+            z: pos.z,
+            expected_x: column_x,
+            expected_z: column_z,
+        });
+    }
+    if !(min_y..min_y.saturating_add(height)).contains(&pos.y) {
+        return Err(ChunkRecordError::BlockEntityOutsideExtent {
+            index,
+            y: pos.y,
+            min_y,
+            height,
+        });
+    }
+    Ok(())
 }
 
 fn unsupported_fields(column: &crate::chunk::ChunkColumn) -> UnsupportedChunkFields {
     UnsupportedChunkFields {
-        block_entities: !column.block_entities().is_empty(),
+        block_entities: false,
         structures: !column.structure_starts().is_empty()
             || !column.structure_references().is_empty(),
         shaped_generation: column.generation_stage() == crate::chunk::ChunkGenerationStage::Shaped,
@@ -716,6 +888,7 @@ mod tests {
                     biome_sections: Vec::new(),
                     surface_biome_ids: Vec::new(),
                     motion_blocking_heights: Vec::new(),
+                    block_entity_nbt: Vec::new(),
                     extensions: Vec::new(),
                 })),
             },
@@ -768,6 +941,33 @@ mod tests {
         source.set_block(1, -16, 2, "minecraft:stone");
         source.set_block(3, -1, 4, "minecraft:oak_log[axis=x]");
         source.set_block(5, 15, 6, "minecraft:water[level=3]");
+        let opaque_pos = lodestone_model::BlockPos::new(-109, 0, 184);
+        let opaque_nbt = lodestone_core::Nbt::Compound(vec![
+            ("id".to_owned(), lodestone_core::Nbt::String("example:archive".to_owned())),
+            ("x".to_owned(), lodestone_core::Nbt::Int(opaque_pos.x)),
+            ("y".to_owned(), lodestone_core::Nbt::Int(opaque_pos.y)),
+            ("z".to_owned(), lodestone_core::Nbt::Int(opaque_pos.z)),
+            (
+                "example:payload".to_owned(),
+                lodestone_core::Nbt::Compound(vec![(
+                    "untouched".to_owned(),
+                    lodestone_core::Nbt::Long(9_876_543_210),
+                )]),
+            ),
+        ]);
+        source.set_block_entities(vec![
+            (
+                lodestone_model::BlockPos::new(-111, -1, 182),
+                crate::block_entities::BlockEntity::Beacon(Default::default()),
+            ),
+            (
+                opaque_pos,
+                crate::block_entities::BlockEntity::Opaque {
+                    id: "example:archive".to_owned(),
+                    nbt: opaque_nbt.clone(),
+                },
+            ),
+        ]);
 
         storage
             .write_dirty_chunk(-7, 11, &source)
@@ -786,6 +986,11 @@ mod tests {
         assert_eq!(loaded.block_state(3, -1, 4), "minecraft:oak_log[axis=x]");
         assert_eq!(loaded.block_state(5, 15, 6), "minecraft:water[level=3]");
         assert_eq!(loaded.block_state(0, 0, 0), "minecraft:air");
+        assert_eq!(
+            loaded.block_entities(),
+            source.block_entities(),
+            "resident simulated and opaque block entities survive a native reopen"
+        );
         assert!(
             reopened.load_chunk(-8, 11, -16, 32).unwrap().is_none(),
             "a distinct key is the independent absence control"
@@ -833,6 +1038,47 @@ mod tests {
         assert_eq!(loaded.biome_state(4, 4), "minecraft:cherry_grove");
         drop(reopened);
         std::fs::remove_dir_all(&directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_chunk_refuses_an_opaque_entity_whose_nbt_position_disagrees() {
+        let mut source = crate::chunk::ChunkColumn::new(0, 16);
+        let tuple_pos = lodestone_model::BlockPos::new(1, 4, 1);
+        source.set_block_entities(vec![(
+            tuple_pos,
+            crate::block_entities::BlockEntity::Opaque {
+                id: "example:custom".to_owned(),
+                nbt: lodestone_core::Nbt::Compound(vec![
+                    ("id".to_owned(), lodestone_core::Nbt::String("example:custom".to_owned())),
+                    ("x".to_owned(), lodestone_core::Nbt::Int(2)),
+                    ("y".to_owned(), lodestone_core::Nbt::Int(tuple_pos.y)),
+                    ("z".to_owned(), lodestone_core::Nbt::Int(tuple_pos.z)),
+                ]),
+            },
+        )]);
+
+        assert!(matches!(
+            encode_chunk(0, 0, &source),
+            Err(ChunkRecordError::BlockEntityNbtPositionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn native_chunk_refuses_a_malformed_stored_block_entity_instead_of_dropping_it() {
+        let source = crate::chunk::ChunkColumn::new(0, 16);
+        let mut record = encode_chunk(0, 0, &source).expect("empty terrain encodes");
+        let Some(storage_record::Record::Chunk(chunk)) = record.record.as_mut() else {
+            panic!("chunk encoder must produce a chunk record");
+        };
+        // A named-NBT `End` root has no compound, id, or coordinates. It is a
+        // structurally valid NBT byte sequence, so accepting it would prove a
+        // decoder drop rather than merely a parser error.
+        chunk.block_entity_nbt = vec![vec![lodestone_core::NbtTag::End.id()]];
+
+        assert!(matches!(
+            decode_chunk(0, 0, 0, 16, record),
+            Err(ChunkRecordError::InvalidBlockEntityNbt { index: 0, .. })
+        ));
     }
 
     #[test]
