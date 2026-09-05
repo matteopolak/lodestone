@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use jni::errors::ThrowRuntimeExAndDefault;
 use jni::objects::{Global, JClass, JObject, JString};
 use jni::strings::JNIString;
-use jni::sys::{jint, jlong, jobject, jstring};
+use jni::sys::{jboolean, jint, jlong, jobject, jstring};
 use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
 
 use crate::runtime::{JvmConfig, JvmRuntime};
@@ -567,6 +567,25 @@ fn resolve_resident_player_handle_uuid(bits: i64) -> Result<String, AdapterError
         text.push(HEX[usize::from(byte & 0x0f)] as char);
     }
     Ok(text)
+}
+
+/// Reports whether a live player handle's copied profile is in the worker's
+/// reconciled lifecycle map.
+///
+/// This resolves the supplied generation before consulting the map, so an old
+/// `long` cannot become active again when a slot is reused. The answer is a
+/// worker snapshot: the dedicated host is the sole producer of joins and
+/// disconnects, and no server registry, connection, ECS value, or guard is
+/// read from JNI.
+fn resolve_resident_player_handle_is_active(bits: i64) -> Result<bool, AdapterError> {
+    let player = resolve_resident_player_handle(bits, "playerHandleIsActive")?;
+    ACTIVE_PLAYER_HANDLES.with(|slot| {
+        let active = slot.borrow();
+        let active = active.as_ref().ok_or_else(|| {
+            AdapterError::new("playerHandleIsActive requires the adapter worker thread")
+        })?;
+        Ok(active.contains_key(&player))
+    })
 }
 
 fn release_resident_handles(identity: &LifecycleIdentity) -> usize {
@@ -1517,6 +1536,29 @@ pub(crate) fn register_player_handle_uuid_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_player_handle_is_active_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts one opaque jlong and
+    // returns a copied boolean from the worker-local lifecycle map. The
+    // generation check precedes the map lookup, so no server object, pointer,
+    // or guard reaches Java.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_player_handle_is_active as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_active_player_count_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -1711,6 +1753,19 @@ extern "system" fn native_player_handle_uuid<'local>(
         env.new_string(uuid)
             .map(|value| value.into_raw())
             .map_err(|error| AdapterError::new(format!("playerHandleUuid: {error}")))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_is_active<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jboolean {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        Ok::<_, AdapterError>(jboolean::from(resolve_resident_player_handle_is_active(bits)?))
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -2226,6 +2281,11 @@ mod tests {
         let first = active_player_handle(&identity, &player).expect("active player handle");
         assert_eq!(active_player_handle_for(&player), Some(first));
         assert_eq!(active_player_count(), Ok(1));
+        assert_eq!(
+            resolve_resident_player_handle_is_active(first.to_bits()),
+            Ok(true),
+            "an active lifecycle handle resolves through the worker snapshot",
+        );
         assert_eq!(resolve_resident_player_handle_name(first.to_bits()), Ok("Alice".to_owned()));
         assert_eq!(
             resolve_resident_player_handle_uuid(first.to_bits()),
@@ -2234,6 +2294,13 @@ mod tests {
         assert_eq!(release_active_player_handle(&identity, &player), Some(first));
         assert_eq!(active_player_handle_for(&player), None);
         assert_eq!(active_player_count(), Ok(0));
+        assert_eq!(
+            resolve_resident_player_handle_is_active(first.to_bits()),
+            Err(AdapterError::new(
+                "playerHandleIsActive: the referenced object no longer exists",
+            )),
+            "generation validation must reject the old bits before map lookup",
+        );
         assert_eq!(
             resolve_resident_player_handle_name(first.to_bits()),
             Err(AdapterError::new(
@@ -2572,6 +2639,7 @@ mod tests {
             *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(2));
         });
         CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
 
         let first = resident_player_handle(&identity, &player).expect("first player handle");
         assert_eq!(first.kind(), ObjectKind::Player);
@@ -2582,6 +2650,11 @@ mod tests {
             resolve_resident_player_handle_uuid(first.to_bits()),
             Ok("07070707-0707-0707-0707-070707070707".to_owned()),
             "the UUID is fixed-size copied profile data, not a Java server object",
+        );
+        assert_eq!(
+            resolve_resident_player_handle_is_active(first.to_bits()),
+            Ok(false),
+            "a callback-only handle does not imply a reconciled active lifecycle entry",
         );
         assert_eq!(
             RESIDENT_OBJECT_HANDLES.with(|slot| {
@@ -2663,5 +2736,6 @@ mod tests {
         );
         RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
         CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
     }
 }

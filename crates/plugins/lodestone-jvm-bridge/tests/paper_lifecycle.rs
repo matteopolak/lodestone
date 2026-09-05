@@ -63,7 +63,8 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native long currentPlayerHandle(); \
          public static native String playerHandleName(long handle); \
          public static native String playerHandleUuid(long handle); \
-         public static native int activePlayerCount(); }",
+         public static native int activePlayerCount(); \
+         public static native boolean playerHandleIsActive(long handle); }",
     )
     .expect("shim source");
     let intercepted_package = shim_sources.join("fixture/intercepted");
@@ -298,7 +299,8 @@ fn plugin_child_reads_resident_block_state_through_operator_member() {
          public static native long currentPlayerHandle(); \
          public static native String playerHandleName(long handle); \
          public static native String playerHandleUuid(long handle); \
-         public static native int activePlayerCount(); }",
+         public static native int activePlayerCount(); \
+         public static native boolean playerHandleIsActive(long handle); }",
     )
     .expect("shim source");
     let descriptor_source = shim_package.join("IsolatedPluginDescriptor.java");
