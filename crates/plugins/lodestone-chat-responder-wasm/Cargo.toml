@@ -139,6 +139,7 @@ disconnect = []
 send-command = []
 # Reads a three-position, bounded world snapshot and reports the copied values.
 world-read = []
+world-write = []
 # A denied-by-default filesystem write import. The fixture writes one file inside
 # the configured root and attempts one path outside it for the confinement gate.
 fs-write = []

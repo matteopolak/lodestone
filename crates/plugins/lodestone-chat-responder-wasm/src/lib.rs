@@ -50,8 +50,10 @@ use lodestone::plugin::types::LookIntent;
 use lodestone::plugin::types::MovementIntent;
 #[cfg(any(feature = "place", feature = "break"))]
 use lodestone::plugin::types::BlockFace;
-#[cfg(any(feature = "place", feature = "break", feature = "world-read"))]
+#[cfg(any(feature = "place", feature = "break", feature = "world-read", feature = "world-write"))]
 use lodestone::plugin::types::BlockPos;
+#[cfg(feature = "world-write")]
+use lodestone::plugin::types::ResidentBlockMutation;
 #[cfg(feature = "world-read")]
 use lodestone::plugin::world_snapshot::read_blocks;
 #[cfg(feature = "place")]
@@ -86,6 +88,8 @@ static RESPAWN_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 static DISCONNECT_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "send-command")]
 static COMMAND_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "world-write")]
+static WORLD_WRITE_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "scheduler")]
 static REPEATS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(feature = "scheduler")]
@@ -113,7 +117,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.25.0".to_string(),
+            abi: "lodestone:plugin@0.26.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -262,10 +266,21 @@ impl Guest for ChatResponder {
         #[cfg(feature = "world-read")]
         return report_world_snapshot();
 
+        #[cfg(feature = "world-write")]
+        return if !WORLD_WRITE_SENT.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            vec![Action::SetResidentBlock(ResidentBlockMutation {
+                request_id: 1,
+                pos: BlockPos { x: 2, y: 4, z: 3 },
+                state_id: 20,
+            })]
+        } else {
+            Vec::new()
+        };
+
         #[cfg(feature = "fs-write")]
         return write_files();
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "entity-observation", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "send-command", feature = "world-read", feature = "fs-write")))]
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "entity-observation", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "send-command", feature = "world-read", feature = "world-write", feature = "fs-write")))]
         return respond(events);
     }
 

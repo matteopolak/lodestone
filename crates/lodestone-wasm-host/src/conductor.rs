@@ -64,7 +64,10 @@ use lodestone_ecs::{ChunkWorld, CorePlugin, GameTick, TickSet};
 use crate::abi;
 use crate::abi::{IntentAction, LoweredAction};
 use crate::capability::Capability;
-use crate::host::{CommandSpec, Event, PluginGrantPolicy, PluginHost, ReloadError};
+use crate::host::{
+    BlockMutationRefusal, BlockMutationStatus, CommandSpec, Event, PluginGrantPolicy, PluginHost,
+    ReloadError, ResidentBlockMutation, ResidentBlockMutationOutcome,
+};
 
 /// The loaded guests, as an ECS resource.
 ///
@@ -105,6 +108,53 @@ pub struct PendingWasmIntents(Vec<IntentAction>);
 /// of those and drains this after the game-tick world guard is gone.
 #[derive(Resource, Default, Debug)]
 pub struct PendingWasmMenuClicks(Vec<crate::abi::InventoryClickIntent>);
+
+/// Bounded copied requests awaiting the shell's authoritative singleplayer
+/// bridge. This resource never holds an ECS guard, a network handle, or a
+/// server borrow: the shell drains it after the game-tick guard ends, and feeds
+/// finite outcomes back before a later guest tick.
+#[derive(Resource, Default, Debug)]
+pub struct PendingWasmWorldMutations {
+    requests: Vec<(usize, ResidentBlockMutation)>,
+    outcomes: Vec<(usize, ResidentBlockMutationOutcome)>,
+}
+
+impl PendingWasmWorldMutations {
+    const MAX_PENDING: usize = 64;
+
+    /// Remove this tick's copied requests for transport by the shell.
+    #[must_use]
+    pub fn take_requests(&mut self) -> Vec<(usize, ResidentBlockMutation)> {
+        std::mem::take(&mut self.requests)
+    }
+
+    /// Return all terminal answers accumulated by the network task.
+    fn take_outcomes(&mut self) -> Vec<(usize, ResidentBlockMutationOutcome)> {
+        std::mem::take(&mut self.outcomes)
+    }
+
+    /// Add one terminal answer. It is intentionally public so the shell can
+    /// return a result without ever borrowing the guest host.
+    pub fn push_outcome(&mut self, plugin: usize, outcome: ResidentBlockMutationOutcome) {
+        self.outcomes.push((plugin, outcome));
+    }
+
+    fn push_request(&mut self, plugin: usize, request: ResidentBlockMutation) -> bool {
+        if self.requests.len() == Self::MAX_PENDING {
+            self.push_outcome(
+                plugin,
+                ResidentBlockMutationOutcome {
+                    request_id: request.request_id,
+                    status: BlockMutationStatus::Refused(BlockMutationRefusal::Unavailable),
+                },
+            );
+            false
+        } else {
+            self.requests.push((plugin, request));
+            true
+        }
+    }
+}
 
 impl PendingWasmMenuClicks {
     const MAX_PENDING: usize = 64;
@@ -459,6 +509,7 @@ impl Plugin for WasmHostPlugin {
         app.insert_resource(WasmCommandRoots(roots));
         app.init_resource::<PendingWasmIntents>();
         app.init_resource::<PendingWasmMenuClicks>();
+        app.init_resource::<PendingWasmWorldMutations>();
         app.add_systems(
             GameTick,
             drive_wasm_plugins
@@ -502,6 +553,7 @@ pub fn drive_wasm_plugins(
     mut queue: ResMut<ActionQueue>,
     mut intents: ResMut<PendingWasmIntents>,
     mut menu_clicks: ResMut<PendingWasmMenuClicks>,
+    mut world_mutations: ResMut<PendingWasmWorldMutations>,
     chunk_world: Option<Res<ChunkWorld>>,
     players: Query<(Entity, &BreakOutcome, &PlaceOutcome), With<LocalPlayer>>,
 ) {
@@ -515,8 +567,9 @@ pub fn drive_wasm_plugins(
         .next()
         .map(|(player, outcome, _)| (player, abi::lift_break_outcome(outcome)));
 
+    let mutation_outcomes = world_mutations.take_outcomes();
     let mut refused = 0_u64;
-    let (lowered, lowered_intents, lowered_menu_clicks) = plugins.with_host(|host| {
+    let (lowered, lowered_intents, lowered_menu_clicks, lowered_world_mutations) = plugins.with_host(|host| {
         // `ChunkWorld` is a cloneable Arc handle, not an ECS guard. Guests can
         // only reach it through the bounded `world-snapshot.read-blocks` import, which
         // copies values and drops the chunk lock before returning to guest code.
@@ -525,7 +578,8 @@ pub fn drive_wasm_plugins(
         let mut out = Vec::new();
         let mut intent_out = Vec::new();
         let mut menu_click_out = Vec::new();
-        for plugin in host.plugins_mut() {
+        let mut world_mutation_out = Vec::new();
+        for (plugin_index, plugin) in host.plugins_mut().iter_mut().enumerate() {
             let granted = plugin.granted().clone();
             let lifted: Vec<Event> = batch
                 .iter()
@@ -551,6 +605,11 @@ pub fn drive_wasm_plugins(
             {
                 lifted.push(Event::BreakOutcome(outcome.clone()));
             }
+            for (outcome_plugin, outcome) in &mutation_outcomes {
+                if granted.contains(Capability::WriteWorld) && *outcome_plugin == plugin_index {
+                    lifted.push(Event::ResidentBlockMutationOutcome(outcome.clone()));
+                }
+            }
             for action in plugin.tick(&lifted, fuel) {
                 match abi::lower_action(action, &granted) {
                     Ok(LoweredAction::Client(client_action)) => out.push(client_action),
@@ -558,6 +617,9 @@ pub fn drive_wasm_plugins(
                         menu_click_out.push(click)
                     }
                     Ok(LoweredAction::Intent(intent)) => intent_out.push(intent),
+                    Ok(LoweredAction::ResidentBlockMutation(request)) => {
+                        world_mutation_out.push((plugin_index, request));
+                    }
                     Err(missing) => {
                         refused += 1;
                         tracing::warn!(
@@ -569,7 +631,7 @@ pub fn drive_wasm_plugins(
                 }
             }
         }
-        (out, intent_out, menu_click_out)
+        (out, intent_out, menu_click_out, world_mutation_out)
     });
 
     // Appended, not assigned: `ActionQueue` is shared with every native system in
@@ -580,6 +642,12 @@ pub fn drive_wasm_plugins(
         if !menu_clicks.push(click) {
             refused += 1;
             tracing::warn!("refused a WASM inventory click: the bounded shell handoff is full");
+        }
+    }
+    for (plugin, request) in lowered_world_mutations {
+        if !world_mutations.push_request(plugin, request) {
+            refused += 1;
+            tracing::warn!("refused a WASM resident-block mutation: the bounded shell handoff is full");
         }
     }
     plugins.refused = plugins.refused.saturating_add(refused);

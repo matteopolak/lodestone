@@ -48,6 +48,7 @@ use crate::host::{
     EntityHealthChanged, EntityIdentity, EntityMotion, EntityMoved, EntityRotation, EntitySpawned,
     EntityVelocity, EquipmentSlot, Event, Hand, Health, InventoryClickVerdict,
     InventorySlotChanged, ItemStack, PlaceOutcome, PlaceRejection, PlaceStatus, PlayerTeleported,
+    ResidentBlockMutation,
     SelectedItemDropMode, TeleportRelative, Vec3,
     PlayerInteractVerdict, PlayerMoveVerdict,
     SectionBlocksChanged, SectionPos, VerdictContext,
@@ -145,6 +146,8 @@ pub enum LoweredAction {
     Client(ClientAction),
     /// A copied intent consumed by the local-player ECS path.
     Intent(IntentAction),
+    /// A copied request the shell must route to its authoritative net task.
+    ResidentBlockMutation(ResidentBlockMutation),
 }
 
 /// Per-guest lifecycle generations for copied network entity identities.
@@ -580,6 +583,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::InventoryThrow(_) => Capability::ActInventoryThrow,
         Action::InventoryDropCursor => Capability::ActInventoryDropCursor,
         Action::DropSelectedItem(_) => Capability::ActDropSelectedItem,
+        Action::SetResidentBlock(_) => Capability::WriteWorld,
     }
 }
 
@@ -697,6 +701,7 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
             SelectedItemDropMode::One => ClientAction::DropSelectedItem,
             SelectedItemDropMode::Stack => ClientAction::DropSelectedItemStack,
         }),
+        Action::SetResidentBlock(request) => LoweredAction::ResidentBlockMutation(request),
     })
 }
 
@@ -1443,6 +1448,17 @@ mod tests {
             Err(Capability::ActBreak)
         );
         assert_eq!(
+            lower_action(
+                Action::SetResidentBlock(ResidentBlockMutation {
+                    request_id: 7,
+                    pos: BlockPos { x: 1, y: 2, z: 3 },
+                    state_id: 4,
+                }),
+                &CapabilitySet::empty(),
+            ),
+            Err(Capability::WriteWorld)
+        );
+        assert_eq!(
             lower_action(Action::SelectSlot(6), &CapabilitySet::empty()),
             Err(Capability::ActSelectSlot)
         );
@@ -1484,6 +1500,11 @@ mod tests {
             Action::SetLook(None),
             Action::SetMovement(None),
             Action::SetBreak(None),
+            Action::SetResidentBlock(ResidentBlockMutation {
+                request_id: 0,
+                pos: BlockPos { x: 0, y: 0, z: 0 },
+                state_id: 0,
+            }),
             Action::PlaceBlock(PlaceIntent {
                 pos: BlockPos { x: 0, y: 0, z: 0 },
                 face: BlockFace::Up,

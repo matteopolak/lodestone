@@ -1359,6 +1359,55 @@ const NET_RELAY_CAPACITY: usize = 1024;
 /// just reachable before the thread actually exits too.
 const ACTION_RELAY_CAPACITY: usize = 256;
 
+/// The bounded client-ECS to integrated-server handoff for one WASM guest's
+/// authoritative resident-block request. It carries only copied WIT values;
+/// the net task resolves the state id before it reaches the server proposal.
+#[cfg(not(target_arch = "wasm32"))]
+struct WasmBlockMutationRequest {
+    plugin: usize,
+    request: lodestone_wasm_host::ResidentBlockMutation,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type WasmBlockMutationResult = (usize, lodestone_wasm_host::ResidentBlockMutationOutcome);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn wasm_block_mutation_outcome(
+    request_id: u64,
+    status: lodestone_wasm_host::BlockMutationStatus,
+) -> lodestone_wasm_host::ResidentBlockMutationOutcome {
+    lodestone_wasm_host::ResidentBlockMutationOutcome { request_id, status }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn wasm_block_mutation_refusal(
+    refusal: lodestone_server::BlockMutationRefusal,
+) -> lodestone_wasm_host::BlockMutationRefusal {
+    match refusal {
+        lodestone_server::BlockMutationRefusal::Denied => {
+            lodestone_wasm_host::BlockMutationRefusal::Denied
+        }
+        lodestone_server::BlockMutationRefusal::TimedOut => {
+            lodestone_wasm_host::BlockMutationRefusal::TimedOut
+        }
+        lodestone_server::BlockMutationRefusal::Unavailable => {
+            lodestone_wasm_host::BlockMutationRefusal::Unavailable
+        }
+        lodestone_server::BlockMutationRefusal::MismatchedAction => {
+            lodestone_wasm_host::BlockMutationRefusal::MismatchedAction
+        }
+        lodestone_server::BlockMutationRefusal::PrimaryWorldUnavailable => {
+            lodestone_wasm_host::BlockMutationRefusal::PrimaryWorldUnavailable
+        }
+        lodestone_server::BlockMutationRefusal::ColumnNotResident => {
+            lodestone_wasm_host::BlockMutationRefusal::ColumnNotResident
+        }
+        lodestone_server::BlockMutationRefusal::OutOfBounds => {
+            lodestone_wasm_host::BlockMutationRefusal::OutOfBounds
+        }
+    }
+}
+
 /// A live client running on a background thread. Drop to request shutdown.
 #[derive(Debug)]
 pub struct NetClient {
@@ -1381,6 +1430,13 @@ pub struct NetClient {
     /// field list; a request into a loopback's receiver is simply never drained.
     #[cfg(not(target_arch = "wasm32"))]
     publish_tx: Sender<u16>,
+    /// Bounded requests the net task resolves only against the integrated
+    /// server it owns; remote sessions return `Unavailable` rather than
+    /// touching a client replica.
+    #[cfg(not(target_arch = "wasm32"))]
+    wasm_block_mutation_tx: SyncSender<WasmBlockMutationRequest>,
+    #[cfg(not(target_arch = "wasm32"))]
+    wasm_block_mutation_rx: Receiver<WasmBlockMutationResult>,
     stop: Arc<AtomicBool>,
     /// The driver's OS thread, joined on `Drop`.
     ///
@@ -2058,6 +2114,10 @@ impl NetClient {
         let (action_tx, action_rx) = mpsc::sync_channel(ACTION_RELAY_CAPACITY);
         #[cfg(not(target_arch = "wasm32"))]
         let (publish_tx, publish_rx) = mpsc::channel();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (wasm_block_mutation_tx, wasm_block_mutation_request_rx) = mpsc::sync_channel(64);
+        #[cfg(not(target_arch = "wasm32"))]
+        let (wasm_block_mutation_result_tx, wasm_block_mutation_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
         let handle: SharedHandle = Arc::new(OnceLock::new());
@@ -2096,6 +2156,8 @@ impl NetClient {
                     tx,
                     action_rx,
                     publish_rx,
+                    wasm_block_mutation_request_rx,
+                    wasm_block_mutation_result_tx,
                     stop_thread,
                     handle_thread,
                     horizon_surface_thread,
@@ -2153,6 +2215,10 @@ impl NetClient {
             action_tx,
             #[cfg(not(target_arch = "wasm32"))]
             publish_tx,
+            #[cfg(not(target_arch = "wasm32"))]
+            wasm_block_mutation_tx,
+            #[cfg(not(target_arch = "wasm32"))]
+            wasm_block_mutation_rx,
             stop,
             #[cfg(not(target_arch = "wasm32"))]
             thread: Some(thread),
@@ -2258,6 +2324,42 @@ impl NetClient {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn publish_to_lan(&self, port: u16) {
         let _ = self.publish_tx.send(port);
+    }
+
+    /// Queue one copied guest request for the authoritative singleplayer server.
+    /// A full or disconnected relay is a terminal finite outcome, not a retry
+    /// loop on the game thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn submit_wasm_block_mutation(
+        &self,
+        plugin: usize,
+        request: lodestone_wasm_host::ResidentBlockMutation,
+    ) -> Result<(), WasmBlockMutationResult> {
+        let request_id = request.request_id;
+        self.wasm_block_mutation_tx
+            .try_send(WasmBlockMutationRequest { plugin, request })
+            .map_err(|_| {
+                (
+                    plugin,
+                    wasm_block_mutation_outcome(
+                        request_id,
+                        lodestone_wasm_host::BlockMutationStatus::Refused(
+                            lodestone_wasm_host::BlockMutationRefusal::Unavailable,
+                        ),
+                    ),
+                )
+            })
+    }
+
+    /// Drain terminal answers without waiting; the caller is the sole writer of
+    /// the ECS resource that the WASM conductor observes next tick.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn drain_wasm_block_mutation_results(&self) -> Vec<WasmBlockMutationResult> {
+        let mut results = Vec::new();
+        while let Ok(result) = self.wasm_block_mutation_rx.try_recv() {
+            results.push(result);
+        }
+        results
     }
 
     /// Read the single block state at a world position from the client-owned
@@ -2541,6 +2643,8 @@ impl NetClient {
             // Its receiver is dropped with `_publish_rx` below, same as `_tx`
             // above: nothing on a loopback ever calls `publish_to_lan`.
             publish_tx: mpsc::channel().0,
+            wasm_block_mutation_tx: mpsc::sync_channel::<WasmBlockMutationRequest>(1).0,
+            wasm_block_mutation_rx: mpsc::sync_channel::<WasmBlockMutationResult>(1).1,
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
@@ -2618,6 +2722,8 @@ impl NetClient {
             // See `loopback`'s identical field for why an immediately-dropped
             // receiver is fine here.
             publish_tx: mpsc::channel().0,
+            wasm_block_mutation_tx: mpsc::sync_channel::<WasmBlockMutationRequest>(1).0,
+            wasm_block_mutation_rx: mpsc::sync_channel::<WasmBlockMutationResult>(1).1,
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
@@ -2944,6 +3050,10 @@ async fn run_async(
     // call site below passes nothing for this parameter, matching how `world_dir`/
     // `lan_port` are already cfg-gated on `Origin::Integrated`.
     #[cfg(not(target_arch = "wasm32"))] publish_rx: Receiver<u16>,
+    #[cfg(not(target_arch = "wasm32"))]
+    wasm_block_mutation_request_rx: Receiver<WasmBlockMutationRequest>,
+    #[cfg(not(target_arch = "wasm32"))]
+    wasm_block_mutation_result_tx: Sender<WasmBlockMutationResult>,
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
     horizon_surface: SharedHorizonSurface,
@@ -3795,6 +3905,51 @@ async fn run_async(
                     tracing::debug!(target: "net", "handed {handed_actions} action(s) to client handle (encode is the adapter's job)");
                 }
             }
+            // The authoritative mutation bridge shares this loop with client
+            // egress because this is the only task that owns the live integrated
+            // server. It never runs guest code, and the server proposal awaits
+            // before it touches its source lock.
+            #[cfg(not(target_arch = "wasm32"))]
+            while let Ok(request) = wasm_block_mutation_request_rx.try_recv() {
+                let outcome = match lodestone_data::block_states::StateId::new(
+                    request.request.state_id,
+                ) {
+                    None => wasm_block_mutation_outcome(
+                        request.request.request_id,
+                        lodestone_wasm_host::BlockMutationStatus::Refused(
+                            lodestone_wasm_host::BlockMutationRefusal::InvalidStateId,
+                        ),
+                    ),
+                    Some(state) => match integrated_server.as_ref() {
+                        Some(server) => wasm_block_mutation_outcome(
+                            request.request.request_id,
+                            match server
+                                .set_resident_block_state_proposed(
+                                    lodestone_model::BlockPos::new(
+                                        request.request.pos.x,
+                                        request.request.pos.y,
+                                        request.request.pos.z,
+                                    ),
+                                    state,
+                                )
+                                .await
+                            {
+                                Ok(()) => lodestone_wasm_host::BlockMutationStatus::Applied,
+                                Err(refusal) => lodestone_wasm_host::BlockMutationStatus::Refused(
+                                    wasm_block_mutation_refusal(refusal),
+                                ),
+                            },
+                        ),
+                        None => wasm_block_mutation_outcome(
+                            request.request.request_id,
+                            lodestone_wasm_host::BlockMutationStatus::Refused(
+                                lodestone_wasm_host::BlockMutationRefusal::Unavailable,
+                            ),
+                        ),
+                    },
+                };
+                let _ = wasm_block_mutation_result_tx.send((request.plugin, outcome));
+            }
             // The player's answer to a shown resource-pack prompt
             // (`NetClient::respond_to_resource_pack`) — drained here for the
             // same reason outbound actions are: this loop is the only place
@@ -4078,6 +4233,8 @@ fn run(
     tx: SyncSender<NetUpdate>,
     action_rx: Receiver<ClientAction>,
     publish_rx: Receiver<u16>,
+    wasm_block_mutation_request_rx: Receiver<WasmBlockMutationRequest>,
+    wasm_block_mutation_result_tx: Sender<WasmBlockMutationResult>,
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
     horizon_surface: SharedHorizonSurface,
@@ -4109,6 +4266,8 @@ fn run(
         tx,
         action_rx,
         publish_rx,
+        wasm_block_mutation_request_rx,
+        wasm_block_mutation_result_tx,
         stop,
         shared_handle,
         horizon_surface,

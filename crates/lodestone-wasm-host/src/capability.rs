@@ -74,6 +74,11 @@ pub enum Capability {
     /// chunk store. This is an import capability, so an ungranted guest cannot
     /// instantiate if it references the `world` interface at all.
     ReadWorld,
+    /// Request one finite, server-authoritative mutation of an already-resident
+    /// block in the current singleplayer world. The guest supplies only copied
+    /// coordinates and a state id; the shell owns transport and the server owns
+    /// proposal adjudication, validation, and persistence.
+    WriteWorld,
     /// Push `ClientAction::SendChat` / `SendCommand` onto `ActionQueue`.
     ///
     /// One capability for both because they are the same power: `SendCommand`
@@ -224,6 +229,7 @@ impl Capability {
         Self::ObserveBlocks,
         Self::ObserveEntities,
         Self::ReadWorld,
+        Self::WriteWorld,
         Self::ActChat,
         Self::ActCommand,
         Self::ActInteract,
@@ -264,6 +270,7 @@ impl Capability {
             Self::ObserveBlocks => "observe:blocks",
             Self::ObserveEntities => "observe:entities",
             Self::ReadWorld => "world:read",
+            Self::WriteWorld => "world:write",
             Self::ActChat => "act:chat",
             Self::ActCommand => "act:command",
             Self::ActInteract => "act:interact",
@@ -322,6 +329,7 @@ impl Capability {
             | Self::ObserveInventory
             | Self::ObserveBlocks
             | Self::ObserveEntities
+            | Self::WriteWorld
             | Self::ActChat
             | Self::ActCommand
             | Self::ActInteract

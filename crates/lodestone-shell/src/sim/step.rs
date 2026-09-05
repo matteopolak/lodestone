@@ -326,6 +326,17 @@ impl Sim {
             }
             actions
         });
+        // The WASM conductor hands out copied requests only. Take them while
+        // the ECS guard is held, then release it before crossing into
+        // `NetClient`: that task owns the integrated server and may await its
+        // bounded proposal lifecycle. Results return through the same resource
+        // on a later tick, never through a guest callback under this guard.
+        #[cfg(not(target_arch = "wasm32"))]
+        let wasm_world_mutations = self.write(|w| {
+            w.get_resource_mut::<lodestone_wasm_host::PendingWasmWorldMutations>()
+                .map(|mut pending| pending.take_requests())
+                .unwrap_or_default()
+        });
         // Only the *main* hand drives the first-person arm and the self-avatar's
         // right arm. An off-hand swing animates the left arm, which neither
         // consumer draws — treating it as a main-hand swing would swing the wrong
@@ -372,6 +383,47 @@ impl Sim {
             for action in actions {
                 // Best-effort — a closed session just drops it.
                 net.send_action(action);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut results = net.drain_wasm_block_mutation_results();
+                for (plugin, request) in wasm_world_mutations {
+                    if let Err(result) = net.submit_wasm_block_mutation(plugin, request) {
+                        results.push(result);
+                    }
+                }
+                if !results.is_empty() {
+                    self.write(|w| {
+                        if let Some(mut pending) = w
+                            .get_resource_mut::<lodestone_wasm_host::PendingWasmWorldMutations>()
+                        {
+                            for (plugin, outcome) in results {
+                                pending.push_outcome(plugin, outcome);
+                            }
+                        }
+                    });
+                }
+            }
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            if !wasm_world_mutations.is_empty() {
+                self.write(|w| {
+                    if let Some(mut pending) = w
+                        .get_resource_mut::<lodestone_wasm_host::PendingWasmWorldMutations>()
+                    {
+                        for (plugin, request) in wasm_world_mutations {
+                            pending.push_outcome(
+                                plugin,
+                                lodestone_wasm_host::ResidentBlockMutationOutcome {
+                                    request_id: request.request_id,
+                                    status: lodestone_wasm_host::BlockMutationStatus::Refused(
+                                        lodestone_wasm_host::BlockMutationRefusal::Unavailable,
+                                    ),
+                                },
+                            );
+                        }
+                    }
+                });
             }
         }
     }
