@@ -13502,19 +13502,21 @@ mod leash_tests {
     #[test]
     #[ignore = "manual dense-scene throughput measurement"]
     fn measure_dense_leash_owner_workers() {
-        let sim = dense_leash_owner_fixture(2_048);
-        let started = std::time::Instant::now();
-        let _ = sim.tick_leash_owner_batches_with_workers(1);
-        let serial = started.elapsed();
-        let started = std::time::Instant::now();
-        let _ = sim.tick_leash_owner_batches_with_workers(4);
-        let parallel = started.elapsed();
-        eprintln!(
-            "dense_leash owners=4 leashes=2048 serial_ms={:.3} parallel_ms={:.3} speedup={:.3}",
-            serial.as_secs_f64() * 1_000.0,
-            parallel.as_secs_f64() * 1_000.0,
-            serial.as_secs_f64() / parallel.as_secs_f64()
-        );
+        for leash_count in [256, 2_048] {
+            let sim = dense_leash_owner_fixture(leash_count);
+            let started = std::time::Instant::now();
+            let _ = sim.tick_leash_owner_batches_with_workers(1);
+            let serial = started.elapsed();
+            let started = std::time::Instant::now();
+            let _ = sim.tick_leash_owner_batches_with_workers(4);
+            let parallel = started.elapsed();
+            eprintln!(
+                "dense_leash owners=4 leashes={leash_count} serial_ms={:.3} parallel_ms={:.3} speedup={:.3}",
+                serial.as_secs_f64() * 1_000.0,
+                parallel.as_secs_f64() * 1_000.0,
+                serial.as_secs_f64() / parallel.as_secs_f64()
+            );
+        }
     }
 }
 
