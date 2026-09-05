@@ -402,6 +402,10 @@ pub mod player_data;
 /// `docs/world-storage.md` for the current boundary.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod world_storage;
+/// Authorization-gated conversion of one Anvil world-properties record into
+/// the selected native record backend.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod anvil_import;
 /// [`live_save::LiveSaveSlot`] — the one piece of the player-save story that
 /// has to compile on every target. Deliberately **not** `cfg`-gated, unlike
 /// `player_data` above: `LiveSaveSlot` is threaded unconditionally through
