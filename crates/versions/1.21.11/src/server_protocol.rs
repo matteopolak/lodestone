@@ -7,7 +7,7 @@
 use lodestone_core::{
     Ctx, Decode, Encode, Reader, State, Writer, encode_body,
 };
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -17,7 +17,7 @@ use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::configuration::RegistryData;
 use crate::packets::game::{
     ClientboundPlayerPosition, JoinGame, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
-    MovePlayerStatusOnly, PlayerAction, SpawnInfo,
+    MovePlayerStatusOnly, PlayerAction, SpawnInfo, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginStart, LoginFinished, SetCompression};
@@ -348,6 +348,42 @@ impl ServerProtocol for V774ServerProtocol {
                     pos,
                     face,
                     sequence,
+                }
+            }
+            State::Play if packet_id == play::serverbound::USE_ITEM_ON => {
+                let Some(UseItemOn {
+                    hand,
+                    location: Position(pos),
+                    direction,
+                    cursor_x,
+                    cursor_y,
+                    cursor_z,
+                    inside_block: _,
+                    world_border_hit: _,
+                    sequence,
+                }) = decode_full(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                let (Ok(hand), Ok(face)) = (u8::try_from(hand), i8::try_from(direction)) else {
+                    return ServerBound::Ignored;
+                };
+                let Some(face) = block_face(face) else {
+                    return ServerBound::Ignored;
+                };
+                if hand > 1 {
+                    return ServerBound::Ignored;
+                }
+                ServerBound::UseItemOn {
+                    pos,
+                    face,
+                    cursor: Vec3f {
+                        x: cursor_x,
+                        y: cursor_y,
+                        z: cursor_z,
+                    },
+                    sequence,
+                    hand,
                 }
             }
             State::Play if packet_id == play::serverbound::CHUNK_BATCH_RECEIVED => {

@@ -1,5 +1,5 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Vec3f};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_21_11::{V774ServerProtocol, packet_ids};
 use lodestone_v1_21_11::packets::chunk::{ChunkShape, LevelChunk};
@@ -142,6 +142,49 @@ fn block_action_and_initial_chunk_batch_use_the_hosted_wire_shapes() {
     });
     assert_eq!(protocol.decode(State::Play, 0x0a, &[0x40, 0x60, 0x00, 0x00]),
         ServerBound::ChunkBatchAcknowledged { desired_chunks_per_tick: 3.5 });
+}
+
+#[test]
+fn block_use_decodes_the_774_border_flag_before_its_prediction_sequence() {
+    let protocol = V774ServerProtocol;
+    // This is an independently assembled fixture: main hand, packed (3, 101, 5),
+    // south face, cursor (0.25, 1.0, 0.75), inside=true, border-hit=false,
+    // then prediction sequence 17. The second boolean is unique to 774.
+    let mut body = vec![0x00];
+    body.extend((3_i64 << 38 | 5_i64 << 12 | 101_i64).to_be_bytes());
+    body.extend([0x03]);
+    body.extend(0.25_f32.to_be_bytes());
+    body.extend(1.0_f32.to_be_bytes());
+    body.extend(0.75_f32.to_be_bytes());
+    body.extend([0x01, 0x00, 0x11]);
+    assert_eq!(
+        protocol.decode(State::Play, 0x3f, &body),
+        ServerBound::UseItemOn {
+            pos: BlockPos::new(3, 101, 5),
+            face: BlockFace::South,
+            cursor: Vec3f {
+                x: 0.25,
+                y: 1.0,
+                z: 0.75,
+            },
+            sequence: 17,
+            hand: 0,
+        }
+    );
+    let mut stale_layout = body.clone();
+    stale_layout.remove(stale_layout.len() - 2);
+    assert_eq!(
+        protocol.decode(State::Play, 0x3f, &stale_layout),
+        ServerBound::Ignored,
+        "omitting the 774-only border flag must not reinterpret the sequence"
+    );
+    let mut invalid_hand = body;
+    invalid_hand[0] = 0x02;
+    assert_eq!(
+        protocol.decode(State::Play, 0x3f, &invalid_hand),
+        ServerBound::Ignored,
+        "only the two real interaction hands reach the server consumer"
+    );
 }
 
 #[test]
