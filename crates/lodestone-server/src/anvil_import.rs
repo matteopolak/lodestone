@@ -18,11 +18,8 @@ use std::path::Path;
 
 use lodestone_anvil::{level_dat, region::RegionFile, world_gen_settings};
 use lodestone_core::{Nbt, Reader, read_named_nbt};
-use lodestone_storage::RecordWrite;
 use lodestone_storage_schema::{
-    BuiltinDimension, FORMAT_VERSION_V1, GameMode, GeneralRecord, StorageRecord,
-    WorldProperties,
-    generated::{general_record, storage_record},
+    BuiltinDimension, GameMode, WorldProperties,
 };
 use lodestone_world::{ColumnLight, Heightmap, LightData, NibbleArray};
 
@@ -192,9 +189,10 @@ pub fn import_world_properties(
         });
     }
 
-    let record = world_properties_record(level, settings)?;
+    let properties = world_properties(level, settings)?;
     storage
-        .write_dirty([RecordWrite::new(WORLD_PROPERTIES_KEY, record)])
+        .write_dirty_world_properties(properties)
+        .map(|_| 1)
         .map_err(Error::Storage)
 }
 
@@ -709,10 +707,10 @@ pub fn preflight_world_properties(
     builder.finish()
 }
 
-fn world_properties_record(
+fn world_properties(
     level: &level_dat::LevelDat,
     settings: &world_gen_settings::WorldGenSettings,
-) -> Result<StorageRecord, Error> {
+) -> Result<WorldProperties, Error> {
     let game_data_version = u32::try_from(
         level
             .data_version()
@@ -746,13 +744,7 @@ fn world_properties_record(
         day_time: 0,
         default_game_mode: default_game_mode as i32,
     };
-    Ok(StorageRecord {
-        format_version: FORMAT_VERSION_V1,
-        record: Some(storage_record::Record::General(GeneralRecord {
-            record: Some(general_record::Record::WorldProperties(properties)),
-            extensions: Vec::new(),
-        })),
-    })
+    Ok(properties)
 }
 
 fn game_mode(value: i32) -> Result<GameMode, Error> {
