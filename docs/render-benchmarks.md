@@ -82,6 +82,16 @@ redraw (CPU, GPU backpressure, compositor scheduling, OS noise); it is not
 decomposable into "CPU part" and "GPU part" by subtraction, and the two bracketing
 GPU spans carry the identical caveat as the in-process profiler's.
 
+Before a run can be written to `bench-results/live_frame_profile.jsonl`, the runner
+also requires at least one positive `world.model_sections_visited` sample in both
+the stationary and moving segments. This is a deliberately small production
+consumer witness: live world submission must have visited a model section, so a
+missing or disconnected counter bridge cannot leave a no-op run looking like valid
+timing data. A segment with no count samples, or whose supplied samples are zero,
+fractional, negative, or non-finite, fails. The hermetic control suite is `just
+test-client-frame-benchmark`; it exercises missing, zero, fractional, and positive
+controls without requiring a GPU or local oracle.
+
 ### Heavyweight local profiling scenes
 
 `heavyweight` is profiler-first local evidence, not comparable history or CI timing
@@ -217,6 +227,8 @@ fresh per-iteration setup rather than one long-lived `b.iter` closure.
 - `--validate-heavy-profile CAPTURE` / `just validate-client-heavy-profile <capture>`
   — validate a completed heavyweight capture and its sidecars without launching any
   workload or requiring Samply on `PATH`.
+- `just test-client-frame-benchmark` — run finite, no-GPU controls for client-run
+  completion, fullscreen provenance, and the production render-submission witness.
 - `bench-results/*.jsonl` and `bench-results/live_frame_profile.jsonl` — gitignored,
   local-only history; a fresh clone has no baseline to compare against.
 - Criterion CLI flags after `--` (`--quick`, `--sample-size`, `--save-baseline`/
