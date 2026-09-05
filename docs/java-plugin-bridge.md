@@ -572,6 +572,14 @@ lifecycle fixture checks that a real retained plugin entry receives the expected
 this path. This is a narrow class-loader/native-registration control, not a parallel Bukkit facade
 or a claim of broad internal-surface coverage.
 
+`OperatorLongValueMember` supplies the adjacent but non-interchangeable static `()J` control. It
+keeps a copied signed 64-bit value in the adapter worker and validates the selected Java declaration
+as `static native ()J` before registration; it never narrows a long through the integer callback.
+The same retained bootstrap loader owns that definition, so plugin children observe it through the
+normal parent route. The ignored lifecycle fixture uses `9_876_543_210`, which cannot fit an `int`,
+to prove both the exact descriptor and value preservation. It still supplies no world object, port,
+or mutable host state.
+
 A second, independently selected control accepts one static `(long): int` block-state member.
 The `long` is an opaque resident block handle, not a server object: the worker generation-checks it,
 copies its coordinates, and only then sends the already-bounded state query to the host. The ignored
