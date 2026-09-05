@@ -1828,6 +1828,8 @@ pub enum BenchmarkWorkload {
     Megaworld,
     /// Stampy's Lovelier World, viewed from an open-air large-build waypoint.
     Lovelier,
+    /// A deterministic command scene emitted by the integrated-server profiler.
+    Heavyweight,
 }
 
 impl BenchmarkWorkload {
@@ -1839,8 +1841,22 @@ impl BenchmarkWorkload {
             Self::Showcase => "showcase",
             Self::Megaworld => "megaworld",
             Self::Lovelier => "lovelier",
+            Self::Heavyweight => "heavyweight",
         }
     }
+}
+
+/// Immutable scene identity forwarded by the client profiling runner.
+///
+/// The release server example remains the authority for the command list and
+/// witnesses. The shell keeps only the typed launch values it needs to label
+/// the heavyweight benchmark lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeavyweightConfig {
+    pub scenario: String,
+    pub seed: u64,
+    pub scale: u32,
+    pub camera_plan: String,
 }
 
 /// Whether a benchmark includes the F3 text overlay's measurable observer cost.
@@ -1851,14 +1867,18 @@ pub enum BenchmarkDebugOverlay {
 }
 
 /// Durations and workload for one deterministic live frame benchmark session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BenchmarkConfig {
     /// Which Java-backed scene the runner prepared.
     pub workload: BenchmarkWorkload,
     /// Explicit F3 state; result metadata must never infer this from timings.
     pub debug_overlay: BenchmarkDebugOverlay,
+    /// Emitter-owned scene identity for [`BenchmarkWorkload::Heavyweight`].
+    pub heavyweight: Option<HeavyweightConfig>,
     /// Joined-world settling time excluded from reported measurements.
     pub warmup: Duration,
+    /// Command-mutation measurement duration, used only by heavyweight scenes.
+    pub mutation: Duration,
     /// Fixed-view measurement duration.
     pub stationary: Duration,
     /// Terrain-flight or showcase-orbit measurement duration.
@@ -1962,6 +1982,13 @@ impl Config {
         let mut benchmark_warmup = BenchmarkConfig::DEFAULT_WARMUP;
         let mut benchmark_stationary = BenchmarkConfig::DEFAULT_STATIONARY;
         let mut benchmark_moving = BenchmarkConfig::DEFAULT_MOVING;
+        let mut benchmark_mutation = Duration::ZERO;
+        let mut benchmark_mutation_seen = false;
+        let mut heavy_option_seen = false;
+        let mut heavy_scenario = None;
+        let mut heavy_seed = 1_u64;
+        let mut heavy_scale = 1_u32;
+        let mut heavy_camera_plan = "stationary".to_string();
         while let Some(arg) = it.next() {
             match arg.as_str() {
                 "--help" | "-h" => return CliOutcome::Help(Self::usage()),
@@ -2009,7 +2036,7 @@ impl Config {
                     benchmark_option_seen = true;
                     let Some(value) = it.next() else {
                         return CliOutcome::Error(
-                            "--benchmark requires terrain, showcase, megaworld, or lovelier".into(),
+                            "--benchmark requires terrain, showcase, megaworld, lovelier, or heavyweight".into(),
                         );
                     };
                     benchmark_workload = Some(match value.as_str() {
@@ -2017,9 +2044,10 @@ impl Config {
                         "showcase" => BenchmarkWorkload::Showcase,
                         "megaworld" => BenchmarkWorkload::Megaworld,
                         "lovelier" => BenchmarkWorkload::Lovelier,
+                        "heavyweight" => BenchmarkWorkload::Heavyweight,
                         _ => {
                             return CliOutcome::Error(format!(
-                                "--benchmark requires terrain, showcase, megaworld, or lovelier, got {value}"
+                                "--benchmark requires terrain, showcase, megaworld, lovelier, or heavyweight, got {value}"
                             ));
                         }
                     });
@@ -2064,6 +2092,65 @@ impl Config {
                     };
                     benchmark_moving = Duration::from_secs(seconds);
                 }
+                "--benchmark-mutation" => {
+                    benchmark_option_seen = true;
+                    benchmark_mutation_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error("--benchmark-mutation requires a value in seconds".into());
+                    };
+                    let Ok(seconds) = value.parse::<u64>() else {
+                        return CliOutcome::Error(format!(
+                            "--benchmark-mutation requires a value in seconds, got {value}"
+                        ));
+                    };
+                    benchmark_mutation = Duration::from_secs(seconds);
+                }
+                "--heavy-scenario" => {
+                    benchmark_option_seen = true;
+                    heavy_option_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error("--heavy-scenario requires a scenario name".into());
+                    };
+                    heavy_scenario = Some(value);
+                }
+                "--heavy-seed" => {
+                    benchmark_option_seen = true;
+                    heavy_option_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error("--heavy-seed requires an unsigned integer".into());
+                    };
+                    let Ok(value) = value.parse::<u64>() else {
+                        return CliOutcome::Error("--heavy-seed requires an unsigned integer".into());
+                    };
+                    heavy_seed = value;
+                }
+                "--heavy-scale" => {
+                    benchmark_option_seen = true;
+                    heavy_option_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error("--heavy-scale requires a positive integer".into());
+                    };
+                    let Ok(value) = value.parse::<u32>() else {
+                        return CliOutcome::Error("--heavy-scale requires a positive integer".into());
+                    };
+                    if value == 0 {
+                        return CliOutcome::Error("--heavy-scale must be at least 1".into());
+                    }
+                    heavy_scale = value;
+                }
+                "--heavy-camera-plan" => {
+                    benchmark_option_seen = true;
+                    heavy_option_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error("--heavy-camera-plan requires stationary or orbit".into());
+                    };
+                    if !matches!(value.as_str(), "stationary" | "orbit") {
+                        return CliOutcome::Error(format!(
+                            "--heavy-camera-plan requires stationary or orbit, got {value}"
+                        ));
+                    }
+                    heavy_camera_plan = value;
+                }
                 "--benchmark-debug-overlay" => {
                     benchmark_option_seen = true;
                     benchmark_debug_overlay_seen = true;
@@ -2099,10 +2186,39 @@ impl Config {
                         .into(),
                 );
             };
+            if heavy_option_seen && workload != BenchmarkWorkload::Heavyweight {
+                return CliOutcome::Error("--heavy-scenario requires --benchmark heavyweight".into());
+            }
+            if benchmark_mutation_seen
+                && !benchmark_mutation.is_zero()
+                && workload != BenchmarkWorkload::Heavyweight
+            {
+                return CliOutcome::Error(
+                    "--benchmark-mutation with a nonzero duration requires --benchmark heavyweight"
+                        .into(),
+                );
+            }
+            let heavyweight = if workload == BenchmarkWorkload::Heavyweight {
+                let Some(scenario) = heavy_scenario else {
+                    return CliOutcome::Error(
+                        "--benchmark heavyweight requires --heavy-scenario".into(),
+                    );
+                };
+                Some(HeavyweightConfig {
+                    scenario,
+                    seed: heavy_seed,
+                    scale: heavy_scale,
+                    camera_plan: heavy_camera_plan,
+                })
+            } else {
+                None
+            };
             cfg.benchmark = Some(BenchmarkConfig {
                 workload,
                 debug_overlay: benchmark_debug_overlay,
+                heavyweight,
                 warmup: benchmark_warmup,
+                mutation: benchmark_mutation,
                 stationary: benchmark_stationary,
                 moving: benchmark_moving,
             });
@@ -2178,13 +2294,20 @@ RENDER / INPUT:
     --sensitivity <F>        Mouse-look sensitivity, 0..1 (default: 0.5)
 
 LIVE FRAME BENCHMARK:
-    --benchmark <WORKLOAD>   terrain, showcase, megaworld, or lovelier; forces a windowed run
+    --benchmark <WORKLOAD>   terrain, showcase, megaworld, lovelier, or heavyweight; forces a windowed run
     --benchmark-debug-overlay <STATE>
                              closed or open (default: closed)
     --benchmark-warmup <N>  Joined-world warm-up seconds (default: 20)
     --benchmark-stationary <N>
                              Fixed-view measurement seconds (default: 30)
     --benchmark-moving <N>  Flight/orbit measurement seconds (default: 60)
+    --benchmark-mutation <N>
+                             Heavyweight mutation seconds (default: 0)
+    --heavy-scenario <NAME> Emitter scenario; required for heavyweight
+    --heavy-seed <N>        Emitter seed (default: 1)
+    --heavy-scale <N>       Emitter scale (default: 1)
+    --heavy-camera-plan <PLAN>
+                             stationary or orbit (default: stationary)
 
     -h, --help               Print this help and exit
 "
@@ -2283,7 +2406,9 @@ mod tests {
             Some(BenchmarkConfig {
                 workload: BenchmarkWorkload::Terrain,
                 debug_overlay: BenchmarkDebugOverlay::Closed,
+                heavyweight: None,
                 warmup: Duration::from_secs(20),
+                mutation: Duration::ZERO,
                 stationary: Duration::from_secs(30),
                 moving: Duration::from_secs(60),
             })
@@ -2333,6 +2458,49 @@ mod tests {
             parsed.benchmark.expect("benchmark config").workload,
             BenchmarkWorkload::Lovelier
         );
+    }
+
+    #[test]
+    fn heavyweight_flags_require_a_scene_and_preserve_explicit_values() {
+        assert!(matches!(
+            Config::from_args(["--benchmark".into(), "heavyweight".into()]),
+            CliOutcome::Error(message) if message.contains("requires --heavy-scenario")
+        ));
+        let parsed = parse(&[
+            "--benchmark",
+            "heavyweight",
+            "--heavy-scenario",
+            "mixed",
+            "--heavy-seed",
+            "17",
+            "--heavy-scale",
+            "2",
+            "--heavy-camera-plan",
+            "orbit",
+            "--benchmark-mutation",
+            "7",
+        ]);
+        let benchmark = parsed.benchmark.expect("heavy benchmark config");
+        assert_eq!(benchmark.workload, BenchmarkWorkload::Heavyweight);
+        assert_eq!(benchmark.mutation, Duration::from_secs(7));
+        assert_eq!(
+            benchmark.heavyweight,
+            Some(HeavyweightConfig {
+                scenario: "mixed".into(),
+                seed: 17,
+                scale: 2,
+                camera_plan: "orbit".into(),
+            })
+        );
+        assert!(matches!(
+            Config::from_args([
+                "--benchmark".into(),
+                "terrain".into(),
+                "--heavy-scenario".into(),
+                "mixed".into(),
+            ]),
+            CliOutcome::Error(message) if message.contains("requires --benchmark heavyweight")
+        ));
     }
 
     #[test]

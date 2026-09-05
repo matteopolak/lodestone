@@ -11,7 +11,9 @@ fn benchmark_config(workload: crate::config::BenchmarkWorkload) -> Config {
         benchmark: Some(crate::config::BenchmarkConfig {
             workload,
             debug_overlay: crate::config::BenchmarkDebugOverlay::Closed,
+            heavyweight: None,
             warmup: Duration::from_secs(20),
+            mutation: Duration::ZERO,
             stationary: Duration::from_secs(30),
             moving: Duration::from_secs(60),
         }),

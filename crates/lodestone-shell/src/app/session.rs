@@ -23,8 +23,8 @@ impl WindowApp {
     /// guarantee that.
     pub(super) fn new_with_app(app: lodestone_app::App, config: Config) -> Self {
         let sim = Sim::from_app(app, config.clone());
-        let benchmark = config.benchmark.map(BenchmarkDriver::new);
-        let show_debug = config.benchmark.is_some_and(|benchmark| {
+        let benchmark = config.benchmark.clone().map(BenchmarkDriver::new);
+        let show_debug = config.benchmark.as_ref().is_some_and(|benchmark| {
             benchmark.debug_overlay == crate::config::BenchmarkDebugOverlay::Open
         });
         // Matches the sky fog set at render bring-up, so the fog reconciliation's

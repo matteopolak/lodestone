@@ -636,6 +636,20 @@ pub(crate) struct WorldSubphaseCounts {
     /// `sections_culled_*` fields (already on the F3 overlay) for
     /// visited-vs-drawn on the loop that actually matters live.
     pub model_sections_visited: usize,
+    /// Opaque terrain sections submitted in the production draw pass.
+    pub opaque_sections_drawn: usize,
+    /// Water sections submitted after opaque geometry.
+    pub water_sections_drawn: usize,
+    /// Translucent block sections submitted in their production pass.
+    pub translucent_sections_drawn: usize,
+    /// Entity instances submitted by the entity pass.
+    pub entities_drawn: usize,
+    /// Block-entity instances submitted by their renderer.
+    pub block_entities_drawn: usize,
+    /// Prepared sign-text vertices submitted with block entities.
+    pub sign_text_vertices: u32,
+    /// Particle instances submitted in the frame's particle pass.
+    pub particles_drawn: usize,
 }
 
 thread_local! {
@@ -707,6 +721,13 @@ mod world_subphase_tests {
         record_world_subphase_counts(WorldSubphaseCounts {
             packed_sections_visited: 11,
             model_sections_visited: 4,
+            opaque_sections_drawn: 7,
+            water_sections_drawn: 13,
+            translucent_sections_drawn: 17,
+            entities_drawn: 19,
+            block_entities_drawn: 23,
+            sign_text_vertices: 29,
+            particles_drawn: 31,
         });
 
         let (timings, counts) = take_world_subphases();
@@ -723,6 +744,13 @@ mod world_subphase_tests {
         let counts = counts.expect("counts recorded above must round-trip");
         assert_eq!(counts.packed_sections_visited, 11);
         assert_eq!(counts.model_sections_visited, 4);
+        assert_eq!(counts.opaque_sections_drawn, 7);
+        assert_eq!(counts.water_sections_drawn, 13);
+        assert_eq!(counts.translucent_sections_drawn, 17);
+        assert_eq!(counts.entities_drawn, 19);
+        assert_eq!(counts.block_entities_drawn, 23);
+        assert_eq!(counts.sign_text_vertices, 29);
+        assert_eq!(counts.particles_drawn, 31);
 
         // Draining must reset state for the next frame — a phase not
         // recorded again must read back as `None`, never a stale `Some` from

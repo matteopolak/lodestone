@@ -87,7 +87,10 @@ impl DumpWriter {
             header.push_str(subphase.name());
         }
         header.push_str(
-            ",world.packed_sections_visited,world.model_sections_visited,hud.chat_lines,\
+            ",world.packed_sections_visited,world.model_sections_visited,\
+             world.opaque_sections_drawn,world.water_sections_drawn,\
+             world.translucent_sections_drawn,world.entities_drawn,\
+             world.block_entities_drawn,world.sign_text_vertices,world.particles_drawn,hud.chat_lines,\
              hud.debug_lines,hud.menu_overlays_drawn,light.relight_input_blocks,\
              light.relight_input_sections,light.relight_cells_visited,\
              light.relight_cells_changed,light.relight_dirty_sections,\
@@ -138,6 +141,13 @@ impl DumpWriter {
         for value in [
             world_counts.map(|counts| counts.packed_sections_visited),
             world_counts.map(|counts| counts.model_sections_visited),
+            world_counts.map(|counts| counts.opaque_sections_drawn),
+            world_counts.map(|counts| counts.water_sections_drawn),
+            world_counts.map(|counts| counts.translucent_sections_drawn),
+            world_counts.map(|counts| counts.entities_drawn),
+            world_counts.map(|counts| counts.block_entities_drawn),
+            world_counts.map(|counts| counts.sign_text_vertices as usize),
+            world_counts.map(|counts| counts.particles_drawn),
             hud_counts.map(|counts| counts.chat_lines),
             hud_counts.map(|counts| counts.debug_lines),
             hud_counts.map(|counts| counts.menu_overlays_drawn),

@@ -17,6 +17,9 @@ pub(crate) enum BenchmarkSegment {
     WaitingForJoin,
     /// Joined-world settling period, excluded from reported measurements.
     Warmup,
+    /// Heavyweight scene mutations have been dispatched; their frame rows are
+    /// retained as reachability evidence rather than timing comparisons.
+    Mutation,
     /// Fixed-view measurement period.
     Stationary,
     /// Terrain flight or showcase camera orbit measurement period.
@@ -89,6 +92,7 @@ impl BenchmarkDriver {
                 "terrain.waiting_for_join"
             }
             (BenchmarkWorkload::Terrain, BenchmarkSegment::Warmup) => "terrain.warmup",
+            (BenchmarkWorkload::Terrain, BenchmarkSegment::Mutation) => "terrain.mutation",
             (BenchmarkWorkload::Terrain, BenchmarkSegment::Stationary) => "terrain.stationary",
             (BenchmarkWorkload::Terrain, BenchmarkSegment::Moving) => "terrain.moving",
             (BenchmarkWorkload::Terrain, BenchmarkSegment::Complete) => "terrain.complete",
@@ -96,6 +100,7 @@ impl BenchmarkDriver {
                 "showcase.waiting_for_join"
             }
             (BenchmarkWorkload::Showcase, BenchmarkSegment::Warmup) => "showcase.warmup",
+            (BenchmarkWorkload::Showcase, BenchmarkSegment::Mutation) => "showcase.mutation",
             (BenchmarkWorkload::Showcase, BenchmarkSegment::Stationary) => "showcase.stationary",
             (BenchmarkWorkload::Showcase, BenchmarkSegment::Moving) => "showcase.moving",
             (BenchmarkWorkload::Showcase, BenchmarkSegment::Complete) => "showcase.complete",
@@ -103,6 +108,7 @@ impl BenchmarkDriver {
                 "megaworld.waiting_for_join"
             }
             (BenchmarkWorkload::Megaworld, BenchmarkSegment::Warmup) => "megaworld.warmup",
+            (BenchmarkWorkload::Megaworld, BenchmarkSegment::Mutation) => "megaworld.mutation",
             (BenchmarkWorkload::Megaworld, BenchmarkSegment::Stationary) => {
                 "megaworld.stationary"
             }
@@ -112,11 +118,22 @@ impl BenchmarkDriver {
                 "lovelier.waiting_for_join"
             }
             (BenchmarkWorkload::Lovelier, BenchmarkSegment::Warmup) => "lovelier.warmup",
+            (BenchmarkWorkload::Lovelier, BenchmarkSegment::Mutation) => "lovelier.mutation",
             (BenchmarkWorkload::Lovelier, BenchmarkSegment::Stationary) => {
                 "lovelier.stationary"
             }
             (BenchmarkWorkload::Lovelier, BenchmarkSegment::Moving) => "lovelier.moving",
             (BenchmarkWorkload::Lovelier, BenchmarkSegment::Complete) => "lovelier.complete",
+            (BenchmarkWorkload::Heavyweight, BenchmarkSegment::WaitingForJoin) => {
+                "heavyweight.waiting_for_join"
+            }
+            (BenchmarkWorkload::Heavyweight, BenchmarkSegment::Warmup) => "heavyweight.warmup",
+            (BenchmarkWorkload::Heavyweight, BenchmarkSegment::Mutation) => "heavyweight.mutation",
+            (BenchmarkWorkload::Heavyweight, BenchmarkSegment::Stationary) => {
+                "heavyweight.stationary"
+            }
+            (BenchmarkWorkload::Heavyweight, BenchmarkSegment::Moving) => "heavyweight.moving",
+            (BenchmarkWorkload::Heavyweight, BenchmarkSegment::Complete) => "heavyweight.complete",
         }
     }
 
@@ -141,11 +158,12 @@ impl BenchmarkDriver {
     }
 
     fn intent_for(&self, elapsed: Duration, previous_elapsed: Duration) -> BenchmarkIntent {
-        let stationary_start = self.config.warmup;
+        let mutation_start = self.config.warmup;
+        let stationary_start = mutation_start.saturating_add(self.config.mutation);
         let moving_start = stationary_start.saturating_add(self.config.stationary);
         let complete_at = moving_start.saturating_add(self.config.moving);
 
-        if elapsed < stationary_start {
+        if elapsed < mutation_start {
             let mut intent = BenchmarkIntent::idle(BenchmarkSegment::Warmup);
             if matches!(
                 self.config.workload,
@@ -162,6 +180,9 @@ impl BenchmarkDriver {
                     || (1_150..1_225).contains(&flight_edge);
             }
             return intent;
+        }
+        if elapsed < stationary_start {
+            return BenchmarkIntent::idle(BenchmarkSegment::Mutation);
         }
         if elapsed < moving_start {
             return BenchmarkIntent::idle(BenchmarkSegment::Stationary);
@@ -182,7 +203,16 @@ impl BenchmarkDriver {
                 // benchmark in any real build.
                 intent.jump = elapsed.saturating_sub(moving_start) < Duration::from_secs(5);
             }
-            BenchmarkWorkload::Showcase => {}
+            BenchmarkWorkload::Showcase | BenchmarkWorkload::Heavyweight => {}
+        }
+        if self.config.workload == BenchmarkWorkload::Heavyweight
+            && self
+                .config
+                .heavyweight
+                .as_ref()
+                .is_some_and(|heavy| heavy.camera_plan == "stationary")
+        {
+            return intent;
         }
         // At the canonical 0.5 sensitivity, 0.15 degrees/raw pixel. Integrate
         // only the portion of this update overlapping the moving segment,
@@ -205,7 +235,9 @@ mod tests {
         BenchmarkConfig {
             workload: BenchmarkWorkload::Terrain,
             debug_overlay: crate::config::BenchmarkDebugOverlay::Closed,
+            heavyweight: None,
             warmup: Duration::from_secs(20),
+            mutation: Duration::ZERO,
             stationary: Duration::from_secs(30),
             moving: Duration::from_secs(60),
         }
@@ -255,6 +287,47 @@ mod tests {
         assert!(!moving.forward && !moving.sprint && !moving.jump);
         assert!(moving.mouse_dx > 0.0);
         assert_eq!(driver.label(moving.segment), "showcase.moving");
+    }
+
+    #[test]
+    fn heavyweight_runs_mutation_before_stationary_and_orbits_without_translation() {
+        let t0 = Instant::now();
+        let mut cfg = fixture_config();
+        cfg.workload = BenchmarkWorkload::Heavyweight;
+        cfg.mutation = Duration::from_secs(7);
+        let mut driver = BenchmarkDriver::new(cfg);
+        let _ = driver.update(t0, true);
+        assert_eq!(
+            driver.update(t0 + Duration::from_secs(20), true).segment,
+            BenchmarkSegment::Mutation
+        );
+        assert_eq!(
+            driver.label(BenchmarkSegment::Mutation),
+            "heavyweight.mutation"
+        );
+        let moving = driver.update(t0 + Duration::from_secs(58), true);
+        assert_eq!(moving.segment, BenchmarkSegment::Moving);
+        assert!(!moving.forward && !moving.sprint && !moving.jump);
+        assert!(moving.mouse_dx > 0.0);
+    }
+
+    #[test]
+    fn heavyweight_stationary_camera_does_not_add_an_orbit() {
+        let t0 = Instant::now();
+        let mut cfg = fixture_config();
+        cfg.workload = BenchmarkWorkload::Heavyweight;
+        cfg.heavyweight = Some(crate::config::HeavyweightConfig {
+            scenario: "palette".into(),
+            seed: 1,
+            scale: 1,
+            camera_plan: "stationary".into(),
+        });
+        let mut driver = BenchmarkDriver::new(cfg);
+        let _ = driver.update(t0, true);
+        assert_eq!(
+            driver.update(t0 + Duration::from_secs(51), true).mouse_dx,
+            0.0
+        );
     }
 
     #[test]

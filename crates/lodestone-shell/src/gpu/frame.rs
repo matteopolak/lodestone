@@ -1040,12 +1040,6 @@ impl RenderState {
                 crate::gpu::gpu_timing::WorldSubphase::TerrainCullAndDraw,
                 world_encode_terrain_t0.elapsed().as_secs_f32() * 1000.0,
             );
-            crate::gpu::gpu_timing::record_world_subphase_counts(
-                crate::gpu::gpu_timing::WorldSubphaseCounts {
-                    packed_sections_visited: self.sections.len(),
-                    model_sections_visited: self.model.as_ref().map_or(0, |m| m.sections.len()),
-                },
-            );
             world_encode_other_t0.set(crate::platform::Instant::now());
 
             // Entities share the terrain depth buffer (depth test + write on, so
@@ -2269,6 +2263,23 @@ impl RenderState {
         // `RenderState::resident_mesh_bytes`.
         stats.vram_bytes = self.resident_mesh_bytes();
         stats.vram_reserved_bytes = self.reserved_mesh_bytes();
+        // Record this only after every production pass has updated `stats`.
+        // The CSV witnesses are therefore actual submissions, not a terrain-only
+        // snapshot that would report zero for later entity, water, sign, and
+        // particle work regardless of what reached the renderer.
+        crate::gpu::gpu_timing::record_world_subphase_counts(
+            crate::gpu::gpu_timing::WorldSubphaseCounts {
+                packed_sections_visited: self.sections.len(),
+                model_sections_visited: self.model.as_ref().map_or(0, |m| m.sections.len()),
+                opaque_sections_drawn: stats.sections_drawn,
+                water_sections_drawn: stats.water_sections_drawn,
+                translucent_sections_drawn: stats.translucent_sections_drawn,
+                entities_drawn: stats.entities_drawn,
+                block_entities_drawn: stats.block_entities_drawn,
+                sign_text_vertices: stats.sign_text_vertices,
+                particles_drawn: stats.particles_drawn,
+            },
+        );
         self.terrain_cull_diagnostics
             .borrow_mut()
             .report(camera, &terrain_cull, stats, sign_prepare);
