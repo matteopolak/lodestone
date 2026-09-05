@@ -195,6 +195,19 @@ trailing-bytes or truncation error, or lands it on an ignored id.
 `misrouting_between_protocols_is_never_a_plausible_wrong_event` holds that
 line for the whole capture, so a future lenient decode cannot quietly undo it.
 
+### External-client acceptance
+
+The opt-in release-client gate covers this era's hosted protocol 754 as row **754**. Run it with
+`just external-client-acceptance --protocol 754 --output /private/tmp/lodestone-v754` and an
+external driver. The six-stage evidence records the direct login-to-Play transition in
+`configuration.mode: "login_to_play"` and the unbatched initial columns in
+`chunk_batch_acknowledgement.mode: "unbatched", batch_count: 0`; it then requires world join,
+deliberate movement, one observed `start_destroy_block` result, and a client-initiated clean
+disconnect. Provenance must identify the exact 1.16.5 client build and retain non-empty capture and
+client-log artifacts. This gate was not launched while this documentation was updated, so protocol
+754 remains unverified by a real external client until that manual run produces `report.json`;
+protocols 498 and 578 remain outside the external-client gate.
+
 ## How to change it
 
 - **Adding a fourth protocol to this era** (there is none — 1.13.2 is below it

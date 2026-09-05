@@ -72,6 +72,21 @@ controls join each registry-selected server, read a known chunk block and
 observe its block update after a break. Real 1.17.1 and 1.18.2 client sessions
 remain required validation.
 
+### External-client acceptance
+
+The opt-in release-client gate covers both hosted rows in this era: protocol 756 (1.17.1) and
+protocol 758 (1.18.2). Run either with `just external-client-acceptance --protocol 756 --output
+/private/tmp/lodestone-v756` or `just external-client-acceptance --protocol 758 --output
+/private/tmp/lodestone-v758`, using an external driver. Both revisions transition directly from
+login to Play and send unbatched initial chunks, so their six-stage evidence records
+`configuration.mode: "login_to_play"` and `chunk_batch_acknowledgement.mode: "unbatched",
+batch_count: 0`; 758's per-section biome and inline-light payload do not add a batch
+acknowledgement. The remaining stages require world join, deliberate movement, one observed
+`start_destroy_block` result, and a client-initiated clean disconnect. Provenance must identify the
+exact 1.17.1 or 1.18.2 client build and retain non-empty capture and client-log artifacts. These
+gates were not launched while this documentation was updated, so both protocols remain
+unverified by a real external client until their manual runs produce `report.json`.
+
 The same hosts decode all four ordinary Play movement bodies. Position and
 position-with-look become `ServerBound::PlayerMoved`; look-only becomes
 `PlayerRotated`; and the grounded-only form becomes `PlayerStatusOnly`. This
