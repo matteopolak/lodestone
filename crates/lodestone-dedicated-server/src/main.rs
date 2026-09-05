@@ -12,7 +12,7 @@
 //! # Usage
 //!
 //! ```text
-//! lodestone-server [directory]
+//! lodestone-server [--protocol <number>] [directory]
 //! ```
 //!
 //! `directory` defaults to the current directory. It is created if missing.
@@ -117,7 +117,14 @@ async fn main() {
         )
         .init();
 
-    let dir = server_directory();
+    let launch = match ServerLaunch::from_args() {
+        Ok(launch) => launch,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
+    let dir = launch.directory;
     if let Err(err) = std::fs::create_dir_all(&dir) {
         tracing::error!("could not create server directory {}: {err}", dir.display());
         std::process::exit(1);
@@ -189,21 +196,34 @@ async fn main() {
     // `None` is a real product state, not an error to route around: a build
     // with no servable family compiled in cannot host anything, and must say
     // so rather than starting and refusing every join.
-    let Some((protocol_version, protocol)) = lodestone_registry::supported_protocols()
+    let mut servable = lodestone_registry::supported_protocols()
         .into_iter()
         .filter_map(|version| {
             lodestone_registry::server_protocol_for_protocol(version)
                 .map(|protocol| (version, protocol))
-        })
-        .max_by_key(|(version, _)| *version)
-    else {
+        });
+    let selected = match launch.protocol {
+        Some(requested) => servable
+            .find(|(version, _)| *version == requested)
+            .ok_or(requested),
+        None => servable.max_by_key(|(version, _)| *version).ok_or(0),
+    };
+    let (protocol_version, protocol) = match selected {
+        Ok(selected) => selected,
+        Err(requested) => {
+            let requested = if requested == 0 {
+                "no protocol selected".to_owned()
+            } else {
+                format!("protocol {requested}")
+            };
         tracing::error!(
-            "this build has no protocol family that can be hosted (client families compiled in: {:?}, \
-             servable: {:?}) — rebuild with a servable version feature enabled",
+            "{requested} cannot be hosted by this build (client families compiled in: {:?}, \
+             servable: {:?}) — rebuild with the matching dedicated-server feature",
             lodestone_registry::compiled_families(),
             lodestone_registry::compiled_server_families(),
         );
         std::process::exit(1);
+        }
     };
     tracing::info!(
         "hosting protocol {protocol_version} ({:?})",
@@ -441,12 +461,47 @@ async fn next_console_line<R: tokio::io::AsyncBufRead + Unpin>(
     std::future::pending().await
 }
 
-/// The directory to serve, from `argv[1]`, defaulting to the current directory.
-fn server_directory() -> PathBuf {
-    std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+/// Arguments accepted by the standalone server. Protocol selection is explicit
+/// for release-client acceptance sessions; normal operator launches retain the
+/// existing highest-hostable default.
+#[derive(Debug)]
+struct ServerLaunch {
+    directory: PathBuf,
+    protocol: Option<i32>,
+}
+
+impl ServerLaunch {
+    fn from_args() -> Result<Self, String> {
+        parse_launch_args(std::env::args().skip(1))
+    }
+}
+
+fn parse_launch_args(
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> Result<ServerLaunch, String> {
+    let mut args = args.into_iter().map(Into::into);
+    let mut directory = None;
+    let mut protocol = None;
+    while let Some(arg) = args.next() {
+        if arg == "--protocol" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--protocol requires an integer".to_owned())?;
+            protocol = Some(value.parse().map_err(|_| {
+                format!("--protocol must be an integer, got {value:?}")
+            })?);
+        } else if arg == "--help" || arg == "-h" {
+            return Err("usage: lodestone-server [--protocol <number>] [directory]".to_owned());
+        } else if arg.starts_with('-') {
+            return Err(format!("unknown option {arg:?}; use --help"));
+        } else if directory.replace(PathBuf::from(arg)).is_some() {
+            return Err("only one server directory may be supplied".to_owned());
+        }
+    }
+    Ok(ServerLaunch {
+        directory: directory.unwrap_or_else(|| PathBuf::from(".")),
+        protocol,
+    })
 }
 
 /// Vanilla's own random-world-seed generation shape: a fresh, opaque `i64` with no
@@ -504,6 +559,22 @@ mod tests {
     use lodestone_server::{ChunkColumn, ChunkSource};
 
     use super::*;
+
+    #[test]
+    fn launch_arguments_accept_an_explicit_protocol_and_directory() {
+        // Keep command-line parsing independent of the process environment so
+        // the acceptance harness can select a host without changing global
+        // arguments in this test binary.
+        let parsed = parse_launch_args(["--protocol", "47", "/tmp/world"]).unwrap();
+        assert_eq!(parsed.protocol, Some(47));
+        assert_eq!(parsed.directory, PathBuf::from("/tmp/world"));
+    }
+
+    #[test]
+    fn launch_arguments_reject_ambiguous_directories() {
+        let error = parse_launch_args(["first", "second"]).unwrap_err();
+        assert!(error.contains("one server directory"));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn closed_console_preserves_timer_progress() {
