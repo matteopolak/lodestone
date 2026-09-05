@@ -46,8 +46,8 @@ use lodestone_model::{GameMode, Vec3};
 use lodestone_net::Connection;
 use lodestone_server::player_data::{PlayerData, PlayerDataStore};
 use lodestone_server::world_storage::{
-    Error as WorldStorageError, NativePlayerRecord, PlayerRecordError, WorldStorage,
-    WorldStorageBackend,
+    Error as WorldStorageError, NativePlayerData, NativePlayerRecord, PlayerRecordError,
+    WorldStorage, WorldStorageBackend,
 };
 use lodestone_server::{
     ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective, ServerProtocol,
@@ -73,6 +73,7 @@ const PLAYER_MOVED_C2S: i32 = 42;
 const CHANGE_GAME_MODE_C2S: i32 = 58;
 const PING_REQUEST_C2S: i32 = 91;
 const PONG_RESPONSE_S2C: i32 = 92;
+const GAME_MODE_S2C: i32 = 93;
 
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
@@ -191,6 +192,20 @@ impl ServerProtocol for FakeProtocol {
         Vec::new()
     }
 
+    fn begin_play_at(
+        &self,
+        _view_radius: i32,
+        _spawn: Vec3,
+        mode: GameMode,
+    ) -> Vec<ServerDirective> {
+        let mut w = Writer::default();
+        w.u8(mode as u8);
+        vec![ServerDirective::Send {
+            packet_id: GAME_MODE_S2C,
+            payload: w.as_slice().to_vec(),
+        }]
+    }
+
     fn encode_set_time(&self, game_time: i64, day_time: Option<i64>) -> ServerDirective {
         let mut w = Writer::default();
         w.i64(game_time);
@@ -249,6 +264,15 @@ impl ServerProtocol for FakeProtocol {
 /// helper — no chunk-batch accounting beyond draining the one column a
 /// `view_radius: 0` join produces.
 async fn drive_login_and_join(client: &mut Connection<DuplexStream>, username: &str) -> (i32, i32) {
+    drive_login_and_join_with_mode(client, username).await.0
+}
+
+/// Drives the normal join and returns both the streamed column and the mode
+/// the protocol received at the join boundary.
+async fn drive_login_and_join_with_mode(
+    client: &mut Connection<DuplexStream>,
+    username: &str,
+) -> ((i32, i32), GameMode) {
     client.write_packet(HANDSHAKE, &[2]).await.expect("handshake");
     let mut w = Writer::default();
     w.string(username);
@@ -271,6 +295,16 @@ async fn drive_login_and_join(client: &mut Connection<DuplexStream>, username: &
         .await
         .expect("finish configuration");
 
+    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, GAME_MODE_S2C, "join receives its resolved game mode first");
+    let mode = match Reader::new(&payload).u8().expect("game mode") {
+        0 => GameMode::Survival,
+        1 => GameMode::Creative,
+        2 => GameMode::Adventure,
+        3 => GameMode::Spectator,
+        other => panic!("unexpected game mode {other}"),
+    };
+
     let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
     assert_eq!(id, SET_TIME_S2C, "join sends the full time sync before any chunk");
 
@@ -284,7 +318,7 @@ async fn drive_login_and_join(client: &mut Connection<DuplexStream>, username: &
     let cz = chunk.var_i32().expect("chunk z");
     let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
     assert_eq!(id, CHUNK_BATCH_FINISHED);
-    (cx, cz)
+    ((cx, cz), mode)
 }
 
 async fn send_player_moved(client: &mut Connection<DuplexStream>, x: f64, y: f64, z: f64) {
@@ -617,6 +651,215 @@ async fn native_locator_survives_join_restart_and_cancelled_shutdown() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The native mode is a live join input and is published into the same
+/// cancellation-safe snapshot as the locator. A changed mode therefore
+/// survives a singleplayer shutdown even though no clean disconnect occurs.
+#[tokio::test]
+async fn native_game_mode_survives_join_and_cancelled_shutdown() {
+    let dir = tempdir("native-game-mode");
+    let native_dir = dir.join("native");
+    let username = format!("NMode{:08x}", Uuid::new_v4().as_u128() as u32);
+    let uuid = test_uuid_for(&username);
+    let uuid_bytes = *uuid.as_bytes();
+    let seeded = NativePlayerData {
+        locator: NativePlayerRecord {
+            uuid: uuid_bytes,
+            dimension: BuiltinDimension::Overworld,
+            x_fixed: 32_000,
+            y_fixed: 71_000,
+            z_fixed: 32_000,
+            yaw_millidegrees: 90_000,
+            pitch_millidegrees: -1_000,
+        },
+        game_mode: Some(GameMode::Adventure),
+    };
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir.clone(),
+    })
+    .expect("open native game-mode store");
+    storage
+        .write_dirty_player_data(seeded)
+        .expect("seed typed native game mode");
+
+    let (server, client_end, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+        FakeProtocol,
+        &dir,
+        FlatWorld,
+        MIN_Y,
+        HEIGHT,
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+        Duration::from_secs(3600),
+        storage,
+    )
+    .expect("open native persistent world");
+    server.world_state().set_default_game_mode(GameMode::Spectator);
+    let mut client = Connection::new(client_end);
+    let ((chunk_x, chunk_z), mode) = drive_login_and_join_with_mode(&mut client, &username).await;
+    assert_eq!((chunk_x, chunk_z), (2, 2), "native locator remains the join-position source");
+    assert_eq!(mode, GameMode::Adventure, "native mode fills an absent Anvil mode");
+    send_game_mode(&mut client, 1 /* Creative */).await;
+    ping_pong(&mut client, 714).await;
+    std::mem::forget(client);
+    server.shutdown().await;
+
+    let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir,
+    })
+    .expect("reopen native game-mode store");
+    assert_eq!(
+        reopened
+            .load_player_data(uuid_bytes)
+            .expect("read native game mode")
+            .map(|data| data.game_mode),
+        Some(Some(GameMode::Creative)),
+        "the cancelled session must publish its latest native game mode"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A record written before `PlayerRecord.game_mode` existed serializes its
+/// default zero without tag 8. Decoding that exact value must keep the host's
+/// world default rather than inventing a native mode.
+#[tokio::test]
+async fn native_locator_without_game_mode_keeps_the_world_default() {
+    let dir = tempdir("native-game-mode-absent");
+    let native_dir = dir.join("native");
+    let username = format!("NAbsent{:08x}", Uuid::new_v4().as_u128() as u32);
+    let uuid_bytes = *test_uuid_for(&username).as_bytes();
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir,
+    })
+    .expect("open native backward-compatible store");
+    let key = RecordKey::general(
+        i32::from_le_bytes(uuid_bytes[..4].try_into().expect("uuid prefix")),
+        i32::from_le_bytes(uuid_bytes[4..8].try_into().expect("uuid prefix")),
+        u32::from_le_bytes(uuid_bytes[8..12].try_into().expect("uuid prefix")),
+    );
+    storage
+        .write_dirty([RecordWrite::new(
+            key,
+            StorageRecord {
+                format_version: 1,
+                record: Some(storage_record::Record::General(GeneralRecord {
+                    extensions: Vec::new(),
+                    record: Some(general_record::Record::Player(PlayerRecord {
+                        player_uuid: uuid_bytes.to_vec(),
+                        dimension: BuiltinDimension::Overworld as i32,
+                        x_fixed: 0,
+                        y_fixed: 61_000,
+                        z_fixed: 0,
+                        yaw_millidegrees: 0,
+                        pitch_millidegrees: 0,
+                        game_mode: 0,
+                    })),
+                })),
+            },
+        )])
+        .expect("write pre-game-mode player record");
+    assert_eq!(
+        storage
+            .load_player_data(uuid_bytes)
+            .expect("decode pre-game-mode player record")
+            .map(|data| data.game_mode),
+        Some(None),
+        "the default zero from a record without tag 8 must stay absent"
+    );
+
+    let (server, client_end, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+        FakeProtocol,
+        &dir,
+        FlatWorld,
+        MIN_Y,
+        HEIGHT,
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+        Duration::from_secs(3600),
+        storage,
+    )
+    .expect("open backward-compatible native world");
+    server.world_state().set_default_game_mode(GameMode::Creative);
+    let mut client = Connection::new(client_end);
+    let (_, mode) = drive_login_and_join_with_mode(&mut client, &username).await;
+    assert_eq!(
+        mode,
+        GameMode::Creative,
+        "an omitted native mode must not override the world"
+    );
+    std::mem::forget(client);
+    server.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Complete Anvil state is authoritative when it supplies a game mode, even
+/// when a native sidecar has a different independently consumable value.
+#[tokio::test]
+async fn anvil_game_mode_overrides_native_game_mode_on_join() {
+    let dir = tempdir("native-game-mode-anvil");
+    let native_dir = dir.join("native");
+    let username = format!("NAnvil{:08x}", Uuid::new_v4().as_u128() as u32);
+    let uuid = test_uuid_for(&username);
+    let uuid_bytes = *uuid.as_bytes();
+    PlayerDataStore::new(&dir)
+        .expect("open Anvil player store")
+        .write(
+            uuid,
+            &PlayerData {
+                game_mode: Some(GameMode::Spectator),
+                ..PlayerData::default()
+            },
+        )
+        .expect("seed authoritative Anvil mode");
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir,
+    })
+    .expect("open native mode sidecar");
+    storage
+        .write_dirty_player_data(NativePlayerData {
+            locator: NativePlayerRecord {
+                uuid: uuid_bytes,
+                dimension: BuiltinDimension::Overworld,
+                x_fixed: 0,
+                y_fixed: 61_000,
+                z_fixed: 0,
+                yaw_millidegrees: 0,
+                pitch_millidegrees: 0,
+            },
+            game_mode: Some(GameMode::Adventure),
+        })
+        .expect("seed native mode sidecar");
+
+    let (server, client_end, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+        FakeProtocol,
+        &dir,
+        FlatWorld,
+        MIN_Y,
+        HEIGHT,
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+        Duration::from_secs(3600),
+        storage,
+    )
+    .expect("open native world with authoritative Anvil mode");
+    server.world_state().set_default_game_mode(GameMode::Creative);
+    let mut client = Connection::new(client_end);
+    let (_, mode) = drive_login_and_join_with_mode(&mut client, &username).await;
+    assert_eq!(
+        mode,
+        GameMode::Spectator,
+        "Anvil mode must win over native and world defaults"
+    );
+    std::mem::forget(client);
+    server.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The missing-record control proves the runtime consumer is the producer of
 /// the first locator: an empty native segment starts with `None`, then a
 /// cancelled session writes the normal spawn fallback and can reopen it.
@@ -779,6 +1022,7 @@ async fn corrupt_native_locator_is_not_overwritten_on_cancelled_shutdown() {
                 z_fixed: -4_000,
                 yaw_millidegrees: 4_000,
                 pitch_millidegrees: -2_000,
+                game_mode: 0,
             })),
         })),
     };

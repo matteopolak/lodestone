@@ -1912,16 +1912,17 @@ fn player_store<S: ChunkSource + ?Sized>(source: &S) -> Option<crate::player_dat
 /// The native half of one live connection's bounded player persistence.
 ///
 /// The complete Anvil [`PlayerData`](crate::player_data::PlayerData) remains
-/// the source of truth for inventory, health, game mode and opaque fields.
-/// This session only adds the typed locator record, and marks itself blocked
-/// after a corrupt read so a later disconnect cannot overwrite evidence needed
-/// for recovery.
+/// the source of truth whenever it has a value for inventory, health, game
+/// mode or opaque fields. This session adds a typed locator and can fill the
+/// independently consumable native game-mode gap only when Anvil has none. It
+/// marks itself blocked after a corrupt read so a later disconnect cannot
+/// overwrite evidence needed for recovery.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 struct NativePlayerSession {
     storage: Arc<crate::world_storage::WorldStorage>,
     uuid: [u8; 16],
-    loaded: Option<crate::world_storage::NativePlayerRecord>,
+    loaded: Option<crate::world_storage::NativePlayerData>,
     save_blocked: bool,
 }
 
@@ -1930,10 +1931,11 @@ impl NativePlayerSession {
     fn load<S: ChunkSource + ?Sized>(source: &S, uuid: uuid::Uuid) -> Option<Self> {
         let storage = source.world_registries()?.native_storage?;
         let uuid = *uuid.as_bytes();
-        match storage.load_player(uuid) {
+        match storage.load_player_data(uuid) {
             Ok(loaded) => {
                 let save_blocked = loaded.is_some_and(|record| {
-                    record.dimension != lodestone_storage_schema::BuiltinDimension::Overworld
+                    record.locator.dimension
+                        != lodestone_storage_schema::BuiltinDimension::Overworld
                 });
                 if save_blocked {
                     tracing::warn!(
@@ -1962,7 +1964,7 @@ impl NativePlayerSession {
     }
 
     fn join_position(&self, fallback: Vec3) -> Vec3 {
-        let Some(record) = self.loaded else {
+        let Some(record) = self.loaded.map(|data| data.locator) else {
             return fallback;
         };
         if record.dimension != lodestone_storage_schema::BuiltinDimension::Overworld {
@@ -1977,10 +1979,15 @@ impl NativePlayerSession {
 
     fn initial_rotation(&self) -> Option<Rotation> {
         self.loaded
+            .map(|data| data.locator)
             .filter(|record| {
                 record.dimension == lodestone_storage_schema::BuiltinDimension::Overworld
             })
             .map(native_rotation)
+    }
+
+    fn game_mode(&self) -> Option<GameMode> {
+        self.loaded.and_then(|data| data.game_mode)
     }
 
     fn snapshot(
@@ -1989,7 +1996,8 @@ impl NativePlayerSession {
         player_rot: Option<Rotation>,
         fallback: Vec3,
         dimension: crate::dimension::Dimension,
-    ) -> Option<crate::world_storage::NativePlayerRecord> {
+        game_mode: GameMode,
+    ) -> Option<crate::world_storage::NativePlayerData> {
         if self.save_blocked {
             return None;
         }
@@ -1997,6 +2005,7 @@ impl NativePlayerSession {
             .map(|(x, y, z)| Vec3::new(x, y, z))
             .or_else(|| {
                 self.loaded
+                    .map(|data| data.locator)
                     .filter(|record| {
                         record.dimension == lodestone_storage_schema::BuiltinDimension::Overworld
                     })
@@ -2006,20 +2015,24 @@ impl NativePlayerSession {
         let rotation = player_rot
             .or_else(|| {
                 self.loaded
+                    .map(|data| data.locator)
                     .filter(|record| {
                         record.dimension == lodestone_storage_schema::BuiltinDimension::Overworld
                     })
                     .map(native_rotation)
             })
             .unwrap_or_default();
-        Some(crate::world_storage::NativePlayerRecord {
-            uuid: self.uuid,
-            dimension: native_dimension(dimension),
-            x_fixed: native_fixed_coordinate(position.x)?,
-            y_fixed: native_fixed_coordinate(position.y)?,
-            z_fixed: native_fixed_coordinate(position.z)?,
-            yaw_millidegrees: native_fixed_rotation(rotation.yaw)?,
-            pitch_millidegrees: native_fixed_rotation(rotation.pitch)?,
+        Some(crate::world_storage::NativePlayerData {
+            locator: crate::world_storage::NativePlayerRecord {
+                uuid: self.uuid,
+                dimension: native_dimension(dimension),
+                x_fixed: native_fixed_coordinate(position.x)?,
+                y_fixed: native_fixed_coordinate(position.y)?,
+                z_fixed: native_fixed_coordinate(position.z)?,
+                yaw_millidegrees: native_fixed_rotation(rotation.yaw)?,
+                pitch_millidegrees: native_fixed_rotation(rotation.pitch)?,
+            },
+            game_mode: Some(game_mode),
         })
     }
 }
@@ -2082,19 +2095,22 @@ fn persist_native_player(
     player_rot: Option<Rotation>,
     fallback: Vec3,
     dimension: crate::dimension::Dimension,
+    game_mode: GameMode,
 ) {
     let Some(session) = session else {
         return;
     };
-    let Some(record) = session.snapshot(player_pos, player_rot, fallback, dimension) else {
+    let Some(record) =
+        session.snapshot(player_pos, player_rot, fallback, dimension, game_mode)
+    else {
         tracing::error!(
             "native player locator for {:?} contains a non-finite or out-of-range live value; it was not written",
             session.uuid
         );
         return;
     };
-    if let Err(error) = session.storage.write_dirty_player(record) {
-        tracing::warn!("could not save native player locator for {:?}: {error}", session.uuid);
+    if let Err(error) = session.storage.write_dirty_player_data(record) {
+        tracing::warn!("could not save native player data for {:?}: {error}", session.uuid);
     }
 }
 
@@ -2106,11 +2122,14 @@ fn publish_native_player(
     player_rot: Option<Rotation>,
     fallback: Vec3,
     dimension: crate::dimension::Dimension,
+    game_mode: GameMode,
 ) {
     let Some(session) = session else {
         return;
     };
-    let Some(record) = session.snapshot(player_pos, player_rot, fallback, dimension) else {
+    let Some(record) =
+        session.snapshot(player_pos, player_rot, fallback, dimension, game_mode)
+    else {
         return;
     };
     live_save.publish_native(Some(session.storage.clone()), record);
@@ -3693,6 +3712,11 @@ where
                 let game_mode = saved_player
                     .as_ref()
                     .and_then(|data| data.game_mode)
+                    .or_else(|| {
+                        native_player
+                            .as_ref()
+                            .and_then(NativePlayerSession::game_mode)
+                    })
                     .unwrap_or(game_mode);
 
                 state = State::Play;
@@ -13307,6 +13331,7 @@ where
                         player_rot,
                         world_spawn,
                         source.dimension(),
+                        game_mode,
                     );
                     return Ok(ServeSummary { username, chunks_sent, inventory });
                 };
@@ -14979,6 +15004,7 @@ where
             player_rot,
             world_spawn,
             source.dimension(),
+            game_mode,
         );
     }
 }

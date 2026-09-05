@@ -4445,15 +4445,15 @@ impl IntegratedServer {
                 tracing::warn!("player data flush on shutdown failed for {uuid}: {err}");
             }
         }
-        // The bounded native locator has its own cancellation-safe slot. Read
-        // it only after the connection task joined above, then append the typed
-        // record without touching the complete Anvil player file.
+        // The bounded native player data has its own cancellation-safe slot.
+        // Read it only after the connection task joined above, then append the
+        // typed record without touching the complete Anvil player file.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some((storage, record)) = self.live_save.take_native() {
-            if let Err(err) = storage.write_dirty_player(record) {
+            if let Err(err) = storage.write_dirty_player_data(record) {
                 tracing::warn!(
-                    "native player locator flush on shutdown failed for {:?}: {err}",
-                    record.uuid
+                    "native player data flush on shutdown failed for {:?}: {err}",
+                    record.locator.uuid
                 );
             }
         }
