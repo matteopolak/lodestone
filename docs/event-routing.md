@@ -58,7 +58,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**21 of 134** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**20 of 134** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -77,9 +77,10 @@ One other `Route::NOWHERE` entry is not a real island at all: a pushed resource-
 acknowledgement is answered automatically, before the shell's event loop ever runs, from inside
 `lodestone_client::driver::Driver::emit` itself — routing table silence is not proof of no
 consumer when a reply is synthesized upstream of routing. The clientbound ping is explicitly
-claimed by `Route::client` for the same reason. A cookie request is also explicitly claimed by
-`Route::client`: the driver reads its in-memory cookie store and emits the matching response
-action before surfacing the event. A transfer request is likewise explicitly claimed by
+claimed by `Route::client` for the same reason. A cookie request and store are also explicitly
+claimed by `Route::client`: the driver reads and writes its in-memory cookie store, emitting the
+matching response action for a request before surfacing either event. A transfer request is
+likewise explicitly claimed by
 `Route::client`: the driver records its existing `SessionOutcome::Transferred` result before
 surfacing the event, while the shell records the target for the resulting disconnect message.
 
