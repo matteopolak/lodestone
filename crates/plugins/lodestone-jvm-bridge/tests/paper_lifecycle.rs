@@ -53,9 +53,21 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native long serverTickCount(); \
          public static native int setBlockStateId(int x, int y, int z, int stateId); \
          public static native String currentPluginName(); \
-         public static native String currentPluginVersion(); }",
+         public static native String currentPluginVersion(); \
+         public static native IsolatedPluginDescriptor currentPluginDescriptor(); }",
     )
     .expect("shim source");
+    let descriptor_source = shim_package.join("IsolatedPluginDescriptor.java");
+    fs::write(
+        &descriptor_source,
+        "package lodestone.bridge; public final class IsolatedPluginDescriptor { \
+         private final String name; private final String version; private final String mainClass; \
+         public IsolatedPluginDescriptor(String name, String version, String mainClass) { \
+         this.name = name; this.version = version; this.mainClass = mainClass; } \
+         public String name() { return name; } public String version() { return version; } \
+         public String mainClass() { return mainClass; } }",
+    )
+    .expect("descriptor source");
     let adapter_package = adapter_sources.join("fixture/adapter");
     fs::create_dir_all(&adapter_package).expect("adapter package directory");
     let adapter_source = adapter_package.join("LifecycleAdapter.java");
@@ -68,7 +80,8 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     )
     .expect("adapter source");
     compile(&jdk, &paper_classes, &bootstrap_source);
-    compile(&jdk, &shim_classes, &shim_source);
+    compile(&jdk, &shim_classes, &descriptor_source);
+    compile_with_classpath(&jdk, &shim_classes, &shim_source, &shim_classes);
     compile(&jdk, &adapter_classes, &adapter_source);
     let manifest = fixture.path().join("MANIFEST.MF");
     fs::write(&manifest, "Manifest-Version: 1.0\nImplementation-Title: Paper\n")
@@ -180,7 +193,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     assert_eq!(status.plugins()[3].phase(), PaperPluginLifecyclePhase::Disabled);
     assert_eq!(
         fs::read_to_string(&callback_log).expect("callback log"),
-        "Alpha-construct:Alpha:one\nBravo-construct:Bravo:one\nCharlie-construct:Charlie:one\nDelta-construct:Delta:one\nAlpha-enable:Alpha:one\nBravo-enable:Bravo:one\nCharlie-enable:Charlie:one\nDelta-enable:Delta:one\nDelta-disable:Delta:one\nCharlie-disable:Charlie:one\nAlpha-disable:Alpha:one\n",
+        "Alpha-construct:Alpha:one:fixture.alpha.Main\nBravo-construct:Bravo:one:fixture.bravo.Main\nCharlie-construct:Charlie:one:fixture.charlie.Main\nDelta-construct:Delta:one:fixture.delta.Main\nAlpha-enable:Alpha:one:fixture.alpha.Main\nBravo-enable:Bravo:one:fixture.bravo.Main\nCharlie-enable:Charlie:one:fixture.charlie.Main\nDelta-enable:Delta:one:fixture.delta.Main\nDelta-disable:Delta:one:fixture.delta.Main\nCharlie-disable:Charlie:one:fixture.charlie.Main\nAlpha-disable:Alpha:one:fixture.alpha.Main\n",
     );
 }
 
@@ -198,7 +211,7 @@ fn callback_plugin_source(
          java.nio.file.Path.of(System.getProperty(\"fixture.lifecycle.log\")), event + \"\\n\", \
          java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND); \
          }} catch (java.io.IOException error) {{ throw new RuntimeException(error); }} }} \
-         private static String identity() {{ return lodestone.bridge.IsolatedPaperShim.currentPluginName() + \":\" + lodestone.bridge.IsolatedPaperShim.currentPluginVersion(); }} \
+         private static String identity() {{ lodestone.bridge.IsolatedPluginDescriptor descriptor = lodestone.bridge.IsolatedPaperShim.currentPluginDescriptor(); return descriptor.name() + \":\" + descriptor.version() + \":\" + descriptor.mainClass(); }} \
          public Main() {{ log(\"{name}-construct:\" + identity()); }} \
          public void onEnable() {{ log(\"{name}-enable:\" + identity()); {enable_failure} }} \
          public void onDisable() {{ log(\"{name}-disable:\" + identity()); {disable_failure} }} }}"

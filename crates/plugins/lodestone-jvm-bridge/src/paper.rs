@@ -928,6 +928,7 @@ impl PaperPluginConstructionPlan {
             match crate::adapter::with_lifecycle_identity(
                 plugin.descriptor.name(),
                 plugin.descriptor.version(),
+                plugin.descriptor.main_class(),
                 || plugin.construct(env),
             ) {
                 Ok(instance) => {
@@ -1001,6 +1002,7 @@ impl PaperPluginEntryConstruction {
             match crate::adapter::with_lifecycle_identity(
                 plugin.descriptor.name(),
                 plugin.descriptor.version(),
+                plugin.descriptor.main_class(),
                 || plugin.callback(env, "onEnable"),
             ) {
                 Ok(()) => {
@@ -1066,6 +1068,7 @@ impl PaperPluginEntryEnablement {
             match crate::adapter::with_lifecycle_identity(
                 plugin.descriptor.name(),
                 plugin.descriptor.version(),
+                plugin.descriptor.main_class(),
                 || plugin.callback(env, "onDisable"),
             ) {
                 Ok(()) => self.lifecycle.status.disabled(index),

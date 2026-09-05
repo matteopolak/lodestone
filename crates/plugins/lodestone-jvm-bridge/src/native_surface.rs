@@ -17,6 +17,11 @@ use crate::runtime::{JvmError, JvmRuntime};
 /// Binary name an operator-built isolated shim must use for this native seam.
 pub const ISOLATED_SHIM_CLASS: &str = "lodestone.bridge.IsolatedPaperShim";
 
+/// Binary name of the value object returned by the descriptor query.
+///
+/// This is an isolated bridge type, not a Bukkit or Paper metadata class.
+pub const ISOLATED_PLUGIN_DESCRIPTOR_CLASS: &str = "lodestone.bridge.IsolatedPluginDescriptor";
+
 /// A native member in the generated isolated server-state surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeMethodSpec {
@@ -26,7 +31,16 @@ pub struct NativeMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 5] = [
+/// One required constructor or accessor on the isolated descriptor value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IsolatedDescriptorMemberSpec {
+    /// JVM member name; `<init>` names the sole construction contract.
+    pub name: &'static str,
+    /// Exact JNI descriptor, including argument and return types.
+    pub descriptor: &'static str,
+}
+
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 6] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -47,6 +61,29 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 5] = [
         name: "currentPluginVersion",
         descriptor: "()Ljava/lang/String;",
     },
+    NativeMethodSpec {
+        name: "currentPluginDescriptor",
+        descriptor: "()Llodestone/bridge/IsolatedPluginDescriptor;",
+    },
+];
+
+const ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS: [IsolatedDescriptorMemberSpec; 4] = [
+    IsolatedDescriptorMemberSpec {
+        name: "<init>",
+        descriptor: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+    },
+    IsolatedDescriptorMemberSpec {
+        name: "name",
+        descriptor: "()Ljava/lang/String;",
+    },
+    IsolatedDescriptorMemberSpec {
+        name: "version",
+        descriptor: "()Ljava/lang/String;",
+    },
+    IsolatedDescriptorMemberSpec {
+        name: "mainClass",
+        descriptor: "()Ljava/lang/String;",
+    },
 ];
 
 /// One non-interchangeable phase of native registration.
@@ -58,17 +95,19 @@ pub enum NativeRegistrationStep {
     Register(NativeMethodSpec),
 }
 
-const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 10] = [
+const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 12] = [
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[2]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[3]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[4]),
+    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[5]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[2]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[3]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[4]),
+    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[5]),
 ];
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -83,6 +122,11 @@ pub const fn isolated_shim_methods() -> &'static [NativeMethodSpec] {
 /// Generated validation and registration sequence for the isolated shim.
 pub const fn isolated_shim_registration_steps() -> &'static [NativeRegistrationStep] {
     &ISOLATED_SHIM_REGISTRATION
+}
+
+/// The source-of-truth value contract for an isolated plugin descriptor.
+pub const fn isolated_plugin_descriptor_members() -> &'static [IsolatedDescriptorMemberSpec] {
+    &ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS
 }
 
 /// A bounded failure while validating or registering the isolated native shim.
@@ -104,6 +148,22 @@ pub enum NativeSurfaceError {
         class: &'static str,
         detail: String,
     },
+    /// The operator shim did not provide the isolated descriptor value class.
+    DescriptorClassLoad {
+        /// The required descriptor binary name.
+        class: &'static str,
+        /// JVM loader error detail.
+        detail: String,
+    },
+    /// The descriptor value class does not provide the exact narrow contract.
+    DescriptorMember {
+        /// The descriptor binary name.
+        class: &'static str,
+        /// The missing constructor or accessor.
+        member: IsolatedDescriptorMemberSpec,
+        /// JVM lookup error detail.
+        detail: String,
+    },
 }
 
 impl fmt::Display for NativeSurfaceError {
@@ -120,6 +180,14 @@ impl fmt::Display for NativeSurfaceError {
             Self::ClassLoad { class, detail } => {
                 write!(formatter, "could not load isolated shim {class}: {detail}")
             }
+            Self::DescriptorClassLoad { class, detail } => {
+                write!(formatter, "could not load isolated plugin descriptor {class}: {detail}")
+            }
+            Self::DescriptorMember { class, member, detail } => write!(
+                formatter,
+                "isolated plugin descriptor {class} must declare {}{}: {detail}",
+                member.name, member.descriptor,
+            ),
         }
     }
 }
@@ -185,6 +253,12 @@ fn method_id(
             jni_str!("currentPluginVersion"),
             jni_sig!("()Ljava/lang/String;"),
         ),
+        ("currentPluginDescriptor", "()Llodestone/bridge/IsolatedPluginDescriptor;") => env
+            .get_static_method_id(
+                class,
+                jni_str!("currentPluginDescriptor"),
+                jni_sig!("()Llodestone/bridge/IsolatedPluginDescriptor;"),
+            ),
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -216,6 +290,14 @@ fn register_method(
             method.name,
             method.descriptor,
         ),
+        ("currentPluginDescriptor", "()Llodestone/bridge/IsolatedPluginDescriptor;") => {
+            adapter::register_lifecycle_plugin_descriptor_query(
+                env,
+                class,
+                method.name,
+                method.descriptor,
+            )
+        }
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -234,7 +316,60 @@ pub(crate) fn install_in_loader<'local>(
     let class = runtime
         .load_class_from_loader(env, loader, ISOLATED_SHIM_CLASS)
         .map_err(class_load_error)?;
+    validate_descriptor_value(runtime, env, loader)?;
     validate_and_register(env, &class)
+}
+
+fn validate_descriptor_value<'local>(
+    runtime: &JvmRuntime,
+    env: &mut Env<'local>,
+    loader: &JObject<'local>,
+) -> Result<(), NativeSurfaceError> {
+    let descriptor = runtime
+        .load_class_from_loader(env, loader, ISOLATED_PLUGIN_DESCRIPTOR_CLASS)
+        .map_err(|error| NativeSurfaceError::DescriptorClassLoad {
+            class: ISOLATED_PLUGIN_DESCRIPTOR_CLASS,
+            detail: error.to_string(),
+        })?;
+    for member in isolated_plugin_descriptor_members() {
+        descriptor_member_id(env, &descriptor, *member).map_err(|error| {
+            NativeSurfaceError::DescriptorMember {
+                class: ISOLATED_PLUGIN_DESCRIPTOR_CLASS,
+                member: *member,
+                detail: error.to_string(),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn descriptor_member_id(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    member: IsolatedDescriptorMemberSpec,
+) -> jni::errors::Result<jni::objects::JMethodID> {
+    match (member.name, member.descriptor) {
+        ("<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V") => env
+            .get_method_id(
+                class,
+                jni_str!("<init>"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+            ),
+        ("name", "()Ljava/lang/String;") => {
+            env.get_method_id(class, jni_str!("name"), jni_sig!("()Ljava/lang/String;"))
+        }
+        ("version", "()Ljava/lang/String;") => env.get_method_id(
+            class,
+            jni_str!("version"),
+            jni_sig!("()Ljava/lang/String;"),
+        ),
+        ("mainClass", "()Ljava/lang/String;") => env.get_method_id(
+            class,
+            jni_str!("mainClass"),
+            jni_sig!("()Ljava/lang/String;"),
+        ),
+        _ => unreachable!("the isolated descriptor has only generated member specs"),
+    }
 }
 
 fn class_load_error(error: JvmError) -> NativeSurfaceError {
@@ -272,6 +407,10 @@ mod tests {
                     name: "currentPluginVersion",
                     descriptor: "()Ljava/lang/String;",
                 },
+                NativeMethodSpec {
+                    name: "currentPluginDescriptor",
+                    descriptor: "()Llodestone/bridge/IsolatedPluginDescriptor;",
+                },
             ],
         );
         let block_state = isolated_shim_methods()[0];
@@ -279,6 +418,7 @@ mod tests {
         let block_write = isolated_shim_methods()[2];
         let plugin_name = isolated_shim_methods()[3];
         let plugin_version = isolated_shim_methods()[4];
+        let plugin_descriptor = isolated_shim_methods()[5];
         assert_eq!(
             isolated_shim_registration_steps(),
             &[
@@ -287,13 +427,37 @@ mod tests {
                 NativeRegistrationStep::Validate(block_write),
                 NativeRegistrationStep::Validate(plugin_name),
                 NativeRegistrationStep::Validate(plugin_version),
+                NativeRegistrationStep::Validate(plugin_descriptor),
                 NativeRegistrationStep::Register(block_state),
                 NativeRegistrationStep::Register(server_tick),
                 NativeRegistrationStep::Register(block_write),
                 NativeRegistrationStep::Register(plugin_name),
                 NativeRegistrationStep::Register(plugin_version),
+                NativeRegistrationStep::Register(plugin_descriptor),
             ],
             "a registration must never precede declaration validation",
+        );
+        assert_eq!(
+            isolated_plugin_descriptor_members(),
+            &[
+                IsolatedDescriptorMemberSpec {
+                    name: "<init>",
+                    descriptor: "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                },
+                IsolatedDescriptorMemberSpec {
+                    name: "name",
+                    descriptor: "()Ljava/lang/String;",
+                },
+                IsolatedDescriptorMemberSpec {
+                    name: "version",
+                    descriptor: "()Ljava/lang/String;",
+                },
+                IsolatedDescriptorMemberSpec {
+                    name: "mainClass",
+                    descriptor: "()Ljava/lang/String;",
+                },
+            ],
+            "the descriptor must remain an inert three-field value, not a plugin API",
         );
     }
 
@@ -303,6 +467,22 @@ mod tests {
         // registration list protects the lifecycle-load guarantee until there
         // is a concrete, separately designed live-state strategy.
         assert!(isolated_shim_methods().iter().all(|method| method.name != "ABI_VERSION"));
+    }
+
+    #[test]
+    fn descriptor_contract_failure_names_the_missing_member() {
+        let error = NativeSurfaceError::DescriptorMember {
+            class: ISOLATED_PLUGIN_DESCRIPTOR_CLASS,
+            member: IsolatedDescriptorMemberSpec {
+                name: "mainClass",
+                descriptor: "()Ljava/lang/String;",
+            },
+            detail: "NoSuchMethodError".to_owned(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "isolated plugin descriptor lodestone.bridge.IsolatedPluginDescriptor must declare mainClass()Ljava/lang/String;: NoSuchMethodError",
+        );
     }
 
     #[test]
@@ -324,13 +504,26 @@ mod tests {
              public static native long serverTickCount(); \
              public static native int setBlockStateId(int x, int y, int z, int stateId); \
              public static native String currentPluginName(); \
-             public static native String currentPluginVersion(); }",
+             public static native String currentPluginVersion(); \
+             public static native IsolatedPluginDescriptor currentPluginDescriptor(); }",
         )
         .expect("shim source");
+        let descriptor_source = source_root.join("IsolatedPluginDescriptor.java");
+        fs::write(
+            &descriptor_source,
+            "package lodestone.bridge; public final class IsolatedPluginDescriptor { \
+             private final String name; private final String version; private final String mainClass; \
+             public IsolatedPluginDescriptor(String name, String version, String mainClass) { \
+             this.name = name; this.version = version; this.mainClass = mainClass; } \
+             public String name() { return name; } public String version() { return version; } \
+             public String mainClass() { return mainClass; } }",
+        )
+        .expect("descriptor source");
         let output = Command::new(std::path::PathBuf::from(jdk).join("bin/javac"))
             .arg("-d")
             .arg(&fixture)
             .arg(&source)
+            .arg(&descriptor_source)
             .output()
             .expect("javac");
         assert!(
@@ -378,9 +571,21 @@ mod tests {
              public static native long serverTickCount(); \
              public static native int setBlockStateId(int x, int y, int z, int stateId); \
              public static native String currentPluginName(); \
-             public static native String currentPluginVersion(); }",
+             public static native String currentPluginVersion(); \
+             public static native IsolatedPluginDescriptor currentPluginDescriptor(); }",
         )
         .expect("shim source");
+        let descriptor_source = shim_source_root.join("IsolatedPluginDescriptor.java");
+        fs::write(
+            &descriptor_source,
+            "package lodestone.bridge; public final class IsolatedPluginDescriptor { \
+             private final String name; private final String version; private final String mainClass; \
+             public IsolatedPluginDescriptor(String name, String version, String mainClass) { \
+             this.name = name; this.version = version; this.mainClass = mainClass; } \
+             public String name() { return name; } public String version() { return version; } \
+             public String mainClass() { return mainClass; } }",
+        )
+        .expect("descriptor source");
         let adapter_source = adapter_source_root.join("SurfaceAdapter.java");
         fs::write(
             &adapter_source,
@@ -390,11 +595,14 @@ mod tests {
              public static void onBlockStateChanged(int x, int y, int z, int stateId) {} }",
         )
         .expect("adapter source");
-        for (output, source) in [(&shim_root, &shim_source), (&adapter_root, &adapter_source)] {
+        for (output, sources) in [
+            (&shim_root, vec![&shim_source, &descriptor_source]),
+            (&adapter_root, vec![&adapter_source]),
+        ] {
             let compile = Command::new(std::path::PathBuf::from(&jdk).join("bin/javac"))
                 .arg("-d")
                 .arg(output)
-                .arg(source)
+                .args(sources)
                 .output()
                 .expect("javac");
             assert!(
