@@ -393,6 +393,27 @@ struct PreparedChunk {
     scheduled: scheduled_tick::ScheduledTickHandle,
 }
 
+/// Decoded and converted terrain records from one region, before a storage
+/// transaction has started.
+///
+/// This internal preparation value lets the world-directory coordinator prove
+/// every selected region is convertible before it submits the one aggregate
+/// native batch. It deliberately contains no storage reference and cannot
+/// mutate a backend by itself.
+pub(crate) struct PreparedRegion {
+    pub(crate) report: PreflightReport,
+    pub(crate) chunks_seen: usize,
+    chunks: Vec<PreparedChunk>,
+}
+
+impl PreparedRegion {
+    pub(crate) fn dirty_records(
+        &self,
+    ) -> impl Iterator<Item = world_storage::NativeDirtyChunkRecord<'_>> {
+        self.chunks.iter().map(PreparedChunk::dirty)
+    }
+}
+
 impl PreparedChunk {
     fn dirty(&self) -> world_storage::NativeDirtyChunkRecord<'_> {
         world_storage::NativeDirtyChunkRecord::new(
@@ -438,6 +459,44 @@ fn read_region_chunks(
         }
     }
     Ok(chunks)
+}
+
+/// Decodes and converts every present member of one region without writing.
+///
+/// The returned records are ready for `WorldStorage::write_dirty_chunks`, but
+/// no storage transaction is opened here. Keep this narrower than the public
+/// region importer: it is an implementation seam for a coordinator that owns
+/// a larger all-or-nothing batch.
+pub(crate) fn prepare_region_file(
+    dimension: &str,
+    region_x: i32,
+    region_z: i32,
+    region_path: &Path,
+    min_y: i32,
+    height: i32,
+) -> Result<PreparedRegion, Error> {
+    if height <= 0 || min_y.rem_euclid(16) != 0 {
+        return Err(Error::InvalidChunkExtent { min_y, height });
+    }
+    let chunks = read_region_chunks(region_x, region_z, region_path)?;
+    let report = preflight_region_chunks(dimension, &chunks);
+    let chunks_seen = chunks.len();
+    let mut prepared = Vec::with_capacity(chunks_seen);
+    for chunk in &chunks {
+        prepared.push(prepare_chunk(
+            dimension,
+            chunk.column_x,
+            chunk.column_z,
+            &chunk.nbt,
+            min_y,
+            height,
+        )?);
+    }
+    Ok(PreparedRegion {
+        report,
+        chunks_seen,
+        chunks: prepared,
+    })
 }
 
 fn absolute_chunk_coordinate(
