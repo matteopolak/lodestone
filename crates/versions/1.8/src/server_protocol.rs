@@ -25,6 +25,7 @@ use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
 use crate::packets::settings::Settings;
+use crate::packets::window::ServerboundHeldItemSlot;
 
 const CTX: Ctx = Ctx { version: PROTOCOL };
 const COMPRESSION_THRESHOLD: i32 = 256;
@@ -304,10 +305,19 @@ impl ServerProtocol for V47ServerProtocol {
             // hand zero; any byte is a trailing-byte error, not a hand value.
             State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
                 if payload.is_empty() {
-                    ServerBound::Swing { hand: 0 }
+                    ServerBound::Swing { hand: lodestone_model::Hand::Main }
                 } else {
                     ServerBound::Ignored
                 }
+            }
+            State::Play if packet_id == play::serverbound::HELD_ITEM_SLOT => {
+                let Some(slot) = decode_full::<ServerboundHeldItemSlot>(payload)
+                    .and_then(|packet| u8::try_from(packet.slot).ok())
+                    .filter(|&slot| slot < 9)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::CarriedItemChanged { slot }
             }
             // This era's leave-bed action is ordinal two. The wire's player
             // id belongs to the connection, while the shared wake consumer

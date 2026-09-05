@@ -195,7 +195,7 @@ fn registry_selected_arm_animation_connects_protocol_47_to_the_shared_swing_broa
         assert!(payload.is_empty(), "protocol-47 arm animation has no fields");
         assert_eq!(
             protocol.decode(State::Play, packet_id, &[]),
-            ServerBound::Swing { hand: 0 },
+            ServerBound::Swing { hand: Hand::Main },
             "the literal empty body must reach the shared swing consumer"
         );
     }
@@ -235,6 +235,53 @@ fn registry_selected_arm_animation_connects_protocol_47_to_the_shared_swing_broa
         protocol.decode(State::Login, play::serverbound::ARM_ANIMATION, &[]),
         ServerBound::Ignored,
         "the Play packet must not be accepted before Play"
+    );
+}
+
+#[test]
+fn registry_selected_hotbar_selection_reaches_the_inventory_consumer() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(47)
+        .expect("protocol 47 must resolve to its hosted server protocol");
+
+    // The body is a signed big-endian i16. These literals pin both legal
+    // boundaries without asking either adapter direction for the bytes.
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::HELD_ITEM_SLOT, &[0x00, 0x00]),
+        ServerBound::CarriedItemChanged { slot: 0 },
+    );
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::HELD_ITEM_SLOT, &[0x00, 0x08]),
+        ServerBound::CarriedItemChanged { slot: 8 },
+    );
+    for body in [&[0xff, 0xff][..], &[0x00, 0x09], &[0x00], &[0x00, 0x08, 0x00]] {
+        assert_eq!(
+            protocol.decode(State::Play, play::serverbound::HELD_ITEM_SLOT, body),
+            ServerBound::Ignored,
+            "an invalid hotbar body {body:?} must not change inventory state",
+        );
+    }
+    assert_eq!(
+        protocol.decode(State::Login, play::serverbound::HELD_ITEM_SLOT, &[0x00, 0x08]),
+        ServerBound::Ignored,
+        "hotbar selection must not bypass the Play-state boundary",
+    );
+
+    let adapter = V47Adapter::new();
+    let Some((packet_id, payload)) = adapter
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::SetCarriedItem { slot: 3 },
+        )
+        .expect("the client adapter must encode hotbar selection")
+    else {
+        panic!("hotbar selection must produce a packet");
+    };
+    assert_eq!(packet_id, play::serverbound::HELD_ITEM_SLOT);
+    assert_eq!(payload, vec![0x00, 0x03]);
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &payload),
+        ServerBound::CarriedItemChanged { slot: 3 },
+        "the client action must reach the registry-selected hosted consumer",
     );
 }
 
