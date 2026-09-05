@@ -82,6 +82,11 @@ pub enum Capability {
     /// This is intentionally separate from [`Self::ActInteract`]: releasing a
     /// held use can commit an item effect, while an arm swing cannot.
     ActReleaseUseItem,
+    /// Push `ClientAction::Stab`.
+    ///
+    /// This remains distinct from [`Self::ActInteract`]: the selected item and
+    /// its attack lifecycle stay owned by the live client.
+    ActStab,
     /// Install or remove the local player's copied look intent.
     ///
     /// This is deliberately distinct from `act:interact`: changing a player's
@@ -196,6 +201,7 @@ impl Capability {
         Self::ActInteract,
         Self::ActSwapOffhand,
         Self::ActReleaseUseItem,
+        Self::ActStab,
         Self::ActLook,
         Self::ActMovement,
         Self::ActBreak,
@@ -229,6 +235,7 @@ impl Capability {
             Self::ActInteract => "act:interact",
             Self::ActSwapOffhand => "act:swap-offhand",
             Self::ActReleaseUseItem => "act:release-use-item",
+            Self::ActStab => "act:stab",
             Self::ActLook => "act:look",
             Self::ActMovement => "act:movement",
             Self::ActBreak => "act:break",
@@ -277,6 +284,7 @@ impl Capability {
             | Self::ActInteract
             | Self::ActSwapOffhand
             | Self::ActReleaseUseItem
+            | Self::ActStab
             | Self::ActLook
             | Self::ActMovement
             | Self::ActBreak
@@ -496,6 +504,10 @@ mod tests {
         assert!(
             !policy.contains(Capability::ActReleaseUseItem),
             "act:release-use-item must not be granted by default"
+        );
+        assert!(
+            !policy.contains(Capability::ActStab),
+            "act:stab must not be granted by default"
         );
         assert!(policy.contains(Capability::ObserveChat));
         assert!(policy.contains(Capability::ActChat));
