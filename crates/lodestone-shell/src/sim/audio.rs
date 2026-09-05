@@ -313,14 +313,14 @@ impl Sim {
                 crate::net::entity_light_at(handle, pos.x, pos.y, pos.z, policy.get())
             });
             match packed {
-                Some(p) => lodestone_sound::ambient::LightSample {
-                    sky: i32::from((p >> 4) & 0x0F),
-                    block: i32::from(p & 0x0F),
-                },
+                Some(p) => lodestone_sound::ambient::LightSample::from_packed_nibbles(p),
                 // No sample is "the column has not streamed in". Report full sky
                 // rather than darkness: guessing dark would bank moodiness while
                 // the world loads and fire cave ambience on the surface.
-                None => lodestone_sound::ambient::LightSample { sky: 15, block: 0 },
+                None => lodestone_sound::ambient::LightSample::new(
+                    lodestone_sound::ambient::LightLevel::MAX,
+                    lodestone_sound::ambient::LightLevel::ZERO,
+                ),
             }
         };
         // Rain is only audible where the sky reaches the ear. `landing` is
@@ -334,7 +334,7 @@ impl Sim {
             eye.y.floor() as i32,
             eye.z.floor() as i32,
         ));
-        let landing = (sky_at_ear.sky > 0).then_some([
+        let landing = (sky_at_ear.sky != lodestone_sound::ambient::LightLevel::ZERO).then_some([
             eye.x.floor() as i32,
             eye.y.floor() as i32,
             eye.z.floor() as i32,

@@ -137,6 +137,16 @@ which is a stronger signal than a distance check would add.
 
 ### Ambient sounds and client prediction
 
+The ambient light probe crosses into `lodestone-sound` as a `LightSample` of
+two validated `LightLevel` values. A level is exactly one packed-light nibble
+(`0..=15`): `LightSample::from_packed_nibbles` owns unpacking network/world
+data, while synthetic callers construct values through `LightLevel::new` or
+the `ZERO` and `MAX` constants. This is deliberately stricter than the mood
+arithmetic needs today. Both layers once used raw signed integers, so an
+unrelated value could silently change the sky divisor or cross the block-light
+break-even at one. Keep the range check at this boundary if another world-light
+source is added; do not reintroduce raw brightness values at the accumulator.
+
 Ambience comes from **two layers that override, not merge**: the dimension
 sets the cave "mood" default (`ambient.cave`), and a biome can fully replace
 loop/mood/additions — the Nether's dimension type sets nothing at all,

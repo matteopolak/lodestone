@@ -346,17 +346,17 @@ pub(crate) fn step_volume(sound_type_volume: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lodestone_sound::ambient::{AmbientAdditionsSettings, AmbientMoodSettings};
+    use lodestone_sound::ambient::{AmbientAdditionsSettings, AmbientMoodSettings, LightLevel};
 
     /// A probe reporting pitch darkness everywhere — the state cave ambience
     /// accumulates in.
     fn dark(_: IVec3) -> LightSample {
-        LightSample { sky: 0, block: 0 }
+        LightSample::new(LightLevel::ZERO, LightLevel::ZERO)
     }
 
     /// A probe reporting full sky light — the state that drains moodiness.
     fn daylight(_: IVec3) -> LightSample {
-        LightSample { sky: 15, block: 0 }
+        LightSample::new(LightLevel::MAX, LightLevel::ZERO)
     }
 
     fn cave_input(eye: DVec3, ambient: &AmbientSounds) -> AmbienceInput<'_> {
