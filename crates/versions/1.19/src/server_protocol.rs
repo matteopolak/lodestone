@@ -22,6 +22,7 @@ use crate::packets::game::{
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
+use crate::packets::window::ServerboundHeldItemSlot;
 
 const CTX: Ctx = Ctx {
     version: PROTOCOL_1_19_4,
@@ -330,6 +331,15 @@ impl ServerProtocol for V762ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 ServerBound::Swing { hand }
+            }
+            State::Play if packet_id == play::serverbound::HELD_ITEM_SLOT => {
+                let Some(slot) = decode_full::<ServerboundHeldItemSlot>(payload)
+                    .and_then(|packet| u8::try_from(packet.slot).ok())
+                    .filter(|&slot| slot < 9)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::CarriedItemChanged { slot }
             }
             State::Play if packet_id == play::serverbound::POSITION => {
                 let Some(ServerboundPosition {
