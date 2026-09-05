@@ -229,6 +229,9 @@ message PlayerRecord {
   sint32 z_fixed = 5;
   sint32 yaw_millidegrees = 6;
   sint32 pitch_millidegrees = 7;
+  // Unspecified preserves compatibility with locator-only records written
+  // before this independently consumable full-player field was introduced.
+  GameMode game_mode = 8;
 }
 
 message EntityRecord {

@@ -1,8 +1,8 @@
-//! Authorization-gated import of one Anvil player file into a native locator.
+//! Authorization-gated import of one Anvil player file into typed native player data.
 //!
 //! The native player schema is deliberately a locator, not a replacement for
 //! a complete player save. This module converts the identity, built-in
-//! dimension, feet position, and rotation from one selected Anvil player root;
+//! dimension, feet position, rotation, and game mode from one selected Anvil player root;
 //! it inventories every other player value before writing the native record.
 //! The Anvil file remains the authoritative complete player state.
 
@@ -16,7 +16,7 @@ use lodestone_storage_schema::BuiltinDimension;
 
 use crate::{
     player_data::PlayerData,
-    world_storage::{NativePlayerRecord, WorldStorage},
+    world_storage::{NativePlayerData, NativePlayerRecord, WorldStorage},
 };
 
 /// The fixed-point producer contract used by this importer.
@@ -128,8 +128,6 @@ pub enum UnsupportedPlayerData {
     FallDistance,
     /// Ground contact has no native locator field.
     GroundState,
-    /// Game mode has no native locator field.
-    GameMode,
     /// The selected inventory slot has no native locator field.
     SelectedSlot,
     /// Inventory contents have no native locator field.
@@ -273,7 +271,7 @@ impl PlayerBatchImportReport {
 /// the full unsupported NBT payload after the typed locator transaction.
 pub struct PlayerBatchImportPlan {
     report: PlayerBatchImportReport,
-    locators: Vec<NativePlayerRecord>,
+    players: Vec<NativePlayerData>,
 }
 
 impl fmt::Debug for PlayerBatchImportPlan {
@@ -493,7 +491,6 @@ pub fn preflight_player(player: &PlayerData) -> PlayerImportReport {
             UnsupportedPlayerData::VitalState,
             UnsupportedPlayerData::FallDistance,
             UnsupportedPlayerData::GroundState,
-            UnsupportedPlayerData::GameMode,
             UnsupportedPlayerData::SelectedSlot,
             UnsupportedPlayerData::Inventory,
             UnsupportedPlayerData::Experience,
@@ -565,7 +562,7 @@ pub fn preflight_player_batch(
         return Err(Error::NoSelectedPlayers);
     }
     let mut reports = Vec::with_capacity(selected.len());
-    let mut locators = Vec::with_capacity(selected.len());
+    let mut players = Vec::with_capacity(selected.len());
     for file in selected {
         let Some(root) = lodestone_anvil::player_dat::read_from_file(&file.path)
             .map_err(Error::PlayerDat)?
@@ -576,7 +573,7 @@ pub fn preflight_player_batch(
         };
         let player = PlayerData::from_nbt(&root).map_err(Error::PlayerDat)?;
         let report = preflight_player(&player);
-        locators.push(locator_from_player_unchecked(file.uuid, &player));
+        players.push(player_data_from_player_unchecked(file.uuid, &player));
         reports.push(PlayerFileImportReport {
             uuid: file.uuid,
             report,
@@ -584,7 +581,7 @@ pub fn preflight_player_batch(
     }
     Ok(PlayerBatchImportPlan {
         report: PlayerBatchImportReport { players: reports },
-        locators,
+        players,
     })
 }
 
@@ -613,7 +610,7 @@ pub fn import_player_batch(
         });
     }
     let records_written = storage
-        .write_dirty_players(plan.locators)
+        .write_dirty_player_data_batch(plan.players)
         .map_err(Error::Storage)?;
     Ok(PlayerBatchImportResult {
         report: plan.report,
@@ -650,7 +647,7 @@ pub fn import_player(
     }
 
     storage
-        .write_dirty_player(locator_from_player(uuid, player))
+        .write_dirty_player_data(player_data_from_player(uuid, player))
         .map_err(Error::Storage)?;
     Ok(PlayerImportResult {
         report,
@@ -700,28 +697,35 @@ fn fits_i32(value: f64) -> bool {
     value.round() >= f64::from(i32::MIN) && value.round() <= f64::from(i32::MAX)
 }
 
-fn locator_from_player(uuid: uuid::Uuid, player: &PlayerData) -> NativePlayerRecord {
-    NativePlayerRecord {
-        uuid: *uuid.as_bytes(),
-        dimension: builtin_dimension(&player.dimension)
-            .expect("preflight authorization rejects unsupported player dimensions"),
-        x_fixed: round_to_i32(player.pos.x * POSITION_UNITS_PER_BLOCK),
-        y_fixed: round_to_i32(player.pos.y * POSITION_UNITS_PER_BLOCK),
-        z_fixed: round_to_i32(player.pos.z * POSITION_UNITS_PER_BLOCK),
-        yaw_millidegrees: round_to_i32(f64::from(player.rotation.yaw) * 1_000.0),
-        pitch_millidegrees: round_to_i32(f64::from(player.rotation.pitch) * 1_000.0),
+fn player_data_from_player(uuid: uuid::Uuid, player: &PlayerData) -> NativePlayerData {
+    NativePlayerData {
+        locator: NativePlayerRecord {
+            uuid: *uuid.as_bytes(),
+            dimension: builtin_dimension(&player.dimension)
+                .expect("preflight authorization rejects unsupported player dimensions"),
+            x_fixed: round_to_i32(player.pos.x * POSITION_UNITS_PER_BLOCK),
+            y_fixed: round_to_i32(player.pos.y * POSITION_UNITS_PER_BLOCK),
+            z_fixed: round_to_i32(player.pos.z * POSITION_UNITS_PER_BLOCK),
+            yaw_millidegrees: round_to_i32(f64::from(player.rotation.yaw) * 1_000.0),
+            pitch_millidegrees: round_to_i32(f64::from(player.rotation.pitch) * 1_000.0),
+        },
+        game_mode: player.game_mode,
     }
 }
 
-fn locator_from_player_unchecked(uuid: uuid::Uuid, player: &PlayerData) -> NativePlayerRecord {
-    NativePlayerRecord {
-        uuid: *uuid.as_bytes(),
-        dimension: builtin_dimension(&player.dimension).unwrap_or(BuiltinDimension::Unspecified),
-        x_fixed: round_to_i32(player.pos.x * POSITION_UNITS_PER_BLOCK),
-        y_fixed: round_to_i32(player.pos.y * POSITION_UNITS_PER_BLOCK),
-        z_fixed: round_to_i32(player.pos.z * POSITION_UNITS_PER_BLOCK),
-        yaw_millidegrees: round_to_i32(f64::from(player.rotation.yaw) * 1_000.0),
-        pitch_millidegrees: round_to_i32(f64::from(player.rotation.pitch) * 1_000.0),
+fn player_data_from_player_unchecked(uuid: uuid::Uuid, player: &PlayerData) -> NativePlayerData {
+    NativePlayerData {
+        locator: NativePlayerRecord {
+            uuid: *uuid.as_bytes(),
+            dimension: builtin_dimension(&player.dimension)
+                .unwrap_or(BuiltinDimension::Unspecified),
+            x_fixed: round_to_i32(player.pos.x * POSITION_UNITS_PER_BLOCK),
+            y_fixed: round_to_i32(player.pos.y * POSITION_UNITS_PER_BLOCK),
+            z_fixed: round_to_i32(player.pos.z * POSITION_UNITS_PER_BLOCK),
+            yaw_millidegrees: round_to_i32(f64::from(player.rotation.yaw) * 1_000.0),
+            pitch_millidegrees: round_to_i32(f64::from(player.rotation.pitch) * 1_000.0),
+        },
+        game_mode: player.game_mode,
     }
 }
 
@@ -821,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn independent_player_fixture_decodes_through_anvil_codec_and_maps_locator_fields() {
+    fn independent_player_fixture_decodes_through_anvil_codec_and_maps_typed_fields() {
         let directory = scratch("fixture");
         let file = directory.join("fixture-player.dat");
         let root = fixture_root();
@@ -835,7 +839,7 @@ mod tests {
             report
                 .unsupported()
                 .contains(&UnsupportedPlayerData::Inventory),
-            "the native locator must make inventory loss visible"
+            "the partial native record must make inventory loss visible"
         );
         assert!(
             report
@@ -856,17 +860,20 @@ mod tests {
             .expect("fixture player imports");
         assert_eq!(result.records_written, 1);
         assert_eq!(
-            storage.load_player(*uuid.as_bytes()).expect("load locator"),
-            Some(NativePlayerRecord {
-                uuid: *uuid.as_bytes(),
-                dimension: BuiltinDimension::Nether,
-                x_fixed: -16_384,
-                y_fixed: 64_125,
-                z_fixed: 65_535,
-                yaw_millidegrees: -90_001,
-                pitch_millidegrees: 45_002,
+            storage.load_player_data(*uuid.as_bytes()).expect("load typed player"),
+            Some(NativePlayerData {
+                locator: NativePlayerRecord {
+                    uuid: *uuid.as_bytes(),
+                    dimension: BuiltinDimension::Nether,
+                    x_fixed: -16_384,
+                    y_fixed: 64_125,
+                    z_fixed: 65_535,
+                    yaw_millidegrees: -90_001,
+                    pitch_millidegrees: 45_002,
+                },
+                game_mode: Some(lodestone_model::GameMode::Creative),
             }),
-            "fixture expectations name the native fields independently of conversion"
+            "fixture expectations name the typed native fields independently of conversion"
         );
 
         drop(storage);

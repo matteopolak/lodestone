@@ -258,6 +258,9 @@ fn validate_player(player: &PlayerRecord) -> Result<(), ValidationError> {
     {
         return Err(ValidationError::UnknownBuiltinDimension(player.dimension));
     }
+    if GameMode::try_from(player.game_mode).is_err() {
+        return Err(ValidationError::UnknownPlayerGameMode(player.game_mode));
+    }
     Ok(())
 }
 
@@ -299,6 +302,7 @@ pub enum ValidationError {
     NonFiniteEntityPosition,
     NonFiniteEntityRotation,
     UnknownBuiltinDimension(i32),
+    UnknownPlayerGameMode(i32),
     ZeroExtensionId,
     DuplicateExtensionId(u32),
     UnregisteredExtensionId(u32),
@@ -376,6 +380,9 @@ impl std::fmt::Display for ValidationError {
             }
             Self::UnknownBuiltinDimension(id) => {
                 write!(formatter, "unknown built-in dimension {id}")
+            }
+            Self::UnknownPlayerGameMode(mode) => {
+                write!(formatter, "unknown player game mode {mode}")
             }
             Self::ZeroExtensionId => formatter.write_str("extension local ID zero is reserved"),
             Self::DuplicateExtensionId(id) => write!(formatter, "duplicate extension local ID {id}"),

@@ -191,6 +191,7 @@ fn player_locator_requires_a_complete_uuid_and_a_builtin_dimension() {
                 z_fixed: 65_535,
                 yaw_millidegrees: -90_001,
                 pitch_millidegrees: 45_002,
+                game_mode: GameMode::Creative as i32,
             })),
             extensions: Vec::new(),
         })),
@@ -211,6 +212,17 @@ fn player_locator_requires_a_complete_uuid_and_a_builtin_dimension() {
     assert_eq!(
         validate_record(&record),
         Err(ValidationError::UnknownBuiltinDimension(77))
+    );
+
+    set_player_uuid_and_dimension(
+        &mut record,
+        vec![0x42; 16],
+        BuiltinDimension::Nether as i32,
+    );
+    player_in(&mut record).game_mode = 99;
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::UnknownPlayerGameMode(99))
     );
 }
 
@@ -267,13 +279,18 @@ fn entity_in(record: &mut StorageRecord) -> &mut EntityRecord {
     entity
 }
 
-fn set_player_uuid_and_dimension(record: &mut StorageRecord, uuid: Vec<u8>, dimension: i32) {
+fn player_in(record: &mut StorageRecord) -> &mut PlayerRecord {
     let Some(storage_record::Record::General(general)) = &mut record.record else {
         unreachable!();
     };
     let Some(general_record::Record::Player(player)) = &mut general.record else {
         unreachable!();
     };
+    player
+}
+
+fn set_player_uuid_and_dimension(record: &mut StorageRecord, uuid: Vec<u8>, dimension: i32) {
+    let player = player_in(record);
     player.player_uuid = uuid;
     player.dimension = dimension;
 }
