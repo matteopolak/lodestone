@@ -16,6 +16,10 @@ path = "src/lib.rs"
 name = "lodestone"
 path = "src/main.rs"
 
+[[bin]]
+name = "horizon-profile"
+path = "src/bin/horizon_profile.rs"
+
 [lints]
 workspace = true
 

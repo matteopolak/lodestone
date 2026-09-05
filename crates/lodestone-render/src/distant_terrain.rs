@@ -104,6 +104,30 @@ pub struct HorizonTile {
     cells: Box<[HorizonCell]>,
 }
 
+/// Returns whether a tile overlaps a circle around a world-space camera.
+///
+/// Both the GPU bridge and headless profiling use this exact predicate. Keeping
+/// candidate selection here prevents a profiling run from counting a different
+/// set of tiles than the renderer can populate or draw.
+#[must_use]
+pub fn horizon_tile_intersects_radius(
+    tile: &HorizonTile,
+    camera_block: [i32; 2],
+    radius_blocks: f32,
+) -> bool {
+    if radius_blocks <= 0.0 {
+        return false;
+    }
+    let (origin_x, origin_z) = tile.coord().block_origin();
+    let end_x = origin_x.saturating_add(HORIZON_TILE_BLOCKS);
+    let end_z = origin_z.saturating_add(HORIZON_TILE_BLOCKS);
+    let nearest_x = camera_block[0].clamp(origin_x, end_x);
+    let nearest_z = camera_block[1].clamp(origin_z, end_z);
+    let dx = i64::from(nearest_x) - i64::from(camera_block[0]);
+    let dz = i64::from(nearest_z) - i64::from(camera_block[1]);
+    (dx * dx + dz * dz) as f64 <= f64::from(radius_blocks) * f64::from(radius_blocks)
+}
+
 impl HorizonTile {
     fn empty(coord: HorizonTileCoord) -> Result<Self, HorizonAllocationError> {
         let mut cells = Vec::new();
