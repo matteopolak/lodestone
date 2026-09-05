@@ -94,14 +94,6 @@ pub fn legacy_solid(id: StateId) -> bool {
     bit(&table::LEGACY_SOLID, id)
 }
 
-/// Raw-id compatibility boundary for callers that have not validated a
-/// block-state id. New code should construct [`StateId`] and call
-/// [`legacy_solid`] so this complete table is accessed with a total lookup.
-#[must_use]
-pub fn legacy_solid_raw(id: u32) -> Option<bool> {
-    StateId::new(id).map(legacy_solid)
-}
-
 /// Vanilla's own "blocks motion" accessor for a validated block-state id.
 ///
 /// This is [`legacy_solid`] with vanilla's two hard-coded exclusions already
