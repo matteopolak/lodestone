@@ -260,7 +260,14 @@ impl Sim {
         for x in x0..=x1 {
             for y in y0..=y1 {
                 for z in z0..=z1 {
-                    if is_nether_portal_state(self.block_at_world([x, y, z])) {
+                    // The chunk store is the raw-state boundary. Once it has
+                    // validated the snapshot value, portal classification stays
+                    // in the built-in `StateId`/`Block` domain.
+                    if lodestone_data::block_states::StateId::new(
+                        self.block_at_world([x, y, z]),
+                    )
+                    .is_some_and(is_nether_portal_state)
+                    {
                         return true;
                     }
                 }
@@ -400,14 +407,15 @@ impl Sim {
     }
 }
 
-/// Whether a block state id is a nether portal.
+/// Whether a validated built-in state belongs to a nether portal.
 ///
-/// Keyed on the *block* name rather than on a state id range, because
-/// `nether_portal` has two states (`axis=x`/`axis=z`) and matching one would
-/// make the effect fire in half the portals — the kind of half-working that
-/// reads as a flaky bug rather than a wrong branch.
-fn is_nether_portal_state(state: u32) -> bool {
-    lodestone_data::block_states::block_name(state) == Some("minecraft:nether_portal")
+/// `StateId::block` makes the state-to-block join explicit: `nether_portal`
+/// has two states (`axis=x`/`axis=z`), so matching one state id would make the
+/// effect fire in half the portals. A raw snapshot id is validated by the sole
+/// caller above; an out-of-census value therefore fails closed before reaching
+/// this in-process classification.
+fn is_nether_portal_state(state: lodestone_data::block_states::StateId) -> bool {
+    state.block() == lodestone_data::block::Block::NetherPortal
 }
 
 #[cfg(test)]
@@ -649,8 +657,13 @@ mod tests {
     /// single-state block.
     #[test]
     fn both_portal_axes_count_and_neighbouring_blocks_do_not() {
-        let ids: Vec<u32> = (0..u32::try_from(lodestone_data::block_states::STATE_COUNT).unwrap())
-            .filter(|&id| is_nether_portal_state(id))
+        let ids: Vec<lodestone_data::block_states::StateId> =
+            (0..lodestone_data::block_states::STATE_COUNT)
+                .map(|raw| {
+                    lodestone_data::block_states::StateId::new(raw)
+                        .expect("the generated census range is valid")
+                })
+                .filter(|&state| is_nether_portal_state(state))
             .collect();
         assert_eq!(
             ids.len(),
@@ -658,14 +671,20 @@ mod tests {
             "nether_portal has axis=x and axis=z; got {ids:?}"
         );
         assert_ne!(ids[0], ids[1]);
-        // The blocks a portal is actually made of and stood in must not count —
-        // obsidian is the frame and air is what a player walks through to reach
-        // it, so either one matching would make the effect fire permanently.
-        for name in ["minecraft:obsidian", "minecraft:air", "minecraft:end_portal"] {
-            let hit = (0..u32::try_from(lodestone_data::block_states::STATE_COUNT).unwrap())
-                .filter(|&id| is_nether_portal_state(id))
-                .any(|id| lodestone_data::block_states::block_name(id) == Some(name));
-            assert!(!hit, "{name} must not read as a nether portal");
+        // Detector control: these nearby blocks must not count. `Obsidian` is
+        // the frame, `Air` is the approach, and `EndPortal` is a distinct
+        // portal-like block; accepting any one would keep the effect active in
+        // ordinary terrain or the wrong dimension.
+        for block in [
+            lodestone_data::block::Block::Obsidian,
+            lodestone_data::block::Block::Air,
+            lodestone_data::block::Block::EndPortal,
+        ] {
+            assert!(
+                !is_nether_portal_state(block.default_state()),
+                "{} must not read as a nether portal",
+                block.name()
+            );
         }
     }
 }
