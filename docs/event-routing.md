@@ -58,7 +58,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**18 of 134** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**17 of 134** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -83,6 +83,9 @@ reads and writes its in-memory cookie store, emitting the matching response acti
 before surfacing either event. A transfer request is likewise explicitly claimed by
 `Route::client`: the driver records its existing `SessionOutcome::Transferred` result before
 surfacing the event, while the shell records the target for the resulting disconnect message.
+A resource-pack pop is claimed by the shell's connection loop: it clears the active in-memory pack
+and any matching prompt before generic forwarding, so it is marked as a shell interception rather
+than requiring a `NetUpdate` arm.
 
 ## What this table does **not** do
 
