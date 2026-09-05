@@ -787,6 +787,19 @@ handle; neither reads a server registry. There is no additional environment
 variable or runtime toggle: the `jvm` feature and an operator-built shim
 containing the exact isolated declarations are the only prerequisites.
 
+`playerHandleForProfile(String, String)` is the explicit disambiguator. Its
+exact JNI descriptor is `(Ljava/lang/String;Ljava/lang/String;)J`: the first
+argument is the copied display name and the second is a 36-character hexadecimal UUID form.
+It resolves only their complete value pair in the worker-local lifecycle map.
+That means a transient roster with either duplicate names or duplicate UUIDs
+still has one deterministic answer when the pair is unique, while null or
+malformed inputs and an absent pair fail before any server lookup. The returned
+`long` remains the same generation-checked handle as the other resolvers, so a
+disconnect removes the inverse mapping and an old handle fails rather than
+identifying a later reconnect. The generated shim fixtures pin this exact
+declaration and registration; hermetic controls prove both unqualified lookup
+ambiguities before proving the qualified pair selects the intended handle.
+
 `activePlayerCount()` returns the count of live player handles in that same
 worker-owned lifecycle map. Its producer is the dedicated host's existing
 value-only roster reconciliation: each queued join adds a handle before its
