@@ -1443,10 +1443,8 @@ pub struct SetTestBlock {
 /// Serverbound `entity_tag_query` packet (F3+I-style debug NBT inspection
 /// request for an entity).
 ///
-/// Wire layout: VarInt transaction id, then VarInt entity id
-/// (vanilla's own serverbound entity tag query packet, decompiled `.cache/mc/26.2/src`). No
-/// clientbound `tag_query` encoder exists yet to answer it — see this
-/// struct's decode-side consumer for why it is decoded but not acted on.
+/// Wire layout: VarInt transaction id, then VarInt entity id. The hosting
+/// decoder lifts both into an operator query answered with the shared NBT reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct EntityTagQuery {
     /// Transaction id echoed back in the reply.
@@ -1460,9 +1458,8 @@ pub struct EntityTagQuery {
 /// Serverbound `block_entity_tag_query` packet (F3+I-style debug NBT
 /// inspection request for a block entity).
 ///
-/// Wire layout: VarInt transaction id, then a packed `BlockPos` long
-/// (vanilla's own serverbound block entity tag query packet). Same "decoded, no reply
-/// encoder yet" situation as [`EntityTagQuery`].
+/// Wire layout: VarInt transaction id, then a packed `BlockPos` long. The
+/// hosting decoder preserves both for the permission-gated NBT response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct BlockEntityTagQuery {
     /// Transaction id echoed back in the reply.

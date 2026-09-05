@@ -1088,6 +1088,13 @@ pub enum ServerBound {
         /// Position in the player's current dimension.
         pos: BlockPos,
     },
+    /// Requests the authoritative save data for a live entity.
+    EntityTagQuery {
+        /// Correlation id echoed in the response.
+        transaction_id: i32,
+        /// Connection-visible entity id, not an entity-type registry id.
+        entity_id: i32,
+    },
     /// The client closed a container screen (`ServerboundContainerClosePacket`).
     /// `window_id` is the id the client had open — vanilla's
     /// `ServerPlayer::doCloseContainer` compares this against nothing at all

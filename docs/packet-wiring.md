@@ -62,6 +62,24 @@ entities present in the live registry; they do not load chunks from disk.
 Other hosting families retain the trait's unsupported default until they provide
 a response encoder. No new configuration or external dependency is required.
 
+### Operator entity queries
+
+On native hosts, `ENTITY_TAG_QUERY` uses the same permission level and response
+encoder. The entity id is resolved to a live snapshot UUID, then matched to the
+save record under one `MobHandle` lock, so the returned health, position, motion,
+and dropped-item contents belong to the requested entity. Only the top-level
+entity-type `id` is removed; a dropped stack's nested item `id` must survive.
+Unknown ids receive no response, unlike an absent block entity's null response.
+
+This path inherits `MobSim::saved_entities` and `SavedEntity::to_nbt` coverage:
+simulated mobs and dropped items on native hosts. Players, vehicles, projectiles,
+and browser-hosted entities remain unsupported, and unmodeled save fields remain
+absent. Extending those requires an authoritative per-entity record source;
+moving that source out of the filesystem-backed persistence module is the
+prerequisite for browser support. Queries currently inspect snapshot/save lists
+under the simulation lock, so repeated operator inspection scales with the live
+population. They perform no disk access or world mutation.
+
 ### Clientbound: `lodestone_model::event::route`, an exhaustive table
 
 The clientbound mirror of the serverbound problem above has its own document,
