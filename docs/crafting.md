@@ -74,9 +74,9 @@ is `!Sync`, which propagates through `RecipeBook`, which cannot then be a
 `bevy_ecs` `Resource` at all; `unregister` must go through `RecipeBook`,
 never a caller-side `Vec::remove`, because a stale `grid_index` entry does
 not panic, it silently degrades an unrelated recipe's own matching. Server-side
-registration is not wired — `lodestone-server` has no recipe model at all, so
-a registered recipe is client-side prediction and recipe-book UI only against
-a real server.
+plugin registration is not wired: the host's bundled recipe corpus is
+independent of the plugin registry, so a registered recipe is client-side
+prediction and recipe-book UI only against a real server.
 
 ### Recipe-book UI
 
@@ -122,6 +122,15 @@ The server folds inbound recipe-book open/filter changes into the connection's
 `PlayerInventory::recipe_book_settings` state. This state is separate from the
 crafting grid and is intentionally session-scoped until player-data persistence
 has an authoritative recipe-book representation.
+
+The host also owns the per-connection "new" state for its recipe display ids.
+Every entry in the initial `recipe_book_add` snapshot is highlighted without a
+toast; when a visible recipe button makes the client send
+`recipe_book_seen_recipe`, the server validates that opaque id against the same
+book it advertised, clears only that entry's highlight, and returns a
+non-replacing one-entry update so the client read-model clears too. The ids and
+the acknowledgements are session-local, so they deliberately do not enter
+player persistence.
 
 ## How to change it
 

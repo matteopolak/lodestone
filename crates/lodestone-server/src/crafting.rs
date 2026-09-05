@@ -210,6 +210,10 @@ pub struct RecipeBookEntry {
     /// entry naming a tag is left for the encoder to resolve, so this is the
     /// resolved item list.
     pub crafting_requirements: Vec<Vec<lodestone_model::Identifier>>,
+    /// Whether this entry should make the recipe-book tab show its "new"
+    /// highlight. The connection owns this bit: the immutable recipe corpus is
+    /// shared by every player, while acknowledgement is per player.
+    pub highlight: bool,
 }
 
 impl RecipeBookEntry {
@@ -321,6 +325,7 @@ pub fn recipe_book_entries() -> &'static [RecipeBookEntry] {
                     group,
                     category: book_category(recipe),
                     crafting_requirements: reqs,
+                    highlight: false,
                 })
             })
             .collect()

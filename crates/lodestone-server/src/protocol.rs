@@ -1079,6 +1079,14 @@ pub enum ServerBound {
         /// Whether the tab shows only craftable recipes.
         filtering: bool,
     },
+    /// The client has displayed one recipe-book entry and cleared its "new"
+    /// highlight. The display id is validated against the book this connection
+    /// received before the server folds it into
+    /// [`crate::inventory::PlayerInventory`].
+    RecipeBookRecipeSeen {
+        /// The per-session display id from the server's recipe-book add packet.
+        recipe_index: i32,
+    },
     /// The client opened an advancement tab, or closed the advancements
     /// screen. The connection keeps this selection and republishes it through
     /// [`ServerProtocol::encode_select_advancements_tab`] so the client-side

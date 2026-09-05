@@ -1067,8 +1067,9 @@ fn write_recipe_display(w: &mut Writer, display: &ServerRecipeDisplay) {
 /// items are already resolved server-side), so every count here is `len + 1` — an
 /// off-by-one that is *not* an off-by-one.
 ///
-/// `flags` is `0`: neither `FLAG_NOTIFICATION` nor `FLAG_HIGHLIGHT`, because the
-/// join-time book is not a discovery toast.
+/// Bit 0 remains clear because a join-time book is not a discovery toast. Bit
+/// 1 comes from the server's per-connection seen state: a fresh entry is
+/// highlighted until the client reports `recipe_book_seen_recipe` for its id.
 fn encode_recipe_book_add_body(entries: &[ServerRecipeBookEntry], replace: bool) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(i32::try_from(entries.len()).unwrap_or(i32::MAX));
@@ -1110,7 +1111,7 @@ fn encode_recipe_book_add_body(entries: &[ServerRecipeBookEntry], replace: bool)
                 }
             }
         }
-        w.u8(0); // flags: not a notification, not highlighted
+        w.u8(if entry.highlight { 0x02 } else { 0x00 }); // no notification; optional highlight
     }
     w.bool(replace);
     w.into_vec()
@@ -3978,8 +3979,12 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::RECIPE_BOOK_SEEN_RECIPE => {
-                let _ = decode_full::<RecipeBookSeenRecipe>(payload);
-                ServerBound::Ignored
+                match decode_full::<RecipeBookSeenRecipe>(payload) {
+                    Some(p) => ServerBound::RecipeBookRecipeSeen {
+                        recipe_index: p.recipe,
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             // `SELECT_TRADE` lifts into `ServerBound::SelectTrade`. The server
             // consumer resolves the villager from this connection's tracked
