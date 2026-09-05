@@ -29,6 +29,8 @@ wit_bindgen::generate!({
 
 use lodestone::plugin::logging::{log, LogLevel};
 use lodestone::plugin::types::CommandSpec;
+#[cfg(feature = "fs-write")]
+use lodestone::plugin::filesystem_write::write_file;
 #[cfg(any(feature = "inventory-click", feature = "inventory-click-invalid"))]
 use lodestone::plugin::types::{InventoryClick, InventoryClickButton};
 #[cfg(any(
@@ -58,6 +60,7 @@ use lodestone::plugin::scheduler::{cancel, schedule_once, schedule_repeating};
 /// An `AtomicU64` rather than a `static mut` because the workspace denies
 /// `unsafe_code`; a wasm guest is single-threaded, so the atomicity costs nothing
 /// and buys the borrow checker's approval.
+#[cfg(not(feature = "fs-write"))]
 static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(feature = "place")]
 static PLACEMENT_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -90,7 +93,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.16.0".to_string(),
+            abi: "lodestone:plugin@0.17.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -181,7 +184,10 @@ impl Guest for ChatResponder {
         #[cfg(feature = "inventory-drop-cursor")]
         return vec![Action::InventoryDropCursor];
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor")))]
+        #[cfg(feature = "fs-write")]
+        return write_files();
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "fs-write")))]
         return respond(events);
     }
 
@@ -270,6 +276,20 @@ impl Guest for ChatResponder {
         let _ = (input, context);
         CommandOutcome::Failure("unknown command".to_owned())
     }
+}
+
+/// Exercise both halves of the write contract. The parent traversal must be
+/// rejected before any host filesystem mutation, while the file below the
+/// configured root must be written with the exact copied bytes.
+#[cfg(feature = "fs-write")]
+fn write_files() -> Vec<Action> {
+    let outside = write_file("../outside.txt", b"must-not-escape");
+    let inside = write_file("written.txt", b"written-by-guest");
+    vec![Action::SendChat(format!(
+        "fs-write: outside={} inside={}",
+        outside.is_ok(),
+        inside.is_ok()
+    ))]
 }
 
 /// Request one placement, then turn the finite next-tick lifecycle result into
@@ -444,7 +464,7 @@ fn attempt_network() -> Vec<Action> {
     ))]
 }
 
-#[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement")))]
+#[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "fs-write")))]
 fn respond(events: Vec<Event>) -> Vec<Action> {
     {
         let mut actions = Vec::new();

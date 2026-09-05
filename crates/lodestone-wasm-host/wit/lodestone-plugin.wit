@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.16.0;
+package lodestone:plugin@0.17.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -454,7 +454,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.16.0"`.
+        /// `"lodestone:plugin@0.17.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.
@@ -491,6 +491,16 @@ interface filesystem {
     read-file: func(path: string) -> result<list<u8>, string>;
 }
 
+/// Capability `fs:write` — **never granted by default**. Writes are confined
+/// to the host-configured plugin filesystem root, just like `fs:read`.
+///
+/// This is a separate interface rather than another function on `filesystem`
+/// so the host can grant read and write independently: an import absent from
+/// the linker is unavailable even to a guest that knows the other interface.
+interface filesystem-write {
+    write-file: func(path: string, contents: list<u8>) -> result<_, string>;
+}
+
 /// Capability `schedule:tasks` — denied unless the plugin manifest requests it
 /// and host policy grants it. Delays are measured in host ticks; zero and one
 /// both mean the next tick, and a zero repeat period is clamped to one tick.
@@ -511,6 +521,7 @@ world plugin {
 
     import logging;
     import filesystem;
+    import filesystem-write;
     import scheduler;
 
     /// Called once, immediately after instantiation. The returned

@@ -113,6 +113,9 @@ inventory-throw = []
 inventory-throw-invalid = []
 # A copied no-argument cursor drop through the shell's live menu predictor.
 inventory-drop-cursor = []
+# A denied-by-default filesystem write import. The fixture writes one file inside
+# the configured root and attempts one path outside it for the confinement gate.
+fs-write = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is

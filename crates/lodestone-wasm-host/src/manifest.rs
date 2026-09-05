@@ -8,7 +8,7 @@
 //! version = "0.1.0"
 //! # The WIT world the module was built against. Checked against
 //! # `lodestone_wasm_host::ABI_WORLD` before the module is compiled.
-//! abi = "lodestone:plugin@0.16.0"
+//! abi = "lodestone:plugin@0.17.0"
 //! # The `.wasm`, relative to this file. A core module or a component; the host
 //! # encodes the former.
 //! module = "chat_responder.wasm"
@@ -540,7 +540,7 @@ mod tests {
     const GOOD: &str = r#"
 name = "chat-responder"
 version = "0.1.0"
-abi = "lodestone:plugin@0.16.0"
+abi = "lodestone:plugin@0.17.0"
 module = "chat_responder.wasm"
 priority = "normal"
 description = "Replies pong to ping."
@@ -611,10 +611,10 @@ capabilities = ["log", "observe:chat", "act:chat"]
     /// does know.
     #[test]
     fn an_unknown_capability_is_rejected_by_name_with_the_known_list() {
-        let text = GOOD.replace(r#""act:chat""#, r#""fs:write""#);
+        let text = GOOD.replace(r#""act:chat""#, r#""fs:future""#);
         let err = parse(&text).expect_err("must reject");
         let msg = err.to_string();
-        assert!(msg.contains("fs:write"), "{msg}");
+        assert!(msg.contains("fs:future"), "{msg}");
         assert!(msg.contains("fs:read"), "the known list must be shown: {msg}");
         assert!(matches!(err, ManifestError::UnknownCapability { .. }), "{err:?}");
     }
@@ -640,7 +640,7 @@ capabilities = ["log", "observe:chat", "act:chat"]
     /// at instantiation would not have been.
     #[test]
     fn a_newer_abi_world_is_rejected_naming_both_versions() {
-        let text = GOOD.replace("lodestone:plugin@0.16.0", "lodestone:plugin@0.12.0");
+        let text = GOOD.replace("lodestone:plugin@0.17.0", "lodestone:plugin@0.12.0");
         let err = parse(&text).expect_err("must reject");
         let msg = err.to_string();
         assert!(msg.contains("0.12.0"), "{msg}");

@@ -2,7 +2,7 @@
 //! [`wit/lodestone-plugin.wit`](../wit/lodestone-plugin.wit).
 //!
 //! The generated module tree is `lodestone::plugin::{types, logging,
-//! filesystem}`; [`crate`] re-exports the handful of names callers need so that
+//! filesystem, filesystem_write}`; [`crate`] re-exports the handful of names callers need so that
 //! nothing outside this crate spells a `bindings::lodestone::plugin::…` path.
 //!
 //! # Why the exports are called through `get_typed_func` rather than the
