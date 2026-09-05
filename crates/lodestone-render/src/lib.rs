@@ -55,6 +55,7 @@ pub mod crack_resolver;
 pub mod cull;
 pub mod device;
 pub mod display;
+pub mod distant_terrain;
 pub mod driver;
 pub mod end_portal;
 pub mod entity;
@@ -203,6 +204,12 @@ pub use cull::{
     section_coord_of, within_view_distance,
 };
 pub use device::{GpuContext, GpuError};
+pub use distant_terrain::{
+    DISTANT_TERRAIN_WGSL, DistantTerrain, HORIZON_CELL_BLOCKS, HORIZON_CELLS_PER_TILE,
+    HORIZON_TILE_BLOCKS, HORIZON_TILE_CELLS, HORIZON_TILE_RADIUS, HORIZON_TILES_PER_AXIS,
+    HorizonAllocationError, HorizonCell, HorizonTile, HorizonTileCoord, MAX_HORIZON_BYTES,
+    MAX_HORIZON_CELLS, MAX_HORIZON_DISTANCE_CHUNKS, MAX_HORIZON_TILES,
+};
 pub use driver::{InstanceTable, WorldMesher};
 pub use entity::{
     ENTITY_FULLBRIGHT, EXPERIENCE_ORB_ICON_COUNT, EXPERIENCE_ORB_TEXTURE, SHADOW_TEXTURE, ArmourMesh,
