@@ -88,6 +88,8 @@ columns also win over a shaped request, so saved player changes cannot disappear
 `ColumnPipeline::with_generation_band` computes the band in Chebyshev chunk distance and defaults
 to all-full until its caller opts in. `DEFAULT_FULL_GENERATION_RADIUS` is 8: it contains the
 simulation and interaction areas with margin, but is not an allocation cap.
+Movement re-centres that band together with the pending-column priority queue, so steady-state
+streaming classifies newly visible columns around the current player chunk rather than the join point.
 
 Raising a render-distance slider does not by itself make every corresponding real column
 affordable. At render distance 256 the streamed square is 265,225 columns; even a 31.1 KiB

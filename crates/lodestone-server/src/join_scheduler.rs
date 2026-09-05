@@ -729,6 +729,9 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     /// window, not one column — which is also what keeps the emitted order a
     /// deterministic function of the queue rather than of who finished first.
     pub(crate) fn reprioritise(&mut self, centre: (i32, i32), facing: Option<f32>) -> bool {
+        if let Some((band_centre, _)) = &mut self.generation_band {
+            *band_centre = centre;
+        }
         self.queue.reprioritise(centre, facing)
     }
 
@@ -1724,6 +1727,39 @@ mod tests {
                 .iter()
                 .all(|(_, stage)| *stage == ChunkGenerationStage::Shaped),
             "control: radius -1 must request no full columns; a Full request proves the stage detector is inert"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn moving_recentres_the_full_generation_band_for_new_columns() {
+        let source = Arc::new(StageRecordingSource {
+            requests: Mutex::new(Vec::new()),
+        });
+        let mut pipeline = ColumnPipeline::prioritised(
+            Arc::clone(&source),
+            Vec::new(),
+            1,
+            (0, 0),
+            None,
+        )
+        .with_generation_band((0, 0), 1);
+
+        assert!(pipeline.reprioritise((100, 100), None));
+        pipeline.enqueue(vec![(0, 0), (101, 100)]);
+        while pipeline
+            .next()
+            .await
+            .expect("stage-recording source cannot fail")
+            .is_some()
+        {}
+
+        assert_eq!(
+            *source.requests.lock().expect("stage request log lock poisoned"),
+            vec![
+                ((101, 100), ChunkGenerationStage::Full),
+                ((0, 0), ChunkGenerationStage::Shaped),
+            ],
+            "the near band must follow the current player chunk instead of the join chunk"
         );
     }
 
