@@ -46,6 +46,16 @@ Effects carry that original sequence because entities from two chunks may be
 interleaved; the central publisher restores it rather than changing behavior to
 owner-major order. Negative positions use `floor` followed by Euclidean chunk
 division, so an entity at `x = -0.5` belongs to chunk `-1`, not chunk `0`.
+Chunk lifecycle has the same explicit smallest owner before the cache crosses
+its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
+selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
+consumes it for the real `column_at` and `unload` calls used by every
+`IntegratedServer`. Ticket transitions remain demand-driven: becoming resident
+does not pre-generate a column, and becoming unresident only releases a column
+that is actually cached. An eviction batch is bounded by current cache entries,
+deduplicated, and ordered `(cx, cz)` before `ChunkSource::unload`, so the
+hash-map iteration behind a ticket delta cannot make negative-column unload
+order vary. This is a serial hand-off, not an unload worker or an I/O change.
 Entities outside this ambient-effect hand-off, natural-spawn planning, world
 border, game rules, time, weather and other cross-column work remain global.
 For a named populated scene,
@@ -80,6 +90,16 @@ effects before another's changes observable packet order. Add both a
 negative-coordinate control and an interleaved-owner order control before a
 future executor is allowed to run owners separately.
 
+Keep lifecycle planning at the existing cache boundaries. A ticket becoming
+resident is permission for a later demand load, not authority to generate in a
+background task. A ticket or LRU eviction may call `ChunkSource::unload` only
+after it has removed that retained cache entry, and must pass the selected
+coordinates through `ChunkLifecyclePlan`; calling the source under the cache
+lock would reintroduce the lock/I/O and re-entry hazards this boundary avoids.
+If a future owner can release a column concurrently, define the source-facing
+acknowledgement and persistence ordering first; the current plan only makes the
+serial owner and canonical order observable.
+
 When recording a candidate report, name the populated scene and the explicit
 edge passed to `candidate_region_workload`. Compare total chunks, the number of
 non-empty cells, and the largest-cell count across clustered and spread-out
@@ -89,13 +109,16 @@ claim that a particular edge is the right size for coalescing chunk owners.
 
 ## Configuration
 
-None. Chunk ownership has no tunable size. A candidate edge remains an explicit
-measurement argument, while any useful multi-chunk worker size depends on
-profiling a populated, named workload and has not been selected.
+None. Chunk ownership has no tunable size. Lifecycle batches are bounded by the
+existing cache selection rather than a new queue capacity. A candidate edge
+remains an explicit measurement argument, while any useful multi-chunk worker
+size depends on profiling a populated, named workload and has not been selected.
 
 ## Dependencies
 
 `tick_area::FollowArea` supplies the live chunk set. `tick::run_tick_loop`
 consumes its ownership sequence for random ticks and thunder decisions. The
+`chunk_store::ChunkStore` consumes lifecycle assignments around its real source
+load/unload boundary, including the stores owned by `IntegratedServer`.
 regionised ticking design document records the prerequisites for changing this
 serial ownership seam into concurrent execution.

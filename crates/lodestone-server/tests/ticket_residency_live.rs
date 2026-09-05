@@ -40,6 +40,7 @@
 //! longer resident" is exactly that control, and it fires before the
 //! positive assertions that lean on the same check reading `true`.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_core::{Reader, State, Writer};
@@ -69,8 +70,10 @@ const HEIGHT: i32 = 384;
 /// about the ticket graph, not worldgen, and a flat stone floor gives
 /// `find_initial_spawn` an unambiguous surface at every column so the spawn
 /// search this test relies on is not itself a variable.
-#[derive(Debug)]
-struct FlatWorld;
+#[derive(Debug, Clone, Default)]
+struct FlatWorld {
+    unloaded: Arc<Mutex<Vec<(i32, i32)>>>,
+}
 
 impl ChunkSource for FlatWorld {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
@@ -101,6 +104,13 @@ impl ChunkSource for FlatWorld {
 
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage needed; nothing in this gate reads terrain back.
+    }
+
+    fn unload(&self, cx: i32, cz: i32) {
+        self.unloaded
+            .lock()
+            .expect("unload log poisoned")
+            .push((cx, cz));
     }
 }
 
@@ -315,7 +325,7 @@ async fn a_real_join_move_and_disconnect_drive_real_ticket_residency() {
         let (server, _client_end, _world) = IntegratedServer::open_persistent_with_mobs(
             FakeProtocol,
             &dir,
-            FlatWorld,
+            FlatWorld::default(),
             MIN_Y,
             HEIGHT,
             (0..=0, 0..=0),
@@ -331,7 +341,7 @@ async fn a_real_join_move_and_disconnect_drive_real_ticket_residency() {
     let (server, client_end, _world) = IntegratedServer::open_persistent_with_mobs(
         FakeProtocol,
         &dir,
-        FlatWorld,
+        FlatWorld::default(),
         MIN_Y,
         HEIGHT,
         (0..=0, 0..=0),
@@ -463,6 +473,58 @@ async fn a_real_join_move_and_disconnect_drive_real_ticket_residency() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A live server owns the cache lifecycle hand-off as well as the ticket graph:
+/// a client crossing negative chunk boundaries first loads `(-1, 0)`, then
+/// releases it after crossing into `(-2, 0)`. The source log observes the real
+/// `ChunkStore` call, rather than an inspected ticket delta alone.
+#[tokio::test]
+async fn integrated_server_unloads_a_negative_chunk_through_the_owned_lifecycle_plan() {
+    let world = FlatWorld::default();
+    let unloads = Arc::clone(&world.unloaded);
+    let (server, client_end) = IntegratedServer::open_in_memory_with_mobs(
+        FakeProtocol,
+        world,
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+    );
+    let mut client = Connection::new(client_end);
+    let username = format!("Life{:08x}", Uuid::new_v4().as_u128() as u32);
+    drive_login_and_join(&mut client, &username).await;
+
+    // `floor(-0.5 / 16.0)` is -1; truncating toward zero would leave the
+    // intended lifecycle column at the origin and make this assertion vacuous.
+    const FIRST: (f64, f64, f64) = (-0.5, 70.0, 8.0);
+    const SECOND: (f64, f64, f64) = (-16.5, 70.0, 8.0);
+    assert_eq!(chunk_of(FIRST), (-1, 0));
+    assert_eq!(chunk_of(SECOND), (-2, 0));
+
+    send_player_moved(&mut client, FIRST.0, FIRST.1, FIRST.2).await;
+    ping_pong(&mut client, 10).await;
+    send_player_moved(&mut client, SECOND.0, SECOND.1, SECOND.2).await;
+    ping_pong(&mut client, 11).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let observed = unloads.lock().expect("unload log poisoned").clone();
+        if observed.contains(&(-1, 0)) {
+            assert!(
+                observed.windows(2).all(|pair| pair[0] < pair[1]),
+                "the live cache-release hand-off must retain canonical (cx, cz) order: {observed:?}"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the real integrated server never released chunk (-1, 0) after crossing into (-2, 0); observed unloads: {observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    server.shutdown().await;
+}
+
 /// Two real connections share one column; the column must survive either player
 /// alone leaving it, and only stop being resident once both have. The first
 /// connection uses the in-memory duplex returned by
@@ -472,7 +534,7 @@ async fn a_real_join_move_and_disconnect_drive_real_ticket_residency() {
 async fn a_chunk_near_two_players_stays_resident_when_either_one_alone_moves_away() {
     let (mut server, client_a_end) = IntegratedServer::open_in_memory_with_mobs(
         FakeProtocol,
-        FlatWorld,
+        FlatWorld::default(),
         (0..=0, 0..=0),
         (8, 8),
         0,
