@@ -85,6 +85,15 @@ become the server's inventory/drop, use-release, and hand-swap inputs. The
 makes those input paths reach their existing consumers instead of disappearing
 after encoding. Statuses outside the model remain ignored.
 
+Arm swings now use the same complete hosted path: `arm_animation` decodes to
+the shared server's `Swing` input, whose broadcast feed reaches every other
+connection as clientbound `animation`. The protocol-404 host writes the entity
+id as a VarInt and the animation selector as an unsigned byte; the existing
+404 client adapter maps selectors `0` and `3` to main- and off-hand motion.
+The registry-selected control drives both legal hand values from client action
+through the hosted decoder and back through the clientbound adapter, so this
+is not merely a decode-only packet entry.
+
 The packed `position` row is the widest single difference from the era above:
 fifteen of the twenty-eight packets whose shape changes between 1.13.2 and
 1.14.4 change *only* because they carry a position. That is why

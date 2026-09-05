@@ -19,7 +19,7 @@ use crate::packet_ids::{handshaking, login, play};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::game::{
     BlockDig, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
-    ServerboundPosition, ServerboundPositionLook, TeleportConfirm,
+    ServerboundArmAnimation, ServerboundPosition, ServerboundPositionLook, TeleportConfirm,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -272,6 +272,19 @@ impl ServerProtocol for V404ServerProtocol {
                     _ => ServerBound::Ignored,
                 }
             }
+            // `arm_animation` is a one-field packet, but it is a visible
+            // multiplayer action: the shared host appends it to its broadcast
+            // feed and every other connection renders the matching clientbound
+            // `animation`. Restrict the hand ordinal here so malformed input
+            // cannot become an arbitrary animation action downstream.
+            State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
+                match decode_full::<ServerboundArmAnimation>(payload) {
+                    Some(ServerboundArmAnimation { hand }) if (0..=1).contains(&hand) => {
+                        ServerBound::Swing { hand: hand as u8 }
+                    }
+                    _ => ServerBound::Ignored,
+                }
+            }
             State::Play if packet_id == play::serverbound::TELEPORT_CONFIRM => {
                 decode_full::<TeleportConfirm>(payload).map_or(ServerBound::Ignored, |confirm| {
                     ServerBound::TeleportationAccepted { id: confirm.teleport_id }
@@ -346,6 +359,16 @@ impl ServerProtocol for V404ServerProtocol {
                 },
             ),
         ]
+    }
+
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(entity_id);
+        payload.u8(action);
+        ServerDirective::Send {
+            packet_id: play::clientbound::ANIMATION,
+            payload: payload.into_vec(),
+        }
     }
 
     fn has_configuration_phase(&self) -> bool {
