@@ -198,6 +198,10 @@ pub struct PlayerRecord {
     pub yaw_millidegrees: i32,
     #[prost(sint32, tag = "7")]
     pub pitch_millidegrees: i32,
+    /// Unspecified preserves compatibility with locator-only records written
+    /// before this independently consumable full-player field was introduced.
+    #[prost(enumeration = "GameMode", tag = "8")]
+    pub game_mode: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EntityRecord {

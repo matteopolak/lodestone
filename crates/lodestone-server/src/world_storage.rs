@@ -19,7 +19,8 @@ use lodestone_storage::{
 };
 use lodestone_storage_schema::{
     BiomeSection, BuiltinDimension, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1,
-    EntityRecord, GeneralRecord, LightData as StoredLightData, LightSection, PlayerRecord,
+    EntityRecord, GameMode as StoredGameMode, GeneralRecord, LightData as StoredLightData,
+    LightSection, PlayerRecord,
     RegisteredExtension, WorldProperties,
     ScheduledTick as StoredScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord,
     generated::{general_record, light_data, storage_record},
@@ -57,6 +58,29 @@ pub struct NativePlayerRecord {
     pub yaw_millidegrees: i32,
     /// Pitch in millidegrees.
     pub pitch_millidegrees: i32,
+}
+
+/// One typed native player value that extends a bounded locator.
+///
+/// The current field group contains only game mode. It remains separate from
+/// [`NativePlayerRecord`] so existing locator producers keep their exact
+/// contract, while an importer with a complete player root can persist this
+/// independently consumable value in the same atomic record replacement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativePlayerData {
+    /// The durable player identity and locator.
+    pub locator: NativePlayerRecord,
+    /// The saved game mode, or `None` for locator-only records.
+    pub game_mode: Option<lodestone_model::GameMode>,
+}
+
+impl From<NativePlayerRecord> for NativePlayerData {
+    fn from(locator: NativePlayerRecord) -> Self {
+        Self {
+            locator,
+            game_mode: None,
+        }
+    }
 }
 
 /// One bounded native resident-entity pose.
@@ -577,6 +601,8 @@ pub enum PlayerRecordError {
     InvalidUuidLength { actual: usize },
     /// The typed record names an unknown or custom dimension.
     UnsupportedDimension(i32),
+    /// The typed game-mode field was neither absent nor a known built-in value.
+    UnsupportedGameMode(i32),
     /// This bounded reader cannot preserve opaque player extensions.
     UnsupportedExtensions,
     /// The key's 96-bit UUID prefix resolves to a different complete UUID.
@@ -612,6 +638,9 @@ impl fmt::Display for PlayerRecordError {
             }
             Self::UnsupportedDimension(dimension) => {
                 write!(formatter, "unsupported built-in player dimension {dimension}")
+            }
+            Self::UnsupportedGameMode(mode) => {
+                write!(formatter, "unsupported player game mode {mode}")
             }
             Self::UnsupportedExtensions => {
                 formatter.write_str("player record carries unsupported extension payloads")
@@ -895,7 +924,7 @@ impl WorldStorage {
     /// UUID remains in the body and is checked before any replacement, so the
     /// unkeyed final 32 bits can never cause a silent overwrite.
     pub fn write_dirty_player(&self, player: NativePlayerRecord) -> Result<(), Error> {
-        self.write_dirty_players([player]).map(|_| ())
+        self.write_dirty_player_data(player.into())
     }
 
     /// Atomically saves a non-empty batch of independently dirty player
@@ -909,6 +938,24 @@ impl WorldStorage {
         &self,
         players: impl IntoIterator<Item = NativePlayerRecord>,
     ) -> Result<usize, Error> {
+        self.write_dirty_player_data_batch(players.into_iter().map(Into::into))
+    }
+
+    /// Saves one native player record with the typed full-player fields this
+    /// build can consume, without changing locator-only producers.
+    pub fn write_dirty_player_data(&self, player: NativePlayerData) -> Result<(), Error> {
+        self.write_dirty_player_data_batch([player]).map(|_| ())
+    }
+
+    /// Atomically saves a non-empty batch of typed player records.
+    ///
+    /// This shares the locator batch's pre-transaction UUID and compact-key
+    /// checks. A complete player import therefore cannot commit an earlier
+    /// player after a later one is rejected.
+    pub fn write_dirty_player_data_batch(
+        &self,
+        players: impl IntoIterator<Item = NativePlayerData>,
+    ) -> Result<usize, Error> {
         let players: Vec<_> = players.into_iter().collect();
         if players.is_empty() {
             return Ok(0);
@@ -917,18 +964,18 @@ impl WorldStorage {
         let mut keys = BTreeMap::new();
         let mut writes = Vec::with_capacity(players.len());
         for player in players {
-            if !requested.insert(player.uuid) {
-                return Err(PlayerRecordError::DuplicateUuid(player.uuid).into());
+            if !requested.insert(player.locator.uuid) {
+                return Err(PlayerRecordError::DuplicateUuid(player.locator.uuid).into());
             }
-            let key = player_key(player.uuid);
-            if let Some(first) = keys.insert(key, player.uuid) {
+            let key = player_key(player.locator.uuid);
+            if let Some(first) = keys.insert(key, player.locator.uuid) {
                 return Err(PlayerRecordError::BatchKeyCollision {
                     first,
-                    second: player.uuid,
+                    second: player.locator.uuid,
                 }
                 .into());
             }
-            writes.push((key, player.uuid, encode_player(player)?));
+            writes.push((key, player.locator.uuid, encode_player(player)?));
         }
         let Some(native) = &self.native else {
             return Err(Error::AnvilDoesNotAcceptTypedRecords);
@@ -955,6 +1002,16 @@ impl WorldStorage {
     /// different UUID is an explicit collision error, and extensions or custom
     /// dimensions are refused rather than being silently discarded.
     pub fn load_player(&self, uuid: [u8; 16]) -> Result<Option<NativePlayerRecord>, Error> {
+        self.load_player_data(uuid)
+            .map(|player| player.map(|player| player.locator))
+    }
+
+    /// Loads one native player record including the typed full-player fields
+    /// currently represented by this build.
+    ///
+    /// Locator-only records written before these fields existed remain readable
+    /// and report `None` for each absent field.
+    pub fn load_player_data(&self, uuid: [u8; 16]) -> Result<Option<NativePlayerData>, Error> {
         let Some(native) = &self.native else {
             return Err(Error::AnvilDoesNotAcceptTypedRecords);
         };
@@ -1775,20 +1832,21 @@ fn player_key(uuid: [u8; 16]) -> RecordKey {
     )
 }
 
-fn encode_player(player: NativePlayerRecord) -> Result<StorageRecord, PlayerRecordError> {
-    let dimension = player.dimension as i32;
+fn encode_player(player: NativePlayerData) -> Result<StorageRecord, PlayerRecordError> {
+    let dimension = player.locator.dimension as i32;
     validate_player_dimension(dimension)?;
     Ok(StorageRecord {
         format_version: FORMAT_VERSION_V1,
         record: Some(storage_record::Record::General(GeneralRecord {
             record: Some(general_record::Record::Player(PlayerRecord {
-                player_uuid: player.uuid.to_vec(),
+                player_uuid: player.locator.uuid.to_vec(),
                 dimension,
-                x_fixed: player.x_fixed,
-                y_fixed: player.y_fixed,
-                z_fixed: player.z_fixed,
-                yaw_millidegrees: player.yaw_millidegrees,
-                pitch_millidegrees: player.pitch_millidegrees,
+                x_fixed: player.locator.x_fixed,
+                y_fixed: player.locator.y_fixed,
+                z_fixed: player.locator.z_fixed,
+                yaw_millidegrees: player.locator.yaw_millidegrees,
+                pitch_millidegrees: player.locator.pitch_millidegrees,
+                game_mode: encode_player_game_mode(player.game_mode),
             })),
             extensions: Vec::new(),
         })),
@@ -1798,7 +1856,7 @@ fn encode_player(player: NativePlayerRecord) -> Result<StorageRecord, PlayerReco
 fn decode_player(
     requested_uuid: [u8; 16],
     record: StorageRecord,
-) -> Result<NativePlayerRecord, PlayerRecordError> {
+) -> Result<NativePlayerData, PlayerRecordError> {
     if record.format_version != FORMAT_VERSION_V1 {
         return Err(PlayerRecordError::UnsupportedFormatVersion(record.format_version));
     }
@@ -1823,16 +1881,42 @@ fn decode_player(
         });
     }
     validate_player_dimension(player.dimension)?;
-    Ok(NativePlayerRecord {
-        uuid,
-        dimension: BuiltinDimension::try_from(player.dimension)
-            .expect("validated built-in player dimension"),
-        x_fixed: player.x_fixed,
-        y_fixed: player.y_fixed,
-        z_fixed: player.z_fixed,
-        yaw_millidegrees: player.yaw_millidegrees,
-        pitch_millidegrees: player.pitch_millidegrees,
+    Ok(NativePlayerData {
+        locator: NativePlayerRecord {
+            uuid,
+            dimension: BuiltinDimension::try_from(player.dimension)
+                .expect("validated built-in player dimension"),
+            x_fixed: player.x_fixed,
+            y_fixed: player.y_fixed,
+            z_fixed: player.z_fixed,
+            yaw_millidegrees: player.yaw_millidegrees,
+            pitch_millidegrees: player.pitch_millidegrees,
+        },
+        game_mode: decode_player_game_mode(player.game_mode)?,
     })
+}
+
+fn encode_player_game_mode(mode: Option<lodestone_model::GameMode>) -> i32 {
+    match mode {
+        None => StoredGameMode::Unspecified as i32,
+        Some(lodestone_model::GameMode::Survival) => StoredGameMode::Survival as i32,
+        Some(lodestone_model::GameMode::Creative) => StoredGameMode::Creative as i32,
+        Some(lodestone_model::GameMode::Adventure) => StoredGameMode::Adventure as i32,
+        Some(lodestone_model::GameMode::Spectator) => StoredGameMode::Spectator as i32,
+    }
+}
+
+fn decode_player_game_mode(
+    mode: i32,
+) -> Result<Option<lodestone_model::GameMode>, PlayerRecordError> {
+    match StoredGameMode::try_from(mode) {
+        Ok(StoredGameMode::Unspecified) => Ok(None),
+        Ok(StoredGameMode::Survival) => Ok(Some(lodestone_model::GameMode::Survival)),
+        Ok(StoredGameMode::Creative) => Ok(Some(lodestone_model::GameMode::Creative)),
+        Ok(StoredGameMode::Adventure) => Ok(Some(lodestone_model::GameMode::Adventure)),
+        Ok(StoredGameMode::Spectator) => Ok(Some(lodestone_model::GameMode::Spectator)),
+        Err(_) => Err(PlayerRecordError::UnsupportedGameMode(mode)),
+    }
 }
 
 fn validate_player_dimension(dimension: i32) -> Result<(), PlayerRecordError> {
@@ -2339,9 +2423,12 @@ mod tests {
         })
         .expect("reopen native store");
         assert_eq!(
-            reopened.load_player(player.uuid).unwrap(),
-            Some(player),
-            "the persisted body retains every typed locator field"
+            reopened.load_player_data(player.uuid).unwrap(),
+            Some(NativePlayerData {
+                locator: player,
+                game_mode: None,
+            }),
+            "a locator-only writer must reopen with every locator field and no invented game mode"
         );
         let absent = [0x7f; 16];
         assert!(
@@ -2397,7 +2484,7 @@ mod tests {
             yaw_millidegrees: 4,
             pitch_millidegrees: -5,
         };
-        let mut record = encode_player(player).expect("built-in player encodes");
+        let mut record = encode_player(player.into()).expect("built-in player encodes");
         let Some(storage_record::Record::General(general)) = &mut record.record else {
             panic!("player encoder must produce a general record");
         };
@@ -2411,6 +2498,40 @@ mod tests {
         assert_eq!(
             decode_player(player.uuid, record),
             Err(PlayerRecordError::UnsupportedExtensions)
+        );
+    }
+
+    #[test]
+    fn native_player_data_reopens_game_mode_and_refuses_unknown_mode() {
+        let player = NativePlayerData {
+            locator: NativePlayerRecord {
+                uuid: [0x6d; 16],
+                dimension: BuiltinDimension::Overworld,
+                x_fixed: 1,
+                y_fixed: 2,
+                z_fixed: 3,
+                yaw_millidegrees: 4,
+                pitch_millidegrees: 5,
+            },
+            game_mode: Some(lodestone_model::GameMode::Adventure),
+        };
+        let record = encode_player(player).expect("typed game mode encodes");
+        assert_eq!(
+            decode_player(player.locator.uuid, record).expect("known game mode decodes"),
+            player
+        );
+
+        let mut invalid = encode_player(player).expect("typed game mode encodes again");
+        let Some(storage_record::Record::General(general)) = &mut invalid.record else {
+            panic!("player encoder must produce a general record");
+        };
+        let Some(general_record::Record::Player(player)) = &mut general.record else {
+            panic!("player encoder must produce a player record");
+        };
+        player.game_mode = 99;
+        assert_eq!(
+            decode_player([0x6d; 16], invalid),
+            Err(PlayerRecordError::UnsupportedGameMode(99))
         );
     }
 
