@@ -913,6 +913,7 @@ fn clear_resident_handles() -> usize {
 enum LifecycleIdentityField {
     Name,
     Version,
+    MainClass,
 }
 
 impl Drop for LifecycleIdentityGuard {
@@ -1658,6 +1659,27 @@ pub(crate) fn register_lifecycle_plugin_version_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_lifecycle_plugin_main_class_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native takes no arguments and returns a
+    // Java string. Its worker-local context has no route to world state.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_lifecycle_plugin_main_class as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_lifecycle_plugin_descriptor_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -2153,6 +2175,14 @@ extern "system" fn native_lifecycle_plugin_version<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+extern "system" fn native_lifecycle_plugin_main_class<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jstring {
+    env.with_env(|env| lifecycle_identity_string(env, LifecycleIdentityField::MainClass))
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 extern "system" fn native_lifecycle_plugin_descriptor<'local>(
     mut env: EnvUnowned<'local>,
     class: JClass<'local>,
@@ -2635,14 +2665,19 @@ fn lifecycle_identity_string(
 ) -> Result<jstring, AdapterError> {
     let _depth = CallbackDepthGuard::enter()
         .map_err(|error| AdapterError::new(error.to_string()))?;
-    let identity = active_lifecycle_identity()?;
-    let value = match field {
-        LifecycleIdentityField::Name => identity.name,
-        LifecycleIdentityField::Version => identity.version,
-    };
+    let value = lifecycle_identity_value(field)?;
     env.new_string(value)
         .map(|value| value.into_raw())
         .map_err(|error| AdapterError::new(format!("plugin descriptor query: {error}")))
+}
+
+fn lifecycle_identity_value(field: LifecycleIdentityField) -> Result<String, AdapterError> {
+    let identity = active_lifecycle_identity()?;
+    Ok(match field {
+        LifecycleIdentityField::Name => identity.name,
+        LifecycleIdentityField::Version => identity.version,
+        LifecycleIdentityField::MainClass => identity.main_class,
+    })
 }
 
 fn lifecycle_plugin_descriptor(
@@ -2716,11 +2751,21 @@ mod tests {
             "plugin descriptor queries require an active retained-entry lifecycle call",
         );
         with_lifecycle_identity("outer", "one", "outer.Main", || {
+            assert_eq!(
+                lifecycle_identity_value(LifecycleIdentityField::MainClass),
+                Ok("outer.Main".to_owned()),
+                "the direct lifecycle query returns the validated main-class name",
+            );
             let outer = active_lifecycle_identity().expect("outer identity");
             assert_eq!(outer.name, "outer");
             assert_eq!(outer.version, "one");
             assert_eq!(outer.main_class, "outer.Main");
             with_lifecycle_identity("inner", "two", "inner.Main", || {
+                assert_eq!(
+                    lifecycle_identity_value(LifecycleIdentityField::MainClass),
+                    Ok("inner.Main".to_owned()),
+                    "nested lifecycle identity must take precedence",
+                );
                 let inner = active_lifecycle_identity().expect("inner identity");
                 assert_eq!(inner.name, "inner");
                 assert_eq!(inner.version, "two");
@@ -2736,7 +2781,18 @@ mod tests {
                     .main_class,
                 "outer.Main",
             );
+            assert_eq!(
+                lifecycle_identity_value(LifecycleIdentityField::MainClass),
+                Ok("outer.Main".to_owned()),
+                "dropping the nested identity restores the direct query",
+            );
         });
+        assert_eq!(
+            lifecycle_identity_value(LifecycleIdentityField::MainClass)
+                .expect_err("direct query must fail outside the lifecycle scope")
+                .to_string(),
+            "plugin descriptor queries require an active retained-entry lifecycle call",
+        );
         assert_eq!(
             active_lifecycle_identity()
                 .expect_err("descriptor context must be removed after callback")
