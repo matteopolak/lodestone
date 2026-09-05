@@ -562,6 +562,40 @@ fn active_player_handle_for_profile(
     })
 }
 
+/// Returns the worker-owned handle at one deterministic position in the
+/// reconciled active-player snapshot.
+///
+/// A count without an enumeration path cannot represent the usual server
+/// operation of walking the online-player set. The backing map is keyed by a
+/// complete copied profile, so iteration order is not a contract; sort by
+/// UUID and then display name before selecting the requested entry. Negative
+/// and out-of-range positions fail before a handle can be fabricated.
+fn active_player_handle_at(index: jint) -> Result<ObjectRef, AdapterError> {
+    let index = usize::try_from(index)
+        .map_err(|_| AdapterError::new("activePlayerHandleAt requires a non-negative index"))?;
+    ACTIVE_PLAYER_HANDLES.with(|slot| {
+        let active = slot.borrow();
+        let active = active.as_ref().ok_or_else(|| {
+            AdapterError::new("activePlayerHandleAt requires the adapter worker thread")
+        })?;
+        let mut entries = active.iter().collect::<Vec<_>>();
+        entries.sort_unstable_by(|(left, _), (right, _)| {
+            left.uuid()
+                .cmp(&right.uuid())
+                .then_with(|| left.name().cmp(right.name()))
+        });
+        entries
+            .get(index)
+            .map(|(_, handle)| **handle)
+            .ok_or_else(|| {
+                AdapterError::new(format!(
+                    "activePlayerHandleAt: index {index} is outside active player count {}",
+                    entries.len(),
+                ))
+            })
+    })
+}
+
 fn parse_uuid_string(value: &str, operation: &str) -> Result<[u8; 16], AdapterError> {
     let bytes = value.as_bytes();
     if bytes.len() != 36 || ![8, 13, 18, 23].into_iter().all(|index| bytes[index] == b'-') {
@@ -1833,6 +1867,28 @@ pub(crate) fn register_player_handle_for_profile_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_active_player_handle_at_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts one jint and returns one
+    // opaque jlong. Selection reads only the worker-owned copied roster and
+    // never publishes a player pointer, connection, ECS value, or guard.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_active_player_handle_at as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_player_handle_is_active_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -2141,6 +2197,19 @@ extern "system" fn native_player_handle_for_profile<'local>(
             })?)
         };
         resolve_active_player_profile(name.as_deref(), uuid.as_deref()).map(ObjectRef::to_bits)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_active_player_handle_at<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    index: jint,
+) -> jlong {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        active_player_handle_at(index).map(ObjectRef::to_bits)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -2746,6 +2815,14 @@ mod tests {
             "truncated UUIDs must fail before map lookup",
         );
         assert_eq!(active_player_count(), Ok(1));
+        assert_eq!(active_player_handle_at(0), Ok(first));
+        assert_eq!(
+            active_player_handle_at(-1),
+            Err(AdapterError::new(
+                "activePlayerHandleAt requires a non-negative index",
+            )),
+            "a malformed Java index must fail before selecting a roster entry",
+        );
         assert_eq!(
             resolve_resident_player_handle_is_active(first.to_bits()),
             Ok(true),
@@ -2759,6 +2836,13 @@ mod tests {
         assert_eq!(release_active_player_handle(&identity, &player), Some(first));
         assert_eq!(active_player_handle_for(&player), None);
         assert_eq!(active_player_count(), Ok(0));
+        assert_eq!(
+            active_player_handle_at(0),
+            Err(AdapterError::new(
+                "activePlayerHandleAt: index 0 is outside active player count 0",
+            )),
+            "a departed player must not remain enumerable after its handle is released",
+        );
         assert_eq!(
             resolve_resident_player_handle_is_active(first.to_bits()),
             Err(AdapterError::new(
@@ -2811,8 +2895,59 @@ mod tests {
             "a later roster observation resolves its new generation, never the departed handle",
         );
         assert_eq!(active_player_count(), Ok(1));
+        assert_eq!(active_player_handle_at(0), Ok(replacement));
         assert_eq!(release_active_player_handle(&identity, &player), Some(replacement));
         assert_eq!(active_player_count(), Ok(0));
+        RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn active_player_handle_enumeration_is_sorted_and_bounded() {
+        let identity = lifecycle_identity("adapter", "adapter", "fixture.Adapter");
+        let first_player = PlayerIdentity::new([2; 16], "Zulu");
+        let second_player = PlayerIdentity::new([1; 16], "Beta");
+        let third_player = PlayerIdentity::new([1; 16], "Alpha");
+        RESIDENT_OBJECT_HANDLES.with(|slot| {
+            *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(3));
+        });
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
+
+        // Deliberately insert in the reverse of the contract order. The UUID
+        // tie also proves that display name is the deterministic secondary key
+        // instead of a hash-map winner.
+        let first = active_player_handle(&identity, &first_player).expect("first profile handle");
+        let second = active_player_handle(&identity, &second_player).expect("second profile handle");
+        let third = active_player_handle(&identity, &third_player).expect("third profile handle");
+        assert_eq!(active_player_count(), Ok(3));
+        assert_eq!(
+            resolve_active_player_uuid("01010101-0101-0101-0101-010101010101"),
+            Err(AdapterError::new(
+                "playerHandleForUuid: multiple active players with UUID 01010101-0101-0101-0101-010101010101",
+            )),
+            "duplicate UUIDs remain ambiguous to the unqualified resolver",
+        );
+        assert_eq!(active_player_handle_at(0), Ok(third));
+        assert_eq!(active_player_handle_at(1), Ok(second));
+        assert_eq!(active_player_handle_at(2), Ok(first));
+        assert_eq!(
+            active_player_handle_at(3),
+            Err(AdapterError::new(
+                "activePlayerHandleAt: index 3 is outside active player count 3",
+            )),
+            "an out-of-range Java index must not fabricate a handle",
+        );
+        assert!(release_active_player_handle(&identity, &third_player).is_some());
+        assert_eq!(
+            resolve_resident_player_handle_name(third.to_bits()),
+            Err(AdapterError::new(
+                "playerHandleName: the referenced object no longer exists",
+            )),
+            "releasing an indexed profile must stale its old generation",
+        );
+        assert_eq!(active_player_handle_at(0), Ok(second));
+        assert!(release_active_player_handle(&identity, &second_player).is_some());
+        assert!(release_active_player_handle(&identity, &first_player).is_some());
         RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
         ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
     }

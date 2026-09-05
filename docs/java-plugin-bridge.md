@@ -800,6 +800,16 @@ identifying a later reconnect. The generated shim fixtures pin this exact
 declaration and registration; hermetic controls prove both unqualified lookup
 ambiguities before proving the qualified pair selects the intended handle.
 
+`activePlayerHandleAt(int)` completes the worker-local roster boundary for
+callers that need to enumerate active profiles. It uses the exact `(I)J` JNI
+descriptor and returns the same generation-checked opaque handle as the
+profile resolvers. Because the backing map has no stable iteration order, the
+worker sorts copied profiles by UUID and then display name before selecting an
+index. Negative and out-of-range indices fail explicitly; a disconnected
+profile therefore cannot remain enumerable or be replaced by a later
+generation. The selection is bounded by the worker's existing object-handle
+and lifecycle limits and never reads a server registry or world state.
+
 `activePlayerCount()` returns the count of live player handles in that same
 worker-owned lifecycle map. Its producer is the dedicated host's existing
 value-only roster reconciliation: each queued join adds a handle before its
@@ -850,7 +860,7 @@ block-state reads, validated resident block-state replacement, the current serve
 active retained entry's validated descriptor name and version. It also reconciles the server's
 value-only player roster into generation-checked handles: `playerHandleName(long)`,
 `playerHandleUuid(long)`, `playerHandleForUuid(String)`, `playerHandleForName(String)`,
-`playerHandleForNameIgnoringCase(String)`, `activePlayerCount()`, and
+`playerHandleForNameIgnoringCase(String)`, `activePlayerHandleAt(int)`, `activePlayerCount()`, and
 `playerHandleIsActive(long)` read that worker snapshot only. The dedicated host
 never hands a server object, connection, ECS entity, or world guard to Java.
 `AdapterHost::start_with_setup` mints the corresponding capability token only
@@ -1049,8 +1059,16 @@ wait on corresponding server capabilities.
 `activePlayerCount()` reads the same active lifecycle map as the retained
 player handles. Hermetic bridge tests cover its `0 → 1 → 0 → 1 → 0` transition
 around a release and slot reuse, so the count's consumer chain cannot quietly
-stop following the generation-checked lifecycle path. It is not a replacement
-for a future live roster enumeration API.
+stop following the generation-checked lifecycle path. The count is paired with
+`activePlayerHandleAt(int)` for callers that need the bounded handle sequence.
+
+`activePlayerHandleAt(int)` supplies that missing enumeration step without
+publishing the map itself. Its controls insert profiles in reverse order,
+including a duplicate UUID with distinct names, and predict the UUID/name
+sort order independently of hash-map layout. Negative and out-of-range
+indices are rejected, and releasing a profile removes it from the indexed
+snapshot before a slot can be reused. The result remains a worker-local,
+generation-checked handle; no connection, ECS value, or guard crosses JNI.
 
 `playerHandleIsActive(long)` has hermetic controls for both sides of that
 worker snapshot: an active lifecycle handle reports `true`, a live
