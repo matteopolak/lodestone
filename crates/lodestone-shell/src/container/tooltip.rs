@@ -296,7 +296,8 @@ fn title_line(stack: &ItemStack) -> TooltipLine {
             .or_else(|| {
                 stack
                     .potion_effect_id()
-                    .and_then(lodestone_data::potion::potion_effect_key)
+                    .and_then(lodestone_data::potion::PotionId::from_registry_id)
+                    .map(lodestone_data::potion::potion_effect_key)
                     .map(str::to_owned)
             })
             .or_else(|| stack.potion_color().is_some().then(|| "empty".to_string()));
@@ -362,7 +363,9 @@ fn hover_name(stack: &ItemStack) -> String {
 ///    `swiftness`/`slowness`/`strength`/`weakness`/`luck`/`leaping`/`invisibility`
 ///    are the ones that do.
 fn potion_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
-    let potion_id = stack.potion_effect_id();
+    let potion_id = stack
+        .potion_effect_id()
+        .and_then(lodestone_data::potion::PotionId::from_registry_id);
     let custom_effects = stack.potion_custom_effects();
     if potion_id.is_none()
         && custom_effects.is_empty()

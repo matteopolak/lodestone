@@ -163,6 +163,16 @@ duration and potency aliases are source data, not names inferred by removing `lo
 `strong_`. The fixture-backed generator rejects missing, duplicate, or out-of-range ids and a
 base name absent from the canonical potion registry.
 
+`lodestone_data::potion::PotionId` is the built-in-potion boundary. Construct it only with
+`PotionId::from_registry_id` before calling a census lookup; that makes every lookup total and
+keeps invalid numeric values out of display, tint, and splash-effect logic. The wire value stays
+raw in `lodestone_model::ItemComponents` because that version-free carrier must preserve an
+unknown custom, datapack, or future holder exactly. Its consumers validate on entry to the
+built-in census and fail closed: an unknown holder contributes no built-in effects and falls
+back to the component's custom data. When adding a generated potion row, regenerate the census
+and let `PotionId`'s length check follow the regenerated name table; do not add an unchecked
+numeric constructor or replace an unknown raw model value with a built-in default.
+
 ### `lodestone-data`: the crate these censuses live in
 
 Owns roughly twenty generated 26.2 game-data tables — block states, hardness, collision

@@ -34,21 +34,52 @@ use crate::generated_potions::POTION_NAMES;
 pub use crate::generated_potion_effects::POTION_EFFECTS;
 pub use crate::generated_potions::POTION_COUNT;
 
+/// A validated built-in `minecraft:potion` registry id for the canonical 26.2
+/// data census.
+///
+/// The wire codec is still an `i32` VarInt and the version-free item model
+/// retains that raw value, including an unrecognised one. Convert it at a
+/// consumer's built-in-census boundary with [`Self::from_registry_id`]: an
+/// unknown plugin, datapack, malformed, or future id then fails closed for
+/// built-in lookup without being rewritten or mistaken for a known potion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PotionId(u8);
+
+impl PotionId {
+    /// Validates a wire `minecraft:potion` registry id against this census.
+    #[must_use]
+    pub fn from_registry_id(id: i32) -> Option<Self> {
+        let id = u8::try_from(id).ok()?;
+        (usize::from(id) < POTION_NAMES.len()).then_some(Self(id))
+    }
+
+    /// Returns this potion's wire registry id.
+    #[must_use]
+    pub const fn registry_id(self) -> i32 {
+        self.0 as i32
+    }
+
+    const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// The base potion colour constant (`-13083194`), opaque ARGB, used when a potion has
 /// no colour-contributing effects.
 pub const BASE_POTION_COLOR: u32 = 0xFF38_5DC6;
 
-/// Resolves a network potion registry id to its canonical `minecraft:*` identifier.
-///
-/// Returns `None` for ids outside `0..POTION_COUNT`, so a malformed or future-version
-/// id surfaces as an explicit miss rather than a panic or a silently wrong potion.
+/// Resolves a validated potion registry id to its canonical `minecraft:*`
+/// identifier.
 #[must_use]
-pub fn potion_name(id: i32) -> Option<&'static str> {
-    usize::try_from(id).ok().and_then(|index| POTION_NAMES.get(index).copied())
+pub fn potion_name(id: PotionId) -> &'static str {
+    POTION_NAMES[id.index()]
 }
 
 /// Resolves a canonical `minecraft:*` potion identifier to its network registry id
 /// for protocol 776. The reverse of [`potion_name`].
+///
+/// This raw output is retained for version-free model storage; validate it with
+/// [`PotionId::from_registry_id`] before passing it back to a built-in census lookup.
 #[must_use]
 pub fn potion_id(name: &str) -> Option<i32> {
     POTION_NAMES
@@ -82,15 +113,19 @@ fn accumulate(effect_id: i32, amplifier: u8, red: &mut u32, green: &mut u32, blu
 /// The weighted effect-colour average that a `minecraft:potion_contents` component
 /// resolves to, with an explicit custom colour taking precedence over any computed mix.
 ///
-/// `potion` is the wire's `minecraft:potion` registry id (its built-in effect list is
-/// looked up from [`POTION_EFFECTS`]); `custom_color` and `custom_effects` are the
-/// component's own custom-colour and custom-effects fields, `custom_effects` as
-/// `(network mob-effect id, amplifier)` pairs in wire order. `custom_color` wins
-/// outright when present; otherwise every effect from both the potion and the custom
-/// list is averaged, weighted by `amplifier + 1`; an empty result (no potion holder, no
-/// custom effects) is [`BASE_POTION_COLOR`], matching vanilla's own no-argument default.
+/// `potion` is a validated built-in `minecraft:potion` registry id (its built-in
+/// effect list is looked up from [`POTION_EFFECTS`]); `custom_color` and
+/// `custom_effects` are the component's own custom-colour and custom-effects fields,
+/// `custom_effects` as `(network mob-effect id, amplifier)` pairs in wire order.
+/// `custom_color` wins outright when present; otherwise every effect from both the
+/// potion and the custom list is averaged, weighted by `amplifier + 1`; an empty result
+/// (no potion holder, no custom effects) is [`BASE_POTION_COLOR`].
 #[must_use]
-pub fn potion_color(potion: Option<i32>, custom_color: Option<u32>, custom_effects: &[(i32, u8)]) -> u32 {
+pub fn potion_color(
+    potion: Option<PotionId>,
+    custom_color: Option<u32>,
+    custom_effects: &[(i32, u8)],
+) -> u32 {
     if let Some(c) = custom_color {
         return opaque(c);
     }
@@ -98,9 +133,8 @@ pub fn potion_color(potion: Option<i32>, custom_color: Option<u32>, custom_effec
     let mut green = 0;
     let mut blue = 0;
     let mut weight = 0;
-    if let Some(id) = potion.and_then(|id| usize::try_from(id).ok())
-        && let Some(effects) = POTION_EFFECTS.get(id)
-    {
+    if let Some(id) = potion {
+        let effects = &POTION_EFFECTS[id.index()];
         for &(effect_index, amplifier, _duration_ticks) in *effects {
             let effect_id = i32::try_from(effect_index).unwrap_or(-1);
             accumulate(effect_id, amplifier, &mut red, &mut green, &mut blue, &mut weight);
@@ -116,16 +150,17 @@ pub fn potion_color(potion: Option<i32>, custom_color: Option<u32>, custom_effec
     }
 }
 
-/// The base effect-key name for a network potion registry id.
+/// The base effect-key name for a validated potion registry id.
 ///
 /// [`POTION_EFFECT_BASE_IDS`] explicitly maps each duration/potency variant to the
 /// registry id of its base potion; the returned path then comes from the canonical
 /// [`POTION_NAMES`] column. No alias is inferred from a `long_` or `strong_` prefix.
 #[must_use]
-pub fn potion_effect_key(id: i32) -> Option<&'static str> {
-    let index = usize::try_from(id).ok()?;
-    let base_id = usize::from(*POTION_EFFECT_BASE_IDS.get(index)?);
-    POTION_NAMES.get(base_id)?.strip_prefix("minecraft:")
+pub fn potion_effect_key(id: PotionId) -> &'static str {
+    let base_id = usize::from(POTION_EFFECT_BASE_IDS[id.index()]);
+    POTION_NAMES[base_id]
+        .strip_prefix("minecraft:")
+        .expect("generated potion names are minecraft-namespaced")
 }
 
 /// The display-name-with-prefix formula, ported as a literal table rather than
@@ -138,10 +173,10 @@ pub fn potion_effect_key(id: i32) -> Option<&'static str> {
 ///
 /// `base_item` is the bare path (`"potion"`, `"splash_potion"`, `"lingering_potion"`,
 /// `"tipped_arrow"`) — a `minecraft:` prefix, if the caller has one, must be stripped
-/// first. `None` for an unrecognised `base_item` or an `id` outside `0..POTION_COUNT`.
+/// first. `None` for an unrecognised `base_item`.
 #[must_use]
-pub fn potion_item_display_name(base_item: &str, id: i32) -> Option<&'static str> {
-    let key = potion_effect_key(id)?;
+pub fn potion_item_display_name(base_item: &str, id: PotionId) -> Option<&'static str> {
+    let key = potion_effect_key(id);
     potion_item_display_name_for_key(base_item, key)
 }
 
@@ -298,23 +333,22 @@ pub fn mob_effect_tooltip(effect_id: i32) -> Option<(&'static str, bool)> {
 /// `effect_index as i32`) rather than [`potion_effect_entries`]'s display name —
 /// `crate::mob_effects` is a network id->identifier resolver and this index is
 /// exactly a network id (see [`POTION_EFFECTS`]'s own doc comment). `None` for
-/// an id outside `0..POTION_COUNT`, matching every other lookup in this module.
+/// a caller with an unrecognised raw wire value must validate with [`PotionId`]
+/// before reaching this lookup, preserving that raw value in its owning component.
 #[must_use]
-pub fn potion_built_in_effects(id: i32) -> Option<&'static [(usize, u8, u32)]> {
-    usize::try_from(id).ok().and_then(|index| POTION_EFFECTS.get(index)).copied()
+pub fn potion_built_in_effects(id: PotionId) -> &'static [(usize, u8, u32)] {
+    POTION_EFFECTS[id.index()]
 }
 
 /// A potion's built-in effect list with no custom effects applied, resolved to
 /// display data — in the registry's own declaration order (which is also the
 /// tooltip's iteration order). Empty for `water`/`mundane`/`thick`/`awkward` and for
-/// an id outside `0..POTION_COUNT`, matching vanilla's cue to print `"No Effects"`
-/// instead.
+/// a caller with an unrecognised raw wire value must validate with [`PotionId`]
+/// before reaching this lookup, which makes an unknown holder behave like no
+/// built-in potion rather than a guessed one.
 #[must_use]
-pub fn potion_effect_entries(id: i32) -> Vec<PotionEffectEntry> {
-    let Some(effects) = usize::try_from(id).ok().and_then(|index| POTION_EFFECTS.get(index)) else {
-        return Vec::new();
-    };
-    effects
+pub fn potion_effect_entries(id: PotionId) -> Vec<PotionEffectEntry> {
+    POTION_EFFECTS[id.index()]
         .iter()
         .map(|&(effect_index, amplifier, duration_ticks)| {
             let (effect_name, harmful) = mob_effect_tooltip(effect_index as i32)
@@ -386,11 +420,8 @@ pub fn mob_effect_attribute_modifiers(
 /// potion's effects modify an attribute (most of them: only
 /// `speed`/`slowness`/`strength`/`weakness`/`luck`/`jump_boost`/`invisibility` do).
 #[must_use]
-pub fn potion_attribute_modifiers(id: i32) -> Vec<AttributeModifierEntry> {
-    let Some(effects) = usize::try_from(id).ok().and_then(|index| POTION_EFFECTS.get(index)) else {
-        return Vec::new();
-    };
-    effects
+pub fn potion_attribute_modifiers(id: PotionId) -> Vec<AttributeModifierEntry> {
+    POTION_EFFECTS[id.index()]
         .iter()
         .flat_map(|&(effect_index, amplifier, _duration_ticks)| {
             mob_effect_attribute_modifiers(effect_index as i32, amplifier)
@@ -405,11 +436,12 @@ mod tests {
     #[test]
     fn potion_name_and_id_round_trip_every_entry() {
         for id in 0..POTION_COUNT as i32 {
-            let name = potion_name(id).unwrap_or_else(|| panic!("no name for potion id {id}"));
-            assert_eq!(potion_id(name), Some(id), "{name}");
+            let id = PotionId::from_registry_id(id).expect("id within generated potion census");
+            let name = potion_name(id);
+            assert_eq!(potion_id(name), Some(id.registry_id()), "{name}");
         }
-        assert_eq!(potion_name(-1), None);
-        assert_eq!(potion_name(POTION_COUNT as i32), None);
+        assert_eq!(PotionId::from_registry_id(-1), None);
+        assert_eq!(PotionId::from_registry_id(POTION_COUNT as i32), None);
         assert_eq!(potion_id("minecraft:not_a_potion"), None);
     }
 
@@ -427,7 +459,7 @@ mod tests {
     /// default" for everything.
     #[test]
     fn water_bottle_is_the_base_colour_control() {
-        let water = potion_id("minecraft:water").unwrap();
+        let water = PotionId::from_registry_id(potion_id("minecraft:water").unwrap()).unwrap();
         assert_eq!(potion_color(Some(water), None, &[]), opaque(BASE_POTION_COLOR));
     }
 
@@ -440,8 +472,8 @@ mod tests {
     /// effect, any weight, divides back out to itself).
     #[test]
     fn swiftness_and_strong_harming_resolve_to_their_own_effect_colours() {
-        let swiftness = potion_id("minecraft:swiftness").unwrap();
-        let strong_harming = potion_id("minecraft:strong_harming").unwrap();
+        let swiftness = PotionId::from_registry_id(potion_id("minecraft:swiftness").unwrap()).unwrap();
+        let strong_harming = PotionId::from_registry_id(potion_id("minecraft:strong_harming").unwrap()).unwrap();
 
         let swiftness_color = potion_color(Some(swiftness), None, &[]);
         let harming_color = potion_color(Some(strong_harming), None, &[]);
@@ -467,7 +499,7 @@ mod tests {
     /// 50/50 mean of the two channel values.
     #[test]
     fn turtle_master_weights_by_amplifier_plus_one() {
-        let turtle_master = potion_id("minecraft:turtle_master").unwrap();
+        let turtle_master = PotionId::from_registry_id(potion_id("minecraft:turtle_master").unwrap()).unwrap();
         let mixed = potion_color(Some(turtle_master), None, &[]);
 
         // slowness = 0x8BAFE0 (weight 4), resistance = 0x9146F0 (weight 3).
@@ -492,7 +524,7 @@ mod tests {
     /// present-optional check.
     #[test]
     fn custom_color_overrides_every_effect() {
-        let swiftness = potion_id("minecraft:swiftness").unwrap();
+        let swiftness = PotionId::from_registry_id(potion_id("minecraft:swiftness").unwrap()).unwrap();
         let custom = potion_color(Some(swiftness), Some(0x00FF_0000), &[]);
         assert_eq!(custom, 0xFFFF_0000);
     }
@@ -516,11 +548,11 @@ mod tests {
     /// differently-worded set.
     #[test]
     fn item_display_name_covers_the_regular_and_irregular_shapes() {
-        let swiftness = potion_id("minecraft:swiftness").unwrap();
-        let turtle_master = potion_id("minecraft:turtle_master").unwrap();
+        let swiftness = PotionId::from_registry_id(potion_id("minecraft:swiftness").unwrap()).unwrap();
+        let turtle_master = PotionId::from_registry_id(potion_id("minecraft:turtle_master").unwrap()).unwrap();
 
         let mut mismatches = Vec::new();
-        let cases: &[(&str, i32, &str)] = &[
+        let cases: &[(&str, PotionId, &str)] = &[
             ("potion", swiftness, "Potion of Swiftness"),
             ("splash_potion", swiftness, "Splash Potion of Swiftness"),
             ("lingering_potion", swiftness, "Lingering Potion of Swiftness"),
@@ -533,7 +565,10 @@ mod tests {
         for &(base, id, expected) in cases {
             let actual = potion_item_display_name(base, id);
             if actual != Some(expected) {
-                mismatches.push(format!("{base}#{id}: expected {expected:?}, got {actual:?}"));
+                mismatches.push(format!(
+                    "{base}#{}: expected {expected:?}, got {actual:?}",
+                    id.registry_id()
+                ));
             }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
@@ -580,9 +615,10 @@ mod tests {
     /// a "Long" qualifier; only the tooltip's effect line does.
     #[test]
     fn duration_and_potency_variants_share_one_item_name() {
-        let base = potion_item_display_name("potion", potion_id("minecraft:swiftness").unwrap());
-        let long = potion_item_display_name("potion", potion_id("minecraft:long_swiftness").unwrap());
-        let strong = potion_item_display_name("potion", potion_id("minecraft:strong_swiftness").unwrap());
+        let id = |name| PotionId::from_registry_id(potion_id(name).unwrap()).unwrap();
+        let base = potion_item_display_name("potion", id("minecraft:swiftness"));
+        let long = potion_item_display_name("potion", id("minecraft:long_swiftness"));
+        let strong = potion_item_display_name("potion", id("minecraft:strong_swiftness"));
         assert_eq!(base, Some("Potion of Swiftness"));
         assert_eq!(base, long);
         assert_eq!(base, strong);
@@ -592,8 +628,8 @@ mod tests {
     /// every entry that a generic `"<Prefix> of <Effect>"` formula would get wrong.
     #[test]
     fn irregular_names_do_not_follow_the_of_pattern() {
-        let water = potion_id("minecraft:water").unwrap();
-        let mundane = potion_id("minecraft:mundane").unwrap();
+        let water = PotionId::from_registry_id(potion_id("minecraft:water").unwrap()).unwrap();
+        let mundane = PotionId::from_registry_id(potion_id("minecraft:mundane").unwrap()).unwrap();
         assert_eq!(potion_item_display_name("potion", water), Some("Water Bottle"));
         assert_eq!(potion_item_display_name("splash_potion", water), Some("Splash Water Bottle"));
         assert_eq!(potion_item_display_name("tipped_arrow", water), Some("Arrow of Splashing"));
@@ -608,7 +644,7 @@ mod tests {
     /// default/placeholder entry, proving the empty case is deliberate.
     #[test]
     fn water_bottle_has_no_effect_entries() {
-        let water = potion_id("minecraft:water").unwrap();
+        let water = PotionId::from_registry_id(potion_id("minecraft:water").unwrap()).unwrap();
         assert_eq!(potion_effect_entries(water), Vec::new());
         assert_eq!(potion_attribute_modifiers(water), Vec::new());
     }
@@ -620,8 +656,8 @@ mod tests {
     /// (amplifier 1) are the same effect, so amplifier is the only thing that differs.
     #[test]
     fn amplifier_zero_is_distinguished_from_nonzero() {
-        let swiftness = potion_id("minecraft:swiftness").unwrap();
-        let strong = potion_id("minecraft:strong_swiftness").unwrap();
+        let swiftness = PotionId::from_registry_id(potion_id("minecraft:swiftness").unwrap()).unwrap();
+        let strong = PotionId::from_registry_id(potion_id("minecraft:strong_swiftness").unwrap()).unwrap();
         let base = potion_effect_entries(swiftness);
         let strong_entries = potion_effect_entries(strong);
         assert_eq!(base.len(), 1);
@@ -637,8 +673,8 @@ mod tests {
     /// against the registry's own declared arguments rather than guessed.
     #[test]
     fn high_amplifiers_are_carried_through_unmodified() {
-        let strong_slowness = potion_id("minecraft:strong_slowness").unwrap();
-        let strong_turtle_master = potion_id("minecraft:strong_turtle_master").unwrap();
+        let strong_slowness = PotionId::from_registry_id(potion_id("minecraft:strong_slowness").unwrap()).unwrap();
+        let strong_turtle_master = PotionId::from_registry_id(potion_id("minecraft:strong_turtle_master").unwrap()).unwrap();
         let slowness_entries = potion_effect_entries(strong_slowness);
         let turtle_entries = potion_effect_entries(strong_turtle_master);
         assert_eq!(slowness_entries, vec![PotionEffectEntry { effect_name: "Slowness", amplifier: 3, duration_ticks: 400, harmful: true }]);
@@ -658,11 +694,11 @@ mod tests {
     /// alone (3600 ticks) cannot see a formatter that always prints a duration.
     #[test]
     fn instant_effect_duration_is_below_the_display_cutoff() {
-        let healing = potion_id("minecraft:healing").unwrap();
+        let healing = PotionId::from_registry_id(potion_id("minecraft:healing").unwrap()).unwrap();
         let entries = potion_effect_entries(healing);
         assert_eq!(entries, vec![PotionEffectEntry { effect_name: "Instant Health", amplifier: 0, duration_ticks: 1, harmful: false }]);
         assert!(entries[0].duration_ticks <= 20, "must fall inside endsWithin(20)");
-        let swiftness = potion_id("minecraft:swiftness").unwrap();
+        let swiftness = PotionId::from_registry_id(potion_id("minecraft:swiftness").unwrap()).unwrap();
         let sustained = potion_effect_entries(swiftness);
         assert!(sustained[0].duration_ticks > 20, "must fall outside endsWithin(20), the control");
     }
@@ -674,10 +710,10 @@ mod tests {
     /// modifiers" from "no effects".
     #[test]
     fn attribute_modifiers_distinguish_percent_from_flat_and_from_none() {
-        let swiftness = potion_id("minecraft:swiftness").unwrap();
-        let strong_swiftness = potion_id("minecraft:strong_swiftness").unwrap();
-        let strength = potion_id("minecraft:strength").unwrap();
-        let night_vision = potion_id("minecraft:night_vision").unwrap();
+        let swiftness = PotionId::from_registry_id(potion_id("minecraft:swiftness").unwrap()).unwrap();
+        let strong_swiftness = PotionId::from_registry_id(potion_id("minecraft:strong_swiftness").unwrap()).unwrap();
+        let strength = PotionId::from_registry_id(potion_id("minecraft:strength").unwrap()).unwrap();
+        let night_vision = PotionId::from_registry_id(potion_id("minecraft:night_vision").unwrap()).unwrap();
 
         let speed_mods = potion_attribute_modifiers(swiftness);
         assert_eq!(speed_mods, vec![AttributeModifierEntry { attribute_name: "Speed", amount: 0.2, percent: true }]);

@@ -152,15 +152,19 @@ fn fixture_covers_every_mapping_and_unique_base() {
     assert_eq!(bases.iter().copied().collect::<BTreeSet<_>>().len(), 24);
 
     for (row, base_id) in rows.iter().zip(bases) {
-        assert_eq!(potion::potion_name(row.id as i32), Some(row.potion_name.as_str()));
+        let potion_id = potion::PotionId::from_registry_id(row.id as i32)
+            .expect("fixture id is within the generated census");
+        assert_eq!(potion::potion_name(potion_id), row.potion_name.as_str());
         let expected_key = row
             .base_name
             .strip_prefix("minecraft:")
             .expect("validated namespace");
-        assert_eq!(potion::potion_effect_key(row.id as i32), Some(expected_key));
+        assert_eq!(potion::potion_effect_key(potion_id), expected_key);
+        let base_id = potion::PotionId::from_registry_id(i32::from(base_id))
+            .expect("fixture base id is within the generated census");
         assert_eq!(
-            potion::potion_name(i32::from(base_id)),
-            Some(row.base_name.as_str()),
+            potion::potion_name(base_id),
+            row.base_name.as_str(),
             "potion id {} must join through its canonical base-potion row",
             row.id
         );
@@ -170,13 +174,31 @@ fn fixture_covers_every_mapping_and_unique_base() {
 #[test]
 fn aliases_and_irregular_keys_use_the_explicit_mapping() {
     for ids in [[13, 14, 15], [19, 20, 21]] {
-        let expected = potion::potion_effect_key(ids[0]);
-        assert!(ids.into_iter().all(|id| potion::potion_effect_key(id) == expected));
+        let expected = potion::potion_effect_key(
+            potion::PotionId::from_registry_id(ids[0]).expect("fixture id is valid"),
+        );
+        assert!(ids.into_iter().all(|id| {
+            potion::potion_effect_key(
+                potion::PotionId::from_registry_id(id).expect("fixture id is valid"),
+            ) == expected
+        }));
     }
-    assert_eq!(potion::potion_effect_key(20), Some("turtle_master"));
-    assert_eq!(potion::potion_effect_key(40), Some("slow_falling"));
-    assert_eq!(potion::potion_effect_key(42), Some("wind_charged"));
-    assert_eq!(potion::potion_effect_key(45), Some("infested"));
+    assert_eq!(
+        potion::potion_effect_key(potion::PotionId::from_registry_id(20).unwrap()),
+        "turtle_master"
+    );
+    assert_eq!(
+        potion::potion_effect_key(potion::PotionId::from_registry_id(40).unwrap()),
+        "slow_falling"
+    );
+    assert_eq!(
+        potion::potion_effect_key(potion::PotionId::from_registry_id(42).unwrap()),
+        "wind_charged"
+    );
+    assert_eq!(
+        potion::potion_effect_key(potion::PotionId::from_registry_id(45).unwrap()),
+        "infested"
+    );
 
     let rows = parse_fixture(
         "0 minecraft:water minecraft:water\n\
@@ -189,10 +211,10 @@ fn aliases_and_irregular_keys_use_the_explicit_mapping() {
 
 #[test]
 fn negative_and_out_of_range_ids_are_none() {
-    assert_eq!(potion::potion_effect_key(i32::MIN), None);
-    assert_eq!(potion::potion_effect_key(-1), None);
-    assert_eq!(potion::potion_effect_key(POTION_COUNT as i32), None);
-    assert_eq!(potion::potion_effect_key(i32::MAX), None);
+    assert_eq!(potion::PotionId::from_registry_id(i32::MIN), None);
+    assert_eq!(potion::PotionId::from_registry_id(-1), None);
+    assert_eq!(potion::PotionId::from_registry_id(POTION_COUNT as i32), None);
+    assert_eq!(potion::PotionId::from_registry_id(i32::MAX), None);
 }
 
 #[test]

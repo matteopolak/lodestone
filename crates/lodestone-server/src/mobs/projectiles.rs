@@ -1089,7 +1089,9 @@ mod tests {
     #[test]
     fn a_splash_potion_of_swiftness_scales_the_applied_duration_by_distance() {
         let swiftness = lodestone_data::potion::potion_id("minecraft:swiftness").expect("swiftness exists");
-        let entries = lodestone_data::potion::potion_effect_entries(swiftness);
+        let potion_id = lodestone_data::potion::PotionId::from_registry_id(swiftness)
+            .expect("generated potion id is valid");
+        let entries = lodestone_data::potion::potion_effect_entries(potion_id);
         assert_eq!(entries.len(), 1, "swiftness carries exactly one built-in effect");
         let base_duration = f64::from(entries[0].duration_ticks);
         assert_eq!(base_duration, 3600.0, "swiftness's own base duration");
