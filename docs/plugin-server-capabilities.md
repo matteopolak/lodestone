@@ -3,14 +3,12 @@
 ## What it is
 
 A survey of what a server-side plugin can actually do today, set against the client's five-clause
-intent doctrine (`docs/plugin-api.md`), and a design for what a *general* server-side capability
-surface should look like once the server's own `bevy_ecs::World` (`crate::ecs` in
-`lodestone-server`) grows past Phase 0. The client has one coherent doctrine covering every
-player-verb seam; the server has five independently-shipped capability clusters, each answering
-its own issue, each choosing its own subset of that doctrine — some choosing none of it. This
-document names which is which, by symbol, and proposes the one addition (a general veto/adjudicate
-layer riding the substrate's own `TickSet::Adjudicate`) that would make the pattern the crafting
-hooks already discovered available to everything else, instead of being reinvented per feature.
+intent doctrine (`docs/plugin-api.md`), and the first working slice of a *general* server-side
+capability surface on the server's own `bevy_ecs::World` (`crate::ecs` in
+`lodestone-server`). The client has one coherent doctrine covering every player-verb seam; the
+server has independently-shipped capability clusters, each answering its own scope. This document
+names which is which, by symbol, and records the bounded veto/adjudicate layer riding
+`TickSet::Adjudicate` that the checked mob-spawn path now consumes.
 
 ## How it works
 
@@ -31,8 +29,12 @@ Scheduler callbacks run after maintenance, so their messages have the same lifet
 
 Do not install another aging system for a type registered with `add_message`; that would shorten its
 delivery window. Merely inserting `Messages<T>` as a resource does not register its maintenance.
-This surface supports plugin-defined observations; it does not expose built-in gameplay proposals,
-event cancellation, cross-plugin priority tiers, or a read-only monitor tier.
+`ServerProposal` is the built-in gameplay proposal vocabulary. The initial `SpawnMob` case carries
+only entity key and position; plugins observe it with `MessageReader<ServerProposal>` and call
+`ServerProposalDecisions::decide`. `Allow` leaves it unchanged, `Deny` reports a typed refusal,
+and `Replace` supplies the action the single apply path will perform. Lower numeric priorities win;
+equal priorities retain the first system to decide. The vocabulary has no durable history or
+read-only monitor tier yet.
 
 ### Native tick scheduling
 
@@ -93,7 +95,7 @@ table generalises).
 | Worldgen: custom generator | [`lodestone_worldgen::generator::ChunkGenerator`] | — (a `dyn` trait a plugin *implements*, not an event it *observes*) | yes — one trait object per dimension key | N/A — there is no refusal; the plugin's output *is* the terrain | N/A — nothing else supplies terrain for the same column | N/A — a generator has no lifecycle beyond existing |
 | Worldgen: custom dimension | [`lodestone_server::plugin_dimension::DimensionRegistry`] | — (a registration call, `register(dimension)`) | yes — `Option<Arc<PluginDimension>>` keyed by string, one owner per key | partial — `register` returns `None` on a duplicate key, so *that* refusal is observable; there is no other refusal shape | N/A | N/A — register once, `get`/`chunk_source` forever after |
 | Worldgen: live structure placement | [`lodestone_server::structure_placement::place_structure_live`] | — (a direct function call with a template and origin) | yes — one function, called synchronously | no — returns a plain `usize` (cells written), no verdict a second party could have vetoed | N/A — nothing else contests one placement call | N/A — one-shot, matches its own shape |
-| Entity spawn/despawn | [`lodestone_server::IntegratedServer::spawn_mob`]/[`despawn_mob`], backed by [`crate::mobs::MobSim::remove_mob`] | — (direct calls: `spawn_mob(kind, pos)`, `despawn_mob(id)`) | yes — `MobHandle::with` is the one mutation path | no — a spawn/despawn either applies or the handle is `None` (no tick loop); there is no "another plugin said no" outcome at all | **missing entirely** — a second plugin cannot object to, delay, or observe-before-apply another plugin's spawn or despawn; it just happens | N/A — install/remove exist (spawn/despawn) but nothing between them is observable by a third party |
+| Entity spawn/despawn | [`lodestone_server::IntegratedServer::spawn_mob_proposed`]/[`despawn_mob`], backed by [`crate::mobs::MobSim::remove_mob`] | partial — `ServerProposalAction::SpawnMob` is observable; legacy `spawn_mob` and `despawn_mob` remain direct | yes — the checked path resolves exactly one action before `MobHandle::with` mutates | partial — checked spawn returns `SpawnProposalRefusal::{Denied, TimedOut, Unavailable}`; direct spawn/despawn retain their legacy `Option` result | partial — native plugins can prioritize allow/deny/replace for checked spawn; despawn has no proposal yet | N/A — install/remove exist (spawn/despawn) but nothing between them is observable by a third party |
 | Crafting-station hooks | [`lodestone_server::plugin_crafting::CraftingStationHooks`], [`StationVerdict`] | **yes** — [`StationInputs`] is observation-only: the station, its input cells, vanilla's own computed result; never a menu-slot index, a raw click, or a mutable inventory borrow | **yes** — `workstation_result` is the one choke point every one of the five production entry points already passed through before this work | **yes** — `StationVerdict::{Allow, Deny, Replace(ItemStack)}`, always returned, never inferred from silence | **dropped, by name** — "there is no second, *human* source of a workstation result to arbitrate against ('human outranks a plugin' has nothing to outrank)" | **dropped, by name** — "a station evaluation has no lifecycle beyond answering the one question it was asked" |
 
 Reading the table by column rather than by row is the actual finding. Column (1): only crafting
@@ -124,24 +126,20 @@ did — never default to
 either "shipping only Allow" (silently dropping clause 3) or "faking a human to outrank" (clause 4
 answered with a fabrication instead of an argument).**
 
-### The one gap that is a real hole, not a dropped clause
+### The first real hole: checked spawn
 
-Entity spawn/despawn is the one capability in the table whose missing clauses are not defensible by
-the same argument crafting hooks used. There genuinely *is* a second claimant an adjudication layer
-would matter for: two independently-loaded plugins each deciding, on the same tick, whether to
-spawn a mob at a location, or a world-population cap a different plugin wants to enforce against
-every spawn regardless of source. Today `spawn_mob`/`MobSim::spawn_species` simply run — there is
-no point at which a second plugin's opinion could be consulted, and no typed outcome a caller could
-inspect to learn "a mob was spawned but something downstream immediately removed it," because
-nothing downstream exists to do that.
+Checked spawn closes the first real adjudication hole. A caller awaits
+`IntegratedServer::spawn_mob_proposed`; its bounded ingress reaches the primary tick task's
+`TickSet::Drain`, plugins see the proposal during `TickSet::Adjudicate`, and `TickSet::Apply`
+returns the final action before `MobHandle::with` runs. Plugins run only on the tick task, and the
+caller awaits without either a world lock or a mob-handle lock. The bounded queue and one-second
+response deadline make a stopped or overloaded tick task observable as `Unavailable` or
+`TimedOut`, rather than silently applying a late mutation.
 
-This is not a criticism of `docs/plugin-entity-api.md`'s own scoping — that document says plainly
-its own server-side half is built on `crate::mobs::MobHandle`, a pre-ECS primitive, specifically
-*because* `crate::ecs` (Phase 0) moves no state yet and there is nowhere else to hang a veto. The
-gap is real, and closing it is gated on the same thing every other future capability in this
-document is gated on: `crate::ecs`'s `TickSet::Adjudicate` actually having systems in it.
+The remaining gap is narrower: legacy direct spawn, despawn, population-driven spawn, and every
+non-spawn capability do not yet submit `ServerProposal`s.
 
-### The substrate already has the right shape, and nothing uses it yet
+### The substrate now has one production consumer
 
 `crates/lodestone-server/src/ecs/schedules.rs` declares [`TickSet`] with five members — `Drain`,
 **`Adjudicate`**, `Apply`, `Simulate`, `Publish` — and `Adjudicate`'s own doc comment already states
@@ -149,9 +147,10 @@ the target design this document is proposing, almost verbatim: *"a protection pl
 plugin or a minigame manager gets a place in the schedule to say no before a proposal becomes world
 state... server-side, the plugin outranks the client."* That is clauses (1)–(4) of the intent
 doctrine, restated for the inverted-arbitration case, already written down — the set exists, it is
-chained into `GameTick`, and Phase 2 of `docs/plans/server-ecs-migration.md` is where it gets
-populated. **None of the five shipped capabilities above route through it.** Every one predates
-Phase 0 or was built parallel to it, against whichever pre-ECS primitive already existed
+chained into `GameTick`, and Phase 2 of `docs/plans/server-ecs-migration.md` is where it grows
+beyond this first case. `IntegratedServer::spawn_mob_proposed` is the current production route
+through it. The other capabilities predate Phase 0 or were built parallel to it, against whichever
+pre-ECS primitive already existed
 (`MobHandle`, `WorldStateHandle`, a plain registry) — which is the correct call for each of them
 individually (there was nothing else to build against), and is exactly why this survey exists: the
 five capabilities are real, individually well-reasoned, and collectively inconsistent, because each
@@ -180,56 +179,48 @@ callback execution so nested scheduling and cancellation remain valid. The dedic
 `dedicated_scheduler_runs_delayed_work_on_the_persistent_primary_world` test asserts exact observed
 counts at every tick, including cancellation before a would-be third repetition.
 
-### The recommendation
+### Extending the implemented mechanism
 
-**Do not build a sixth, bespoke adjudication mechanism for entity spawn/despawn (or for whatever
-capability lands next).** Build one general one, once, on `TickSet::Adjudicate`, shaped like this:
+**Do not build a bespoke adjudication mechanism for despawn or the next capability.** Extend the
+existing `ServerProposal` mechanism on `TickSet::Adjudicate`:
 
 ```rust
 /// One proposed server-side action, in the observation vocabulary a plugin
 /// reasons about — never a raw ClientAction or an internal id allocation
-/// detail. `SpawnMob { kind, pos, source }` is the concrete first case;
-/// the enum grows one variant per capability that adopts this layer.
-#[derive(Event)] // bevy_ecs Message, matching `docs/plugin-api.md`'s `GameEvent` shape
-pub enum ServerProposal { SpawnMob { kind: ResourceKey, pos: Vec3 }, /* ... */ }
+/// detail. The action enum grows one variant per capability that adopts this
+/// layer.
+#[derive(Message)]
+pub struct ServerProposal { id: u64, action: ServerProposalAction }
 
 /// A plugin's answer — the same three-way shape `StationVerdict` already
 /// proved out, generalised past crafting.
-pub enum ProposalVerdict { Allow, Deny, Replace(ServerProposal) }
+pub enum ProposalVerdict { Allow, Deny, Replace(ServerProposalAction) }
 
 /// Systems in `TickSet::Adjudicate` read `Messages<ServerProposal>` and
 /// write into this per-proposal-id table; `TickSet::Apply`'s systems
-/// consult it before doing anything the proposal described. First
-/// non-`Allow` verdict wins — `CraftingStationHooks::evaluate`'s own rule,
-/// unchanged.
+/// consult it before doing anything the proposal described. The lowest numeric
+/// priority wins; equal priorities retain the first decision.
 ```
 
-This reuses, rather than reinvents, three things this repo has already built and tested: the
-verdict shape (`StationVerdict`), the "first non-`Allow` wins, priority-ordered" rule
-(`CraftingStationHooks::evaluate`, `EgressFilters`/`ActionVetoes`), and the schedule position
+This reuses the verdict shape, the priority-ordered rule, and the schedule position
 (`TickSet::Adjudicate`, already declared and already documented for exactly this purpose). What it
-adds is the one thing none of the three prior art pieces needed on their own: a **shared** proposal
+adds is the one thing no direct mutation path needed on its own: a **shared** proposal
 vocabulary two independently-authored plugins can both see, which is precisely what "two plugins
 disagreeing about the same spawn" requires and what a bespoke per-capability hook (a second
-`SpawnHooks` registry, mirroring `CraftingStationHooks` one-for-one) would not provide — a second
-registry solves one capability's arbitration and leaves the next one to invent a seventh mechanism.
+registry) would not provide — a second registry solves one capability's arbitration and leaves the
+next one to invent another mechanism.
 
-### Migration path, not a rewrite
+### Next adoption, not a rewrite
 
 Nothing above requires touching `spawn_mob`/`despawn_mob`'s existing signatures or breaking
 `crates/lodestone-server/tests/native_plugin_spawns_and_despawns_a_mob.rs`, which is deliberate:
 
-1. **Land `TickSet::Adjudicate`'s first real system** the day Phase 1 threads `&mut World` into
-   `crate::tick::run_tick_loop` (`docs/plans/server-ecs-migration.md`'s own next step) — a plain
-   `Messages<ServerProposal>` reader/writer pair, no capability wired to it yet. This is the
-   substrate work this document's recommendation is gated on, and it is Phase 2's stated job, not
-   new scope this document invents.
-2. **`spawn_mob` gains a checked variant** (`spawn_mob_proposed`, or a feature flag on the existing
-   one) that pushes a `ServerProposal::SpawnMob` and reads back a verdict from the `World` before
-   calling `MobSim::spawn_species` — additive, so every existing caller (including the direct-call
-   test above) keeps working unchanged until a host opts in.
-3. **A second capability adopts the same enum** only once a second real need appears — do not
-   pre-populate `ServerProposal` with every capability in this document's table "for completeness."
+1. **Keep `spawn_mob` direct** while callers migrate deliberately to async
+   `spawn_mob_proposed`; the direct-call test remains the compatibility control.
+2. **Add a second action only with a production owner** — likely a checked despawn or a natural-spawn
+   seam — and make it use the same ingress, message, decision resource, and apply pass.
+3. **Do not pre-populate `ServerProposal`** with every capability in this document's table. Add an
+   action only once a second real need appears; a speculative variant has no production consumer.
    Crafting hooks stay on `StationVerdict` regardless: `docs/plugin-crafting-hooks.md`'s own
    argument for why clauses 4/5 do not apply there is unaffected by this document, and there is no
    second human/plugin claimant for a workstation read the way there is for a spawn — migrating it
@@ -255,14 +246,14 @@ Nothing above requires touching `spawn_mob`/`despawn_mob`'s existing signatures 
 
 Scheduling uses integer gameplay-tick delays and periods; no environment variable or runtime flag
 is required. Delays, repeats, and handles reject `u64` overflow rather than wrapping.
-The adjudication proposal adds no crate, dependency, or runtime flag — `ServerProposal`/
-`ProposalVerdict` would live in `crate::ecs` (or a small new sibling module) in `lodestone-server`,
-the same crate every capability in the table above already lives in.
+The adjudication layer adds no crate, dependency, or runtime flag. It lives in
+`lodestone_server::ecs::proposals`; its queue holds 64 in-flight requests and its async caller
+deadline is one second.
 
 ## Dependencies
 
-`bevy_ecs`/`bevy_app`, already direct dependencies of `lodestone-server` (see the doc-drift note
-above for why this is not "via `lodestone-ecs`"). No new crate is implied by the recommendation.
+`bevy_ecs`/`bevy_app` and the existing Tokio runtime, already direct dependencies of
+`lodestone-server` (see the doc-drift note above for why this is not "via `lodestone-ecs`").
 
 ## See also
 

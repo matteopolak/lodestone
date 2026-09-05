@@ -722,6 +722,10 @@ pub struct IntegratedServer {
     /// `crate::ecs::ServerTickWitness` for why it is a one-way valve rather
     /// than an accessor.
     server_tick: Option<crate::ecs::ServerTickWitness>,
+    /// Bounded ingress for native-plugin adjudication of externally requested
+    /// server actions. It never exposes the tick-owned ECS `World`.
+    #[cfg(not(target_arch = "wasm32"))]
+    spawn_proposals: Option<crate::ecs::ServerProposalHandle>,
     /// The one-shot mob-seeding task, `Some` only for
     /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs).
     ///
@@ -1203,6 +1207,8 @@ impl IntegratedServer {
                 clock: None,
                 // No tick task, so nobody owns a server `World`.
                 server_tick: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                spawn_proposals: None,
                 // Nothing seeds a mob population through this constructor
                 // (see the `mobs` binding above), so there is nothing to seed.
                 seed_task: None,
@@ -1362,6 +1368,8 @@ impl IntegratedServer {
                 clock: None,
                 // No tick task, so nobody owns a server `World`.
                 server_tick: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                spawn_proposals: None,
                 // Nothing seeds a mob population through this constructor (see
                 // the `mobs` binding above), so there is nothing to seed.
                 seed_task: None,
@@ -2104,6 +2112,7 @@ impl IntegratedServer {
         // `crate::ecs`'s module doc — the primary tick-loop variant owns a
         // `World`, not an `App`.
         let server_tick = server_app.witness();
+        let spawn_proposals = server_app.proposal_handle();
         let server_world = server_app.into_world();
         // Cloned out here rather than inside the `async move` below: an
         // `Arc::clone(&x)` *inside* the block moves `x` into the coroutine, so
@@ -2209,6 +2218,7 @@ impl IntegratedServer {
                 tick_task: Some(tick_task),
                 clock: Some(clock),
                 server_tick: Some(server_tick),
+                spawn_proposals: Some(spawn_proposals),
                 seed_task: Some(seed_task),
                 #[cfg(not(target_arch = "wasm32"))]
                 save: None,
@@ -2726,10 +2736,9 @@ impl IntegratedServer {
 
     /// Spawns a mob of `entity_type` at `pos` on the live simulation, through
     /// the same [`MobHandle::with`] lock [`crate::server::apply_attack`]
-    /// already uses from a connection task — the server-side half of a
-    /// native plugin's spawn/despawn/modify surface. Returns the id a
-    /// subsequent [`despawn_mob`](Self::despawn_mob) or any connection's
-    /// attack can target.
+    /// already uses from a connection task — the server-side half of a native
+    /// plugin's spawn/despawn/modify surface. Returns the id a subsequent
+    /// [`despawn_mob`](Self::despawn_mob) or any connection's attack can target.
     ///
     /// `None` for a constructor with no tick loop, matching [`mobs`](Self::mobs)
     /// — see that accessor's own doc for the reseed race a caller should poll
@@ -2743,6 +2752,33 @@ impl IntegratedServer {
     ) -> Option<i32> {
         self.mobs()
             .map(|mobs| mobs.with(|sim| sim.spawn_species(entity_type, pos).id()))
+    }
+
+    /// Submits a mob spawn to native-plugin adjudication and applies the final
+    /// action to the live mob simulation.
+    ///
+    /// The wait occurs before [`MobHandle::with`] is called, so a plugin never
+    /// runs while the mob simulation lock is held. `Unavailable` means this
+    /// constructor has no primary tick task or that task can no longer accept
+    /// requests; `TimedOut` bounds a stalled task rather than retaining a
+    /// caller indefinitely.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub async fn spawn_mob_proposed(
+        &self,
+        entity_type: lodestone_model::ResourceKey,
+        pos: lodestone_model::Vec3,
+    ) -> Result<i32, crate::ecs::SpawnProposalRefusal> {
+        let proposals = self
+            .spawn_proposals
+            .as_ref()
+            .ok_or(crate::ecs::SpawnProposalRefusal::Unavailable)?;
+        let crate::ecs::ServerProposalAction::SpawnMob { entity_type, pos } =
+            proposals.spawn_mob(entity_type, pos).await?;
+        let mobs = self
+            .mobs()
+            .ok_or(crate::ecs::SpawnProposalRefusal::Unavailable)?;
+        Ok(mobs.with(|sim| sim.spawn_species(entity_type, pos).id()))
     }
 
     /// Removes the mob `id` names from the live simulation, returning whether
@@ -3033,6 +3069,7 @@ impl IntegratedServer {
         // block already rules out.
         let server_app = crate::ecs::ServerApp::bootstrap();
         let server_tick = server_app.witness();
+        let spawn_proposals = server_app.proposal_handle();
         let server_world = server_app.into_world();
         // Every one of these is cloned out *here* rather than inside the
         // `async move` below: a `.clone()` inside the block moves the original
@@ -3405,6 +3442,7 @@ impl IntegratedServer {
             tick_task: Some(tick_task),
             clock: Some(clock),
             server_tick: Some(server_tick),
+            spawn_proposals: Some(spawn_proposals),
             // LAN seeds no mob population (nothing calls `MobHandle::reseed`
             // here — see the `mobs` binding above), so there is nothing to seed.
             seed_task: None,

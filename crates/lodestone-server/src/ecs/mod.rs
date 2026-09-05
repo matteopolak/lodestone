@@ -98,10 +98,15 @@ mod gate;
 #[cfg(test)]
 mod messages;
 pub(crate) mod plugin;
+pub mod proposals;
 pub(crate) mod schedules;
 mod scheduler;
 
 pub use plugin::{ServerCorePlugin, ServerTick, ServerTickWitness, advance_server_tick};
+pub use proposals::{
+    ProposalVerdict, ServerProposal, ServerProposalAction, ServerProposalDecisions,
+    ServerProposalHandle, ServerProposalPlugin, SpawnProposalRefusal,
+};
 pub use schedules::{GameTick, IngestSet, NetIngest, ServerBoot, TickSet};
 pub use scheduler::{ServerTaskId, ServerTaskScheduler, run_server_tasks};
 
@@ -172,6 +177,16 @@ impl ServerApp {
     #[must_use]
     pub fn witness(&self) -> ServerTickWitness {
         self.app.world().resource::<ServerTickWitness>().clone()
+    }
+
+    /// A cloneable ingress for actions that must be adjudicated by the tick
+    /// task before they mutate server state.
+    ///
+    /// This is deliberately a sender, never a `World` accessor: callers can
+    /// wait for an answer without borrowing or locking the tick-owned world.
+    #[must_use]
+    pub fn proposal_handle(&self) -> ServerProposalHandle {
+        self.app.world().resource::<ServerProposalHandle>().clone()
     }
 
     /// [`ServerTick::count`] — how many schedule runs have executed
