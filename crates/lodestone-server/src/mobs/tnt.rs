@@ -74,7 +74,6 @@
 //!   indirect-source attribution. Nothing here reads it back, so
 //!   [`MobSim::spawn_tnt`] takes no owner parameter.
 
-use lodestone_data::block_states;
 use lodestone_entity::DamageFlags;
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_physics::{
@@ -333,10 +332,7 @@ struct TntCollision<'a> {
 impl CollisionView for TntCollision<'_> {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
         let name = (self.block_state)(x, y, z);
-        let Some(id) = block_state_id(&name).or_else(|| block_states::state_id(&name)) else {
-            return;
-        };
-        let Some(state) = block_states::StateId::new(id) else {
+        let Some(state) = block_state_id(&name) else {
             return;
         };
         let shape = lodestone_data::collision_shapes::collision_boxes(state);

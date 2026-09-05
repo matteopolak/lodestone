@@ -303,11 +303,7 @@ pub fn grass_can_stay_alive(above_state: &str) -> bool {
     }
     // 3. The real light-dampening-into query is strictly less than 15.
     match crate::mobs::block_state_id(above_state) {
-        Some(id) => {
-            let id = lodestone_data::block_states::StateId::new(id)
-                .expect("state-id resolution returns a generated state");
-            lodestone_data::light_props::dampening(id) < 15
-        }
+        Some(id) => lodestone_data::light_props::dampening(id) < 15,
         None => true,
     }
 }
@@ -3074,10 +3070,7 @@ mod tests {
         let dampening = |state: &str| {
             let id = crate::mobs::block_state_id(state)
                 .unwrap_or_else(|| panic!("{state} is not a known block state"));
-            lodestone_data::light_props::dampening(
-                lodestone_data::block_states::StateId::new(id)
-                    .expect("fixture state is generated"),
-            )
+            lodestone_data::light_props::dampening(id)
         };
         // The values the predictions rest on, asserted from the census.
         assert_eq!(dampening("minecraft:air"), 0);

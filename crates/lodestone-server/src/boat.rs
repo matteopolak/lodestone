@@ -105,7 +105,7 @@
 //! [`crate::mobs::MobSim`] for the spawn. No protocol and no world handle — the
 //! caller supplies a block-state reader, as `use_spawn_egg` does.
 
-use lodestone_data::{block_states, collision_shapes, entity_types, outline_shapes};
+use lodestone_data::{collision_shapes, entity_types, outline_shapes};
 use lodestone_model::{BlockPos, ResourceKey, Vec3};
 
 /// Every boat's width — every boat, chest boat and raft in 26.2 shares
@@ -424,13 +424,11 @@ fn fluid_surface_height(
 /// The **outline** boxes of a full block-state string, empty for air and for a
 /// name outside the table.
 ///
-/// Resolution is `block_state_id` then `block_states::state_id`, never
-/// `block_state_id_or_default` — the same choice, for the same reason,
-/// [`crate::spawn_egg`]'s own helper documents: the default answer for a bare
-/// name is not the block's *lowest* state id.
+/// Resolution uses `block_state_id`, not a lowest-id fallback: a bare name
+/// resolves through its block's registered default state, including only the
+/// properties the input explicitly overrides.
 fn outline_boxes_for(state: &str) -> &'static [lodestone_model::BlockAabb] {
-    let id = crate::mobs::block_state_id(state).or_else(|| block_states::state_id(state));
-    id.and_then(block_states::StateId::new)
+    crate::mobs::block_state_id(state)
         .map(outline_shapes::outline_boxes)
         .unwrap_or(&[])
 }
@@ -438,8 +436,7 @@ fn outline_boxes_for(state: &str) -> &'static [lodestone_model::BlockAabb] {
 /// The **collision** boxes of a full block-state string, for the obstruction
 /// test. Empty for air, a fluid, and every plant.
 fn collision_boxes_for(state: &str) -> &'static [collision_shapes::Aabb] {
-    let id = crate::mobs::block_state_id(state).or_else(|| block_states::state_id(state));
-    id.and_then(block_states::StateId::new)
+    crate::mobs::block_state_id(state)
         .map(collision_shapes::collision_boxes)
         .unwrap_or(&[])
 }

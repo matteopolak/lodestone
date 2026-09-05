@@ -405,16 +405,16 @@ struct VehicleCollision<'a> {
 }
 
 impl VehicleCollision<'_> {
-    /// The resolved block-state id at a cell, `None` outside the table.
-    fn state_id(&self, x: i32, y: i32, z: i32) -> Option<u32> {
+    /// The validated block-state id at a cell, `None` outside the table.
+    fn state_id(&self, x: i32, y: i32, z: i32) -> Option<block_states::StateId> {
         let name = (self.block_state)(x, y, z);
-        block_state_id(&name).or_else(|| block_states::state_id(&name))
+        block_state_id(&name)
     }
 }
 
 impl CollisionView for VehicleCollision<'_> {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<lodestone_physics::Aabb>) {
-        let Some(state) = self.state_id(x, y, z).and_then(block_states::StateId::new) else {
+        let Some(state) = self.state_id(x, y, z) else {
             return;
         };
         let shape = collision_shapes::collision_boxes(state);

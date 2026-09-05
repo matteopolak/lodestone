@@ -105,7 +105,7 @@
 //! [`crate::mob_spawn::allowed_in_peaceful`] for the peaceful guard. No protocol,
 //! no world handle — the caller supplies a block-state reader.
 
-use lodestone_data::{block_states, collision_shapes, entity_types};
+use lodestone_data::{collision_shapes, entity_types};
 use lodestone_model::{BlockFace, BlockPos, Difficulty, ResourceKey, Vec3};
 
 /// What a right-click with the held item means for this module.
@@ -326,18 +326,15 @@ pub fn y_offset(top: Option<f64>, moved_up: bool) -> f64 {
 /// The collision boxes of a full block-state string, empty for air, a fluid, tall
 /// grass, or a name outside the table.
 ///
-/// Resolution is `block_state_id` then `block_states::state_id`, deliberately —
-/// **never** `block_state_id_or_default`, which answers a bare name with the
-/// block's *lowest* state id rather than its default. That distinction is what
-/// decides whether a bare `minecraft:oak_slab` is a bottom slab or a full cube,
-/// and it is the same trap `crate::mobs`' item-settling probe documents.
+/// Resolution uses the shared generated-state boundary, deliberately never a
+/// lowest-id fallback. That distinction decides whether a bare
+/// `minecraft:oak_slab` is a bottom slab or a full cube.
 ///
 /// `pub(crate)`: `crate::mob_spawner`'s spawner-tick collision check
 /// (`crate::tick::run_tick_loop`'s call site) reuses this rather than a second
 /// copy of the same resolution order.
 pub(crate) fn collision_boxes_for(state: &str) -> &'static [collision_shapes::Aabb] {
-    let id = crate::mobs::block_state_id(state).or_else(|| block_states::state_id(state));
-    id.and_then(block_states::StateId::new)
+    crate::mobs::block_state_id(state)
         .map(collision_shapes::collision_boxes)
         .unwrap_or(&[])
 }

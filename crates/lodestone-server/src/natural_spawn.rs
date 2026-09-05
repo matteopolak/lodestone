@@ -574,7 +574,6 @@ impl PaletteProps {
                 .iter()
                 .map(|name| {
                     block_state_id_or_default(name)
-                        .and_then(lodestone_data::block_states::StateId::new)
                         .map(lodestone_data::light_props::light_props)
                         // An unresolvable state darkens and occludes, never
                         // brightens — see `light_props`' own module doc.
@@ -1256,7 +1255,6 @@ fn is_lava(state: &str) -> bool {
 /// `spawnCategoryForPosition` opens with.
 fn is_full_solid(state: &str) -> bool {
     block_state_id_or_default(state)
-        .and_then(lodestone_data::block_states::StateId::new)
         .map(lodestone_data::collision_shapes::collision_boxes)
         .is_some_and(|boxes| {
             boxes.len() == 1
@@ -1274,7 +1272,6 @@ fn is_valid_spawn_surface(state: &str) -> bool {
         return false;
     }
     block_state_id_or_default(state)
-        .and_then(lodestone_data::block_states::StateId::new)
         .map(lodestone_data::light_props::light_props)
         .is_none_or(|(_, emission)| emission < 14)
 }

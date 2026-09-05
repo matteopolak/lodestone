@@ -115,6 +115,13 @@ boundaries validate with `StateId::new` before either lookup, preserving `None` 
 for unknown input. Extend the paired census and its committed-dump tests together, keeping its
 state count equal to the block-state table; there is no configuration or external runtime lookup.
 
+The integrated server's `mobs::block_state_id` is the equivalent boundary for a state string read
+from a chunk: it returns `Option<StateId>`, never a raw integer. A built-in name (including a bare
+name whose omitted properties use the registered default) becomes a validated generated ID; a
+plug-in or data-pack name stays `None` for its owner to handle. Keep that `Option` at new server
+consumers rather than converting a custom name to air or fabricating a numeric ID; call `raw()` only
+at a packet or other explicitly numeric boundary.
+
 Per-state outline (`getShape`, what block **selection** uses) and interaction
 (`getInteractionShape`, refines the hit *face* only, never adds a hit) shapes,
 dumped and committed the same way as collision shapes — see [Registries](./registries.md). The

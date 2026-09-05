@@ -116,7 +116,6 @@
 //! primed-TNT entity's own, so a TNT minecart is a third *producer* into an
 //! existing pipeline, not a new consumer.
 
-use lodestone_data::block_states;
 use lodestone_entity::DamageFlags;
 use lodestone_model::{BlockPos, ItemStack, ResourceKey, Vec3};
 use lodestone_physics::{
@@ -368,10 +367,7 @@ impl MinecartCollision<'_> {
 impl CollisionView for MinecartCollision<'_> {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
         let name = (self.block_state)(x, y, z);
-        let Some(id) = block_state_id(&name).or_else(|| block_states::state_id(&name)) else {
-            return;
-        };
-        let Some(state) = block_states::StateId::new(id) else {
+        let Some(state) = block_state_id(&name) else {
             return;
         };
         let shape = lodestone_data::collision_shapes::collision_boxes(state);

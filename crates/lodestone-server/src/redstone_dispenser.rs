@@ -102,7 +102,7 @@
 //!   no-op: vanilla plays a click sound instead, which this crate does not
 //!   model sound effects for yet.
 
-use lodestone_data::{block_states, collision_shapes};
+use lodestone_data::collision_shapes;
 use lodestone_model::{BlockPos, Vec3};
 
 use crate::chunk::ChunkSource;
@@ -388,12 +388,11 @@ pub fn plain_toss(
 /// The collision boxes' highest top, block-local — the one piece
 /// [`spawn_egg_position`] needs and [`crate::spawn_egg`]/[`crate::boat`] each
 /// already duplicate locally rather than share (both modules' own doc
-/// comments give the same reason: resolution is `block_state_id` then
-/// `block_states::state_id`, **never** `_or_default`, because a bare name's
-/// default answer is its *lowest* state id, not its default state).
+/// comments give the same reason: resolution uses the generated-state boundary,
+/// never a lowest-id fallback, because a bare name's registered default is not
+/// necessarily its lowest state id.
 fn collision_top(state: &str) -> Option<f64> {
-    let id = crate::mobs::block_state_id(state).or_else(|| block_states::state_id(state));
-    let boxes = id.and_then(block_states::StateId::new)
+    let boxes = crate::mobs::block_state_id(state)
         .map(collision_shapes::collision_boxes)
         .unwrap_or(&[]);
     boxes

@@ -50,40 +50,51 @@ pub(super) fn census_to_pathfinding_type(pt: CensusPathType) -> PathType {
     }
 }
 
-/// The global block-state id for a canonical state string, or `None` for a
-/// block name this version's census does not carry.
+/// The validated global block-state id for a canonical state string, or `None`
+/// for a block name this version's census does not carry.
 ///
-/// Delegates straight to [`lodestone_data::block_states::state_id`]. This used
-/// to build and query its own 32,366-entry `HashMap<String, u32>` — one
-/// `String` allocation per state at first use, one SipHash per lookup — added
-/// for [`crate::block_drops`]'s correct-tool gate. `lodestone-data`
-/// now carries the forward index itself (a block-major sorted-span lookup,
-/// `O(log 1196)` plus a scan bounded by that one block's own state count), so
-/// building a second copy of the same map in this crate was exactly the
-/// duplicated-inverse defect this function's own doc used to warn against.
+/// Delegates straight to [`block_states::StateId::from_state_str`]. The
+/// generated table validates its range at this string boundary, so every
+/// downstream census lookup is total. A name owned by a plug-in or data pack is
+/// deliberately still `None`: this server does not invent a built-in state for
+/// it.
 ///
 /// Accepts a bare name (`"minecraft:stone"`) or one with properties
 /// (`"minecraft:oak_log[axis=y]"`), since that is exactly what
 /// [`ChunkColumn::block_state`] returns. Unlike the old exact-match map, a bare
 /// or partial name now resolves through vanilla's
-/// `defaultBlockState().setValue(…)` semantics (see [`block_states::state_id`]'s
-/// doc for the three-tier fallback) instead of missing.
+/// `defaultBlockState().setValue(…)` semantics (see
+/// [`block_states::StateId::from_state_str`]'s doc) instead of missing.
 #[must_use]
-pub(crate) fn block_state_id(name: &str) -> Option<u32> {
-    block_states::state_id(name)
+pub(crate) fn block_state_id(name: &str) -> Option<block_states::StateId> {
+    block_states::StateId::from_state_str(name)
 }
 
-/// Was a second door with a lowest-id-by-block fallback for a bare or partial
-/// name — [`block_states::state_id`] already resolves those to the
-/// jar-marked default state (properties named by the caller overridden on top
-/// of it), which is what this function's callers actually wanted, so the two
-/// doors are now the same call. Kept as a separate name so call sites do not
-/// need to change.
+/// Resolves a bare or partial name to the jar-marked default state with the
+/// caller's named properties overridden on top. Kept as a separate name to
+/// make consumers that intentionally accept partial input explicit.
 ///
-/// Do not reintroduce a lowest-id fallback here: `defaultBlockState()` is not
-/// the lowest id, and [`block_states::state_id`]'s own doc names the three
-/// shipped bugs that assumption caused.
+/// Do not replace this with a lowest-id fallback: a block's registered default
+/// state is not necessarily its lowest state id.
 #[must_use]
-pub(crate) fn block_state_id_or_default(name: &str) -> Option<u32> {
-    block_states::state_id(name)
+pub(crate) fn block_state_id_or_default(name: &str) -> Option<block_states::StateId> {
+    block_states::StateId::from_state_str(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_state_string_boundary_returns_only_generated_ids() {
+        let resolve: fn(&str) -> Option<block_states::StateId> = block_state_id;
+        let air = resolve("minecraft:air").expect("the generated air state resolves");
+        assert_eq!(air.raw(), 0, "air's generated global state id is the fixed literal 0");
+
+        assert_eq!(resolve("lodestone:custom_block"), None);
+        assert_eq!(resolve("minecraft:not_a_real_block"), None);
+
+        assert!(block_states::StateId::new(block_states::STATE_COUNT).is_none());
+        assert!(block_states::StateId::new(u32::MAX).is_none());
+    }
 }
