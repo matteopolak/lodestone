@@ -552,6 +552,8 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
                     scheduled: scheduled.clone(),
                     #[cfg(not(target_arch = "wasm32"))]
                     player_data: None,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    native_storage: None,
                 })
         })
     }

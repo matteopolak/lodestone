@@ -562,6 +562,9 @@ struct WorldState {
     /// `<world>/players/data`, or `None` if it could not be created (a
     /// non-persistable player store). Handed out through [`ChunkSource::world_registries`].
     player_data: Option<crate::player_data::PlayerDataStore>,
+    /// The selected typed-record backend, attached before the connection task
+    /// is spawned so the join path sees the same handle as the server owner.
+    native_storage: Mutex<Option<Arc<crate::world_storage::WorldStorage>>>,
     min_y: i32,
     height: i32,
     /// The **authoritative** columns: everything a `set_block` has touched.
@@ -929,6 +932,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             state: Arc::new(WorldState {
                 region_dir,
                 player_data,
+                native_storage: Mutex::new(None),
                 min_y,
                 height,
                 edits: Mutex::new(HashMap::new()),
@@ -940,6 +944,23 @@ impl<S: ChunkSource> RegionChunkSource<S> {
                 regions: Mutex::new(RegionCache::default()),
             }),
         })
+    }
+
+    /// Attaches the selected native typed-record backend to this source.
+    ///
+    /// The persistent integrated-server constructor calls this before handing
+    /// the source to its connection task. An Anvil selection passes `None`, so
+    /// the bounded native player consumer is absent rather than pretending the
+    /// compatibility backend accepts typed records.
+    pub(crate) fn set_native_storage(
+        &self,
+        storage: Option<Arc<crate::world_storage::WorldStorage>>,
+    ) {
+        *self
+            .state
+            .native_storage
+            .lock()
+            .expect("native storage lock poisoned") = storage;
     }
 
     /// The world's block-entity registry, for the server to tick and for
@@ -1151,6 +1172,13 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
             block_entities: self.block_entities(),
             scheduled: self.scheduled_ticks(),
             player_data: self.state.player_data.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            native_storage: self
+                .state
+                .native_storage
+                .lock()
+                .expect("native storage lock poisoned")
+                .clone(),
         })
     }
 

@@ -1909,6 +1909,213 @@ fn player_store<S: ChunkSource + ?Sized>(source: &S) -> Option<crate::player_dat
         .and_then(|registries| registries.player_data)
 }
 
+/// The native half of one live connection's bounded player persistence.
+///
+/// The complete Anvil [`PlayerData`](crate::player_data::PlayerData) remains
+/// the source of truth for inventory, health, game mode and opaque fields.
+/// This session only adds the typed locator record, and marks itself blocked
+/// after a corrupt read so a later disconnect cannot overwrite evidence needed
+/// for recovery.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+struct NativePlayerSession {
+    storage: Arc<crate::world_storage::WorldStorage>,
+    uuid: [u8; 16],
+    loaded: Option<crate::world_storage::NativePlayerRecord>,
+    save_blocked: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativePlayerSession {
+    fn load<S: ChunkSource + ?Sized>(source: &S, uuid: uuid::Uuid) -> Option<Self> {
+        let storage = source.world_registries()?.native_storage?;
+        let uuid = *uuid.as_bytes();
+        match storage.load_player(uuid) {
+            Ok(loaded) => {
+                let save_blocked = loaded.is_some_and(|record| {
+                    record.dimension != lodestone_storage_schema::BuiltinDimension::Overworld
+                });
+                if save_blocked {
+                    tracing::warn!(
+                        "native player locator for {uuid:02x?} names a non-overworld dimension; it will not be overwritten until dimension-aware join restore exists"
+                    );
+                }
+                Some(Self {
+                    storage,
+                    uuid,
+                    loaded,
+                    save_blocked,
+                })
+            }
+            Err(error) => {
+                tracing::error!(
+                    "native player locator for {uuid:02x?} could not be read and will NOT be overwritten this session: {error}"
+                );
+                Some(Self {
+                    storage,
+                    uuid,
+                    loaded: None,
+                    save_blocked: true,
+                })
+            }
+        }
+    }
+
+    fn join_position(&self, fallback: Vec3) -> Vec3 {
+        let Some(record) = self.loaded else {
+            return fallback;
+        };
+        if record.dimension != lodestone_storage_schema::BuiltinDimension::Overworld {
+            tracing::warn!(
+                "native player locator for {:?} names a non-overworld dimension; using the world spawn until dimension-aware join restore exists",
+                self.uuid
+            );
+            return fallback;
+        }
+        native_position(record)
+    }
+
+    fn initial_rotation(&self) -> Option<Rotation> {
+        self.loaded
+            .filter(|record| {
+                record.dimension == lodestone_storage_schema::BuiltinDimension::Overworld
+            })
+            .map(native_rotation)
+    }
+
+    fn snapshot(
+        &self,
+        player_pos: Option<(f64, f64, f64)>,
+        player_rot: Option<Rotation>,
+        fallback: Vec3,
+        dimension: crate::dimension::Dimension,
+    ) -> Option<crate::world_storage::NativePlayerRecord> {
+        if self.save_blocked {
+            return None;
+        }
+        let position = player_pos
+            .map(|(x, y, z)| Vec3::new(x, y, z))
+            .or_else(|| {
+                self.loaded
+                    .filter(|record| {
+                        record.dimension == lodestone_storage_schema::BuiltinDimension::Overworld
+                    })
+                    .map(native_position)
+            })
+            .unwrap_or(fallback);
+        let rotation = player_rot
+            .or_else(|| {
+                self.loaded
+                    .filter(|record| {
+                        record.dimension == lodestone_storage_schema::BuiltinDimension::Overworld
+                    })
+                    .map(native_rotation)
+            })
+            .unwrap_or_default();
+        Some(crate::world_storage::NativePlayerRecord {
+            uuid: self.uuid,
+            dimension: native_dimension(dimension),
+            x_fixed: native_fixed_coordinate(position.x)?,
+            y_fixed: native_fixed_coordinate(position.y)?,
+            z_fixed: native_fixed_coordinate(position.z)?,
+            yaw_millidegrees: native_fixed_rotation(rotation.yaw)?,
+            pitch_millidegrees: native_fixed_rotation(rotation.pitch)?,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_dimension(
+    dimension: crate::dimension::Dimension,
+) -> lodestone_storage_schema::BuiltinDimension {
+    match dimension {
+        crate::dimension::Dimension::Overworld => lodestone_storage_schema::BuiltinDimension::Overworld,
+        crate::dimension::Dimension::Nether => lodestone_storage_schema::BuiltinDimension::Nether,
+        crate::dimension::Dimension::End => lodestone_storage_schema::BuiltinDimension::End,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_position(record: crate::world_storage::NativePlayerRecord) -> Vec3 {
+    let units = crate::anvil_player_storage::POSITION_UNITS_PER_BLOCK;
+    Vec3::new(
+        f64::from(record.x_fixed) / units,
+        f64::from(record.y_fixed) / units,
+        f64::from(record.z_fixed) / units,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_rotation(record: crate::world_storage::NativePlayerRecord) -> Rotation {
+    Rotation::new(
+        record.yaw_millidegrees as f32 / 1_000.0,
+        record.pitch_millidegrees as f32 / 1_000.0,
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_fixed_coordinate(value: f64) -> Option<i32> {
+    native_fixed(value, crate::anvil_player_storage::POSITION_UNITS_PER_BLOCK)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_fixed_rotation(value: f32) -> Option<i32> {
+    native_fixed(f64::from(value), 1_000.0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_fixed(value: f64, scale: f64) -> Option<i32> {
+    let scaled = value * scale;
+    if !scaled.is_finite()
+        || scaled.round() < f64::from(i32::MIN)
+        || scaled.round() > f64::from(i32::MAX)
+    {
+        return None;
+    }
+    Some(scaled.round() as i32)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn persist_native_player(
+    session: Option<&NativePlayerSession>,
+    player_pos: Option<(f64, f64, f64)>,
+    player_rot: Option<Rotation>,
+    fallback: Vec3,
+    dimension: crate::dimension::Dimension,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    let Some(record) = session.snapshot(player_pos, player_rot, fallback, dimension) else {
+        tracing::error!(
+            "native player locator for {:?} contains a non-finite or out-of-range live value; it was not written",
+            session.uuid
+        );
+        return;
+    };
+    if let Err(error) = session.storage.write_dirty_player(record) {
+        tracing::warn!("could not save native player locator for {:?}: {error}", session.uuid);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn publish_native_player(
+    session: Option<&NativePlayerSession>,
+    live_save: &crate::live_save::LiveSaveSlot,
+    player_pos: Option<(f64, f64, f64)>,
+    player_rot: Option<Rotation>,
+    fallback: Vec3,
+    dimension: crate::dimension::Dimension,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    let Some(record) = session.snapshot(player_pos, player_rot, fallback, dimension) else {
+        return;
+    };
+    live_save.publish_native(Some(session.storage.clone()), record);
+}
+
 /// Writes this connection's live state to its `.dat` file.
 ///
 /// # Why the position is an `Option`
@@ -3456,6 +3663,11 @@ where
                 });
                 #[cfg(target_arch = "wasm32")]
                 let saved_player: Option<()> = None;
+                #[cfg(not(target_arch = "wasm32"))]
+                let native_player = NativePlayerSession::load(
+                    source.get(),
+                    login_uuid.unwrap_or_default(),
+                );
 
                 // Where the player actually re-enters the world. `spawn.pos`
                 // stays the **world** spawn: it is what `serve_play` uses for a
@@ -3464,7 +3676,13 @@ where
                 // `join_position_for_saved_player`'s own doc comment for why a
                 // saved position is not always trusted verbatim.
                 #[cfg(not(target_arch = "wasm32"))]
-                let join_pos = join_position_for_saved_player(saved_player.as_ref(), spawn.pos);
+                let join_pos = {
+                    let anvil_pos =
+                        join_position_for_saved_player(saved_player.as_ref(), spawn.pos);
+                    native_player
+                        .as_ref()
+                        .map_or(anvil_pos, |native| native.join_position(anvil_pos))
+                };
                 #[cfg(target_arch = "wasm32")]
                 let join_pos = spawn.pos;
                 // Vanilla's own player-game-type field, restored — a player who typed
@@ -3950,6 +4168,8 @@ where
                     game_mode,
                     world,
                     live_save,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    native_player,
                 )
                 .await;
             }
@@ -12740,6 +12960,10 @@ async fn serve_play<T, P, S, E>(
     // structurally unreachable on that path, and only this mirror survives
     // the cancellation to be read back afterwards.
     live_save: &crate::live_save::LiveSaveSlot,
+    // The selected native backend's bounded locator session. Full player state
+    // continues through the Anvil store above; this value only supplies the
+    // native join/read and cancellation-safe locator save sidecar.
+    native_player: Option<NativePlayerSession>,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -12755,8 +12979,12 @@ where
     let mut client_loaded = false;
     let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
-    // parameter comment.
-    let mut player_rot: Option<Rotation> = None;
+    // parameter comment. Restore the native locator's bounded rotation when
+    // present; the complete Anvil player record remains authoritative for all
+    // other state.
+    let native_player = native_player.as_ref();
+    let mut player_rot: Option<Rotation> = native_player
+        .and_then(NativePlayerSession::initial_rotation);
     // Resolve the per-player store once from the source. `player_uuid` is the
     // key for the stored file, and the loop reuses this handle for its saves.
     let player_store = player_store(source.get());
@@ -13071,6 +13299,13 @@ where
                         &inventory,
                         &experience,
                         &preserved_player_fields,
+                        source.dimension(),
+                    );
+                    persist_native_player(
+                        native_player,
+                        player_pos,
+                        player_rot,
+                        world_spawn,
                         source.dimension(),
                     );
                     return Ok(ServeSummary { username, chunks_sent, inventory });
@@ -14731,6 +14966,18 @@ where
             &inventory,
             &experience,
             &preserved_player_fields,
+            source.dimension(),
+        );
+        // The native locator is deliberately a separate, typed sidecar. It is
+        // published in memory only; IntegratedServer::shutdown writes the last
+        // snapshot after joining this task, while a real socket disconnect uses
+        // the synchronous path above.
+        publish_native_player(
+            native_player,
+            live_save,
+            player_pos,
+            player_rot,
+            world_spawn,
             source.dimension(),
         );
     }
@@ -19085,6 +19332,8 @@ mod tests {
                 scheduled: self.scheduled.clone(),
                 #[cfg(not(target_arch = "wasm32"))]
                 player_data: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                native_storage: None,
             })
         }
         fn block_tick_feed(&self) -> Option<BlockTickFeed> {
