@@ -1254,7 +1254,7 @@ mod wasm_menu_click_tests {
                     );
                     Ok(Some((
                         CONTAINER_CLICK_PACKET,
-                        [*window_id, *state_id, *slot, *button]
+                        [*window_id, state_id.as_wire(), *slot, *button]
                             .into_iter()
                             .flat_map(i32::to_be_bytes)
                             .collect(),

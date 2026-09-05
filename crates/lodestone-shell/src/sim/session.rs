@@ -2104,7 +2104,7 @@ impl Sim {
             if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
                 // The current state id, unchanged: nothing about a creative write
                 // advances the container's synchronisation counter.
-                let state_id = menus.0.player().state_id() as i32;
+                let state_id = menus.0.player().state_id();
                 menus.0.apply(&lodestone_model::ClientEvent::ContainerSlot {
                     window_id: 0,
                     state_id,
