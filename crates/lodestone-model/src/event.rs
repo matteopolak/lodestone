@@ -4215,6 +4215,11 @@ pub fn route(event: &ClientEvent) -> Route {
         // the resulting `CookieResponse` action is sent before the event reaches
         // the shell, so this is a client-internal consumer rather than an island.
         ClientEvent::CookieRequested { .. } => CLIENT,
+        // `Driver::emit` writes the received payload into the same in-memory
+        // cookie store used by `CookieRequested`, before the event reaches any
+        // router. It is therefore consumed by the client even though no action
+        // is emitted for the store operation itself.
+        ClientEvent::CookieStored { .. } => CLIENT,
         // `Driver::emit` records the existing `SessionOutcome::Transferred`
         // result before surfacing this event, so a caller can reconnect with
         // the target and the driver's preserved cookie store.
@@ -4345,7 +4350,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::PlayerCombatEnded { .. }
         | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
-        | ClientEvent::CookieStored { .. }
         | ClientEvent::ResourcePackPushed { .. }
         | ClientEvent::ResourcePackPopped { .. }
         | ClientEvent::CustomPayload { .. }
@@ -4536,6 +4540,21 @@ mod route_tests {
         let r = route(&event);
         assert!(!r.ingest && !r.session && !r.shell);
         assert!(r.client, "the driver answers cookie requests automatically");
+        assert!(!r.is_island());
+    }
+
+    /// `Driver::emit` stores a cookie before the event reaches any router, so
+    /// the route must record this client-internal consumer as well as the
+    /// matching request's automatic response.
+    #[test]
+    fn cookie_store_reaches_the_client_driver() {
+        let event = ClientEvent::CookieStored {
+            key: Identifier::new("lodestone", "route-test").unwrap(),
+            payload: vec![0xAA, 0xBB],
+        };
+        let r = route(&event);
+        assert!(!r.ingest && !r.session && !r.shell);
+        assert!(r.client, "the driver stores cookies automatically");
         assert!(!r.is_island());
     }
 
