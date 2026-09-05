@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 lodestone-core = { workspace = true }
+lodestone-data = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-world = { workspace = true }
 # One OPTIONAL dependency per version family, mirroring `lodestone-registry`'s

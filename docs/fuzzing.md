@@ -314,6 +314,12 @@ What exists:
   replays server-authored pickaxe and potion slot packets from checked-in
   fixtures, compares the resulting item identity and count to each fixture's
   external annotation, and includes a wrong-item detector control.
+- `tests/differential_captured_block_updates.rs` — a fixed captured terrain
+  sequence through the real 26.2 adapter and the public client world read
+  model. It replays an externally captured one-cell update followed by a
+  two-cell section update into an all-air resident chunk, compares every
+  commanded position after its packet, and proves that omitting the bulk
+  packet leaves both cells at the all-air baseline.
 - `tests/differential_generated_gravity.rs` — a bounded generated gravity
   action domain through `IntegratedServer`, covering sand, red sand and gravel.
   It injects the public `BlockTickFeed` schedule, reads the server's retained
@@ -630,11 +636,52 @@ RCON transport. It removes the tagged stand after capture or a capture timeout.
 The ordinary replay needs only `v26-2`, no oracle or network, and bounds every
 expected event wait to five seconds.
 
+### Captured block-update sequence
+
+`differential_captured_block_updates.rs` replays two unmodified payloads from
+`tests/fixtures/block_updates_26_2.json`: a one-cell update at `(8, 100, 8)`
+and a section update covering `(9, 100, 8)` and `(10, 100, 8)`. The external
+capture commands name gold and diamond blocks, so those state names are the
+expected values; the replay resolves them through the independently generated
+block-state report, not a local packet encoder. Before replay the normal
+client owns one all-air chunk at `(0, 0)`. This makes the read model's
+loaded-chunk precondition explicit while keeping the subject narrow: each
+captured packet must cross the production adapter and driver before
+`ClientHandle::block_at` sees its write.
+
+The ordinary test compares every commanded cell immediately after its packet.
+Its control replays only the first packet and proves each cell owned by the
+omitted section update remains air and differs from the commanded diamond
+state. That is a correctness detector, not a malformed-input or robustness
+test.
+
+To acquire a fresh sequence, start the local headless creative oracle, then
+run:
+
+```bash
+CARGO_TARGET_DIR=/private/tmp/lodestone-batch-549 cargo test -p lodestone-fuzz \
+  --no-default-features --features v26-2,rcon-oracle \
+  --test differential_captured_block_updates acquire_block_updates_from_external_server \
+  -j 2 --no-fail-fast -- --ignored --nocapture
+```
+
+The acquisition uses only the local game and RCON ports, loads the capture
+client's chunk, captures the two server-sent payloads after the two annotated
+commands, then restores the three cells and releases the forced chunk. It
+prints `BLOCK_UPDATE_CAPTURE=` followed by reviewable JSON. Replace the
+fixture with that output without re-encoding or normalizing packet bytes.
+
+This is deliberately **not** a captured full-column lane: the initial
+all-air resident chunk is a small test setup, while the state-changing packets
+and expectations are external. It therefore proves update routing and public
+world visibility, but does not yet differentially verify chunk-packet palette,
+light, biome, heightmap or block-entity contents.
+
 ### What Track B still does not do
 - **The client-state packet corpus is still small.** The captured lane covers
-  three inventory slot payloads; it does not yet cover captured chunk or broader
-  inventory packet sequences. The captured armor-stand lane covers spawn,
-  movement and removal, but not metadata. The two committed item-entity
+  three inventory slot payloads and one block-update sequence, but no captured
+  full chunk or broader inventory packet sequence. The captured armor-stand
+  lane covers spawn, movement and removal, but not metadata. The two committed item-entity
   metadata fixtures remain unpaired with their own session's spawn, so they
   cannot independently drive an item-entity lifecycle. The generated
   block/entity/inventory/container campaign remains

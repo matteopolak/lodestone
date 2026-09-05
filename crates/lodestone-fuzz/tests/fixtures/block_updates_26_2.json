@@ -1,0 +1,22 @@
+{
+  "source": "Unmodified payloads captured from the external 26.2 creative server on 25570, protocol 776. The capture client had chunk (0,0) loaded, then RCON set (8,100,8) to gold_block and filled (9,100,8)..(10,100,8) with diamond_block. Capture entry point: acquire_block_updates_from_external_server. State annotations are the source commands.",
+  "protocol": 776,
+  "chunk": [0, 0],
+  "packets": [
+    {
+      "packet_id": 8,
+      "payload": [0, 0, 2, 0, 0, 0, 128, 100, 162, 18],
+      "writes": [
+        { "pos": [8, 100, 8], "state": "minecraft:gold_block" }
+      ]
+    },
+    {
+      "packet_id": 84,
+      "payload": [0, 0, 0, 0, 0, 0, 0, 6, 2, 132, 181, 175, 10, 132, 179, 175, 10],
+      "writes": [
+        { "pos": [9, 100, 8], "state": "minecraft:diamond_block" },
+        { "pos": [10, 100, 8], "state": "minecraft:diamond_block" }
+      ]
+    }
+  ]
+}
