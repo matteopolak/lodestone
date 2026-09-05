@@ -215,6 +215,14 @@ png = { workspace = true }
 # before us; it is a build-configuration change only and native behaviour is
 # unchanged.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Terminal rendering stays native-only: Ratatui owns the alternate-screen UI
+# and event loop, while ratatui-image converts the headless wgpu readback into
+# true-colour Unicode half blocks. Image format decoders and Chafa are disabled
+# because this path starts with an in-memory RGBA frame rather than an image
+# file, and the primitive half-block backend has no system-library dependency.
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+ratatui-image = { version = "11.0.8", default-features = false, features = ["crossterm"] }
+image = { version = "0.25.6", default-features = false }
 # Runtime-loaded component plugins are native-only because Wasmtime cannot run
 # inside the browser build. The shell uses the host's single directory loader;
 # it does not parse manifests or instantiate modules itself.

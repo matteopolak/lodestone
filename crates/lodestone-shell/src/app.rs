@@ -201,8 +201,8 @@ pub fn run(config: Config) -> anyhow::Result<()> {
         // line to select anything else — so the arms are refused rather than gated
         // into silence, which keeps "how did we get here?" answerable if a future
         // caller does set one.
-        // **These two are behind the ownership gate as well**, and they are the
-        // one pair the menu's own gate structurally cannot cover: neither ever
+        // These native non-window paths are behind the ownership gate as well,
+        // because the menu's own gate structurally cannot cover them: none
         // builds a `MenuAction`, so neither passes the `Entitlement` the play
         // verbs carry. `--connect` establishes a real session against a real
         // server and `--headless` renders a world; a compliance gate a command
@@ -219,11 +219,14 @@ pub fn run(config: Config) -> anyhow::Result<()> {
         Mode::Headless => crate::diagnostics::run_headless(crate::diagnostics::require_owned_account()?, config),
         #[cfg(not(target_arch = "wasm32"))]
         Mode::Connect => crate::diagnostics::run_connect(crate::diagnostics::require_owned_account()?, config),
+        #[cfg(not(target_arch = "wasm32"))]
+        Mode::Stdio => crate::terminal::run_stdio(crate::diagnostics::require_owned_account()?, config),
+        #[cfg(not(target_arch = "wasm32"))]
+        Mode::Terminal => crate::terminal::run_terminal(crate::diagnostics::require_owned_account()?, config),
         #[cfg(target_arch = "wasm32")]
-        Mode::Headless | Mode::Connect => Err(anyhow::anyhow!(
-            "{:?} is a native CLI diagnostic mode: it needs a filesystem to write a \
-             PPM to, or a raw TCP socket and a blocking sleep. A browser session is \
-             always Mode::Window.",
+        Mode::Headless | Mode::Connect | Mode::Stdio | Mode::Terminal => Err(anyhow::anyhow!(
+            "{:?} is a native CLI mode: it needs native files, sockets, stdin, or a \
+             headless GPU target. A browser session is always Mode::Window.",
             config.mode
         )),
         // Same ownership-gate reasoning as `Headless`/`Connect`

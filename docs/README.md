@@ -287,6 +287,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   literally, plus the small cluster of input-feel options built on top of it — mouse
   sensitivity, wheel sensitivity, axis inversion, hold-vs-toggle sneak/sprint, and the
   sprint food gate.
+- [Launch surfaces](./launch-surfaces.md) — Launch surfaces choose where an
+  interactive multiplayer session is presented. `window` is the normal wgpu window,
+  `stdio` is a GPU-free chat and command stream, and `terminal` draws the real game
+  camera as true-colour Unicode cells without creating a GUI window.
 - [Legacy movement packet selection](./legacy-movement-packet-selection.md) — The
   v1-8 (Minecraft 1.8.9), v1-9 (1.12.2), and v1-14 (1.16.5) protocol adapters select a
   serverbound movement packet from the pose actually last transmitted on that
