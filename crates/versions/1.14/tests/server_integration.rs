@@ -4,11 +4,65 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, Rotation, Vec3};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Hand, Rotation, Vec3,
+    Vec3f, VersionAdapter,
+};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_14::adapter_for;
 
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
+
+fn assert_adapter_block_use_reaches_host(protocol_version: i32) {
+    let adapter = adapter_for(protocol_version);
+    let action = ClientAction::UseItemOn {
+        hand: Hand::Off,
+        pos: BlockPos::new(5, -10, -7),
+        face: BlockFace::South,
+        cursor: Vec3f::new(0.25, 1.0, 0.75),
+        inside_block: true,
+        sequence: 17,
+    };
+    let Some((packet_id, payload)) = adapter
+        .encode_action(ConnectionState::Play, &action)
+        .expect("the era adapter must encode a block use")
+    else {
+        panic!("block use must have a serverbound packet");
+    };
+    let host = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .expect("the hosted protocol must resolve from the registry");
+    assert_eq!(
+        host.decode(lodestone_core::State::Play, packet_id, &payload),
+        lodestone_server::ServerBound::UseItemOn {
+            pos: BlockPos::new(5, -10, -7),
+            face: BlockFace::South,
+            cursor: Vec3f::new(0.25, 1.0, 0.75),
+            sequence: 0,
+            hand: 1,
+        },
+        "the adapter and registry-selected host must agree on the server consumer input"
+    );
+    assert_eq!(
+        host.decode(lodestone_core::State::Configuration, packet_id, &payload),
+        lodestone_server::ServerBound::Ignored,
+        "the same bytes must not bypass the Play-state gate"
+    );
+}
+
+#[test]
+fn adapter_block_use_reaches_protocol_498_host_consumer() {
+    assert_adapter_block_use_reaches_host(498);
+}
+
+#[test]
+fn adapter_block_use_reaches_protocol_578_host_consumer() {
+    assert_adapter_block_use_reaches_host(578);
+}
+
+#[test]
+fn adapter_block_use_reaches_protocol_754_host_consumer() {
+    assert_adapter_block_use_reaches_host(754);
+}
 
 struct FixtureSource {
     column: Mutex<ChunkColumn>,

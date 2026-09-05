@@ -59,7 +59,14 @@ Protocol 498 writes 256 fixed biome integers inside the length-prefixed
 1,024 fixed biome integers before the buffer and also uses straddling palettes;
 protocol 754 writes a length-prefixed VarInt biome array and padded palettes.
 Light-update encoding and many interaction/inventory serverbound actions are
-still outside this host slice and require their own protocol evidence.
+still outside this host slice and require their own protocol evidence. A
+right-click against a block is the supported interaction exception: each host
+decodes the shared 1.14+ `block_place` body (hand, packed target, face, three
+cursor floats, `inside_block`) into `ServerBound::UseItemOn`. The three
+revisions predate block-prediction sequences, so that consumer input uses zero
+rather than inventing one. Literal wire bodies prove the decoder separately
+for 498, 578 and 754; adapter-to-registry tests prove the matching producer and
+host agree, including rejection outside Play and for an invalid face.
 
 The host tests anchor packet ids in the committed generated tables and exercise
 each differing chunk framing against the crate's independent decoder. Every

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, State, Writer, encode_body, write_named_nbt};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Text};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Text, Vec3f};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -21,7 +21,7 @@ use crate::packet_ids_578::{handshaking, login, play};
 use crate::packet_ids::{handshaking as handshaking_754, login as login_754, play as play_754};
 use crate::packet_ids_498::{handshaking as handshaking_498, login as login_498, play as play_498};
 use crate::packets::game::{
-    BlockDig, ClientboundPositionLook, JoinGameLegacy, KickDisconnect, ServerboundFlying,
+    BlockDig, BlockPlace, ClientboundPositionLook, JoinGameLegacy, KickDisconnect, ServerboundFlying,
     ServerboundLook, ServerboundPosition, ServerboundPositionLook,
 };
 use crate::packets::handshake::SetProtocol;
@@ -104,6 +104,46 @@ fn block_face(face: i8) -> Option<BlockFace> {
         4 => Some(BlockFace::West),
         5 => Some(BlockFace::East),
         _ => None,
+    }
+}
+
+/// Lifts the shared 1.14+ block-use body into the server's placement input.
+///
+/// The three hosted revisions use the same body: hand, packed target, face,
+/// three cursor floats and the `inside_block` flag.  The server has no use for
+/// that final flag yet, but consuming it here is necessary to reject a shifted
+/// or truncated packet rather than accepting its prefix.  These revisions
+/// predate client block-prediction, so the consumer receives sequence zero.
+fn block_use(
+    BlockPlace {
+        hand,
+        location: Position(pos),
+        direction,
+        cursor_x,
+        cursor_y,
+        cursor_z,
+        inside_block: _,
+    }: BlockPlace,
+) -> ServerBound {
+    let (Ok(hand), Ok(direction)) = (u8::try_from(hand), i8::try_from(direction)) else {
+        return ServerBound::Ignored;
+    };
+    let Some(face) = block_face(direction) else {
+        return ServerBound::Ignored;
+    };
+    if hand > 1 {
+        return ServerBound::Ignored;
+    }
+    ServerBound::UseItemOn {
+        pos,
+        face,
+        cursor: Vec3f {
+            x: cursor_x,
+            y: cursor_y,
+            z: cursor_z,
+        },
+        sequence: 0,
+        hand,
     }
 }
 
@@ -540,6 +580,9 @@ impl ServerProtocol for V578ServerProtocol {
                 };
                 ServerBound::BlockAction { action, pos, face, sequence: 0 }
             }
+            State::Play if packet_id == play::serverbound::BLOCK_PLACE => {
+                decode_full::<BlockPlace>(payload).map_or(ServerBound::Ignored, block_use)
+            }
             // The four movement forms have distinct payloads. Position-bearing
             // forms are what drive view recentering and the integrated server's
             // chunk stream; look and grounded-only updates still carry real
@@ -722,6 +765,9 @@ impl ServerProtocol for V754ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 ServerBound::BlockAction { action, pos, face, sequence: 0 }
+            }
+            State::Play if packet_id == play_754::serverbound::BLOCK_PLACE => {
+                decode_full_754::<BlockPlace>(payload).map_or(ServerBound::Ignored, block_use)
             }
             State::Play if packet_id == play_754::serverbound::POSITION => {
                 decode_full_754::<ServerboundPosition>(payload).map_or(
@@ -908,6 +954,9 @@ impl ServerProtocol for V498ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 ServerBound::BlockAction { action, pos, face, sequence: 0 }
+            }
+            State::Play if packet_id == play_498::serverbound::BLOCK_PLACE => {
+                decode_full_498::<BlockPlace>(payload).map_or(ServerBound::Ignored, block_use)
             }
             State::Play if packet_id == play_498::serverbound::POSITION => {
                 decode_full_498::<ServerboundPosition>(payload).map_or(
