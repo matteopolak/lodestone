@@ -2,11 +2,58 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, Rotation, Vec3};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Hand, Rotation, Vec3,
+    Vec3f, VersionAdapter,
+};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_19::adapter_for;
 
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
+
+#[test]
+fn adapter_block_use_reaches_protocol_762_host_consumer() {
+    let action = ClientAction::UseItemOn {
+        hand: Hand::Off,
+        pos: BlockPos::new(5, -10, -7),
+        face: BlockFace::South,
+        cursor: Vec3f {
+            x: 0.25,
+            y: 1.0,
+            z: 0.75,
+        },
+        inside_block: true,
+        sequence: 17,
+    };
+    let Some((packet_id, payload)) = adapter_for(762)
+        .encode_action(ConnectionState::Play, &action)
+        .expect("the era adapter must encode a block use")
+    else {
+        panic!("block use must have a serverbound packet");
+    };
+    let host = lodestone_registry::server_protocol_for_protocol(762)
+        .expect("protocol 762 must resolve to the hosted family");
+    assert_eq!(
+        host.decode(lodestone_core::State::Play, packet_id, &payload),
+        lodestone_server::ServerBound::UseItemOn {
+            pos: BlockPos::new(5, -10, -7),
+            face: BlockFace::South,
+            cursor: Vec3f {
+                x: 0.25,
+                y: 1.0,
+                z: 0.75,
+            },
+            sequence: 17,
+            hand: 1,
+        },
+        "the adapter and registry-selected host must agree on the placement consumer input"
+    );
+    assert_eq!(
+        host.decode(lodestone_core::State::Configuration, packet_id, &payload),
+        lodestone_server::ServerBound::Ignored,
+        "the same bytes must not bypass the Play-state gate"
+    );
+}
 
 struct FixtureSource {
     column: Mutex<ChunkColumn>,
