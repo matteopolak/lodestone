@@ -153,6 +153,13 @@ owner set and restores registration-order slots before it publishes motion or
 removes an expired or out-of-world item. The global proximity merge remains a
 central pass afterwards, so two stacks crossing a chunk edge cannot merge in a
 different direction merely because one owner completes first.
+Fishing bobbers use the same tick-start ownership rule inside the live mob
+pass. `MobSim::tick_fishing_owner_batches` clones each bobber under its source
+chunk and consumes the shared fishing RNG in entity-id order; this is a serial
+planning boundary, not independent random work. The validated
+`MobSim::apply_fishing_tick_owner_batches` central writer restores those slots
+before replacing or expiring a bobber, so completion order cannot change which
+bobber receives a bite roll or which visible transform is published.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
@@ -310,6 +317,14 @@ must not mutate either live item registry. Validate the complete unique owner
 set and every serial slot before applying any result, then run the global item
 merge centrally. Preserve negative-coordinate, reversed-completion, missing-
 owner, and duplicate-owner controls when changing the hand-off.
+
+Keep fishing-bobber simulation behind
+`MobSim::tick_fishing_owner_batches` and
+`MobSim::apply_fishing_tick_owner_batches`. The shared fishing RNG must stay in
+entity-id order during planning; an owner completion carries only its cloned
+bobber state and an expiry decision. Validate every unique owner and serial
+slot before mutating the live bobber map. Preserve the negative-coordinate,
+reversed-completion, missing-owner, and duplicate-owner controls.
 
 Do not drain a scheduled queue directly from a future owner worker. Keep the
 world-wide queue comparator as the tick-start selector, return one completion
