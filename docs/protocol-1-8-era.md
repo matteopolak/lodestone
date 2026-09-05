@@ -82,6 +82,15 @@ Literal empty/trailing-byte request controls and literal main/off-hand animation
 codes cover both packet directions, while the registry-selected adapter test
 proves the complete protocol-to-consumer-to-client-event path.
 
+The protocol-47 `entity_action` frame now passes its leave-bed ordinal (`2`)
+to the shared wake consumer as `ServerBound::PlayerCommand { action: 0 }`.
+Its sender id is deliberately ignored because the connection determines the
+player being woken; the riding-jump field is likewise not a wake input. A
+literal three-VarInt control fixes the packet shape and rejects the adjacent
+sneak ordinal, trailing bytes, and all non-Play states. The client adapter's
+leave-bed action is then decoded through the registry-selected protocol, which
+proves this version-family frame reaches the common consumer boundary.
+
 ### External-client acceptance
 
 The opt-in release-client gate covers hosted protocol **47** (1.8.9). Run it with
