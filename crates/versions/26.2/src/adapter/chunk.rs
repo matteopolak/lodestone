@@ -4,6 +4,7 @@
 use super::*;
 use super::player::game_mode;
 use lodestone_data::block::Block;
+use lodestone_data::particle_types::ParticleTypeId;
 use lodestone_data::sound_events::SoundEventId;
 
 impl V770Adapter {
@@ -637,9 +638,10 @@ impl V770Adapter {
             // `ParticleOptions::None`, same as when this crate dropped them
             // outright.
             let particles: LevelParticles = decode_full(payload)?;
-            let name = particle_type_name(particles.particle_id).ok_or_else(|| {
+            let particle_id = ParticleTypeId::new(particles.particle_id).ok_or_else(|| {
                 AdapterError::Decode(format!("unknown particle id {}", particles.particle_id))
             })?;
+            let name = particle_type_name(particle_id);
             let options = decode_particle_options(name, &particles.options)?;
             return Ok(vec![Directive::Emit(ClientEvent::Particles {
                 particle: parse_key(name, "particle")?,
@@ -1119,9 +1121,13 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     // `dropping undecodable packet ... explode: unmodeled explosionParticle
     // registry id 34`. 103 of the 125 registered types are in that class, so the
     // old allowlist rejected the large majority of legal packets.
+    let raw_particle_id = particle_id;
+    let particle_id = ParticleTypeId::new(raw_particle_id).ok_or_else(|| {
+        AdapterError::Decode(format!("unknown explosion particle registry id {raw_particle_id}"))
+    })?;
     if !lodestone_data::particle_types::is_simple_particle_type(particle_id) {
         return Err(AdapterError::Decode(format!(
-            "explode: explosionParticle registry id {particle_id} is a parameterised \
+            "explode: explosionParticle registry id {raw_particle_id} is a parameterised \
              particle type, whose trailing arguments this decoder cannot skip \
              byte-accurately"
         )));

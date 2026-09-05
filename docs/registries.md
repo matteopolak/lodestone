@@ -165,6 +165,16 @@ present in the report. `sound_events::sound_event` bounds-checks the name table 
 joins the sparse metadata, preserving the same `(name, Option<range>)` API without storing a
 second set of 1,968 string pointers.
 
+`lodestone_data::particle_types::ParticleTypeId` is the equivalent boundary for the built-in
+particle registry. Packet decoders validate their raw VarInt before looking up a name or deciding
+whether a particle has no option payload; those data lookups are total for the resulting type.
+The integrated-server encoder obtains the typed value from its name cache and unwraps it to a raw
+integer only at the writer. This prevents a state, sound, or arbitrary integer from selecting a
+particle-table row by accident, while an unknown or future wire value remains an explicit decode
+failure. When the generated particle census changes, keep `ParticleTypeId::new` tied to the
+generated count and extend the classification controls rather than adding a raw lookup escape
+hatch.
+
 Potion display-name keys use the same canonical-column rule. A generated 46-entry `u8` table
 maps each potion registry id to the registry id of its explicitly declared base potion, then
 `potion::potion_effect_key` resolves that id through `POTION_NAMES` and returns the bare path.
