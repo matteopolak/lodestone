@@ -87,9 +87,8 @@ impl Block {
 
     /// The canonical namespaced name, for example `"minecraft:oak_stairs"`.
     ///
-    /// Zero-heap: a `&'static str` straight out of rodata, from the *same*
-    /// table `block_type_name` reads. There is exactly one copy of each block
-    /// name in the binary.
+    /// Zero-heap: a `&'static str` straight out of rodata. There is exactly
+    /// one copy of each block name in the binary.
     #[must_use]
     pub fn name(self) -> &'static str {
         BLOCK_REGISTRY_NAMES[self as usize]

@@ -89,6 +89,7 @@ use lodestone_world::{
     ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
     LightProperties, compute_column_light,
 };
+use lodestone_data::block::Block;
 use uuid::Uuid;
 
 // Test-only since the string→id resolver moved into `lodestone-data`
@@ -871,17 +872,15 @@ const CUSTOM_STAT_IDS: &[&str] = &[
 
 /// The `minecraft:block` **registry** id (registration order) for a block name.
 ///
-/// A linear scan over [`lodestone_data::block_states::block_type_name`] rather
-/// than a reverse map: statistics are a request/response batch of at most a few
-/// hundred entries, sent when a player opens one screen, so a table would cost
-/// more to keep than the scan does to run. Note this is the registry id space,
-/// **not** the block-state id space a chunk palette uses.
+/// A linear scan over [`Block`] rather than a reverse map: statistics are a
+/// request/response batch of at most a few hundred entries, sent when a player
+/// opens one screen, so a table would cost more to keep than the scan does to
+/// run. Note this is the registry id space, **not** the block-state id space a
+/// chunk palette uses.
 fn block_registry_id_by_name(name: &str) -> Option<i32> {
-    (0..lodestone_data::block_states::BLOCK_COUNT).find_map(|id| {
-        (lodestone_data::block_states::block_type_name(id)? == name)
-            .then(|| i32::try_from(id).ok())
-            .flatten()
-    })
+    Block::all()
+        .find(|block| block.name() == name)
+        .map(|block| i32::from(block.registry_id()))
 }
 
 /// Resolves a [`StatKey`] to the pair of VarInts vanilla's own stat stream

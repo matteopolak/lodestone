@@ -70,7 +70,7 @@ const COMMAND_BLOCKS: [(&str, CommandBlockMode); 3] = [
 
 /// The mode for `state_id`, or `None` if it is not a command block at all.
 ///
-/// # `block_name`, and why `block_type_name` here was a live bug
+/// # `block_name`, and why a block-type lookup here was a live bug
 ///
 /// [`block_name`](lodestone_data::block_states::block_name) is the accessor
 /// keyed by **block-state** id — the id space a chunk-section palette and
@@ -78,26 +78,18 @@ const COMMAND_BLOCKS: [(&str, CommandBlockMode); 3] = [
 /// block's own identifier rather than the state's, so it is stable across
 /// `facing`/`conditional`, which is the property the three-way match needs.
 ///
-/// This used to call `block_type_name`, whose parameter is a
+/// A block-type lookup's parameter is a
 /// **`minecraft:block` registry** id (1,196 entries, registration order) and
 /// *not* a state id — its own doc says so. The two spaces are unrelated orders,
-/// so passing a state id in resolved to an arbitrary block, and the effect was
-/// symmetrical and both halves player-visible: every real command block
-/// (states 9968, 14817, 14829) fell past `BLOCK_COUNT` and answered `None`, so
-/// the edit screen that fix wired up could never open in the game; while the three
-/// *registry* ids reused as state ids answered `Some` — state 407 is
-/// `minecraft:cherry_leaves` (→ Redstone) and 668/669 are
-/// `minecraft:note_block` (→ Auto/Sequence), so right-clicking leaves or a note
-/// block opened the command-block editor.
+/// so passing a state id in resolves an arbitrary block. The discriminating
+/// values show both directions: real command-block states 9968, 14817 and
+/// 14829 fall past `BLOCK_COUNT` and answer `None`, while the three registry ids
+/// reused as state ids answer `Some` — state 407 is `minecraft:cherry_leaves`
+/// (→ Redstone) and 668/669 are `minecraft:note_block` (→ Auto/Sequence).
 ///
-/// It survived review because every test gating this picked its subject with
-/// the *same* wrong accessor, so the gate agreed with the bug — a mirror, and
-/// the reason a green suite said nothing. Reverting this line was run and
-/// observed: `each_command_block_reports_its_own_mode_and_a_normal_block_
-/// reports_none` fails immediately on the real command block (`None` vs
-/// `Some(Redstone)`), now that it selects its subject in the state-id space.
-/// That test's second half additionally pins the *false-positive* direction,
-/// which no positive assertion can see.
+/// The test selects its subject in the state-id space and checks the real
+/// command block (`Some(Redstone)`), while its second half additionally pins
+/// the false-positive direction, which no positive assertion can see.
 #[must_use]
 pub fn mode_for_state(state_id: u32) -> Option<CommandBlockMode> {
     let name = lodestone_data::block_states::block_name(state_id)?;
@@ -219,10 +211,9 @@ mod tests {
     /// The first **block-state** id belonging to `name`, panicking rather than
     /// skipping if the table has no such block.
     ///
-    /// `block_name`, not `block_type_name`: see [`mode_for_state`]'s doc. The
-    /// previous spelling made every helper here select its subject through the
-    /// same wrong id space as the code under test, so the whole module's tests
-    /// agreed with the bug.
+    /// `block_name`, not a block-type lookup: see [`mode_for_state`]'s doc. The
+    /// Selecting the subject through a block-type id would make the helper use
+    /// the wrong id space as the code under test.
     ///
     /// A `find` that returns `None` used to `continue`/`return` — the
     /// *precondition* species of vacuous test, green when it measured nothing.
@@ -275,11 +266,9 @@ mod tests {
         );
 
         for (name, _) in COMMAND_BLOCKS {
-            let registry_id = (0u32..lodestone_data::block_states::BLOCK_COUNT as u32)
-                .find(|id| {
-                    lodestone_data::block_states::block_type_name(*id).is_some_and(|n| n == name)
-                })
-                .unwrap_or_else(|| panic!("the block registry must contain {name}"));
+            let registry_id = lodestone_data::block::Block::from_name(name)
+                .unwrap_or_else(|| panic!("the block registry must contain {name}"))
+                .registry_id() as u32;
             let as_a_state = lodestone_data::block_states::block_name(registry_id);
             assert_ne!(
                 as_a_state,

@@ -52,7 +52,6 @@ use lodestone_world::{
 use lodestone_game::chat_ack::{MessageSignature, MessageSignatureCache};
 
 use lodestone_data::block_entity_types::block_entity_type;
-use lodestone_data::block_states::block_type_name;
 use crate::chunk_batch::ChunkBatchSizeCalculator;
 use lodestone_data::data_component_types::component_type_name;
 use lodestone_data::entity_types::entity_type_name;

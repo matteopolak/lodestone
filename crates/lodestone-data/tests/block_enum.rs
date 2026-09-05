@@ -51,9 +51,8 @@ fn dump_blocks() -> Vec<(u16, String)> {
 ///
 /// This is the assertion that makes every array-indexed-by-`Block` census in the
 /// crate correct. It fails if the generator ever emits the enum in an order
-/// other than registration order — which is exactly the mistake
-/// `block_type_name` already shipped once in the other direction, when a
-/// registry id was used to index a name-sorted table.
+/// other than registration order: a registry id is not an index into a
+/// name-sorted table.
 #[test]
 fn discriminant_is_the_registry_id_and_names_match_the_server_dump() {
     let rows = dump_blocks();

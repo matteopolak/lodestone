@@ -409,16 +409,14 @@ fn level_event_rejects_trailing_bytes() {
 /// `block_event`'s trailing VarInt is a `registry(BLOCK)` id — registration
 /// order, `air` is 0 — and `minecraft:note_block` is **109** there.
 ///
-/// # This test used to encode 640 and still pass
+/// # Why the test encodes 109 rather than 640
 ///
 /// 640 is note_block's index in the *alphabetical* `blocks.json` key order, and
-/// `block_type_name` used to index that alphabetical table with a registry id.
-/// The test and the decoder shared the mistake, so the pair round-tripped
-/// perfectly while every real `block_event` on the wire named the wrong block: a
-/// server's note block (109) decoded as `minecraft:blue_glazed_terracotta`, and
-/// this test's 640 decodes as `minecraft:acacia_fence`. Neither id is a free
-/// choice — 109 is fixed by `generated/reports/registries.json`, outside this
-/// crate.
+/// is not its registration id. A lookup that used this alphabetical table with
+/// a registry id would decode a server's note block (109) as
+/// `minecraft:blue_glazed_terracotta`; this test's 640 would decode as
+/// `minecraft:acacia_fence`. Neither id is a free choice — 109 is fixed by
+/// `generated/reports/registries.json`, outside this crate.
 #[test]
 fn block_event_emits_pos_params_and_block_name() {
     let adapter = V770Adapter::new();
@@ -439,11 +437,10 @@ fn block_event_emits_pos_params_and_block_name() {
 }
 
 /// The negative control for the test above: the alphabetical index must *not*
-/// resolve to the block it names in that ordering. Without this, reverting
-/// `block_type_name` to index the name-sorted table would make the assertion
-/// above fail — but only for as long as someone remembers which of the two ids
-/// is the wire's. Pinning both directions makes the id spaces impossible to
-/// re-conflate silently.
+/// resolve to the block it names in that ordering. Without this, a name-sorted
+/// lookup would make the assertion above fail only while someone remembered
+/// which of the two ids is the wire's. Pinning both directions makes the id
+/// spaces impossible to re-conflate silently.
 #[test]
 fn block_event_does_not_read_the_alphabetical_block_index() {
     let adapter = V770Adapter::new();
