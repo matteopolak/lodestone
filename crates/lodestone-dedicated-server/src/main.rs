@@ -13,6 +13,7 @@
 //!
 //! ```text
 //! lodestone-server [--protocol <number>] [directory]
+//! lodestone-server anvil-convert <import|export> [options]
 //! ```
 //!
 //! `directory` defaults to the current directory. It is created if missing.
@@ -37,6 +38,7 @@ use lodestone_server::{eula, parse_seed};
 
 #[cfg(feature = "jvm")]
 mod java_adapter;
+mod anvil_conversion;
 
 /// How often the world autosaves while running. Vanilla has no
 /// `server.properties` key for this (its own autosave cadence is
@@ -117,7 +119,18 @@ async fn main() {
         )
         .init();
 
-    let launch = match ServerLaunch::from_args() {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    if arguments.first().is_some_and(|argument| argument == "anvil-convert") {
+        match anvil_conversion::run(arguments.into_iter().skip(1)) {
+            Ok(output) => print!("{output}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+    let launch = match parse_launch_args(arguments) {
         Ok(launch) => launch,
         Err(error) => {
             eprintln!("{error}");
@@ -468,12 +481,6 @@ async fn next_console_line<R: tokio::io::AsyncBufRead + Unpin>(
 struct ServerLaunch {
     directory: PathBuf,
     protocol: Option<i32>,
-}
-
-impl ServerLaunch {
-    fn from_args() -> Result<Self, String> {
-        parse_launch_args(std::env::args().skip(1))
-    }
 }
 
 fn parse_launch_args(

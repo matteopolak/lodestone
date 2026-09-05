@@ -22,6 +22,8 @@ Do not write a region from inside the walk. Add any new source conversion to the
 
 There are no flags or environment variables. The caller supplies the Anvil world root, native `WorldStorage`, selected dimension identifier, aligned `min_y`, positive height, and matching `ImportAuthorization`.
 
+The dedicated binary exposes that caller contract as `lodestone-server anvil-convert import`. It requires explicit `--source` (Anvil world), `--destination` and matching `--native-path` (native backend), `--dimension`, `--min-y`, and `--height`. A run without `--apply` prints the complete payload-free report and refuses mutation. If the report is lossy, rerun with both `--apply` and its exact printed `--acknowledge` token; blockers cannot be acknowledged. The command does not discover player, entity, POI, metadata, or opaque auxiliary payloads.
+
 ## Dependencies
 
 The coordinator depends on `lodestone_anvil::import_preflight` for aggregate loss accounting, `anvil_import` for region decoding and typed terrain preparation, and `world_storage::WorldStorage` for the one native transaction.
