@@ -948,6 +948,7 @@ impl BlockEntityTickPlan {
             if batches.last().is_none_or(|batch| batch.owner != assignment.owner) {
                 batches.push(BlockEntityTickOwnerBatch {
                     owner: assignment.owner,
+                    serial: batches.len(),
                     assignments: Vec::new(),
                 });
             }
@@ -966,6 +967,8 @@ impl BlockEntityTickPlan {
 pub struct BlockEntityTickOwnerBatch {
     /// The owner that executes every assignment in this batch.
     pub owner: BlockEntityTickOwner,
+    /// The batch's position in the tick-start serial plan.
+    serial: usize,
     assignments: Vec<BlockEntityTickAssignment>,
 }
 
@@ -991,14 +994,21 @@ pub struct BlockEntityTickEffect {
 
 /// The messages one chunk owner returns after its block-entity work.
 ///
-/// The central tick task applies batches in this vector's existing serial
-/// order. A future worker may construct one independently, but it must not
-/// write the world directly or reorder these batches without a separately
-/// validated hand-off rule.
+/// The central tick task merges batches by their tick-start serial slots. A
+/// future worker may construct one independently, but it must not write the
+/// world directly or publish completion order as behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockEntityTickEffectBatch {
     /// The owner that produced all effects in this batch.
     pub owner: BlockEntityTickOwner,
+    /// The batch's immutable publication position in the tick-start plan.
+    ///
+    /// An owner may finish preparation in any order in a future executor. This
+    /// token is the central writer's authority to restore the current serial
+    /// publication order rather than treating completion order as behavior.
+    serial: usize,
+    /// The number of owner batches the tick-start plan assigned.
+    batch_count: usize,
     effects: Vec<BlockEntityTickEffect>,
 }
 
@@ -1012,6 +1022,48 @@ impl BlockEntityTickEffectBatch {
     fn into_effects(self) -> Vec<BlockEntityTickEffect> {
         self.effects
     }
+}
+
+/// Restores a completed owner batch set to the tick-start publication order.
+///
+/// The serial executor currently returns batches in this order already, but
+/// the live central writer uses this merge rather than relying on that timing.
+/// A later owner worker must return exactly one batch for every plan slot;
+/// duplicate, missing, or mismatched slots are rejected before any effect is
+/// made visible.
+#[must_use]
+pub fn merge_tick_effect_batches(
+    mut batches: Vec<BlockEntityTickEffectBatch>,
+) -> Vec<BlockEntityTickEffect> {
+    let expected_count = batches.first().map_or(0, |batch| batch.batch_count);
+    assert_eq!(
+        batches.len(),
+        expected_count,
+        "block-entity owner completion omitted or duplicated a plan batch"
+    );
+    assert!(
+        batches
+            .iter()
+            .all(|batch| batch.batch_count == expected_count),
+        "block-entity owner completions disagree about their tick-start plan"
+    );
+    assert!(
+        batches
+            .iter()
+            .all(|batch| batch.effects.iter().all(|effect| effect.owner == batch.owner)),
+        "a block-entity owner completion contains another owner's effect"
+    );
+    batches.sort_unstable_by_key(|batch| batch.serial);
+    for (serial, batch) in batches.iter().enumerate() {
+        assert_eq!(
+            batch.serial, serial,
+            "block-entity owner completion has a duplicate, missing, or stale plan slot"
+        );
+    }
+    batches
+        .into_iter()
+        .flat_map(BlockEntityTickEffectBatch::into_effects)
+        .collect()
 }
 
 /// A [`BlockPos`]-keyed map of live [`BlockEntity`] values — the world's own
@@ -1171,8 +1223,10 @@ impl BlockEntityRegistry {
         enabled: &dyn Fn(BlockPos) -> bool,
     ) -> Vec<BlockEntityTickEffectBatch> {
         let plan = self.tick_plan();
+        let owner_batches = plan.owner_batches();
+        let batch_count = owner_batches.len();
         let mut batches = Vec::new();
-        for owner_batch in plan.owner_batches() {
+        for owner_batch in owner_batches {
             let mut effects = Vec::new();
             for assignment in owner_batch.assignments() {
                 let pos = assignment.pos;
@@ -1194,6 +1248,8 @@ impl BlockEntityRegistry {
             }
             batches.push(BlockEntityTickEffectBatch {
                 owner: owner_batch.owner,
+                serial: owner_batch.serial,
+                batch_count,
                 effects,
             });
         }
@@ -1719,6 +1775,7 @@ mod tests {
             [
                 BlockEntityTickOwnerBatch {
                     owner: BlockEntityTickOwner::Chunk { cx: -1, cz: 0 },
+                    serial: 0,
                     assignments: vec![BlockEntityTickAssignment {
                         owner: BlockEntityTickOwner::Chunk { cx: -1, cz: 0 },
                         pos: BlockPos::new(-1, 72, 0),
@@ -1726,6 +1783,7 @@ mod tests {
                 },
                 BlockEntityTickOwnerBatch {
                     owner: BlockEntityTickOwner::Chunk { cx: 0, cz: 0 },
+                    serial: 1,
                     assignments: vec![
                         BlockEntityTickAssignment {
                             owner: BlockEntityTickOwner::Chunk { cx: 0, cz: 0 },
@@ -1739,6 +1797,7 @@ mod tests {
                 },
                 BlockEntityTickOwnerBatch {
                     owner: BlockEntityTickOwner::Chunk { cx: 1, cz: 0 },
+                    serial: 2,
                     assignments: vec![BlockEntityTickAssignment {
                         owner: BlockEntityTickOwner::Chunk { cx: 1, cz: 0 },
                         pos: BlockPos::new(16, 70, 0),
@@ -1767,6 +1826,8 @@ mod tests {
             [
                 BlockEntityTickEffectBatch {
                     owner: BlockEntityTickOwner::Chunk { cx: -1, cz: 0 },
+                    serial: 0,
+                    batch_count: 2,
                     effects: vec![BlockEntityTickEffect {
                         owner: BlockEntityTickOwner::Chunk { cx: -1, cz: 0 },
                         pos: BlockPos::new(-1, 70, 0),
@@ -1775,6 +1836,8 @@ mod tests {
                 },
                 BlockEntityTickEffectBatch {
                     owner: BlockEntityTickOwner::Chunk { cx: 1, cz: 0 },
+                    serial: 1,
+                    batch_count: 2,
                     effects: vec![BlockEntityTickEffect {
                         owner: BlockEntityTickOwner::Chunk { cx: 1, cz: 0 },
                         pos: BlockPos::new(16, 70, 0),
@@ -1783,6 +1846,43 @@ mod tests {
                 },
             ],
             "the central world writer must receive distinct owner batches in serial order"
+        );
+    }
+
+    /// Owner completion is not publication order. This control creates the
+    /// same two real furnace batches, reverses their simulated completion
+    /// order, and proves the central merge restores the tick-start sequence.
+    /// The unmerged control must differ, or this fixture would not detect an
+    /// accidental completion-order publication.
+    #[test]
+    fn tick_effect_batch_merge_restores_serial_order_after_swapped_completion() {
+        let mut reg = BlockEntityRegistry::new();
+        for pos in [BlockPos::new(16, 70, 0), BlockPos::new(-1, 70, 0)] {
+            let mut furnace = Furnace::new(FurnaceKind::Furnace);
+            furnace.set_fuel(Some(stack("minecraft:coal", 1)));
+            furnace.set_input(Some(stack("minecraft:iron_ore", 1)));
+            reg.insert(pos, BlockEntity::Furnace(furnace));
+        }
+
+        let batches = reg.tick_all_by_owner_with_hopper_lock(&|_| true, &|_| true);
+        let serial_effects: Vec<_> = batches
+            .iter()
+            .flat_map(|batch| batch.effects().iter().copied())
+            .collect();
+        let mut completed = batches;
+        completed.reverse();
+        let completion_order_effects: Vec<_> = completed
+            .iter()
+            .flat_map(|batch| batch.effects().iter().copied())
+            .collect();
+        assert_ne!(
+            completion_order_effects, serial_effects,
+            "control requires swapped owner completion to alter raw publication order"
+        );
+        assert_eq!(
+            merge_tick_effect_batches(completed),
+            serial_effects,
+            "central publication must restore plan order independently of owner completion order"
         );
     }
 
