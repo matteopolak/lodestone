@@ -8,6 +8,8 @@
 
 `app::friends::FriendsApp` is the execution boundary around that coordinator. Native builds run it on a named worker with its own current-thread async runtime; browser builds use a local-task-compatible handle. Both receive only account metadata and activity intent, then return only `FriendsView` snapshots. Selected-account resolution, cache refresh, service calls, and the resolved session stay private to the executor. The frame calls `FriendsApp::sync` with the account switcher's selected profile and the game activity; it sends only changes, filters late views from a prior account, and gives menus a credential-free `view` accessor.
 
+`menu::friends` is the presentation consumer. The title and pause-menu Friends buttons open one two-tab surface: Friends lists established relationships and Pending combines incoming and outgoing requests. It renders loading, failure, empty, and cached-list states from `FriendsView`; its only outbound values are refresh and already-supported `Accept`, `Decline`, `Cancel`, and `Remove` mutations. It deliberately has no text field for sending a request and no preference switches yet: those would need a reviewed user-input and settings flow, not a menu-side call to the service.
+
 ## How it works
 
 `FriendsService::production` owns a five-second, redirect-disabled HTTP client and a fixed `https://api.minecraftservices.com/` origin. A caller passes `&Session` to each operation, so the service neither opens token storage nor refreshes credentials. The session's bearer header is added only to the fixed request origin.
@@ -35,6 +37,8 @@ Keep wire request and response structs private in `lodestone_auth::friends`; pro
 When changing the shell executor, preserve the `Select → ResolveSession → FetchAttributes` ordering and keep `FriendsView` as the only worker-to-frame type. Native work belongs in `app::friends::run_native_worker`; browser work belongs in the local-task seam, not a blocking executor. The application must call `FriendsApp::shutdown` as it exits so its account-scoped state is cleared and the native worker is asked to stop.
 
 Put polling, cooldown, account replacement, and authentication-retry decisions in `FriendsCoordinator`, not in menu callbacks or the worker. The worker must complete each emitted operation exactly once before polling again. If an app integration adds a new activity source, call `FriendsRuntime::set_desired_presence`; do not send a presence HTTP request directly. `FriendsView` is the only object frame code should retain or clone.
+
+When changing the menu, keep `MenuNav::refresh_friends_view` as the one app-to-menu copy and drain `MenuNav::take_friends_intents` at the app boundary. Do not make a renderer resolve an account or call `FriendsService`, and do not turn repeated refresh clicks into immediate network traffic: the coordinator owns the request floor and backoff. The pause route must be drawn and hit-tested as an overlay over the paused world; the title route is a full menu screen. Both escape and Done must return to the route that opened Friends.
 
 If a new HTTP client is needed, construct it inside this module with redirects disabled. Accepting an arbitrary caller-built client can silently re-enable token forwarding on redirects. Never log response bodies, submitted names, or `Session` values.
 

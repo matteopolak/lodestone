@@ -56,6 +56,7 @@ pub mod confirm;
 pub mod create_world;
 pub mod edit_box;
 pub mod focus;
+pub mod friends;
 pub mod key_binds;
 pub mod language;
 pub mod layout;
@@ -346,6 +347,9 @@ pub enum Screen {
     /// inactive regardless of session kind: it needs secure chat signing,
     /// which does not exist here (see [`social`]'s module docs).
     Social,
+    /// The account-scoped Friends service. It is reached from the title or the
+    /// pause menu and returns to the screen that opened it.
+    Friends,
     /// The Statistics screen: vanilla's `StatsScreen`. Reached
     /// from the pause menu's Statistics button
     /// ([`nav::PauseButton::Statistics`], now live); Escape or the screen's
@@ -506,6 +510,7 @@ impl Screen {
             | Screen::Death
             | Screen::Credits
             | Screen::Social
+            | Screen::Friends
             | Screen::Statistics
             | Screen::ServerLinks
             | Screen::Advancements
@@ -533,7 +538,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 27] = [
+    pub const ALL: [Screen; 28] = [
         Screen::Ownership,
         Screen::MainMenu,
         Screen::ServerList,
@@ -555,6 +560,7 @@ impl Screen {
         Screen::Error,
         Screen::Credits,
         Screen::Social,
+        Screen::Friends,
         Screen::Statistics,
         Screen::ServerLinks,
         Screen::Advancements,
@@ -584,6 +590,9 @@ pub struct UiState {
     /// whichever opened it. See [`UiState::open_settings`],
     /// [`UiState::open_settings_from_pause`] and [`UiState::close_settings`].
     settings_return: Screen,
+    /// Where the Friends screen returns to. Unlike Settings, only the title
+    /// and pause menu can open it.
+    friends_return: Screen,
     /// The current death's message, populated only on [`Screen::Death`] — see
     /// [`Self::die`]. Mirrors how [`Self::error`] carries `Screen::Error`'s
     /// reason. Interactive runs, not a plain string: a killer's own decorated
@@ -621,6 +630,7 @@ impl Default for UiState {
             error: None,
             quit_requested: false,
             settings_return: Screen::MainMenu,
+            friends_return: Screen::MainMenu,
             death_message: None,
             connect_phase: loading::ConnectPhase::default(),
             container_server_window: None,
@@ -759,6 +769,12 @@ impl UiState {
         self.screen == Screen::Settings
     }
 
+    /// Whether Friends is open over a paused world rather than from the title.
+    #[must_use]
+    pub fn friends_in_world(&self) -> bool {
+        self.screen == Screen::Friends && self.friends_return == Screen::Paused
+    }
+
     /// Whether the shell is on any pre-session menu screen, i.e. no world is
     /// loaded and the menu renderer owns the frame.
     ///
@@ -771,6 +787,9 @@ impl UiState {
     /// continue (see the module docs' note on gating input, not the network).
     #[must_use]
     pub fn is_menu(&self) -> bool {
+        if self.screen == Screen::Friends {
+            return !self.friends_in_world();
+        }
         matches!(
             self.screen,
             // The ownership gate is a pre-session menu screen exactly as the
@@ -949,6 +968,10 @@ impl UiState {
                     // silently strand the player on a screen backed by a
                     // session that no longer exists.
                     | Screen::Social
+                    // Friends can be opened over a paused world as well. Its
+                    // title route cannot have a live session to fail, so this
+                    // arm only affects the in-world return path.
+                    | Screen::Friends
                     // Same reasoning, for Statistics.
                     | Screen::Statistics
                     // And for Advancements, whose tree is data-pack data
@@ -1014,6 +1037,31 @@ impl UiState {
     pub fn close_server_edit(&mut self) {
         if self.screen == Screen::ServerEdit {
             self.screen = Screen::ServerList;
+        }
+    }
+
+    /// Open Friends from the title. The destination is still useful before an
+    /// account is selected because its credential-free state explains that
+    /// requirement instead of leaving the title icon inert.
+    pub fn open_friends_from_title(&mut self) {
+        if self.screen == Screen::MainMenu {
+            self.friends_return = Screen::MainMenu;
+            self.screen = Screen::Friends;
+        }
+    }
+
+    /// Open Friends from pause without replacing the world behind the menu.
+    pub fn open_friends_from_pause(&mut self) {
+        if self.screen == Screen::Paused {
+            self.friends_return = Screen::Paused;
+            self.screen = Screen::Friends;
+        }
+    }
+
+    /// Return to the entry surface that opened Friends.
+    pub fn close_friends(&mut self) {
+        if self.screen == Screen::Friends {
+            self.screen = self.friends_return;
         }
     }
 
@@ -1566,6 +1614,7 @@ impl UiState {
             // like every ordinary sub-screen (unlike `Screen::Credits`, this
             // one has a real "back", the pause menu it was opened from).
             Screen::Social => self.close_social(),
+            Screen::Friends => self.close_friends(),
             // Same reasoning as `Screen::Social` immediately above.
             Screen::Statistics => self.close_statistics(),
             // In practice `MenuNav::key_server_links` intercepts Escape
