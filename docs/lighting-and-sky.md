@@ -180,6 +180,11 @@ alone cannot express "draw no sun", so before this landed the Nether had correct
 and clear colour but still rendered the overworld's sun and clouds overhead. Cloud
 opacity is gated separately, on the dimension's own cloud-colour alpha.
 
+The eight moon textures are selected by `lodestone_assets::MoonPhase`, not a raw
+integer. `moon_phase_for_time_of_day` resolves the day-clock boundary once, and the
+asset atlas accepts only the finite phase domain; its compact index is used only for
+the renderer's fixed UV table.
+
 The gradient itself comes from fogging a flat-coloured disc radially from its
 centre outward, not from vertex colours — `skyEnd` (where the gradient reaches full
 fog) is the render distance in blocks, clamped, not the attribute's raw registered

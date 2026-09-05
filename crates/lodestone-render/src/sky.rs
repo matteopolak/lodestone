@@ -369,15 +369,13 @@ pub fn star_brightness_for_time_of_day(time_of_day: i64) -> f32 {
     f * f * 0.5
 }
 
-/// The active moon phase, `0..8`, in [`lodestone_assets::MOON_PHASE_NAMES`]
-/// order. Vanilla fixes each phase's start tick to `index * 24000`, which fixes
-/// the mapping: the phase active on world-day `d` (`d = time_of_day / 24000`)
-/// is enum index `d % 8`. This is a per-day integer cycle, not a continuous
-/// keyframe track, so unlike the ramp-shaped formulas above it does not
-/// diverge from the timeline-exact 26.2 behaviour.
+/// The active [`lodestone_assets::MoonPhase`] for `time_of_day`.
+///
+/// Each phase begins on a whole world-day boundary, so this is a discrete
+/// eight-day cycle rather than a continuous keyframe track.
 #[must_use]
-pub fn moon_phase_index_for_time_of_day(time_of_day: i64) -> u8 {
-    time_of_day.div_euclid(24_000).rem_euclid(8) as u8
+pub fn moon_phase_for_time_of_day(time_of_day: i64) -> lodestone_assets::MoonPhase {
+    lodestone_assets::MoonPhase::for_day(time_of_day.div_euclid(24_000))
 }
 
 // ---------------------------------------------------------------------------
@@ -1556,11 +1554,16 @@ mod tests {
     /// `n`; day 8 must wrap back to phase 0, not overflow or misalign.
     #[test]
     fn moon_phase_cycles_every_eight_days() {
-        assert_eq!(moon_phase_index_for_time_of_day(0), 0);
-        assert_eq!(moon_phase_index_for_time_of_day(24_000), 1);
-        assert_eq!(moon_phase_index_for_time_of_day(24_000 * 7), 7);
-        assert_eq!(moon_phase_index_for_time_of_day(24_000 * 8), 0);
-        assert_eq!(moon_phase_index_for_time_of_day(24_000 * 8 + 12_000), 0);
+        use lodestone_assets::MoonPhase;
+
+        assert_eq!(moon_phase_for_time_of_day(0), MoonPhase::FullMoon);
+        assert_eq!(moon_phase_for_time_of_day(24_000), MoonPhase::WaningGibbous);
+        assert_eq!(moon_phase_for_time_of_day(24_000 * 7), MoonPhase::WaxingGibbous);
+        assert_eq!(moon_phase_for_time_of_day(24_000 * 8), MoonPhase::FullMoon);
+        assert_eq!(
+            moon_phase_for_time_of_day(24_000 * 8 + 12_000),
+            MoonPhase::FullMoon
+        );
     }
 
     /// Every expected value here is `Math.min(chunks * 16, 512)`

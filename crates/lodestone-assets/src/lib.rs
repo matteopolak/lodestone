@@ -159,7 +159,7 @@ pub use skin::{
     DefaultSkin, PlayerModelType, ProfileTextures, SkinTexture, SkinTextureError, default_skin,
     default_skin_for_uuid, decode_textures_property,
 };
-pub use sky::{CelestialAtlas, MOON_PHASE_NAMES, SUN_SPRITE_PATH, load_cloud_texture};
+pub use sky::{CelestialAtlas, MOON_PHASE_NAMES, MoonPhase, SUN_SPRITE_PATH, load_cloud_texture};
 #[cfg(not(target_arch = "wasm32"))]
 pub use source::DirectorySource;
 pub use source::{MemorySource, ResourceSource, ZipSource};
