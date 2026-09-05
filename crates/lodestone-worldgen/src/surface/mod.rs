@@ -518,8 +518,13 @@ impl SurfaceSystem {
             .get_value(f64::from(x), 0.0, f64::from(z))
     }
 
-    /// Vanilla's own preliminary-surface-level lookup at `(sample_x, sample_z)`.
-    fn preliminary_surface_level(&self, sample_x: i32, sample_z: i32) -> i32 {
+    /// Preliminary surface-height estimate at `(sample_x, sample_z)`.
+    ///
+    /// This has no block-grid allocation or generation-store access. It is the
+    /// deliberate low-detail input for a distant heightfield, not a substitute
+    /// for a generated column: carving, aquifers, and surface rules can still
+    /// alter the final visible top block.
+    pub(crate) fn preliminary_surface_level(&self, sample_x: i32, sample_z: i32) -> i32 {
         // Vanilla's quart<->block conversion round-trip collapses to
         // (v >> 2) << 2.
         let qx = (sample_x >> 2) << 2;
