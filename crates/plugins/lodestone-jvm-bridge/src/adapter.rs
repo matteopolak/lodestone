@@ -14,7 +14,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::time::{Duration, Instant};
 
 use jni::errors::ThrowRuntimeExAndDefault;
-use jni::objects::{JClass, JObject, JString};
+use jni::objects::{Global, JClass, JObject, JString};
 use jni::strings::JNIString;
 use jni::sys::{jint, jlong, jobject, jstring};
 use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
@@ -90,6 +90,9 @@ thread_local! {
     static LIFECYCLE_IDENTITY: RefCell<Vec<LifecycleIdentity>> = const {
         RefCell::new(Vec::new())
     };
+    static RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS: RefCell<Option<ResidentBlockChangeSubscriptions<Global<JObject<'static>>>>> = const {
+        RefCell::new(None)
+    };
 }
 
 /// Descriptor identity available only during one retained-entry call.
@@ -97,11 +100,128 @@ thread_local! {
 /// This is deliberately worker-local rather than a JVM property or a static
 /// field: another plugin cannot observe it between callbacks, and nested Java
 /// calls restore the outer identity when they return.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct LifecycleIdentity {
     name: String,
     version: String,
     main_class: String,
+}
+
+/// One listener failure reported after a resident block-state callback.
+///
+/// The host-confirmed change has already happened. This report means one
+/// isolated listener failed while observing it; it does not cancel the change
+/// or prevent later registrations from receiving that same callback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResidentBlockChangeListenerFailure {
+    /// Zero-based registration number assigned when the listener subscribed.
+    pub registration: usize,
+    /// Validated descriptor name captured while the listener subscribed.
+    pub plugin_name: String,
+    /// Bounded Java failure description after the listener exception was cleared.
+    pub detail: String,
+}
+
+/// Maximum number of resident block-change listeners retained by one worker.
+///
+/// A plugin can register more than once, so this is a worker-wide bound rather
+/// than a per-plugin promise. It keeps registration aligned with the bounded
+/// request ports: a misbehaving entry gets a named error instead of growing a
+/// process-lifetime collection without limit.
+const MAX_RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResidentBlockChangeRegistration {
+    number: usize,
+    identity: LifecycleIdentity,
+    active: bool,
+}
+
+struct ResidentBlockChangeSubscription<T> {
+    registration: ResidentBlockChangeRegistration,
+    listener: T,
+}
+
+/// Ordered listener bookkeeping shared by the JNI storage and hermetic tests.
+///
+/// The order is insertion order, never a hash-map order. Registrations begin
+/// inactive so constructor and enable failures cannot leak listeners into a
+/// later host-confirmed change; the lifecycle owner activates them only after
+/// the matching enable callback succeeds.
+#[derive(Default)]
+struct ResidentBlockChangeSubscriptions<T> {
+    entries: Vec<ResidentBlockChangeSubscription<T>>,
+    next_registration: usize,
+}
+
+impl<T> ResidentBlockChangeSubscriptions<T> {
+    fn register(&mut self, identity: LifecycleIdentity, listener: T) -> Result<usize, AdapterError> {
+        if self.entries.len() >= MAX_RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS {
+            return Err(AdapterError::new(format!(
+                "resident block listener subscription limit {} exceeded",
+                MAX_RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS,
+            )));
+        }
+        let registration = self.next_registration;
+        self.next_registration += 1;
+        self.entries.push(ResidentBlockChangeSubscription {
+            registration: ResidentBlockChangeRegistration {
+                number: registration,
+                identity,
+                active: false,
+            },
+            listener,
+        });
+        Ok(registration)
+    }
+
+    fn activate(&mut self, identity: &LifecycleIdentity) -> usize {
+        let mut activated = 0;
+        for entry in &mut self.entries {
+            if entry.registration.identity == *identity && !entry.registration.active {
+                entry.registration.active = true;
+                activated += 1;
+            }
+        }
+        activated
+    }
+
+    fn clear(&mut self, identity: &LifecycleIdentity) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| entry.registration.identity != *identity);
+        before - self.entries.len()
+    }
+
+    fn active_entries(&self) -> impl Iterator<Item = (usize, &LifecycleIdentity, &T)> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.registration.active)
+            .map(|entry| {
+                (
+                    entry.registration.number,
+                    &entry.registration.identity,
+                    &entry.listener,
+                )
+            })
+    }
+}
+
+fn dispatch_isolated_listeners<T>(
+    listeners: impl IntoIterator<Item = (usize, String, T)>,
+    mut invoke: impl FnMut(&T) -> Result<(), String>,
+) -> Vec<ResidentBlockChangeListenerFailure> {
+    let mut failures = Vec::new();
+    for (registration, plugin_name, listener) in listeners {
+        if let Err(detail) = invoke(&listener) {
+            failures.push(ResidentBlockChangeListenerFailure {
+                registration,
+                plugin_name,
+                detail,
+            });
+        }
+    }
+    failures
 }
 
 struct LifecycleIdentityGuard;
@@ -134,11 +254,9 @@ pub(crate) fn with_lifecycle_identity<T>(
     operation: impl FnOnce() -> T,
 ) -> T {
     LIFECYCLE_IDENTITY.with(|identities| {
-        identities.borrow_mut().push(LifecycleIdentity {
-            name: name.to_owned(),
-            version: version.to_owned(),
-            main_class: main_class.to_owned(),
-        });
+        identities
+            .borrow_mut()
+            .push(lifecycle_identity(name, version, main_class));
     });
     let _identity = LifecycleIdentityGuard;
     operation()
@@ -157,11 +275,17 @@ enum AdapterCommand {
 
 /// A completed worker transition. Payload-bearing events preserve the host's
 /// original callback values so callers can match completion without guessing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdapterEvent {
     Ready,
     TickCompleted(u64),
-    BlockStateChangedCompleted(BlockStateWrite),
+    /// The adapter callback and every registered isolated listener were
+    /// invoked on the one worker. Listener failures are reported here instead
+    /// of making the adapter terminal.
+    BlockStateChangedCompleted {
+        change: BlockStateWrite,
+        listener_failures: Vec<ResidentBlockChangeListenerFailure>,
+    },
 }
 
 #[derive(Debug)]
@@ -385,12 +509,12 @@ impl AdapterHost {
             return Err(error);
         }
         let result = match self.events.try_recv() {
-            Ok(Ok(event)) => match (&self.state, event) {
+            Ok(Ok(event)) => match (&self.state, &event) {
                 (State::Loading(_), AdapterEvent::Ready) => Ok(Some(event)),
                 (
                     State::Running { command: AdapterCommand::Tick(tick), .. },
                     AdapterEvent::TickCompleted(done),
-                ) if *tick == done => {
+                ) if *tick == *done => {
                     Ok(Some(event))
                 }
                 (
@@ -398,8 +522,8 @@ impl AdapterHost {
                         command: AdapterCommand::BlockStateChanged(expected),
                         ..
                     },
-                    AdapterEvent::BlockStateChangedCompleted(done),
-                ) if *expected == done => {
+                    AdapterEvent::BlockStateChangedCompleted { change, .. },
+                ) if *expected == *change => {
                     Ok(Some(event))
                 }
                 _ => Err(AdapterError::new("adapter worker returned an unexpected completion")),
@@ -469,6 +593,8 @@ fn run_java<S>(
             CALLBACK_PORT.with(|slot| *slot.borrow_mut() = Some(port.clone()));
             BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = Some(block_write_port.clone()));
             SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = Some(server_tick_port.clone()));
+            RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS
+                .with(|slot| *slot.borrow_mut() = Some(Default::default()));
             let surface = NativeServerSurface::from_ports(
                 port.clone(),
                 block_write_port.clone(),
@@ -528,9 +654,13 @@ fn run_java<S>(
                                 env,
                                 &format!("{class_name}.onBlockStateChanged(IIII)V"),
                                 error,
-                            ))
+                                ))
                         })?;
-                        AdapterEvent::BlockStateChangedCompleted(change)
+                        let listener_failures = dispatch_resident_block_change(env, change);
+                        AdapterEvent::BlockStateChangedCompleted {
+                            change,
+                            listener_failures,
+                        }
                     }
                 };
                 if events.send(Ok(completion)).is_err() {
@@ -543,6 +673,7 @@ fn run_java<S>(
         CALLBACK_PORT.with(|slot| *slot.borrow_mut() = None);
         BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = None);
         SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = None);
+        RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS.with(|slot| *slot.borrow_mut() = None);
         Ok(result)
     }).map_err(|error| AdapterError::new(error.to_string()))?
 }
@@ -688,6 +819,28 @@ pub(crate) fn register_lifecycle_plugin_descriptor_query(
     }
 }
 
+#[allow(unsafe_code)]
+pub(crate) fn register_resident_block_change_subscription(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native takes one isolated listener object
+    // and returns void. The native callback retains it only on this adapter
+    // worker, where the matching dispatch command is single-flight.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_subscribe_resident_block_changes as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
 extern "system" fn native_block_state_id<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -769,6 +922,166 @@ extern "system" fn native_lifecycle_plugin_descriptor<'local>(
 ) -> jobject {
     env.with_env(|env| lifecycle_plugin_descriptor(env, &class))
         .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_subscribe_resident_block_changes<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    listener: JObject<'local>,
+) {
+    env.with_env(|env| subscribe_resident_block_changes(env, listener))
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+fn subscribe_resident_block_changes(
+    env: &mut Env<'_>,
+    listener: JObject<'_>,
+) -> Result<(), AdapterError> {
+    let _depth = CallbackDepthGuard::enter()
+        .map_err(|error| AdapterError::new(error.to_string()))?;
+    if listener.is_null() {
+        return Err(AdapterError::new(
+            "subscribeResidentBlockStateChanges requires a listener",
+        ));
+    }
+    let identity = active_subscription_identity()?;
+    let listener = env
+        .new_global_ref(listener)
+        .map_err(|error| AdapterError::new(format!("resident block listener subscription: {error}")))?;
+    RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS.with(|slot| {
+        let mut subscriptions = slot.borrow_mut();
+        let subscriptions = subscriptions.as_mut().ok_or_else(|| {
+            AdapterError::new("subscribeResidentBlockStateChanges requires the adapter worker thread")
+        })?;
+        subscriptions.register(identity, listener)?;
+        Ok(())
+    })
+}
+
+fn active_subscription_identity() -> Result<LifecycleIdentity, AdapterError> {
+    LIFECYCLE_IDENTITY.with(|identities| identities.borrow().last().cloned())
+        .ok_or_else(|| AdapterError::new(
+            "subscribeResidentBlockStateChanges requires an active retained-entry lifecycle call",
+        ))
+}
+
+fn lifecycle_identity(name: &str, version: &str, main_class: &str) -> LifecycleIdentity {
+    LifecycleIdentity {
+        name: name.to_owned(),
+        version: version.to_owned(),
+        main_class: main_class.to_owned(),
+    }
+}
+
+/// Marks registrations made by one entry active after its enable callback
+/// succeeds. The lifecycle owner runs this only on the adapter worker.
+pub(crate) fn activate_resident_block_change_subscriptions(
+    name: &str,
+    version: &str,
+    main_class: &str,
+) -> usize {
+    let identity = lifecycle_identity(name, version, main_class);
+    RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS.with(|slot| {
+        slot.borrow_mut()
+            .as_mut()
+            .map_or(0, |subscriptions| subscriptions.activate(&identity))
+    })
+}
+
+/// Drops all registrations owned by one entry after construction/enable
+/// failure or after its disable callback. Dropping the JNI globals here keeps
+/// cleanup on the attached adapter worker rather than an arbitrary thread.
+pub(crate) fn clear_resident_block_change_subscriptions(
+    name: &str,
+    version: &str,
+    main_class: &str,
+) -> usize {
+    let identity = lifecycle_identity(name, version, main_class);
+    RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS.with(|slot| {
+        slot.borrow_mut()
+            .as_mut()
+            .map_or(0, |subscriptions| subscriptions.clear(&identity))
+    })
+}
+
+fn dispatch_resident_block_change(
+    env: &mut Env<'_>,
+    change: BlockStateWrite,
+) -> Vec<ResidentBlockChangeListenerFailure> {
+    let state_id = i32::try_from(change.state_id)
+        .expect("block-state callback range was checked before worker dispatch");
+    let mut failures = Vec::new();
+    let mut listeners = Vec::new();
+    RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS.with(|slot| {
+        let subscriptions = slot.borrow();
+        let Some(subscriptions) = subscriptions.as_ref() else {
+            return;
+        };
+        for (registration, identity, listener) in subscriptions.active_entries() {
+            match env.new_local_ref(listener.as_obj()) {
+                Ok(listener) => listeners.push((registration, identity.clone(), listener)),
+                Err(error) => failures.push(ResidentBlockChangeListenerFailure {
+                    registration,
+                    plugin_name: identity.name.clone(),
+                    detail: bound_listener_detail(format!(
+                        "could not retain listener local reference: {error}"
+                    )),
+                }),
+            }
+        }
+    });
+    failures.extend(dispatch_isolated_listeners(
+        listeners.into_iter().map(|(registration, identity, listener)| {
+            (registration, identity.name.clone(), (identity, listener))
+        }),
+        |(identity, listener)| {
+            with_lifecycle_identity(
+                &identity.name,
+                &identity.version,
+                &identity.main_class,
+                || {
+                    let result = env.with_local_frame(16, |env| {
+                        env.call_method(
+                            listener,
+                            jni_str!("onResidentBlockStateChanged"),
+                            jni_sig!("(IIII)V"),
+                            &[
+                                JValue::Int(change.x),
+                                JValue::Int(change.y),
+                                JValue::Int(change.z),
+                                JValue::Int(state_id),
+                            ],
+                        )
+                        .map(|_| ())
+                    });
+                    result.map_err(|error| {
+                        bound_listener_detail(
+                            java_error(
+                                env,
+                                "resident block listener onResidentBlockStateChanged(IIII)V",
+                                error,
+                            )
+                            .to_string(),
+                        )
+                    })
+                },
+            )
+        },
+    ));
+    failures
+}
+
+const MAX_LISTENER_FAILURE_DETAIL: usize = 512;
+
+fn bound_listener_detail(detail: String) -> String {
+    if detail.len() <= MAX_LISTENER_FAILURE_DETAIL {
+        return detail;
+    }
+    let mut end = MAX_LISTENER_FAILURE_DETAIL;
+    while !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &detail[..end])
 }
 
 fn lifecycle_identity_string(
@@ -945,14 +1258,20 @@ mod tests {
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             let command = commands.recv().expect("one host callback");
             assert_eq!(command, AdapterCommand::BlockStateChanged(expected));
-            events.send(Ok(AdapterEvent::BlockStateChangedCompleted(expected))).unwrap();
+            events.send(Ok(AdapterEvent::BlockStateChangedCompleted {
+                change: expected,
+                listener_failures: Vec::new(),
+            })).unwrap();
         }).unwrap();
         assert_eq!(await_event(&mut host), AdapterEvent::Ready);
         host.dispatch_block_state_changed(expected).unwrap();
         assert!(host.dispatch_tick(37).is_err(), "no callback backlog is permitted");
         assert_eq!(
             await_event(&mut host),
-            AdapterEvent::BlockStateChangedCompleted(expected),
+            AdapterEvent::BlockStateChangedCompleted {
+                change: expected,
+                listener_failures: Vec::new(),
+            },
         );
         assert!(host.is_idle());
         let oversized = BlockStateWrite { state_id: i32::MAX as u32 + 1, ..expected };
@@ -1057,5 +1376,76 @@ mod tests {
             assert!(Instant::now() < limit, "block write did not reach the host");
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn resident_block_change_subscriptions_activate_and_cleanup_in_stable_order() {
+        let alpha = lifecycle_identity("alpha", "one", "alpha.Main");
+        let beta = lifecycle_identity("beta", "one", "beta.Main");
+        let mut subscriptions = ResidentBlockChangeSubscriptions::<u8>::default();
+        assert_eq!(subscriptions.register(alpha.clone(), 10).unwrap(), 0);
+        assert_eq!(subscriptions.register(beta.clone(), 20).unwrap(), 1);
+        assert_eq!(subscriptions.register(alpha.clone(), 30).unwrap(), 2);
+        assert_eq!(subscriptions.active_entries().count(), 0);
+
+        assert_eq!(subscriptions.activate(&alpha), 2);
+        let active: Vec<_> = subscriptions
+            .active_entries()
+            .map(|(number, identity, listener)| (number, identity.name.as_str(), *listener))
+            .collect();
+        assert_eq!(active, vec![(0, "alpha", 10), (2, "alpha", 30)]);
+
+        assert_eq!(subscriptions.clear(&alpha), 2);
+        assert_eq!(subscriptions.register(beta.clone(), 40).unwrap(), 3);
+        assert_eq!(subscriptions.activate(&beta), 2);
+        let active: Vec<_> = subscriptions
+            .active_entries()
+            .map(|(number, identity, listener)| (number, identity.name.as_str(), *listener))
+            .collect();
+        assert_eq!(active, vec![(1, "beta", 20), (3, "beta", 40)]);
+    }
+
+    #[test]
+    fn resident_block_change_listener_failures_do_not_stop_later_listeners() {
+        let mut calls = Vec::new();
+        let failures = dispatch_isolated_listeners(
+            vec![
+                (0, "alpha".to_owned(), 10_u8),
+                (1, "bravo".to_owned(), 20_u8),
+                (2, "charlie".to_owned(), 30_u8),
+            ],
+            |listener| {
+                calls.push(*listener);
+                if *listener == 20 {
+                    Err("listener threw".to_owned())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(calls, vec![10, 20, 30]);
+        assert_eq!(
+            failures,
+            vec![ResidentBlockChangeListenerFailure {
+                registration: 1,
+                plugin_name: "bravo".to_owned(),
+                detail: "listener threw".to_owned(),
+            }],
+        );
+    }
+
+    #[test]
+    fn resident_block_change_subscriptions_have_a_worker_bound() {
+        let identity = lifecycle_identity("bounded", "one", "bounded.Main");
+        let mut subscriptions = ResidentBlockChangeSubscriptions::<()>::default();
+        for _ in 0..MAX_RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS {
+            subscriptions
+                .register(identity.clone(), ())
+                .expect("entries below the worker bound are accepted");
+        }
+        let error = subscriptions
+            .register(identity, ())
+            .expect_err("the worker bound must reject another listener");
+        assert!(error.to_string().contains("subscription limit 64 exceeded"));
     }
 }

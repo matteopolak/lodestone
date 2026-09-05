@@ -96,7 +96,7 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
                 })
                 .expect("dispatch host block-change callback");
             }
-            Ok(Some(AdapterEvent::BlockStateChangedCompleted(change))) => {
+            Ok(Some(AdapterEvent::BlockStateChangedCompleted { change, .. })) => {
                 assert_eq!(
                     change,
                     BlockStateWrite { x: -17, y: 64, z: 33, state_id: 1234 },

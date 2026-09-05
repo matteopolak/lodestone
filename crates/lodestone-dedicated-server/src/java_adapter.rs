@@ -140,7 +140,7 @@ impl JavaAdapter {
 
     pub(crate) fn poll(&mut self, server: &IntegratedServer) -> Result<Option<u64>, String> {
         let event = self.host.poll().map_err(|error| error.to_string())?;
-        match event {
+        match &event {
             Some(AdapterEvent::Ready) => {
                 if let Some(plan) = &self.paper_plan {
                     let construction = self
@@ -199,9 +199,19 @@ impl JavaAdapter {
                     tracing::info!("experimental Java adapter ready");
                 }
             }
-            Some(AdapterEvent::TickCompleted(tick)) => tracing::debug!(tick, "Java adapter callback completed"),
-            Some(AdapterEvent::BlockStateChangedCompleted(change)) => {
-                tracing::debug!(?change, "Java adapter block-change callback completed");
+            Some(AdapterEvent::TickCompleted(tick)) => {
+                tracing::debug!(tick, "Java adapter callback completed");
+            }
+            Some(AdapterEvent::BlockStateChangedCompleted { change, listener_failures }) => {
+                tracing::debug!(?change, listeners = listener_failures.len(), "Java adapter block-change callback completed");
+                for failure in listener_failures {
+                    tracing::warn!(
+                        registration = failure.registration,
+                        plugin = %failure.plugin_name,
+                        detail = %failure.detail,
+                        "Java adapter block-change listener failed; later listeners were isolated"
+                    );
+                }
             }
             None => {}
         }
@@ -233,8 +243,8 @@ impl JavaAdapter {
                 }
             }
         }
-        Ok(match event {
-            Some(AdapterEvent::TickCompleted(tick)) => Some(tick),
+        Ok(match &event {
+            Some(AdapterEvent::TickCompleted(tick)) => Some(*tick),
             _ => None,
         })
     }

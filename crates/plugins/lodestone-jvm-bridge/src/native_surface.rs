@@ -22,6 +22,13 @@ pub const ISOLATED_SHIM_CLASS: &str = "lodestone.bridge.IsolatedPaperShim";
 /// This is an isolated bridge type, not a Bukkit or Paper metadata class.
 pub const ISOLATED_PLUGIN_DESCRIPTOR_CLASS: &str = "lodestone.bridge.IsolatedPluginDescriptor";
 
+/// Binary name of the one callback interface accepted by the isolated event seam.
+///
+/// This is neither a Bukkit listener nor a general event base type. It observes
+/// only a host-confirmed resident block-state replacement.
+pub const ISOLATED_RESIDENT_BLOCK_CHANGE_LISTENER_CLASS: &str =
+    "lodestone.bridge.ResidentBlockChangeListener";
+
 /// A native member in the generated isolated server-state surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeMethodSpec {
@@ -40,7 +47,16 @@ pub struct IsolatedDescriptorMemberSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 6] = [
+/// One required method on the isolated resident block-change listener.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IsolatedListenerMethodSpec {
+    /// Java method name.
+    pub name: &'static str,
+    /// Exact JNI descriptor, including argument and return types.
+    pub descriptor: &'static str,
+}
+
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 7] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -65,6 +81,10 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 6] = [
         name: "currentPluginDescriptor",
         descriptor: "()Llodestone/bridge/IsolatedPluginDescriptor;",
     },
+    NativeMethodSpec {
+        name: "subscribeResidentBlockStateChanges",
+        descriptor: "(Llodestone/bridge/ResidentBlockChangeListener;)V",
+    },
 ];
 
 const ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS: [IsolatedDescriptorMemberSpec; 4] = [
@@ -86,6 +106,13 @@ const ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS: [IsolatedDescriptorMemberSpec; 4] = [
     },
 ];
 
+const ISOLATED_RESIDENT_BLOCK_CHANGE_LISTENER_METHODS: [IsolatedListenerMethodSpec; 1] = [
+    IsolatedListenerMethodSpec {
+        name: "onResidentBlockStateChanged",
+        descriptor: "(IIII)V",
+    },
+];
+
 /// One non-interchangeable phase of native registration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeRegistrationStep {
@@ -95,19 +122,21 @@ pub enum NativeRegistrationStep {
     Register(NativeMethodSpec),
 }
 
-const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 12] = [
+const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 14] = [
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[2]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[3]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[4]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[5]),
+    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[6]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[2]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[3]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[4]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[5]),
+    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[6]),
 ];
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -127,6 +156,11 @@ pub const fn isolated_shim_registration_steps() -> &'static [NativeRegistrationS
 /// The source-of-truth value contract for an isolated plugin descriptor.
 pub const fn isolated_plugin_descriptor_members() -> &'static [IsolatedDescriptorMemberSpec] {
     &ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS
+}
+
+/// The source-of-truth callback contract for isolated resident block changes.
+pub const fn isolated_resident_block_change_listener_methods() -> &'static [IsolatedListenerMethodSpec] {
+    &ISOLATED_RESIDENT_BLOCK_CHANGE_LISTENER_METHODS
 }
 
 /// A bounded failure while validating or registering the isolated native shim.
@@ -164,6 +198,22 @@ pub enum NativeSurfaceError {
         /// JVM lookup error detail.
         detail: String,
     },
+    /// The operator shim did not provide the isolated listener interface.
+    ListenerClassLoad {
+        /// The required listener binary name.
+        class: &'static str,
+        /// JVM loader error detail.
+        detail: String,
+    },
+    /// The isolated listener interface does not provide the exact callback.
+    ListenerMember {
+        /// The listener binary name.
+        class: &'static str,
+        /// The missing callback.
+        member: IsolatedListenerMethodSpec,
+        /// JVM lookup error detail.
+        detail: String,
+    },
 }
 
 impl fmt::Display for NativeSurfaceError {
@@ -186,6 +236,14 @@ impl fmt::Display for NativeSurfaceError {
             Self::DescriptorMember { class, member, detail } => write!(
                 formatter,
                 "isolated plugin descriptor {class} must declare {}{}: {detail}",
+                member.name, member.descriptor,
+            ),
+            Self::ListenerClassLoad { class, detail } => {
+                write!(formatter, "could not load isolated resident block listener {class}: {detail}")
+            }
+            Self::ListenerMember { class, member, detail } => write!(
+                formatter,
+                "isolated resident block listener {class} must declare {}{}: {detail}",
                 member.name, member.descriptor,
             ),
         }
@@ -259,6 +317,14 @@ fn method_id(
                 jni_str!("currentPluginDescriptor"),
                 jni_sig!("()Llodestone/bridge/IsolatedPluginDescriptor;"),
             ),
+        (
+            "subscribeResidentBlockStateChanges",
+            "(Llodestone/bridge/ResidentBlockChangeListener;)V",
+        ) => env.get_static_method_id(
+            class,
+            jni_str!("subscribeResidentBlockStateChanges"),
+            jni_sig!("(Llodestone/bridge/ResidentBlockChangeListener;)V"),
+        ),
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -298,6 +364,15 @@ fn register_method(
                 method.descriptor,
             )
         }
+        (
+            "subscribeResidentBlockStateChanges",
+            "(Llodestone/bridge/ResidentBlockChangeListener;)V",
+        ) => adapter::register_resident_block_change_subscription(
+            env,
+            class,
+            method.name,
+            method.descriptor,
+        ),
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -317,7 +392,46 @@ pub(crate) fn install_in_loader<'local>(
         .load_class_from_loader(env, loader, ISOLATED_SHIM_CLASS)
         .map_err(class_load_error)?;
     validate_descriptor_value(runtime, env, loader)?;
+    validate_resident_block_change_listener(runtime, env, loader)?;
     validate_and_register(env, &class)
+}
+
+fn validate_resident_block_change_listener<'local>(
+    runtime: &JvmRuntime,
+    env: &mut Env<'local>,
+    loader: &JObject<'local>,
+) -> Result<(), NativeSurfaceError> {
+    let listener = runtime
+        .load_class_from_loader(env, loader, ISOLATED_RESIDENT_BLOCK_CHANGE_LISTENER_CLASS)
+        .map_err(|error| NativeSurfaceError::ListenerClassLoad {
+            class: ISOLATED_RESIDENT_BLOCK_CHANGE_LISTENER_CLASS,
+            detail: error.to_string(),
+        })?;
+    for method in isolated_resident_block_change_listener_methods() {
+        listener_method_id(env, &listener, *method).map_err(|error| {
+            NativeSurfaceError::ListenerMember {
+                class: ISOLATED_RESIDENT_BLOCK_CHANGE_LISTENER_CLASS,
+                member: *method,
+                detail: error.to_string(),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn listener_method_id(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method: IsolatedListenerMethodSpec,
+) -> jni::errors::Result<jni::objects::JMethodID> {
+    match (method.name, method.descriptor) {
+        ("onResidentBlockStateChanged", "(IIII)V") => env.get_method_id(
+            class,
+            jni_str!("onResidentBlockStateChanged"),
+            jni_sig!("(IIII)V"),
+        ),
+        _ => unreachable!("the isolated listener has only generated method specs"),
+    }
 }
 
 fn validate_descriptor_value<'local>(
@@ -411,6 +525,10 @@ mod tests {
                     name: "currentPluginDescriptor",
                     descriptor: "()Llodestone/bridge/IsolatedPluginDescriptor;",
                 },
+                NativeMethodSpec {
+                    name: "subscribeResidentBlockStateChanges",
+                    descriptor: "(Llodestone/bridge/ResidentBlockChangeListener;)V",
+                },
             ],
         );
         let block_state = isolated_shim_methods()[0];
@@ -419,6 +537,7 @@ mod tests {
         let plugin_name = isolated_shim_methods()[3];
         let plugin_version = isolated_shim_methods()[4];
         let plugin_descriptor = isolated_shim_methods()[5];
+        let block_change_subscription = isolated_shim_methods()[6];
         assert_eq!(
             isolated_shim_registration_steps(),
             &[
@@ -428,12 +547,14 @@ mod tests {
                 NativeRegistrationStep::Validate(plugin_name),
                 NativeRegistrationStep::Validate(plugin_version),
                 NativeRegistrationStep::Validate(plugin_descriptor),
+                NativeRegistrationStep::Validate(block_change_subscription),
                 NativeRegistrationStep::Register(block_state),
                 NativeRegistrationStep::Register(server_tick),
                 NativeRegistrationStep::Register(block_write),
                 NativeRegistrationStep::Register(plugin_name),
                 NativeRegistrationStep::Register(plugin_version),
                 NativeRegistrationStep::Register(plugin_descriptor),
+                NativeRegistrationStep::Register(block_change_subscription),
             ],
             "a registration must never precede declaration validation",
         );
@@ -458,6 +579,18 @@ mod tests {
                 },
             ],
             "the descriptor must remain an inert three-field value, not a plugin API",
+        );
+        assert_eq!(
+            ISOLATED_RESIDENT_BLOCK_CHANGE_LISTENER_CLASS,
+            "lodestone.bridge.ResidentBlockChangeListener",
+        );
+        assert_eq!(
+            isolated_resident_block_change_listener_methods(),
+            &[IsolatedListenerMethodSpec {
+                name: "onResidentBlockStateChanged",
+                descriptor: "(IIII)V",
+            }],
+            "the listener is one typed callback, not a general event hierarchy",
         );
     }
 
@@ -505,7 +638,8 @@ mod tests {
              public static native int setBlockStateId(int x, int y, int z, int stateId); \
              public static native String currentPluginName(); \
              public static native String currentPluginVersion(); \
-             public static native IsolatedPluginDescriptor currentPluginDescriptor(); }",
+             public static native IsolatedPluginDescriptor currentPluginDescriptor(); \
+             public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); }",
         )
         .expect("shim source");
         let descriptor_source = source_root.join("IsolatedPluginDescriptor.java");
@@ -519,11 +653,19 @@ mod tests {
              public String mainClass() { return mainClass; } }",
         )
         .expect("descriptor source");
+        let listener_source = source_root.join("ResidentBlockChangeListener.java");
+        fs::write(
+            &listener_source,
+            "package lodestone.bridge; public interface ResidentBlockChangeListener { \
+             void onResidentBlockStateChanged(int x, int y, int z, int stateId); }",
+        )
+        .expect("listener source");
         let output = Command::new(std::path::PathBuf::from(jdk).join("bin/javac"))
             .arg("-d")
             .arg(&fixture)
             .arg(&source)
             .arg(&descriptor_source)
+            .arg(&listener_source)
             .output()
             .expect("javac");
         assert!(
@@ -572,7 +714,8 @@ mod tests {
              public static native int setBlockStateId(int x, int y, int z, int stateId); \
              public static native String currentPluginName(); \
              public static native String currentPluginVersion(); \
-             public static native IsolatedPluginDescriptor currentPluginDescriptor(); }",
+             public static native IsolatedPluginDescriptor currentPluginDescriptor(); \
+             public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); }",
         )
         .expect("shim source");
         let descriptor_source = shim_source_root.join("IsolatedPluginDescriptor.java");
@@ -586,6 +729,13 @@ mod tests {
              public String mainClass() { return mainClass; } }",
         )
         .expect("descriptor source");
+        let listener_source = shim_source_root.join("ResidentBlockChangeListener.java");
+        fs::write(
+            &listener_source,
+            "package lodestone.bridge; public interface ResidentBlockChangeListener { \
+             void onResidentBlockStateChanged(int x, int y, int z, int stateId); }",
+        )
+        .expect("listener source");
         let adapter_source = adapter_source_root.join("SurfaceAdapter.java");
         fs::write(
             &adapter_source,
@@ -596,7 +746,7 @@ mod tests {
         )
         .expect("adapter source");
         for (output, sources) in [
-            (&shim_root, vec![&shim_source, &descriptor_source]),
+            (&shim_root, vec![&shim_source, &descriptor_source, &listener_source]),
             (&adapter_root, vec![&adapter_source]),
         ] {
             let compile = Command::new(std::path::PathBuf::from(&jdk).join("bin/javac"))
@@ -677,7 +827,7 @@ mod tests {
                 Some(AdapterEvent::TickCompleted(tick)) => {
                     panic!("unexpected adapter tick {tick}");
                 }
-                Some(AdapterEvent::BlockStateChangedCompleted(change)) => {
+            Some(AdapterEvent::BlockStateChangedCompleted { change, .. }) => {
                     panic!("unexpected adapter block-change callback {change:?}");
                 }
                 None => assert!(Instant::now() < limit, "server tick surface did not become ready"),

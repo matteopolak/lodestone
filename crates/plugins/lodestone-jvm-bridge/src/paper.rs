@@ -939,14 +939,21 @@ impl PaperPluginConstructionPlan {
                         status_index: index,
                     });
                 }
-                Err(error) => self.lifecycle.status.failed_to_construct(
-                    index,
-                    format!(
-                        "could not construct plugin {:?} entry class {}: {error}",
+                Err(error) => {
+                    crate::adapter::clear_resident_block_change_subscriptions(
                         plugin.descriptor.name(),
+                        plugin.descriptor.version(),
                         plugin.descriptor.main_class(),
-                    ),
-                ),
+                    );
+                    self.lifecycle.status.failed_to_construct(
+                        index,
+                        format!(
+                            "could not construct plugin {:?} entry class {}: {error}",
+                            plugin.descriptor.name(),
+                            plugin.descriptor.main_class(),
+                        ),
+                    );
+                }
             }
         }
         assert!(
@@ -1006,17 +1013,29 @@ impl PaperPluginEntryConstruction {
                 || plugin.callback(env, "onEnable"),
             ) {
                 Ok(()) => {
+                    crate::adapter::activate_resident_block_change_subscriptions(
+                        plugin.descriptor.name(),
+                        plugin.descriptor.version(),
+                        plugin.descriptor.main_class(),
+                    );
                     self.lifecycle.status.enabled(index);
                     entries.push(plugin);
                 }
-                Err(error) => self.lifecycle.status.failed_to_enable(
-                    index,
-                    format!(
-                        "could not enable plugin {:?} entry class {}: {error}",
+                Err(error) => {
+                    crate::adapter::clear_resident_block_change_subscriptions(
                         plugin.descriptor.name(),
+                        plugin.descriptor.version(),
                         plugin.descriptor.main_class(),
-                    ),
-                ),
+                    );
+                    self.lifecycle.status.failed_to_enable(
+                        index,
+                        format!(
+                            "could not enable plugin {:?} entry class {}: {error}",
+                            plugin.descriptor.name(),
+                            plugin.descriptor.main_class(),
+                        ),
+                    );
+                }
             }
         }
         PaperPluginEntryEnablement {
@@ -1065,12 +1084,18 @@ impl PaperPluginEntryEnablement {
                 self.lifecycle.status.plugins()[index].phase(),
                 PaperPluginLifecyclePhase::Enabled,
             );
-            match crate::adapter::with_lifecycle_identity(
+            let callback = crate::adapter::with_lifecycle_identity(
                 plugin.descriptor.name(),
                 plugin.descriptor.version(),
                 plugin.descriptor.main_class(),
                 || plugin.callback(env, "onDisable"),
-            ) {
+            );
+            crate::adapter::clear_resident_block_change_subscriptions(
+                plugin.descriptor.name(),
+                plugin.descriptor.version(),
+                plugin.descriptor.main_class(),
+            );
+            match callback {
                 Ok(()) => self.lifecycle.status.disabled(index),
                 Err(error) => self.lifecycle.status.failed_to_disable(
                     index,
