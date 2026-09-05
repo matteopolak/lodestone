@@ -915,6 +915,24 @@ impl WorldStorage {
             .map_err(Into::into)
     }
 
+    /// Saves the world's one independently dirty typed properties record.
+    ///
+    /// The fixed [`WORLD_PROPERTIES_KEY`] and the generated general-record
+    /// envelope are owned here, so a metadata producer cannot accidentally
+    /// write a valid world-properties body under an unfindable general key.
+    /// `Anvil` rejects this native-only path without writing any compatibility
+    /// files.
+    pub fn write_dirty_world_properties(
+        &self,
+        properties: WorldProperties,
+    ) -> Result<(), Error> {
+        self.write_dirty([RecordWrite::new(
+            WORLD_PROPERTIES_KEY,
+            encode_world_properties(properties),
+        )])
+        .map(|_| ())
+    }
+
     /// Saves one independently dirty bounded player locator record.
     ///
     /// This path intentionally retains only the fields represented by
@@ -1820,6 +1838,16 @@ fn decode_world_properties(record: StorageRecord) -> Result<WorldProperties, Wor
     Ok(properties)
 }
 
+fn encode_world_properties(properties: WorldProperties) -> StorageRecord {
+    StorageRecord {
+        format_version: FORMAT_VERSION_V1,
+        record: Some(storage_record::Record::General(GeneralRecord {
+            record: Some(general_record::Record::WorldProperties(properties)),
+            extensions: Vec::new(),
+        })),
+    }
+}
+
 fn player_key(uuid: [u8; 16]) -> RecordKey {
     // The compact key has exactly 96 identity bits. The complete UUID remains
     // in `PlayerRecord`, and `write_dirty_player`/`load_player` compare it
@@ -2434,6 +2462,56 @@ mod tests {
         assert!(
             reopened.load_player(absent).unwrap().is_none(),
             "a different UUID prefix is the independent absence control"
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn typed_world_properties_use_the_reserved_key_and_anvil_refuses_them() {
+        let properties = WorldProperties {
+            game_data_version: GAME_DATA_VERSION,
+            seed: -195_764_831,
+            spawn_dimension: BuiltinDimension::Overworld as i32,
+            spawn_x: 12,
+            spawn_y: 64,
+            spawn_z: -33,
+            day_time: 5_432,
+            default_game_mode: StoredGameMode::Adventure as i32,
+        };
+        let anvil = WorldStorage::open(WorldStorageBackend::Anvil).expect("open Anvil backend");
+        assert!(matches!(
+            anvil.write_dirty_world_properties(properties.clone()),
+            Err(Error::AnvilDoesNotAcceptTypedRecords)
+        ));
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-world-properties-{}-{unique}",
+            std::process::id()
+        ));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native backend");
+        storage
+            .write_dirty_world_properties(properties.clone())
+            .expect("write typed native world properties");
+        drop(storage);
+
+        let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("reopen native backend");
+        assert_eq!(
+            reopened
+                .load_world_properties()
+                .expect("read typed native world properties"),
+            Some(properties),
+            "the typed writer and reader must agree on the one reserved global key"
         );
         drop(reopened);
         std::fs::remove_dir_all(directory).expect("remove native test segment");
