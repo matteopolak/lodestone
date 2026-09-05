@@ -14,6 +14,9 @@ The generated `MOB_EFFECT_NAMES` and colour tables are indexed only by
 creates a `ClientEvent`, and the 26.2 server and beacon encoders obtain an id
 by canonical name before writing it. The HUD's natural effect ordering and the
 beacon UI likewise resolve a validated id, so their table lookups are total.
+The 1.17 family applies the same boundary to both legacy packet forms: it
+converts their 1-based wire value to `MobEffectId` before producing an event,
+and rejects an unknown value without attempting a table lookup.
 
 `MobEffectInstance` intentionally retains its raw `i32` id. It can arrive in
 an item component where the owning session or an extension has supplied a
