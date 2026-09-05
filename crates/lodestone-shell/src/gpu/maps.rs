@@ -29,6 +29,7 @@
 use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 use glam::{Mat4, Vec3};
+use lodestone_game::maps::MapId;
 use lodestone_render::map_item::{MAP_SIZE, map_quad_mesh, map_texture_rgba};
 use lodestone_render::texture::GpuAtlas;
 use lodestone_render::model_pipeline::MapDepthDiagnostic;
@@ -47,12 +48,12 @@ pub(super) type PreparedMap = (Arc<GpuModelMesh>, Arc<wgpu::BindGroup>);
 /// unrelated maps naturally both start at revision zero.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct MapTextureKey {
-    map_id: i32,
+    map_id: MapId,
     color_revision: u64,
 }
 
 impl MapTextureKey {
-    const fn new(map_id: i32, color_revision: u64) -> Self {
+    const fn new(map_id: MapId, color_revision: u64) -> Self {
         Self {
             map_id,
             color_revision,
@@ -70,7 +71,7 @@ impl MapTextureKey {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct FramedMapInput {
     entity_id: i32,
-    map_id: i32,
+    map_id: MapId,
     feet: [u32; 3],
     yaw: u32,
     pitch: u32,
@@ -82,7 +83,7 @@ struct FramedMapInput {
 impl FramedMapInput {
     fn new(
         entity_id: i32,
-        map_id: i32,
+        map_id: MapId,
         feet: [f32; 3],
         yaw: f32,
         pitch: f32,
@@ -182,7 +183,7 @@ impl<K: PartialEq, V> RetainedLast<K, V> {
 }
 
 struct CachedFramedBatch {
-    map_id: i32,
+    map_id: MapId,
     mesh: Arc<GpuModelMesh>,
 }
 
@@ -1379,7 +1380,7 @@ impl RenderState {
             };
             if diagnostic.selected.as_ref().is_some_and(|frame| frame.entity_id == draw.id) {
                 let frame = diagnostic.selected.as_mut().expect("checked selected frame");
-                frame.map_id = Some(picture.map_id);
+                frame.map_id = Some(picture.map_id.raw());
                 frame.source = FramedMapSource::Resolved;
             }
             let input = FramedMapInput::new(
@@ -1425,7 +1426,7 @@ impl RenderState {
                     frame_rotation = draw.item_frame_rotation,
                     held_item = ?draw.item.as_ref().map(ToString::to_string),
                     item_model = ?draw.item_model.as_ref().map(ToString::to_string),
-                    map_id = picture.map_id,
+                    map_id = picture.map_id.raw(),
                     final_transform = ?pose.to_cols_array_2d(),
                     quad_plane = ?unit_quad_plane(map_plane),
                     quad_normal = ?unit_quad_normal(pose),
@@ -1443,7 +1444,7 @@ impl RenderState {
         let batch_inputs = key.0.clone();
         let mut cache = self.map_cache.borrow_mut();
         let batches = cache.framed_batches.get_or_insert_with(key, || {
-            let mut merged: Vec<(i32, ModelMesh)> = Vec::new();
+            let mut merged: Vec<(MapId, ModelMesh)> = Vec::new();
             for input in &batch_inputs {
                 let mesh = map_quad_mesh(input.pose(), input.light);
                 if let Some((_, batch)) = merged
@@ -1472,7 +1473,7 @@ impl RenderState {
             let Some(picture) = pictures.get(&batch.map_id) else {
                 // The cache key and picture collection are built together, so
                 // this is defensive rather than a normal decline.
-                let _ = note_map_skip::<()>(SITE, MapSkip::NoContents, Some(batch.map_id));
+                let _ = note_map_skip::<()>(SITE, MapSkip::NoContents, Some(batch.map_id.raw()));
                 continue;
             };
             let texture = cache.texture(device, queue, &model.pipeline, picture);

@@ -1112,8 +1112,8 @@ impl std::fmt::Debug for SignSource {
 /// texture without hashing its 16 KiB colour grid on every frame.
 #[derive(Clone, Debug)]
 pub struct MapPicture {
-    /// The server's stable saved-map id.
-    pub map_id: i32,
+    /// The server's validated stable saved-map id.
+    pub map_id: lodestone_game::maps::MapId,
     /// The changed-on-pixel-write identity from
     /// [`lodestone_game::maps::MapState::color_revision`].
     pub color_revision: u64,
@@ -1125,7 +1125,11 @@ impl MapPicture {
     /// Pair `colors` with the stable id and current colour revision supplied by
     /// the session map store.
     #[must_use]
-    pub fn new(map_id: i32, color_revision: u64, colors: Arc<Vec<u8>>) -> Self {
+    pub fn new(
+        map_id: lodestone_game::maps::MapId,
+        color_revision: u64,
+        colors: Arc<Vec<u8>>,
+    ) -> Self {
         Self {
             map_id,
             color_revision,
@@ -1489,4 +1493,3 @@ impl std::fmt::Debug for MovingPistonSource {
             .finish()
     }
 }
-

@@ -107,9 +107,9 @@ receives map contents — a server-side gap, not a rendering fault.
 
 `lodestone_game::maps::MapId` owns the signed-wire boundary for persisted map identities. The map store
 retains only a validated non-negative id; negative packet or component values do not allocate a map row.
-Renderer-facing methods intentionally still lower it to `i32`, because the item-component and GPU seams
-use that raw representation. Keep validation at the map-store ingress instead of letting those later
-consumers turn a malformed id into cache identity.
+Store reads, enumeration, `MapPicture`, and retained GPU cache keys preserve `MapId`; only the
+item-component source accepts a raw value and validates it before lookup. Keep validation at that ingress
+instead of letting a malformed component value become cache identity.
 
 `lodestone_render::PackedMapColour` owns the renderer boundary for each packed palette byte. Its high six
 bits must name one of the 62 populated base-colour entries and its low two bits select brightness; ids 62
