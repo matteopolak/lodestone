@@ -580,7 +580,10 @@ impl Sim {
     /// Only the first was wired, so every block break in the game was visually
     /// right and silent — from an event already decoded, routed and handled. See
     /// `docs/sound-playback.md`.
-    pub(crate) fn play_block_break_sound(&mut self, block: [i32; 3], state: u32) {
+    pub(crate) fn play_block_break_sound(&mut self, block: [i32; 3], state: BlockStateRef) {
+        let BlockStateRef::Canonical(state) = state else {
+            return;
+        };
         self.play_block_surface_sound(block, state, lodestone_data::sound_types::break_sound_name);
     }
 

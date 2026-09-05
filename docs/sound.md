@@ -54,8 +54,10 @@ now, using the block's `sound_types` census (see
 expression appears at both of vanilla's own call sites.
 
 The census lookup accepts `lodestone_data::block_states::StateId`, not a raw
-integer. Packet, chunk and prediction boundaries validate their raw state id
-once with `StateId::new`; after that, every one of the 32,366 states has a
+integer. Network level events retain a `BlockStateRef` source tag until this
+boundary: canonical values validate with `StateId::new`, while protocol-local
+values stay silent until their owning adapter provides a demonstrated mapping.
+Predicted local breaks are canonical by construction. After validation, every one of the 32,366 states has a
 total `BlockSoundType` lookup. Each row's five event references are likewise
 validated `SoundEventId` values, so their name lookups are total. A packet
 holder validates its positive registry reference after subtracting one; its
