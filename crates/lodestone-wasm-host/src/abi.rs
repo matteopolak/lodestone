@@ -17,7 +17,7 @@
 //! |---|---|---|
 //! | `Text`, the styled component tree | a plain `String` | `Text` is recursive, with translation keys, hover/click events and per-node style. Lifting it faithfully means a recursive WIT variant plus a translation table the guest cannot resolve anyway. So [`lift_event`] flattens with `Text::to_plain_string`, and this is **lossy**: a guest cannot see colour, cannot see a translation key, and cannot distinguish a translated message from a literal one that happens to render the same. |
 //! | `ChatAckInfo` on `ClientEvent::Chat` | dropped | signed-chat acknowledgement is the *driver's* bookkeeping — a guest that echoed an `offset` back would fork a sequence counter the driver owns, which is clause 2 of the doctrine. Deliberately unreachable. |
-//! | intent components (`BreakIntent`, `PlaceIntent`, `MovementIntent`, `LookIntent`) and their outcome components | **nothing yet** | these are the *other half* of the doctrine and they are not in the v0.1 world. They are install/remove-shaped rather than value-shaped, so they need paired ABI calls the host mirrors into real component inserts and removes, plus an outcome poll — a bigger surface than the one-crossing tick this world defines. See `docs/wasm-plugin-host.md` §"What is not in the world yet". A guest can chat and swing; it cannot yet mine, place or steer. |
+//! | intent components (`BreakIntent`, `PlaceIntent`, `MovementIntent`, `LookIntent`) and their outcome components | `set-look(option<look-intent>)` | look ownership now installs or removes the copied component before its existing consumer. Break, place, movement and outcome polling remain absent because each needs a distinct lifecycle and observability contract. See `docs/wasm-plugin-intents.md`. |
 //! | ~110 `ClientEvent` variants | 3 | the curated subset. Not an oversight and not a TODO: a full mirror is the staleness factory `lodestone_ecs::events`'s own module doc refuses. |
 //!
 //! # The staleness question, and the honest answer to it
@@ -44,6 +44,23 @@ use crate::host::{
     CommandRotation, EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict,
     PlayerInteractVerdict, PlayerMoveVerdict, SectionBlocksChanged, SectionPos, VerdictContext,
 };
+
+/// An action that changes a local-player intent rather than queuing a protocol
+/// action. The conductor applies it before the existing look consumer runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IntentAction {
+    /// Install a copied look target, or remove it and return ownership to input.
+    Look(Option<lodestone_ecs::player::LookIntent>),
+}
+
+/// One capability-authorized guest result.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoweredAction {
+    /// A normal client action owned by `ActionQueue`.
+    Client(ClientAction),
+    /// A copied intent consumed by the local-player ECS path.
+    Intent(IntentAction),
+}
 
 /// Copy a command dispatcher source into the guest's value-only command context.
 ///
@@ -207,6 +224,7 @@ pub fn capability_for(action: &Action) -> Capability {
     match action {
         Action::SendChat(_) | Action::SendCommand(_) => Capability::ActChat,
         Action::SwingArm(_) => Capability::ActInteract,
+        Action::SetLook(_) => Capability::ActLook,
     }
 }
 
@@ -216,20 +234,26 @@ pub fn capability_for(action: &Action) -> Capability {
 /// plugin needed rather than "an action was dropped". A refusal is counted and
 /// logged by the conductor, never silent: a plugin whose actions vanish with no
 /// explanation is the single most confusing thing a plugin API can do.
-pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<ClientAction, Capability> {
+pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAction, Capability> {
     let needed = capability_for(&action);
     if !granted.contains(needed) {
         return Err(needed);
     }
     Ok(match action {
-        Action::SendChat(text) => ClientAction::SendChat { text },
-        Action::SendCommand(command) => ClientAction::SendCommand { command },
-        Action::SwingArm(hand) => ClientAction::SwingArm {
+        Action::SendChat(text) => LoweredAction::Client(ClientAction::SendChat { text }),
+        Action::SendCommand(command) => LoweredAction::Client(ClientAction::SendCommand { command }),
+        Action::SwingArm(hand) => LoweredAction::Client(ClientAction::SwingArm {
             hand: match hand {
                 Hand::Main => lodestone_model::common::Hand::Main,
                 Hand::Off => lodestone_model::common::Hand::Off,
             },
-        },
+        }),
+        Action::SetLook(look) => LoweredAction::Intent(IntentAction::Look(look.map(|look| {
+            lodestone_ecs::player::LookIntent {
+                yaw: look.yaw,
+                pitch: look.pitch,
+            }
+        }))),
     })
 }
 
@@ -335,27 +359,47 @@ mod tests {
         );
     }
 
-    /// The lower produces the real `ClientAction` the driver sends.
+    /// The protocol-facing arms lower onto the real `ClientAction` vocabulary.
     #[test]
     fn actions_lower_onto_the_real_client_action_vocabulary() {
         let granted = CapabilitySet::permissive();
         assert_eq!(
             lower_action(Action::SendChat("hi".to_owned()), &granted),
-            Ok(ClientAction::SendChat {
+            Ok(LoweredAction::Client(ClientAction::SendChat {
                 text: "hi".to_owned()
-            })
+            }))
         );
         assert_eq!(
             lower_action(Action::SendCommand("time set day".to_owned()), &granted),
-            Ok(ClientAction::SendCommand {
+            Ok(LoweredAction::Client(ClientAction::SendCommand {
                 command: "time set day".to_owned()
-            })
+            }))
         );
         assert_eq!(
             lower_action(Action::SwingArm(Hand::Off), &granted),
-            Ok(ClientAction::SwingArm {
+            Ok(LoweredAction::Client(ClientAction::SwingArm {
                 hand: lodestone_model::common::Hand::Off
-            })
+            }))
+        );
+    }
+
+    /// Look ownership crosses as a copied intent, not a fabricated movement
+    /// packet. The existing local-player systems own clamping, physics, and send.
+    #[test]
+    fn look_actions_lower_onto_the_local_player_intent_vocabulary() {
+        let granted = CapabilitySet::from_iter([Capability::ActLook]);
+        assert_eq!(
+            lower_action(
+                Action::SetLook(Some(crate::host::LookIntent { yaw: 37.5, pitch: -12.0 })),
+                &granted,
+            ),
+            Ok(LoweredAction::Intent(IntentAction::Look(Some(
+                lodestone_ecs::player::LookIntent { yaw: 37.5, pitch: -12.0 }
+            ))))
+        );
+        assert_eq!(
+            lower_action(Action::SetLook(None), &granted),
+            Ok(LoweredAction::Intent(IntentAction::Look(None)))
         );
     }
 
@@ -379,6 +423,10 @@ mod tests {
             ),
             Err(Capability::ActInteract)
         );
+        assert_eq!(
+            lower_action(Action::SetLook(None), &CapabilitySet::empty()),
+            Err(Capability::ActLook)
+        );
     }
 
     /// Every action variant is gated by something. Trivial-looking, and it is the
@@ -390,6 +438,7 @@ mod tests {
             Action::SendChat(String::new()),
             Action::SendCommand(String::new()),
             Action::SwingArm(Hand::Main),
+            Action::SetLook(None),
         ] {
             assert!(
                 lower_action(action.clone(), &CapabilitySet::empty()).is_err(),

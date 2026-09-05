@@ -28,7 +28,7 @@ wit_bindgen::generate!({
 });
 
 use lodestone::plugin::logging::{log, LogLevel};
-use lodestone::plugin::types::{CommandAnchor, CommandSpec};
+use lodestone::plugin::types::{CommandAnchor, CommandSpec, LookIntent};
 #[cfg(feature = "scheduler")]
 use lodestone::plugin::scheduler::{cancel, schedule_once, schedule_repeating};
 
@@ -65,7 +65,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.5.0".to_string(),
+            abi: "lodestone:plugin@0.6.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -80,7 +80,13 @@ impl Guest for ChatResponder {
         #[cfg(feature = "network")]
         return attempt_network();
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network")))]
+        #[cfg(feature = "look")]
+        return vec![Action::SetLook(Some(LookIntent {
+            yaw: 37.5,
+            pitch: -12.0,
+        }))];
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look")))]
         return respond(events);
     }
 

@@ -48,8 +48,8 @@ resumable off-thread search over an owned snapshot; anything needing a `World` b
 be a stated ceiling rather than an omission. The WASM ABI today (`wit/lodestone-plugin.wit`) exports
 `on-tick(list<event>) -> list<action>`, `on-task(task-id, token) -> list<action>`, and a synchronous
 `on-command(string) -> command-outcome` over three event
-kinds (`chat`, `health-changed`, `blocks-changed`) and three actions (`send-chat`, `send-command`,
-`swing-arm`), plus `log`, `fs:read`, and capability-gated scheduler imports. Every "WASM" cell below
+kinds (`chat`, `health-changed`, `blocks-changed`) and four actions (`send-chat`, `send-command`,
+`swing-arm`, `set-look`), plus `log`, `fs:read`, and capability-gated scheduler imports. Every "WASM" cell below
 is judged against that.
 
 **`EcsHandle` is `Arc<parking_lot::RwLock<World>>` and is not reentrant.** Of the four
@@ -87,6 +87,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | priority order across plugins | **done** — `EventPriority::{Lowest..Monitor}` chained into all four schedules | partial — manifest `priority` orders guests; nothing else | **gap** |
 | `MONITOR` read-only | **done** — checked against bevy's per-system access set; blind to deferred `Commands` | **gap** | **gap** |
 | sync delayed/repeating tasks | **done** — `TaskScheduler::{schedule_once, schedule_repeating, cancel}` | **done** — `scheduler::{schedule-once, schedule-repeating, cancel}` returns guest-local handles and dispatches `on-task` on host ticks | **done, native** — `ServerTaskScheduler::{schedule_once, schedule_repeating, cancel}`, drained by `ServerCorePlugin` on the production primary world's `GameTick` |
+| drive local movement or look | **done** — native systems install the local-player intent components | partial — `set-look(option<look-intent>)`, gated by `act:look`, installs or removes `LookIntent` before its existing physics and movement-send consumers; movement, break/place, and outcome polling remain absent | n/a |
 | async task + main-thread hand-back | **done** — `AsyncTaskPool::{spawn, spawn_with_handback}`; inline on wasm32 | **ceiling** — single-threaded guest by design | **done, native** — `ServerTaskScheduler::spawn_with_handback` returns `Send` values through a bounded hand-back queue drained on the primary `GameTick` owner |
 | register a command | **done** — `CommandRegistry`/`PluginCommand`, `PluginCommandsPlugin` in `Sim::client_app`, reached from the wire through the shell's `EcsCommandSink` | partial — `commands:register` installs declared roots, aliases, descriptions, and permission gates into that same registry; no typed guest argument schema or sender context | partial — `CommandSink` seam exists; the dedicated server installs `CommandDispatch::none()`, so every plugin command is refused there |
 | tab completion / argument types | **done** — `lodestone-command` argument types, `commands::suggest` | **gap** | as above |
@@ -491,8 +492,9 @@ plan, not a sprint.
 7. **Server: plugin commands and node permissions on the dedicated server** — a `CommandSink`
    backed by a server-side `CommandRegistry` rather than the client's `World`. Server, native.
    Medium; depends on 3.
-8. **WASM: the intent half of the ABI** — install/remove-shaped break/place/move/look plus an
-   outcome poll. Client, WASM. Medium.
+8. **WASM: the remaining intent half of the ABI** — look ownership is shipped through
+   `set-look`; install/remove-shaped break/place/move plus outcome polling remain. Client, WASM.
+   Medium.
 9. **WASM: commands, `fs:write`, and `Monitor` enforcement.** Delayed/repeating scheduling,
    synchronous verdicts, and native-windowed shell discovery are shipped. Client, WASM. Medium,
    three small pieces.
