@@ -70,6 +70,15 @@ in all four tables, and the body is the same through 110, 210, 316, and 340: loc
 VarInt chat mode, colours, skin parts, and VarInt main hand. Literal-body controls check every
 table and reject trailing bytes.
 
+All four hosted tables also carry ordinary legacy chat. Their serverbound id is 2 and its body is
+one bounded, unsigned string; the decoder supplies explicit zero timestamp/salt and no signature
+to the shared chat consumer, which is the only honest representation of a pre-signed-chat wire.
+The shared server decorates and broadcasts the accepted line, then this family encodes the result
+at clientbound id 15 as a JSON literal text component in the ordinary system-chat position. The
+in-memory protocol-340 control sends a quoted message and observes the rendered line back through
+the real client adapter's event stream, while a literal-body test covers all four id tables and
+trailing-byte rejection.
+
 Unlike protocol 47, all four hosted 1.9-era tables put a teleport id on the
 clientbound position packet and accept a distinct `teleport_confirm` at
 serverbound id `0`. Their host decoders lift that reply to
