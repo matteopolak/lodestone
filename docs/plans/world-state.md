@@ -402,7 +402,9 @@ pathspec commits.
   `lodestone_ecs::session::SessionWorldBorder` via `apply_world_border`, stamped from
   `FrameClock`. The formula in `sim::session::border_warning` is sampled once per redraw; its
   strength feeds `ScreenEffects::border_warning_strength`, while the full tuple is reused by the
-  debug overlay. No event-route or `net.rs` change is required.
+  debug overlay. `WarningBlocks` and `WarningTime` preserve the signed wire values while making
+  the two units distinct after this fold; only `blocks()` and `seconds()` expose their values to
+  the warning formula. No event-route or `net.rs` change is required.
 - **Visual consumer:** positive strength draws `misc/vignette.png` through a dedicated multiply
   pipeline in `lodestone-render::screen_effects`; `RenderStats::border_warning_overlay_drawn`
   exposes whether the pass actually ran. The animated wall and ambient-light vignette are separate

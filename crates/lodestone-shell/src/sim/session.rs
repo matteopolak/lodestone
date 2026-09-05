@@ -2470,9 +2470,9 @@ pub(crate) fn border_warning(
         }
     };
     let size = border.extent.size_at(now_secs);
-    let moving_blocks = (lerp_speed * f64::from(border.warning_time))
+    let moving_blocks = (lerp_speed * f64::from(border.warning_time.seconds()))
         .min((border.target_size() - size).abs());
-    let warning_distance = f64::from(border.warning_blocks).max(moving_blocks);
+    let warning_distance = f64::from(border.warning_blocks.blocks()).max(moving_blocks);
     let dist = border.distance_to_border(x, z, now_secs);
     if warning_distance <= 0.0 || dist >= warning_distance {
         return (dist, warning_distance, 0.0);

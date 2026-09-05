@@ -78,12 +78,55 @@ pub const MAX_SIZE: f64 = 5.999_997E7;
 /// vanilla's own max-center-coordinate constant.
 pub const MAX_CENTER_COORDINATE: f64 = 2.999_998_4E7;
 
+/// A world-border warning distance, measured in blocks.
+///
+/// This retains the signed wire value without clamping it. The warning formula
+/// handles a non-positive threshold as no warning, and changing that policy at
+/// the event fold would make the packet boundary silently invent state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WarningBlocks(i32);
+
+impl WarningBlocks {
+    /// Carries the signed warning-distance value over the packet boundary.
+    #[must_use]
+    pub const fn from_wire(raw: i32) -> Self {
+        Self(raw)
+    }
+
+    /// The distance in blocks used by the warning formula.
+    #[must_use]
+    pub const fn blocks(self) -> i32 {
+        self.0
+    }
+}
+
+/// A world-border warning lead time, measured in seconds.
+///
+/// The wire value is signed, so this type deliberately preserves it. A
+/// non-positive delay contributes no moving-border warning distance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WarningTime(i32);
+
+impl WarningTime {
+    /// Carries the signed warning-delay value over the packet boundary.
+    #[must_use]
+    pub const fn from_wire(raw: i32) -> Self {
+        Self(raw)
+    }
+
+    /// The lead time in seconds used by the warning formula.
+    #[must_use]
+    pub const fn seconds(self) -> i32 {
+        self.0
+    }
+}
+
 /// Vanilla's default warning distance in blocks.
-pub const DEFAULT_WARNING_BLOCKS: i32 = 5;
+pub const DEFAULT_WARNING_BLOCKS: WarningBlocks = WarningBlocks::from_wire(5);
 
 /// Vanilla's *effective* default warning delay in seconds — vanilla's own
 /// settings default, not the dead `15` field initializer. See the module docs.
-pub const DEFAULT_WARNING_TIME: i32 = 300;
+pub const DEFAULT_WARNING_TIME: WarningTime = WarningTime::from_wire(300);
 
 /// How the border's diameter behaves over time.
 ///
@@ -182,9 +225,9 @@ pub struct WorldBorder {
     /// How the diameter behaves over time.
     pub extent: BorderExtent,
     /// Distance in blocks at which the warning overlay appears.
-    pub warning_blocks: i32,
+    pub warning_blocks: WarningBlocks,
     /// Seconds of lead time at which an incoming shrink starts warning.
-    pub warning_time: i32,
+    pub warning_time: WarningTime,
     /// The largest diameter this server will ever use, from
     /// [`ClientEvent::WorldBorderInitialized`]. `None` until that packet
     /// arrives — the incremental variants do not carry it.
@@ -235,11 +278,11 @@ impl WorldBorder {
                 true
             }
             ClientEvent::WorldBorderWarningDelayChanged { warning_time } => {
-                self.warning_time = *warning_time;
+                self.warning_time = WarningTime::from_wire(*warning_time);
                 true
             }
             ClientEvent::WorldBorderWarningDistanceChanged { warning_blocks } => {
-                self.warning_blocks = *warning_blocks;
+                self.warning_blocks = WarningBlocks::from_wire(*warning_blocks);
                 true
             }
             ClientEvent::WorldBorderInitialized {
@@ -256,8 +299,8 @@ impl WorldBorder {
                 self.center_z = *z;
                 self.extent = Self::extent_for_lerp(*old_size, *new_size, *lerp_time_ms);
                 self.absolute_max_size = Some(f64::from(*absolute_max_size));
-                self.warning_blocks = *warning_blocks;
-                self.warning_time = *warning_time;
+                self.warning_blocks = WarningBlocks::from_wire(*warning_blocks);
+                self.warning_time = WarningTime::from_wire(*warning_time);
                 self.initialized = true;
                 true
             }
@@ -375,9 +418,14 @@ mod tests {
     #[test]
     fn defaults_match_vanillas_effective_settings() {
         let b = WorldBorder::default();
-        assert_eq!(b.warning_blocks, 5, "vanilla's own default-warning-blocks constant");
         assert_eq!(
-            b.warning_time, 300,
+            b.warning_blocks.blocks(),
+            5,
+            "vanilla's own default-warning-blocks constant"
+        );
+        assert_eq!(
+            b.warning_time.seconds(),
+            300,
             "vanilla's own effective settings default — not the dead 15 field initializer"
         );
         assert!(!b.initialized);
@@ -392,6 +440,28 @@ mod tests {
             (MAX_SIZE - 5.999_996_8E7).abs() > 1.0,
             "must not be 1.21's value: {MAX_SIZE}"
         );
+    }
+
+    /// Warning distance and warning lead time have the same signed wire shape,
+    /// but different units. Keep the conversion at the fold so the consumer
+    /// cannot accidentally use seconds as blocks (or vice versa).
+    #[test]
+    fn warning_values_keep_their_units_after_the_wire_fold() {
+        let distance_from_wire: fn(i32) -> WarningBlocks = WarningBlocks::from_wire;
+        let time_from_wire: fn(i32) -> WarningTime = WarningTime::from_wire;
+        let mut b = WorldBorder::default();
+
+        assert!(b.apply(&ClientEvent::WorldBorderWarningDistanceChanged {
+            warning_blocks: -7,
+        }));
+        assert!(b.apply(&ClientEvent::WorldBorderWarningDelayChanged {
+            warning_time: 19,
+        }));
+
+        assert_eq!(distance_from_wire(-7).blocks(), -7);
+        assert_eq!(time_from_wire(19).seconds(), 19);
+        assert_eq!(b.warning_blocks.blocks(), -7);
+        assert_eq!(b.warning_time.seconds(), 19);
     }
 
     #[test]
@@ -500,8 +570,8 @@ mod tests {
         assert!((b.center_x - 8.0).abs() < f64::EPSILON);
         assert!((b.center_z + 16.0).abs() < f64::EPSILON);
         assert!((b.target_size() - 60.0).abs() < f64::EPSILON);
-        assert_eq!(b.warning_blocks, 7);
-        assert_eq!(b.warning_time, 21);
+        assert_eq!(b.warning_blocks.blocks(), 7);
+        assert_eq!(b.warning_time.seconds(), 21);
         assert_eq!(b.absolute_max_size, Some(29_999_984.0));
     }
 

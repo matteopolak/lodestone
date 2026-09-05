@@ -1958,8 +1958,8 @@ mod tests {
             let b = ecs.get::<SessionWorldBorder>(state.session).unwrap().0;
             assert!(b.initialized, "WorldBorderInitialized");
             assert!((b.center_x - 12.0).abs() < f64::EPSILON);
-            assert_eq!(b.warning_blocks, 11);
-            assert_eq!(b.warning_time, 22);
+            assert_eq!(b.warning_blocks.blocks(), 11);
+            assert_eq!(b.warning_time.seconds(), 22);
         }
 
         // 2-5. Each incremental variant, on a distinct field.
@@ -1979,11 +1979,11 @@ mod tests {
                 "WorldBorderSizeChanged did not reach the fold"
             );
             assert_eq!(
-                b.warning_blocks, 2,
+                b.warning_blocks.blocks(), 2,
                 "WorldBorderWarningDistanceChanged did not reach the fold"
             );
             assert_eq!(
-                b.warning_time, 3,
+                b.warning_time.seconds(), 3,
                 "WorldBorderWarningDelayChanged did not reach the fold"
             );
         }

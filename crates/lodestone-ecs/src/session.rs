@@ -3567,8 +3567,8 @@ mod tests {
         assert!((b.center_x - 100.0).abs() < f64::EPSILON);
         assert!((b.center_z + 200.0).abs() < f64::EPSILON);
         assert!((b.target_size() - 512.0).abs() < f64::EPSILON);
-        assert_eq!(b.warning_blocks, 9);
-        assert_eq!(b.warning_time, 44);
+        assert_eq!(b.warning_blocks.blocks(), 9);
+        assert_eq!(b.warning_time.seconds(), 44);
 
         // Now each incremental variant, so a missing arm in `apply` cannot hide
         // behind `Initialized` having set everything already.
@@ -3589,8 +3589,8 @@ mod tests {
         assert!((b.center_x - 1.0).abs() < f64::EPSILON, "center X arm");
         assert!((b.center_z - 2.0).abs() < f64::EPSILON, "center Z arm");
         assert!((b.target_size() - 64.0).abs() < f64::EPSILON, "size arm");
-        assert_eq!(b.warning_blocks, 3, "warning distance arm");
-        assert_eq!(b.warning_time, 7, "warning delay arm");
+        assert_eq!(b.warning_blocks.blocks(), 3, "warning distance arm");
+        assert_eq!(b.warning_time.seconds(), 7, "warning delay arm");
     }
 
     /// The resize interpolates on [`crate::FrameClock`], and the value is
