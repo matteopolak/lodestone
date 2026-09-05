@@ -828,6 +828,17 @@ test.
   `ClientHandle`. The server-side queue itself is covered by the separate
   fixed-seed model lane above; this does not claim a live client packet oracle
   for scheduled ticks.
+- **Entity effect simulation has a bounded hermetic model lane.**
+  `tests/differential_generated_effects.rs` generates at most 24 operations
+  after a fixed stronger/shorter stacking prefix, then compares the production
+  `lodestone_server::mob_effects::ActiveEffects` surface after every apply,
+  tick, remove, and clear against an independent hidden-chain model. Durations
+  are finite or the explicit infinite sentinel, health and effect ids come
+  from small caller-owned alphabets, and ChaCha seed/case/shrink budgets are
+  fixed. A detector control that stops ticking hidden durations must fail and
+  shrink, proving the comparison can observe the resurfaced effect's shortened
+  remaining duration. This is hermetic and does not claim a live entity-packet
+  or JVM differential oracle.
 - **The live comparison still uses the fluid model for its our-side world.**
   `FluidModelOracle` drives `lodestone_server::fluid`'s production
   scheduled-tick entry point over a sparse world. The hermetic
