@@ -30,6 +30,13 @@ still join revisions it does not host, so callers must use the registry's explic
 rather than infer hosting from the family feature. No family is enabled by default in the registry;
 the live shell enables `v26-2`.
 
+`hosted_protocols` exposes that table's hostable rows for diagnostics and the bounded acceptance
+matrix in `crates/lodestone-registry/tests/hosted_action_matrix.rs`. With every registry feature
+enabled, it runs the rows serially through an in-memory server and real adapter: a block-breaking
+Play action must change the received client block, then movement must stream the newly centred
+column on the same session. This is an internal compatibility gate, not a substitute for an
+external-client join against each release.
+
 ## Server compatibility roadmap
 
 The outer connection path is implemented: status and pong replies, phase-appropriate
