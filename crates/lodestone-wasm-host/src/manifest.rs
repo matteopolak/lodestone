@@ -8,7 +8,7 @@
 //! version = "0.1.0"
 //! # The WIT world the module was built against. Checked against
 //! # `lodestone_wasm_host::ABI_WORLD` before the module is compiled.
-//! abi = "lodestone:plugin@0.2.0"
+//! abi = "lodestone:plugin@0.4.0"
 //! # The `.wasm`, relative to this file. A core module or a component; the host
 //! # encodes the former.
 //! module = "chat_responder.wasm"
@@ -314,7 +314,7 @@ mod tests {
     const GOOD: &str = r#"
 name = "chat-responder"
 version = "0.1.0"
-abi = "lodestone:plugin@0.2.0"
+abi = "lodestone:plugin@0.4.0"
 module = "chat_responder.wasm"
 priority = "normal"
 description = "Replies pong to ping."
@@ -386,10 +386,10 @@ capabilities = ["log", "observe:chat", "act:chat"]
     /// at instantiation would not have been.
     #[test]
     fn a_newer_abi_world_is_rejected_naming_both_versions() {
-        let text = GOOD.replace("lodestone:plugin@0.2.0", "lodestone:plugin@0.3.0");
+        let text = GOOD.replace("lodestone:plugin@0.4.0", "lodestone:plugin@0.5.0");
         let err = parse(&text).expect_err("must reject");
         let msg = err.to_string();
-        assert!(msg.contains("0.3.0"), "{msg}");
+        assert!(msg.contains("0.5.0"), "{msg}");
         assert!(msg.contains(ABI_WORLD), "{msg}");
         assert!(matches!(err, ManifestError::AbiMismatch { .. }), "{err:?}");
     }

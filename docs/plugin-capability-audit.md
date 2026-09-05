@@ -46,7 +46,8 @@ substitutes for the other. So for a capability to count as "portable", it has to
 the WASM tier as well as the native one — and where the WASM tier structurally cannot host it (a
 resumable off-thread search over an owned snapshot; anything needing a `World` borrow), that has to
 be a stated ceiling rather than an omission. The WASM ABI today (`wit/lodestone-plugin.wit`) exports
-`on-tick(list<event>) -> list<action>` and `on-task(task-id, token) -> list<action>` over three event
+`on-tick(list<event>) -> list<action>`, `on-task(task-id, token) -> list<action>`, and a synchronous
+`on-command(string) -> command-outcome` over three event
 kinds (`chat`, `health-changed`, `blocks-changed`) and three actions (`send-chat`, `send-command`,
 `swing-arm`), plus `log`, `fs:read`, and capability-gated scheduler imports. Every "WASM" cell below
 is judged against that.
@@ -87,7 +88,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | `MONITOR` read-only | **done** — checked against bevy's per-system access set; blind to deferred `Commands` | **gap** | **gap** |
 | sync delayed/repeating tasks | **done** — `TaskScheduler::{schedule_once, schedule_repeating, cancel}` | **done** — `scheduler::{schedule-once, schedule-repeating, cancel}` returns guest-local handles and dispatches `on-task` on host ticks | **done, native** — `ServerTaskScheduler::{schedule_once, schedule_repeating, cancel}`, drained by `ServerCorePlugin` on the production primary world's `GameTick` |
 | async task + main-thread hand-back | **done** — `AsyncTaskPool::{spawn, spawn_with_handback}`; inline on wasm32 | **ceiling** — single-threaded guest by design | **done, native** — `ServerTaskScheduler::spawn_with_handback` returns `Send` values through a bounded hand-back queue drained on the primary `GameTick` owner |
-| register a command | **done** — `CommandRegistry`/`PluginCommand`, `PluginCommandsPlugin` in `Sim::client_app`, reached from the wire through the shell's `EcsCommandSink` | partial — `send-command` invokes; nothing registers | partial — `CommandSink` seam exists; the dedicated server installs `CommandDispatch::none()`, so every plugin command is refused there |
+| register a command | **done** — `CommandRegistry`/`PluginCommand`, `PluginCommandsPlugin` in `Sim::client_app`, reached from the wire through the shell's `EcsCommandSink` | partial — `commands:register` installs declared roots, aliases, descriptions, and permission gates into that same registry; no typed guest argument schema or sender context | partial — `CommandSink` seam exists; the dedicated server installs `CommandDispatch::none()`, so every plugin command is refused there |
 | tab completion / argument types | **done** — `lodestone-command` argument types, `commands::suggest` | **gap** | as above |
 | permission nodes, wildcards, defaults, groups, delegation | **done** — `PermissionStore`, `PermissionRegistry`, `PermissionResolver`, `Permissions` resource | **gap** | partial — native `AccessHandle::set_permission_provider` delegates the five connection levels by UUID before Play; node/wildcard permissions remain client-side through the sink, and existing connections retain their resolved level |
 | read a block | **done** — `ChunkWorld`, `VersionAdapter::block_*` | partial — `blocks-changed` deltas only; no query | **done** — `ChunkSource::block_state` on the source the plugin constructed |
@@ -248,7 +249,7 @@ Reentrancy for a command handler: **ledger**, via the sink's `hold_write`. The h
 `CommandInvocation<'w>` holding `&mut World`; a handler that calls a `ClientHandle` accessor panics
 naming both sites rather than hanging.
 
-WASM: a guest can `send-command` (invoke) and nothing else.
+WASM: a guest can `send-command` (invoke), or — with `commands:register` explicitly granted — declare a root command whose canonical input reaches `on-command`. It has no typed argument schema, suggestions, sender, or execution context yet.
 
 ### World and block editing
 

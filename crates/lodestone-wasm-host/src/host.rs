@@ -54,8 +54,9 @@ use crate::capability::{Capability, CapabilitySet};
 /// named in `wit/lodestone-plugin.wit`.
 pub use crate::bindings::lodestone::plugin::types::{
     Action, BlockBreakVerdict, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
-    EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict, LogLevel, PlayerInteractVerdict,
-    PlayerMoveVerdict, PluginInfo, PluginVerdict, SectionBlocksChanged, SectionPos, VerdictContext,
+    CommandOutcome, CommandSpec, EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict,
+    LogLevel, PlayerInteractVerdict, PlayerMoveVerdict, PluginInfo, PluginVerdict,
+    SectionBlocksChanged, SectionPos, VerdictContext,
 };
 
 /// The world version this host speaks. A guest's `init` must return this, and a
@@ -64,7 +65,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.3.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.4.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
@@ -158,6 +159,12 @@ pub enum HostError {
         name: String,
         missing: String,
         granted: String,
+    },
+    #[error("plugin `{name}` declared invalid command `{command}`: {reason}")]
+    InvalidCommandSpec {
+        name: String,
+        command: String,
+        reason: &'static str,
     },
 }
 
@@ -327,6 +334,7 @@ pub struct LoadedPlugin {
     on_tick: TypedFunc<(Vec<Event>,), (Vec<Action>,)>,
     on_task: TypedFunc<(types::TaskId, u64), (Vec<Action>,)>,
     on_verdict: TypedFunc<(VerdictContext,), (PluginVerdict,)>,
+    on_command: TypedFunc<(String,), (CommandOutcome,)>,
     failure: Option<String>,
 }
 
@@ -464,6 +472,56 @@ impl LoadedPlugin {
             }
         }
     }
+
+    fn command(&mut self, input: String, fuel: u64) -> Result<CommandOutcome, String> {
+        if let Some(failure) = &self.failure {
+            return Err(failure.clone());
+        }
+        if let Err(e) = self.store.set_fuel(fuel) {
+            let message = format!("setting command fuel: {e:?}");
+            self.failure = Some(message.clone());
+            return Err(message);
+        }
+        match self.on_command.call(&mut self.store, (input,)) {
+            Ok((outcome,)) => Ok(outcome),
+            Err(e) => {
+                let message = format!("{e:?}");
+                tracing::error!(plugin = %self.name, "plugin command failed and will not be called again: {message}");
+                self.failure = Some(message.clone());
+                Err(message)
+            }
+        }
+    }
+}
+
+fn validate_command_specs(name: &str, specs: &[CommandSpec]) -> Result<(), HostError> {
+    let mut names = std::collections::BTreeSet::new();
+    for spec in specs {
+        for literal in std::iter::once(&spec.name).chain(spec.aliases.iter()) {
+            if literal.is_empty() || literal.chars().any(char::is_whitespace) {
+                return Err(HostError::InvalidCommandSpec {
+                    name: name.to_owned(),
+                    command: literal.clone(),
+                    reason: "a root literal or alias must be one non-empty token",
+                });
+            }
+            if !names.insert(literal.to_lowercase()) {
+                return Err(HostError::InvalidCommandSpec {
+                    name: name.to_owned(),
+                    command: literal.clone(),
+                    reason: "a root literal or alias was declared more than once",
+                });
+            }
+        }
+        if spec.permission.as_deref().is_some_and(|permission| permission.trim().is_empty()) {
+            return Err(HostError::InvalidCommandSpec {
+                name: name.to_owned(),
+                command: spec.name.clone(),
+                reason: "a command permission must not be empty",
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The result of synchronously asking the loaded verdict guests.
@@ -586,6 +644,41 @@ impl PluginHost {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
+    }
+
+    /// Command declarations from guests which the host actually granted the
+    /// registration capability. The conductor turns these copy-only specs into
+    /// native command handlers while it owns application setup.
+    #[must_use]
+    pub(crate) fn command_specs(&self) -> Vec<(usize, CommandSpec)> {
+        self.plugins
+            .iter()
+            .enumerate()
+            .filter(|(_, plugin)| plugin.granted.contains(Capability::RegisterCommands))
+            .flat_map(|(index, plugin)| {
+                plugin
+                    .info
+                    .commands
+                    .iter()
+                    .cloned()
+                    .map(move |spec| (index, spec))
+            })
+            .collect()
+    }
+
+    /// Call one guest command handler, using the synchronous callback budget.
+    /// The caller holds no host world borrow across this boundary; it passes only
+    /// the canonical command string.
+    pub(crate) fn command(
+        &mut self,
+        plugin_index: usize,
+        input: String,
+    ) -> Result<CommandOutcome, String> {
+        let fuel = self.verdict_fuel;
+        let Some(plugin) = self.plugins.get_mut(plugin_index) else {
+            return Err(format!("WASM plugin at index {plugin_index} is no longer loaded"));
+        };
+        plugin.command(input, fuel)
     }
 
     /// Load a plugin from a `.wasm` **file on disk**, granting it
@@ -748,6 +841,13 @@ impl PluginHost {
                 export: "on-verdict".to_owned(),
                 message: format!("{e:?}"),
             })?;
+        let on_command = instance
+            .get_typed_func::<(String,), (CommandOutcome,)>(&mut store, "on-command")
+            .map_err(|e| HostError::MissingExport {
+                name: name.to_owned(),
+                export: "on-command".to_owned(),
+                message: format!("{e:?}"),
+            })?;
 
         let (info,) = init.call(&mut store, ()).map_err(|e| HostError::Trap {
             name: name.to_owned(),
@@ -761,6 +861,7 @@ impl PluginHost {
                 expected: ABI_WORLD.to_owned(),
             });
         }
+        validate_command_specs(name, &info.commands)?;
 
         tracing::info!(
             plugin = %name,
@@ -776,6 +877,7 @@ impl PluginHost {
             on_tick,
             on_task,
             on_verdict,
+            on_command,
             failure: None,
         });
         Ok(self.plugins.len() - 1)
