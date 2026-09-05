@@ -165,7 +165,7 @@ impl AdapterHost {
                 -> Result<S, String>
             + Send
             + 'static,
-        S: Send + 'static,
+        S: 'static,
     {
         validate_class(class)?;
         if deadline.is_zero() {
