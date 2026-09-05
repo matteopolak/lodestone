@@ -12,6 +12,51 @@ const CHUNK_V1: &str = include_str!("fixtures/chunk-v1.hex");
 const WORLD_PROPERTIES_V1: &str = include_str!("fixtures/world-properties-v1.hex");
 const EXTENSIONS_V1: &str = include_str!("fixtures/extensions-v1.hex");
 const PLAYER_RUNTIME_V1: &str = include_str!("fixtures/player-runtime-v1.hex");
+const PLAYER_INVENTORY_V1: &str = include_str!("fixtures/player-inventory-v1.hex");
+
+#[test]
+fn player_inventory_fixture_is_sparse_and_slot_typed() {
+    let expected = fixture(PLAYER_INVENTORY_V1);
+    let inventory = lodestone_storage_schema::PlayerInventory::decode(expected.as_slice()).unwrap();
+    assert_eq!(inventory.selected_hotbar_slot, 4);
+    assert_eq!(inventory.occupied_slots.len(), 1);
+    let item = &inventory.occupied_slots[0];
+    assert_eq!(item.slot, 4);
+    assert_eq!(item.item_key, "minecraft:stone");
+    assert_eq!(item.count, 32);
+    assert!(item.custom_data.is_empty());
+    assert_eq!(inventory.encode_to_vec(), expected);
+
+    let mut record = StorageRecord {
+        format_version: FORMAT_VERSION_V1,
+        record: Some(storage_record::Record::General(GeneralRecord {
+            extensions: Vec::new(),
+            record: Some(general_record::Record::Player(PlayerRecord {
+                player_uuid: vec![1; 16],
+                dimension: BuiltinDimension::Overworld as i32,
+                x_fixed: 0,
+                y_fixed: 64_000,
+                z_fixed: 0,
+                yaw_millidegrees: 0,
+                pitch_millidegrees: 0,
+                game_mode: GameMode::Survival as i32,
+                runtime_state: None,
+                inventory: Some(inventory.clone()),
+            })),
+        })),
+    };
+    validate_record(&record).unwrap();
+    player_in(&mut record)
+        .inventory
+        .as_mut()
+        .unwrap()
+        .occupied_slots
+        .push(inventory.occupied_slots[0].clone());
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::DuplicatePlayerInventorySlot(4))
+    );
+}
 
 #[test]
 fn player_runtime_fixture_is_the_specified_scalar_wire_group() {
@@ -212,6 +257,7 @@ fn player_locator_requires_a_complete_uuid_and_a_builtin_dimension() {
                     experience_progress: 0.25,
                     experience_total: 91,
                 }),
+                inventory: None,
             })),
             extensions: Vec::new(),
         })),

@@ -97,6 +97,7 @@ fn player_update() -> RecordWrite {
                     pitch_millidegrees: 0,
                     game_mode: 1,
                     runtime_state: None,
+                    inventory: None,
                 })),
                 extensions: vec![ExtensionValue {
                     local_id: 1,

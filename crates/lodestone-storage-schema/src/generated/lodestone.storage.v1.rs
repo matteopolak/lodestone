@@ -203,10 +203,13 @@ pub struct PlayerRecord {
     #[prost(enumeration = "GameMode", tag = "8")]
     pub game_mode: i32,
     /// Absent for locator-only and early native records. This group contains the
-    /// complete scalar player state currently consumed by the live server loop;
-    /// inventory remains a separate future typed vocabulary.
+    /// Complete scalar player state currently consumed by the live server loop.
     #[prost(message, optional, tag = "9")]
     pub runtime_state: ::core::option::Option<PlayerRuntimeState>,
+    /// Sparse durable inventory state; session-only menu and crafting state stays
+    /// outside the world format.
+    #[prost(message, optional, tag = "10")]
+    pub inventory: ::core::option::Option<PlayerInventory>,
 }
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct PlayerRuntimeState {
@@ -220,6 +223,28 @@ pub struct PlayerRuntimeState {
     pub experience_progress: f32,
     #[prost(sint32, tag = "5")]
     pub experience_total: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PlayerInventory {
+    #[prost(uint32, tag = "1")]
+    pub selected_hotbar_slot: u32,
+    #[prost(message, repeated, tag = "2")]
+    pub occupied_slots: ::prost::alloc::vec::Vec<PlayerInventorySlot>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PlayerInventorySlot {
+    #[prost(uint32, tag = "1")]
+    pub slot: u32,
+    /// Canonical resource key remains textual because plugin/datapack items do
+    /// not have durable built-in ordinals.
+    #[prost(string, tag = "2")]
+    pub item_key: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "3")]
+    pub count: u32,
+    /// The modeled custom-data component is intentionally opaque NBT; plugins
+    /// own its schema and the normal extension registry cannot type it globally.
+    #[prost(bytes = "vec", tag = "4")]
+    pub custom_data: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EntityRecord {

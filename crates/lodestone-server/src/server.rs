@@ -1959,7 +1959,7 @@ impl NativePlayerSession {
         if self.save_blocked {
             return fallback;
         }
-        let Some(record) = self.loaded.map(|data| data.locator) else {
+        let Some(record) = self.loaded.as_ref().map(|data| data.locator) else {
             return fallback;
         };
         native_position(record)
@@ -1967,6 +1967,7 @@ impl NativePlayerSession {
 
     fn initial_rotation(&self) -> Option<Rotation> {
         self.loaded
+            .as_ref()
             .map(|data| data.locator)
             .filter(|_| !self.save_blocked)
             .map(native_rotation)
@@ -1976,7 +1977,7 @@ impl NativePlayerSession {
         if self.save_blocked {
             return None;
         }
-        self.loaded.map(|data| match data.locator.dimension {
+        self.loaded.as_ref().map(|data| match data.locator.dimension {
             lodestone_storage_schema::BuiltinDimension::Overworld => {
                 crate::dimension::Dimension::Overworld
             }
@@ -2021,11 +2022,21 @@ impl NativePlayerSession {
     }
 
     fn game_mode(&self) -> Option<GameMode> {
-        self.loaded.and_then(|data| data.game_mode)
+        self.loaded.as_ref().and_then(|data| data.game_mode)
     }
 
     fn runtime(&self) -> Option<crate::world_storage::NativePlayerRuntimeState> {
-        self.loaded.filter(|_| !self.save_blocked).and_then(|data| data.runtime)
+        self.loaded
+            .as_ref()
+            .filter(|_| !self.save_blocked)
+            .and_then(|data| data.runtime)
+    }
+
+    fn inventory(&self) -> Option<crate::inventory::PlayerInventory> {
+        self.loaded
+            .as_ref()
+            .filter(|_| !self.save_blocked)
+            .and_then(|data| data.inventory.clone())
     }
 
     fn snapshot(
@@ -2037,6 +2048,7 @@ impl NativePlayerSession {
         game_mode: GameMode,
         vitals: &PlayerVitals,
         experience: &crate::experience::PlayerExperience,
+        inventory: &PlayerInventory,
     ) -> Option<crate::world_storage::NativePlayerData> {
         if self.save_blocked {
             return None;
@@ -2045,6 +2057,7 @@ impl NativePlayerSession {
             .map(|(x, y, z)| Vec3::new(x, y, z))
             .or_else(|| {
                 self.loaded
+                    .as_ref()
                     .map(|data| data.locator)
                     .filter(|_| !self.save_blocked)
                     .map(native_position)
@@ -2053,6 +2066,7 @@ impl NativePlayerSession {
         let rotation = player_rot
             .or_else(|| {
                 self.loaded
+                    .as_ref()
                     .map(|data| data.locator)
                     .filter(|_| !self.save_blocked)
                     .map(native_rotation)
@@ -2074,6 +2088,7 @@ impl NativePlayerSession {
                 air_supply: vitals.air_supply(),
                 experience: *experience,
             }),
+            inventory: Some(inventory.clone()),
         })
     }
 }
@@ -2139,13 +2154,14 @@ fn persist_native_player(
     game_mode: GameMode,
     vitals: &PlayerVitals,
     experience: &crate::experience::PlayerExperience,
+    inventory: &PlayerInventory,
 ) {
     let Some(session) = session else {
         return;
     };
     let Some(record) =
         session.snapshot(
-            player_pos, player_rot, fallback, dimension, game_mode, vitals, experience,
+            player_pos, player_rot, fallback, dimension, game_mode, vitals, experience, inventory,
         )
     else {
         tracing::error!(
@@ -2170,13 +2186,14 @@ fn publish_native_player(
     game_mode: GameMode,
     vitals: &PlayerVitals,
     experience: &crate::experience::PlayerExperience,
+    inventory: &PlayerInventory,
 ) {
     let Some(session) = session else {
         return;
     };
     let Some(record) =
         session.snapshot(
-            player_pos, player_rot, fallback, dimension, game_mode, vitals, experience,
+            player_pos, player_rot, fallback, dimension, game_mode, vitals, experience, inventory,
         )
     else {
         return;
@@ -13116,7 +13133,9 @@ where
     let mut fall = FallTracker::default();
     let mut inventory = saved_player
         .as_ref()
-        .map_or_else(PlayerInventory::default, crate::player_data::PlayerData::to_inventory);
+        .map(crate::player_data::PlayerData::to_inventory)
+        .or_else(|| native_player.and_then(NativePlayerSession::inventory))
+        .unwrap_or_default();
     // Send the book only after this connection's inventory exists: its
     // highlight flags are a per-connection acknowledgement state, while the
     // corpus itself is shared. The client uses the ids for `PLACE_RECIPE` too.
@@ -13424,6 +13443,7 @@ where
                         game_mode,
                         &vitals,
                         &experience,
+                        &inventory,
                     );
                     return Ok(ServeSummary { username, chunks_sent, inventory });
                 };
@@ -15099,6 +15119,7 @@ where
             game_mode,
             &vitals,
             &experience,
+            &inventory,
         );
     }
 }
@@ -19602,6 +19623,7 @@ mod tests {
                 air_supply: 42,
                 experience: crate::experience::PlayerExperience::restored(12, 0.5, 345),
             }),
+            inventory: None,
         };
         (
             directory,
@@ -19650,6 +19672,7 @@ mod tests {
                     GameMode::Survival,
                     &PlayerVitals::default(),
                     &crate::experience::PlayerExperience::default(),
+                    &PlayerInventory::default(),
                 )
                 .is_none(),
             "a failed cross-dimension restore must not overwrite its evidence on disconnect"

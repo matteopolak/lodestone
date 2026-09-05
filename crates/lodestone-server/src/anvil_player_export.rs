@@ -92,7 +92,7 @@ pub fn export_all_players(
         for player in &players {
             let uuid = uuid::Uuid::from_bytes(player.locator.uuid);
             staged_store
-                .write(uuid, &to_anvil_player(*player))
+                .write(uuid, &to_anvil_player(player))
                 .map_err(Error::Anvil)?;
         }
         let players_dir = destination.join("players");
@@ -108,7 +108,7 @@ pub fn export_all_players(
     result
 }
 
-fn to_anvil_player(player: NativePlayerData) -> PlayerData {
+fn to_anvil_player(player: &NativePlayerData) -> PlayerData {
     let locator = player.locator;
     let units = POSITION_UNITS_PER_BLOCK;
     let runtime = player.runtime;
@@ -138,6 +138,19 @@ fn to_anvil_player(player: NativePlayerData) -> PlayerData {
             crate::experience::PlayerExperience::default,
             |state| state.experience,
         ),
+        selected_slot: player
+            .inventory
+            .as_ref()
+            .map_or(0, crate::inventory::PlayerInventory::selected_hotbar_slot),
+        inventory: player
+            .inventory
+            .as_ref()
+            .map(|inventory| {
+                (0..crate::inventory::PLAYER_NATIVE_SIZE)
+                    .map(|slot| inventory.native(slot).cloned())
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![None; crate::inventory::PLAYER_NATIVE_SIZE]),
         ..PlayerData::default()
     }
 }
@@ -161,6 +174,15 @@ mod tests {
     }
 
     fn player(uuid: [u8; 16], dimension: BuiltinDimension) -> NativePlayerData {
+        let mut inventory = crate::inventory::PlayerInventory::new();
+        inventory.set_native(
+            4,
+            Some(lodestone_model::ItemStack::new(
+                "minecraft:stone".parse().unwrap(),
+                32,
+            )),
+        );
+        assert!(inventory.set_selected_hotbar_slot(4));
         NativePlayerData {
             locator: NativePlayerRecord {
                 uuid,
@@ -177,6 +199,7 @@ mod tests {
                 air_supply: 222,
                 experience: crate::experience::PlayerExperience::restored(4, 0.75, 57),
             }),
+            inventory: Some(inventory),
         }
     }
 
@@ -192,9 +215,11 @@ mod tests {
         .expect("open native store");
         let overworld = player([0x11; 16], BuiltinDimension::Overworld);
         let nether = player([0x22; 16], BuiltinDimension::Nether);
-        storage.write_dirty_player_data(nether).expect("seed Nether player");
         storage
-            .write_dirty_player_data(overworld)
+            .write_dirty_player_data(nether.clone())
+            .expect("seed Nether player");
+        storage
+            .write_dirty_player_data(overworld.clone())
             .expect("seed Overworld player");
 
         assert_eq!(
@@ -211,14 +236,23 @@ mod tests {
                 .expect("read exported Anvil player")
                 .expect("exported player exists");
             let locator = expected.locator;
-            assert_eq!(actual.pos, to_anvil_player(expected).pos);
-            assert_eq!(actual.rotation, to_anvil_player(expected).rotation);
-            assert_eq!(actual.dimension, to_anvil_player(expected).dimension);
+            assert_eq!(actual.pos, to_anvil_player(&expected).pos);
+            assert_eq!(actual.rotation, to_anvil_player(&expected).rotation);
+            assert_eq!(actual.dimension, to_anvil_player(&expected).dimension);
             assert_eq!(actual.game_mode, expected.game_mode);
             let runtime = expected.runtime.expect("fixture carries runtime state");
             assert_eq!(actual.health, runtime.health);
             assert_eq!(actual.air_supply, runtime.air_supply);
             assert_eq!(actual.experience, runtime.experience);
+            assert_eq!(actual.selected_slot, 4);
+            assert_eq!(
+                actual.inventory[4],
+                expected
+                    .inventory
+                    .as_ref()
+                    .and_then(|inventory| inventory.native(4))
+                    .cloned(),
+            );
             assert!(anvil.path_for(uuid).is_file());
             assert_ne!(locator.dimension, BuiltinDimension::Unspecified);
         }

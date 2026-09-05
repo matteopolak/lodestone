@@ -42,7 +42,7 @@
 use std::time::Duration;
 
 use lodestone_core::{Nbt, Reader, State, Writer};
-use lodestone_model::{GameMode, Vec3};
+use lodestone_model::{GameMode, ItemStack, Vec3};
 use lodestone_net::Connection;
 use lodestone_server::player_data::{PlayerData, PlayerDataStore};
 use lodestone_server::world_storage::{
@@ -655,12 +655,17 @@ async fn native_locator_survives_join_restart_and_cancelled_shutdown() {
 /// cancellation-safe snapshot as the locator. A changed mode therefore
 /// survives a singleplayer shutdown even though no clean disconnect occurs.
 #[tokio::test]
-async fn native_game_mode_survives_join_and_cancelled_shutdown() {
+async fn native_player_state_survives_join_and_cancelled_shutdown() {
     let dir = tempdir("native-game-mode");
     let native_dir = dir.join("native");
     let username = format!("NMode{:08x}", Uuid::new_v4().as_u128() as u32);
     let uuid = test_uuid_for(&username);
     let uuid_bytes = *uuid.as_bytes();
+    let mut seeded_inventory = lodestone_server::PlayerInventory::new();
+    let mut seeded_stack = ItemStack::new("minecraft:stone".parse().unwrap(), 13);
+    seeded_stack.components.custom_data = Some(vec![10, 0]);
+    seeded_inventory.set_native(3, Some(seeded_stack.clone()));
+    assert!(seeded_inventory.set_selected_hotbar_slot(3));
     let seeded = NativePlayerData {
         locator: NativePlayerRecord {
             uuid: uuid_bytes,
@@ -677,6 +682,7 @@ async fn native_game_mode_survives_join_and_cancelled_shutdown() {
             air_supply: 240,
             experience: lodestone_server::experience::PlayerExperience::restored(7, 0.25, 341),
         }),
+        inventory: Some(seeded_inventory),
     };
     let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
         directory: native_dir.clone(),
@@ -725,6 +731,9 @@ async fn native_game_mode_survives_join_and_cancelled_shutdown() {
     assert_eq!(runtime.experience.level(), 7);
     assert_eq!(runtime.experience.progress(), 0.25);
     assert_eq!(runtime.experience.total(), 341);
+    let inventory = restored.inventory.expect("native inventory survives shutdown");
+    assert_eq!(inventory.selected_hotbar_slot(), 3);
+    assert_eq!(inventory.native(3), Some(&seeded_stack));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -763,6 +772,7 @@ async fn native_locator_without_game_mode_keeps_the_world_default() {
                         pitch_millidegrees: 0,
                         game_mode: 0,
                         runtime_state: None,
+                        inventory: None,
                     })),
                 })),
             },
@@ -840,6 +850,7 @@ async fn anvil_game_mode_overrides_native_game_mode_on_join() {
             },
             game_mode: Some(GameMode::Adventure),
             runtime: None,
+            inventory: None,
         })
         .expect("seed native mode sidecar");
 
@@ -1034,6 +1045,7 @@ async fn corrupt_native_locator_is_not_overwritten_on_cancelled_shutdown() {
                 pitch_millidegrees: -2_000,
                 game_mode: 0,
                 runtime_state: None,
+                inventory: None,
             })),
         })),
     };

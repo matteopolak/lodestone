@@ -4450,10 +4450,11 @@ impl IntegratedServer {
         // typed record without touching the complete Anvil player file.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some((storage, record)) = self.live_save.take_native() {
+            let uuid = record.locator.uuid;
             if let Err(err) = storage.write_dirty_player_data(record) {
                 tracing::warn!(
                     "native player data flush on shutdown failed for {:?}: {err}",
-                    record.locator.uuid
+                    uuid
                 );
             }
         }
