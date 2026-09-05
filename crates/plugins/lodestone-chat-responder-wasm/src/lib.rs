@@ -70,6 +70,8 @@ static PLACEMENT_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 static BREAK_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "drop-selected-item")]
 static DROP_SELECTED_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "swap-offhand")]
+static SWAP_OFFHAND_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "scheduler")]
 static REPEATS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(feature = "scheduler")]
@@ -195,10 +197,17 @@ impl Guest for ChatResponder {
             Vec::new()
         };
 
+        #[cfg(feature = "swap-offhand")]
+        return if !SWAP_OFFHAND_SENT.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            vec![Action::SwapItemWithOffhand]
+        } else {
+            Vec::new()
+        };
+
         #[cfg(feature = "fs-write")]
         return write_files();
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "fs-write")))]
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "fs-write")))]
         return respond(events);
     }
 
