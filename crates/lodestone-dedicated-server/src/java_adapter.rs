@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost};
 use lodestone_jvm_bridge::paper::{
-    PaperBootstrapConfig, PaperBootstrapPlan, PaperPluginLifecycleStatusSet,
+    PaperBootstrapConfig, PaperBootstrapPlan, PaperPluginConstructionBlocker,
+    PaperPluginConstructionReadiness,
 };
 use lodestone_jvm_bridge::runtime::JvmConfig;
 use lodestone_server::IntegratedServer;
@@ -14,8 +15,8 @@ use lodestone_server::IntegratedServer;
 pub(crate) struct JavaAdapter {
     host: AdapterHost,
     paper_plan: Option<PaperBootstrapPlan>,
-    paper_lifecycle: Option<PaperPluginLifecycleStatusSet>,
-    paper_lifecycle_receiver: Option<Receiver<PaperPluginLifecycleStatusSet>>,
+    paper_construction: Option<PaperPluginConstructionReadiness>,
+    paper_construction_receiver: Option<Receiver<PaperPluginConstructionReadiness>>,
     last_dispatched: Option<u64>,
 }
 
@@ -61,7 +62,9 @@ impl JavaAdapter {
         if paths.iter().any(|path| path.as_os_str().is_empty()) {
             return Err("LODESTONE_JAVA_CLASSPATH contains an empty entry".to_owned());
         }
-        let config = paths.into_iter().fold(JvmConfig::new(), |config, path| config.with_classpath(path));
+        let config = paths.into_iter().fold(JvmConfig::new(), |config, path| {
+            config.with_classpath(path)
+        });
         let paper_plan = configuration.paper
             .map(PaperBootstrapConfig::discover)
             .transpose()
@@ -75,15 +78,21 @@ impl JavaAdapter {
         deadline: Duration,
         paper_plan: Option<PaperBootstrapPlan>,
     ) -> Result<Self, String> {
-        let (host, paper_lifecycle_receiver) = if let Some(plan) = paper_plan.clone() {
-            let (lifecycle_sender, lifecycle_receiver) = sync_channel(1);
+        let (host, paper_construction_receiver) = if let Some(plan) = paper_plan.clone() {
+            let (construction_sender, construction_receiver) = sync_channel(1);
             AdapterHost::start_with_setup(config, class, deadline, move |runtime, env| {
-                let lifecycle = plan.load_lifecycle_entries_in_runtime(runtime, env)
-                    .map_err(|error| format!("could not load configured Paper lifecycle entries: {error}"))?;
-                lifecycle_sender.send(lifecycle.status().clone())
-                    .map_err(|error| format!("could not retain configured Paper lifecycle status: {error}"))?;
-                Ok(lifecycle)
-            }).map(|host| (host, Some(lifecycle_receiver)))
+                let lifecycle = plan.load_lifecycle_entries_in_runtime(runtime, env).map_err(|error| {
+                    format!("could not load configured Paper lifecycle entries: {error}")
+                })?;
+                let construction = lifecycle.into_construction_plan();
+                construction_sender
+                    .send(construction.readiness().clone())
+                    .map_err(|error| {
+                        format!("could not retain configured Paper construction state: {error}")
+                    })?;
+                Ok(construction)
+            })
+            .map(|host| (host, Some(construction_receiver)))
         } else {
             AdapterHost::start(config, class, deadline).map(|host| (host, None))
         }.map_err(|error| error.to_string())?;
@@ -100,8 +109,8 @@ impl JavaAdapter {
         Ok(Self {
             host,
             paper_plan,
-            paper_lifecycle: None,
-            paper_lifecycle_receiver,
+            paper_construction: None,
+            paper_construction_receiver,
             last_dispatched: None,
         })
     }
@@ -115,14 +124,28 @@ impl JavaAdapter {
         match event {
             Some(AdapterEvent::Ready) => {
                 if let Some(plan) = &self.paper_plan {
-                    let lifecycle = self.paper_lifecycle_receiver.take()
-                        .ok_or_else(|| "configured Paper lifecycle did not report its Load status".to_owned())?
+                    let construction = self
+                        .paper_construction_receiver
+                        .take()
+                        .ok_or_else(|| {
+                            "configured Paper lifecycle did not report its construction prerequisites"
+                                .to_owned()
+                        })?
                         .try_recv()
-                        .map_err(|error| format!("configured Paper lifecycle status disconnected: {error}"))?;
-                    let failed = lifecycle.plugins().iter()
-                        .filter(|plugin| plugin.failure().is_some())
+                        .map_err(|error| format!("configured Paper construction state disconnected: {error}"))?;
+                    let failed = construction
+                        .plugins()
+                        .iter()
+                        .filter(|plugin| {
+                            matches!(plugin.blocker(), PaperPluginConstructionBlocker::EntryLoadFailed)
+                        })
                         .count();
-                    for plugin in lifecycle.plugins().iter().filter(|plugin| plugin.failure().is_some()) {
+                    for plugin in construction
+                        .lifecycle()
+                        .plugins()
+                        .iter()
+                        .filter(|plugin| plugin.failure().is_some())
+                    {
                         let failure = plugin.failure().expect("filtered plugin lifecycle failure");
                         tracing::warn!(
                             plugin = plugin.descriptor().name(),
@@ -132,18 +155,29 @@ impl JavaAdapter {
                             "configured Paper plugin Load failed in an isolated lifecycle entry; it remains disabled"
                         );
                     }
-                    self.paper_lifecycle = Some(lifecycle);
-                    let loaded_plugins = self.paper_lifecycle.as_ref()
-                        .expect("stored Paper lifecycle status")
-                        .plugins().iter()
-                        .filter(|plugin| plugin.failure().is_none())
+                    self.paper_construction = Some(construction);
+                    let blocked_plugins = self
+                        .paper_construction
+                        .as_ref()
+                        .expect("stored Paper construction state")
+                        .plugins()
+                        .iter()
+                        .filter(|plugin| {
+                            matches!(
+                                plugin.blocker(),
+                                PaperPluginConstructionBlocker::ServerFacadeUnavailable
+                            )
+                        })
                         .count();
                     tracing::info!(
                         paper_jar = %plan.paper_jar().display(),
                         plugins = plan.plugins().len(),
-                        loaded_plugins,
+                        blocked_plugins,
                         failed_plugins = failed,
-                        "configured Paper lifecycle Load completed; Paper is not initialized and plugins are not instantiated or enabled"
+                        facade = %self.paper_construction.as_ref()
+                            .expect("stored Paper construction state")
+                            .facade(),
+                        "configured Paper lifecycle Load completed; retained entries are blocked from construction until a compatible server facade exists"
                     );
                 } else {
                     tracing::info!("experimental Java adapter ready");

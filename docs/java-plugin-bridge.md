@@ -566,10 +566,18 @@ This is deliberately only the retained `Load` lifecycle step. It retains a loade
 entry-class reference per successful descriptor, but does not initialize the server or a plugin,
 construct a plugin object, invoke an entry point, or establish Bukkit/Paper compatibility.
 Construction is not safe to infer from a descriptor: it can execute arbitrary plugin code and needs
-the server-owned API state that this bridge does not yet provide. Enablement, disabling, and event
-dispatch remain later lifecycle work. The unignored unit tests inject a loader to prove ordering,
-phase rules, bootstrap-terminal failure, and isolated plugin failures. The runtime gate stays ignored
-because it needs a locally installed JDK; it uses stand-in archives only, not an operator Paper jar.
+the server-owned API state that this bridge does not yet provide. The retained load is therefore
+immediately wrapped in `PaperPluginConstructionPlan`. Its descriptor-backed readiness snapshot keeps
+each plugin's validated name, version, kind, and main class beside the same worker-lifetime loader
+that resolved its entry. It reports `PaperServerFacadeState::Unavailable` for every successfully
+loaded entry and `EntryLoadFailed` for an entry with no retained class. There is deliberately no
+ready-to-construct state and no Java constructor call: a later slice must install a real,
+server-owned facade through that retained loader before it may add one. Enablement, disabling, and
+event dispatch remain later lifecycle work. The unignored unit tests inject a loader to prove
+ordering, phase rules, bootstrap-terminal failure, isolated plugin failures, and that construction
+readiness preserves the descriptor while explicitly blocking every constructor. The runtime gate
+stays ignored because it needs a locally installed JDK; it uses stand-in archives only, not an
+operator Paper jar.
 
 ```bash
 cargo test -p lodestone-jvm-bridge --features jvm --test paper_lifecycle \
@@ -677,10 +685,13 @@ loading the corresponding entry. The host discovers and retains a `PaperBootstra
 a JVM, then loads the Paper bootstrap followed by each plugin entry class through separate shim-first
 isolated loaders before the adapter can report ready. The dedicated adapter owns the resulting
 worker-lifetime lifecycle state and snapshots each descriptor's Load status before readiness. Each
-plugin loader sees shim paths, the server jar, and only its own jar. These are non-initializing class
-loads: the host does **not** initialize Paper, construct or enable plugins, dispatch Paper events,
-or promise plugin compatibility. A failed plugin entry is logged with its descriptor and stays
-disabled; a failed Paper bootstrap remains terminal for the configured run.
+plugin loader sees shim paths, the server jar, and only its own jar. The worker also snapshots each
+descriptor's construction prerequisite: the only facade state is explicitly unavailable. These are
+non-initializing class loads: the host does **not** initialize Paper, construct or enable plugins,
+dispatch Paper events, or promise plugin compatibility. Successfully loaded entries are retained but
+blocked from construction rather than receiving a fake partial API. A failed plugin entry is logged
+with its descriptor and stays disabled; a failed Paper bootstrap remains terminal for the configured
+run.
 A malformed Paper configuration or bootstrap Load failure saves the world before the configured run
 can continue. A plugin-entry Load failure is instead retained as disabled descriptor status, rather
 than silently removing the operator input or preventing the later isolated entries from being checked.

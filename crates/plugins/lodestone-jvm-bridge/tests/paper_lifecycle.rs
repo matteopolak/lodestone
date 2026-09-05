@@ -65,6 +65,13 @@ fn lifecycle_entries_load_without_initialization() {
         assert!(lifecycle.retains_bootstrap_loader());
         assert_eq!(lifecycle.loaded_plugins()[0].descriptor().name(), "Fixture");
         assert!(lifecycle.loaded_plugins()[0].retains_entry_association());
+        let construction = lifecycle.into_construction_plan();
+        assert_eq!(construction.loader_count(), 2, "keep the loaders beside construction state");
+        assert_eq!(construction.readiness().plugins()[0].descriptor().name(), "Fixture");
+        assert_eq!(
+            construction.readiness().plugins()[0].blocker().to_string(),
+            "no compatible server facade is installed",
+        );
         Ok(())
     })
     .expect("attach fixture JVM thread");

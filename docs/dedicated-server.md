@@ -263,7 +263,10 @@ record per descriptor: Load is the only implemented operation; the later order i
 Disable. A bootstrap-load failure saves and stops the server, so a requested Paper intake cannot
 silently degrade into an ordinary adapter run. A plugin-entry Load failure is isolated, logged with
 that descriptor, and remains disabled while later entries are checked. These loads do not initialize
-Paper, construct or enable a plugin, or provide Paper-plugin compatibility.
+Paper, construct or enable a plugin, or provide Paper-plugin compatibility. After each retained Load,
+the worker records construction prerequisites from the validated plugin description. Its only server
+facade state is explicitly unavailable, so even a successfully loaded entry remains blocked from
+construction until a real server-owned facade can be attached through that same retained loader.
 See [Java plugin bridge](java-plugin-bridge.md) for its explicit boundary and live
 fixture.
 
