@@ -45,6 +45,17 @@ field (`PLAYER_ACTION`, `PLAYER_COMMAND`, `INTERACT`, `CUSTOM_CLICK_ACTION`), ch
 *ordinal* individually — a packet id can read as fully connected while one ordinal inside it
 still falls through to `Ignored`.
 
+### Client tick boundaries and launch momentum
+
+The 26.2 play-only `client_tick_end` frame has an empty body, but it is not a
+discardable keep-alive. `V770ServerProtocol` lowers only an exactly empty frame
+to `ServerBound::ClientTickEnded`; trailing bytes remain `Ignored`. The play
+dispatcher uses that boundary to expire a connection's previous movement sample
+when no player-position packet arrived in the tick. Projectile launches inherit
+the sample's horizontal velocity and inherit its vertical velocity only while
+the source is airborne. This prevents an idle player from throwing a projectile
+with momentum left over from an earlier movement tick.
+
 ### Operator block-entity queries
 
 The 26.2 `BLOCK_ENTITY_TAG_QUERY` decoder preserves the transaction id and packed

@@ -823,6 +823,13 @@ pub enum ServerBound {
         /// The challenge id the client echoed back.
         id: i64,
     },
+    /// The client completed one local play tick.
+    ///
+    /// This empty marker closes the movement sample for the connection. The
+    /// server uses it to clear inherited launch momentum after a tick that
+    /// carried no player-position packet; otherwise a projectile fired later
+    /// while standing still would retain the previous tick's velocity.
+    ClientTickEnded,
     /// The client's absolute position changed (`move_player_pos` /
     /// `move_player_pos_rot` — the only two serverbound movement packets that
     /// carry a position). This drives chunk-cache-center/view-streaming

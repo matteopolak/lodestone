@@ -19,6 +19,8 @@ mod serverbound_interaction_tier2;
 mod serverbound_ping_spectator;
 #[path = "serverbound/serverbound_player_loaded_decode.rs"]
 mod serverbound_player_loaded_decode;
+#[path = "serverbound/serverbound_client_tick_end_decode.rs"]
+mod serverbound_client_tick_end_decode;
 #[path = "serverbound/serverbound_protocol_hygiene.rs"]
 mod serverbound_protocol_hygiene;
 #[path = "serverbound/serverbound_recipe_bundle.rs"]

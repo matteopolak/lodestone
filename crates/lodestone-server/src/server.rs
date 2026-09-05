@@ -3985,6 +3985,7 @@ where
             | ServerBound::SeenAdvancements { .. }
             | ServerBound::ResourcePackResponse { .. }
             | ServerBound::PlayerLoaded
+            | ServerBound::ClientTickEnded
             | ServerBound::TeleportationAccepted { .. }
             | ServerBound::PlayerAbilitiesChanged { .. }
             | ServerBound::BlockEntityTagQuery { .. }
@@ -9253,6 +9254,7 @@ fn apply_use_item(
     mobs: &MobHandle,
     inventory: &mut PlayerInventory,
     player_pos: Option<(f64, f64, f64)>,
+    client_movement: ClientMovement,
     game_mode: GameMode,
     food_level: i32,
     invulnerable: bool,
@@ -9311,11 +9313,13 @@ fn apply_use_item(
                 if !consume_one(inventory, native, game_mode) {
                     return UseItemOutcome::Nothing;
                 }
-                let velocity = lodestone_entity::projectile::launch_velocity(
-                    f64::from(yaw),
-                    f64::from(pitch),
-                    pitch_offset,
-                    power,
+                let velocity = client_movement.add_to_launch(
+                    lodestone_entity::projectile::launch_velocity(
+                        f64::from(yaw),
+                        f64::from(pitch),
+                        pitch_offset,
+                        power,
+                    ),
                 );
                 spawn_player_projectile(
                     mobs,
@@ -9575,6 +9579,7 @@ fn apply_release_use_item(
     mobs: &MobHandle,
     inventory: &mut PlayerInventory,
     player_pos: Option<(f64, f64, f64)>,
+    client_movement: ClientMovement,
     player_rot: Option<Rotation>,
     game_mode: GameMode,
     draw: BowDraw,
@@ -9608,11 +9613,13 @@ fn apply_release_use_item(
         yaw: draw.yaw,
         pitch: draw.pitch,
     });
-    let velocity = lodestone_entity::projectile::launch_velocity(
-        f64::from(rotation.yaw),
-        f64::from(rotation.pitch),
-        0.0,
-        power * BOW_ARROW_SPEED,
+    let velocity = client_movement.add_to_launch(
+        lodestone_entity::projectile::launch_velocity(
+            f64::from(rotation.yaw),
+            f64::from(rotation.pitch),
+            0.0,
+            power * BOW_ARROW_SPEED,
+        ),
     );
     spawn_player_projectile(mobs, "arrow", Vec3::new(x, y + EYE_HEIGHT, z), velocity, None);
     true
@@ -10339,6 +10346,60 @@ fn issue_teleport_id(teleports: &mut Option<TeleportAcknowledgements>) -> i32 {
     teleports.as_mut().map_or(0, TeleportAcknowledgements::issue)
 }
 
+/// The movement sample a client has reported for its current local tick.
+///
+/// Position packets carry a delta only indirectly: the server derives it from
+/// two absolute positions. The empty tick-end marker is the delimiter that
+/// tells us when an absent position packet means zero movement rather than
+/// "keep the previous sample". This is per connection because another
+/// player's movement cannot affect this player's projectile launch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ClientMovement {
+    delta: Vec3,
+    on_ground: bool,
+    received_this_tick: bool,
+}
+
+impl Default for ClientMovement {
+    fn default() -> Self {
+        Self {
+            delta: Vec3::new(0.0, 0.0, 0.0),
+            on_ground: true,
+            received_this_tick: false,
+        }
+    }
+}
+
+impl ClientMovement {
+    /// Records the latest player-position sample in this client tick.
+    fn observe(&mut self, delta: Vec3, on_ground: bool) {
+        self.delta = delta;
+        self.on_ground = on_ground;
+        self.received_this_tick = true;
+    }
+
+    /// Ends the client's local tick, zeroing only a tick with no movement.
+    fn finish_tick(&mut self) {
+        if !self.received_this_tick {
+            self.delta = Vec3::new(0.0, 0.0, 0.0);
+        }
+        self.received_this_tick = false;
+    }
+
+    /// Adds the source's latest movement to a launched projectile.
+    ///
+    /// Grounded sources contribute horizontal velocity only. This is the
+    /// launch rule the protocol's movement boundary protects: a following
+    /// idle tick must not leave a projectile with stale horizontal momentum.
+    fn add_to_launch(self, velocity: Vec3) -> Vec3 {
+        Vec3::new(
+            velocity.x + self.delta.x,
+            velocity.y + if self.on_ground { 0.0 } else { self.delta.y },
+            velocity.z + self.delta.z,
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_play_packet<T, P, S>(
     conn: &mut Connection<T>,
@@ -10359,6 +10420,9 @@ async fn dispatch_play_packet<T, P, S>(
     // `TeleportationAccepted` clears it; movement stays inert while it remains.
     teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
     player_pos: &mut Option<(f64, f64, f64)>,
+    // The latest position delta and its tick boundary. Projectile launches
+    // inherit this connection-local motion; see [`ClientMovement`].
+    client_movement: &mut ClientMovement,
     // Mirrors `player_pos` exactly — updated here, read back by
     // the caller, republished to the `PlayerRegistry` so *other* connections
     // stream this player's facing. `Option` because "no angles reported yet"
@@ -10577,6 +10641,7 @@ where
             if abilities.flying {
                 fall.reset();
             }
+            let previous_pos = *player_pos;
             // Hunger exhaustion for the distance just travelled — vanilla's
             // vanilla's own check-movement-statistics routine, which is driven by the
             // position delta rather than by a per-tick constant. Charged **before**
@@ -10610,6 +10675,13 @@ where
                 }
             }
             *player_pos = Some((x, y, z));
+            let delta = previous_pos.map_or_else(
+                || Vec3::new(0.0, 0.0, 0.0),
+                |(previous_x, previous_y, previous_z)| {
+                    Vec3::new(x - previous_x, y - previous_y, z - previous_z)
+                },
+            );
+            client_movement.observe(delta, on_ground);
             // `move_player_pos_rot` carries angles and
             // `move_player_pos` does not, so this is `if let`, not an
             // assignment — overwriting with `None` on every straight-line
@@ -10744,6 +10816,7 @@ where
             if abilities.flying {
                 fall.reset();
             }
+            client_movement.observe(Vec3::new(0.0, 0.0, 0.0), on_ground);
             *player_rot = Some(Rotation { yaw, pitch });
             fall_status_sample(
                 conn,
@@ -10769,6 +10842,7 @@ where
             if abilities.flying {
                 fall.reset();
             }
+            client_movement.observe(Vec3::new(0.0, 0.0, 0.0), on_ground);
             fall_status_sample(
                 conn,
                 state,
@@ -11078,6 +11152,9 @@ where
         }
         ServerBound::PlayerLoaded => {
             *client_loaded = true;
+        }
+        ServerBound::ClientTickEnded => {
+            client_movement.finish_tick();
         }
         ServerBound::PlayerAbilitiesChanged { flying } => {
             abilities.flying = flying && abilities.may_fly;
@@ -11671,6 +11748,7 @@ where
                 mobs,
                 inventory,
                 *player_pos,
+                *client_movement,
                 *game_mode,
                 vitals.food().food_level(),
                 Abilities::for_mode(*game_mode).invulnerable,
@@ -11738,6 +11816,7 @@ where
                     mobs,
                     inventory,
                     *player_pos,
+                    *client_movement,
                     *player_rot,
                     *game_mode,
                     draw,
@@ -12657,6 +12736,7 @@ where
     let mut pending_break: Option<PendingBreak> = None;
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut player_pos: Option<(f64, f64, f64)> = None;
+    let mut client_movement = ClientMovement::default();
     let mut client_loaded = false;
     let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
@@ -12992,6 +13072,7 @@ where
                     &mut pending_break,
                     &mut teleport_acknowledgements,
                     &mut player_pos,
+                    &mut client_movement,
                     &mut player_rot,
                     &mut fall,
                     &mut vitals,
@@ -15222,6 +15303,7 @@ where
     // drowning, border damage, burning, status effects, and hunger; fall damage
     // remains driven by inbound `PlayerMoved` packets.
     let mut player_pos: Option<(f64, f64, f64)> = None;
+    let mut client_movement = ClientMovement::default();
     let mut client_loaded = false;
     let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
@@ -15383,6 +15465,7 @@ where
             &mut pending_break,
             &mut teleport_acknowledgements,
             &mut player_pos,
+            &mut client_movement,
             &mut player_rot,
             &mut fall,
             &mut vitals,
@@ -15550,6 +15633,40 @@ mod tests {
     use crate::protocol::MetadataField;
     use lodestone_model::{Rotation, Vec3};
     use uuid::Uuid;
+
+    #[test]
+    fn client_tick_boundary_clears_stale_launch_momentum() {
+        let launch = Vec3::new(4.0, 5.0, 6.0);
+        let mut movement = ClientMovement::default();
+        movement.observe(Vec3::new(1.0, 2.0, 3.0), false);
+
+        assert_eq!(
+            movement.add_to_launch(launch),
+            Vec3::new(5.0, 7.0, 9.0),
+            "an airborne launch inherits this tick's complete movement sample"
+        );
+
+        movement.finish_tick();
+        assert_eq!(
+            movement.add_to_launch(launch),
+            Vec3::new(5.0, 7.0, 9.0),
+            "the boundary retains movement reported during the tick it closes"
+        );
+
+        movement.finish_tick();
+        assert_eq!(
+            movement.add_to_launch(launch),
+            launch,
+            "a following tick with no movement must clear stale launch momentum"
+        );
+
+        movement.observe(Vec3::new(1.0, 2.0, 3.0), true);
+        assert_eq!(
+            movement.add_to_launch(launch),
+            Vec3::new(5.0, 5.0, 9.0),
+            "a grounded launch inherits horizontal movement but not vertical movement"
+        );
+    }
 
     #[test]
     fn recipe_book_seen_accepts_only_advertised_display_ids() {
