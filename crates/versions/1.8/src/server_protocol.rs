@@ -17,8 +17,9 @@ use crate::packet_ids::{handshaking, login, play};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::Animation;
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientboundChat, ClientboundPositionLook, JoinGame, ServerboundChat,
-    ServerboundFlying, ServerboundLook, ServerboundPosition, ServerboundPositionLook,
+    BlockDig, BlockPlace, ClientboundChat, ClientboundPositionLook, EntityAction, JoinGame,
+    ServerboundChat, ServerboundFlying, ServerboundLook, ServerboundPosition,
+    ServerboundPositionLook,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -307,6 +308,15 @@ impl ServerProtocol for V47ServerProtocol {
                 } else {
                     ServerBound::Ignored
                 }
+            }
+            // This era's leave-bed action is ordinal two. The wire's player
+            // id belongs to the connection, while the shared wake consumer
+            // represents leave-bed with action zero.
+            State::Play if packet_id == play::serverbound::ENTITY_ACTION => {
+                let Some(EntityAction { action_id: 2, .. }) = decode_full(payload) else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::PlayerCommand { action: 0 }
             }
             State::Play if packet_id == play::serverbound::CHAT => {
                 decode_full::<ServerboundChat>(payload).map_or(ServerBound::Ignored, |chat| {
