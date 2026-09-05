@@ -351,6 +351,15 @@ What exists:
   that deliberately drops an `extra` child must disagree, proving the detector
   observes the folded output instead of accepting every generated input.
 
+- `tests/resource_key_model.rs` — a bounded fixed-ChaCha-seed grammar check
+  over `lodestone_model::ResourceKey`, the shared identifier parser packet
+  adapters use before retaining registry, sound, channel, and command-parser
+  keys. The model independently classifies empty components, extra separators,
+  first invalid namespace/path characters, and implicit namespaces. A wrong
+  default namespace is required to fail and shrink to a one-character bare
+  key, proving the detector observes the production result rather than merely
+  accepting generated input.
+
 - `tests/differential_client_state.rs` — a bounded hermetic client-state
   comparison. It replays fixed block, entity and inventory packet scripts
   through the public `ClientBuilder` over `lodestone_net::memory_pair`, with a
