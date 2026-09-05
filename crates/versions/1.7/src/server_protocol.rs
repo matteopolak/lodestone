@@ -26,6 +26,7 @@ use crate::packets::entity::Animation;
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess};
 use crate::packets::settings::Settings;
+use crate::packets::window::ServerboundHeldItemSlot;
 use crate::packets::world::{BlockChange, BlockDig, BlockPlace};
 use crate::packets::position::PositionIbi;
 
@@ -402,6 +403,15 @@ impl ServerProtocol for V5ServerProtocol {
                 } else {
                     ServerBound::Ignored
                 }
+            }
+            State::Play if packet_id == play::serverbound::HELD_ITEM_SLOT => {
+                let Some(slot) = decode_full::<ServerboundHeldItemSlot>(payload)
+                    .and_then(|packet| u8::try_from(packet.slot_id).ok())
+                    .filter(|&slot| slot < 9)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::CarriedItemChanged { slot }
             }
             // Protocol 5 has no teleport-confirm packet. Its position and
             // position/look frames are both the teleport echo and ordinary
