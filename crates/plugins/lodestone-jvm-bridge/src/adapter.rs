@@ -436,6 +436,24 @@ fn active_player_handle_for(player: &PlayerIdentity) -> Option<ObjectRef> {
     })
 }
 
+/// Returns the count of players whose lifecycle has reached this worker.
+///
+/// The dedicated host is the sole producer: it copies its connected roster,
+/// queues joins and disconnects, and this map changes only when those
+/// callbacks are processed. The count intentionally reports that reconciled
+/// snapshot rather than reading a server registry from JNI. It therefore has
+/// no world, connection, or guard behind it.
+fn active_player_count() -> Result<jint, AdapterError> {
+    ACTIVE_PLAYER_HANDLES.with(|slot| {
+        let active = slot.borrow();
+        let active = active.as_ref().ok_or_else(|| {
+            AdapterError::new("activePlayerCount requires the adapter worker thread")
+        })?;
+        jint::try_from(active.len())
+            .map_err(|_| AdapterError::new("activePlayerCount exceeds Java int range"))
+    })
+}
+
 /// Removes and invalidates the worker-owned handle for one disconnected
 /// player.
 fn release_active_player_handle(
@@ -1498,6 +1516,28 @@ pub(crate) fn register_player_handle_uuid_query(
     }
 }
 
+#[allow(unsafe_code)]
+pub(crate) fn register_active_player_count_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts no arguments and returns a
+    // jint copied from the worker-owned lifecycle map. It never reads a server
+    // registry or a world value at the JNI boundary.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_active_player_count as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
 extern "system" fn native_block_state_id<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -1671,6 +1711,18 @@ extern "system" fn native_player_handle_uuid<'local>(
         env.new_string(uuid)
             .map(|value| value.into_raw())
             .map_err(|error| AdapterError::new(format!("playerHandleUuid: {error}")))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_active_player_count<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        active_player_count()
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -2173,6 +2225,7 @@ mod tests {
         ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
         let first = active_player_handle(&identity, &player).expect("active player handle");
         assert_eq!(active_player_handle_for(&player), Some(first));
+        assert_eq!(active_player_count(), Ok(1));
         assert_eq!(resolve_resident_player_handle_name(first.to_bits()), Ok("Alice".to_owned()));
         assert_eq!(
             resolve_resident_player_handle_uuid(first.to_bits()),
@@ -2180,6 +2233,7 @@ mod tests {
         );
         assert_eq!(release_active_player_handle(&identity, &player), Some(first));
         assert_eq!(active_player_handle_for(&player), None);
+        assert_eq!(active_player_count(), Ok(0));
         assert_eq!(
             resolve_resident_player_handle_name(first.to_bits()),
             Err(AdapterError::new(
@@ -2188,7 +2242,9 @@ mod tests {
         );
         let replacement = active_player_handle(&identity, &player).expect("reusable slot");
         assert_ne!(replacement, first);
+        assert_eq!(active_player_count(), Ok(1));
         assert_eq!(release_active_player_handle(&identity, &player), Some(replacement));
+        assert_eq!(active_player_count(), Ok(0));
         RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
         ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
     }

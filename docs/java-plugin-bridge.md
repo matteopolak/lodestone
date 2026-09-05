@@ -780,6 +780,15 @@ additional environment variable or runtime toggle: the `jvm` feature and an
 operator-built shim containing the exact isolated declarations are the only
 prerequisites.
 
+`activePlayerCount()` returns the count of live player handles in that same
+worker-owned lifecycle map. Its producer is the dedicated host's existing
+value-only roster reconciliation: each queued join adds a handle before its
+Java callback, and each disconnect removes and generation-invalidates it after
+its callback. It is consequently a reconciled worker snapshot, not a fresh
+JNI read of the server registry; transitions still waiting in the bounded host
+queue are not counted. The count is a copied integer and has no path to an ECS
+value, connection, world, or guard.
+
 To extend this event subset, update the source-of-truth declarations and validation in
 `native_surface`, the JNI registration and worker dispatch in `adapter`, and the lifecycle cleanup
 calls in `paper`. Keep the listener list ordered and bounded; do not turn it into a general event
@@ -988,6 +997,12 @@ stale. The dedicated-host source tests drive a value-only join/disconnect tracke
 burst control. The ignored JVM fixtures validate the declaration and callback ABI separately; they
 do not claim complete Paper object compatibility. Typed world and remaining object resolvers still
 wait on corresponding server capabilities.
+
+`activePlayerCount()` reads the same active lifecycle map as the retained
+player handles. Hermetic bridge tests cover its `0 → 1 → 0 → 1 → 0` transition
+around a release and slot reuse, so the count's consumer chain cannot quietly
+stop following the generation-checked lifecycle path. It is not a replacement
+for a future live roster enumeration API.
 
 The same composed caller exercises recursive Java-to-Rust-to-Java callbacks below and above the
 budget. Depth `2` returns `REENTRANT:OK:3`; depth `4` attempts one more callback and receives
