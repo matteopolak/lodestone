@@ -55,7 +55,7 @@
 //! silently dropped, regardless of the new call's `trigger_tick` or
 //! `priority`. [`ScheduledTickQueue::schedule`] mirrors this exactly.
 
-use std::collections::{BTreeMap, BinaryHeap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -508,6 +508,133 @@ pub struct ChunkScheduledTickQueue<T> {
     next_sub_tick_order: u64,
 }
 
+/// The chunk that owns a scheduled tick until the central drain consumes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ScheduledTickOwner {
+    /// The tick's target position belongs to this chunk column.
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl ScheduledTickOwner {
+    fn for_position(pos: (i32, i32, i32)) -> Self {
+        Self::Chunk {
+            cx: pos.0.div_euclid(16),
+            cz: pos.2.div_euclid(16),
+        }
+    }
+}
+
+/// One scheduled tick's immutable position in a tick-start drain plan.
+///
+/// The owner batch is allowed to complete in any order, but this serial token
+/// remains the established world-wide `(trigger, priority, insertion)` order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledTickOwnerAssignment<T> {
+    serial: usize,
+    tick: ScheduledTick<T>,
+}
+
+impl<T> ScheduledTickOwnerAssignment<T> {
+    /// The scheduled tick this owner returns to the central drain.
+    #[must_use]
+    pub fn tick(&self) -> &ScheduledTick<T> {
+        &self.tick
+    }
+}
+
+/// One chunk owner's due scheduled-tick messages.
+///
+/// Every owner selected by one drain receives exactly one batch. Empty owners
+/// are not selected by a due-tick drain, unlike a simulation plan: a queue
+/// with no due head has no work or publication authority for this pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledTickOwnerBatch<T> {
+    /// The owner of every tick in this completion.
+    pub owner: ScheduledTickOwner,
+    /// This owner's immutable slot in the tick-start owner plan.
+    serial: usize,
+    /// The number of owner completions this drain selected.
+    batch_count: usize,
+    /// The number of ticks in the complete tick-start drain.
+    tick_count: usize,
+    assignments: Vec<ScheduledTickOwnerAssignment<T>>,
+}
+
+impl<T> ScheduledTickOwnerBatch<T> {
+    /// The owner-local ticks, each carrying its former global drain slot.
+    #[must_use]
+    pub fn assignments(&self) -> &[ScheduledTickOwnerAssignment<T>] {
+        &self.assignments
+    }
+
+    fn into_assignments(self) -> Vec<ScheduledTickOwnerAssignment<T>> {
+        self.assignments
+    }
+}
+
+/// Restores completed scheduled-tick owners to the tick-start drain order.
+///
+/// A producer removes due heads while they are still physically chunk-owned.
+/// The central tick task must receive exactly one completion for each selected
+/// owner and every original drain slot before it runs any callback. That keeps
+/// completion order from becoming visible behavior when owners eventually run
+/// independently.
+#[must_use]
+pub fn merge_due_owner_batches<T>(
+    mut batches: Vec<ScheduledTickOwnerBatch<T>>,
+) -> Vec<ScheduledTick<T>> {
+    let expected_batch_count = batches.first().map_or(0, |batch| batch.batch_count);
+    let expected_tick_count = batches.first().map_or(0, |batch| batch.tick_count);
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "scheduled-tick owner completion omitted or duplicated a plan batch"
+    );
+    assert!(
+        batches.iter().all(|batch| {
+            batch.batch_count == expected_batch_count && batch.tick_count == expected_tick_count
+        }),
+        "scheduled-tick owner completions disagree about their tick-start plan"
+    );
+    assert_eq!(
+        batches.iter().map(|batch| batch.owner).collect::<BTreeSet<_>>().len(),
+        expected_batch_count,
+        "scheduled-tick owner completion has a duplicate owner"
+    );
+    assert!(
+        batches.iter().all(|batch| {
+            batch.assignments.iter().all(|assignment| {
+                ScheduledTickOwner::for_position(assignment.tick.pos) == batch.owner
+            })
+        }),
+        "a scheduled-tick owner completion contains another owner's tick"
+    );
+    batches.sort_unstable_by_key(|batch| batch.serial);
+    for (serial, batch) in batches.iter().enumerate() {
+        assert_eq!(
+            batch.serial, serial,
+            "scheduled-tick owner completion has a duplicate, missing, or stale plan slot"
+        );
+    }
+    let mut assignments: Vec<_> = batches
+        .into_iter()
+        .flat_map(ScheduledTickOwnerBatch::into_assignments)
+        .collect();
+    assert_eq!(
+        assignments.len(),
+        expected_tick_count,
+        "scheduled-tick owner completion omitted or duplicated a drain assignment"
+    );
+    assignments.sort_unstable_by_key(|assignment| assignment.serial);
+    for (serial, assignment) in assignments.iter().enumerate() {
+        assert_eq!(
+            assignment.serial, serial,
+            "scheduled-tick owner completion has a duplicate, missing, or stale drain slot"
+        );
+    }
+    assignments.into_iter().map(|assignment| assignment.tick).collect()
+}
+
 impl<T> Default for ChunkScheduledTickQueue<T> {
     fn default() -> Self {
         Self::new()
@@ -630,6 +757,42 @@ impl<T: Eq + Hash + Clone> ChunkScheduledTickQueue<T> {
             out.push(tick);
         }
         out
+    }
+
+    /// Drains due records into chunk-owner completions for the central tick
+    /// task. The current task still produces these batches serially; the
+    /// separate completion contract exists so a future worker cannot publish
+    /// whichever owner happens to finish first.
+    pub fn drain_due_owner_batches(
+        &mut self,
+        current_tick: u64,
+        max_to_process: usize,
+    ) -> Vec<ScheduledTickOwnerBatch<T>> {
+        let due = self.drain_due(current_tick, max_to_process);
+        let tick_count = due.len();
+        let mut batches: Vec<ScheduledTickOwnerBatch<T>> = Vec::new();
+        for (serial, tick) in due.into_iter().enumerate() {
+            let owner = ScheduledTickOwner::for_position(tick.pos);
+            if let Some(batch) = batches
+                .iter_mut()
+                .find(|batch| batch.owner == owner)
+            {
+                batch.assignments.push(ScheduledTickOwnerAssignment { serial, tick });
+            } else {
+                batches.push(ScheduledTickOwnerBatch {
+                    owner,
+                    serial: batches.len(),
+                    batch_count: 0,
+                    tick_count,
+                    assignments: vec![ScheduledTickOwnerAssignment { serial, tick }],
+                });
+            }
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.batch_count = batch_count;
+        }
+        batches
     }
 
     /// Removes the first matching tick in `pos`'s local queue.
@@ -1220,6 +1383,82 @@ mod tests {
         let drained = q.drain_due(10, usize::MAX);
         let kinds: Vec<_> = drained.iter().map(|tick| tick.kind).collect();
         assert_eq!(kinds, ["high-second", "normal-first"]);
+    }
+
+    /// Owner completion is not callback order. Two due ticks from one owner
+    /// deliberately surround one from another owner, so publishing a reversed
+    /// completion vector differs from the established serial drain.
+    #[test]
+    fn due_owner_batches_restore_global_order_after_reversed_completion() {
+        fn queue() -> ChunkScheduledTickQueue<&'static str> {
+            let mut q = ChunkScheduledTickQueue::new();
+            assert!(q.schedule((-1, 0, 0), "west-first", 10, TickPriority::Normal));
+            assert!(q.schedule((16, 0, 0), "east-second", 10, TickPriority::Normal));
+            assert!(q.schedule((-2, 0, 0), "west-third", 10, TickPriority::Normal));
+            q
+        }
+
+        let mut q = queue();
+        let batches = q.drain_due_owner_batches(10, usize::MAX);
+        assert_eq!(
+            batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
+            [
+                ScheduledTickOwner::Chunk { cx: -1, cz: 0 },
+                ScheduledTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "owners enter the completion plan when their first serial tick is selected"
+        );
+        let serial: Vec<_> = queue()
+            .drain_due(10, usize::MAX)
+            .iter()
+            .map(|tick| tick.kind)
+            .collect();
+        let mut completed = batches;
+        completed.reverse();
+        let completion_order: Vec<_> = completed
+            .iter()
+            .flat_map(|batch| batch.assignments())
+            .map(|assignment| assignment.tick().kind)
+            .collect();
+        assert_ne!(
+            completion_order, serial,
+            "control requires completion order to differ from global drain order"
+        );
+        assert_eq!(
+            merge_due_owner_batches(completed)
+                .iter()
+                .map(|tick| tick.kind)
+                .collect::<Vec<_>>(),
+            serial,
+            "the central merge must restore every original drain slot"
+        );
+    }
+
+    /// A central scheduled-tick drain must fail closed when an owner result is
+    /// missing; silently running the remaining callbacks would make worker
+    /// timing visible as a lost world update.
+    #[test]
+    #[should_panic(expected = "omitted or duplicated a plan batch")]
+    fn due_owner_batch_merge_rejects_a_missing_owner() {
+        let mut q: ChunkScheduledTickQueue<&str> = ChunkScheduledTickQueue::new();
+        assert!(q.schedule((0, 0, 0), "origin", 10, TickPriority::Normal));
+        assert!(q.schedule((16, 0, 0), "east", 10, TickPriority::Normal));
+        let mut batches = q.drain_due_owner_batches(10, usize::MAX);
+        batches.pop();
+        let _ = merge_due_owner_batches(batches);
+    }
+
+    /// A repeated owner result is equally invalid: it could otherwise run one
+    /// chunk's callback twice and discard a different selected owner's work.
+    #[test]
+    #[should_panic(expected = "duplicate owner")]
+    fn due_owner_batch_merge_rejects_a_duplicate_owner() {
+        let mut q: ChunkScheduledTickQueue<&str> = ChunkScheduledTickQueue::new();
+        assert!(q.schedule((0, 0, 0), "origin", 10, TickPriority::Normal));
+        assert!(q.schedule((16, 0, 0), "east", 10, TickPriority::Normal));
+        let mut batches = q.drain_due_owner_batches(10, usize::MAX);
+        batches[1] = batches[0].clone();
+        let _ = merge_due_owner_batches(batches);
     }
 
     /// Block reactions can hand work to either side of a column boundary,

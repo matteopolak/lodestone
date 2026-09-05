@@ -48,9 +48,14 @@ single-chunk workload per selected column). `FollowArea::spawnable_chunks`
 consumes that report on the live tick path, so the count cannot become an
 unobserved parallel data structure. Scheduled queues and block entities now
 have their own chunk-local ownership seams: `ChunkScheduledTickQueue` keeps
-pending ticks at their target chunk and merges due heads into one serial order,
-while `BlockEntityRegistry::tick_plan` assigns its tick-start snapshot to
-chunk owners. It executes one owner batch at a time and returns a
+pending ticks at their target chunk, selects due heads in the established
+world-wide order, and returns one `ScheduledTickOwnerBatch` per selected
+owner. `tick::apply_scheduled_tick_owner_batches` is the sole central consumer
+for both block and fluid callbacks: it requires a complete, unique owner set,
+then restores every global drain slot before a callback can mutate the world.
+Thus an owner finishing first cannot move its tick ahead of an earlier
+`(trigger, priority, insertion)` entry. `BlockEntityRegistry::tick_plan`
+assigns its tick-start snapshot to chunk owners. It executes one owner batch at a time and returns a
 `BlockEntityTickEffectBatch` for each owner, including an empty batch when no
 visible write occurred. `tick::apply_block_entity_effect_batches` is the sole
 central consumer: it validates the complete tick-start batch set, restores its
@@ -152,6 +157,15 @@ are interleaved in the serial simulation list, applying all of one owner's
 effects before another's changes observable packet order. Add both a
 negative-coordinate control and an interleaved-owner order control before a
 future executor is allowed to run owners separately.
+
+Do not drain a scheduled queue directly from a future owner worker. Keep the
+world-wide queue comparator as the tick-start selector, return one completion
+per selected chunk owner, and pass all completions through
+`tick::apply_scheduled_tick_owner_batches` before running block or fluid
+callbacks. The batch contract must reject missing, duplicated, stale, or
+wrong-owner work; a partial callback run cannot be retried without changing
+the world. Preserve every tick's global drain slot because a single owner can
+have entries on both sides of another owner's entry.
 
 Keep lifecycle planning at the existing cache boundaries. A ticket becoming
 resident is permission for a later demand load, not authority to generate in a
