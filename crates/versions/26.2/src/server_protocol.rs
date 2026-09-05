@@ -4442,8 +4442,13 @@ impl ServerProtocol for V770ServerProtocol {
                 ServerBound::Ignored
             }
             State::Play if packet_id == play::serverbound::ENTITY_TAG_QUERY => {
-                let _ = decode_full::<EntityTagQuery>(payload);
-                ServerBound::Ignored
+                match decode_full::<EntityTagQuery>(payload) {
+                    Some(query) => ServerBound::EntityTagQuery {
+                        transaction_id: query.transaction_id,
+                        entity_id: query.entity_id,
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::BLOCK_ENTITY_TAG_QUERY => {
                 match decode_full::<BlockEntityTagQuery>(payload) {
