@@ -22,7 +22,7 @@ pub(crate) const HORIZON_ATLAS_CELLS: u32 =
     HORIZON_TILES_PER_AXIS as u32 * HORIZON_TILE_CELLS as u32;
 /// Bytes in the height/water and colour/flags atlases combined.
 pub(crate) const HORIZON_ATLAS_GPU_BYTES: u64 =
-    u64::from(HORIZON_ATLAS_CELLS) * u64::from(HORIZON_ATLAS_CELLS) * 2 * 4;
+    HORIZON_ATLAS_CELLS as u64 * HORIZON_ATLAS_CELLS as u64 * 2 * 4;
 /// Vertices emitted by the vertex-pulled 63 by 63 quad grid for one tile.
 pub(crate) const HORIZON_TILE_VERTEX_COUNT: u32 =
     ((HORIZON_TILE_CELLS as u32 - 1) * (HORIZON_TILE_CELLS as u32 - 1)) * 6;
@@ -32,7 +32,7 @@ const TILE_UNIFORM_BYTES: u64 = 32;
 /// per-tile uniform allocation a known 20,736 bytes rather than a
 /// device-specific unbounded multiple.
 const MAX_TILE_UNIFORM_STRIDE: u32 = 256;
-const TILE_UNIFORM_BUFFER_BYTES: u64 = u64::from(MAX_TILE_UNIFORM_STRIDE)
+const TILE_UNIFORM_BUFFER_BYTES: u64 = MAX_TILE_UNIFORM_STRIDE as u64
     * HORIZON_TILES_PER_AXIS as u64
     * HORIZON_TILES_PER_AXIS as u64;
 
@@ -313,6 +313,8 @@ impl DistantTerrainRenderer {
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
         });
 
         Ok(Self {
