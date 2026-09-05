@@ -350,7 +350,51 @@ def main() -> int:
             f"exit {got.returncode}\n{got.stdout}{got.stderr}",
         )
 
-        # 10. Python accepts NaN and Infinity as JSON extensions, but a
+        # 10. Two baseline files must not alias one results log. Otherwise
+        #     distinct entries in each file can make one bench's observation
+        #     satisfy --min-compared twice, hiding that another bench never
+        #     ran.
+        work = root / "duplicate-baseline-bench"
+        (work / "bench-baselines").mkdir(parents=True)
+        (work / "bench-results").mkdir(parents=True)
+        (work / "bench-baselines" / "first.json").write_text(
+            json.dumps(baseline_doc([BIND_GROUP_ENTRY], bench="shared"), indent=2)
+            + "\n"
+        )
+        (work / "bench-baselines" / "second.json").write_text(
+            json.dumps(baseline_doc([SECTION_ENTRY], bench="shared"), indent=2)
+            + "\n"
+        )
+        (work / "bench-results" / "shared.jsonl").write_text(
+            jsonl(
+                [
+                    record("camera_bind_group_switches", 1, "calls"),
+                    record("drawn_sections", 347, "sections"),
+                ]
+            )
+        )
+        got = run_gate(work, "--min-compared", "2")
+        check(
+            "duplicate baseline bench names are rejected before coverage is counted",
+            got.returncode == 2,
+            f"exit {got.returncode}\n{got.stdout}{got.stderr}",
+        )
+        check(
+            "duplicate bench rejection names both files and the shared bench",
+            "duplicate baseline bench" in got.stderr
+            and "first.json" in got.stderr
+            and "second.json" in got.stderr
+            and "shared" in got.stderr,
+            f"{got.stdout}{got.stderr}",
+        )
+        got = run_gate(work, "--update")
+        check(
+            "--update rejects duplicate baseline bench names too",
+            got.returncode == 2,
+            f"exit {got.returncode}\n{got.stdout}{got.stderr}",
+        )
+
+        # 11. Python accepts NaN and Infinity as JSON extensions, but a
         # non-finite tolerance can widen the band until every regression
         # passes. Reject it as an invalid gate input rather than treating a
         # wildly changed count as healthy.
@@ -392,7 +436,7 @@ def main() -> int:
             f"exit {got.returncode}\n{got.stdout}{got.stderr}",
         )
 
-        # 11. The structural rule: a duration can never enter a baseline. This
+        # 12. The structural rule: a duration can never enter a baseline. This
         #    is the wall-clock-ceiling trap made unreachable rather than
         #    documented.
         work = make_case(
@@ -427,7 +471,7 @@ def main() -> int:
             f"exit {got.returncode}\n{got.stdout}{got.stderr}",
         )
 
-        # 12. A metric that changed unit changed meaning.
+        # 13. A metric that changed unit changed meaning.
         work = make_case(
             root,
             "unit-drift",
@@ -441,7 +485,7 @@ def main() -> int:
             f"exit {got.returncode}\n{got.stdout}",
         )
 
-        # 13. Zero is a real baseline value (a healthy leak probe records
+        # 14. Zero is a real baseline value (a healthy leak probe records
         #     exactly zero bytes of growth) and a ratio against it is
         #     undefined, so the tolerance reads as an absolute allowance.
         zero_entry = {
@@ -473,7 +517,7 @@ def main() -> int:
             f"exit {got.returncode}\n{got.stdout}",
         )
 
-        # 14. --update is the documented answer to a legitimate change: it
+        # 15. --update is the documented answer to a legitimate change: it
         #     moves the value, preserves the tolerance, and makes the move a
         #     reviewable diff.
         work = make_case(
@@ -509,7 +553,7 @@ def main() -> int:
             upd.stdout,
         )
 
-        # 15. A recorder that wrote a null value must not crash the gate for
+        # 16. A recorder that wrote a null value must not crash the gate for
         #     every other metric in the same file. One real bench in this
         #     repository records `null` for a rate whose denominator was zero.
         work = root / "null-value"

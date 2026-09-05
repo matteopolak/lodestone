@@ -230,6 +230,46 @@ def validate_entries(path: Path, entries: list[object]) -> None:
         seen[key] = index
 
 
+def load_baseline_set(
+    baseline_dir: Path, only: str | None
+) -> list[tuple[Path, dict, str]]:
+    """Load and structurally validate the selected baselines as one set.
+
+    A baseline file may override its filename with the ``bench`` field. Two
+    files naming the same bench would then read the same results log and make
+    one observed metric count twice toward ``--min-compared``. Keep that
+    identity unique before either the gate or ``--update`` uses the set.
+    """
+    paths = sorted(baseline_dir.glob("*.json"))
+    if only:
+        paths = [p for p in paths if p.stem == only]
+        if not paths:
+            raise GateError(f"no baseline named {only!r} under {baseline_dir}")
+    if not paths:
+        raise GateError(f"no baseline files under {baseline_dir}")
+
+    loaded: list[tuple[Path, dict, str]] = []
+    seen: dict[str, Path] = {}
+    for path in paths:
+        doc = load_baseline(path)
+        validate_entries(path, doc["entries"])
+        bench = doc.get("bench", path.stem)
+        if not isinstance(bench, str) or not bench:
+            raise GateError(
+                f"{path}: baseline 'bench' must be a non-empty string"
+            )
+        previous = seen.get(bench)
+        if previous is not None:
+            raise GateError(
+                f"{path}: duplicate baseline bench {bench!r}; also declared by "
+                f"{previous}. Each bench must have one baseline file so one "
+                "results log cannot satisfy coverage twice"
+            )
+        seen[bench] = path
+        loaded.append((path, doc, bench))
+    return loaded
+
+
 def check_unit(entry: dict, where: str) -> None:
     unit = entry.get("unit")
     if unit in ALLOWED_UNITS:
@@ -327,27 +367,14 @@ def run_gate(
     min_compared: int,
     out=sys.stdout,
 ) -> int:
-    baselines = sorted(baseline_dir.glob("*.json"))
-    if only:
-        baselines = [p for p in baselines if p.stem == only]
-        if not baselines:
-            print(
-                f"no baseline named {only!r} under {baseline_dir}", file=out
-            )
-            return 2
-    if not baselines:
-        print(f"no baseline files under {baseline_dir}", file=out)
-        return 2
+    baselines = load_baseline_set(baseline_dir, only)
 
     compared = 0
     failures: list[str] = []
     lines: list[str] = []
     unrun: list[str] = []
 
-    for path in baselines:
-        doc = load_baseline(path)
-        validate_entries(path, doc["entries"])
-        bench = doc.get("bench", path.stem)
+    for path, doc, bench in baselines:
         observed = load_results(results_dir / f"{bench}.jsonl")
         lines.append(f"--- {bench} ({len(doc['entries'])} baselined) ---")
         # A bench whose log is absent or carries no usable record did not run
@@ -430,18 +457,10 @@ def run_update(
     no recorded value are left exactly as they are, so running `--update` after
     a partial bench run cannot silently drop coverage.
     """
-    baselines = sorted(baseline_dir.glob("*.json"))
-    if only:
-        baselines = [p for p in baselines if p.stem == only]
-    if not baselines:
-        print(f"no baseline files under {baseline_dir}", file=out)
-        return 2
+    baselines = load_baseline_set(baseline_dir, only)
 
     touched = 0
-    for path in baselines:
-        doc = load_baseline(path)
-        validate_entries(path, doc["entries"])
-        bench = doc.get("bench", path.stem)
+    for path, doc, bench in baselines:
         observed = load_results(results_dir / f"{bench}.jsonl")
         changed = False
         for entry in doc["entries"]:
