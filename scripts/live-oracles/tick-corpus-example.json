@@ -1,10 +1,10 @@
 {
-  "scenario": "replace-with-a-live-rig-name",
-  "settle_ticks": 1,
+  "scenario": "live-stone-placement-single-tick",
+  "settle_ticks": 0,
   "region": [
     {
       "pos": [20000, 200, 20000],
-      "candidates": ["minecraft:air", "minecraft:stone"]
+      "candidates": ["minecraft:stone"]
     }
   ],
   "steps": [

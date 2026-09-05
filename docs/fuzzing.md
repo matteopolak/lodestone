@@ -241,7 +241,8 @@ What exists:
 - `tests/support/tick_corpus.rs` and
   `scripts/live-oracles/capture-differential-ticks.py` — a deliberately small
   companion lane for a one-to-sixteen-tick Java-oracle trace. The recorder
-  takes a SetBlock-only JSON plan, waits for the server's own game-time value,
+  takes a SetBlock-only JSON plan, force-loads only its action and probe
+  chunks for the capture, waits for the server's own game-time value,
   and writes the observed candidate-alphabet state for every probe after every
   tick. It rejects a counter jump rather than silently labelling two elapsed
   ticks as one. The Rust consumer accepts only a versioned artifact marked
@@ -249,11 +250,16 @@ What exists:
   game-time increment, and compares an in-process production oracle to those
   externally authored expected values. Its hermetic detector control corrupts
   the Rust-side read at a known second tick and requires the corpus runner to
-  return that tick, position, expected state and actual state. This is a
-  capture/replay seam, not a live corpus yet: run the recorder against a
-  prepared real-oracle rig, inspect the resulting JSON, then add the reviewed
-  artifact and a scenario-specific model test. The checked-in example is a
-  plan only and has no expected values.
+  return that tick, position, expected state and actual state. The reviewed
+  `tests/fixtures/tick_corpus_26_2_stone.json` capture is the smallest live
+  corpus: one force-loaded stone placement observed after one elapsed tick and
+  replayed through `fluid::FluidModelOracle`. It proves the capture-to-model
+  route without pretending one static cell exercises delayed scheduling.
+  Re-capture it with `tick-corpus-example.json`, inspect the JSON and its
+  redacted command provenance, then replace the reviewed artifact. Longer
+  scenarios remain bounded by the recorder's strict counter-jump rejection;
+  an RCON round trip that straddles a tick is a rejected capture, never a
+  silently relabelled observation.
 
 - [`Action`]/[`ScriptStep`]/[`Script`] — the shared action-sequence type used
   by both hand-written live scripts and the hermetic generator.

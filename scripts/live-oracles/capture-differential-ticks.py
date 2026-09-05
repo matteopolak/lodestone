@@ -85,6 +85,39 @@ def probe(rcon, pos, candidates):
     return None
 
 
+def chunks_to_force_load(plan):
+    """Return the distinct chunks touched by a bounded plan, in stable order.
+
+    A fresh dedicated server does not keep an arbitrary capture lane resident.
+    Capturing an unloaded position must not turn into an implicit dependency on
+    a prior interactive session, so the recorder owns that short-lived setup.
+    """
+    positions = [entry["pos"] for entry in plan["region"]]
+    positions.extend(step["action"]["pos"] for step in plan["steps"])
+    return sorted({(x // 16 * 16, z // 16 * 16) for x, _y, z in positions})
+
+
+def force_load(rcon, plan):
+    """Keep every action and probe chunk resident, returning cleanup tokens."""
+    loaded = []
+    for x, z in chunks_to_force_load(plan):
+        rcon.command(f"forceload add {x} {z}")
+        loaded.append((x, z))
+    return loaded
+
+
+def release_force_loads(rcon, loaded):
+    """Release only chunks this recorder added, even after a failed capture."""
+    errors = []
+    for x, z in reversed(loaded):
+        try:
+            rcon.command(f"forceload remove {x} {z}")
+        except (OSError, ValueError, PermissionError) as error:
+            errors.append(f"{x} {z}: {error}")
+    if errors:
+        raise RuntimeError("could not release force-loaded chunks: " + "; ".join(errors))
+
+
 def validate(plan):
     required = {"scenario", "settle_ticks", "region", "steps"}
     missing = required - set(plan)
@@ -140,11 +173,19 @@ def main():
         plan = json.load(source)
     total = validate(plan)
     rcon = Rcon(args.endpoint, args.password)
+    loaded = []
     try:
+        loaded = force_load(rcon, plan)
+        # A RCON edit is handled by the server tick loop. Anchor the first
+        # observed boundary after tick-zero edits, otherwise the command
+        # round trip itself can be mislabeled as an unobserved elapsed tick.
+        for step in (entry for entry in plan["steps"] if entry["tick"] == 0):
+            x, y, z = step["action"]["pos"]
+            rcon.command(f"setblock {x} {y} {z} {step['action']['state']}")
         baseline = game_time(rcon)
         observations = []
         for tick in range(total):
-            for step in (entry for entry in plan["steps"] if entry["tick"] == tick):
+            for step in (entry for entry in plan["steps"] if entry["tick"] == tick and tick != 0):
                 x, y, z = step["action"]["pos"]
                 rcon.command(f"setblock {x} {y} {z} {step['action']['state']}")
             deadline = time.monotonic() + 5
@@ -160,7 +201,10 @@ def main():
                                  "states": [probe(rcon, entry["pos"], entry["candidates"]) for entry in plan["region"]]})
             baseline = current
     finally:
-        rcon.close()
+        try:
+            release_force_loads(rcon, loaded)
+        finally:
+            rcon.close()
     output = {"format_version": 1, "scenario": plan["scenario"],
               "provenance": {"source": "real-java-rcon", "minecraft_version": args.minecraft_version,
                              "capture_command": recorded_command(sys.argv)},
