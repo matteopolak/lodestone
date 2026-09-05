@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use lodestone_jvm_bridge::paper::PaperBootstrapConfig;
+use lodestone_jvm_bridge::paper::{
+    PaperBootstrapConfig, PaperServerFacadeInput, PaperServerFacadeState,
+};
 
 /// This deliberately uses stand-in archives. It proves only the production
 /// loader's non-initializing lifecycle boundary, not Paper startup or plugin
@@ -18,7 +20,16 @@ fn lifecycle_entries_load_without_initialization() {
     let paper_classes = fixture.path().join("paper-classes");
     let plugin_sources = fixture.path().join("plugin-sources");
     let plugin_classes = fixture.path().join("plugin-classes");
-    for path in [&paper_sources, &paper_classes, &plugin_sources, &plugin_classes] {
+    let shim_sources = fixture.path().join("shim-sources");
+    let shim_classes = fixture.path().join("shim-classes");
+    for path in [
+        &paper_sources,
+        &paper_classes,
+        &plugin_sources,
+        &plugin_classes,
+        &shim_sources,
+        &shim_classes,
+    ] {
         fs::create_dir_all(path).expect("fixture directory");
     }
     let bootstrap_source = paper_sources.join("PaperBootstrap.java");
@@ -33,8 +44,19 @@ fn lifecycle_entries_load_without_initialization() {
         "package fixture.plugin; public final class Main { static { if (System.nanoTime() != Long.MIN_VALUE) throw new AssertionError(\"plugin initialized\"); } }",
     )
     .expect("plugin source");
+    let shim_package = shim_sources.join("lodestone/bridge");
+    fs::create_dir_all(&shim_package).expect("shim package directory");
+    let shim_source = shim_package.join("IsolatedPaperShim.java");
+    fs::write(
+        &shim_source,
+        "package lodestone.bridge; public final class IsolatedPaperShim { \
+         static { if (System.nanoTime() != Long.MIN_VALUE) throw new AssertionError(\"shim initialized\"); } \
+         public static native int blockStateId(int x, int y, int z); }",
+    )
+    .expect("shim source");
     compile(&jdk, &paper_classes, &bootstrap_source);
     compile(&jdk, &plugin_classes, &plugin_source);
+    compile(&jdk, &shim_classes, &shim_source);
     fs::write(
         plugin_classes.join("plugin.yml"),
         "name: Fixture\nversion: one\nmain: fixture.plugin.Main\n",
@@ -55,6 +77,8 @@ fn lifecycle_entries_load_without_initialization() {
     archive(&jdk, &plugins, "fixture.jar", &plugin_classes, None);
 
     let plan = PaperBootstrapConfig::new(&paper_jar, &plugins)
+        .with_shim_path(&shim_classes)
+        .with_isolated_native_shim()
         .discover()
         .expect("discover stand-in lifecycle inputs");
     let runtime = plan.start_runtime().expect("start JVM");
@@ -65,12 +89,18 @@ fn lifecycle_entries_load_without_initialization() {
         assert!(lifecycle.retains_bootstrap_loader());
         assert_eq!(lifecycle.loaded_plugins()[0].descriptor().name(), "Fixture");
         assert!(lifecycle.loaded_plugins()[0].retains_entry_association());
-        let construction = lifecycle.into_construction_plan();
+        let construction = lifecycle
+            .into_construction_plan(PaperServerFacadeInput::native_block_state_read())
+            .expect("retain native facade construction state");
         assert_eq!(construction.loader_count(), 2, "keep the loaders beside construction state");
         assert_eq!(construction.readiness().plugins()[0].descriptor().name(), "Fixture");
         assert_eq!(
+            construction.readiness().facade(),
+            PaperServerFacadeState::NativeBlockStateRead,
+        );
+        assert_eq!(
             construction.readiness().plugins()[0].blocker().to_string(),
-            "no compatible server facade is installed",
+            "the installed server capability cannot supply plugin construction semantics",
         );
         Ok(())
     })

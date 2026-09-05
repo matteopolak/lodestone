@@ -6,7 +6,7 @@ use std::time::Duration;
 use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost};
 use lodestone_jvm_bridge::paper::{
     PaperBootstrapConfig, PaperBootstrapPlan, PaperPluginConstructionBlocker,
-    PaperPluginConstructionReadiness,
+    PaperPluginConstructionReadiness, PaperServerFacadeInput,
 };
 use lodestone_jvm_bridge::runtime::JvmConfig;
 use lodestone_server::IntegratedServer;
@@ -84,7 +84,14 @@ impl JavaAdapter {
                 let lifecycle = plan.load_lifecycle_entries_in_runtime(runtime, env).map_err(|error| {
                     format!("could not load configured Paper lifecycle entries: {error}")
                 })?;
-                let construction = lifecycle.into_construction_plan();
+                let facade_input = if plan.requires_isolated_native_shim() {
+                    PaperServerFacadeInput::native_block_state_read()
+                } else {
+                    PaperServerFacadeInput::Unavailable
+                };
+                let construction = lifecycle.into_construction_plan(facade_input).map_err(|error| {
+                    format!("could not retain configured Paper construction state: {error}")
+                })?;
                 construction_sender
                     .send(construction.readiness().clone())
                     .map_err(|error| {
@@ -166,6 +173,7 @@ impl JavaAdapter {
                             matches!(
                                 plugin.blocker(),
                                 PaperPluginConstructionBlocker::ServerFacadeUnavailable
+                                    | PaperPluginConstructionBlocker::PluginConstructionUnsupported
                             )
                         })
                         .count();
@@ -177,7 +185,7 @@ impl JavaAdapter {
                         facade = %self.paper_construction.as_ref()
                             .expect("stored Paper construction state")
                             .facade(),
-                        "configured Paper lifecycle Load completed; retained entries are blocked from construction until a compatible server facade exists"
+                        "configured Paper lifecycle Load completed; retained entries are blocked from construction until a compatible server facade and plugin-loader construction path exist"
                     );
                 } else {
                     tracing::info!("experimental Java adapter ready");
