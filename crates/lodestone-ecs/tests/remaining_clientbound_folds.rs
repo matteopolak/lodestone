@@ -116,7 +116,8 @@ fn every_new_event() -> Vec<ClientEvent> {
         ClientEvent::ServerLinksReceived {
             links: vec![ServerLink {
                 kind: ServerLinkKind::Known(0),
-                url: "https://example.invalid".to_owned(),
+                url: lodestone_model::event::ServerLinkUrl::parse("https://example.invalid")
+                    .expect("valid test URL"),
             }],
         },
         ClientEvent::WaypointUpdated {

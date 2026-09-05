@@ -143,6 +143,12 @@ had typed it and pressed Enter; "suggest command" only fills the input without s
 clipboard" and "open file" are supported and explicitly unsupported respectively, with the latter
 surfaced as a local message rather than touching the filesystem.
 
+Server-list links and chat `open_url` values become `ServerLinkUrl` wrappers around `url::Url` at their
+respective network/UI ingress boundaries. Malformed values and non-web schemes such as `javascript:`
+or `file:` never enter the confirmation state, while a confirmed value stays typed until the final
+platform handoff calls `ServerLinkUrl::as_str`. The confirmation remains necessary: syntactic URL
+validity says nothing about whether a server-authored destination is trustworthy.
+
 ## How to change it
 
 - **Add a new editing operation to the shared `EditBox`, not to the chat input directly.** A second,

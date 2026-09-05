@@ -3582,9 +3582,69 @@ pub enum DebugSampleKind {
 pub struct ServerLink {
     /// What kind of link this is.
     pub kind: ServerLinkKind,
-    /// The URL, exactly as the server sent it. **Not validated** — see
-    /// [`ClientEvent::ServerLinksReceived`].
-    pub url: String,
+    /// The URL, validated at packet or chat-component ingress.
+    pub url: ServerLinkUrl,
+}
+
+/// A syntactically valid URL supplied by a server or interactive chat component.
+///
+/// The underlying [`url::Url`] stays private so downstream crates cannot replace
+/// the validated value with an arbitrary string between confirmation and the
+/// platform browser handoff.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ServerLinkUrl(url::Url);
+
+/// Why an untrusted server/chat URL could not become a [`ServerLinkUrl`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ParseServerLinkUrlError {
+    /// The value is not an absolute syntactically valid URL.
+    #[error("invalid URL: {0}")]
+    Invalid(#[from] url::ParseError),
+    /// Browser handoff is limited to web links; executable and local-resource
+    /// schemes must never cross this boundary.
+    #[error("unsupported URL scheme {0}")]
+    UnsupportedScheme(String),
+}
+
+impl ServerLinkUrl {
+    /// Parses and validates an untrusted URL at its ingress boundary.
+    pub fn parse(value: &str) -> Result<Self, ParseServerLinkUrlError> {
+        let url = url::Url::parse(value)?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(ParseServerLinkUrlError::UnsupportedScheme(
+                url.scheme().to_owned(),
+            ));
+        }
+        Ok(Self(url))
+    }
+
+    /// The normalized URL spelling for display or final platform handoff.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Display for ServerLinkUrl {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[cfg(test)]
+mod server_link_url_tests {
+    use super::ServerLinkUrl;
+
+    #[test]
+    fn absolute_urls_validate_and_relative_or_malformed_values_do_not() {
+        let url = ServerLinkUrl::parse("https://example.invalid/path?q=one")
+            .expect("absolute URL is valid");
+        assert_eq!(url.as_str(), "https://example.invalid/path?q=one");
+        assert!(ServerLinkUrl::parse("/relative/path").is_err());
+        assert!(ServerLinkUrl::parse("not a URL").is_err());
+        assert!(ServerLinkUrl::parse("javascript:alert(1)").is_err());
+        assert!(ServerLinkUrl::parse("file:///private/etc/passwd").is_err());
+    }
 }
 
 /// A server link's label: one of vanilla's known kinds, or a custom component.
