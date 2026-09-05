@@ -59,6 +59,9 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
          public static native long currentBlockHandle(); \
          public static native String blockHandlePosition(long handle); \
+         public static native int blockHandleX(long handle); \
+         public static native int blockHandleY(long handle); \
+         public static native int blockHandleZ(long handle); \
          public static native int blockHandleStateId(long handle); \
          public static native long currentPlayerHandle(); \
          public static native String playerHandleName(long handle); \
@@ -301,6 +304,9 @@ fn plugin_child_reads_resident_block_state_through_operator_member() {
          public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
          public static native long currentBlockHandle(); \
          public static native String blockHandlePosition(long handle); \
+         public static native int blockHandleX(long handle); \
+         public static native int blockHandleY(long handle); \
+         public static native int blockHandleZ(long handle); \
          public static native int blockHandleStateId(long handle); \
          public static native long currentPlayerHandle(); \
          public static native String playerHandleName(long handle); \
