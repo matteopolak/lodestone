@@ -57,8 +57,8 @@ use crate::entity::{
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
     FireworkFlags, PaintingVariant, PlayerProfileName,
     MobState, OnGround,
-    Passengers, Pose, Position, ProjectileOwner, Rotation, Tamed, Variant, Vehicle, VehicleHurt,
-    Velocity,
+    Passengers, Pose, Position, ProjectileOwner, ProjectilePower, Rotation, Tamed, Variant,
+    Vehicle, VehicleHurt, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -423,6 +423,36 @@ pub fn apply_entity_velocity(
         // Inserts rather than assigns, because the component is absent until
         // the server has reported a velocity at all.
         commands.entity(entity).insert(Velocity(*velocity));
+    }
+}
+
+/// `IngestSet::Apply`: `ClientEvent::ProjectilePowerChanged` →
+/// [`ProjectilePower`] for the named entity.
+///
+/// The packet changes a live movement rule, not a spawn-only fact: a deflected
+/// fireball keeps its position and velocity but its next client tick must use
+/// the new power. The render-side projectile simulation reads this component
+/// through `EntityFacts`, so inserting it here gives the visible track one
+/// authoritative source rather than a parallel shell-side map.
+pub fn apply_projectile_power(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    mut commands: Commands,
+) {
+    for event in batch.events() {
+        let ClientEvent::ProjectilePowerChanged {
+            entity_id,
+            acceleration_power,
+        } = event
+        else {
+            continue;
+        };
+        let Some(entity) = index.get(*entity_id) else {
+            continue;
+        };
+        commands
+            .entity(entity)
+            .insert(ProjectilePower(*acceleration_power));
     }
 }
 
@@ -1491,7 +1521,7 @@ impl Plugin for IngestPlugin {
                 (apply_entity_spawn, apply_player_profile_name).chain(),
                 apply_entity_removal,
                 apply_entity_movement,
-                apply_entity_velocity,
+                (apply_entity_velocity, apply_projectile_power).chain(),
                 apply_entity_head_rotation,
                 apply_entity_metadata,
                 // A different packet from the metadata family above
@@ -1637,6 +1667,38 @@ mod tests {
                 modifiers: Vec::new(),
             }],
         }
+    }
+
+    #[test]
+    fn projectile_power_reaches_its_named_entity_and_zero_is_not_absence() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(17, "minecraft:fireball"));
+
+        feed(
+            &mut world,
+            ClientEvent::ProjectilePowerChanged {
+                entity_id: 17,
+                acceleration_power: 0.2,
+            },
+        );
+        assert_eq!(
+            entity_for(&world, 17).get::<ProjectilePower>().map(|power| power.0),
+            Some(0.2),
+            "the packet must update the entity component the render track reads"
+        );
+
+        feed(
+            &mut world,
+            ClientEvent::ProjectilePowerChanged {
+                entity_id: 17,
+                acceleration_power: 0.0,
+            },
+        );
+        assert_eq!(
+            entity_for(&world, 17).get::<ProjectilePower>().map(|power| power.0),
+            Some(0.0),
+            "zero is a real update that removes acceleration, not an absent component"
+        );
     }
 
     /// Feed one event and run the schedule, exactly as `SharedState::apply`
@@ -3722,6 +3784,10 @@ mod tests {
         assert!(handles_event(&ClientEvent::ProjectileOwner {
             entity_id: 1,
             owner_id: 44,
+        }));
+        assert!(handles_event(&ClientEvent::ProjectilePowerChanged {
+            entity_id: 1,
+            acceleration_power: 0.2,
         }));
         // `EntityLeashed` (decoded from `SET_ENTITY_LINK`) — per-entity like
         // `FallingBlockState` immediately above, and used to sit in

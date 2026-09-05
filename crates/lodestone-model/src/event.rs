@@ -2834,8 +2834,8 @@ pub enum ClientEvent {
         /// Tab identifier, or `None` to close/deselect the tab.
         tab: Option<Identifier>,
     },
-    /// A projectile's acceleration power changed (e.g. a charged crossbow
-    /// bolt), from the projectile power packet.
+    /// A direction-accelerating projectile's power changed after a deflection,
+    /// from the projectile power packet.
     ProjectilePowerChanged {
         /// Projectile entity id.
         entity_id: i32,
@@ -4381,12 +4381,12 @@ pub fn route(event: &ClientEvent) -> Route {
         // producer, whose cell queries must follow the server's center rather
         // than a predicted player position.
         ClientEvent::ChunkCacheCenterChanged { .. } => SHELL,
+        ClientEvent::ProjectilePowerChanged { .. } => INGEST,
         ClientEvent::SimulationDistanceChanged { .. }
         | ClientEvent::ItemCooldown { .. }
         | ClientEvent::SoundStopped { .. }
         | ClientEvent::PlayerCombatEntered
         | ClientEvent::PlayerCombatEnded { .. }
-        | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
         | ClientEvent::ServerDataReceived { .. } => Route::NOWHERE,
         // The target is already server-resolved, so the shell can derive the

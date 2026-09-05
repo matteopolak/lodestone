@@ -63,6 +63,54 @@ pub struct Projectile {
     pub order: IntegrationOrder,
 }
 
+/// A projectile whose current movement direction gains a fixed amount of
+/// speed each tick before inertia and translation.
+///
+/// This is deliberately separate from [`Projectile`]: ballistic projectiles
+/// have gravity and a family-specific integration order, while this family
+/// has no gravity and always applies acceleration, inertia, then movement.
+/// Keeping the two rules in distinct types makes it impossible to accidentally
+/// give an arrow an acceleration-power packet's behaviour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AcceleratingProjectile {
+    /// Current position.
+    pub position: Vec3,
+    /// Current velocity in blocks per tick.
+    pub velocity: Vec3,
+    /// Speed added in the current direction before inertia.
+    pub acceleration_power: f64,
+    /// Velocity multiplier applied after acceleration.
+    pub inertia: f64,
+}
+
+impl AcceleratingProjectile {
+    /// Builds an accelerating projectile with the supplied position, movement,
+    /// acceleration power, and medium-specific inertia.
+    #[must_use]
+    pub const fn new(
+        position: Vec3,
+        velocity: Vec3,
+        acceleration_power: f64,
+        inertia: f64,
+    ) -> Self {
+        Self {
+            position,
+            velocity,
+            acceleration_power,
+            inertia,
+        }
+    }
+
+    /// Advances one tick: add acceleration in the movement direction, apply
+    /// inertia, then translate. A zero velocity has no direction, so it stays
+    /// stationary even when its acceleration power is non-zero.
+    pub fn tick(&mut self) {
+        self.velocity = (self.velocity + self.velocity.normalize().scale(self.acceleration_power))
+            .scale(self.inertia);
+        self.position += self.velocity;
+    }
+}
+
 impl Projectile {
     /// A throwable projectile (snowball / egg / ender pearl / thrown potion):
     /// gravity `0.03`, air drag `0.99`, water drag `0.8`, gravity-first order.
@@ -571,6 +619,23 @@ mod tests {
             "vy {}",
             p.velocity.y
         );
+    }
+
+    #[test]
+    fn acceleration_power_changes_the_next_velocity_before_the_pose_moves() {
+        let mut p = AcceleratingProjectile::new(v(0.0, 64.0, 0.0), v(1.0, 0.0, 0.0), 0.2, 0.95);
+        p.tick();
+        // `(1.0 + unit_x * 0.2) * 0.95 = 1.14`; movement uses that new
+        // velocity rather than the stale 1.0 value.
+        assert!((p.velocity.x - 1.14).abs() < 1e-12, "vx {}", p.velocity.x);
+        assert!((p.position.x - 1.14).abs() < 1e-12, "x {}", p.position.x);
+
+        // A reported zero is not an absent power: it preserves inertia but
+        // removes the directional speed gain.
+        let mut zero = AcceleratingProjectile::new(v(0.0, 64.0, 0.0), v(1.0, 0.0, 0.0), 0.0, 0.95);
+        zero.tick();
+        assert!((zero.velocity.x - 0.95).abs() < 1e-12, "vx {}", zero.velocity.x);
+        assert!((zero.position.x - 0.95).abs() < 1e-12, "x {}", zero.position.x);
     }
 
     #[test]

@@ -58,7 +58,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**8 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**7 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -70,8 +70,12 @@ that set other flags) and fails if this line drifts from the real count — upda
 the source together whenever a variant is added or wired.
 
 The current terminal routes are `SimulationDistanceChanged`, `ItemCooldown`, `SoundStopped`,
-`PlayerCombatEntered`, `PlayerCombatEnded`, `ProjectilePowerChanged`, `MountScreenOpened`, and
-`ServerDataReceived`. `ChunkCacheCenterChanged` now crosses `net::forward` to
+`PlayerCombatEntered`, `PlayerCombatEnded`, `MountScreenOpened`, and `ServerDataReceived`.
+`ProjectilePowerChanged` now crosses the ingest route into an entity component, then the render
+track's locally integrated projectile state. The next tick adds the reported power along the current
+velocity direction, applies inertia, and advances the pose, so a power update changes the
+`EntityDraw` consumed by the projectile renderer; a reported zero stops only that speed gain.
+`ChunkCacheCenterChanged` now crosses `net::forward` to
 `Sim::poll_net`, which records the authoritative streamed-view center and makes the loading
 screen's per-column grid query that square rather than a possibly stale player position.
 `PlayerLookAt` is no
