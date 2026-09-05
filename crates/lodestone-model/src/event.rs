@@ -3857,7 +3857,7 @@ pub struct Route {
     pub shell_conditional: bool,
     /// Consumed inside `lodestone-client` itself by something that is **not** one
     /// of the three routers, so [`Route::NOWHERE`] can mean "nothing anywhere"
-    /// rather than "nothing I happened to check". Exactly three such places:
+    /// rather than "nothing I happened to check". Exactly four such places:
     ///
     /// * `Driver::emit`'s auto-response switch (keep-alive, chat acknowledgement,
     ///   `player_loaded`, auto-respawn, cookie response/store, transfer outcome) —
@@ -3865,6 +3865,9 @@ pub struct Route {
     /// * `LocalEcho::apply`, which is down to `TeleportPlayer` alone.
     /// * `SharedState::apply`'s own `TimeChanged` arm, which writes `WorldTime`
     ///   ahead of consulting either `handles_event`.
+    /// * `SharedState::apply`'s optional `GameEventBus`, which carries every
+    ///   event to installed client plugins; the shipped brand-channel plugin
+    ///   consumes `CustomPayload` there.
     ///
     /// Chunk payloads are a fourth path but not a router: the version adapter
     /// writes them straight through the `lodestone_world::WorldSink`, and the
@@ -4242,6 +4245,10 @@ pub fn route(event: &ClientEvent) -> Route {
         // `SharedState::apply`'s own arm, ahead of both `handles_event` calls:
         // straight into the `WorldTime` resource.
         ClientEvent::TimeChanged { .. } => CLIENT,
+        // `SharedState::apply` publishes this through the optional `GameEvent`
+        // bus before routing. The shipped app installs a brand-channel plugin,
+        // whose typed decoder and state fold consume this channel in production.
+        ClientEvent::CustomPayload { .. } => CLIENT,
 
         // ---- world-level admin state, folded by `session` ---------------------
         //
@@ -4375,7 +4382,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::PlayerCombatEnded { .. }
         | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
-        | ClientEvent::CustomPayload { .. }
         | ClientEvent::ServerDataReceived { .. }
         | ClientEvent::PongReceived { .. }
         | ClientEvent::PlayerLookAt { .. } => Route::NOWHERE,
@@ -4518,6 +4524,68 @@ mod route_tests {
             catch_all_lines("        ClientEvent::Ping { .. } => Route::NOWHERE,\n").is_empty(),
             "the detector must not read an ordinary struct pattern as a wildcard"
         );
+    }
+
+    /// The public routing document quotes both the remaining terminal islands
+    /// and the exhaustive variant total. Keep those numbers derived from this
+    /// source, not remembered after an otherwise-correct routing edit.
+    #[test]
+    fn the_island_count_in_the_docs_matches_this_source() {
+        let source = include_str!("event.rs");
+        let route_body = source
+            .split_once("pub fn route(event: &ClientEvent) -> Route {")
+            .expect("route() must exist in this file")
+            .1
+            .split_once("\n#[cfg(test)]")
+            .expect("the route tests must follow route()").0;
+
+        let islands = route_body
+            .match_indices("=> Route::NOWHERE,")
+            .map(|(end, _)| {
+                let arm_start = route_body[..end]
+                    .rfind("\n        ClientEvent::")
+                    .expect("every terminal NOWHERE arm must start with ClientEvent");
+                route_body[arm_start..end].matches("ClientEvent::").count()
+            })
+            .sum::<usize>();
+
+        let enum_body = source
+            .split_once("pub enum ClientEvent {")
+            .expect("ClientEvent must remain an enum")
+            .1
+            .split_once("\n}\n")
+            .expect("ClientEvent enum must end before the next item").0;
+        let variants = enum_body
+            .lines()
+            .filter(|line| {
+                line.strip_prefix("    ").is_some_and(|rest| {
+                    !rest.starts_with("    ")
+                        && rest
+                            .chars()
+                            .next()
+                            .is_some_and(char::is_uppercase)
+                })
+            })
+            .count();
+
+        let counts = include_str!("../../../docs/event-routing.md")
+            .lines()
+            .find(|line| line.contains("variants are currently `Route::NOWHERE`"))
+            .and_then(|line| line.strip_prefix("**").and_then(|line| line.split_once("**")))
+            .map(|(counts, _)| counts)
+            .expect("event-routing.md must declare its island count");
+        let (documented_islands, documented_variants) = counts
+            .split_once(" of ")
+            .map(|(islands, variants)| {
+                (
+                    islands.parse::<usize>().expect("documented island count"),
+                    variants.parse::<usize>().expect("documented variant count"),
+                )
+            })
+            .expect("event-routing.md count must read **N of M** variants");
+
+        assert_eq!(documented_islands, islands);
+        assert_eq!(documented_variants, variants);
     }
 
 
@@ -4743,6 +4811,18 @@ mod route_tests {
         assert!(!r.ingest && !r.session && !r.shell, "no router claims it");
         assert!(r.client, "but `Driver::emit` records the transfer outcome");
         assert!(!r.is_island(), "so it is not an island");
+
+        let custom_payload = ClientEvent::CustomPayload {
+            channel: "minecraft:brand".parse().unwrap(),
+            data: vec![6, b'r', b'o', b'u', b't', b'e', b'd'],
+        };
+        let r = route(&custom_payload);
+        assert!(!r.ingest && !r.session && !r.shell, "no router claims it");
+        assert!(
+            r.client,
+            "SharedState publishes it to the production plugin event bus"
+        );
+        assert!(!r.is_island(), "the installed brand channel consumes it");
 
         assert!(
             route(&ClientEvent::PlayerCombatEntered).is_island(),

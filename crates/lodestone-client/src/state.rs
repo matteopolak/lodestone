@@ -2077,6 +2077,24 @@ mod tests {
         SharedState::adopting(ecs, session)
     }
 
+    /// Builds the same bus-and-channel shape the production app installs, so
+    /// this test exercises the whole path from `SharedState::apply` to a typed
+    /// channel consumer rather than only checking that the generic bus queued a
+    /// message.
+    fn state_with_server_brand_channel() -> SharedState {
+        let mut app = lodestone_ecs::app::App::new();
+        app.add_plugins((
+            lodestone_ecs::ingest::IngestPlugin,
+            lodestone_ecs::SessionPlugin,
+            lodestone_ecs::ServerBrandChannelPlugin,
+        ));
+        let session = lodestone_ecs::spawn_session(app.world_mut());
+        let ecs: EcsHandle = std::sync::Arc::new(lodestone_ecs::parking_lot::RwLock::new(
+            std::mem::take(app.world_mut()),
+        ));
+        SharedState::adopting(ecs, session)
+    }
+
     /// **The source-scan guard**, in the style of
     /// `lodestone_model::event::route_tests::route_has_no_catch_all_arm`: the
     /// bus's whole safety property is that its one write site has no `match`
@@ -2150,6 +2168,32 @@ mod tests {
             1,
             "the Ping must have reached the bus through the real SharedState::apply path"
         );
+    }
+
+    /// The generic bus check above is intentionally not enough: it can be green
+    /// while a channel decoder or its scheduled fold has no production consumer.
+    /// This drives one valid `minecraft:brand` payload through the actual client
+    /// state path, then runs the regular game tick and reads the plugin's state.
+    #[test]
+    fn custom_payload_reaches_the_installed_brand_channel_consumer() {
+        let state = state_with_server_brand_channel();
+        assert!(
+            state.game_event_bus_enabled,
+            "precondition: the installed channel must enable the event bus"
+        );
+
+        state.apply(&ClientEvent::CustomPayload {
+            channel: "minecraft:brand".parse().unwrap(),
+            data: vec![6, b'r', b'o', b'u', b't', b'e', b'd'],
+        });
+
+        let mut ecs = state.ecs.write();
+        ecs.run_schedule(lodestone_ecs::GameTick);
+        let reported = ecs
+            .get_resource::<lodestone_ecs::ReportedServerBrand>()
+            .expect("the installed channel must expose its folded state");
+        assert_eq!(reported.brand.as_deref(), Some("routed"));
+        assert_eq!(reported.announcements, 1);
     }
 
     /// A state with the bus disabled must not populate `Messages<GameEvent>`
