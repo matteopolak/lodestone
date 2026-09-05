@@ -23,8 +23,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-ACTION = "start_destroy_block"
-SCHEMA = 2
+SCHEMA = 3
 
 # This is intentionally a bounded host gate over every hosted row. Join-only
 # revisions stay in ROWS so `--list` remains a registry cross-check, but they
@@ -33,11 +32,13 @@ GATE_PROTOCOLS = (
     5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, 762, 766, 774, 776,
 )
 STAGES = (
-    "configuration",
-    "chunk_batch_acknowledgement",
     "join",
+    "chunks",
     "movement",
-    "play_action",
+    "break_place",
+    "chat",
+    "inventory_select",
+    "keepalive",
     "disconnect",
 )
 
@@ -141,57 +142,73 @@ def validate_stages(value: Any, row: Row) -> list[dict[str, Any]]:
         raise RuntimeError(f"evidence stages must contain exactly {len(STAGES)} ordered entries")
     stages = [_observed_stage(stage, expected) for stage, expected in zip(value, STAGES)]
 
-    configuration = value[0]
-    if configuration.get("mode") != row.configuration_mode:
+    join = value[0]
+    if join.get("configuration_mode") != row.configuration_mode:
         raise RuntimeError(
-            f"evidence stage configuration.mode must be {row.configuration_mode!r}, "
-            f"got {configuration.get('mode')!r}"
+            f"evidence stage join.configuration_mode must be {row.configuration_mode!r}, "
+            f"got {join.get('configuration_mode')!r}"
         )
-    stages[0]["mode"] = row.configuration_mode
+    stages[0]["configuration_mode"] = row.configuration_mode
 
-    batch = value[1]
-    if batch.get("mode") != row.chunk_batch_mode:
+    chunks = value[1]
+    if chunks.get("batch_mode") != row.chunk_batch_mode:
         raise RuntimeError(
-            "evidence stage chunk_batch_acknowledgement.mode must be "
-            f"{row.chunk_batch_mode!r}, got {batch.get('mode')!r}"
+            "evidence stage chunks.batch_mode must be "
+            f"{row.chunk_batch_mode!r}, got {chunks.get('batch_mode')!r}"
         )
-    batch_count = batch.get("batch_count")
+    batch_count = chunks.get("batch_count")
     if isinstance(batch_count, bool) or not isinstance(batch_count, int) or batch_count < 0:
-        raise RuntimeError("evidence stage chunk_batch_acknowledgement.batch_count must be non-negative")
+        raise RuntimeError("evidence stage chunks.batch_count must be non-negative")
     if row.chunk_batch_mode == "acknowledged" and batch_count < 1:
-        raise RuntimeError("evidence stage chunk_batch_acknowledgement.batch_count must be positive")
+        raise RuntimeError("evidence stage chunks.batch_count must be positive")
     if row.chunk_batch_mode == "unbatched" and batch_count != 0:
         raise RuntimeError(
-            "evidence stage chunk_batch_acknowledgement.batch_count must be zero for unbatched protocols"
+            "evidence stage chunks.batch_count must be zero for unbatched protocols"
         )
-    stages[1]["mode"] = row.chunk_batch_mode
+    stages[1]["batch_mode"] = row.chunk_batch_mode
     stages[1]["batch_count"] = batch_count
 
-    movement = value[3]
+    movement = value[2]
     movement_count = movement.get("movement_count")
     if isinstance(movement_count, bool) or not isinstance(movement_count, int) or movement_count < 1:
         raise RuntimeError("evidence stage movement.movement_count must be positive")
-    stages[3]["movement_count"] = movement_count
+    stages[2]["movement_count"] = movement_count
 
-    action = value[4]
-    if action.get("kind") != ACTION:
-        raise RuntimeError(f"evidence stage play_action.kind must be {ACTION!r}")
-    action_count = action.get("action_count")
-    if isinstance(action_count, bool) or not isinstance(action_count, int) or action_count != 1:
-        raise RuntimeError("evidence stage play_action.action_count must be exactly 1")
-    if action.get("result_observed") is not True:
-        raise RuntimeError("evidence stage play_action.result_observed must be true")
-    stages[4]["kind"] = ACTION
-    stages[4]["action_count"] = 1
+    actions = value[3]
+    for kind in ("break", "place"):
+        if actions.get(f"{kind}_count") != 1 or actions.get(f"{kind}_result_observed") is not True:
+            raise RuntimeError(f"evidence stage break_place must record exactly one observed {kind}")
+        stages[3][f"{kind}_count"] = 1
+        stages[3][f"{kind}_result_observed"] = True
+
+    chat = value[4]
+    if chat.get("message_count") != 1 or chat.get("result_observed") is not True:
+        raise RuntimeError("evidence stage chat must record exactly one observed message")
+    stages[4]["message_count"] = 1
     stages[4]["result_observed"] = True
 
-    disconnect = value[5]
+    inventory = value[5]
+    slot = inventory.get("selected_slot")
+    if isinstance(slot, bool) or not isinstance(slot, int) or not 0 <= slot <= 8:
+        raise RuntimeError("evidence stage inventory_select.selected_slot must be in 0..=8")
+    if inventory.get("result_observed") is not True:
+        raise RuntimeError("evidence stage inventory_select.result_observed must be true")
+    stages[5]["selected_slot"] = slot
+    stages[5]["result_observed"] = True
+
+    keepalive = value[6]
+    if keepalive.get("exchange_count") != 1 or keepalive.get("id_matched") is not True:
+        raise RuntimeError("evidence stage keepalive must record exactly one matched exchange")
+    stages[6]["exchange_count"] = 1
+    stages[6]["id_matched"] = True
+
+    disconnect = value[7]
     if disconnect.get("clean") is not True:
         raise RuntimeError("evidence stage disconnect.clean must be true")
     if disconnect.get("initiated_by") != "client":
         raise RuntimeError("evidence stage disconnect.initiated_by must be 'client'")
-    stages[5]["clean"] = True
-    stages[5]["initiated_by"] = "client"
+    stages[7]["clean"] = True
+    stages[7]["initiated_by"] = "client"
     return stages
 
 
@@ -271,7 +288,7 @@ def run_row(row: Row, args: argparse.Namespace) -> dict[str, Any]:
                     raise RuntimeError("--mode launch requires --driver or LODESTONE_EXTERNAL_CLIENT_DRIVER")
                 client = [
                     args.driver, "--release", row.release, "--protocol", str(row.protocol),
-                    "--host", "127.0.0.1", "--port", str(port), "--action", ACTION,
+                    "--host", "127.0.0.1", "--port", str(port),
                     "--configuration-mode", row.configuration_mode,
                     "--chunk-batch-mode", row.chunk_batch_mode,
                     "--required-stages", ",".join(STAGES), "--evidence-schema", str(SCHEMA),
@@ -283,7 +300,7 @@ def run_row(row: Row, args: argparse.Namespace) -> dict[str, Any]:
             else:
                 print(f"Attach release {row.release} (protocol {row.protocol}) to 127.0.0.1:{port}.")
                 print(
-                    f"Perform {' -> '.join(STAGES)} ({ACTION} is the play action), "
+                    f"Perform {' -> '.join(STAGES)}, "
                     f"using configuration={row.configuration_mode} and "
                     f"chunk_batch={row.chunk_batch_mode}; then write the driver evidence to {evidence}."
                 )
@@ -337,7 +354,6 @@ def main() -> int:
         "schema": SCHEMA,
         "gate_protocols": list(GATE_PROTOCOLS),
         "required_stages": list(STAGES),
-        "action": ACTION,
         "mode": args.mode,
         "results": results,
     }

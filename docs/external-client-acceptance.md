@@ -15,10 +15,10 @@ row. Rows run serially. Each gets a fresh temporary world,
 ephemeral localhost port, deadline, server log, and isolated Cargo target directory; a timeout or
 nonzero client-driver exit stops the server and records a failed row.
 
-The six stages have one contract across all seven rows, while the first two stages record the wire
-flow that actually exists in each era:
+The eight-stage minimum Play contract is identical for every row. Join and chunk evidence also
+records the wire flow that actually exists in each era:
 
-| protocol | release | configuration stage `mode` | chunk stage `mode` and `batch_count` |
+| protocol | release | join `configuration_mode` | chunks `batch_mode` and `batch_count` |
 |---:|---|---|---|
 | 5 | 1.7.10 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
 | 47 | 1.8.9 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
@@ -38,31 +38,38 @@ flow that actually exists in each era:
 | 776 | 26.2 | `configuration` | `acknowledged`, positive |
 
 Protocols 5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, and 762 have no Configuration
-phase or chunk-batch acknowledgement: their configuration stage is an explicit direct-login
-checkpoint, and their chunk stage records the unbatched delivery rather than inventing an
+phase or chunk-batch acknowledgement: their join stage records the direct-login path,
+and their chunks stage records the unbatched delivery rather than inventing an
 acknowledgement. Their join packets carry the dimension information needed by each era's host;
 the 1.13 and 1.14-era rows retain their own chunk framing while sharing the same gate modes.
 Protocols 766, 774, and 776 use Configuration flows that include the synchronized
 registry and tag stream before the finish signal; the gate records that the phase completed but
 does not replace the client's own wire witness with a packet-level claim.
 
-The release client must complete this ordered session before the driver writes its evidence:
+The release client must complete this finite ordered session before the driver writes its evidence:
 
-1. establish the era's login flow, completing Configuration where that phase exists;
-2. receive the initial chunk delivery and acknowledge its batch where the protocol provides batch
-   pacing (5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, and 762 record an
-   unbatched delivery with `batch_count: 0`);
-3. enter the world (join);
-4. send at least one deliberate movement update;
-5. perform exactly one `start_destroy_block` action and observe its result; and
-6. close the client session cleanly, with the client initiating the disconnect and observing the
+1. enter the world after completing the era's login flow;
+2. receive initial chunks and acknowledge a batch where the protocol provides batch pacing;
+3. send at least one deliberate movement update;
+4. break one block and place one block, observing both world results;
+5. send one chat message and observe its result;
+6. select a hotbar slot and observe the selection;
+7. complete one keepalive exchange with the same identifier in both directions; and
+8. close the client session cleanly, with the client initiating the disconnect and observing the
    server-side EOF.
 
-The evidence contract is schema 2. Its `stages` array must contain those six entries in that
-order. The configuration stage records its row's `mode` (`login_to_play` or `configuration`), and
-the chunk stage records its row's `mode` (`unbatched` or `acknowledged`) plus a zero or positive
+These eight rows are the closure boundary for minimum hosted Play support; packet coverage beyond
+them is tracked separately and cannot silently expand this gate. No hosted protocol has a passing
+external witness yet, so the currently passing matrix is empty. All 16 rows are configured and can
+be attempted; a row becomes accepted only when an exact release client supplies all eight observations.
+
+The evidence contract is schema 3. Its `stages` array must contain those eight entries in that
+order. The join stage records its row's `configuration_mode` (`login_to_play` or `configuration`), and
+the chunks stage records its row's `batch_mode` (`unbatched` or `acknowledged`) plus a zero or positive
 `batch_count` as described above. The movement stage records a positive `movement_count`, the
-action stage records `action_count: 1` plus `result_observed: true`, and the disconnect stage
+break/place stage records exactly one observed result of each kind, chat records exactly one observed
+message, inventory selection records a slot in `0..=8`, keepalive records exactly one identifier-matched
+exchange, and the disconnect stage
 records `clean: true` plus `initiated_by: "client"`. Every stage also carries a short non-empty
 observation, so the report says what was witnessed rather than only repeating a boolean. Provenance
 names the client binary and exact build, describes the capture method, and points at non-empty
@@ -97,7 +104,7 @@ LODESTONE_EXTERNAL_CLIENT_DRIVER=/absolute/path/to/driver \
 The driver receives `--release`, `--protocol`, `--host`, `--port`, `--action`,
 `--configuration-mode`, `--chunk-batch-mode`, `--required-stages` (a comma-separated ordered
 list), `--evidence-schema`, `--evidence`, and `--deadline-seconds`. The two mode arguments make the
-era-specific flow explicit to the driver. It must write evidence only after all six stages have
+era-specific flow explicit to the driver. It must write evidence only after all eight stages have
 completed and the client has disconnected cleanly. A screenshot plus client log is the smallest
 useful artifact pair; a packet capture is stronger when the automation can collect one.
 
@@ -105,19 +112,25 @@ An accepted evidence file has this shape (artifact paths may be relative to the 
 
 ```json
 {
-  "schema": 2,
+  "schema": 3,
   "protocol": 766,
   "release": "1.20.6",
   "stages": [
-    {"name": "configuration", "observed": true, "observation": "finish accepted",
-     "mode": "configuration"},
-    {"name": "chunk_batch_acknowledgement", "observed": true,
-     "observation": "initial batch acknowledged", "mode": "acknowledged", "batch_count": 1},
-    {"name": "join", "observed": true, "observation": "world entered"},
+    {"name": "join", "observed": true, "observation": "world entered",
+     "configuration_mode": "configuration"},
+    {"name": "chunks", "observed": true, "observation": "initial batch acknowledged",
+     "batch_mode": "acknowledged", "batch_count": 1},
     {"name": "movement", "observed": true, "observation": "position update sent",
      "movement_count": 1},
-    {"name": "play_action", "observed": true, "observation": "block result captured",
-     "kind": "start_destroy_block", "action_count": 1, "result_observed": true},
+    {"name": "break_place", "observed": true, "observation": "both results captured",
+     "break_count": 1, "break_result_observed": true,
+     "place_count": 1, "place_result_observed": true},
+    {"name": "chat", "observed": true, "observation": "message appeared",
+     "message_count": 1, "result_observed": true},
+    {"name": "inventory_select", "observed": true, "observation": "slot changed",
+     "selected_slot": 4, "result_observed": true},
+    {"name": "keepalive", "observed": true, "observation": "identifier matched",
+     "exchange_count": 1, "id_matched": true},
     {"name": "disconnect", "observed": true, "observation": "client observed EOF",
      "clean": true, "initiated_by": "client"}
   ],
@@ -131,8 +144,8 @@ An accepted evidence file has this shape (artifact paths may be relative to the 
 }
 ```
 
-For protocols 5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, and 762, the same six
-entries use `"mode": "login_to_play"` on the configuration entry and `"mode": "unbatched",
+For protocols 5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, and 762, the same eight
+entries use `"configuration_mode": "login_to_play"` on the join entry and `"batch_mode": "unbatched",
 "batch_count": 0` on the chunk entry. The observations should say that login entered Play
 directly and that the initial columns arrived without batch framing; the validator checks those
 row-specific modes rather than accepting a fabricated acknowledgement.
@@ -141,7 +154,7 @@ row-specific modes rather than accepting a fabricated acknowledgement.
 
 When a hosted row changes, update `ROWS` and keep its release version, registry feature, and
 protocol number aligned with `lodestone_registry::hosted_protocols`. Add a protocol to
-`GATE_PROTOCOLS` only when its host implements the complete six-stage contract. Keep the row's
+`GATE_PROTOCOLS` only when its host is intended to satisfy the complete eight-stage contract. Keep the row's
 configuration and chunk-batch modes aligned with the host's actual join path: protocols 5 through
 762 listed above are direct login-to-Play and unbatched, while 766, 774, and 776 use Configuration
 and batch acknowledgement. Do not add join-only revisions or imply that a protocol has a packet it
@@ -175,4 +188,4 @@ plus an automation driver or human/UI-assisted evidence recorder. Release-accoun
 client container images, and a reliable launcher/UI automation surface are intentionally outside the
 repository. All 16 hosted protocols are now represented by gate rows, but no client was launched
 while this documentation was updated: every row remains unverified until its manual execution
-produces a passing `report.json` with the six-stage witness and exact client-build provenance.
+produces a passing `report.json` with the eight-stage witness and exact client-build provenance.
