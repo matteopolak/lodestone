@@ -135,6 +135,11 @@ recorded split.
   indexed by position.
 - **Do not "fix" the interpolation order to the incremental chain** — read the density-engine
   module's own doc on interpolation order first.
+- **Keep embedded data lookup in `TableResolver`.** An embedding crate supplies
+  its sorted JSON/template tables and any version-specific block-state census;
+  it must not recreate `Resolver` methods. Use the key selectors for
+  dimension-specific biome tables or the typed-empty selectors for a fixed
+  biome, and use `document` only for bundled data outside the `Resolver` trait.
 - **When you add a caller that resolves per-chunk state, route it through the existing memo/store
   rather than adding a second cache.** A `Mutex`-guarded FIFO cache under concurrent load has already
   cost this repo a reverted change once; sharded once-only slots or a thread-local direct-mapped memo
@@ -164,8 +169,9 @@ recorded split.
 ## Dependencies
 
 `lodestone-worldgen-core` (numeric leaf: rng/hash/math/noise/density/counters) ← `lodestone-worldgen`
-(engine: overworld/biome/surface/aquifer/carver/feature/structure) ← `lodestone-server`
-(`worldgen_data::EmbeddedResolver`, the bundled 26.2 JSON under `assets/worldgen/`) ← `lodestone-shell`
+(engine: overworld/biome/surface/aquifer/carver/feature/structure and `TableResolver`) ← `lodestone-server`
+(`worldgen_data::embedded_resolver`, the bundled 26.2 JSON and structure-template tables under
+`assets/worldgen/`) ← `lodestone-shell`
 (the singleplayer path, same generator). `lodestone-javarandom` for the shared `java.util.Random` port.
 
 Verification is against a real vanilla 26.2 server, never against this engine's own output:

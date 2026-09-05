@@ -60,20 +60,21 @@
 
 use std::sync::OnceLock;
 
-use lodestone_worldgen::density::{NoiseParams, Resolver};
+use lodestone_worldgen::density::Resolver;
 use lodestone_worldgen::overworld::OverworldGenerator;
+use lodestone_worldgen::table_resolver::TableResolver;
 use serde_json::Value;
 
 use crate::protocol::WorldgenScope;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_worldgen.rs"));
 // `EMBEDDED_STRUCTURE_TEMPLATES` — the `.nbt` bytes, sorted by key. See
-// `EmbeddedResolver::structure_template`.
+// `TableResolver::with_structure_templates`.
 include!(concat!(env!("OUT_DIR"), "/embedded_structures.rs"));
 
 /// The raw `.nbt` bytes of one bundled structure template, borrowed from rodata.
 ///
-/// The same table [`EmbeddedResolver::structure_template`] serves the worldgen
+/// The same table `embedded_resolver` serves the worldgen
 /// engine from, exposed without its owning `Vec` copy because
 /// [`crate::structure_loot`] only reads: it re-parses these bytes for the data
 /// markers the engine's own parser drops. Accepts an id with or without the
@@ -100,8 +101,8 @@ pub fn embedded_structure_template_ids() -> impl Iterator<Item = &'static str> {
     EMBEDDED_STRUCTURE_TEMPLATES.iter().map(|(key, _)| *key)
 }
 
-/// The fallback biome [`OverworldGenerator`] would use if [`EmbeddedResolver`]
-/// supplied no biome-parameter table. [`EmbeddedResolver::biome_parameters`]
+/// The fallback biome [`OverworldGenerator`] would use if `embedded_resolver`
+/// supplied no biome-parameter table. Its [`Resolver::biome_parameters`]
 /// supplies one, so real per-column biome variety is what this generator
 /// actually produces; these two constants only document "what it used to
 /// always be" and are the value a future resolver with no biome data still
@@ -190,242 +191,18 @@ pub fn overworld_chunk_source_checked(
     }
 }
 
-/// A [`Resolver`] backed by the embedded worldgen table.
+/// Builds the production resolver over this crate's generated 26.2 tables.
 ///
-/// Parsed `Value`s are cached so repeated references to the same density
-/// function (the router tree revisits shared nodes heavily) parse once.
-#[derive(Debug, Default)]
-struct EmbeddedResolver;
-
-impl EmbeddedResolver {
-    fn raw(&self, key: &str) -> &'static str {
-        // Binary search: the table is sorted by id in `build.rs`.
-        EMBEDDED_WORLDGEN
-            .binary_search_by(|(id, _)| (*id).cmp(key))
-            .map(|i| EMBEDDED_WORLDGEN[i].1)
-            .unwrap_or_else(|_| panic!("embedded worldgen data missing '{key}'"))
-    }
-
-    fn json(&self, key: &str) -> Value {
-        serde_json::from_str(self.raw(key))
-            .unwrap_or_else(|e| panic!("parsing embedded '{key}': {e}"))
-    }
-
-    /// Like [`Self::raw`], but a missing key returns `None` instead of
-    /// panicking during composition lookups
-    /// (`biome_document`/`configured_carver`/`configured_feature`/
-    /// `placed_feature`/`block_tag`), where a name absent from the embedded
-    /// table (e.g. a `mineable/*` tool tag never bundled, or a biome id the
-    /// parameter table names that this bundle didn't ship) is expected and
-    /// should resolve to "no data" per `Resolver`'s own documented default,
-    /// not abort chunk generation.
-    fn try_raw(&self, key: &str) -> Option<&'static str> {
-        EMBEDDED_WORLDGEN
-            .binary_search_by(|(id, _)| (*id).cmp(key))
-            .ok()
-            .map(|i| EMBEDDED_WORLDGEN[i].1)
-    }
-
-    fn try_json(&self, key: &str) -> Value {
-        self.try_raw(key).map_or(Value::Null, |raw| {
-            serde_json::from_str(raw)
-                .unwrap_or_else(|e| panic!("parsing embedded '{key}': {e}"))
-        })
-    }
-}
-
-impl Resolver for EmbeddedResolver {
-    fn density_function(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.json(&format!("density_function/{name}"))
-    }
-
-    fn noise(&self, id: &str) -> NoiseParams {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        let v = self.json(&format!("noise/{name}"));
-        NoiseParams {
-            first_octave: v["firstOctave"]
-                .as_i64()
-                .unwrap_or_else(|| panic!("noise '{name}' missing firstOctave"))
-                as i32,
-            amplitudes: v["amplitudes"]
-                .as_array()
-                .unwrap_or_else(|| panic!("noise '{name}' missing amplitudes"))
-                .iter()
-                .map(|a| a.as_f64().expect("amplitude"))
-                .collect(),
-        }
-    }
-
-    /// Real multi-noise biome assignment. Overriding this
-    /// (default is an empty array, per [`Resolver::biome_parameters`]'s own
-    /// doc) is what switches [`OverworldGenerator`] from its old
-    /// single-fixed-biome behaviour to real per-column variety — see
-    /// `biome_parameters/overworld.json`'s own header for provenance
-    /// (`scripts/worldgen-oracle/BiomeOracle.java`, `table` mode, 7594 rows).
-    fn biome_parameters(&self) -> Value {
-        self.json("biome_parameters/overworld")
-    }
-
-    /// Per-biome `temperature`, used to derive `cold_enough_to_snow` per
-    /// sampled column (`biome_parameters/overworld_temperature.json`, read
-    /// directly from vanilla's own `data/minecraft/worldgen/biome/*.json`
-    /// files — no oracle needed for this one, see that file's own header).
-    fn biome_temperatures(&self) -> Value {
-        self.json("biome_parameters/overworld_temperature")
-    }
-
-    /// Full `worldgen/biome/<name>.json` documents for composition:
-    /// carvers + `UNDERGROUND_ORES` feature lists, for
-    /// `crate::worldgen_data`'s bundled generator to compose carvers into
-    /// [`OverworldGenerator::column`]. 66 files, copied verbatim from
-    /// `.cache/mc/26.2/src/data/minecraft/worldgen/biome/` (Mojang's own
-    /// generated data, the repository's primary data source).
-    fn biome_document(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.try_json(&format!("biome/{name}"))
-    }
-
-    /// `worldgen/configured_carver/<name>.json` — 4 files (`cave`,
-    /// `cave_extra_underground`, `canyon`, `nether_cave`; only the first
-    /// three are ever referenced by an overworld biome).
-    fn configured_carver(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.try_json(&format!("configured_carver/{name}"))
-    }
-
-    /// `worldgen/configured_feature/<name>.json` — 226 bundled documents for
-    /// ore composition, vegetation, and other feature families. The resolver
-    /// keeps every document rather than filtering to currently executed ones.
-    fn configured_feature(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.try_json(&format!("configured_feature/{name}"))
-    }
-
-    /// `worldgen/placed_feature/<name>.json` — 262 files, same provenance as
-    /// [`Self::configured_feature`].
-    fn placed_feature(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.try_json(&format!("placed_feature/{name}"))
-    }
-
-    /// `tags/block/<name>.json` — 261 files, needed to resolve
-    /// `#overworld_carver_replaceables`' recursive closure, and
-    /// `#cannot_support_snow_layer`/`#support_override_snow_layer` for
-    /// `freeze_top_layer`.
-    fn block_tag(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.try_json(&format!("tags/block/{name}"))
-    }
-
-    /// Every bundled `worldgen/structure_set/*.json` id.
-    ///
-    /// **This method is the entry point to the whole structure engine.** The
-    /// default is an empty list, and a resolver returning nothing here places no
-    /// structures at all — which is exactly the state the integrated server was
-    /// in while the placement engine sat fully built and unreachable. Every
-    /// fixture resolver in the workspace still returns nothing, deliberately, so
-    /// the parity fixtures stay byte-identical; this is the one resolver that
-    /// opts production in.
-    ///
-    /// Derived from the embedded table rather than a hand-written list, so adding
-    /// a `structure_set/*.json` to `assets/worldgen/` is the whole change. Order
-    /// is not significant — `StructureRegistry` re-orders into vanilla's
-    /// `StructureSets.bootstrap` order.
-    fn structure_set_ids(&self) -> Vec<String> {
-        EMBEDDED_WORLDGEN
-            .iter()
-            .filter_map(|(id, _)| id.strip_prefix("structure_set/"))
-            .map(|name| format!("minecraft:{name}"))
-            .collect()
-    }
-
-    /// `worldgen/structure_set/<name>.json` — 20 files.
-    fn structure_set(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.try_json(&format!("structure_set/{name}"))
-    }
-
-    /// `worldgen/structure/<name>.json` — 34 files.
-    fn structure(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.try_json(&format!("structure/{name}"))
-    }
-
-    /// The raw `structure/<name>.nbt` bytes for one template (the S2 unit).
-    ///
-    /// **The second entry point to the structure engine**, and it fails the same
-    /// quiet way [`structure_set_ids`](Self::structure_set_ids) does: the trait
-    /// default is `None`, and a resolver taking it makes the worldgen side
-    /// **demote** every template-driven structure to `Unsupported` and record it
-    /// in the ledger — the start is placed, the blocks are not. Shipwrecks, ocean
-    /// ruins and igloos reached zero blocks in the served world for exactly that
-    /// reason.
-    ///
-    /// Served from a `binary_search_by` over the generated table, which `build.rs`
-    /// sorts by key for this reason (an unsorted table would silently miss rather
-    /// than fail). Owned `Vec` because the trait is version-free and cannot name
-    /// this crate's `&'static` table.
-    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        EMBEDDED_STRUCTURE_TEMPLATES
-            .binary_search_by(|(key, _)| (*key).cmp(name))
-            .ok()
-            .map(|i| EMBEDDED_STRUCTURE_TEMPLATES[i].1.to_vec())
-    }
-
-    /// `worldgen/template_pool/<name>.json` — 188 files.
-    ///
-    /// **An entry point to the structure engine**, and it fails exactly the
-    /// way the other two do: the trait default is `Value::Null`, and a resolver
-    /// taking it makes every *jigsaw* structure demote to `Unsupported` and land
-    /// on the ledger — the five villages, `pillager_outpost`, `ancient_city`,
-    /// `trail_ruins`, `trial_chambers` and the bastion, i.e. every structure whose
-    /// terrain adaptation S3's beardifier exists to apply.
-    fn template_pool(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.try_json(&format!("template_pool/{name}"))
-    }
-
-    /// `worldgen/processor_list/<name>.json` — 40 files. A pool element's
-    /// `processors` field is either an inline object or a reference to one of
-    /// these; only the reference form reaches this method.
-    fn processor_list(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.try_json(&format!("processor_list/{name}"))
-    }
-
-    /// `tags/worldgen/biome/<name>.json`. Load-bearing rather than a nicety:
-    /// every bundled structure spells its `biomes` field as a single tag
-    /// reference (`"#minecraft:has_structure/shipwreck"`), so without this every
-    /// structure's biome predicate is empty and no start is ever valid — the
-    /// engine would run and place nothing, which looks identical to it not
-    /// running.
-    fn biome_tag(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.try_json(&format!("tags/worldgen/biome/{name}"))
-    }
-
-    /// The five per-block-state predicates `freeze_top_layer` needs, built from
-    /// [`lodestone_data`]'s jar-dumped censuses rather
-    /// than from an embedded JSON asset.
-    ///
-    /// **This is deliberately not a datapack asset**, unlike every other method
-    /// on this impl. `blocks_motion`, fluid presence and collision UP-face
-    /// fullness are properties of the game's *compiled behaviour*, not of any
-    /// JSON file — `blocks.json` has no geometry at all — so the authoritative
-    /// source is `lodestone_data::{block_solidity, snow_support}`, which are
-    /// themselves dumps of the real 26.2 server. Routing them through the
-    /// `Resolver` seam rather than making `lodestone-worldgen` depend on
-    /// `lodestone-data` is what keeps the engine version-free (see
-    /// `docs/plans/worldgen-parity.md` §4 — the engine takes *all* its data
-    /// through `Resolver` by construction).
-    ///
-    /// Built once per process, not per generator: it is a pure function of two
-    /// static tables.
-    fn block_freeze_facts(&self) -> Value {
-        freeze_facts().clone()
-    }
+/// This is the one version seam for Overworld, Nether and End generation:
+/// `TableResolver` owns every JSON and template lookup, while this crate only
+/// supplies its version-specific asset tables and the compiled block-state
+/// census that cannot be represented in a datapack. The returned value is a
+/// small `Copy` view of static data, so it is cheap to construct at each
+/// generator boundary and cannot retain a per-world cache.
+fn embedded_resolver() -> TableResolver<'static> {
+    TableResolver::new(EMBEDDED_WORLDGEN)
+        .with_structure_templates(EMBEDDED_STRUCTURE_TEMPLATES)
+        .with_block_freeze_facts(freeze_facts)
 }
 
 /// Builds [`Resolver::block_freeze_facts`]'s document by walking all 32,366
@@ -541,7 +318,8 @@ fn canonical_state(id: u32) -> String {
     format!("{name}[{}]", body.join(","))
 }
 
-/// The Nether's [`Resolver`]: [`EmbeddedResolver`] with **one** method changed.
+/// The production resolver for the Nether, whose only data difference is its
+/// biome-parameter table.
 ///
 /// `biome_parameters` is the whole difference. `NetherGenerator::new` parses that
 /// document as the dimension's own 5-row multi-noise table and *asserts* it is
@@ -552,70 +330,13 @@ fn canonical_state(id: u32) -> String {
 /// overworld biome name whose surface rules and carver list do not exist here.
 ///
 /// Everything else — density functions, noises, biome documents, carvers, block
-/// tags, structure sets and templates — is dimension-agnostic lookup by id, so it
-/// delegates. `biome_temperatures` delegates too: it feeds
+/// tags, structure sets and templates — shares `embedded_resolver`'s lookup
+/// table. `biome_temperatures` stays on the Overworld table: it feeds
 /// `cold_enough_to_snow`, which only [`OverworldGenerator`] consults, and the
 /// Nether has no `biome_parameters/nether_temperature` asset to point at.
 ///
-/// A newtype rather than a discriminant field on [`EmbeddedResolver`] so that no
-/// existing `&EmbeddedResolver` call site changes shape.
-#[derive(Debug, Default)]
-struct NetherResolver(EmbeddedResolver);
-
-impl Resolver for NetherResolver {
-    /// The one override — see the struct doc.
-    fn biome_parameters(&self) -> Value {
-        self.0.json("biome_parameters/nether")
-    }
-
-    fn density_function(&self, id: &str) -> Value {
-        self.0.density_function(id)
-    }
-    fn noise(&self, id: &str) -> NoiseParams {
-        self.0.noise(id)
-    }
-    fn biome_temperatures(&self) -> Value {
-        self.0.biome_temperatures()
-    }
-    fn biome_document(&self, id: &str) -> Value {
-        self.0.biome_document(id)
-    }
-    fn configured_carver(&self, id: &str) -> Value {
-        self.0.configured_carver(id)
-    }
-    fn configured_feature(&self, id: &str) -> Value {
-        self.0.configured_feature(id)
-    }
-    fn placed_feature(&self, id: &str) -> Value {
-        self.0.placed_feature(id)
-    }
-    fn block_tag(&self, id: &str) -> Value {
-        self.0.block_tag(id)
-    }
-    fn structure_set_ids(&self) -> Vec<String> {
-        self.0.structure_set_ids()
-    }
-    fn structure_set(&self, id: &str) -> Value {
-        self.0.structure_set(id)
-    }
-    fn structure(&self, id: &str) -> Value {
-        self.0.structure(id)
-    }
-    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
-        self.0.structure_template(id)
-    }
-    fn template_pool(&self, id: &str) -> Value {
-        self.0.template_pool(id)
-    }
-    fn processor_list(&self, id: &str) -> Value {
-        self.0.processor_list(id)
-    }
-    fn biome_tag(&self, id: &str) -> Value {
-        self.0.biome_tag(id)
-    }
-    fn block_freeze_facts(&self) -> Value {
-        self.0.block_freeze_facts()
-    }
+fn nether_resolver() -> TableResolver<'static> {
+    embedded_resolver().with_biome_parameters_key("biome_parameters/nether")
 }
 
 /// Which bundled overworld `noise_settings` + density functions a generator
@@ -626,13 +347,13 @@ impl Resolver for NetherResolver {
 /// `Amplified` and `LargeBiomes` need no new engine code: their
 /// `noise_settings/*.json` and `density_function/overworld_amplified/*` /
 /// `overworld_large_biomes/*` documents are already bundled, and
-/// [`EmbeddedResolver::density_function`] already resolves any dotted id
+/// `TableResolver::density_function` already resolves any dotted id
 /// under `density_function/`, so `minecraft:overworld_amplified/depth` (as
 /// referenced by `noise_settings/amplified.json`'s own `noise_router`)
 /// resolves the same way `minecraft:overworld/depth` always has. Both
 /// presets' own `world_preset/*.json` select
 /// `biome_source.preset: "minecraft:overworld"`, so
-/// [`EmbeddedResolver::biome_parameters`]'s hardcoded `biome_parameters/
+/// `embedded_resolver`'s `biome_parameters/
 /// overworld` table is the *correct* table for them too, not a stand-in —
 /// their biome variety instead comes from `noise_settings/{amplified,
 /// large_biomes}.json`'s own `temperature`/`vegetation` router entries
@@ -652,7 +373,7 @@ impl Resolver for NetherResolver {
 /// None`, see that constructor's own doc) *is* vanilla's `FixedBiomeSource`;
 /// what was missing was a resolver that deliberately withholds
 /// `biome_parameters` to select it, plus a caller-chosen biome — see
-/// [`SingleBiomeResolver`]. `debug_all_block_states` is a structurally
+/// [`single_biome_resolver`]. `debug_all_block_states` is a structurally
 /// different, seed-free generator, exactly like `flat` below — see
 /// [`lodestone_worldgen::debug`].
 ///
@@ -696,9 +417,7 @@ fn settings_for(world_type: WorldType) -> &'static Value {
         WorldType::LargeBiomes => &LARGE_BIOMES,
     };
     lock.get_or_init(|| {
-        let key = world_type.settings_asset();
-        let raw = EmbeddedResolver.raw(key);
-        serde_json::from_str(raw).unwrap_or_else(|e| panic!("parsing embedded '{key}': {e}"))
+        embedded_resolver().document(world_type.settings_asset())
     })
 }
 
@@ -761,7 +480,7 @@ pub fn overworld_generator_of_type(seed: i64, world_type: WorldType) -> Overworl
     OverworldGenerator::new(
         seed,
         settings_for(world_type),
-        &EmbeddedResolver,
+        &embedded_resolver(),
         DEFAULT_BIOME,
         DEFAULT_BIOME_SNOWS,
     )
@@ -788,7 +507,7 @@ pub fn bundled_biome_spawners()
             .iter()
             .filter_map(|(id, _)| id.strip_prefix("biome/"))
             .filter_map(|name| {
-                let document = EmbeddedResolver.biome_document(name);
+                let document = embedded_resolver().biome_document(name);
                 let spawners = lodestone_worldgen::spawners::parse_biome_spawners(&document);
                 (!spawners.is_empty()).then(|| (format!("minecraft:{name}"), spawners))
             })
@@ -821,71 +540,14 @@ pub fn overworld_chunk_source_of_type(
     crate::chunk::OverworldChunkSource::new(overworld_generator_of_type(seed, world_type))
 }
 
-/// [`Resolver`] for `single_biome_surface`:
-/// identical to [`EmbeddedResolver`] except it does **not** override
-/// [`Resolver::biome_parameters`]/[`Resolver::biome_temperatures`], so it
-/// takes the trait's own empty defaults instead of the real 7594-row overworld
-/// table. [`OverworldGenerator::new`] treats an empty `biome_parameters()` as
-/// "no real biome variety supplied" and falls back to its fixed-biome path
-/// (`dynamic_biome: None`) — vanilla's `FixedBiomeSource`, already built into
-/// the engine and never before deliberately selected in production (see
-/// [`WorldType`]'s own doc). `biome_temperatures` is likewise left at the
-/// default: the fixed-biome path never consults it —
-/// [`single_biome_generator`] derives `cold_enough_to_snow` from
-/// [`EmbeddedResolver`]'s real temperature table before construction instead.
-///
-/// A newtype over [`EmbeddedResolver`], same shape as [`NetherResolver`].
-#[derive(Debug, Default)]
-struct SingleBiomeResolver(EmbeddedResolver);
-
-impl Resolver for SingleBiomeResolver {
-    fn density_function(&self, id: &str) -> Value {
-        self.0.density_function(id)
-    }
-    fn noise(&self, id: &str) -> NoiseParams {
-        self.0.noise(id)
-    }
-    // biome_parameters / biome_temperatures: intentionally not overridden —
-    // see the struct doc.
-    fn biome_document(&self, id: &str) -> Value {
-        self.0.biome_document(id)
-    }
-    fn configured_carver(&self, id: &str) -> Value {
-        self.0.configured_carver(id)
-    }
-    fn configured_feature(&self, id: &str) -> Value {
-        self.0.configured_feature(id)
-    }
-    fn placed_feature(&self, id: &str) -> Value {
-        self.0.placed_feature(id)
-    }
-    fn block_tag(&self, id: &str) -> Value {
-        self.0.block_tag(id)
-    }
-    fn structure_set_ids(&self) -> Vec<String> {
-        self.0.structure_set_ids()
-    }
-    fn structure_set(&self, id: &str) -> Value {
-        self.0.structure_set(id)
-    }
-    fn structure(&self, id: &str) -> Value {
-        self.0.structure(id)
-    }
-    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
-        self.0.structure_template(id)
-    }
-    fn template_pool(&self, id: &str) -> Value {
-        self.0.template_pool(id)
-    }
-    fn processor_list(&self, id: &str) -> Value {
-        self.0.processor_list(id)
-    }
-    fn biome_tag(&self, id: &str) -> Value {
-        self.0.biome_tag(id)
-    }
-    fn block_freeze_facts(&self) -> Value {
-        self.0.block_freeze_facts()
-    }
+/// The fixed-biome resolver is the production table with both climate documents
+/// intentionally withheld. `OverworldGenerator::new` treats the typed empty
+/// biome-parameter table as its fixed-biome path; its temperature table is not
+/// consulted after construction.
+fn single_biome_resolver() -> TableResolver<'static> {
+    embedded_resolver()
+        .without_biome_parameters()
+        .without_biome_temperatures()
 }
 
 /// `world_preset/single_biome_surface.json`'s embedded overworld
@@ -893,7 +555,7 @@ impl Resolver for SingleBiomeResolver {
 /// without customizing it (`"minecraft:plains"`).
 #[must_use]
 pub fn world_preset_single_biome_default_biome() -> String {
-    let doc = EmbeddedResolver.json("world_preset/single_biome_surface");
+    let doc = embedded_resolver().document("world_preset/single_biome_surface");
     doc["dimensions"]["minecraft:overworld"]["generator"]["biome_source"]["biome"]
         .as_str()
         .expect("world_preset/single_biome_surface.json must name a fixed biome")
@@ -902,7 +564,7 @@ pub fn world_preset_single_biome_default_biome() -> String {
 
 /// Builds the `single_biome_surface` generator:
 /// every column answers `biome`, vanilla's `FixedBiomeSource` selected
-/// deliberately rather than as a degradation — see [`SingleBiomeResolver`].
+/// deliberately rather than as a degradation — see [`single_biome_resolver`].
 ///
 /// Reuses [`OverworldGenerator`] rather than a new type: shape, surface
 /// rules, carvers, ore features and vegetation are all already per-biome data
@@ -913,7 +575,7 @@ pub fn world_preset_single_biome_default_biome() -> String {
 /// module's overworld path uses — nothing about surface selection is
 /// hardcoded to `"minecraft:plains"`.
 ///
-/// `cold_enough_to_snow` is derived from [`EmbeddedResolver`]'s real
+/// `cold_enough_to_snow` is derived from `embedded_resolver`'s real
 /// `biome_parameters/overworld_temperature` table via
 /// [`lodestone_worldgen::biome::cold_enough_to_snow`], not hardcoded, so an
 /// unusually warm or cold fixed biome still gets the right answer.
@@ -925,12 +587,12 @@ pub fn world_preset_single_biome_default_biome() -> String {
 pub fn single_biome_generator(seed: i64, biome: &str) -> OverworldGenerator {
     ACTIVE_WORLD_SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
     let temperatures =
-        lodestone_worldgen::biome::parse_temperatures(&EmbeddedResolver.biome_temperatures());
+        lodestone_worldgen::biome::parse_temperatures(&embedded_resolver().biome_temperatures());
     let cold_enough_to_snow = lodestone_worldgen::biome::cold_enough_to_snow(&temperatures, biome);
     OverworldGenerator::new(
         seed,
         settings_for(WorldType::Overworld),
-        &SingleBiomeResolver::default(),
+        &single_biome_resolver(),
         biome,
         cold_enough_to_snow,
     )
@@ -962,7 +624,7 @@ pub fn flat_level_generator_preset_settings(
     id: &str,
 ) -> lodestone_worldgen::flat::FlatLevelGeneratorSettings {
     let name = id.strip_prefix("minecraft:").unwrap_or(id);
-    let doc = EmbeddedResolver.json(&format!("flat_level_generator_preset/{name}"));
+    let doc = embedded_resolver().document(&format!("flat_level_generator_preset/{name}"));
     lodestone_worldgen::flat::FlatLevelGeneratorSettings::from_json(&doc["settings"])
 }
 
@@ -987,7 +649,7 @@ pub fn world_preset_flat_settings(
     } else {
         "world_preset/flat"
     };
-    let doc = EmbeddedResolver.json(key);
+    let doc = embedded_resolver().document(key);
     lodestone_worldgen::flat::FlatLevelGeneratorSettings::from_json(
         &doc["dimensions"]["minecraft:overworld"]["generator"]["settings"],
     )
@@ -1371,8 +1033,7 @@ pub fn debug_chunk_source() -> DebugChunkSource {
 fn nether_settings() -> &'static Value {
     static SETTINGS: OnceLock<Value> = OnceLock::new();
     SETTINGS.get_or_init(|| {
-        let raw = EmbeddedResolver.raw("noise_settings/nether");
-        serde_json::from_str(raw).expect("parsing embedded nether noise settings")
+        embedded_resolver().document("noise_settings/nether")
     })
 }
 
@@ -1386,7 +1047,7 @@ fn nether_settings() -> &'static Value {
 /// worst kind of correct.
 #[must_use]
 pub fn nether_generator(seed: i64) -> lodestone_worldgen::nether::NetherGenerator {
-    lodestone_worldgen::nether::NetherGenerator::new(seed, nether_settings(), &NetherResolver::default())
+    lodestone_worldgen::nether::NetherGenerator::new(seed, nether_settings(), &nether_resolver())
 }
 
 /// Builds the bundled Nether [`ChunkSource`](crate::ChunkSource) for `seed` — the
@@ -1400,15 +1061,14 @@ pub fn nether_chunk_source(seed: i64) -> crate::chunk::NetherChunkSource {
 fn end_settings() -> &'static Value {
     static SETTINGS: OnceLock<Value> = OnceLock::new();
     SETTINGS.get_or_init(|| {
-        let raw = EmbeddedResolver.raw("noise_settings/end");
-        serde_json::from_str(raw).expect("parsing embedded end noise settings")
+        embedded_resolver().document("noise_settings/end")
     })
 }
 
 /// Builds the bundled End generator for `seed`.
 ///
-/// **Takes the plain [`EmbeddedResolver`]**, unlike [`nether_generator`]'s
-/// [`NetherResolver`]: `EndGenerator::new` never calls `Resolver::biome_parameters`
+/// **Takes the plain `embedded_resolver`**, unlike [`nether_generator`]'s
+/// Nether table: `EndGenerator::new` never calls `Resolver::biome_parameters`
 /// at all (`EndBiomeSource` — see `lodestone_worldgen::end`'s module doc — is
 /// built from the seed alone, not from a multi-noise parameter table), so there is
 /// no method to override and nothing that could resolve to the wrong dimension's
@@ -1419,7 +1079,7 @@ fn end_settings() -> &'static Value {
 /// chunks", a question only the overworld's spawner asks.
 #[must_use]
 pub fn end_generator(seed: i64) -> lodestone_worldgen::end::EndGenerator {
-    lodestone_worldgen::end::EndGenerator::new(seed, end_settings(), &EmbeddedResolver)
+    lodestone_worldgen::end::EndGenerator::new(seed, end_settings(), &embedded_resolver())
 }
 
 /// Builds the bundled End [`ChunkSource`](crate::ChunkSource) for `seed` — the
@@ -1517,7 +1177,7 @@ mod tests {
     #[test]
     fn no_structure_is_demoted_for_unloadable_templates() {
         let registry =
-            lodestone_worldgen::structure::StructureRegistry::new(1234, &EmbeddedResolver);
+            lodestone_worldgen::structure::StructureRegistry::new(1234, &embedded_resolver());
         let template_failures: Vec<_> = registry
             .unsupported()
             .iter()
@@ -1534,11 +1194,13 @@ mod tests {
         );
 
         // A template really resolves, by name and to plausible NBT (gzip magic).
-        let bytes = EmbeddedResolver
+        let bytes = embedded_resolver()
             .structure_template("minecraft:shipwreck/with_mast")
             .expect("shipwreck/with_mast is bundled");
         assert_eq!(&bytes[..2], &[0x1f, 0x8b], "structure templates are gzipped NBT");
-        assert!(EmbeddedResolver.structure_template("minecraft:not/a/template").is_none());
+        assert!(embedded_resolver()
+            .structure_template("minecraft:not/a/template")
+            .is_none());
     }
 
     /// Coordinate sweep used to *choose* the `freeze_top_layer` fixtures rather
@@ -1709,7 +1371,7 @@ mod tests {
     /// Every production caller of [`lodestone_worldgen::density::Builder::build`]
     /// (the overworld/nether/end generators, the aquifer, the surface system,
     /// the biome climate sampler, the ore-vein programs) reads its document
-    /// from [`EmbeddedResolver`] and then `.expect(...)`s the `Result` rather
+    /// from `embedded_resolver` and then `.expect(...)`s the `Result` rather
     /// than propagating it, on the grounds that a document we compiled into
     /// the binary can only fail to parse as a shipping bug, never as
     /// attacker-supplied input. That claim was previously an assumption; this
@@ -1722,7 +1384,7 @@ mod tests {
     fn every_embedded_density_function_document_builds() {
         use lodestone_worldgen::density::Builder;
 
-        let resolver = EmbeddedResolver;
+        let resolver = embedded_resolver();
         let builder = Builder::new(0, &resolver);
         let mut checked = 0usize;
         for &(id, raw) in EMBEDDED_WORLDGEN {
@@ -1974,7 +1636,7 @@ mod tests {
 
     /// Diffs a measured `biome -> sorted, deduped reasons` map against
     /// [`KNOWN_VEGETATION_GAPS`], both directions. Standalone (no
-    /// `EmbeddedResolver` needed) specifically so
+    /// `embedded_resolver` needed) specifically so
     /// [`vegetation_gap_mismatches_fires_on_an_undeclared_gap`] can exercise
     /// it with a synthetic map — CLAUDE.md's "absence assertions need a
     /// control proving the detector fires."
@@ -2000,7 +1662,7 @@ mod tests {
         mismatches
     }
 
-    /// Measures the real gap surface once (via `EmbeddedResolver`, the same
+    /// Measures the real gap surface once (via `embedded_resolver`, the same
     /// data the bundled generator serves) and asserts it matches
     /// [`KNOWN_VEGETATION_GAPS`] exactly, in both directions. This is the
     /// The gate fails when a biome's declared `VEGETAL_DECORATION` step
@@ -2010,7 +1672,7 @@ mod tests {
     #[test]
     fn vegetation_placer_gaps_are_named_not_silent() {
         use std::collections::BTreeMap;
-        let table = lodestone_worldgen::biome::parse_table(&EmbeddedResolver.biome_parameters());
+        let table = lodestone_worldgen::biome::parse_table(&embedded_resolver().biome_parameters());
         let table = lodestone_worldgen::biome::usable_overworld_table(table);
         let mut names: Vec<String> = table.into_iter().map(|p| p.biome).collect();
         names.sort_unstable();
@@ -2023,7 +1685,7 @@ mod tests {
 
         let mut actual: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for biome in names {
-            let list = lodestone_worldgen::compose::build_biome_vegetation(&EmbeddedResolver, &biome);
+            let list = lodestone_worldgen::compose::build_biome_vegetation(&embedded_resolver(), &biome);
             let mut reasons: Vec<String> = list
                 .iter()
                 .flat_map(|(_, placed)| lodestone_worldgen::feature::vegetation::collect_unsupported(placed))
@@ -2149,7 +1811,7 @@ mod tests {
         // Guard the prediction against the data moving under it: if a future
         // 26.2+ drop changes these constants, fail here naming the field rather
         // than failing the arithmetic below with no explanation.
-        let doc = EmbeddedResolver.placed_feature("minecraft:patch_grass_plain");
+        let doc = embedded_resolver().placed_feature("minecraft:patch_grass_plain");
         let placement = doc["placement"].as_array().expect("patch_grass_plain placement array");
         let ntc = placement
             .iter()
@@ -2163,9 +1825,9 @@ mod tests {
             .expect("patch_grass_plain must still carry a count");
         assert_eq!(count["count"].as_u64(), Some(COUNT as u64));
 
-        let tags = build_veg_tags(&EmbeddedResolver);
+        let tags = build_veg_tags(&embedded_resolver());
         let placed = resolve_placed_feature_ref(
-            &EmbeddedResolver,
+            &embedded_resolver(),
             &Value::String("minecraft:patch_grass_plain".to_owned()),
         );
 
@@ -2250,7 +1912,7 @@ mod tests {
         const HEIGHT: i32 = 384;
         const SURFACE_Y: i32 = 64;
 
-        let mut doc = EmbeddedResolver.placed_feature("minecraft:patch_grass_plain");
+        let mut doc = embedded_resolver().placed_feature("minecraft:patch_grass_plain");
         let before = doc["placement"].as_array().expect("placement array").len();
         doc["placement"] = Value::Array(
             doc["placement"]
@@ -2268,8 +1930,8 @@ mod tests {
             "the control must actually remove exactly one modifier, else it measures nothing"
         );
 
-        let tags = build_veg_tags(&EmbeddedResolver);
-        let placed = resolve_placed_feature_ref(&EmbeddedResolver, &doc);
+        let tags = build_veg_tags(&embedded_resolver());
+        let placed = resolve_placed_feature_ref(&embedded_resolver(), &doc);
 
         let mut grid = VegGrid::new(MIN_Y, HEIGHT, 0, 0);
         for lz in 0..16 {
@@ -2320,7 +1982,7 @@ mod tests {
     }
 
     /// **island** gate: the composed production pipeline
-    /// (`EmbeddedResolver`'s bundled data -> real generated terrain -> the 3x3
+    /// (`embedded_resolver`'s bundled data -> real generated terrain -> the 3x3
     /// vegetal-decoration driver -> the fold back into a `GeneratedColumn`) must
     /// put real vegetation blocks into served columns.
     ///
@@ -3097,7 +2759,7 @@ mod tests {
         use lodestone_worldgen::feature::vegetation::{BlockStateProvider, ConfiguredFeature};
 
         let list = lodestone_worldgen::compose::build_biome_vegetation(
-            &EmbeddedResolver,
+            &embedded_resolver(),
             "minecraft:plains",
         );
         assert!(!list.is_empty(), "plains must have a non-empty vegetal-decoration list");
@@ -3140,7 +2802,7 @@ mod tests {
     /// only being visible through a 64-chunk sweep's aggregate count.
     #[test]
     fn embedded_veg_tags_resolve_grass_block_as_supporting_vegetation() {
-        let tags = lodestone_worldgen::feature::vegetation::build_veg_tags(&EmbeddedResolver);
+        let tags = lodestone_worldgen::feature::vegetation::build_veg_tags(&embedded_resolver());
         assert!(
             tags.supports_vegetation.contains("minecraft:grass_block"),
             "supports_vegetation must include grass_block via \
@@ -3264,7 +2926,7 @@ mod tests {
 /// jar-sourced per-block-state facts that engine runs on. Only this crate has
 /// both — the engine is version-free by construction and takes all its data
 /// through [`Resolver`], so it cannot reach `lodestone_data` itself. Putting the
-/// gate here also means it drives [`freeze_facts`] and [`EmbeddedResolver`]
+/// gate here also means it drives [`freeze_facts`] and `embedded_resolver`
 /// **directly**, i.e. the exact production data rather than a re-derivation that
 /// could quietly diverge from it. The fixtures live with the other worldgen
 /// oracle dumps in `crates/lodestone-worldgen/tests/support/`, reached with one
@@ -3317,7 +2979,7 @@ mod top_layer_parity {
     };
     use lodestone_worldgen::noise::ClimateNoise;
 
-    use super::{EmbeddedResolver, Resolver, freeze_facts};
+    use super::{Resolver, embedded_resolver, freeze_facts};
 
     struct Fixture {
         biome: String,
@@ -3470,7 +3132,7 @@ mod top_layer_parity {
     /// The production `SnowSupport`: [`freeze_facts`]'s real document plus the two
     /// real tag closures out of the embedded datapack.
     fn support() -> SnowSupport {
-        let s = top_layer::build_snow_support(&EmbeddedResolver);
+        let s = top_layer::build_snow_support(&embedded_resolver());
         assert!(
             !s.is_empty(),
             "the production block_freeze_facts document is empty, so every assertion \
@@ -3492,7 +3154,7 @@ mod top_layer_parity {
     }
 
     fn climates(biome: &str) -> HashMap<String, BiomeClimate> {
-        let document = EmbeddedResolver.biome_document(biome);
+        let document = embedded_resolver().biome_document(biome);
         let climate = top_layer::parse_biome_climate(&document)
             .unwrap_or_else(|| panic!("no ClimateSettings in the embedded {biome} document"));
         let mut map = HashMap::new();

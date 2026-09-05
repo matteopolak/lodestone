@@ -4,19 +4,18 @@
 //! # Why this exists
 //!
 //! Every embedding site that wants real terrain (not a hand-rolled test
-//! fixture) ends up writing the same ~150 lines: a `build.rs` that walks
+//! fixture) ends up writing the same table plus private resolver: a `build.rs`
+//! that walks
 //! `assets/worldgen/` into a sorted `&'static [(&str, &str)]` table keyed by
 //! path-with-extension-stripped, and a private `Resolver` impl that does
 //! `strip_prefix("minecraft:")` + `binary_search_by` + `serde_json::from_str`
 //! for every category (`density_function/`, `noise/`, `biome/`,
 //! `configured_carver/`, `configured_feature/`, `placed_feature/`,
 //! `tags/block/`, `structure_set/`, `structure/`, `tags/worldgen/biome/`,
-//! `template_pool/`, `processor_list/`). `lodestone-server`'s
-//! `EmbeddedResolver` was the first of these; a pending version-seam migration
-//! moves 26.2's actual JSON *data* out of this crate's dependents into
-//! whichever version crate ships it, and a second embedding site is exactly
-//! when hand-rolling this a second time would go unnoticed as duplication.
-//! This type is the shared half: supply a table, get a full [`Resolver`].
+//! `template_pool/`, `processor_list/`). `lodestone-server` uses this type for
+//! its live bundled 26.2 data, so a future embedding site reuses the production
+//! lookup path rather than copying it. This type is the shared half: supply a
+//! table, get a full [`Resolver`].
 //!
 //! The `build.rs` directory-scan itself still belongs to each embedding
 //! crate (it needs `OUT_DIR`, which build-time codegen shared across crates
@@ -34,14 +33,12 @@
 //!
 //! # What is NOT covered
 //!
-//! [`Resolver::block_freeze_facts`] is deliberately absent: it is a census of
+//! [`Resolver::block_freeze_facts`] is not a JSON lookup: it is a census of
 //! the game's *compiled* behaviour (collision, fluid state), sourced from
 //! `lodestone_data::{block_solidity, snow_support}`, not from a JSON asset —
 //! and this crate must stay version-free, so it cannot depend on
-//! `lodestone-data`. An embedder that wants it wraps [`TableResolver`] in a
-//! newtype and overrides just that one method, the same way
-//! `lodestone_server::worldgen_data::NetherResolver` wraps `EmbeddedResolver`
-//! to override just `biome_parameters` today.
+//! `lodestone-data`. An embedder that wants it supplies a census factory to
+//! [`TableResolver::with_block_freeze_facts`].
 
 use serde_json::Value;
 
@@ -52,17 +49,16 @@ use crate::density::{NoiseParams, Resolver};
 pub struct TableResolver<'a> {
     json: &'a [(&'a str, &'a str)],
     structure_templates: &'a [(&'a str, &'a [u8])],
-    biome_parameters_key: &'a str,
-    biome_temperatures_key: &'a str,
+    biome_parameters_key: Option<&'a str>,
+    biome_temperatures_key: Option<&'a str>,
+    block_freeze_facts: Option<fn() -> &'static Value>,
 }
 
-/// The keys [`EmbeddedResolver`](../../lodestone_server/struct.EmbeddedResolver.html)
-/// (and every other overworld embedder so far) has used for the two
-/// dimension-scoped singleton documents. A resolver for a different
-/// dimension (e.g. the Nether) overrides these via
-/// [`TableResolver::with_biome_parameters_key`] /
-/// [`TableResolver::with_biome_temperatures_key`] rather than needing a
-/// wrapper type for this one difference.
+/// The keys the bundled Overworld resolver uses for the two dimension-scoped
+/// singleton documents. A resolver for a different dimension (e.g. the
+/// Nether) overrides these via
+/// [`TableResolver::with_biome_parameters_key`] rather than needing a wrapper
+/// type for this one difference.
 const DEFAULT_BIOME_PARAMETERS_KEY: &str = "biome_parameters/overworld";
 const DEFAULT_BIOME_TEMPERATURES_KEY: &str = "biome_parameters/overworld_temperature";
 
@@ -76,8 +72,9 @@ impl<'a> TableResolver<'a> {
         Self {
             json,
             structure_templates: &[],
-            biome_parameters_key: DEFAULT_BIOME_PARAMETERS_KEY,
-            biome_temperatures_key: DEFAULT_BIOME_TEMPERATURES_KEY,
+            biome_parameters_key: Some(DEFAULT_BIOME_PARAMETERS_KEY),
+            biome_temperatures_key: Some(DEFAULT_BIOME_TEMPERATURES_KEY),
+            block_freeze_facts: None,
         }
     }
 
@@ -95,8 +92,40 @@ impl<'a> TableResolver<'a> {
     /// Default: `"biome_parameters/overworld"`.
     #[must_use]
     pub const fn with_biome_parameters_key(mut self, key: &'a str) -> Self {
-        self.biome_parameters_key = key;
+        self.biome_parameters_key = Some(key);
         self
+    }
+
+    /// Makes [`Resolver::biome_parameters`] return its typed empty default.
+    /// This selects the engine's fixed-biome path without a forwarding wrapper.
+    #[must_use]
+    pub const fn without_biome_parameters(mut self) -> Self {
+        self.biome_parameters_key = None;
+        self
+    }
+
+    /// Makes [`Resolver::biome_temperatures`] return its typed empty default.
+    #[must_use]
+    pub const fn without_biome_temperatures(mut self) -> Self {
+        self.biome_temperatures_key = None;
+        self
+    }
+
+    /// Supplies the version-specific block-state census required by
+    /// [`Resolver::block_freeze_facts`]. The table itself stays version-free:
+    /// only the embedding crate knows how to build this document.
+    #[must_use]
+    pub const fn with_block_freeze_facts(mut self, facts: fn() -> &'static Value) -> Self {
+        self.block_freeze_facts = Some(facts);
+        self
+    }
+
+    /// Parses one required document by its table key. Embedders use this for
+    /// non-`Resolver` documents such as `noise_settings/*` and `world_preset/*`.
+    /// A missing document is an embedded-data bug and panics naming the key.
+    #[must_use]
+    pub fn document(&self, key: &str) -> Value {
+        self.json_at(key)
     }
 
     /// Looks up `key` in the JSON table, panicking if absent. For the two
@@ -161,27 +190,30 @@ impl Resolver for TableResolver<'_> {
         // `crate::biome::parse_table` calls `.as_array().expect(..)` on
         // whatever this returns — `Value::Null` would panic instead of
         // taking the "no real biome variety supplied" fallback path.
-        self.try_raw(self.biome_parameters_key).map_or_else(
-            || Value::Array(Vec::new()),
-            |raw| {
-                serde_json::from_str(raw)
-                    .unwrap_or_else(|e| panic!("parsing embedded '{}': {e}", self.biome_parameters_key))
-            },
-        )
+        self.biome_parameters_key
+            .and_then(|key| self.try_raw(key))
+            .map_or_else(
+                || Value::Array(Vec::new()),
+                |raw| {
+                    serde_json::from_str(raw)
+                        .unwrap_or_else(|e| panic!("parsing embedded biome parameters: {e}"))
+                },
+            )
     }
 
     fn biome_temperatures(&self) -> Value {
         // Same reasoning as `biome_parameters`: `crate::biome::parse_temperatures`
         // calls `.as_object().expect(..)`, so the empty default must be an
         // object, not `Null`.
-        self.try_raw(self.biome_temperatures_key).map_or_else(
-            || Value::Object(serde_json::Map::new()),
-            |raw| {
-                serde_json::from_str(raw).unwrap_or_else(|e| {
-                    panic!("parsing embedded '{}': {e}", self.biome_temperatures_key)
-                })
-            },
-        )
+        self.biome_temperatures_key
+            .and_then(|key| self.try_raw(key))
+            .map_or_else(
+                || Value::Object(serde_json::Map::new()),
+                |raw| {
+                    serde_json::from_str(raw)
+                        .unwrap_or_else(|e| panic!("parsing embedded biome temperatures: {e}"))
+                },
+            )
     }
 
     fn biome_document(&self, id: &str) -> Value {
@@ -248,6 +280,11 @@ impl Resolver for TableResolver<'_> {
     fn biome_tag(&self, id: &str) -> Value {
         let name = id.strip_prefix("minecraft:").unwrap_or(id);
         self.try_json(&format!("tags/worldgen/biome/{name}"))
+    }
+
+    fn block_freeze_facts(&self) -> Value {
+        self.block_freeze_facts
+            .map_or(Value::Null, |facts| facts().clone())
     }
 }
 
