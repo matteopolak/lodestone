@@ -81,6 +81,97 @@ class SummaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, message):
                     MODULE._validate_emitted_scene(scene, "mixed", 17, 2)
 
+    def test_heavy_setup_datapack_wraps_every_setup_producer_and_is_runner_owned(self):
+        scene = self.emitted_scene()
+        scene["commands"]["setup"] = [
+            "setblock 0 64 0 minecraft:stone",
+            "summon minecraft:pig 0 65 0",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            pack = MODULE._write_heavy_setup_datapack(pathlib.Path(directory), scene)
+            self.assertTrue(pack.root.is_dir())
+            self.assertTrue(pack.function_id.startswith("lodestone_heavy:setup_"))
+            function_name = pack.function_id.split(":", 1)[1]
+            body = (
+                pack.root / "data" / "lodestone_heavy" / "function"
+                / f"{function_name}.mcfunction"
+            ).read_text(encoding="utf-8")
+            for command in scene["commands"]["setup"]:
+                self.assertIn(f"run {command}", body)
+            self.assertIn(
+                f"run return {len(scene['commands']['setup'])}",
+                body,
+            )
+            metadata = json.loads((pack.root / "pack.mcmeta").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["pack"]["max_format"], MODULE.HEAVY_DATAPACK_FORMAT)
+            pack.cleanup()
+            self.assertFalse(pack.root.exists())
+
+    def test_dense_setup_uses_one_function_call_but_requires_every_producer_success(self):
+        commands = ["kill @e[tag=lodestone_heavy_scene]"] + [
+            f"setblock {index} 64 0 minecraft:stone" for index in range(7_936)
+        ]
+        lines = MODULE._heavy_setup_function_lines(commands, "lh123456789abc")
+        self.assertEqual(
+            sum("execute store success score" in line for line in lines), 7_936
+        )
+        self.assertTrue(any(line.endswith("run return 7936") for line in lines))
+
+    def test_heavy_setup_uses_three_bounded_rcon_requests_and_checks_success_count(self):
+        scene = self.emitted_scene()
+        scene["commands"]["setup"] = ["setblock 0 64 0 minecraft:stone"]
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(MODULE, "_emit_heavy_scene", return_value=scene), mock.patch.object(
+                MODULE,
+                "run_rcon_commands",
+                side_effect=[
+                    ["Reloaded"],
+                    ["Function lodestone_heavy:setup returned 1"],
+                    ["Removed"],
+                ],
+            ) as run:
+                returned, pack = MODULE.prepare_heavy_scene(
+                    25571, pathlib.Path(directory), pathlib.Path("/tmp/emitter"),
+                    "mixed", 17, 1, "orbit",
+                )
+            self.assertIs(returned, scene)
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual(run.call_args_list[0].args[2], ["reload"])
+            self.assertEqual(run.call_args_list[1].args[2], [f"function {pack.function_id}"])
+            self.assertEqual(
+                run.call_args_list[2].args[2],
+                [f"scoreboard objectives remove {pack.objective}"],
+            )
+            pack.cleanup()
+
+    def test_heavy_setup_count_mismatch_removes_its_temporary_datapack(self):
+        scene = self.emitted_scene()
+        scene["commands"]["setup"] = ["setblock 0 64 0 minecraft:stone"]
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(MODULE, "_emit_heavy_scene", return_value=scene), mock.patch.object(
+                MODULE,
+                "run_rcon_commands",
+                side_effect=[
+                    ["Reloaded"],
+                    ["Function lodestone_heavy:setup returned 0"],
+                    ["Removed"],
+                ],
+            ):
+                with self.assertRaisesRegex(RuntimeError, "reported 0 successful producers, expected 1"):
+                    MODULE.prepare_heavy_scene(
+                        25571, pathlib.Path(directory), pathlib.Path("/tmp/emitter"),
+                        "mixed", 17, 1, "orbit",
+                    )
+            self.assertEqual(list((pathlib.Path(directory) / "datapacks").iterdir()), [])
+
+    def test_setup_deadline_refuses_to_open_a_new_rcon_request_after_expiry(self):
+        with mock.patch.object(MODULE.time, "monotonic", return_value=12.0), mock.patch.object(
+            MODULE, "RconClient"
+        ) as rcon:
+            with self.assertRaisesRegex(TimeoutError, "setup RCON deadline expired before action 0"):
+                MODULE.run_rcon_commands(25571, "setup", ["reload"], deadline=11.0)
+        rcon.assert_not_called()
+
     def test_heavy_client_command_forwards_the_emitted_scene_and_mutation_duration(self):
         command = MODULE._client_command(
             pathlib.Path("/tmp/lodestone"), "heavyweight", 25570, (2, 7, 2, 3), "closed",
