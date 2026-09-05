@@ -529,12 +529,25 @@ YAML constructs, missing entry points, duplicate entries, and non-class payloads
 rather than accidental partial plugin loads.
 
 The resulting `PaperBootstrapPlan` records the validated plugin metadata and exact entry surfaces
-but keeps plugin jars out of the server bootstrap classpath. Its `start_runtime` starts an empty-system-classpath JVM;
-`load_bootstrap` is the plan's real JVM consumer and supplies the ordered operator paths only to the
-isolated loader. It loads Paper's bootstrap class without initializing or invoking it. Plugins need
-distinct lifecycle class-loader policy, native shims, and event dispatch before any plugin entry
-point can run. The dedicated binary can retain this plan beside its explicit read-only Java adapter:
-the plan's bootstrap class loads on that adapter's one JVM worker before the adapter reports ready.
+but keeps plugin jars out of the server bootstrap classpath. Its `start_runtime` starts an empty-system-classpath JVM.
+`load_lifecycle_entries` is an injectable, JVM-independent loading seam: it requests the bootstrap
+first, then every plugin entry in sorted discovery order. Each plugin request has a fresh isolated
+loader path of shim paths, the server jar, and that plugin jar only; no plugin jar appears in another
+plugin's request. The dedicated host uses `load_lifecycle_entries_in_runtime`, which turns every
+request into one fresh isolated loader and calls `loadClass` without initialization.
+
+This is deliberately only the first classloader lifecycle step. It does not retain a loader or class
+reference, initialize the server or a plugin, construct a plugin object, invoke an entry point, or
+establish Bukkit/Paper compatibility. Native shims, loader retention, construction, enablement, and
+event dispatch need their own lifecycle policy. The unignored unit tests inject a loader to prove
+ordering and that bootstrap or plugin errors stop later requests with context. The runtime gate stays
+ignored because it needs a locally installed JDK; it uses stand-in archives only, not an operator
+Paper jar.
+
+```bash
+cargo test -p lodestone-jvm-bridge --features jvm --test paper_lifecycle \
+    lifecycle_entries_load_without_initialization -- --ignored --exact
+```
 
 The ignored local-jar gate uses a locally materialized server jar and does not download or extract
 it:
@@ -632,13 +645,13 @@ Configuration supplied to a build without `jvm` is a reported error followed by 
 To add Paper bootstrap intake to that same worker, set `LODESTONE_PAPER_JAR` and
 `LODESTONE_PAPER_PLUGIN_DIRECTORY`; `LODESTONE_PAPER_SHIM_PATH` optionally names one shim directory
 or jar. The host discovers and retains a `PaperBootstrapPlan` before starting a JVM, then loads the
-Paper bootstrap class through its shim-first isolated loader before the adapter can report ready.
-Plugin jars are still preflight inputs only: the host validates each declared main-class archive
-surface, but does **not** initialize Paper, create plugin class loaders, load or instantiate plugin
-classes, enable plugins, dispatch Paper events, or promise plugin compatibility. A malformed Paper
-configuration fails before startup and saves the world; a bootstrap load failure is terminal for a
-configured Paper run and likewise saves the world rather than quietly continuing without the
-requested operator input.
+Paper bootstrap followed by each plugin entry class through separate shim-first isolated loaders
+before the adapter can report ready. Each plugin loader sees shim paths, the server jar, and only its
+own jar. These are non-initializing class loads: the host does **not** initialize Paper, retain plugin
+class loaders, instantiate or enable plugins, dispatch Paper events, or promise plugin compatibility.
+A malformed Paper configuration fails before startup and saves the world; a lifecycle-load failure is
+terminal for a configured Paper run and likewise saves the world rather than quietly continuing
+without the requested operator input.
 
 The admin loop services at most 64 block queries per 1 ms poll, using
 `IntegratedServer::resident_block_state_id`. That accessor reaches the live primary `ChunkStore`,

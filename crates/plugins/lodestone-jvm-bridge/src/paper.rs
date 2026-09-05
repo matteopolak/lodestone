@@ -14,13 +14,10 @@ use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
 #[cfg(feature = "jvm")]
-use jni::objects::JClass;
-#[cfg(feature = "jvm")]
 use jni::Env;
 #[cfg(feature = "jvm")]
 use crate::runtime::{JvmConfig, JvmRuntime};
 
-#[cfg(feature = "jvm")]
 const BOOTSTRAP_CLASS: &str = "io.papermc.paper.PaperBootstrap";
 const BOOTSTRAP_ENTRY: &str = "io/papermc/paper/PaperBootstrap.class";
 const PAPER_MANIFEST_TITLE: &str = "Implementation-Title: Paper";
@@ -123,24 +120,12 @@ impl PaperBootstrapPlan {
         &self.plugins
     }
 
-    /// Builds the ordered classpath for the server bootstrap only.
-    ///
-    /// Plugin jars stay out of this loader until a lifecycle host gives each
-    /// plugin its own class-loader policy; discovery must not accidentally
-    /// make one plugin's classes visible to another.
-    #[cfg(feature = "jvm")]
-    fn bootstrap_loader_config(&self) -> JvmConfig {
-        self.shim_paths.iter().chain(std::iter::once(&self.paper_jar)).fold(
-            JvmConfig::new(),
-            |config, path| config.with_classpath(path),
-        )
-    }
-
     /// Starts the JVM without placing operator jars on its system classpath.
     ///
-    /// [`Self::load_bootstrap`] supplies the ordered operator paths to the
-    /// isolated loader instead. Keeping the system loader empty prevents an
-    /// accidental system-loader lookup from defeating shim-first resolution.
+    /// [`Self::load_lifecycle_entries_in_runtime`] supplies the ordered
+    /// operator paths to isolated loaders instead. Keeping the system loader
+    /// empty prevents an accidental system-loader lookup from defeating
+    /// shim-first resolution.
     #[cfg(feature = "jvm")]
     pub fn start_runtime(&self) -> Result<JvmRuntime, PaperBootstrapError> {
         JvmRuntime::start(&JvmConfig::new()).map_err(|error| {
@@ -148,22 +133,74 @@ impl PaperBootstrapPlan {
         })
     }
 
-    /// Loads, but does not initialize or invoke, Paper's bootstrap class.
+    /// Requests every validated entry class through its own isolated loader.
     ///
-    /// This is the real host-callable consumer of the validated plan. Calling
-    /// it is still not plugin enablement: the caller must install the native
-    /// surface and lifecycle policy before invoking any Paper or plugin code.
+    /// The callback is invoked first for the server bootstrap and then once
+    /// per plugin in discovery order. Each plugin request contains shims, the
+    /// server jar, and only that plugin's jar, in that order. The callback must
+    /// use a fresh isolated loader for every request; this prevents a plugin
+    /// from making its implementation classes visible to another plugin.
+    ///
+    /// The seam is JVM-independent so hosts can prove their ordering and error
+    /// policy without starting a JVM. A successful callback means only that a
+    /// class was loaded without initialization. It does not construct a plugin,
+    /// invoke an entry point, initialize Paper, or establish API compatibility.
+    pub fn load_lifecycle_entries<E>(
+        &self,
+        mut load_class: impl FnMut(&[PathBuf], &str) -> Result<(), E>,
+    ) -> Result<(), PaperBootstrapError>
+    where
+        E: fmt::Display,
+    {
+        let bootstrap_paths = self.loader_paths(None);
+        load_class(&bootstrap_paths, BOOTSTRAP_CLASS).map_err(|error| {
+            PaperBootstrapError::new(format!(
+                "could not load Paper bootstrap class {BOOTSTRAP_CLASS}: {error}"
+            ))
+        })?;
+        for plugin in &self.plugins {
+            let plugin_paths = self.loader_paths(Some(plugin.jar()));
+            load_class(&plugin_paths, plugin.main_class()).map_err(|error| {
+                PaperBootstrapError::new(format!(
+                    "could not load plugin {:?} entry class {}: {error}",
+                    plugin.name(),
+                    plugin.main_class(),
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    fn loader_paths(&self, plugin_jar: Option<&Path>) -> Vec<PathBuf> {
+        let mut paths = self.shim_paths.clone();
+        paths.push(self.paper_jar.clone());
+        if let Some(plugin_jar) = plugin_jar {
+            paths.push(plugin_jar.to_owned());
+        }
+        paths
+    }
+
+    /// Loads every lifecycle entry through fresh JVM isolated loaders.
+    ///
+    /// This is the real JVM consumer of [`Self::load_lifecycle_entries`]. It
+    /// deliberately calls `ClassLoader.loadClass`, which does not initialize
+    /// the loaded class. The returned local class references are discarded
+    /// immediately; retaining loaders, construction, enablement, and event
+    /// dispatch are later lifecycle work.
     #[cfg(feature = "jvm")]
-    pub fn load_bootstrap<'local>(
+    pub fn load_lifecycle_entries_in_runtime<'local>(
         &self,
         runtime: &JvmRuntime,
         env: &mut Env<'local>,
-    ) -> Result<JClass<'local>, PaperBootstrapError> {
-        runtime
-            .load_isolated_class(env, &self.bootstrap_loader_config(), BOOTSTRAP_CLASS)
-            .map_err(|error| PaperBootstrapError::new(format!(
-                "could not load Paper bootstrap class {BOOTSTRAP_CLASS}: {error}"
-            )))
+    ) -> Result<(), PaperBootstrapError> {
+        self.load_lifecycle_entries(|paths, binary_name| {
+            let config = paths.iter().fold(JvmConfig::new(), |config, path| {
+                config.with_classpath(path)
+            });
+            runtime
+                .load_isolated_class(env, &config, binary_name)
+                .map(|_| ())
+        })
     }
 }
 
@@ -658,8 +695,16 @@ mod tests {
     fn discovery_sorts_jars_and_accepts_each_supported_descriptor() {
         let fixture = Fixture::new();
         fixture.paper_jar();
-        fixture.plugin_jar("z-last.jar", BUKKIT_DESCRIPTOR, valid_descriptor("Zulu", "z.Main"));
-        fixture.plugin_jar("a-first.jar", PAPER_DESCRIPTOR, valid_descriptor("Alpha", "a.Main"));
+        fixture.plugin_jar(
+            "z-last.jar",
+            BUKKIT_DESCRIPTOR,
+            valid_descriptor("Zulu", "z.Main"),
+        );
+        fixture.plugin_jar(
+            "a-first.jar",
+            PAPER_DESCRIPTOR,
+            valid_descriptor("Alpha", "a.Main"),
+        );
         let plan = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
             .with_shim_path(fixture.root.join("shim"))
             .discover()
@@ -767,6 +812,77 @@ mod tests {
             .discover()
             .expect_err("missing bootstrap class must fail");
         assert!(error.to_string().contains(BOOTSTRAP_ENTRY));
+    }
+
+    #[test]
+    fn lifecycle_loader_orders_isolated_requests_and_names_plugin_failures() {
+        let fixture = Fixture::new();
+        fixture.paper_jar();
+        fixture.plugin_jar("z-last.jar", BUKKIT_DESCRIPTOR, valid_descriptor("Zulu", "z.Main"));
+        fixture.plugin_jar("a-first.jar", PAPER_DESCRIPTOR, valid_descriptor("Alpha", "a.Main"));
+        let shim = fixture.root.join("shim");
+        let plan = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
+            .with_shim_path(&shim)
+            .discover()
+            .expect("discover lifecycle fixture");
+        let mut requests = Vec::new();
+        let error = plan.load_lifecycle_entries(|paths, class| {
+            requests.push((paths.to_vec(), class.to_owned()));
+            if class == "z.Main" {
+                Err("fixture loader rejected Zulu")
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("one plugin loader failure must stop the lifecycle");
+
+        assert_eq!(requests.len(), 3, "the later plugin must not load after failure");
+        assert_eq!(requests[0].1, BOOTSTRAP_CLASS);
+        assert_eq!(requests[1].1, "a.Main");
+        assert_eq!(requests[2].1, "z.Main");
+        assert_eq!(requests[0].0, vec![shim.clone(), fixture.paper_path()]);
+        assert_eq!(
+            requests[1].0,
+            vec![
+                shim.clone(),
+                fixture.paper_path(),
+                fixture.plugins_path().join("a-first.jar"),
+            ]
+        );
+        assert_eq!(
+            requests[2].0,
+            vec![
+                shim,
+                fixture.paper_path(),
+                fixture.plugins_path().join("z-last.jar"),
+            ]
+        );
+        assert!(error.to_string().contains("plugin \"Zulu\" entry class z.Main"), "{error}");
+        assert!(error.to_string().contains("fixture loader rejected Zulu"), "{error}");
+    }
+
+    #[test]
+    fn lifecycle_loader_does_not_attempt_plugins_after_bootstrap_failure() {
+        let fixture = Fixture::new();
+        fixture.paper_jar();
+        fixture.plugin_jar(
+            "plugin.jar",
+            BUKKIT_DESCRIPTOR,
+            valid_descriptor("Alpha", "a.Main"),
+        );
+        let plan = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
+            .discover()
+            .expect("discover lifecycle fixture");
+        let mut classes = Vec::new();
+        let error = plan.load_lifecycle_entries(|_, class| {
+            classes.push(class.to_owned());
+            Err("bootstrap unavailable")
+        })
+        .expect_err("bootstrap failure must stop before plugin loading");
+
+        assert_eq!(classes, [BOOTSTRAP_CLASS]);
+        assert!(error.to_string().contains("Paper bootstrap class"), "{error}");
+        assert!(error.to_string().contains("bootstrap unavailable"), "{error}");
     }
 
     #[test]
