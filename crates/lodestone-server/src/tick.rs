@@ -224,6 +224,25 @@ pub struct PhaseStats {
     pub over_budget_count: u64,
 }
 
+/// Cumulative work observed at the chunk-owner boundaries of the live tick
+/// loop. These are counts, not timings: a profile can join them to a phase
+/// sample without treating a machine-dependent duration as an invariant.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OwnerTickStats {
+    /// Due scheduled block ticks handed to the central drain.
+    pub scheduled_block_ticks: u64,
+    /// Due scheduled fluid ticks handed to the central drain.
+    pub scheduled_fluid_ticks: u64,
+    /// Block-entity owner batches returned to the central world writer.
+    pub block_entity_batches: u64,
+    /// Visible block-entity effects contained in those batches.
+    pub block_entity_effects: u64,
+    /// Ambient entity-effect owner batches returned to the central publisher.
+    pub entity_effect_batches: u64,
+    /// Ambient entity effects contained in those batches.
+    pub entity_effects: u64,
+}
+
 /// Vanilla's own per-queue drain cap, `ServerLevel.MAX_SCHEDULED_TICKS_PER_TICK`
 /// — see `crate::scheduled_tick`'s module doc for the
 /// full citation of `blockTicks.tick(tick, 65536, ...)`/`fluidTicks.tick(tick,
@@ -863,6 +882,7 @@ pub struct TickClock {
     /// duration, so it stays cheap and load-invariant to read even after
     /// millions of ticks, unlike re-deriving it from the (bounded) record.
     phase_over_budget: [AtomicU64; TICK_PHASE_COUNT],
+    owner_stats: [AtomicU64; 6],
     /// The largest single phase duration ever recorded, and which phase.
     worst_phase: Mutex<Option<WorstPhaseWindow>>,
 }
@@ -885,6 +905,7 @@ impl TickClock {
             phase_history: std::array::from_fn(|_| Mutex::new(VecDeque::with_capacity(TICK_HISTORY_LEN))),
             phase_sample_count: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
             phase_over_budget: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
+            owner_stats: [const { AtomicU64::new(0) }; 6],
             worst_phase: Mutex::new(None),
         }
     }
@@ -945,6 +966,34 @@ impl TickClock {
         let mut worst = self.worst_phase.lock().expect("worst tick phase lock poisoned");
         if worst.is_none_or(|w| micros > w.micros) {
             *worst = Some(WorstPhaseWindow { phase, micros, tick_count: self.tick_count() });
+        }
+    }
+
+    /// Adds work performed at the tick loop's owner hand-off boundaries.
+    pub(crate) fn record_owner_work(&self, stats: OwnerTickStats) {
+        for (counter, value) in self.owner_stats.iter().zip([
+            stats.scheduled_block_ticks,
+            stats.scheduled_fluid_ticks,
+            stats.block_entity_batches,
+            stats.block_entity_effects,
+            stats.entity_effect_batches,
+            stats.entity_effects,
+        ]) {
+            counter.fetch_add(value, Ordering::Relaxed);
+        }
+    }
+
+    /// Snapshot the owner-boundary work accumulated since this clock started.
+    #[must_use]
+    pub fn owner_stats(&self) -> OwnerTickStats {
+        let read = |index: usize| self.owner_stats[index].load(Ordering::Relaxed);
+        OwnerTickStats {
+            scheduled_block_ticks: read(0),
+            scheduled_fluid_ticks: read(1),
+            block_entity_batches: read(2),
+            block_entity_effects: read(3),
+            entity_effect_batches: read(4),
+            entity_effects: read(5),
         }
     }
 
@@ -1028,6 +1077,7 @@ impl TickClock {
             mobs_and_items: self.phase_stats(TickPhase::MobsAndItems),
             weather_and_sleep: self.phase_stats(TickPhase::WeatherAndSleep),
             scheduled_and_physics: self.phase_stats(TickPhase::ScheduledAndPhysics),
+            owner_work: self.owner_stats(),
             worst_phase_window: self.worst_phase_window(),
         }
     }
@@ -1054,6 +1104,8 @@ pub struct TickStats {
     pub weather_and_sleep: PhaseStats,
     /// Snapshot of the scheduled and physics phase's percentile summary.
     pub scheduled_and_physics: PhaseStats,
+    /// Cumulative scheduled and chunk-owner work from this live tick loop.
+    pub owner_work: OwnerTickStats,
     /// Largest phase duration seen since this clock was created.
     pub worst_phase_window: Option<WorstPhaseWindow>,
 }
@@ -2206,10 +2258,16 @@ async fn run_tick_loop_with_weather_impl<W>(
         // Periodic ambient effects are a real entity simulation phase. Its
         // chunk owners return messages, and only this central publisher drains
         // them onto the connection feed; see `apply_entity_effect_batches`.
-        apply_entity_effect_batches(
-            &block_tick_out,
-            mobs.with(MobSim::take_ambient_sound_effect_batches),
-        );
+        let entity_effect_batches = mobs.with(MobSim::take_ambient_sound_effect_batches);
+        clock.record_owner_work(OwnerTickStats {
+            entity_effect_batches: entity_effect_batches.len() as u64,
+            entity_effects: entity_effect_batches
+                .iter()
+                .map(|batch| batch.effects().len() as u64)
+                .sum(),
+            ..OwnerTickStats::default()
+        });
+        apply_entity_effect_batches(&block_tick_out, entity_effect_batches);
         // Drain target-block projectile impacts here, outside
         // the `scheduled.with` region below) because `MobSim` is the only
         // thing that saw the hit; resolved *inside* it further down because a
@@ -2244,6 +2302,14 @@ async fn run_tick_loop_with_weather_impl<W>(
                 &|pos| world.is_column_resident(pos.x.div_euclid(16), pos.z.div_euclid(16)),
                 &|pos| crate::redstone::hopper_enabled(&world.block_state(pos.x, pos.y, pos.z)),
             )
+        });
+        clock.record_owner_work(OwnerTickStats {
+            block_entity_batches: furnace_effect_batches.len() as u64,
+            block_entity_effects: furnace_effect_batches
+                .iter()
+                .map(|batch| batch.effects().len() as u64)
+                .sum(),
+            ..OwnerTickStats::default()
         });
         // `BlockEntityRegistry` has no `ChunkSource` handle of its own (see its
         // module doc's "No visual sync" note), so this is where
@@ -2656,7 +2722,12 @@ async fn run_tick_loop_with_weather_impl<W>(
         // and feeding a further torch) resolves depth-first within this one
         // drain, exactly like vanilla's `LevelTicks::runCollectedTicks`
         // invoking its callback once per due entry, in `DRAIN_ORDER`.
-        for due in block_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK) {
+        let due_block_ticks = block_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK);
+        clock.record_owner_work(OwnerTickStats {
+            scheduled_block_ticks: due_block_ticks.len() as u64,
+            ..OwnerTickStats::default()
+        });
+        for due in due_block_ticks {
             let (x, y, z) = due.pos;
             // Fire, **before** the column work below and not through it. A fire
             // tick spreads two cells horizontally and four up, so it crosses
@@ -3350,7 +3421,12 @@ async fn run_tick_loop_with_weather_impl<W>(
         // out of this same pass — so a flow advances one cell per delay period
         // rather than resolving the whole pool inside one tick.
         let mut fluid_changes: Vec<(BlockPos, String)> = Vec::new();
-        for due in fluid_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK) {
+        let due_fluid_ticks = fluid_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK);
+        clock.record_owner_work(OwnerTickStats {
+            scheduled_fluid_ticks: due_fluid_ticks.len() as u64,
+            ..OwnerTickStats::default()
+        });
+        for due in due_fluid_ticks {
             let (x, y, z) = due.pos;
             let env = *fluid_env.get_or_insert_with(|| {
                 let probe = world.column(x.div_euclid(16), z.div_euclid(16));

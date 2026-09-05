@@ -142,6 +142,8 @@ mod brewing;
 pub mod chat_session;
 pub mod heavy_scene;
 mod chunk;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod chunk_owner_profile;
 mod chunk_lifecycle;
 /// Bit-packed per-section block storage for [`chunk::ChunkColumn`] — unit U8 of
 /// `docs/plans/chunk-lifecycle.md`. Private: the representation is an
@@ -628,7 +630,7 @@ pub use server::serve_connection_with_access_and_state;
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{OnlineModeConfig, serve_connection_with_online_mode};
 pub use tick::{
-    BlockTickFeed, ExplosionFeed, PhaseStats, TickClock, TickPhase, TickStats, WorstPhaseWindow,
+    BlockTickFeed, ExplosionFeed, OwnerTickStats, PhaseStats, TickClock, TickPhase, TickStats, WorstPhaseWindow,
     TICK_HISTORY_LEN,
 };
 pub use ticket::{
