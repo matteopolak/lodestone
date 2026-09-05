@@ -354,7 +354,7 @@ fn container_close_is_varint_window_id() {
 fn container_click_pickup_is_byte_exact_with_hashed_stacks() {
     let (id, bytes) = encode(&ClientAction::ContainerClick {
         window_id: 1,
-        state_id: 7,
+        state_id: lodestone_model::ContainerStateId::new(7),
         slot: 36,
         button: 0,
         click_type: lodestone_model::ContainerClickType::Pickup,
@@ -393,7 +393,7 @@ fn container_click_unknown_item_fails_loudly() {
             ConnectionState::Play,
             &ClientAction::ContainerClick {
                 window_id: 1,
-                state_id: 0,
+                state_id: lodestone_model::ContainerStateId::INITIAL,
                 slot: 0,
                 button: 0,
                 click_type: lodestone_model::ContainerClickType::Pickup,

@@ -1692,7 +1692,7 @@ impl V47Adapter {
             let items = body.items.iter().map(slot_to_item_stack).collect();
             return Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
                 window_id: i32::from(body.window_id),
-                state_id: 0,
+                state_id: lodestone_model::ContainerStateId::INITIAL,
                 items,
                 carried_item: None,
             })]);
@@ -1726,7 +1726,7 @@ impl V47Adapter {
             }
             return Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
                 window_id: i32::from(body.window_id),
-                state_id: 0,
+                state_id: lodestone_model::ContainerStateId::INITIAL,
                 slot: i32::from(body.slot),
                 item,
             })]);

@@ -103,7 +103,7 @@ impl V770Adapter {
         if packet_id == play::clientbound::CONTAINER_SET_CONTENT {
             let mut reader = Reader::new(payload);
             let window_id = reader.var_i32().map_err(dec_err)?;
-            let state_id = reader.var_i32().map_err(dec_err)?;
+            let state_id = ContainerStateId::from_wire(reader.var_i32().map_err(dec_err)?);
             let len = reader.var_i32().map_err(dec_err)?;
             let len = usize::try_from(len)
                 .map_err(|_| AdapterError::Decode(format!("invalid item count {len}")))?;
@@ -152,7 +152,7 @@ impl V770Adapter {
         if packet_id == play::clientbound::CONTAINER_SET_SLOT {
             let mut reader = Reader::new(payload);
             let window_id = reader.var_i32().map_err(dec_err)?;
-            let state_id = reader.var_i32().map_err(dec_err)?;
+            let state_id = ContainerStateId::from_wire(reader.var_i32().map_err(dec_err)?);
             let slot = i32::from(reader.i16().map_err(dec_err)?);
             let item = read_trailing_item_stack(&mut reader)?;
             return Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {

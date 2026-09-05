@@ -2,6 +2,7 @@ use uuid::Uuid;
 
 use crate::{
     common::{Difficulty, GameMode, Hand},
+    container::ContainerStateId,
     ids::ResourceKey,
     item::ItemStack,
     math::{BlockPos, Rotation, Vec3, Vec3f},
@@ -177,7 +178,7 @@ pub enum ClientAction {
         /// Open container/window id.
         window_id: i32,
         /// Server-synchronised menu state id.
-        state_id: i32,
+        state_id: ContainerStateId,
         /// Menu slot index, or the outside-slot sentinel used by the menu model.
         slot: i32,
         /// Button value whose meaning depends on `click_type`.

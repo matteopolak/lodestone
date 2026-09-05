@@ -114,7 +114,7 @@ fn container_input_ordinal(click_type: ContainerClickType) -> i32 {
 /// model's `Vec` order is used as-is.
 fn encode_container_click(
     window_id: i32,
-    state_id: i32,
+    state_id: ContainerStateId,
     slot: i32,
     button: i32,
     click_type: ContainerClickType,
@@ -123,7 +123,7 @@ fn encode_container_click(
 ) -> Result<Vec<u8>, AdapterError> {
     let mut w = Writer::default();
     w.var_i32(window_id);
-    w.var_i32(state_id);
+    w.var_i32(state_id.as_wire());
     let slot_i16 = i16::try_from(slot)
         .map_err(|_| AdapterError::Encode(format!("container click slot {slot} overflows i16")))?;
     w.i16(slot_i16);

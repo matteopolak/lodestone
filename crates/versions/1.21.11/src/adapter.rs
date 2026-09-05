@@ -3330,7 +3330,7 @@ impl VersionAdapter for V774Adapter {
                 }
                 let body = ContainerClick {
                     window_id: *window_id,
-                    state_id: *state_id,
+                    state_id: state_id.as_wire(),
                     slot: i16::try_from(*slot).map_err(|_| {
                         AdapterError::Encode(format!("container slot {slot} overflows i16"))
                     })?,

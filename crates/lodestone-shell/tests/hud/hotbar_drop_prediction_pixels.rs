@@ -88,7 +88,7 @@ fn session_with(count: u32) -> Menus {
     });
     menus.apply(&ClientEvent::ContainerContent {
         window_id: 0,
-        state_id: 3,
+        state_id: lodestone_model::ContainerStateId::new(3),
         items,
         carried_item: None,
     });

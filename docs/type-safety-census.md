@@ -13,12 +13,11 @@ numeric: public functions with state_id, block_state, effect_id, item_id, entity
 text: public String fields whose names end in url, dimension, potion, effect, state, kind, mode, key, or id
 ```
 
-The snapshot contains **99 numeric APIs** and **64 text fields**, **163 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
+The snapshot contains **98 numeric APIs** and **64 text fields**, **162 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
 
 | disposition | sites |
 |---|---:|
 | `canonical-block-state` | 22 |
-| `container-sync-state` | 1 |
 | `dimension-resource-url` | 16 |
 | `entity-network-id` | 32 |
 | `intentional-cache-index` | 6 |
@@ -34,7 +33,7 @@ The snapshot contains **99 numeric APIs** and **64 text fields**, **163 sites to
 | `recipe-item-id` | 2 |
 | `typed-discriminator` | 5 |
 
-Migration families are `canonical-block-state`, `container-sync-state`, `prediction-sequence`, `recipe-item-id`, `entity-network-id`, `inventory-menu-slot`, `potion-and-state-value`, `typed-discriminator`, and `dimension-resource-url`.
+Migration families are `canonical-block-state`, `prediction-sequence`, `recipe-item-id`, `entity-network-id`, `inventory-menu-slot`, `potion-and-state-value`, `typed-discriminator`, and `dimension-resource-url`.
 
 Intentional categories retain primitives because the representation is the interface: bytes/integers at wire boundaries, strings in storage/import formats, external identity strings, cache or ring-buffer indices, observability labels, secrets, and user-authored or format-defined text.
 
@@ -93,7 +92,6 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-shell/src/blocks.rs: pub fn demo_fluid(state_id: u32) -> Option<FluidKind> {` | `canonical-block-state` |
 | `crates/lodestone-shell/src/blocks.rs:     pub fn fluid(&self, state_id: u32) -> Option<FluidKind> {` | `canonical-block-state` |
 | `crates/lodestone-game/src/menu.rs:     pub fn item_combiner(container_size: usize, result_slot: usize, layout: SpecialLayout) -> Self {` | `inventory-menu-slot` |
-| `crates/lodestone-game/src/menu.rs:     pub fn set_state_id(&mut self, state_id: u32) {` | `container-sync-state` |
 | `crates/lodestone-game/src/click.rs: pub fn quick_craft_mask(header: i32, kind: i32) -> i32 {` | `inventory-menu-slot` |
 | `crates/lodestone-game/src/click.rs:     pub fn quick_craft_remainder(&self, painted: &[usize], kind: i32, source: &ItemStack) -> i32 {` | `inventory-menu-slot` |
 | `crates/lodestone-game/src/click.rs:     pub fn perform_drag(&mut self, kind: i32, slots: &[usize], ctx: PlayerCtx) -> ClickOutcome {` | `inventory-menu-slot` |
@@ -210,7 +208,7 @@ Intentional categories retain primitives because the representation is the inter
 
 When a migration family lands, update all rows in that family together and rerun the two census expressions. Remove rows that no longer match; add newly exposed candidates and classify them in the same commit. A primitive may move to an intentional category only when its boundary role is documented and tested.
 
-The container synchronization family needs special care because `state_id` is lexically indistinguishable from a block state in a name-only scan. Review `lodestone_game::menu::Menu`, `lodestone_game::reconcile`, and the container event/action variants as one unit.
+Container synchronization state now uses `lodestone_model::ContainerStateId`; keep packet decoding and encoding at its `from_wire`/`as_wire` boundary rather than restoring integer casts in menu consumers.
 
 ## Configuration
 

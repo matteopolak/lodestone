@@ -22,7 +22,8 @@
 //! `container_set_slot` / `container_set_content` and friends.
 
 use lodestone_model::{
-    ClientAction, ContainerClickType, ContainerSlotChange, ItemStack as ModelItemStack,
+    ClientAction, ContainerClickType, ContainerSlotChange, ContainerStateId,
+    ItemStack as ModelItemStack,
 };
 
 use crate::{
@@ -47,7 +48,7 @@ pub struct ClickIntent {
     /// Click mode.
     pub input: ContainerInput,
     /// The container state id the client believes is current.
-    pub state_id: u32,
+    pub state_id: ContainerStateId,
     /// The slots the prediction changed, as `(menu_index, new_contents)`.
     pub changed_slots: Vec<(u16, Option<ItemStack>)>,
     /// The predicted cursor contents after the click.
@@ -79,7 +80,7 @@ impl ClickIntent {
     pub fn to_action(&self, window_id: i32) -> ClientAction {
         ClientAction::ContainerClick {
             window_id,
-            state_id: self.state_id as i32,
+            state_id: self.state_id,
             slot: self.slot,
             button: self.button,
             click_type: click_type_of(self.input),
@@ -125,7 +126,7 @@ pub enum ServerUpdate {
     /// [`SetCarried`](ServerUpdate::SetCarried).
     SetSlot {
         /// The state id the server stamped this update with.
-        state_id: u32,
+        state_id: ContainerStateId,
         /// Menu slot index.
         slot: usize,
         /// New slot contents.
@@ -134,7 +135,7 @@ pub enum ServerUpdate {
     /// Replace the whole window plus the cursor (`container_set_content`).
     SetContent {
         /// The state id the server stamped this update with.
-        state_id: u32,
+        state_id: ContainerStateId,
         /// New contents for every menu slot, in order.
         items: Vec<Option<ItemStack>>,
         /// New cursor contents.
@@ -338,7 +339,7 @@ impl ClientMenu {
 
     /// Forces the state ids of both menus to the server's, so the next
     /// predicted click stamps the id the server expects.
-    fn sync_state_id(&mut self, state_id: u32) {
+    fn sync_state_id(&mut self, state_id: ContainerStateId) {
         self.predicted.set_state_id(state_id);
         self.confirmed.set_state_id(state_id);
     }

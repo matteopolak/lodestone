@@ -424,7 +424,7 @@ impl Menus {
                 carried_item,
             } => {
                 let update = ServerUpdate::SetContent {
-                    state_id: *state_id as u32,
+                    state_id: *state_id,
                     items: items.iter().map(model_item_to_game).collect(),
                     carried: model_item_to_game(carried_item),
                 };
@@ -450,7 +450,7 @@ impl Menus {
                 if let Ok(slot) = usize::try_from(*slot) {
                     if let Some(menu) = self.menu_for_mut(*window_id) {
                         menu.reconcile(ServerUpdate::SetSlot {
-                            state_id: *state_id as u32,
+                            state_id: *state_id,
                             slot,
                             item: model_item_to_game(item),
                         });
@@ -869,7 +869,7 @@ fn model_item_to_game(item: &Option<ModelItemStack>) -> Option<ItemStack> {
 mod tests {
     use super::*;
     use crate::item::ItemStack as GameItemStack;
-    use lodestone_model::ItemStack as ModelItemStack;
+    use lodestone_model::{ContainerStateId, ItemStack as ModelItemStack};
     use lodestone_model::ids::Identifier;
 
     fn id(s: &str) -> Identifier {
@@ -913,7 +913,7 @@ mod tests {
         ]);
         assert!(menus.apply(&ClientEvent::ContainerContent {
             window_id: 0,
-            state_id: 1,
+            state_id: ContainerStateId::new(1),
             items,
             carried_item: None,
         }));
@@ -964,7 +964,7 @@ mod tests {
         }));
         assert!(menus.apply(&ClientEvent::ContainerContent {
             window_id: 7,
-            state_id: 0,
+            state_id: ContainerStateId::INITIAL,
             items: vec![Some(book.clone())],
             carried_item: None,
         }));
@@ -988,7 +988,7 @@ mod tests {
         items[62] = Some(stack("minecraft:dirt", 1)); // last hotbar slot
         assert!(menus.apply(&ClientEvent::ContainerContent {
             window_id: 5,
-            state_id: 1,
+            state_id: ContainerStateId::new(1),
             items,
             carried_item: None,
         }));
@@ -1029,7 +1029,7 @@ mod tests {
         items[16] = Some(stack("minecraft:gold_ingot", 5));
         assert!(menus.apply(&ClientEvent::ContainerContent {
             window_id: 12,
-            state_id: 4,
+            state_id: ContainerStateId::new(4),
             items,
             carried_item: None,
         }));
@@ -1050,7 +1050,7 @@ mod tests {
         }));
         assert!(menus.apply(&ClientEvent::ContainerContent {
             window_id: 5,
-            state_id: 1,
+            state_id: ContainerStateId::new(1),
             items: vec![None; 45],
             carried_item: None,
         }));
@@ -1084,7 +1084,7 @@ mod tests {
             }));
             assert!(menus.apply(&ClientEvent::ContainerContent {
                 window_id: 5,
-                state_id: 1,
+                state_id: ContainerStateId::new(1),
                 items: vec![None; container_size + 36],
                 carried_item: None,
             }));
@@ -1133,7 +1133,7 @@ mod tests {
         }));
         assert!(menus.apply(&ClientEvent::ContainerContent {
             window_id: 5,
-            state_id: 1,
+            state_id: ContainerStateId::new(1),
             items: vec![None; 9 + 36], // not the real 3-slot anvil size
             carried_item: None,
         }));
@@ -1163,7 +1163,7 @@ mod tests {
         }));
         assert!(menus.apply(&ClientEvent::ContainerContent {
             window_id: 7,
-            state_id: 1,
+            state_id: ContainerStateId::new(1),
             items: vec![None; 3 + 36],
             carried_item: None,
         }));
@@ -1200,7 +1200,7 @@ mod tests {
         }));
         assert!(menus.apply(&ClientEvent::ContainerContent {
             window_id: 7,
-            state_id: 1,
+            state_id: ContainerStateId::new(1),
             items: vec![None; 9 + 36], // not the real 3-slot merchant size
             carried_item: None,
         }));
@@ -1223,14 +1223,14 @@ mod tests {
         });
         menus.apply(&ClientEvent::ContainerContent {
             window_id: 5,
-            state_id: 1,
+            state_id: ContainerStateId::new(1),
             items: vec![None; 63],
             carried_item: None,
         });
         // A slot in the open container.
         assert!(menus.apply(&ClientEvent::ContainerSlot {
             window_id: 5,
-            state_id: 2,
+            state_id: ContainerStateId::new(2),
             slot: 3,
             item: Some(stack("minecraft:emerald", 2)),
         }));
@@ -1241,7 +1241,7 @@ mod tests {
         // A slot in the player inventory (window 0) while the container is open.
         assert!(menus.apply(&ClientEvent::ContainerSlot {
             window_id: 0,
-            state_id: 1,
+            state_id: ContainerStateId::new(1),
             slot: 36,
             item: Some(stack("minecraft:apple", 1)),
         }));
@@ -1261,7 +1261,7 @@ mod tests {
         });
         menus.apply(&ClientEvent::ContainerContent {
             window_id: 5,
-            state_id: 1,
+            state_id: ContainerStateId::new(1),
             items: vec![None; 63],
             carried_item: None,
         });
@@ -1294,7 +1294,7 @@ mod tests {
         });
         menus.apply(&ClientEvent::ContainerContent {
             window_id: 5,
-            state_id: 1,
+            state_id: ContainerStateId::new(1),
             items: vec![None; 63],
             carried_item: None,
         });
@@ -1315,7 +1315,7 @@ mod tests {
         });
         menus.apply(&ClientEvent::ContainerContent {
             window_id: 5,
-            state_id: 1,
+            state_id: ContainerStateId::new(1),
             items: vec![None; 39], // furnace: 3 + 36
             carried_item: None,
         });

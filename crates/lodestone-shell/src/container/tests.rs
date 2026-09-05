@@ -4124,7 +4124,7 @@ fn merchant_menu_via_real_path() -> Menu {
     }));
     assert!(menus.apply(&lodestone_model::ClientEvent::ContainerContent {
         window_id: 9,
-        state_id: 1,
+        state_id: lodestone_model::ContainerStateId::new(1),
         items: vec![None; 3 + 36],
         carried_item: None,
     }));

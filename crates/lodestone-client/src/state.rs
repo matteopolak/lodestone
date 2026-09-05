@@ -1516,7 +1516,7 @@ mod tests {
         });
         state.apply(&ClientEvent::ContainerContent {
             window_id: 0,
-            state_id: 7,
+            state_id: lodestone_model::ContainerStateId::new(7),
             items,
             carried_item: None,
         });
@@ -1536,7 +1536,7 @@ mod tests {
         });
         state.apply(&ClientEvent::ContainerContent {
             window_id: 5,
-            state_id: 7,
+            state_id: lodestone_model::ContainerStateId::new(7),
             items,
             carried_item: None,
         });
@@ -1592,7 +1592,11 @@ mod tests {
             Some(5),
             "the allowed prediction moved the stack onto the cursor"
         );
-        assert_eq!(menu.state_id(), 8, "the allowed predictor advanced its state");
+        assert_eq!(
+            menu.state_id(),
+            lodestone_model::ContainerStateId::new(8),
+            "the allowed predictor advanced its state"
+        );
         assert_eq!(
             state.ecs.read().resource::<lodestone_ecs::ActionVetoes>().stats(),
             lodestone_ecs::VetoStats {

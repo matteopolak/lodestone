@@ -65,7 +65,7 @@ fn container_set_slot_decodes_a_plain_stack() {
             }),
         ] => {
             assert_eq!(*window_id, 1);
-            assert_eq!(*state_id, 5);
+            assert_eq!(*state_id, lodestone_model::ContainerStateId::new(5));
             assert_eq!(*slot, 36);
             assert_eq!(
                 *item,
@@ -225,7 +225,7 @@ fn container_set_content_decodes_items_and_carried() {
             }),
         ] => {
             assert_eq!(*window_id, 1);
-            assert_eq!(*state_id, 2);
+            assert_eq!(*state_id, lodestone_model::ContainerStateId::new(2));
             assert_eq!(items.len(), 2);
             assert_eq!(items[0].as_ref().map(|s| s.count), Some(64));
             assert_eq!(items[1], None);

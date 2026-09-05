@@ -563,7 +563,7 @@ async fn real_client_opens_a_placed_furnace_and_loads_it_via_container_click() {
             handle
                 .send_action(ClientAction::ContainerClick {
                     window_id: opened.window_id,
-                    state_id: 1,
+                    state_id: lodestone_model::ContainerStateId::new(1),
                     slot,
                     button: 0,
                     click_type: ContainerClickType::Pickup,

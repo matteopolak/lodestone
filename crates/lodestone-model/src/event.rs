@@ -1,6 +1,7 @@
 use uuid::Uuid;
 
 use crate::{
+    container::ContainerStateId,
     command_tree::{CommandSuggestionEntry, CommandTree},
     common::{Difficulty, GameMode},
     ids::{DimensionId, Identifier, ResourceKey},
@@ -2351,7 +2352,7 @@ pub enum ClientEvent {
         /// Window/container id.
         window_id: i32,
         /// Container synchronization state id.
-        state_id: i32,
+        state_id: ContainerStateId,
         /// Slot contents in container order.
         items: Vec<Option<ItemStack>>,
         /// Item carried by the cursor.
@@ -2362,7 +2363,7 @@ pub enum ClientEvent {
         /// Window/container id.
         window_id: i32,
         /// Container synchronization state id.
-        state_id: i32,
+        state_id: ContainerStateId,
         /// Slot index.
         slot: i32,
         /// New slot contents.

@@ -1170,7 +1170,7 @@ mod wasm_menu_click_tests {
             }
             Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
                 window_id: 0,
-                state_id: 7,
+                state_id: lodestone_model::ContainerStateId::new(7),
                 items,
                 carried_item: (packet_id == SEED_CURSOR_PACKET).then(|| {
                     ItemStack::new(

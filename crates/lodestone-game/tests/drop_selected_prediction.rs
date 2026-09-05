@@ -108,7 +108,7 @@ fn session_with_hotbar(count: u32, neighbour: Option<u32>) -> Menus {
     }
     menus.apply(&ClientEvent::ContainerContent {
         window_id: 0,
-        state_id: 3,
+        state_id: lodestone_model::ContainerStateId::new(3),
         items,
         carried_item: None,
     });
@@ -287,7 +287,7 @@ fn drop_reaches_the_inventory_owner_while_a_container_is_open() {
     items[CHEST_SIZE + 28] = Some(wire("minecraft:dirt", 2));
     menus.apply(&ClientEvent::ContainerContent {
         window_id: 9,
-        state_id: 4,
+        state_id: lodestone_model::ContainerStateId::new(4),
         items,
         carried_item: None,
     });
@@ -333,7 +333,7 @@ fn drop_reaches_the_inventory_owner_while_a_container_is_open() {
 fn drop_moves_both_the_prediction_and_the_confirmation() {
     let mut menu = ClientMenu::new(Menu::player());
     menu.reconcile(lodestone_game::reconcile::ServerUpdate::SetSlot {
-        state_id: 3,
+        state_id: lodestone_model::ContainerStateId::new(3),
         slot: MENU_INDEX_HOTBAR_0,
         item: Some(game("minecraft:cobblestone", 5)),
     });
@@ -367,7 +367,7 @@ fn drop_moves_both_the_prediction_and_the_confirmation() {
 fn a_container_click_moves_only_the_prediction() {
     let mut menu = ClientMenu::new(Menu::player());
     menu.reconcile(lodestone_game::reconcile::ServerUpdate::SetSlot {
-        state_id: 3,
+        state_id: lodestone_model::ContainerStateId::new(3),
         slot: MENU_INDEX_HOTBAR_0,
         item: Some(game("minecraft:cobblestone", 5)),
     });

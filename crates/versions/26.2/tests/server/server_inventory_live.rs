@@ -155,7 +155,7 @@ async fn real_client_hotbar_select_and_container_click_reach_the_server_model() 
         handle
             .send_action(ClientAction::ContainerClick {
                 window_id: 0,
-                state_id: 1,
+                state_id: lodestone_model::ContainerStateId::new(1),
                 slot,
                 button: 0,
                 click_type: ContainerClickType::Pickup,

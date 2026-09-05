@@ -5582,7 +5582,7 @@ fn lectern_book_view_reads_slot_zero_and_container_page_data() {
         });
         menus.0.apply(&lodestone_model::ClientEvent::ContainerContent {
             window_id: 12,
-            state_id: 4,
+            state_id: lodestone_model::ContainerStateId::new(4),
             items: vec![Some(book)],
             carried_item: None,
         });
@@ -6166,7 +6166,7 @@ fn a_disagreeing_server_set_slot_overwrites_the_predicted_equip() {
         if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
             menus.0.apply(&lodestone_model::ClientEvent::ContainerSlot {
                 window_id: 0,
-                state_id: 1,
+                state_id: lodestone_model::ContainerStateId::new(1),
                 slot: 5,
                 item: None,
             });
@@ -8348,7 +8348,7 @@ fn closing_a_server_menu_clears_it_locally_without_waiting_for_the_server() {
             // actually promotes `pending` to `opened`.
             menus.0.apply(&ClientEvent::ContainerContent {
                 window_id: 5,
-                state_id: 1,
+                state_id: lodestone_model::ContainerStateId::new(1),
                 items: vec![None; 46],
                 carried_item: None,
             });

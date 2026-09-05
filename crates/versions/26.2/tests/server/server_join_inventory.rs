@@ -197,7 +197,14 @@ async fn join<T: Transport>(
 /// independent transcriptions agreeing rather than a self-round-trip. It also proves
 /// the packet our server emits is one our own client accepts with zero trailing
 /// bytes, which a hand reader would not.
-fn decode_content(payload: &[u8]) -> (i32, i32, Vec<Option<ItemStack>>, Option<ItemStack>) {
+fn decode_content(
+    payload: &[u8],
+) -> (
+    i32,
+    lodestone_model::ContainerStateId,
+    Vec<Option<ItemStack>>,
+    Option<ItemStack>,
+) {
     let directives = V770Adapter::new()
         .handle_packet(
             &mut World::new(),
@@ -302,7 +309,8 @@ async fn a_rejoining_players_saved_inventory_arrives_as_a_window_zero_snapshot()
          stack to the inventory or the floor, so nothing survives a disconnect held"
     );
     assert_eq!(
-        state, FIRST_STATE_ID,
+        state,
+        lodestone_model::ContainerStateId::from_wire(FIRST_STATE_ID),
         "sendInitialData passes incrementStateId(), which is (0 + 1) & 32767 — the \
          first content packet a real client sees carries 1, never 0"
     );

@@ -1062,13 +1062,13 @@ fn client_event_carriers_cover_play_state_gameplay_packets_without_protocol_ids(
         },
         ClientEvent::ContainerContent {
             window_id: 1,
-            state_id: 9,
+            state_id: ContainerStateId::new(9),
             items: vec![Some(item.clone()), None],
             carried_item: Some(item.clone()),
         },
         ClientEvent::ContainerSlot {
             window_id: 1,
-            state_id: 10,
+            state_id: ContainerStateId::new(10),
             slot: 5,
             item: Some(item.clone()),
         },
@@ -1234,7 +1234,7 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
         },
         ClientAction::ContainerClick {
             window_id: 1,
-            state_id: 9,
+            state_id: ContainerStateId::new(9),
             slot: 5,
             button: 0,
             click_type: ContainerClickType::Pickup,

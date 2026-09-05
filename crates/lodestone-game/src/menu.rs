@@ -32,7 +32,7 @@ use crate::{
     item::ItemStack,
     recipe::CraftingGrid,
 };
-use lodestone_model::Identifier;
+use lodestone_model::{ContainerStateId, Identifier};
 
 /// Which menu layout a [`Menu`] uses, selecting the quick-move regions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,7 +236,7 @@ pub struct Menu {
     /// See [`SpecialLayout`].
     special_layout: Option<SpecialLayout>,
     /// Server-synchronised state id; bumped on every predicted mutation.
-    state_id: u32,
+    state_id: ContainerStateId,
     /// Drag (quick-craft) accumulator state; see [`crate::click`].
     quick_craft_status: i32,
     quick_craft_type: QuickCraftType,
@@ -296,7 +296,7 @@ impl Menu {
                 height: 2,
             }),
             special_layout: None,
-            state_id: 0,
+            state_id: ContainerStateId::INITIAL,
             quick_craft_status: 0,
             quick_craft_type: QuickCraftType::Even,
             quick_craft_slots: Vec::new(),
@@ -349,7 +349,7 @@ impl Menu {
                 height,
             }),
             special_layout: None,
-            state_id: 0,
+            state_id: ContainerStateId::INITIAL,
             quick_craft_status: 0,
             quick_craft_type: QuickCraftType::Even,
             quick_craft_slots: Vec::new(),
@@ -382,7 +382,7 @@ impl Menu {
             player_container: 1,
             craft: None,
             special_layout: None,
-            state_id: 0,
+            state_id: ContainerStateId::INITIAL,
             quick_craft_status: 0,
             quick_craft_type: QuickCraftType::Even,
             quick_craft_slots: Vec::new(),
@@ -746,19 +746,19 @@ impl Menu {
 
     /// Returns the current state id.
     #[must_use]
-    pub fn state_id(&self) -> u32 {
+    pub fn state_id(&self) -> ContainerStateId {
         self.state_id
     }
 
     /// Bumps the state id, mirroring the client incrementing its container
     /// state before sending a click.
-    pub fn bump_state(&mut self) -> u32 {
-        self.state_id = self.state_id.wrapping_add(1);
+    pub fn bump_state(&mut self) -> ContainerStateId {
+        self.state_id = self.state_id.next();
         self.state_id
     }
 
     /// Sets the state id directly (used to align with a server-sent id).
-    pub fn set_state_id(&mut self, state_id: u32) {
+    pub fn set_state_id(&mut self, state_id: ContainerStateId) {
         self.state_id = state_id;
     }
 

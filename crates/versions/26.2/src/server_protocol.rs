@@ -7746,7 +7746,7 @@ mod inventory_decode_tests {
         let proto = V770ServerProtocol;
         let action = ClientAction::ContainerClick {
             window_id: 0,
-            state_id: 7,
+            state_id: lodestone_model::ContainerStateId::new(7),
             slot: 36,
             button: 0,
             click_type: ContainerClickType::Pickup,
@@ -7785,7 +7785,7 @@ mod inventory_decode_tests {
         let proto = V770ServerProtocol;
         let action = ClientAction::ContainerClick {
             window_id: 0,
-            state_id: 12,
+            state_id: lodestone_model::ContainerStateId::new(12),
             slot: 9,
             button: 0,
             click_type: ContainerClickType::Swap,

@@ -242,7 +242,7 @@ fn actions_absent_from_1_12_fail_loudly() {
         ClientAction::SetPlayerInput(PlayerInput::EMPTY),
         ClientAction::ContainerClick {
             window_id: 0,
-            state_id: 0,
+            state_id: lodestone_model::ContainerStateId::INITIAL,
             slot: 0,
             button: 0,
             click_type: ContainerClickType::Pickup,

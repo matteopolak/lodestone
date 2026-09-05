@@ -84,7 +84,7 @@ fn open_test_stonecutter(
     ));
     ingest(ClientEvent::ContainerContent {
         window_id: WINDOW_ID,
-        state_id: 1,
+        state_id: lodestone_model::ContainerStateId::new(1),
         items,
         carried_item: None,
     });
@@ -4101,7 +4101,7 @@ fn server_initiated_container_close_returns_to_gameplay_not_the_player_inventory
         &app,
         ClientEvent::ContainerContent {
             window_id: 5,
-            state_id: 1,
+            state_id: lodestone_model::ContainerStateId::new(1),
             items: vec![None; 63],
             carried_item: None,
         },
