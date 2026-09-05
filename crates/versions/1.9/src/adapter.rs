@@ -6,7 +6,7 @@ use std::sync::{Arc, LockResult, Mutex, MutexGuard, PoisonError};
 use lodestone_core::{Ctx, Decode, Encode, ProtocolRange, Reader, Writer};
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::block_states;
-use lodestone_data::mob_effects::mob_effect_name;
+use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
@@ -2492,22 +2492,32 @@ impl V340Adapter {
         })]);
     }
 
+    /// Converts this era's signed, one-based wire id to the shared zero-based
+    /// built-in registry id. The conversion is kept at packet ingress so an
+    /// unknown or extension value cannot index the canonical table.
+    fn legacy_mob_effect_id(wire_id: i32) -> Result<MobEffectId, AdapterError> {
+        let Some(id) = wire_id
+            .checked_sub(1)
+            .and_then(MobEffectId::from_registry_id)
+        else {
+            return Err(AdapterError::Decode(format!(
+                "unknown legacy effect id {wire_id}"
+            )));
+        };
+        Ok(id)
+    }
+
+    /// Resolves a validated legacy effect id to its canonical event key.
+    fn legacy_mob_effect_key(effect_id: MobEffectId) -> Result<ResourceKey, AdapterError> {
+        let name = mob_effect_name_for(effect_id);
+        name.parse()
+            .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))
+    }
+
     fn play_entity_effect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         let body: EntityEffect = self.decode_body(payload)?;
-        // 1.12.2's legacy effect id is 1-based; the shared
-        // `lodestone-data` registry table is the 0-based modern
-        // `minecraft:mob_effect` network id, and the two id spaces have
-        // been stable in the same relative order since Minecraft
-        // Beta 1.8 — verified entry-for-entry against
-        // `vendor/minecraft-data`'s `data/pc/1.12/effects.json` (ids
-        // `1..=27`) against `generated/mob_effects.rs`'s `MOB_EFFECT_NAMES`
-        // (indices `0..=26`).
-        let name = mob_effect_name(i32::from(body.effect_id) - 1).ok_or_else(|| {
-            AdapterError::Decode(format!("unknown legacy effect id {}", body.effect_id))
-        })?;
-        let effect: ResourceKey = name
-            .parse()
-            .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
+        let effect_id = Self::legacy_mob_effect_id(i32::from(body.effect_id))?;
+        let effect = Self::legacy_mob_effect_key(effect_id)?;
         return Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
             entity_id: body.entity_id,
             effect,
@@ -2524,12 +2534,8 @@ impl V340Adapter {
 
     fn play_remove_entity_effect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         let body: RemoveEntityEffect = self.decode_body(payload)?;
-        let name = mob_effect_name(i32::from(body.effect_id) - 1).ok_or_else(|| {
-            AdapterError::Decode(format!("unknown legacy effect id {}", body.effect_id))
-        })?;
-        let effect: ResourceKey = name
-            .parse()
-            .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
+        let effect_id = Self::legacy_mob_effect_id(i32::from(body.effect_id))?;
+        let effect = Self::legacy_mob_effect_key(effect_id)?;
         return Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
             entity_id: body.entity_id,
             effect,
@@ -3468,6 +3474,90 @@ mod movement_tests {
                 .map(|(id, _)| id),
             Some(play::serverbound::POSITION)
         );
+    }
+}
+
+#[cfg(test)]
+mod mob_effect_tests {
+    use super::*;
+    use lodestone_world::World;
+
+    fn encoded_update(adapter: &V340Adapter, wire_id: i8) -> Vec<u8> {
+        adapter
+            .encode_body(&EntityEffect {
+                entity_id: 42,
+                effect_id: wire_id,
+                amplifier: 0,
+                duration: 40,
+                flags: 0,
+            })
+            .expect("entity effect encodes")
+    }
+
+    fn encoded_remove(adapter: &V340Adapter, wire_id: i8) -> Vec<u8> {
+        adapter
+            .encode_body(&RemoveEntityEffect {
+                entity_id: 42,
+                effect_id: wire_id,
+            })
+            .expect("remove entity effect encodes")
+    }
+
+    #[test]
+    fn packet_ingress_resolves_one_based_speed_and_rejects_unknown_signed_ids() {
+        for &protocol in PROTOCOLS {
+            let adapter = V340Adapter::for_protocol(protocol);
+            let mut world = World::new();
+            let applied = adapter
+                .play_entity_effect(&mut world, &encoded_update(&adapter, 1))
+                .expect("known legacy effect decodes");
+            let [Directive::Emit(ClientEvent::MobEffectApplied { effect, .. })] = applied.as_slice()
+            else {
+                panic!("known effect did not emit one application event: {applied:?}");
+            };
+            assert_eq!(effect.path(), "speed", "protocol {protocol}");
+
+            let removed = adapter
+                .play_remove_entity_effect(&mut world, &encoded_remove(&adapter, 1))
+                .expect("known legacy effect removal decodes");
+            let [Directive::Emit(ClientEvent::MobEffectRemoved { effect })] = removed.as_slice()
+            else {
+                panic!("known effect did not emit one removal event: {removed:?}");
+            };
+            assert_eq!(effect.path(), "speed", "protocol {protocol}");
+
+            for wire_id in [
+                i8::MIN,
+                0,
+                (lodestone_data::mob_effects::MOB_EFFECT_COUNT + 1) as i8,
+            ] {
+                let mut world = World::new();
+                let error = adapter
+                    .play_entity_effect(&mut world, &encoded_update(&adapter, wire_id))
+                    .expect_err("unknown update effect must fail closed");
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("unknown legacy effect id {wire_id}")),
+                    "protocol {protocol}, update id {wire_id}: {error}"
+                );
+
+                let error = adapter
+                    .play_remove_entity_effect(&mut world, &encoded_remove(&adapter, wire_id))
+                    .expect_err("unknown removal effect must fail closed");
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("unknown legacy effect id {wire_id}")),
+                    "protocol {protocol}, remove id {wire_id}: {error}"
+                );
+            }
+
+            assert!(
+                V340Adapter::legacy_mob_effect_id(i32::MIN).is_err(),
+                "checked subtraction must keep an extreme wire value from overflowing"
+            );
+        }
     }
 }
 

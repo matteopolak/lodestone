@@ -7,7 +7,7 @@ use lodestone_canonical::canonical::{self, CanonicalBlockState};
 use lodestone_core::{Ctx, Decode, Encode, Reader};
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::block_states;
-use lodestone_data::mob_effects::mob_effect_name;
+use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockPos, BlockStateRef, ChatKind,
     ChatMode, ChunkPos, ClientAction, ClientActionKind, ClientEvent, ClientSettings, ConnectionState,
@@ -345,19 +345,24 @@ fn equipment_slot(ordinal: i16) -> Result<EquipmentSlot, AdapterError> {
     }
 }
 
-/// Resolves this era's mob-effect id to its canonical key.
-///
-/// The ids here are **one-based**: this era's own effect list starts speed at
-/// 1, while the canonical registry table this resolves against is the modern
-/// zero-based network id. The offset is a real conversion rather than an
-/// off-by-one, and this module's tests pin both endpoints by name so a table
-/// shift on either side fails.
-fn effect_key(effect_id: i8) -> Result<ResourceKey, AdapterError> {
-    let name = mob_effect_name(i32::from(effect_id) - 1).ok_or_else(|| {
-        AdapterError::Decode(format!(
-            "protocol 5 mob effect id {effect_id} has no canonical key"
-        ))
-    })?;
+/// Converts this era's signed, one-based wire id to the shared zero-based
+/// built-in registry id. The conversion is kept at packet ingress so an
+/// unknown or extension value cannot index the canonical table.
+fn legacy_mob_effect_id(wire_id: i32) -> Result<MobEffectId, AdapterError> {
+    let Some(id) = wire_id
+        .checked_sub(1)
+        .and_then(MobEffectId::from_registry_id)
+    else {
+        return Err(AdapterError::Decode(format!(
+            "unknown legacy effect id {wire_id}"
+        )));
+    };
+    Ok(id)
+}
+
+/// Resolves a validated legacy effect id to its canonical key.
+fn effect_key(effect_id: MobEffectId) -> Result<ResourceKey, AdapterError> {
+    let name = mob_effect_name_for(effect_id);
     name.parse()
         .map_err(|_| AdapterError::Decode(format!("mob effect name {name} is not a key")))
 }
@@ -1441,9 +1446,10 @@ impl V5Adapter {
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
         let body: EntityEffect = decode_body_exact(payload)?;
+        let effect_id = legacy_mob_effect_id(i32::from(body.effect_id))?;
         Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
             entity_id: body.entity_id,
-            effect: effect_key(body.effect_id)?,
+            effect: effect_key(effect_id)?,
             amplifier: i32::from(body.amplifier),
             duration_ticks: i32::from(body.duration),
             // None of these four flags is on the wire in this era: even the
@@ -1462,9 +1468,10 @@ impl V5Adapter {
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
         let body: RemoveEntityEffect = decode_body_exact(payload)?;
+        let effect_id = legacy_mob_effect_id(i32::from(body.effect_id))?;
         Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
             entity_id: body.entity_id,
-            effect: effect_key(body.effect_id)?,
+            effect: effect_key(effect_id)?,
         })])
     }
 
@@ -2618,17 +2625,89 @@ impl VersionAdapter for V5Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_world::World;
 
     /// This era's own effect list starts speed at 1 while the canonical table
     /// starts it at 0. Both endpoints are named here rather than one being
     /// derived from the other, so a table shift on either side fails.
     #[test]
     fn effect_ids_are_one_based_against_the_zero_based_canonical_table() {
-        assert_eq!(effect_key(1).unwrap().to_string(), "minecraft:speed");
-        assert_eq!(effect_key(23).unwrap().to_string(), "minecraft:saturation");
+        let speed = legacy_mob_effect_id(1).expect("speed's legacy id validates");
+        assert_eq!(effect_key(speed).unwrap().to_string(), "minecraft:speed");
+        let saturation = legacy_mob_effect_id(23).expect("saturation's legacy id validates");
+        assert_eq!(effect_key(saturation).unwrap().to_string(), "minecraft:saturation");
         // Zero is below this era's own first id, so it must not silently
         // resolve to the canonical table's first entry.
-        assert!(effect_key(0).is_err());
+        assert!(legacy_mob_effect_id(0).is_err());
+    }
+
+    fn encoded_update(wire_id: i8) -> Vec<u8> {
+        encode_body(&EntityEffect {
+            entity_id: 42,
+            effect_id: wire_id,
+            amplifier: 0,
+            duration: 40,
+        })
+        .expect("entity effect encodes")
+    }
+
+    fn encoded_remove(wire_id: i8) -> Vec<u8> {
+        encode_body(&RemoveEntityEffect {
+            entity_id: 42,
+            effect_id: wire_id,
+        })
+        .expect("remove entity effect encodes")
+    }
+
+    #[test]
+    fn packet_ingress_resolves_one_based_speed_and_rejects_unknown_signed_ids() {
+        let adapter = V5Adapter::new();
+        let mut world = World::new();
+        let applied = adapter
+            .handle_play_entity_effect(&mut world, &encoded_update(1))
+            .expect("known legacy effect decodes");
+        let [Directive::Emit(ClientEvent::MobEffectApplied { effect, .. })] = applied.as_slice()
+        else {
+            panic!("known effect did not emit one application event: {applied:?}");
+        };
+        assert_eq!(effect.path(), "speed");
+
+        let removed = adapter
+            .handle_play_remove_entity_effect(&mut world, &encoded_remove(1))
+            .expect("known legacy effect removal decodes");
+        let [Directive::Emit(ClientEvent::MobEffectRemoved { effect })] = removed.as_slice()
+        else {
+            panic!("known effect did not emit one removal event: {removed:?}");
+        };
+        assert_eq!(effect.path(), "speed");
+
+        for wire_id in [i8::MIN, 0, (lodestone_data::mob_effects::MOB_EFFECT_COUNT + 1) as i8] {
+            let mut world = World::new();
+            let error = adapter
+                .handle_play_entity_effect(&mut world, &encoded_update(wire_id))
+                .expect_err("unknown update effect must fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("unknown legacy effect id {wire_id}")),
+                "update id {wire_id}: {error}"
+            );
+
+            let error = adapter
+                .handle_play_remove_entity_effect(&mut world, &encoded_remove(wire_id))
+                .expect_err("unknown removal effect must fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("unknown legacy effect id {wire_id}")),
+                "remove id {wire_id}: {error}"
+            );
+        }
+
+        assert!(
+            legacy_mob_effect_id(i32::MIN).is_err(),
+            "checked subtraction must keep an extreme wire value from overflowing"
+        );
     }
 
     /// Reading an object id through the mob table would name a real, wrong
