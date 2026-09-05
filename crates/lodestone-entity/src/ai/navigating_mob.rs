@@ -25,6 +25,7 @@
 //! goal-driven mob actually invokes A\*, reaches its target, and detours an
 //! unjumpable fence instead of walking through it.
 
+use lodestone_data::item::Item;
 use lodestone_model::{BlockPos, Vec3};
 
 use super::goal::GoalSelector;
@@ -34,6 +35,29 @@ use crate::pathfinding::{
     Aabb, BlockCues, MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathType,
     PathWorld,
 };
+
+/// An item accepted by [`NavigatingMob::set_main_hand_item`].
+///
+/// Spawn equipment is a validated generated [`Item`]; item names acquired
+/// dynamically after spawn remain strings. The AI stores only the bare path
+/// because its goal predicates intentionally compare paths rather than taking
+/// ownership of a registry identity.
+pub trait MainHandItem {
+    /// Converts the item to the bare path consumed by AI goal predicates.
+    fn into_main_hand_path(self) -> String;
+}
+
+impl MainHandItem for Item {
+    fn into_main_hand_path(self) -> String {
+        self.path().to_owned()
+    }
+}
+
+impl MainHandItem for String {
+    fn into_main_hand_path(self) -> String {
+        self
+    }
+}
 
 /// Vanilla `Animal::setInLove`'s love-mode duration, in ticks
 /// (`this.inLove = 600;`).
@@ -1017,13 +1041,17 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
-    /// Host injection point: the bare item id this mob spawned holding in its
-    /// main hand (e.g. `"trident"`), or `None` for empty-handed. Set once at
-    /// spawn from [`crate::spawn_equipment::populate_default_equipment_slots`]'s
-    /// `main_hand` field — the same "species attribute, not per-tick
-    /// perception" shape as [`set_follow_range`](Self::set_follow_range).
-    pub fn set_main_hand_item(&mut self, item: Option<String>) -> &mut Self {
-        self.main_hand = item;
+    /// Host injection point: the item this mob spawned holding in its main
+    /// hand, or `None` for empty-handed. A generated [`Item`] reaches this
+    /// boundary directly; a `String` remains available for dynamic item names
+    /// obtained after spawn. Both become the AI's intentionally bare path,
+    /// because its goal predicates compare item paths rather than registry
+    /// identities.
+    pub fn set_main_hand_item<T: MainHandItem>(
+        &mut self,
+        item: Option<T>,
+    ) -> &mut Self {
+        self.main_hand = item.map(MainHandItem::into_main_hand_path);
         self
     }
 
@@ -3485,6 +3513,23 @@ mod tests {
 
     fn perception_mob<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
         NavigatingMob::new(world, MobShape::land(0.6, 1.95), at, 0.25, 400, 0)
+    }
+
+    /// Spawn equipment supplies a validated registry item, whereas a later
+    /// interaction may supply an extension item as text. The AI deliberately
+    /// compares only its path, so both inputs must reach the same reader in
+    /// their respective forms without making the spawn producer untyped.
+    #[test]
+    fn main_hand_accepts_typed_spawn_items_and_dynamic_names_at_the_boundary() {
+        let world = Arena { walls: HashSet::new() };
+        let mut mob = perception_mob(&world, Vec3::new(0.0, 0.0, 0.0));
+        let trident = Item::from_name("trident").expect("built-in spawn item");
+
+        mob.set_main_hand_item(Some(trident));
+        assert_eq!(mob.main_hand_item(), Some("trident"));
+
+        mob.set_main_hand_item(Some(String::from("custom_spear")));
+        assert_eq!(mob.main_hand_item(), Some("custom_spear"));
     }
 
     /// Whether each of the six previously-dead goals reports `can_use` for the

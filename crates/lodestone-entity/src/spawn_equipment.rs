@@ -74,6 +74,7 @@
 //! [`DifficultyInstance::special_multiplier`]: ../../lodestone_server/regional_difficulty/struct.DifficultyInstance.html
 
 use crate::equipment::EquipmentSlot;
+use lodestone_data::item::Item;
 
 /// The two `RandomSource` operations this module needs. A trait rather than a
 /// concrete type so this crate stays free of any particular RNG algorithm —
@@ -87,30 +88,35 @@ pub trait EquipRandom {
     fn next_int(&mut self, bound: i32) -> i32;
 }
 
-/// What a mob spawns holding and wearing: one item id (or none) per
-/// [`EquipmentSlot`]. Feeds [`crate::equipment::apply_equipment`] directly
-/// through [`iter`](Self::iter).
+/// What a mob spawns holding and wearing: one built-in item (or none) per
+/// [`EquipmentSlot`].
+///
+/// Default equipment is a closed, generated table, so carrying a `String`
+/// here would let an arbitrary item name masquerade as a result of the spawn
+/// roll. Dynamic item names still enter at the player-combat boundary; this
+/// producer has no such extension point. [`iter`](Self::iter) therefore feeds
+/// validated [`Item`] values directly to [`crate::equipment::apply_equipment`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EquipmentSlots {
-    pub main_hand: Option<String>,
-    pub off_hand: Option<String>,
-    pub head: Option<String>,
-    pub chest: Option<String>,
-    pub legs: Option<String>,
-    pub feet: Option<String>,
+    pub main_hand: Option<Item>,
+    pub off_hand: Option<Item>,
+    pub head: Option<Item>,
+    pub chest: Option<Item>,
+    pub legs: Option<Item>,
+    pub feet: Option<Item>,
 }
 
 impl EquipmentSlots {
     /// The item id in `slot`, if any.
     #[must_use]
-    pub fn get(&self, slot: EquipmentSlot) -> Option<&str> {
+    pub fn get(&self, slot: EquipmentSlot) -> Option<Item> {
         match slot {
-            EquipmentSlot::MainHand => self.main_hand.as_deref(),
-            EquipmentSlot::OffHand => self.off_hand.as_deref(),
-            EquipmentSlot::Head => self.head.as_deref(),
-            EquipmentSlot::Chest => self.chest.as_deref(),
-            EquipmentSlot::Legs => self.legs.as_deref(),
-            EquipmentSlot::Feet => self.feet.as_deref(),
+            EquipmentSlot::MainHand => self.main_hand,
+            EquipmentSlot::OffHand => self.off_hand,
+            EquipmentSlot::Head => self.head,
+            EquipmentSlot::Chest => self.chest,
+            EquipmentSlot::Legs => self.legs,
+            EquipmentSlot::Feet => self.feet,
         }
     }
 
@@ -118,8 +124,8 @@ impl EquipmentSlots {
     /// calls this on an occupied slot (`itemStack.isEmpty()` guards it), but
     /// this setter does not itself enforce that — callers that want "only if
     /// empty" check [`get`](Self::get) first, as [`base_armor_roll`] does.
-    pub fn set(&mut self, slot: EquipmentSlot, item: impl Into<String>) {
-        let item = Some(item.into());
+    pub fn set(&mut self, slot: EquipmentSlot, item: Item) {
+        let item = Some(item);
         match slot {
             EquipmentSlot::MainHand => self.main_hand = item,
             EquipmentSlot::OffHand => self.off_hand = item,
@@ -130,20 +136,27 @@ impl EquipmentSlots {
         }
     }
 
-    /// Every occupied slot, as `(slot, item id)` pairs — the exact shape
+    /// Every occupied slot, as `(slot, built-in item)` pairs — the exact shape
     /// [`crate::equipment::apply_equipment`] takes.
-    pub fn iter(&self) -> impl Iterator<Item = (EquipmentSlot, &str)> {
+    pub fn iter(&self) -> impl Iterator<Item = (EquipmentSlot, Item)> + '_ {
         [
-            (EquipmentSlot::MainHand, self.main_hand.as_deref()),
-            (EquipmentSlot::OffHand, self.off_hand.as_deref()),
-            (EquipmentSlot::Head, self.head.as_deref()),
-            (EquipmentSlot::Chest, self.chest.as_deref()),
-            (EquipmentSlot::Legs, self.legs.as_deref()),
-            (EquipmentSlot::Feet, self.feet.as_deref()),
+            (EquipmentSlot::MainHand, self.main_hand),
+            (EquipmentSlot::OffHand, self.off_hand),
+            (EquipmentSlot::Head, self.head),
+            (EquipmentSlot::Chest, self.chest),
+            (EquipmentSlot::Legs, self.legs),
+            (EquipmentSlot::Feet, self.feet),
         ]
         .into_iter()
         .filter_map(|(slot, item)| item.map(|item| (slot, item)))
     }
+}
+
+/// Resolves one name embedded in this module's closed default-equipment
+/// table. A missing value is a source-code or generated-registry drift, not a
+/// recoverable runtime input.
+fn built_in_item(path: &str) -> Item {
+    Item::from_name(path).expect("default equipment item is in the built-in registry")
 }
 
 /// Vanilla's own equipment population order.
@@ -160,7 +173,7 @@ const EQUIPMENT_POPULATION_ORDER: [EquipmentSlot; 4] = [
 /// never produces (`nextInt(3)` plus at most three `+1`s tops out at `5`), and
 /// for the two non-armour slots.
 #[must_use]
-fn equipment_for_slot(slot: EquipmentSlot, armor_type: i32) -> Option<&'static str> {
+fn equipment_for_slot(slot: EquipmentSlot, armor_type: i32) -> Option<Item> {
     let piece = match slot {
         EquipmentSlot::Head => "helmet",
         EquipmentSlot::Chest => "chestplate",
@@ -177,7 +190,7 @@ fn equipment_for_slot(slot: EquipmentSlot, armor_type: i32) -> Option<&'static s
         5 => "diamond",
         _ => return None,
     };
-    Some(match (tier, piece) {
+    Some(built_in_item(match (tier, piece) {
         ("leather", "helmet") => "leather_helmet",
         ("leather", "chestplate") => "leather_chestplate",
         ("leather", "leggings") => "leather_leggings",
@@ -203,7 +216,7 @@ fn equipment_for_slot(slot: EquipmentSlot, armor_type: i32) -> Option<&'static s
         ("diamond", "leggings") => "diamond_leggings",
         ("diamond", "boots") => "diamond_boots",
         _ => unreachable!("every (tier, piece) pair above is covered"),
-    })
+    }))
 }
 
 /// `Mob.populateDefaultEquipmentSlots` — the generic armour-upgrade roll every
@@ -272,9 +285,9 @@ pub fn populate_default_equipment_slots(
             let weapon_chance = if hard { 0.05 } else { 0.01 };
             if rng.next_f32() < weapon_chance {
                 let item = match rng.next_int(6) {
-                    0 => "iron_sword",
-                    1 => "iron_spear",
-                    _ => "iron_shovel",
+                    0 => built_in_item("iron_sword"),
+                    1 => built_in_item("iron_spear"),
+                    _ => built_in_item("iron_shovel"),
                 };
                 slots.set(EquipmentSlot::MainHand, item);
             }
@@ -285,9 +298,9 @@ pub fn populate_default_equipment_slots(
         "drowned" => {
             if rng.next_f32() > 0.9 {
                 let item = if rng.next_int(16) < 10 {
-                    "trident"
+                    built_in_item("trident")
                 } else {
-                    "fishing_rod"
+                    built_in_item("fishing_rod")
                 };
                 slots.set(EquipmentSlot::MainHand, item);
             }
@@ -296,17 +309,17 @@ pub fn populate_default_equipment_slots(
         // unconditional bow. `Stray`, `Bogged` and `Parched` share this arm.
         "skeleton" | "stray" | "bogged" | "parched" => {
             base_armor_roll(rng, special_multiplier, hard, &mut slots);
-            slots.set(EquipmentSlot::MainHand, "bow");
+            slots.set(EquipmentSlot::MainHand, built_in_item("bow"));
         }
         // `WitherSkeleton.populateDefaultEquipmentSlots`: no `super`, just an
         // unconditional stone sword.
         "wither_skeleton" => {
-            slots.set(EquipmentSlot::MainHand, "stone_sword");
+            slots.set(EquipmentSlot::MainHand, built_in_item("stone_sword"));
         }
         // `Pillager.populateDefaultEquipmentSlots`: no `super`, just an
         // unconditional crossbow.
         "pillager" => {
-            slots.set(EquipmentSlot::MainHand, "crossbow");
+            slots.set(EquipmentSlot::MainHand, built_in_item("crossbow"));
         }
         // Every other species: the generic roll alone, the honest default for
         // a class that declares no override at all.
@@ -318,6 +331,10 @@ pub fn populate_default_equipment_slots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn item(path: &str) -> Item {
+        built_in_item(path)
+    }
 
     /// A scripted [`EquipRandom`]: a fixed sequence of floats and ints, so a
     /// test can drive a specific branch rather than hoping a real RNG lands on
@@ -371,10 +388,10 @@ mod tests {
         );
         let mut slots = EquipmentSlots::default();
         base_armor_roll(&mut rng, 1.0, false, &mut slots);
-        assert_eq!(slots.head.as_deref(), Some("golden_helmet"));
-        assert_eq!(slots.chest.as_deref(), Some("golden_chestplate"));
-        assert_eq!(slots.legs.as_deref(), Some("golden_leggings"));
-        assert_eq!(slots.feet.as_deref(), Some("golden_boots"));
+        assert_eq!(slots.head, Some(item("golden_helmet")));
+        assert_eq!(slots.chest, Some(item("golden_chestplate")));
+        assert_eq!(slots.legs, Some(item("golden_leggings")));
+        assert_eq!(slots.feet, Some(item("golden_boots")));
     }
 
     /// The three `0.1087` bumps each fire, carrying `armor_type` from the
@@ -395,8 +412,8 @@ mod tests {
         let mut slots = EquipmentSlots::default();
         base_armor_roll(&mut rng, 1.0, false, &mut slots);
         assert_eq!(
-            slots.head.as_deref(),
-            Some("chainmail_helmet"),
+            slots.head,
+            Some(item("chainmail_helmet")),
             "three bumps from tier 0 must reach tier 3 (chainmail), not stay at 0 (leather)"
         );
     }
@@ -450,9 +467,9 @@ mod tests {
             vec![5],
         );
         let mut slots = EquipmentSlots::default();
-        slots.set(EquipmentSlot::Head, "diamond_helmet");
+        slots.set(EquipmentSlot::Head, item("diamond_helmet"));
         base_armor_roll(&mut rng, 1.0, false, &mut slots);
-        assert_eq!(slots.head.as_deref(), Some("diamond_helmet"));
+        assert_eq!(slots.head, Some(item("diamond_helmet")));
     }
 
     /// The headline consumer: a drowned's trident roll. `> 0.9` then
@@ -463,7 +480,7 @@ mod tests {
         let mut rng = Script::new(vec![0.95], vec![5]);
         let slots =
             populate_default_equipment_slots("drowned", &mut rng, 1.0, false);
-        assert_eq!(slots.main_hand.as_deref(), Some("trident"));
+        assert_eq!(slots.main_hand, Some(item("trident")));
         assert!(slots.head.is_none(), "drowned's override must not call super");
     }
 
@@ -474,7 +491,7 @@ mod tests {
         let mut rng = Script::new(vec![0.95], vec![12]);
         let slots =
             populate_default_equipment_slots("drowned", &mut rng, 1.0, false);
-        assert_eq!(slots.main_hand.as_deref(), Some("fishing_rod"));
+        assert_eq!(slots.main_hand, Some(item("fishing_rod")));
     }
 
     /// The 90% common case: no weapon at all, and — the discriminating half —
@@ -495,7 +512,7 @@ mod tests {
         let mut rng = Script::new(vec![0.99], Vec::new());
         let slots =
             populate_default_equipment_slots("skeleton", &mut rng, 0.0, false);
-        assert_eq!(slots.main_hand.as_deref(), Some("bow"));
+        assert_eq!(slots.main_hand, Some(item("bow")));
     }
 
     /// A wither skeleton always holds a stone sword and never rolls armour —
@@ -509,7 +526,7 @@ mod tests {
             1.0,
             true,
         );
-        assert_eq!(slots.main_hand.as_deref(), Some("stone_sword"));
+        assert_eq!(slots.main_hand, Some(item("stone_sword")));
         assert_eq!(slots.head, None);
     }
 
@@ -518,7 +535,7 @@ mod tests {
     fn a_pillager_always_holds_a_crossbow() {
         let mut rng = Script::new(Vec::new(), Vec::new());
         let slots = populate_default_equipment_slots("pillager", &mut rng, 1.0, false);
-        assert_eq!(slots.main_hand.as_deref(), Some("crossbow"));
+        assert_eq!(slots.main_hand, Some(item("crossbow")));
     }
 
     /// The zombie weapon roll's three-way split, each branch driven
@@ -530,8 +547,8 @@ mod tests {
             let slots =
                 populate_default_equipment_slots("zombie", &mut rng, 0.0, true);
             assert_eq!(
-                slots.main_hand.as_deref(),
-                Some(expect),
+                slots.main_hand,
+                Some(item(expect)),
                 "roll {roll} should give {expect}"
             );
         }
@@ -543,8 +560,8 @@ mod tests {
     #[test]
     fn iter_feeds_apply_equipment_and_produces_real_armor() {
         let mut slots = EquipmentSlots::default();
-        slots.set(EquipmentSlot::Head, "diamond_helmet");
-        slots.set(EquipmentSlot::MainHand, "iron_sword");
+        slots.set(EquipmentSlot::Head, item("diamond_helmet"));
+        slots.set(EquipmentSlot::MainHand, item("iron_sword"));
         let mut attrs = crate::attribute::AttributeMap::new();
         crate::equipment::apply_equipment(&mut attrs, slots.iter());
         let defenses = crate::equipment::defenses_from_attributes(&attrs);
