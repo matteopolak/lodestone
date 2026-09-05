@@ -94,6 +94,14 @@ rejects incomplete or duplicate owners and restores those slots before replacing
 the live hull states. Boat collision reads remain independent of other boats;
 the serial central writer is retained so completion order cannot change a
 client-visible transform.
+Primed explosives use the equivalent hand-off inside `MobSim::tick_tnt`, which
+the live tick loop already calls. `MobSim::tick_tnt_owner_batches` clones each
+tick-start state under its source chunk owner, and
+`MobSim::apply_tnt_tick_owner_batches` checks complete unique owners plus their
+old entity-id slots before it updates motion/fuses or queues a detonation. The
+existing `MobSim::take_detonations` drain remains the production consumer for
+the block-destruction and network effects, so a reversed owner completion
+cannot reorder visible explosions.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
@@ -197,6 +205,14 @@ through `merge_falling_block_tick_effect_batches` before calling the world
 writer. A falling block's placement and discard are separate visible effects,
 so coalescing them or publishing an owner-major batch would change the entity
 stream and block-update order.
+
+Keep primed-explosive simulation behind `MobSim::tick_tnt_owner_batches` and
+`MobSim::apply_tnt_tick_owner_batches`. A completion must carry cloned
+tick-start state, its source owner, and an entity-id serial slot; do not update
+the live map or queue a detonation while selecting an owner. The central
+consumer must reject missing or duplicate owners and restore every serial slot
+before changing motion, fuses, or the detonation queue. The current live tick
+call remains `MobSim::tick_tnt`, so no extra tick-loop wiring is needed.
 
 Do not drain a scheduled queue directly from a future owner worker. Keep the
 world-wide queue comparator as the tick-start selector, return one completion
