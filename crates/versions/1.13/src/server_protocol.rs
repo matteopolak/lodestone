@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
 use lodestone_server::{
     ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -18,7 +18,7 @@ use crate::canonical::wire_state_for;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::game::{
-    BlockDig, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
+    BlockDig, BlockPlace, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
     ServerboundArmAnimation, ServerboundPosition, ServerboundPositionLook, TeleportConfirm,
 };
 use crate::packets::handshake::SetProtocol;
@@ -71,6 +71,38 @@ fn block_face(face: i8) -> Option<BlockFace> {
         4 => Some(BlockFace::West),
         5 => Some(BlockFace::East),
         _ => None,
+    }
+}
+
+/// Lifts protocol 404's packed-position block-use body into the shared
+/// placement consumer. This era carries position before direction and hand,
+/// has no inline item stack, and predates prediction sequences; the server
+/// resolves the held item and receives sequence zero.
+fn block_use(
+    BlockPlace {
+        location: Position(pos),
+        direction,
+        hand,
+        cursor_x,
+        cursor_y,
+        cursor_z,
+    }: BlockPlace,
+) -> ServerBound {
+    let (Ok(direction), Ok(hand)) = (i8::try_from(direction), u8::try_from(hand)) else {
+        return ServerBound::Ignored;
+    };
+    let Some(face) = block_face(direction) else {
+        return ServerBound::Ignored;
+    };
+    if hand > 1 {
+        return ServerBound::Ignored;
+    }
+    ServerBound::UseItemOn {
+        pos,
+        face,
+        cursor: Vec3f::new(cursor_x, cursor_y, cursor_z),
+        sequence: 0,
+        hand,
     }
 }
 
@@ -271,6 +303,9 @@ impl ServerProtocol for V404ServerProtocol {
                     6 => ServerBound::SwapItemInHand,
                     _ => ServerBound::Ignored,
                 }
+            }
+            State::Play if packet_id == play::serverbound::BLOCK_PLACE => {
+                decode_full::<BlockPlace>(payload).map_or(ServerBound::Ignored, block_use)
             }
             // `arm_animation` is a one-field packet, but it is a visible
             // multiplayer action: the shared host appends it to its broadcast

@@ -1,6 +1,7 @@
 use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_model::{
-    AnimationAction, ClientAction, ClientEvent, ConnectionState, Directive, Hand, VersionAdapter,
+    AnimationAction, BlockFace, BlockPos, ClientAction, ClientEvent, ConnectionState, Directive,
+    Hand, Vec3f, VersionAdapter,
 };
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_13::{V404Adapter, V404ServerProtocol};
@@ -226,6 +227,50 @@ fn block_dig_non_breaking_statuses_reach_their_server_consumers() {
         protocol.decode(State::Play, play::serverbound::BLOCK_DIG, &body(7)),
         ServerBound::Ignored,
         "an unmodelled status must stay ignored rather than selecting a neighbouring action"
+    );
+}
+
+#[test]
+fn block_place_lifts_the_literal_protocol_404_body() {
+    let protocol = V404ServerProtocol;
+    // Position is x(26) | y(12) | z(26): (5, -10, -7), then south, off hand,
+    // and three IEEE-754 cursor coordinates. This is deliberately assembled
+    // without the packet codec so swapping 404's position/direction/hand
+    // ordering for a neighbouring layout cannot pass by round-trip agreement.
+    const BODY: [u8; 22] = [
+        0x00, 0x00, 0x01, 0x7f, 0xdb, 0xff, 0xff, 0xf9, // (5, -10, -7)
+        0x03, // south
+        0x01, // off hand
+        0x3e, 0x80, 0x00, 0x00, // 0.25
+        0x3f, 0x80, 0x00, 0x00, // 1.0
+        0x3f, 0x40, 0x00, 0x00, // 0.75
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::BLOCK_PLACE, &BODY),
+        ServerBound::UseItemOn {
+            pos: BlockPos::new(5, -10, -7),
+            face: BlockFace::South,
+            cursor: Vec3f::new(0.25, 1.0, 0.75),
+            sequence: 0,
+            hand: 1,
+        }
+    );
+
+    let mut invalid_face = BODY;
+    invalid_face[8] = 0x06;
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::BLOCK_PLACE, &invalid_face),
+        ServerBound::Ignored,
+        "a seventh direction must not reach the placement consumer"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::BLOCK_PLACE,
+            &[BODY.as_slice(), &[0]].concat(),
+        ),
+        ServerBound::Ignored,
+        "a trailing byte must not be accepted as part of a protocol-404 block use"
     );
 }
 
