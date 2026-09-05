@@ -532,6 +532,13 @@ pub fn drive_wasm_plugins(
                 .filter_map(|e| abi::lift_event(e, &granted))
                 .collect();
             let mut lifted = lifted;
+            // Entity lifecycles carry a host-owned generation ledger, so they
+            // cannot be lifted by the stateless generic event mapper above.
+            // The guest receives copied packet vocabulary only; the ledger never
+            // contains an ECS entity or survives a reload of this guest store.
+            for event in &batch {
+                lifted.extend(plugin.lift_entity_events(event));
+            }
             if granted.contains(Capability::ObservePlace)
                 && let Some((player, outcome)) = &place_outcome
                 && plugin.observe_place_outcome(*player, outcome)

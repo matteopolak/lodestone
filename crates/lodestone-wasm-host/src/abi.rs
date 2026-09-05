@@ -35,6 +35,8 @@
 //! they ask for it — which is the failure mode that matters. The host operator
 //! learns nothing, and that is the residual gap.
 
+use std::collections::BTreeMap;
+
 use lodestone_model::{ClientAction, ClientEvent};
 
 use crate::capability::{Capability, CapabilitySet};
@@ -42,8 +44,11 @@ use crate::host::{
     Action, BlockBreakVerdict, BlockFace, BlockOffset, BlockPlaceVerdict, BlockPos, BreakOutcome,
     BreakRejection, BreakStatus, ChatKind, ChatMessage,
     CommandAnchor, CommandContext, CommandEntity, CommandExecution, CommandPosition,
-    CommandRotation, EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict,
-    InventorySlotChanged, ItemStack, PlaceOutcome, PlaceRejection, PlaceStatus, SelectedItemDropMode,
+    CommandRotation, EntityDamageVerdict, EntityEquipment, EntityEquipmentChanged,
+    EntityHealthChanged, EntityIdentity, EntityMotion, EntityMoved, EntityRotation, EntitySpawned,
+    EntityVelocity, EquipmentSlot, Event, Hand, Health, InventoryClickVerdict,
+    InventorySlotChanged, ItemStack, PlaceOutcome, PlaceRejection, PlaceStatus, PlayerTeleported,
+    SelectedItemDropMode, TeleportRelative, Vec3,
     PlayerInteractVerdict, PlayerMoveVerdict,
     SectionBlocksChanged, SectionPos, VerdictContext,
 };
@@ -140,6 +145,52 @@ pub enum LoweredAction {
     Client(ClientAction),
     /// A copied intent consumed by the local-player ECS path.
     Intent(IntentAction),
+}
+
+/// Per-guest lifecycle generations for copied network entity identities.
+///
+/// A network id may be recycled after removal. This tracker raises its generation
+/// on every observed spawn and refuses updates for an id whose current lifecycle
+/// was never observed. The value is deliberately held by the host, not supplied
+/// by a guest, and it never contains an ECS entity or borrow.
+#[derive(Debug, Default)]
+pub struct EntityGenerations(BTreeMap<i32, (u64, bool)>);
+
+impl EntityGenerations {
+    fn spawned(&mut self, entity_id: i32) -> EntityIdentity {
+        let (generation, live) = self
+            .0
+            .entry(entity_id)
+            .and_modify(|(generation, _)| *generation = generation.saturating_add(1))
+            .or_insert((1, false));
+        *live = true;
+        EntityIdentity {
+            entity_id,
+            generation: *generation,
+        }
+    }
+
+    fn live(&self, entity_id: i32) -> Option<EntityIdentity> {
+        self.0.get(&entity_id).and_then(|(generation, live)| {
+            live.then_some(EntityIdentity {
+                entity_id,
+                generation: *generation,
+            })
+        })
+    }
+
+    fn removed(&mut self, entity_id: i32) -> Option<EntityIdentity> {
+        self.0.get_mut(&entity_id).and_then(|(generation, live)| {
+            if !*live {
+                return None;
+            }
+            *live = false;
+            Some(EntityIdentity {
+                entity_id,
+                generation: *generation,
+            })
+        })
+    }
 }
 
 /// Copy a command dispatcher source into the guest's value-only command context.
@@ -299,6 +350,141 @@ pub fn lift_event(event: &ClientEvent, granted: &CapabilitySet) -> Option<Event>
         // this one is the definition of the curated subset. A guest cannot ask for a
         // kind that lands here — the manifest rejects the name.
         _ => None,
+    }
+}
+
+/// Lift the entity/player subset of one decoded event into copied guest events.
+///
+/// This is intentionally separate from [`lift_event`]: entity removal can carry
+/// several identities, so its honest WIT representation is a small list rather
+/// than a fabricated aggregate event. The lifecycle tracker is per guest, which
+/// means a newly loaded guest does not receive a movement or metadata update for
+/// an entity whose spawn it did not observe. Guessing a generation in that case
+/// would make a reused id look continuous and violate the identity contract.
+#[must_use]
+pub fn lift_entity_events(
+    event: &ClientEvent,
+    granted: &CapabilitySet,
+    generations: &mut EntityGenerations,
+) -> Vec<Event> {
+    if !granted.contains(Capability::ObserveEntities) {
+        return Vec::new();
+    }
+
+    let vector = |value: lodestone_model::Vec3| Vec3 {
+        x: value.x,
+        y: value.y,
+        z: value.z,
+    };
+    let rotation = |value: lodestone_model::Rotation| EntityRotation {
+        yaw: value.yaw,
+        pitch: value.pitch,
+    };
+    let item = |value: &lodestone_model::ItemStack| ItemStack {
+        item: value.item.to_string(),
+        count: value.count,
+    };
+    let equipment_slot = |slot: lodestone_model::EquipmentSlot| match slot {
+        lodestone_model::EquipmentSlot::MainHand => EquipmentSlot::MainHand,
+        lodestone_model::EquipmentSlot::OffHand => EquipmentSlot::OffHand,
+        lodestone_model::EquipmentSlot::Feet => EquipmentSlot::Feet,
+        lodestone_model::EquipmentSlot::Legs => EquipmentSlot::Legs,
+        lodestone_model::EquipmentSlot::Chest => EquipmentSlot::Chest,
+        lodestone_model::EquipmentSlot::Head => EquipmentSlot::Head,
+        lodestone_model::EquipmentSlot::Body => EquipmentSlot::Body,
+        lodestone_model::EquipmentSlot::Saddle => EquipmentSlot::Saddle,
+    };
+
+    match event {
+        ClientEvent::EntitySpawned {
+            entity_id,
+            entity_type,
+            pos,
+            rotation: entity_rotation,
+            velocity,
+            ..
+        } => vec![Event::EntitySpawned(EntitySpawned {
+            entity: generations.spawned(*entity_id),
+            kind: entity_type.to_string(),
+            pos: vector(*pos),
+            rotation: rotation(*entity_rotation),
+            velocity: velocity.map(vector),
+        })],
+        ClientEvent::EntityMoved {
+            entity_id,
+            movement,
+            rotation: entity_rotation,
+            on_ground,
+        } => generations.live(*entity_id).map_or_else(Vec::new, |entity| {
+            let motion = match movement {
+                lodestone_model::EntityMovement::Absolute(position) => {
+                    EntityMotion::Absolute(vector(*position))
+                }
+                lodestone_model::EntityMovement::Relative(delta) => {
+                    EntityMotion::Relative(vector(*delta))
+                }
+            };
+            vec![Event::EntityMoved(EntityMoved {
+                entity,
+                motion,
+                rotation: entity_rotation.map(rotation),
+                on_ground: *on_ground,
+            })]
+        }),
+        ClientEvent::EntityVelocity {
+            entity_id,
+            velocity,
+        } => generations.live(*entity_id).map_or_else(Vec::new, |entity| {
+            vec![Event::EntityVelocity(EntityVelocity {
+                entity,
+                velocity: vector(*velocity),
+            })]
+        }),
+        ClientEvent::EntityRemoved { entity_ids } => entity_ids
+            .iter()
+            .filter_map(|entity_id| generations.removed(*entity_id))
+            .map(Event::EntityRemoved)
+            .collect(),
+        ClientEvent::EntityMetadataUpdated {
+            entity_id,
+            metadata,
+        } => match (generations.live(*entity_id), metadata.health) {
+            (Some(entity), Some(health)) => {
+                vec![Event::EntityHealthChanged(EntityHealthChanged { entity, health })]
+            }
+            _ => Vec::new(),
+        },
+        ClientEvent::EntityEquipmentUpdated {
+            entity_id,
+            equipment,
+        } => generations.live(*entity_id).map_or_else(Vec::new, |entity| {
+            vec![Event::EntityEquipmentChanged(EntityEquipmentChanged {
+                entity,
+                equipment: equipment
+                    .iter()
+                    .map(|change| EntityEquipment {
+                        slot: equipment_slot(change.slot),
+                        item: change.item.as_ref().map(item),
+                    })
+                    .collect(),
+            })]
+        }),
+        ClientEvent::TeleportPlayer {
+            pos,
+            rotation: entity_rotation,
+            flags,
+        } => vec![Event::PlayerTeleported(PlayerTeleported {
+            pos: vector(*pos),
+            rotation: rotation(*entity_rotation),
+            relative: TeleportRelative {
+                x: flags.relative_x,
+                y: flags.relative_y,
+                z: flags.relative_z,
+                yaw: flags.relative_yaw,
+                pitch: flags.relative_pitch,
+            },
+        })],
+        _ => Vec::new(),
     }
 }
 
@@ -516,6 +702,8 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use lodestone_model::Text;
 
     use crate::host::PlaceIntent;
@@ -539,6 +727,149 @@ mod tests {
                 13,
             )),
         }
+    }
+
+    fn entity_spawn(entity_id: i32) -> ClientEvent {
+        ClientEvent::EntitySpawned {
+            entity_id,
+            uuid: None,
+            entity_type: lodestone_model::ResourceKey::from_str("minecraft:pig")
+                .expect("valid entity key"),
+            pos: lodestone_model::Vec3::new(1.25, 64.0, -3.5),
+            rotation: lodestone_model::Rotation::new(90.0, -15.0),
+            velocity: Some(lodestone_model::Vec3::new(0.125, 0.0, -0.25)),
+        }
+    }
+
+    /// Entity observations are copied, capability-gated, and generation scoped.
+    /// The recycle control proves that a reused wire id cannot look like the
+    /// previous entity lifecycle to a guest that retained an old copy.
+    #[test]
+    fn entity_observations_are_generation_scoped_and_capability_gated() {
+        let mut generations = EntityGenerations::default();
+        let spawn = entity_spawn(41);
+        assert!(lift_entity_events(&spawn, &CapabilitySet::empty(), &mut generations).is_empty());
+
+        let granted = CapabilitySet::from_iter([Capability::ObserveEntities]);
+        assert_eq!(
+            lift_entity_events(&spawn, &granted, &mut generations),
+            vec![Event::EntitySpawned(EntitySpawned {
+                entity: EntityIdentity {
+                    entity_id: 41,
+                    generation: 1,
+                },
+                kind: "minecraft:pig".to_owned(),
+                pos: Vec3 {
+                    x: 1.25,
+                    y: 64.0,
+                    z: -3.5,
+                },
+                rotation: EntityRotation {
+                    yaw: 90.0,
+                    pitch: -15.0,
+                },
+                velocity: Some(Vec3 {
+                    x: 0.125,
+                    y: 0.0,
+                    z: -0.25,
+                }),
+            })]
+        );
+
+        let moved = ClientEvent::EntityMoved {
+            entity_id: 41,
+            movement: lodestone_model::EntityMovement::Relative(lodestone_model::Vec3::new(
+                0.5, 0.0, -1.0,
+            )),
+            rotation: None,
+            on_ground: true,
+        };
+        assert!(matches!(
+            lift_entity_events(&moved, &granted, &mut generations).as_slice(),
+            [Event::EntityMoved(EntityMoved {
+                entity: EntityIdentity {
+                    entity_id: 41,
+                    generation: 1,
+                },
+                motion: EntityMotion::Relative(Vec3 { x: 0.5, y: 0.0, z: -1.0 }),
+                rotation: None,
+                on_ground: true,
+            })]
+        ));
+
+        assert_eq!(
+            lift_entity_events(
+                &ClientEvent::EntityRemoved {
+                    entity_ids: vec![41],
+                },
+                &granted,
+                &mut generations,
+            ),
+            vec![Event::EntityRemoved(EntityIdentity {
+                entity_id: 41,
+                generation: 1,
+            })]
+        );
+        assert!(
+            lift_entity_events(&moved, &granted, &mut generations).is_empty(),
+            "a guest must not receive updates after the lifecycle it saw ended"
+        );
+        assert!(matches!(
+            lift_entity_events(&entity_spawn(41), &granted, &mut generations).as_slice(),
+            [Event::EntitySpawned(EntitySpawned {
+                entity: EntityIdentity {
+                    entity_id: 41,
+                    generation: 2,
+                },
+                ..
+            })]
+        ));
+    }
+
+    /// Health and equipment use the same lifecycle identity, and an explicit
+    /// empty slot stays distinct from an omitted equipment event.
+    #[test]
+    fn entity_health_and_equipment_keep_reported_values_without_ecs_handles() {
+        let granted = CapabilitySet::from_iter([Capability::ObserveEntities]);
+        let mut generations = EntityGenerations::default();
+        let _ = lift_entity_events(&entity_spawn(9), &granted, &mut generations);
+        let health = ClientEvent::EntityMetadataUpdated {
+            entity_id: 9,
+            metadata: lodestone_model::EntityMetadataUpdate {
+                health: Some(7.5),
+                ..lodestone_model::EntityMetadataUpdate::default()
+            },
+        };
+        assert_eq!(
+            lift_entity_events(&health, &granted, &mut generations),
+            vec![Event::EntityHealthChanged(EntityHealthChanged {
+                entity: EntityIdentity {
+                    entity_id: 9,
+                    generation: 1,
+                },
+                health: 7.5,
+            })]
+        );
+        let equipment = ClientEvent::EntityEquipmentUpdated {
+            entity_id: 9,
+            equipment: vec![lodestone_model::EntityEquipment {
+                slot: lodestone_model::EquipmentSlot::MainHand,
+                item: None,
+            }],
+        };
+        assert_eq!(
+            lift_entity_events(&equipment, &granted, &mut generations),
+            vec![Event::EntityEquipmentChanged(EntityEquipmentChanged {
+                entity: EntityIdentity {
+                    entity_id: 9,
+                    generation: 1,
+                },
+                equipment: vec![EntityEquipment {
+                    slot: EquipmentSlot::MainHand,
+                    item: None,
+                }],
+            })]
+        );
     }
 
     /// The lift carries the text and the kind through unchanged.

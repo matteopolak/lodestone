@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.24.0;
+package lodestone:plugin@0.25.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -162,6 +162,106 @@ interface types {
         blocks: list<block-offset>,
     }
 
+    /// A network entity identity, scoped to its observed lifecycle generation.
+    ///
+    /// `entity-id` alone can be reused after removal. A guest must retain and
+    /// compare both fields, and must stop using the identity after the matching
+    /// `entity-removed` event. This is copied protocol identity, never an ECS
+    /// entity handle.
+    record entity-identity {
+        entity-id: s32,
+        generation: u64,
+    }
+
+    /// A copied world-space vector. Positions and velocities use the model's
+    /// f64 coordinates, so the ABI does not silently round a server report.
+    record vec3 {
+        x: f64,
+        y: f64,
+        z: f64,
+    }
+
+    /// A copied yaw/pitch pair in degrees.
+    record entity-rotation {
+        yaw: f32,
+        pitch: f32,
+    }
+
+    /// A newly observed remote entity. `kind` is the canonical resource key;
+    /// UUIDs and ECS handles deliberately do not cross this boundary.
+    record entity-spawned {
+        entity: entity-identity,
+        kind: string,
+        pos: vec3,
+        rotation: entity-rotation,
+        velocity: option<vec3>,
+    }
+
+    /// A remote entity's reported position change. A relative value remains a
+    /// delta: the guest never receives an implicit world read to resolve it.
+    variant entity-motion {
+        absolute(vec3),
+        relative(vec3),
+    }
+
+    record entity-moved {
+        entity: entity-identity,
+        motion: entity-motion,
+        rotation: option<entity-rotation>,
+        on-ground: bool,
+    }
+
+    record entity-velocity {
+        entity: entity-identity,
+        velocity: vec3,
+    }
+
+    /// A living entity's current health when a metadata update reported it.
+    record entity-health-changed {
+        entity: entity-identity,
+        health: f32,
+    }
+
+    enum equipment-slot {
+        main-hand,
+        off-hand,
+        feet,
+        legs,
+        chest,
+        head,
+        body,
+        saddle,
+    }
+
+    /// One explicitly changed equipment slot. `none` is an observed clear.
+    record entity-equipment {
+        slot: equipment-slot,
+        item: option<item-stack>,
+    }
+
+    record entity-equipment-changed {
+        entity: entity-identity,
+        equipment: list<entity-equipment>,
+    }
+
+    /// Which local-player teleport components are relative to the current
+    /// simulation state. The host still owns resolving and acknowledging it.
+    record teleport-relative {
+        x: bool,
+        y: bool,
+        z: bool,
+        yaw: bool,
+        pitch: bool,
+    }
+
+    /// A server-authoritative local-player teleport observation. It is an
+    /// observation only; guests cannot construct a teleport action.
+    record player-teleported {
+        pos: vec3,
+        rotation: entity-rotation,
+        relative: teleport-relative,
+    }
+
     /// A block position in world coordinates — `lodestone_model::BlockPos`.
     record block-pos {
         x: s32,
@@ -182,6 +282,15 @@ interface types {
         inventory-slot-changed(inventory-slot-changed),
         /// `ClientEvent::SectionBlocksChanged` — capability `observe:blocks`.
         blocks-changed(section-blocks-changed),
+        /// Remote-entity lifecycle and copied state — capability `observe:entities`.
+        entity-spawned(entity-spawned),
+        entity-moved(entity-moved),
+        entity-velocity(entity-velocity),
+        entity-removed(entity-identity),
+        entity-health-changed(entity-health-changed),
+        entity-equipment-changed(entity-equipment-changed),
+        /// A server-authoritative local-player relocation — capability `observe:entities`.
+        player-teleported(player-teleported),
         /// A changed local-player mining lifecycle state — capability `observe:break`.
         /// The host suppresses unchanged states, so an ongoing dig does not become
         /// an every-tick event stream.
@@ -482,7 +591,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.24.0"`.
+        /// `"lodestone:plugin@0.25.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.

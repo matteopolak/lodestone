@@ -9,7 +9,7 @@ only; a missing value means no loaded cell exists at that position, while state
 
 ## How it works
 
-`lodestone:plugin@0.24.0` imports `world-snapshot.read-blocks(positions)` (the
+`lodestone:plugin@0.25.0` imports `world-snapshot.read-blocks(positions)` (the
 Rust guest binding is `world_snapshot::read_blocks`). A call accepts
 at most 128 positions and returns one `option<u32>` for each input in the same
 order. `WasmHostPlugin` attaches the composed session's `ChunkWorld` handle to
@@ -42,10 +42,12 @@ any compatibility-affecting change. Keep the request limit explicit and test a
 value that distinguishes an absent cell from state `0`.
 
 Do not turn this into a retained world handle or call guest code while a chunk
-guard is held. Larger scans must be split over host ticks. A future mutation API
-must enqueue a server-owned proposal and report a finite server result; writing
-the client `ChunkWorld` would only alter a replica and violate multiplayer
-authority.
+guard is held. Larger scans must be split over host ticks. The native
+server-side route is now `IntegratedServer::set_resident_block_state_proposed`:
+it enqueues a bounded proposal and returns a finite server result. A WASM bridge
+must hand requests to that exact route (not write the client `ChunkWorld`),
+including when the client is hosting singleplayer; a client-replica write would
+violate multiplayer authority.
 
 ## Configuration
 
