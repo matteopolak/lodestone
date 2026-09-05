@@ -4377,7 +4377,6 @@ pub fn route(event: &ClientEvent) -> Route {
         // the rendered view pointed at the old direction.
         ClientEvent::PlayerRotationSet { .. } => SHELL,
         ClientEvent::ChunkCacheCenterChanged { .. }
-        | ClientEvent::ChunkCacheRadiusChanged { .. }
         | ClientEvent::SimulationDistanceChanged { .. }
         | ClientEvent::ItemCooldown { .. }
         | ClientEvent::CameraSet { .. }
@@ -4388,6 +4387,10 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::MountScreenOpened { .. }
         | ClientEvent::ServerDataReceived { .. }
         | ClientEvent::PlayerLookAt { .. } => Route::NOWHERE,
+        // The server's actual streamed radius, not the launcher's request.
+        // `net::forward` carries it to `Sim::set_view_radius`, which sets the
+        // loading screen's chunk-grid size and progress denominator.
+        ClientEvent::ChunkCacheRadiusChanged { .. } => SHELL,
     }
 }
 
@@ -4789,6 +4792,16 @@ mod route_tests {
         // The contrast that gives the flag meaning: an unconditional shell arm.
         let cleared = ClientEvent::TitlesCleared { reset_times: true };
         assert!(route(&cleared).must_forward());
+    }
+
+    /// The cache-radius update has an unconditional shell forward: it changes
+    /// the live loading views, so this route must keep the forward assertion on.
+    #[test]
+    fn cache_radius_update_is_routed_to_the_shell() {
+        let route = route(&ClientEvent::ChunkCacheRadiusChanged { radius: 7 });
+        assert!(route.shell, "the shell owns the loading-view radius");
+        assert!(route.must_forward(), "the radius must cross net::forward");
+        assert!(!route.is_island());
     }
 
     /// `Route::NOWHERE` means nothing anywhere — including nothing in

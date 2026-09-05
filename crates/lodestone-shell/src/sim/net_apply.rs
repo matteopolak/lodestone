@@ -167,6 +167,13 @@ impl Sim {
                     // only what the *renderer* still holds for it.
                     self.on_column_unloaded(x, z);
                 }
+                NetUpdate::ChunkCacheRadiusChanged { radius } => {
+                    // The server can revise the streamed radius after login.
+                    // The loading screen reads this exact value for both its
+                    // progress denominator and its bounded chunk-status grid;
+                    // retaining the launcher's request makes either surface lie.
+                    self.set_view_radius(u32::try_from(radius).unwrap_or(0));
+                }
                 NetUpdate::SectionBlocks { x, y, z, blocks } => {
                     // A server-authoritative edit inside one loaded section.
                     // Re-mesh at *section* granularity, not the whole column:
