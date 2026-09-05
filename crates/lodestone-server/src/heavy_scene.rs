@@ -388,7 +388,7 @@ pub struct HeavyRunRecord {
 
 impl HeavyRunRecord {
     pub fn validate_ready(&self) -> Result<(), HeavyError> {
-        let requirements = requirements_for_scenario(self.scenario);
+        let requirements = runtime_requirements_for_scenario(self.scenario);
         let mut missing = Vec::new();
         for requirement in &requirements {
             let observed = witness_value(&self.consumed, &requirement.column);
@@ -404,6 +404,44 @@ impl HeavyRunRecord {
         } else {
             Err(HeavyError::Witness(missing.join("; ")))
         }
+    }
+}
+
+/// Readiness facts the server harness can actually observe. These are narrower
+/// than the immutable client-plan witnesses: a ready-phase server run proves
+/// that source cells were installed and encoded into the joined view, but it
+/// cannot claim a client mesh submission or a mutation-time relight.
+fn runtime_requirements_for_scenario(scenario: HeavyScenario) -> Vec<WitnessRequirement> {
+    match scenario {
+        HeavyScenario::Palette => vec![witness(
+            "heavyweight.server-ready",
+            "server.opaque_cells_encoded",
+            1,
+        )],
+        HeavyScenario::Transparency => vec![witness(
+            "heavyweight.server-ready",
+            "server.translucent_cells_encoded",
+            1,
+        )],
+        HeavyScenario::Light => vec![witness(
+            "heavyweight.server-ready",
+            "server.light_emitters_encoded",
+            1,
+        )],
+        HeavyScenario::Liquid => vec![witness(
+            "heavyweight.server-ready",
+            "server.liquid_cells_encoded",
+            1,
+        )],
+        HeavyScenario::Entity => vec![witness(
+            "heavyweight.server-ready",
+            "world.entities_drawn",
+            1,
+        )],
+        HeavyScenario::Sign
+        | HeavyScenario::BlockEntity
+        | HeavyScenario::Scheduled
+        | HeavyScenario::Mixed => requirements_for_scenario(scenario),
     }
 }
 
@@ -437,6 +475,10 @@ fn requirements_for_scenario(scenario: HeavyScenario) -> Vec<WitnessRequirement>
 
 fn witness_value(counts: &HeavyCounts, column: &str) -> u64 {
     match column {
+        "server.opaque_cells_encoded" => counts.opaque_cells,
+        "server.translucent_cells_encoded" => counts.translucent_cells,
+        "server.light_emitters_encoded" => counts.light_emitters,
+        "server.liquid_cells_encoded" => counts.liquid_cells,
         "world.opaque_sections_drawn" => counts.opaque_cells,
         "world.water_sections_drawn" => counts.liquid_cells,
         "world.translucent_sections_drawn" => counts.translucent_cells,
@@ -707,6 +749,28 @@ impl HeavySceneSpec {
         u64::try_from((radius * 2 + 1).pow(2)).expect("positive view radius")
     }
 
+    /// The smallest join view that includes each generated server-side
+    /// producer. The public plan keeps its client-facing camera contract;
+    /// runtime mode expands only its in-memory server view so its consumed
+    /// counters can be tied to decoded chunk coordinates rather than to a
+    /// source-global total.
+    #[must_use]
+    fn runtime_view_radius(&self) -> i32 {
+        let producer_radius = match self.scenario {
+            HeavyScenario::Transparency => 4,
+            HeavyScenario::Light => 7,
+            HeavyScenario::Liquid => 10,
+            _ => 1,
+        };
+        self.view_radius().max(producer_radius)
+    }
+
+    #[must_use]
+    fn expected_runtime_join_columns(&self) -> u64 {
+        let radius = self.runtime_view_radius();
+        u64::try_from((radius * 2 + 1).pow(2)).expect("positive runtime view radius")
+    }
+
     pub fn build_plan(&self) -> Result<HeavyScenePlan, HeavyError> {
         let built = build_for_scenario(self);
         let commands = OrderedSceneCommands {
@@ -761,6 +825,7 @@ pub fn emit_scene(plan: &HeavyScenePlan, destination: &std::path::Path) -> Resul
 #[derive(Debug, Default)]
 struct HeavySourceStats {
     opaque_cells: std::sync::atomic::AtomicU64,
+    translucent_cells: std::sync::atomic::AtomicU64,
     liquid_cells: std::sync::atomic::AtomicU64,
     light_emitters: std::sync::atomic::AtomicU64,
     state_names: Mutex<HashSet<String>>,
@@ -770,6 +835,7 @@ struct HeavySourceStats {
 #[derive(Debug, Default)]
 struct SourceColumnMetrics {
     opaque_cells: u64,
+    translucent_cells: u64,
     liquid_cells: u64,
     light_emitters: u64,
     state_names: HashSet<String>,
@@ -845,6 +911,7 @@ impl HeavyChunkSource {
             retained_columns: columns.len() as u64,
             sections: columns.values().map(|column| column.section_count() as u64).sum(),
             opaque_cells: self.stats.opaque_cells.load(std::sync::atomic::Ordering::Relaxed),
+            translucent_cells: self.stats.translucent_cells.load(std::sync::atomic::Ordering::Relaxed),
             liquid_cells: self.stats.liquid_cells.load(std::sync::atomic::Ordering::Relaxed),
             light_emitters: self.stats.light_emitters.load(std::sync::atomic::Ordering::Relaxed),
             distinct_states: self.stats.state_names.lock().expect("heavy source state lock").len() as u64,
@@ -863,6 +930,7 @@ impl HeavyChunkSource {
             }
             if let Some(column_metrics) = by_column.get(coordinate) {
                 metrics.opaque_cells += column_metrics.opaque_cells;
+                metrics.translucent_cells += column_metrics.translucent_cells;
                 metrics.liquid_cells += column_metrics.liquid_cells;
                 metrics.light_emitters += column_metrics.light_emitters;
                 states.extend(column_metrics.state_names.iter().cloned());
@@ -878,6 +946,7 @@ struct SourceMetrics {
     retained_columns: u64,
     sections: u64,
     opaque_cells: u64,
+    translucent_cells: u64,
     liquid_cells: u64,
     light_emitters: u64,
     distinct_states: u64,
@@ -889,6 +958,7 @@ impl Default for SourceMetrics {
             retained_columns: 0,
             sections: 0,
             opaque_cells: 0,
+            translucent_cells: 0,
             liquid_cells: 0,
             light_emitters: 0,
             distinct_states: 0,
@@ -928,7 +998,12 @@ impl ChunkSource for HeavyChunkSource {
         let mut by_column = self.stats.by_column.lock().expect("heavy source metric lock");
         let column_metrics = by_column.entry((cx, cz)).or_default();
         column_metrics.state_names.insert(name.to_string());
-        if name == "minecraft:water" {
+        if is_translucent_heavy_state(name) {
+            self.stats
+                .translucent_cells
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            column_metrics.translucent_cells += 1;
+        } else if name == "minecraft:water" {
             self.stats
                 .liquid_cells
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -945,6 +1020,13 @@ impl ChunkSource for HeavyChunkSource {
             column_metrics.opaque_cells += 1;
         }
     }
+}
+
+/// The transparency scene's two generated state names. The source records
+/// them at installation time and the harness only accepts the count after the
+/// matching column coordinates have been decoded from chunk packets.
+fn is_translucent_heavy_state(name: &str) -> bool {
+    matches!(name, "minecraft:white_stained_glass" | "minecraft:glass_pane")
 }
 
 /// Drives one finite join against the production integrated server and records
@@ -967,7 +1049,14 @@ impl HeavyServerHarness {
         let phase = args.phase;
         let scenario = args.spec.clone();
         let scenario_hash = plan.scene_hash.clone();
-        if !matches!(args.spec.scenario, HeavyScenario::Palette | HeavyScenario::Entity) {
+        if !matches!(
+            args.spec.scenario,
+            HeavyScenario::Palette
+                | HeavyScenario::Transparency
+                | HeavyScenario::Light
+                | HeavyScenario::Liquid
+                | HeavyScenario::Entity
+        ) {
             let error = HeavyError::Unsupported(format!(
                 "{} requires an integrated entity/tick producer that is not wired in this slice",
                 args.spec.scenario.as_str()
@@ -1052,7 +1141,7 @@ impl HeavyServerHarness {
                         (-4..=3, -4..=3),
                         (0, 0),
                         0,
-                        plan.spec.view_radius(),
+                        plan.spec.runtime_view_radius(),
                     );
                     let mobs = server.mobs().cloned().ok_or_else(|| {
                         HeavyError::Unsupported("entity runtime has no mob handle".to_string())
@@ -1090,7 +1179,7 @@ impl HeavyServerHarness {
                     protocol,
                     source,
                     NoEntities,
-                    plan.spec.view_radius(),
+                    plan.spec.runtime_view_radius(),
                 );
                 (server, io, None::<MobHandle>, 0)
             };
@@ -1098,7 +1187,7 @@ impl HeavyServerHarness {
         let started = Instant::now();
         let join = drive_v770_join(
             &mut peer,
-            plan.spec.expected_join_columns(),
+            plan.spec.expected_runtime_join_columns(),
             requested_entities,
             entity_region,
         )
@@ -1155,9 +1244,15 @@ impl HeavyServerHarness {
         };
         if let Err(error) = record.validate_ready() {
             return Err(HeavyError::Witness(format!(
-                "{error}; installed opaque_cells={}; consumed opaque_cells={}; installed entities_spawned={}; consumed entities_extracted={}; entity_positions_in_region={}; server_ticks={}; chunk_payload_bytes={}",
+                "{error}; installed opaque_cells={}; consumed opaque_cells={}; installed translucent_cells={}; consumed translucent_cells={}; installed liquid_cells={}; consumed liquid_cells={}; installed light_emitters={}; consumed light_emitters={}; installed entities_spawned={}; consumed entities_extracted={}; entity_positions_in_region={}; server_ticks={}; chunk_payload_bytes={}",
                 record.installed.opaque_cells,
                 record.consumed.opaque_cells,
+                record.installed.translucent_cells,
+                record.consumed.translucent_cells,
+                record.installed.liquid_cells,
+                record.consumed.liquid_cells,
+                record.installed.light_emitters,
+                record.consumed.light_emitters,
                 record.installed.entities_spawned,
                 record.consumed.entities_extracted,
                 entity_positions_in_region,
@@ -1232,9 +1327,29 @@ fn counts_for(
     installed_entities: u64,
     consumed_entities: u64,
 ) -> (HeavyCounts, HeavyCounts, HeavyCounts) {
+    let mut requested_cells = HeavyCounts::default();
+    for name in plan
+        .commands
+        .setup
+        .iter()
+        .filter_map(|command| setblock_state_name(command))
+    {
+        if is_translucent_heavy_state(name) {
+            requested_cells.translucent_cells += 1;
+        } else if name == "minecraft:water" {
+            requested_cells.liquid_cells += 1;
+        } else if name == "minecraft:sea_lantern" {
+            requested_cells.light_emitters += 1;
+        } else if name != "minecraft:air" {
+            requested_cells.opaque_cells += 1;
+        }
+    }
     let requested = HeavyCounts {
-        join_columns: plan.spec.expected_join_columns(),
-        opaque_cells: plan.commands.setup.iter().filter(|command| command.starts_with("setblock ")).count() as u64,
+        join_columns: plan.spec.expected_runtime_join_columns(),
+        opaque_cells: requested_cells.opaque_cells,
+        translucent_cells: requested_cells.translucent_cells,
+        liquid_cells: requested_cells.liquid_cells,
+        light_emitters: requested_cells.light_emitters,
         entities_spawned: requested_entities,
         ..HeavyCounts::default()
     };
@@ -1243,6 +1358,7 @@ fn counts_for(
         sections: metrics.sections,
         distinct_states: metrics.distinct_states,
         opaque_cells: metrics.opaque_cells,
+        translucent_cells: metrics.translucent_cells,
         liquid_cells: metrics.liquid_cells,
         light_emitters: metrics.light_emitters,
         entities_spawned: installed_entities,
@@ -1255,6 +1371,7 @@ fn counts_for(
         sections: consumed_metrics.sections,
         distinct_states: consumed_metrics.distinct_states,
         opaque_cells: consumed_metrics.opaque_cells,
+        translucent_cells: consumed_metrics.translucent_cells,
         liquid_cells: consumed_metrics.liquid_cells,
         light_emitters: consumed_metrics.light_emitters,
         entities_extracted: consumed_entities,
@@ -1332,6 +1449,18 @@ fn apply_setblock_commands(source: &HeavyChunkSource, commands: &[String]) {
         let name = raw_name.split(['[', '{']).next().unwrap_or(raw_name);
         source.set_block(x, y, z, name);
     }
+}
+
+fn setblock_state_name(command: &str) -> Option<&str> {
+    let mut fields = command.split_whitespace();
+    if fields.next() != Some("setblock") {
+        return None;
+    }
+    let _x = fields.next()?;
+    let _y = fields.next()?;
+    let _z = fields.next()?;
+    let name = fields.next()?;
+    Some(name.split(['[', '{']).next().unwrap_or(name))
 }
 
 async fn drive_v770_join(

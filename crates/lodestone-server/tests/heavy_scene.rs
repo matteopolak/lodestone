@@ -185,3 +185,62 @@ async fn runtime_counts_are_observed_at_each_boundary() {
     assert_eq!(record.consumed.sections, 9 * 24);
     assert!(record.consumed.chunk_payload_bytes > 0);
 }
+
+#[tokio::test]
+async fn terrain_runtime_scenarios_reach_the_wire_through_their_own_source_counters() {
+    for scenario in [
+        HeavyScenario::Transparency,
+        HeavyScenario::Light,
+        HeavyScenario::Liquid,
+    ] {
+        let mut args = HeavyServerArgs::for_test(scenario);
+        args.output = std::env::temp_dir().join(format!(
+            "lodestone-heavy-server-{}-{}.jsonl",
+            scenario.as_str(),
+            std::process::id()
+        ));
+        let plan = args.spec.build_plan().unwrap();
+        let record = HeavyServerHarness::run(args, plan, V770ServerProtocol)
+            .await
+            .unwrap();
+        match scenario {
+            HeavyScenario::Transparency => {
+                assert!(record.requested.translucent_cells > 0);
+                assert_eq!(record.installed.translucent_cells, record.requested.translucent_cells);
+                assert_eq!(record.consumed.translucent_cells, record.requested.translucent_cells);
+            }
+            HeavyScenario::Light => {
+                assert!(record.requested.light_emitters > 0);
+                assert_eq!(record.installed.light_emitters, record.requested.light_emitters);
+                assert_eq!(record.consumed.light_emitters, record.requested.light_emitters);
+            }
+            HeavyScenario::Liquid => {
+                assert!(record.requested.liquid_cells > 0);
+                assert_eq!(record.installed.liquid_cells, record.requested.liquid_cells);
+                assert_eq!(record.consumed.liquid_cells, record.requested.liquid_cells);
+            }
+            _ => unreachable!("terrain runtime loop lists only terrain scenarios"),
+        }
+        assert_eq!(record.consumed.join_columns, record.requested.join_columns);
+        assert!(record.consumed.chunk_payload_bytes > 0);
+    }
+}
+
+#[tokio::test]
+async fn terrain_runtime_fails_when_the_transparency_producer_is_removed() {
+    let mut args = HeavyServerArgs::for_test(HeavyScenario::Transparency);
+    args.output = std::env::temp_dir().join(format!(
+        "lodestone-heavy-server-transparency-empty-{}.jsonl",
+        std::process::id()
+    ));
+    let mut plan = args.spec.build_plan().unwrap();
+    plan.commands.setup.clear();
+    let error = HeavyServerHarness::run(args, plan, V770ServerProtocol)
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("server.translucent_cells_encoded"), "{message}");
+    assert!(message.contains("installed translucent_cells=0"), "{message}");
+    assert!(message.contains("consumed translucent_cells=0"), "{message}");
+    assert!(!message.contains("chunk_payload_bytes=0"), "{message}");
+}
