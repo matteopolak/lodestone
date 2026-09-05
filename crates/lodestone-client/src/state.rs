@@ -1358,7 +1358,12 @@ impl LocalEcho {
     /// `ChunkLoaded`/`ChunkUnloaded` are applied by the adapter through the
     /// `WorldSink`, so their heavy payload never reaches this fold at all.
     fn apply(&mut self, event: &ClientEvent) {
-        let ClientEvent::TeleportPlayer { pos, rotation, flags } = event else {
+        let ClientEvent::TeleportPlayer {
+            pos,
+            rotation,
+            flags,
+            ..
+        } = event else {
             if let ClientEvent::PongReceived { time } = event {
                 self.last_ping_echo_ms = Some(*time);
             }

@@ -272,6 +272,16 @@ server had already overruled, and the speed check is what names it: measured
 on the survival oracle, a stale claim of the pre-teleport pose reported a
 vertical term of 153 blocks against a target 153 blocks above it.
 
+A position correction can also carry a velocity correction. Protocol 776
+resolves its X/Y/Z components independently: an absolute component replaces
+the current velocity, a relative component adds to it, and an optional rotation
+step first turns the current velocity through the correction's yaw/pitch change.
+`TeleportVelocity::resolve` is the shared rule used by local-player and remote-
+entity corrections. Older protocol families do not carry this record and retain
+their stop-on-teleport behavior. Explosion knockback is separate and additive;
+the 26.2 adapter must emit `ClientEvent::Explosion` as well as its particle and
+sound events so the shell's existing impulse path can consume it.
+
 That stale claim is a real window, and closing it takes a rewrite at **three**
 points because a movement action crosses three queues on its way out: the
 simulation's own action channel (`net.rs`, `NetClient::send_action`), the net

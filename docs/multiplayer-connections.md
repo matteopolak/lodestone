@@ -14,6 +14,13 @@ predicted velocity. Run
 `RUST_LOG=warn,net_join=debug just run` for a short reproduction without enabling
 unrelated renderer or shader diagnostics.
 
+Protocol 776 position corrections carry both pose and velocity. The adapter
+preserves all nine relative bits, the shell resolves local-player velocity, and
+the entity ingest path applies the same component-wise rule to remote entity
+teleports. Treating every correction as a stop produces repeated vertical
+disagreement on proxy-authored movement and turns server impulses into visible
+snaps.
+
 A saved server entry retains its port as `Option<u16>`. An explicit port is dialed unchanged. A bare hostname is passed to `lodestone_net::resolve_server_address`, which checks `_minecraft._tcp.<host>` and uses the selected SRV target when present, otherwise falling back to port `25565`.
 
 The resolved host and port are supplied through `ClientBuilder::connect_target`; the original `ServerAddress` remains untouched for the handshake. This distinction matters for virtual-hosting proxies, which route using the hostname the player entered even when DNS directs the socket elsewhere.

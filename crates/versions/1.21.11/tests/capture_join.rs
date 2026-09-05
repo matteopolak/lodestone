@@ -1405,6 +1405,7 @@ async fn record(oracle: &Oracle) {
                                 pos,
                                 rotation,
                                 flags,
+                                ..
                             }) => {
                                 // Only an absolute reposition needs answering;
                                 // a relative correction leaves the client

@@ -1140,6 +1140,7 @@ impl V766Adapter {
                 pos: Vec3::new(body.x, body.y, body.z),
                 rotation: Rotation::new(body.yaw, body.pitch),
                 flags,
+                velocity: None,
             }),
         ])
     }

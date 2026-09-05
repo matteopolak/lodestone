@@ -578,9 +578,10 @@ fn handle_move_entity(
 /// Decodes an absolute entity position update. `has_relatives` selects between
 /// `teleport_entity` (which carries a trailing `Relative` bit set) and
 /// `entity_position_sync` (which does not); both share a leading VarInt id and
-/// `PositionMoveRotation`, then a trailing on-ground boolean. The delta-movement
-/// is consumed for alignment; velocity is surfaced separately via
-/// `set_entity_motion`.
+/// a position/velocity/rotation record, then a trailing on-ground boolean. A
+/// teleport applies every relative component and its velocity correction. A
+/// position sync uses only its absolute pose; its velocity triple is a tracking
+/// snapshot rather than a motion command.
 fn handle_entity_position(
     payload: &[u8],
     has_relatives: bool,
@@ -590,16 +591,40 @@ fn handle_entity_position(
     let x = reader.f64().map_err(dec_err)?;
     let y = reader.f64().map_err(dec_err)?;
     let z = reader.f64().map_err(dec_err)?;
-    let _dx = reader.f64().map_err(dec_err)?;
-    let _dy = reader.f64().map_err(dec_err)?;
-    let _dz = reader.f64().map_err(dec_err)?;
+    let dx = reader.f64().map_err(dec_err)?;
+    let dy = reader.f64().map_err(dec_err)?;
+    let dz = reader.f64().map_err(dec_err)?;
     let yaw = reader.f32().map_err(dec_err)?;
     let pitch = reader.f32().map_err(dec_err)?;
-    if has_relatives {
-        let _relatives = reader.i32().map_err(dec_err)?;
-    }
+    let relatives = has_relatives
+        .then(|| reader.i32().map_err(dec_err))
+        .transpose()?;
     let on_ground = reader.bool().map_err(dec_err)?;
     reader.ensure_empty().map_err(dec_err)?;
+
+    if let Some(relatives) = relatives {
+        let flags = TeleportFlags {
+            relative_x: relatives & (1 << 0) != 0,
+            relative_y: relatives & (1 << 1) != 0,
+            relative_z: relatives & (1 << 2) != 0,
+            relative_yaw: relatives & (1 << 3) != 0,
+            relative_pitch: relatives & (1 << 4) != 0,
+        };
+        return Ok(vec![Directive::Emit(ClientEvent::EntityTeleported {
+            entity_id,
+            pos: Vec3::new(x, y, z),
+            rotation: Rotation::new(yaw, pitch),
+            flags,
+            velocity: TeleportVelocity {
+                delta: Vec3::new(dx, dy, dz),
+                relative_x: relatives & (1 << 5) != 0,
+                relative_y: relatives & (1 << 6) != 0,
+                relative_z: relatives & (1 << 7) != 0,
+                rotate_delta: relatives & (1 << 8) != 0,
+            },
+            on_ground,
+        })]);
+    }
 
     Ok(vec![Directive::Emit(ClientEvent::EntityMoved {
         entity_id,

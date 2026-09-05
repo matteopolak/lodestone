@@ -44,7 +44,7 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::prelude::{Commands, IntoScheduleConfigs, Query, Res, ResMut, With};
 use bevy_ecs::resource::Resource;
 use bevy_ecs::world::World;
-use lodestone_model::{AnimationAction, ClientEvent, EntityMovement, Reported};
+use lodestone_model::{AnimationAction, ClientEvent, EntityMovement, Reported, Vec3};
 use lodestone_physics::Vec3d;
 
 use crate::entity::{
@@ -334,40 +334,85 @@ pub fn apply_entity_removal(
     }
 }
 
-/// `IngestSet::Apply`: `ClientEvent::EntityMoved` → [`Position`], [`Rotation`],
-/// [`OnGround`].
+/// `IngestSet::Apply`: entity movement and teleport corrections →
+/// [`Position`], [`Rotation`], [`Velocity`], [`OnGround`].
 ///
 /// A relative movement reads the current [`Position`] and adds the delta, so
 /// this system is the only writer of that component on the network path.
 pub fn apply_entity_movement(
     batch: Res<IngestBatch>,
     index: Res<EntityIndex>,
-    mut entities: Query<(&mut Position, &mut Rotation, &mut OnGround)>,
+    mut commands: Commands,
+    mut entities: Query<(
+        &mut Position,
+        &mut Rotation,
+        &mut OnGround,
+        Option<&mut Velocity>,
+    )>,
 ) {
     for event in batch.events() {
-        let ClientEvent::EntityMoved {
-            entity_id,
-            movement,
-            rotation,
-            on_ground,
-        } = event
+        let entity_id = match event {
+            ClientEvent::EntityMoved { entity_id, .. }
+            | ClientEvent::EntityTeleported { entity_id, .. } => *entity_id,
+            _ => continue,
+        };
+        let Some(entity) = index.get(entity_id) else {
+            continue;
+        };
+        let Ok((mut position, mut look, mut grounded, entity_velocity)) = entities.get_mut(entity)
         else {
             continue;
         };
-        let Some(entity) = index.get(*entity_id) else {
-            continue;
-        };
-        let Ok((mut position, mut look, mut grounded)) = entities.get_mut(entity) else {
-            continue;
-        };
-        position.0 = match movement {
-            EntityMovement::Absolute(pos) => *pos,
-            EntityMovement::Relative(delta) => position.0 + *delta,
-        };
-        if let Some(rotation) = rotation {
-            look.0 = *rotation;
+        match event {
+            ClientEvent::EntityMoved {
+                movement,
+                rotation,
+                on_ground,
+                ..
+            } => {
+                position.0 = match movement {
+                    EntityMovement::Absolute(pos) => *pos,
+                    EntityMovement::Relative(delta) => position.0 + *delta,
+                };
+                if let Some(rotation) = rotation {
+                    look.0 = *rotation;
+                }
+                grounded.0 = *on_ground;
+            }
+            ClientEvent::EntityTeleported {
+                pos,
+                rotation,
+                flags,
+                velocity,
+                on_ground,
+                ..
+            } => {
+                let before = look.0;
+                position.0 = Vec3::new(
+                    if flags.relative_x { position.0.x + pos.x } else { pos.x },
+                    if flags.relative_y { position.0.y + pos.y } else { pos.y },
+                    if flags.relative_z { position.0.z + pos.z } else { pos.z },
+                );
+                look.0 = lodestone_model::Rotation::new(
+                    if flags.relative_yaw { before.yaw + rotation.yaw } else { rotation.yaw },
+                    if flags.relative_pitch {
+                        before.pitch + rotation.pitch
+                    } else {
+                        rotation.pitch
+                    }
+                    .clamp(-90.0, 90.0),
+                );
+                let current = entity_velocity.as_ref().map_or(Vec3::default(), |value| value.0);
+                let resolved = velocity.resolve(current, before, look.0);
+                if let Some(mut value) = entity_velocity {
+                    value.0 = resolved;
+                } else {
+                    commands.entity(entity).insert(Velocity(resolved));
+                }
+                grounded.0 = *on_ground;
+            }
+            _ => unreachable!(),
         }
-        grounded.0 = *on_ground;
     }
 }
 
@@ -3278,6 +3323,43 @@ mod tests {
             Some(90.0),
             "a movement with no rotation must not reset the body yaw"
         );
+    }
+
+    #[test]
+    fn entity_teleport_resolves_mixed_relative_pose_and_velocity() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(7, "minecraft:pig"));
+        feed(
+            &mut world,
+            ClientEvent::EntityTeleported {
+                entity_id: 7,
+                pos: Vec3::new(0.5, 70.0, -1.0),
+                rotation: ReportedRotation::new(30.0, 5.0),
+                flags: lodestone_model::TeleportFlags {
+                    relative_x: true,
+                    relative_y: false,
+                    relative_z: true,
+                    relative_yaw: true,
+                    relative_pitch: false,
+                },
+                velocity: lodestone_model::TeleportVelocity {
+                    delta: Vec3::new(1.0, 2.0, 3.0),
+                    relative_x: false,
+                    relative_y: false,
+                    relative_z: false,
+                    rotate_delta: false,
+                },
+                on_ground: true,
+            },
+        );
+        let entity = entity_for(&world, 7);
+        assert_eq!(entity.get::<Position>().map(|value| value.0), Some(Vec3::new(1.5, 70.0, 1.0)));
+        assert_eq!(
+            entity.get::<Rotation>().map(|value| value.0),
+            Some(ReportedRotation::new(120.0, 5.0))
+        );
+        assert_eq!(entity.get::<Velocity>().map(|value| value.0), Some(Vec3::new(1.0, 2.0, 3.0)));
+        assert_eq!(entity.get::<OnGround>().map(|value| value.0), Some(true));
     }
 
     #[test]

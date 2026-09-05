@@ -1209,6 +1209,7 @@ impl V774Adapter {
                 pos: Vec3::new(body.x, body.y, body.z),
                 rotation: Rotation::new(body.yaw, body.pitch),
                 flags,
+                velocity: None,
             }),
         ])
     }
@@ -1235,6 +1236,7 @@ impl V774Adapter {
                 relative_yaw: body.relative_yaw,
                 relative_pitch: body.relative_pitch,
             },
+            velocity: None,
         })])
     }
 

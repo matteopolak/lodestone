@@ -1264,6 +1264,7 @@ fn move_sent_the_same_tick_as_a_teleport_carries_the_new_position() {
             relative_yaw: false,
             relative_pitch: false,
         },
+        velocity: None,
     })
     .unwrap();
 
@@ -1320,6 +1321,7 @@ fn teleport_relative_rotation_differs_from_absolute_rotation() {
                 relative_yaw: relative,
                 relative_pitch: relative,
             },
+            velocity: None,
         })
         .unwrap();
         sim.poll_net();
@@ -1346,6 +1348,43 @@ fn teleport_relative_rotation_differs_from_absolute_rotation() {
         "the relatives bitmask must change the outcome -- a fix that ignores it \
          entirely would otherwise still pass"
     );
+}
+
+#[test]
+fn teleport_velocity_correction_rotates_then_applies_per_axis_deltas() {
+    use crate::net::NetUpdate;
+    use lodestone_model::event::{TeleportFlags, TeleportVelocity};
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    sim.poll_net();
+    sim.player_mut(|player| {
+        player.yaw = 0.0;
+        player.pitch = 0.0;
+        player.velocity = Vec3d::new(1.0, 2.0, 3.0);
+    });
+
+    feed.send(NetUpdate::Teleport {
+        pos: lodestone_client::Vec3::new(0.0, 64.0, 0.0),
+        rotation: Rotation::new(90.0, 0.0),
+        flags: TeleportFlags::default(),
+        velocity: Some(TeleportVelocity {
+            delta: lodestone_model::Vec3::new(0.5, 7.0, -0.25),
+            relative_x: true,
+            relative_y: false,
+            relative_z: true,
+            rotate_delta: true,
+        }),
+    })
+    .unwrap();
+    sim.poll_net();
+
+    let velocity = sim.player().velocity;
+    assert!((velocity.x + 2.5).abs() < 1.0e-9, "rotated x plus delta: {velocity:?}");
+    assert!((velocity.y - 7.0).abs() < 1.0e-9, "absolute y: {velocity:?}");
+    assert!((velocity.z - 0.75).abs() < 1.0e-9, "rotated z plus delta: {velocity:?}");
 }
 
 /// The player-rotation packet changes the pose the visible camera is built
@@ -3008,6 +3047,38 @@ fn disconnect_reason_recovers_embedded_json_and_its_styles() {
         control.to_plain_string().starts_with('{'),
         "the literal control must reproduce the reported raw JSON"
     );
+}
+
+/// Compatibility proxies do not all put the serialized component directly in
+/// the root literal. This shape has an empty root, a child containing a JSON
+/// string, and only then the component object. A root-only, one-pass recovery
+/// leaves the braces on screen.
+#[test]
+fn disconnect_reason_recovers_child_and_repeated_json_wrappers() {
+    use crate::net::NetUpdate;
+    use lodestone_model::{Text, TextColor};
+
+    let raw = r#"{"text":"-----","strikethrough":true,"color":"gray"}"#;
+    let quoted = serde_json::to_string(raw).expect("a string always serializes");
+    let wrapped = Text {
+        extra: vec![Text::literal(quoted)],
+        ..Text::default()
+    };
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::Disconnected(Box::new(wrapped)))
+        .unwrap();
+    sim.poll_net();
+
+    let SessionPhase::Ended(end) = sim.session_phase() else {
+        panic!("expected Ended");
+    };
+    assert_eq!(end.plain(), "-----");
+    let spans = end.reason.to_spans();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].style.color, Some(TextColor::Gray));
+    assert_eq!(spans[0].style.strikethrough, Some(true));
 }
 
 #[test]

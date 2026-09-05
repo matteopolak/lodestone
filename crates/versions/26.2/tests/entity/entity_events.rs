@@ -45,6 +45,44 @@ fn var_i32(value: i32) -> Vec<u8> {
     out
 }
 
+#[test]
+fn teleport_entity_keeps_relative_pose_and_velocity_components() {
+    let adapter = V770Adapter::new();
+    let mut payload = var_i32(42);
+    for value in [1.0f64, 2.0, 3.0, 0.25, -0.5, 0.75] {
+        payload.extend_from_slice(&value.to_be_bytes());
+    }
+    payload.extend_from_slice(&45.0f32.to_be_bytes());
+    payload.extend_from_slice(&(-15.0f32).to_be_bytes());
+    let relatives: i32 = (1 << 0) | (1 << 3) | (1 << 6) | (1 << 8);
+    payload.extend_from_slice(&relatives.to_be_bytes());
+    payload.push(1);
+
+    let directives = handle(&adapter, play::clientbound::TELEPORT_ENTITY, &payload);
+    let [Directive::Emit(ClientEvent::EntityTeleported {
+        entity_id,
+        pos,
+        rotation,
+        flags,
+        velocity,
+        on_ground,
+    })] = directives.as_slice()
+    else {
+        panic!("expected one entity teleport event, got {directives:?}");
+    };
+    assert_eq!(*entity_id, 42);
+    assert_eq!(*pos, Vec3::new(1.0, 2.0, 3.0));
+    assert_eq!(*rotation, lodestone_model::Rotation::new(45.0, -15.0));
+    assert!(flags.relative_x);
+    assert!(flags.relative_yaw);
+    assert!(!flags.relative_z);
+    assert_eq!(velocity.delta, Vec3::new(0.25, -0.5, 0.75));
+    assert!(!velocity.relative_x);
+    assert!(velocity.relative_y);
+    assert!(velocity.rotate_delta);
+    assert!(*on_ground);
+}
+
 // ---- entity_event -----------------------------------------------------
 
 #[test]

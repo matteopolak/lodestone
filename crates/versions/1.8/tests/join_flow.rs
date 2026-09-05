@@ -556,6 +556,7 @@ fn play_position_emits_confirmation_then_teleport_when_absolute() {
                 pos,
                 rotation,
                 flags,
+                ..
             }),
         ] => {
             assert_eq!(*packet_id, play::serverbound::POSITION_LOOK);
@@ -612,6 +613,7 @@ fn play_position_with_relative_flags_emits_no_immediate_echo() {
             pos,
             rotation,
             flags,
+            ..
         })] => {
             assert_eq!(*pos, Vec3::new(11.0, 64.0, 4.0));
             assert_eq!(*rotation, Rotation::new(90.0, -10.0));

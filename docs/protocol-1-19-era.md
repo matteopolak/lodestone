@@ -121,6 +121,13 @@ infers the window. A name the registry does not carry leaves the shape alone
 rather than taking the first entry, which would silently be the overworld's
 window in some other dimension.
 
+Inbound chunk columns retain their positioned block-entity records. The wire
+type id remains version-specific, so the decoder derives the canonical type
+from the already translated block state at the same position and preserves the
+NBT payload. Pre-1.20 sign fields are reshaped into the shared two-sided sign
+model before the column reaches `LoadedChunk`; dropping the records here makes
+signs, containers, and other block entities disappear despite valid chunk data.
+
 `respawn` at 762 names a dimension type but does not describe it, so the
 adapter retains the registry blob the join delivered and re-resolves through
 it. An adapter that keeps reading the old inline field reads a string where an

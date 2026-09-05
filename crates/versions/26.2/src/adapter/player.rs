@@ -359,8 +359,8 @@ fn read_look_anchor(reader: &mut Reader<'_>) -> Result<LookAnchor, AdapterError>
     }
 }
 
-/// Lowers vanilla's own `Relative` bit set to
-/// the canonical [`TeleportFlags`]. Bits: X=0, Y=1, Z=2, Y_ROT=3, X_ROT=4.
+/// Lowers the position/rotation portion of the wire bit set to the canonical
+/// [`TeleportFlags`]. Bits: X=0, Y=1, Z=2, Y_ROT=3, X_ROT=4.
 fn teleport_flags(value: i32) -> TeleportFlags {
     TeleportFlags {
         relative_x: value & (1 << 0) != 0,
@@ -374,19 +374,12 @@ fn teleport_flags(value: i32) -> TeleportFlags {
 /// Decodes `player_position` and returns the teleport-accept confirmation plus
 /// the canonical teleport event.
 ///
-/// Wire layout (`ClientboundPlayerPositionPacket`): VarInt teleport id, a
-/// `PositionMoveRotation` (position `f64`×3, delta-movement `f64`×3, yaw `f32`,
-/// pitch `f32`), then a big-endian `i32` `Relative` bit set. The delta-movement
-/// is decoded for alignment (the trailing-bytes misparse detector below needs
-/// it consumed) and then discarded — **not** applied anywhere. `TeleportFlags`
-/// only carries the X/Y/Z/Y_ROT/X_ROT bits (`Relative`'s bits 0-4); the three
-/// `DELTA_*` bits and `ROTATE_DELTA` (bits 5-8, `PositionMoveRotation.
-/// calculateAbsolute` in the decompile) are not decoded either, so a server
-/// that sends a *relative* delta-movement is silently treated the same as one
-/// that does not. `net_apply.rs`'s `NetUpdate::Teleport` arm zeroes
-/// `player.velocity` unconditionally on every teleport, which is the vanilla
-/// behaviour only for the common all-absolute-delta case. Zero trailing bytes
-/// is the misparse detector.
+/// Wire layout: VarInt teleport id, position `f64`×3, delta movement
+/// `f64`×3, yaw `f32`, pitch `f32`, then a big-endian `i32` bit set. Bits
+/// 0-4 select relative position/rotation components, bits 5-7 select relative
+/// velocity components, and bit 8 rotates existing velocity by the correction's
+/// look-angle change before applying those components. Zero trailing bytes is
+/// the misparse detector.
 fn handle_player_position(
     adapter: &V770Adapter,
     payload: &[u8],
@@ -396,9 +389,9 @@ fn handle_player_position(
     let x = reader.f64().map_err(dec_err)?;
     let y = reader.f64().map_err(dec_err)?;
     let z = reader.f64().map_err(dec_err)?;
-    let _dx = reader.f64().map_err(dec_err)?;
-    let _dy = reader.f64().map_err(dec_err)?;
-    let _dz = reader.f64().map_err(dec_err)?;
+    let dx = reader.f64().map_err(dec_err)?;
+    let dy = reader.f64().map_err(dec_err)?;
+    let dz = reader.f64().map_err(dec_err)?;
     let yaw = reader.f32().map_err(dec_err)?;
     let pitch = reader.f32().map_err(dec_err)?;
     let relatives = reader.i32().map_err(dec_err)?;
@@ -438,7 +431,14 @@ fn handle_player_position(
         Directive::Emit(ClientEvent::TeleportPlayer {
             pos: Vec3::new(x, y, z),
             rotation: Rotation::new(yaw, pitch),
-            flags: teleport_flags(relatives),
+            flags,
+            velocity: Some(TeleportVelocity {
+                delta: Vec3::new(dx, dy, dz),
+                relative_x: relatives & (1 << 5) != 0,
+                relative_y: relatives & (1 << 6) != 0,
+                relative_z: relatives & (1 << 7) != 0,
+                rotate_delta: relatives & (1 << 8) != 0,
+            }),
         }),
     ])
 }

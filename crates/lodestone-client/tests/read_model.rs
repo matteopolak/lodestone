@@ -319,6 +319,7 @@ async fn read_model_folds_player_state() {
                     pos: Vec3::new(1.0, 64.0, 2.0),
                     rotation: Rotation::new(90.0, 0.0),
                     flags: TeleportFlags::default(),
+                    velocity: None,
                 }),
             ],
         );
@@ -707,11 +708,13 @@ async fn relative_teleport_is_applied_as_delta() {
                     pos: Vec3::new(10.0, 64.0, 10.0),
                     rotation: Rotation::default(),
                     flags: TeleportFlags::default(),
+                    velocity: None,
                 }),
                 Directive::Emit(ClientEvent::TeleportPlayer {
                     pos: Vec3::new(5.0, 70.0, -3.0),
                     rotation: Rotation::default(),
                     flags,
+                    velocity: None,
                 }),
             ],
         );
@@ -1533,6 +1536,7 @@ async fn set_position_hits_wire_and_predicts_locally() {
                 pos: Vec3::new(0.0, 64.0, 0.0),
                 rotation: Rotation::default(),
                 flags: TeleportFlags::default(),
+                velocity: None,
             })],
         );
     let (handle, mut events, mut peer) = start(adapter);
@@ -1570,6 +1574,7 @@ async fn move_to_forwards_full_state_to_wire_and_predicts() {
                 pos: Vec3::new(0.0, 64.0, 0.0),
                 rotation: Rotation::default(),
                 flags: TeleportFlags::default(),
+                velocity: None,
             })],
         );
     let (handle, mut events, mut peer) = start(adapter);

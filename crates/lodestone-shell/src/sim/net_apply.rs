@@ -26,37 +26,32 @@ use super::*;
 // Not reachable through `super::*`: the disconnect and failure arms build a
 // `SessionEnd` whose reason is a styled `Text` rather than a formatted string.
 
-/// Recovers a structured component that arrived wrapped in a plain string.
+/// Recovers a structured component that arrived wrapped as visible JSON.
 ///
-/// Some proxies bridge an older JSON disconnect packet into a modern text
-/// packet by placing the complete JSON document inside a literal component.
-/// The protocol decoder correctly preserves that outer literal, but displaying
-/// it directly exposes braces and style fields to the player. Limit the
-/// compatibility parse to an otherwise-unadorned disconnect literal so normal
-/// chat text containing JSON remains literal.
-fn embedded_disconnect_component(reason: lodestone_model::Text) -> lodestone_model::Text {
-    let lodestone_model::Text {
-        content: lodestone_model::text::TextContent::Literal(raw),
-        style,
-        extra,
-        click: None,
-        hover: None,
-        insertion: None,
-    } = &reason
-    else {
-        return reason;
-    };
-    if !style.is_empty() || !extra.is_empty() {
-        return reason;
-    }
+/// A proxy can put the complete JSON document inside an NBT string, inside a
+/// component child, or behind more than one string-serialization layer. The
+/// component decoder correctly preserves each wrapper, but drawing that tree
+/// exposes braces and style fields. Rebuild the complete visible payload at
+/// this disconnect-only boundary and peel at most four JSON layers. Ordinary
+/// chat never passes through this function, and malformed JSON remains exactly
+/// as the server sent it.
+fn embedded_disconnect_component(mut reason: lodestone_model::Text) -> lodestone_model::Text {
+    const MAX_WRAPPERS: usize = 4;
 
-    let trimmed = raw.trim_start();
-    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
-        return reason;
-    }
+    for _ in 0..MAX_WRAPPERS {
+        let visible = reason.to_plain_string();
+        let candidate = visible.trim();
+        if !matches!(candidate.as_bytes().first(), Some(b'{' | b'[' | b'"')) {
+            break;
+        }
 
-    let parsed = lodestone_model::Text::from_json(raw);
-    if parsed == reason { reason } else { parsed }
+        let parsed = lodestone_model::Text::from_json(candidate);
+        if parsed == lodestone_model::Text::literal(candidate) {
+            break;
+        }
+        reason = parsed;
+    }
+    reason
 }
 
 impl Sim {
@@ -406,6 +401,7 @@ impl Sim {
                     pos,
                     rotation,
                     flags,
+                    velocity,
                 } => {
                     // Adopt the server's authoritative placement. The shell runs
                     // its own physics and streams an optimistic position every
@@ -436,6 +432,8 @@ impl Sim {
                                 pos.z
                             },
                         );
+                        let old_yaw = player.yaw;
+                        let old_pitch = player.pitch;
                         player.yaw = if flags.relative_yaw {
                             player.yaw + rotation.yaw
                         } else {
@@ -445,8 +443,20 @@ impl Sim {
                             player.pitch + rotation.pitch
                         } else {
                             rotation.pitch
-                        };
-                        player.velocity = Vec3d::ZERO;
+                        }
+                        .clamp(-90.0, 90.0);
+                        player.velocity = velocity.map_or(Vec3d::ZERO, |correction| {
+                            let resolved = correction.resolve(
+                                lodestone_model::Vec3::new(
+                                    player.velocity.x,
+                                    player.velocity.y,
+                                    player.velocity.z,
+                                ),
+                                Rotation::new(old_yaw, old_pitch),
+                                Rotation::new(player.yaw, player.pitch),
+                            );
+                            Vec3d::new(resolved.x, resolved.y, resolved.z)
+                        });
                         // A teleport is not a fall. Vanilla resets fall distance on
                         // every position snap, and this one handler covers server
                         // corrections, respawn and every teleport packet — so

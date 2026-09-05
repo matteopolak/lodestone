@@ -1078,9 +1078,10 @@ fn decode_sound_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 ///
 /// # What this does not decode
 ///
-/// `radius`, `blockCount` and `playerKnockback` are consumed for wire
-/// alignment only — no consumer today. `explosionParticle` is consumed via
-/// the narrow allowlist above. `blockParticles` (the flying-debris weighted
+/// `blockCount` is consumed for wire alignment only because individual block
+/// changes arrive separately. Radius and optional player knockback are emitted
+/// as [`ClientEvent::Explosion`]. `explosionParticle` is consumed via the
+/// narrow allowlist above. `blockParticles` (the flying-debris weighted
 /// list of particle infos) is **not** decoded at all: `explosionSound` is
 /// the second-to-last field the packet carries, so once it is read there is
 /// nothing left this seam needs, and modelling the flying-debris entry's own
@@ -1104,14 +1105,17 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     let x = reader.f64().map_err(dec_err)?;
     let y = reader.f64().map_err(dec_err)?;
     let z = reader.f64().map_err(dec_err)?;
-    let _radius = reader.f32().map_err(dec_err)?;
+    let radius = reader.f32().map_err(dec_err)?;
     let _block_count = reader.i32().map_err(dec_err)?;
-    if reader.bool().map_err(dec_err)? {
-        // `playerKnockback: Optional<Vec3>` — consumed, not applied yet.
-        reader.f64().map_err(dec_err)?;
-        reader.f64().map_err(dec_err)?;
-        reader.f64().map_err(dec_err)?;
-    }
+    let knockback = if reader.bool().map_err(dec_err)? {
+        Some(Vec3::new(
+            reader.f64().map_err(dec_err)?,
+            reader.f64().map_err(dec_err)?,
+            reader.f64().map_err(dec_err)?,
+        ))
+    } else {
+        None
+    };
     let particle_id = reader.var_i32().map_err(dec_err)?;
     // The question this guard has to answer is **"does this particle's stream
     // codec read any further bytes"**, not "is it one of the two ids we happen
@@ -1148,6 +1152,12 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     // `Particle::tick_huge_explosion_seed`), so the seed is the one real
     // vanilla explosions actually spawn from this packet.
     Ok(vec![
+        Directive::Emit(ClientEvent::Explosion {
+            pos: Vec3::new(x, y, z),
+            radius,
+            affected_blocks: Vec::new(),
+            knockback,
+        }),
         Directive::Emit(ClientEvent::Particles {
             particle: parse_key("explosion_emitter", "particle")?,
             long_distance: false,

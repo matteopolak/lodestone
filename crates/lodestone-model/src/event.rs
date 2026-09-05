@@ -216,6 +216,66 @@ pub struct TeleportFlags {
     pub relative_pitch: bool,
 }
 
+/// Velocity carried by a player position correction.
+///
+/// Newer protocols can replace or add to each velocity component independently,
+/// and can rotate the current velocity into the corrected look direction first.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TeleportVelocity {
+    /// Per-axis velocity value sent by the server.
+    pub delta: Vec3,
+    /// Add `delta.x` to the current X velocity instead of replacing it.
+    pub relative_x: bool,
+    /// Add `delta.y` to the current Y velocity instead of replacing it.
+    pub relative_y: bool,
+    /// Add `delta.z` to the current Z velocity instead of replacing it.
+    pub relative_z: bool,
+    /// Rotate current velocity by the correction's rotation change before applying `delta`.
+    pub rotate_delta: bool,
+}
+
+impl TeleportVelocity {
+    /// Resolve this correction against the current velocity and the look
+    /// direction before and after the position correction.
+    #[must_use]
+    pub fn resolve(self, current: Vec3, before: Rotation, after: Rotation) -> Vec3 {
+        let mut current = current;
+        if self.rotate_delta {
+            let pitch_delta = f64::from(before.pitch - after.pitch).to_radians();
+            let (pitch_sin, pitch_cos) = pitch_delta.sin_cos();
+            current = Vec3::new(
+                current.x,
+                current.y * pitch_cos + current.z * pitch_sin,
+                current.z * pitch_cos - current.y * pitch_sin,
+            );
+            let yaw_delta = f64::from(before.yaw - after.yaw).to_radians();
+            let (yaw_sin, yaw_cos) = yaw_delta.sin_cos();
+            current = Vec3::new(
+                current.x * yaw_cos + current.z * yaw_sin,
+                current.y,
+                current.z * yaw_cos - current.x * yaw_sin,
+            );
+        }
+        Vec3::new(
+            if self.relative_x {
+                current.x + self.delta.x
+            } else {
+                self.delta.x
+            },
+            if self.relative_y {
+                current.y + self.delta.y
+            } else {
+                self.delta.y
+            },
+            if self.relative_z {
+                current.z + self.delta.z
+            } else {
+                self.delta.z
+            },
+        )
+    }
+}
+
 /// A semantic entity movement payload.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EntityMovement {
@@ -2018,6 +2078,9 @@ pub enum ClientEvent {
         rotation: Rotation,
         /// Relative component flags.
         flags: TeleportFlags,
+        /// Velocity correction when the protocol carries one. Older families
+        /// use `None`, preserving their stop-on-teleport behavior.
+        velocity: Option<TeleportVelocity>,
     },
     /// An entity appeared in the world.
     EntitySpawned {
@@ -2054,6 +2117,22 @@ pub enum ClientEvent {
         movement: EntityMovement,
         /// New rotation when included.
         rotation: Option<Rotation>,
+        /// Whether the entity is on the ground.
+        on_ground: bool,
+    },
+    /// An entity received a position, rotation, and velocity correction whose
+    /// components may independently be relative to its current state.
+    EntityTeleported {
+        /// Entity id.
+        entity_id: i32,
+        /// Target position or per-axis delta indicated by `flags`.
+        pos: Vec3,
+        /// Target rotation or per-component delta indicated by `flags`.
+        rotation: Rotation,
+        /// Relative position and rotation components.
+        flags: TeleportFlags,
+        /// Velocity correction carried by the packet.
+        velocity: TeleportVelocity,
         /// Whether the entity is on the ground.
         on_ground: bool,
     },
@@ -4110,6 +4189,7 @@ pub fn route(event: &ClientEvent) -> Route {
 
         // ---- per-entity ECS state -------------------------------------------
         ClientEvent::EntityMoved { .. }
+        | ClientEvent::EntityTeleported { .. }
         | ClientEvent::EntityVelocity { .. }
         | ClientEvent::EntityRemoved { .. }
         | ClientEvent::EntityHeadRotation { .. }

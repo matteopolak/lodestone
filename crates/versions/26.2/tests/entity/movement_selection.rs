@@ -26,7 +26,9 @@
 //! as one adapter is reused across a connection's lifetime.
 
 use lodestone_core::{Ctx, Decode, Reader};
-use lodestone_model::{ClientAction, ConnectionState, Rotation, Vec3, VersionAdapter};
+use lodestone_model::{
+    ClientAction, ClientEvent, ConnectionState, Directive, Rotation, Vec3, VersionAdapter,
+};
 use lodestone_v26_2::V770Adapter;
 use lodestone_v26_2::packet_ids::play;
 use lodestone_v26_2::packets::game::{MovePlayerPos, MovePlayerRot, MovePlayerStatusOnly};
@@ -381,9 +383,9 @@ impl lodestone_world::WorldSink for NullSink {
 }
 
 /// Hand-built clientbound teleport body: varint id, absolute `x`/`y`/`z`,
-/// a delta-movement triple this adapter discards, `f32` yaw and pitch, then the
-/// `relatives` mask. Built here from `to_be_bytes` rather than from any encoder
-/// in the crate under test.
+/// a zero delta-movement triple, `f32` yaw and pitch, then the `relatives`
+/// mask. Built here from `to_be_bytes` rather than from any encoder in the
+/// crate under test.
 fn player_position_payload(id: u8, x: f64, y: f64, z: f64, relatives: i32) -> Vec<u8> {
     assert!(id < 0x80, "single-byte varint only");
     let mut bytes = vec![id];
@@ -394,6 +396,49 @@ fn player_position_payload(id: u8, x: f64, y: f64, z: f64, relatives: i32) -> Ve
     bytes.extend_from_slice(&0.0f32.to_be_bytes());
     bytes.extend_from_slice(&relatives.to_be_bytes());
     bytes
+}
+
+#[test]
+fn player_position_keeps_delta_movement_and_all_relative_bits() {
+    let mut bytes = vec![7];
+    for value in [11.0f64, 64.0, -9.0, 0.25, 1.5, -0.75] {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+    bytes.extend_from_slice(&35.0f32.to_be_bytes());
+    bytes.extend_from_slice(&(-12.0f32).to_be_bytes());
+    let relatives: i32 = (1 << 0) | (1 << 4) | (1 << 5) | (1 << 7) | (1 << 8);
+    bytes.extend_from_slice(&relatives.to_be_bytes());
+
+    let directives = V770Adapter::new()
+        .handle_packet(
+            &mut NullSink,
+            ConnectionState::Play,
+            play::clientbound::PLAYER_POSITION,
+            &bytes,
+        )
+        .expect("decode player position correction");
+    let event = directives
+        .iter()
+        .find_map(|directive| match directive {
+            Directive::Emit(event @ ClientEvent::TeleportPlayer { .. }) => Some(event),
+            _ => None,
+        })
+        .expect("teleport event");
+    let ClientEvent::TeleportPlayer {
+        flags, velocity, ..
+    } = event
+    else {
+        unreachable!();
+    };
+    assert!(flags.relative_x);
+    assert!(!flags.relative_y);
+    assert!(flags.relative_pitch);
+    let velocity = velocity.expect("this protocol carries correction velocity");
+    assert_eq!(velocity.delta, Vec3::new(0.25, 1.5, -0.75));
+    assert!(velocity.relative_x);
+    assert!(!velocity.relative_y);
+    assert!(velocity.relative_z);
+    assert!(velocity.rotate_delta);
 }
 
 fn accept_teleport(adapter: &V770Adapter, id: u8, target: Vec3, relatives: i32) {
