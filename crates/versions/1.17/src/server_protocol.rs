@@ -17,8 +17,8 @@ use crate::canonical::{wire_state_for_756, wire_state_for_758};
 use crate::packet_ids::{handshaking, login, play};
 use crate::packet_ids_758::{handshaking as handshaking_758, login as login_758, play as play_758};
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
-    ServerboundPosition, ServerboundPositionLook,
+    BlockDig, BlockPlace, ClientboundChat, ClientboundPositionLook, JoinGame, ServerboundChat,
+    ServerboundFlying, ServerboundLook, ServerboundPosition, ServerboundPositionLook,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -60,6 +60,40 @@ fn send_758<T: Encode>(packet_id: i32, packet: &T) -> ServerDirective {
     ServerDirective::Send {
         packet_id,
         payload: encode_body(packet, CTX_758).expect("fixed protocol-758 packet must encode"),
+    }
+}
+
+/// Wraps a plain server message in the JSON text object this era's clientbound
+/// chat body expects. Decoration has already happened before this boundary, so
+/// only JSON string escaping belongs here.
+fn system_chat_text(message: &str) -> String {
+    let mut json = String::with_capacity(message.len() + 11);
+    json.push_str("{\"text\":\"");
+    for ch in message.chars() {
+        match ch {
+            '"' => json.push_str("\\\""),
+            '\\' => json.push_str("\\\\"),
+            '\n' => json.push_str("\\n"),
+            '\r' => json.push_str("\\r"),
+            '\t' => json.push_str("\\t"),
+            ch if ch <= '\u{001f}' => {
+                use std::fmt::Write as _;
+                write!(json, "\\u{:04x}", ch as u32)
+                    .expect("writing into a String cannot fail");
+            }
+            ch => json.push(ch),
+        }
+    }
+    json.push_str("\"}");
+    json
+}
+
+fn system_chat(message: &str) -> ClientboundChat {
+    ClientboundChat {
+        message: system_chat_text(message),
+        // This is regular chat history, not an action-bar overlay.
+        position: 1,
+        sender: Uuid::nil(),
     }
 }
 
@@ -316,6 +350,19 @@ impl ServerProtocol for V756ServerProtocol {
                     hand,
                 }
             }
+            State::Play if packet_id == play::serverbound::CHAT => {
+                decode_full::<ServerboundChat>(payload).map_or(ServerBound::Ignored, |chat| {
+                    // This era's one-string chat body predates the signed
+                    // fields. Keep that absence explicit at the shared
+                    // broadcast boundary rather than manufacturing a value.
+                    ServerBound::Chat {
+                        message: chat.message,
+                        timestamp_millis: 0,
+                        salt: 0,
+                        signature: None,
+                    }
+                })
+            }
             // The four movement forms have distinct payloads.  In particular,
             // only the first two carry a position, which is what drives the
             // integrated server's view recentering and tick-area publication.
@@ -454,6 +501,10 @@ impl ServerProtocol for V756ServerProtocol {
 
     fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
         ServerDirective::None
+    }
+
+    fn encode_system_chat(&self, message: &str) -> ServerDirective {
+        send(play::clientbound::CHAT, &system_chat(message))
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
@@ -683,6 +734,17 @@ impl ServerProtocol for V758ServerProtocol {
                     hand,
                 }
             }
+            State::Play if packet_id == play_758::serverbound::CHAT => {
+                decode_full_758::<ServerboundChat>(payload).map_or(
+                    ServerBound::Ignored,
+                    |chat| ServerBound::Chat {
+                        message: chat.message,
+                        timestamp_millis: 0,
+                        salt: 0,
+                        signature: None,
+                    },
+                )
+            }
             State::Play if packet_id == play_758::serverbound::POSITION => {
                 decode_full_758::<ServerboundPosition>(payload).map_or(
                     ServerBound::Ignored,
@@ -821,6 +883,10 @@ impl ServerProtocol for V758ServerProtocol {
 
     fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
         ServerDirective::None
+    }
+
+    fn encode_system_chat(&self, message: &str) -> ServerDirective {
+        send_758(play_758::clientbound::CHAT, &system_chat(message))
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {

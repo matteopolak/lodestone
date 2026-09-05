@@ -109,6 +109,14 @@ the action reaches the integrated server's existing placement consumer. The
 consumer resolves the held item from its server-side inventory, rather than
 trusting a client-supplied stack.
 
+Both hosted decoders also carry the legacy one-string chat body into
+`ServerBound::Chat` with explicit unsigned timestamp, salt, and signature
+values. The shared server broadcasts that message as system chat, which the
+in-memory tests observe through the registry-selected adapter's client event
+stream for both 756 and 758. The wire tests use literal bodies and reject a
+truncated body, trailing bytes, and the wrong connection state; the manual
+external-client gate above is still the only real-client acceptance evidence.
+
 ### One block-state table and one entity table, which is not what the era below needs
 
 The 1.14 era needs three of each, because every release inserts blocks and

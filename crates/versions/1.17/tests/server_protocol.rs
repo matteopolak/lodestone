@@ -30,6 +30,62 @@ const POSITION_LOOK_BODY: [u8; 33] = [
     0x00, // on_ground = false
 ];
 
+/// Literal one-string chat body, assembled separately from the packet codec.
+/// The ASCII-only text keeps the VarInt byte length visibly equal to the
+/// character count; a decoder that accepts trailing data or the wrong state
+/// must still reject the controls below.
+const CHAT_BODY: [u8; 14] = [
+    0x0d, // string byte length
+    b'e', b'r', b'a', b' ', b'c', b'h', b'a', b't', b' ', b'7', b'5', b'6', b'!',
+];
+
+fn assert_legacy_chat_lift<P: ServerProtocol>(protocol: &P, packet_id: i32) {
+    let expected = ServerBound::Chat {
+        message: "era chat 756!".to_owned(),
+        timestamp_millis: 0,
+        salt: 0,
+        signature: None,
+    };
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &CHAT_BODY),
+        expected,
+        "the unsigned one-string body must reach the shared chat consumer"
+    );
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &[0x04, b'o']),
+        ServerBound::Ignored,
+        "a truncated string body must not reach the chat consumer"
+    );
+    let mut trailing = CHAT_BODY.to_vec();
+    trailing.push(0);
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &trailing),
+        ServerBound::Ignored,
+        "a trailing byte must not be treated as another valid chat field"
+    );
+    assert_eq!(
+        protocol.decode(State::Configuration, packet_id, &CHAT_BODY),
+        ServerBound::Ignored,
+        "chat must not bypass the direct login-to-Play state boundary"
+    );
+}
+
+#[test]
+fn protocol_756_lifts_literal_legacy_chat_body() {
+    assert_legacy_chat_lift(
+        &V756ServerProtocol,
+        lodestone_v1_17::packet_ids::play::serverbound::CHAT,
+    );
+}
+
+#[test]
+fn protocol_758_lifts_literal_legacy_chat_body() {
+    assert_legacy_chat_lift(
+        &V758ServerProtocol,
+        lodestone_v1_17::packet_ids_758::play::serverbound::CHAT,
+    );
+}
+
 fn assert_movement_lift<P: ServerProtocol>(protocol: &P, position: i32, position_look: i32, look: i32, flying: i32) {
     assert_eq!(
         protocol.decode(State::Play, position, &POSITION_BODY),
