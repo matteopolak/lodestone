@@ -130,6 +130,11 @@ locally or the dropped count never updates on screen.
 
 ## Cost screens: anvil, grindstone, smithing, enchanting
 
+The enchanting cost calculation accepts an `EnchantmentOfferSlot` rather than
+a numeric row. Its fixed `Top`, `Middle`, and `Bottom` order drives both the RNG
+draw sequence and the distinct cost formulas, preventing an out-of-range row
+from silently borrowing the bottom-row rule.
+
 These four screens share vanilla's `ItemCombinerMenu` shape (or, for the enchanting table, an
 equivalent positional layout): a small `Generic`-sized menu whose *slot kinds* differ (a take-only
 output slot; the enchanting table's lapis-only input) and whose *pixel positions* are a `SpecialLayout`

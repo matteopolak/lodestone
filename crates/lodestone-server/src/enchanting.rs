@@ -95,7 +95,32 @@ pub fn bookshelf_power(source: &dyn ChunkSource, pos: BlockPos) -> u32 {
         .min(15) as u32
 }
 
-/// The real per-slot enchantment-cost rule for `slot` (`0..3`) at `bookcases`
+/// One of the enchanting table's three fixed offer rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnchantmentOfferSlot {
+    /// Top, cheapest offer row.
+    Top,
+    /// Middle offer row.
+    Middle,
+    /// Bottom, strongest offer row.
+    Bottom,
+}
+
+impl EnchantmentOfferSlot {
+    /// All rows in their draw and display order.
+    pub const ALL: [Self; 3] = [Self::Top, Self::Middle, Self::Bottom];
+
+    #[must_use]
+    const fn index(self) -> i32 {
+        match self {
+            Self::Top => 0,
+            Self::Middle => 1,
+            Self::Bottom => 2,
+        }
+    }
+}
+
+/// The per-slot enchantment-cost rule for `slot` at `bookcases`
 /// power, seeded by `rng` — the caller reseeds `rng` from the table's own
 /// enchantment-seed field once per evaluation and calls this three times in slot
 /// order (order matters: the draw is one shared roll per slot, not three
@@ -107,16 +132,21 @@ pub fn bookshelf_power(source: &dyn ChunkSource, pos: BlockPos) -> u32 {
 /// again defensively so a caller feeding a raw value cannot exceed the real
 /// bound.
 #[must_use]
-pub fn cost_for_slot(rng: &mut SpawnRng, slot: u32, bookcases: u32, enchantable_value: Option<u32>) -> i32 {
+pub fn cost_for_slot(
+    rng: &mut SpawnRng,
+    slot: EnchantmentOfferSlot,
+    bookcases: u32,
+    enchantable_value: Option<u32>,
+) -> i32 {
     if enchantable_value.is_none() {
         return 0;
     }
     let bookcases = bookcases.min(15) as i32;
     let selected = rng.next_int(8) + 1 + (bookcases >> 1) + rng.next_int(bookcases + 1);
     match slot {
-        0 => (selected / 3).max(1),
-        1 => selected * 2 / 3 + 1,
-        _ => selected.max(bookcases * 2),
+        EnchantmentOfferSlot::Top => (selected / 3).max(1),
+        EnchantmentOfferSlot::Middle => selected * 2 / 3 + 1,
+        EnchantmentOfferSlot::Bottom => selected.max(bookcases * 2),
     }
 }
 
@@ -134,9 +164,9 @@ pub fn table_costs(seed: i64, bookcases: u32, item: &ItemStack) -> [i32; 3] {
     let value = enchantment_data::enchantable_value(&item.item.to_string());
     let mut rng = SpawnRng::new(seed as u64);
     let mut costs = [0i32; 3];
-    for (slot, cost) in costs.iter_mut().enumerate() {
-        let raw = cost_for_slot(&mut rng, slot as u32, bookcases, value);
-        *cost = if raw < slot as i32 + 1 { 0 } else { raw };
+    for (slot, cost) in EnchantmentOfferSlot::ALL.into_iter().zip(&mut costs) {
+        let raw = cost_for_slot(&mut rng, slot, bookcases, value);
+        *cost = if raw < slot.index() + 1 { 0 } else { raw };
     }
     costs
 }
@@ -297,7 +327,7 @@ mod tests {
         let mut rng = SpawnRng::new(1);
         // Force a low `selected` roll by seeding and reading, then verify the
         // floor kicks in at high bookcases.
-        let cost = cost_for_slot(&mut rng, 2, 15, Some(10));
+        let cost = cost_for_slot(&mut rng, EnchantmentOfferSlot::Bottom, 15, Some(10));
         assert!(cost >= 30, "slot 2 at 15 bookshelves must floor at bookcases*2 = 30, got {cost}");
     }
 
