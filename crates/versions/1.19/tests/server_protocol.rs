@@ -343,3 +343,59 @@ fn registry_selected_protocol_762_carries_arm_swings_to_the_client_event_stream(
         "the Play request must not be accepted before Play"
     );
 }
+
+#[test]
+fn hosted_held_slot_reaches_the_registry_selected_inventory_consumer() {
+    let protocol = V762ServerProtocol;
+
+    // The protocol-762 body is a single signed big-endian i16. This literal
+    // final hotbar value does not use either direction's packet encoder.
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::HELD_ITEM_SLOT,
+            &[0x00, 0x08],
+        ),
+        ServerBound::CarriedItemChanged { slot: 8 },
+        "the last legal hotbar slot must reach the shared inventory consumer"
+    );
+    for (body, description) in [
+        (&[0xff, 0xff][..], "negative slots"),
+        (&[0x00, 0x09][..], "slots beyond the hotbar"),
+        (&[0x00][..], "truncated bodies"),
+        (&[0x00, 0x08, 0x00][..], "trailing bytes"),
+    ] {
+        assert_eq!(
+            protocol.decode(State::Play, play::serverbound::HELD_ITEM_SLOT, body),
+            ServerBound::Ignored,
+            "{description} must not change the selected inventory slot"
+        );
+    }
+    assert_eq!(
+        protocol.decode(
+            State::Login,
+            play::serverbound::HELD_ITEM_SLOT,
+            &[0x00, 0x08],
+        ),
+        ServerBound::Ignored,
+        "the hotbar selector belongs to Play"
+    );
+
+    let adapter = V762Adapter::new();
+    let action = ClientAction::SetCarriedItem { slot: 3 };
+    let Some((packet_id, payload)) = adapter
+        .encode_action(ConnectionState::Play, &action)
+        .expect("the protocol-762 adapter encodes hotbar selection")
+    else {
+        panic!("hotbar selection must produce a Play packet");
+    };
+    assert_eq!(packet_id, play::serverbound::HELD_ITEM_SLOT);
+    assert_eq!(payload, vec![0x00, 0x03]);
+    let registry_protocol = lodestone_registry::server_protocol_for_protocol(762)
+        .expect("protocol 762 must resolve to its hosted server protocol");
+    assert_eq!(
+        registry_protocol.decode(State::Play, packet_id, &payload),
+        ServerBound::CarriedItemChanged { slot: 3 },
+        "the adapter action must pass through the registry-selected host to the shared inventory consumer"
+    );
+}
