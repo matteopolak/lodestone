@@ -76,13 +76,31 @@ impl AdapterHost {
         class: &str,
         deadline: Duration,
     ) -> Result<Self, AdapterError> {
+        Self::start_with_setup(config, class, deadline, |_, _| Ok(()))
+    }
+
+    /// Spawns the JVM worker after running one bounded setup step on it.
+    ///
+    /// The setup runs after the JVM starts but before the adapter class loads.
+    /// It receives no world state and must not invoke arbitrary operator code;
+    /// it exists for a lifecycle host to load and validate an operator bootstrap
+    /// class in the same JVM that will own the adapter.
+    pub fn start_with_setup<F>(
+        config: JvmConfig,
+        class: &str,
+        deadline: Duration,
+        setup: F,
+    ) -> Result<Self, AdapterError>
+    where
+        F: for<'local> FnOnce(&JvmRuntime, &mut Env<'local>) -> Result<(), String> + Send + 'static,
+    {
         validate_class(class)?;
         if deadline.is_zero() {
             return Err(AdapterError::new("adapter deadline must be positive"));
         }
         let class = class.to_owned();
         Self::spawn(deadline, move |commands, events, port| {
-            let result = run_java(config, &class, commands, &events, port);
+            let result = run_java(config, &class, commands, &events, port, setup);
             if let Err(error) = result {
                 let _ = events.send(Err(error));
             }
@@ -217,11 +235,18 @@ fn run_java(
     commands: Receiver<u64>,
     events: &Events,
     port: BlockPort,
+    setup: impl for<'local> FnOnce(&JvmRuntime, &mut Env<'local>) -> Result<(), String>,
 ) -> Result<(), AdapterError> {
-    let runtime = JvmRuntime::start(&config)
+    // Operator paths are supplied only to isolated loaders below. Putting
+    // either the adapter or a Paper jar on the system loader would let its
+    // parent-first lookup defeat shim-first resolution.
+    let runtime = JvmRuntime::start(&JvmConfig::new())
         .map_err(|error| AdapterError::new(format!("adapter {class_name}: {error}")))?;
     runtime.with_attached_thread(|env| {
         let result = (|| {
+            setup(&runtime, env).map_err(|error| AdapterError::new(format!(
+                "adapter {class_name} setup: {error}"
+            )))?;
             let class = runtime.load_isolated_class(env, &config, class_name)
                 .map_err(|error| java_error(env, class_name, error))?;
             register_block_query(env, &class)

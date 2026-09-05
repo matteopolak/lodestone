@@ -247,11 +247,19 @@ Experimental Java adapters require `cargo run -p lodestone-dedicated-server --fe
 both `LODESTONE_JAVA_ADAPTER_CLASS` and `LODESTONE_JAVA_CLASSPATH`. The latter uses the platform's
 path-list separator. `LODESTONE_JAVA_DEADLINE_MS` is a positive integer, default `5000`. No configured
 adapter means no JVM startup or polling timer. A default build rejects Java configuration explicitly.
-See [Java plugin bridge](java-plugin-bridge.md) for the bootstrap class contract and live fixture.
-This loads an explicit adapter, not arbitrary Paper plugins or Fabric mods. Adapter callbacks observe
-the newest completed server tick while idle, coalescing intervening ticks; resident block reads never
-generate missing terrain. Callback errors are logged and disable the adapter. Closed stdin leaves
-adapter polling and signal handling active.
+
+An adapter run may also validate and load an operator-supplied Paper bootstrap class: set both
+`LODESTONE_PAPER_JAR` and `LODESTONE_PAPER_PLUGIN_DIRECTORY`, and optionally
+`LODESTONE_PAPER_SHIM_PATH` for one shim directory or jar that precedes the Paper jar in isolated
+resolution. Invalid paths or plugin descriptors stop cleanly before JVM startup. A bootstrap load
+failure also saves and stops the server, so a requested Paper intake cannot silently degrade into an
+ordinary adapter run. This is only bootstrap-class loading: it does not initialize Paper, load plugin
+classes, enable plugins, or provide Paper-plugin compatibility. See [Java plugin bridge](java-plugin-bridge.md)
+for its explicit boundary and live fixture.
+
+Adapter callbacks observe the newest completed server tick while idle, coalescing intervening ticks;
+resident block reads never generate missing terrain. Callback errors without Paper bootstrap input are
+logged and disable the adapter. Closed stdin leaves adapter polling and signal handling active.
 
 - `server.properties` and `eula.txt` at the server root (dedicated server only); `ops.json`/
   `whitelist.json`/`banned-players.json`/`banned-ips.json` alongside them, vanilla's own layout.

@@ -528,8 +528,8 @@ of the server bootstrap classpath. Its `start_runtime` starts an empty-system-cl
 `load_bootstrap` is the plan's real JVM consumer and supplies the ordered operator paths only to the
 isolated loader. It loads Paper's bootstrap class without initializing or invoking it. Plugins need
 distinct lifecycle class-loader policy, native shims, and event dispatch before any plugin entry
-point can run. The dedicated binary does not yet expose this plan through environment configuration;
-its current explicit Java-adapter path remains a separate, read-only bootstrap.
+point can run. The dedicated binary can retain this plan beside its explicit read-only Java adapter:
+the plan's bootstrap class loads on that adapter's one JVM worker before the adapter reports ready.
 
 The ignored local-jar gate uses a locally materialized server jar and does not download or extract
 it:
@@ -619,11 +619,20 @@ host queries on demand rather than enumerating a speculative compatibility surfa
 ### 4.6 Dedicated-host connection
 
 The dedicated binary enables the bridge only with its default-off `jvm` feature. Set both
-`LODESTONE_JAVA_ADAPTER_CLASS` (dotted class name) and `LODESTONE_JAVA_CLASSPATH` (platform path list
-of compiled class directories or jars, in shim-first resolution order); `LODESTONE_JAVA_DEADLINE_MS`
-optionally overrides the 5000 ms startup/callback deadline. Without configuration, no JVM worker or
-poll timer starts. Configuration supplied to a build without `jvm` is a reported error followed by
-clean shutdown.
+`LODESTONE_JAVA_ADAPTER_CLASS` (dotted class name) and `LODESTONE_JAVA_CLASSPATH` (a platform path
+list of adapter class directories or jars in isolated-loader resolution order); `LODESTONE_JAVA_DEADLINE_MS` optionally overrides the
+5000 ms startup/callback deadline. Without configuration, no JVM worker or poll timer starts.
+Configuration supplied to a build without `jvm` is a reported error followed by clean shutdown.
+
+To add Paper bootstrap intake to that same worker, set `LODESTONE_PAPER_JAR` and
+`LODESTONE_PAPER_PLUGIN_DIRECTORY`; `LODESTONE_PAPER_SHIM_PATH` optionally names one shim directory
+or jar. The host discovers and retains a `PaperBootstrapPlan` before starting a JVM, then loads the
+Paper bootstrap class through its shim-first isolated loader before the adapter can report ready.
+Plugin jars are still descriptor inputs only: the host does **not** initialize Paper, create plugin
+class loaders, instantiate plugin classes, enable plugins, dispatch Paper events, or promise plugin
+compatibility. A malformed Paper configuration fails before startup and saves the world; a bootstrap
+load failure is terminal for a configured Paper run and likewise saves the world rather than quietly
+continuing without the requested operator input.
 
 The admin loop services at most 64 block queries per 1 ms poll, using
 `IntegratedServer::resident_block_state_id`. That accessor reaches the live primary `ChunkStore`,
