@@ -5,8 +5,10 @@
 `lodestone_server::tick_region::TickRegionPlan` makes the ownership of every
 chunk selected for a server tick explicit. The current plan assigns every
 selected chunk to the smallest region possible, its own `TickOwner::Chunk`, but
-the server executes those owners serially while parity and populated-world
-profiling remain prerequisites for concurrent workers.
+most phases still execute those owners serially. Dense entity pushing is the
+first bounded concurrent workload; its immutable planning workers establish
+the executor and parity substrate without claiming the remaining phases are
+already regionised.
 
 ## How it works
 
@@ -168,6 +170,15 @@ are retained so completeness is checkable. The validated
 `MobSim::apply_entity_push_owner_batches` central writer restores the original
 mob-vector slots before applying any impulse, so reversing owner completion
 cannot change the accumulated velocities or silently omit an unaffected mob.
+At 128 or more mobs on native targets, the planning half uses
+`run_bounded_owner_jobs` with at most four lanes and never more lanes than
+source owners. Each lane receives only immutable positions, widths, player
+positions, and entity ids; it computes a mob's contributions in the exact
+serial neighbour order. The live `MobSim` is therefore absent from workers and
+the central apply is the only serialization point. Browser builds retain the
+same serial computation because scoped native threads trap there. Tests prove
+two lanes overlap, compare serial and four-lane results exactly, and keep the
+missing/duplicate/reversed completion controls at the apply boundary.
 Mob burn counters use the same source-chunk boundary after projectile impacts
 have had their established opportunity to ignite a target.
 `MobSim::tick_burning_owner_batches` advances copied counters and records
@@ -278,6 +289,11 @@ explicit cross-owner neighbour exchange. Owners may compute from the shared
 tick-start snapshot, but only `apply_entity_push_owner_batches` may mutate live
 velocities. Preserve one completion per mob, including zero impulses, and keep
 the reversed, missing, and duplicate owner controls when changing this seam.
+Do not pass `MobSim`, a registry lock, or mutable impulse storage into
+`run_bounded_owner_jobs`; the executor is safe because jobs own their source
+serials and share only immutable census slices. Keep the 128-entity threshold
+and four-lane cap measurement-driven, and use the ignored dense-scene
+measurement before changing either.
 
 Keep burn planning after projectile impacts: moving it earlier delays newly
 applied ignition by one tick. Burn owners return copied counter state plus a
