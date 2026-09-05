@@ -10,13 +10,13 @@ Construct `NativeDirtyChunkRecord::new` with the chunk coordinates, a `ChunkColu
 
 `WorldStorage::load_chunk` validates the requested dimension extent, key, current game-data version, contiguous block/light sections, palettes, biome grids, heightmap, entity NBT roots, and both tick lists before returning an owned `NativeChunkRecord`. A record with no persisted light returns `MissingStoredLight`; unsupported or malformed data is never converted into a partial result. `NativeChunkRecord::stage_scheduled_ticks` hands both decoded queues to the live scheduler at the next scheduler access while retaining each stored insertion order.
 
-The integrated-server methods `IntegratedServer::write_dirty_native_chunk` and `IntegratedServer::load_native_chunk` expose the same boundary. They are explicit native-record consumers; the established Anvil world save/load path remains responsible for complete compatibility persistence.
+The persistent integrated-server constructor wires this boundary into the production lifecycle when `LodestoneNative` is selected. Autosave and clean shutdown snapshot the same dirty set before the established Anvil writer drains it, compute canonical light through the live protocol, and commit complete records in one native transaction. `IntegratedServer::reopen_native_chunk` returns the owned record and stages both tick queues into the live scheduler. Anvil remains first-class and continues to write its compatibility world unchanged.
 
 ## How to change it
 
 Change `NativeDirtyChunkRecord` and `NativeChunkRecord` together when adding a chunk field. The write value must require every payload that the reader returns. Extend `encode_chunk_inner` and `decode_chunk` only after adding a typed schema field and validation for its shape; a decoder must reject an unsupported field rather than drop it. New scheduled actions require a schema enum value, lossless kind conversion, and a restart test whose ordering distinguishes trigger tick, priority, and insertion order.
 
-Do not add a terrain-only or light-only native chunk loader. If a caller does not have a canonical light or scheduler snapshot, it must stay on the Anvil path until it can provide the complete typed input. Keep backend checks ahead of conversion so selecting Anvil remains a fail-closed no-op for native records.
+Do not add a terrain-only or light-only native chunk loader. If a production column has no derived heightmap or the live protocol cannot compute canonical light, the native save fails visibly and the Anvil path remains available. Keep backend checks ahead of conversion so selecting Anvil remains a fail-closed no-op for native records.
 
 ## Configuration
 

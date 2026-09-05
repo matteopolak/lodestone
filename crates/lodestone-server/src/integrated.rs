@@ -691,6 +691,71 @@ impl Clone for ErasedChunkSource {
     }
 }
 
+/// The complete production native-save inputs, all shared with the running
+/// integrated world. Keeping this context separate from the Anvil save handle
+/// makes the ordering explicit: native records are built while the dirty set is
+/// still available, then the unchanged Anvil writer drains it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+struct NativeSaveContext {
+    storage: Arc<crate::world_storage::WorldStorage>,
+    save: crate::region_source::WorldSaveHandle,
+    source: ErasedChunkSource,
+    protocol: Arc<Box<dyn ServerProtocol>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate::world_storage::Error> {
+    let snapshots = context
+        .save
+        .native_dirty_chunks(context.source.0.as_ref())
+        .map_err(|error| crate::world_storage::Error::Chunk(
+            crate::world_storage::ChunkRecordError::SourceSnapshot(error.to_string()),
+        ))?;
+    let scheduled = context.save.scheduled_ticks();
+    let protocol: &dyn ServerProtocol = &**context.protocol;
+    let source: &dyn ChunkSource = context.source.0.as_ref();
+    let mut lights = Vec::with_capacity(snapshots.len());
+    for snapshot in &snapshots {
+        if snapshot.column.motion_blocking().is_none() {
+            return Err(crate::world_storage::Error::Chunk(
+                crate::world_storage::ChunkRecordError::MissingMotionBlockingHeightmap,
+            ));
+        }
+        let light = if protocol.uses_cross_column_light() {
+            let mut neighbours = Vec::with_capacity(9);
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    neighbours.push((
+                        snapshot.column_x + dx,
+                        snapshot.column_z + dz,
+                        source.column(snapshot.column_x + dx, snapshot.column_z + dz),
+                    ));
+                }
+            }
+            protocol.compute_column_light_with_neighbours(&snapshot.column, &neighbours)
+        } else {
+            protocol.compute_column_light(&snapshot.column)
+        };
+        let Some(light) = light else {
+            return Err(crate::world_storage::Error::Chunk(
+                crate::world_storage::ChunkRecordError::MissingComputedLight,
+            ));
+        };
+        lights.push(light);
+    }
+    let records = snapshots.iter().zip(&lights).map(|(snapshot, light)| {
+        crate::world_storage::NativeDirtyChunkRecord::new(
+            snapshot.column_x,
+            snapshot.column_z,
+            &snapshot.column,
+            light,
+            &scheduled,
+        )
+    });
+    context.storage.write_dirty_chunks(records)
+}
+
 /// A running integrated server that owns its serving task(s).
 ///
 /// Dropping the handle signals shutdown and aborts the task, so a server can
@@ -2340,7 +2405,7 @@ impl IntegratedServer {
     /// worth playing" argument the entity restore already makes.
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::too_many_arguments)]
-    pub fn open_persistent_with_mobs_and_commands_and_server_app<P, S>(
+    fn open_persistent_with_mobs_and_commands_and_server_app_with_storage<P, S>(
         protocol: P,
         world_dir: &std::path::Path,
         source: S,
@@ -2352,6 +2417,7 @@ impl IntegratedServer {
         view_radius: i32,
         autosave: std::time::Duration,
         commands: CommandDispatch,
+        storage: Option<crate::world_storage::WorldStorage>,
         server_app: crate::ecs::ServerApp,
     ) -> Result<
         (
@@ -2468,6 +2534,12 @@ impl IntegratedServer {
             server_app,
         );
 
+        server.save = Some(save.clone());
+        server.level_dat = Some(std::sync::Arc::clone(&level_dat));
+        server.entity_storage = Some(entity_storage.clone());
+        server.poi_storage = Some(poi_storage.clone());
+        server.world_storage = storage.map(std::sync::Arc::new);
+        let native_save_context = server.native_save_context();
         let autosave_handle = save.clone();
         let autosave_level_dat = std::sync::Arc::clone(&level_dat);
         // the world's scalars, loaded from disk before any connection can
@@ -2517,6 +2589,22 @@ impl IntegratedServer {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
+                // Native snapshots must precede Anvil's dirty-set drain. The
+                // two backends remain additive: native receives the complete
+                // typed record, then the established Anvil writer runs exactly
+                // as it did before native storage was selected.
+                if let Some(context) = &native_save_context {
+                    let context = context.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        save_native_dirty_chunks(&context)
+                    })
+                    .await;
+                    if let Ok(Err(err)) = result {
+                        tracing::warn!(
+                            "native autosave failed, typed chunk state stays pending: {err}"
+                        );
+                    }
+                }
                 let handle = autosave_handle.clone();
                 // The whole point: the write happens on the blocking pool.
                 let result = tokio::task::spawn_blocking(move || handle.save()).await;
@@ -2581,16 +2669,57 @@ impl IntegratedServer {
                 }
             }
         });
-        server.save = Some(save);
-        server.level_dat = Some(level_dat);
-        server.entity_storage = Some(entity_storage);
-        server.poi_storage = Some(poi_storage);
         // Replaces the mob-seeding task slot only if it is free; seeding owns
         // it for `open_in_memory_with_mobs`, so the autosave task is kept
         // alive by racing the same `shutdown` notify and is dropped with the
         // handle.
         server.autosave_task = Some(autosave_task);
         Ok((server, client_end, world))
+    }
+
+    /// Opens a persistent world with a host command dispatcher and server app.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_persistent_with_mobs_and_commands_and_server_app<P, S>(
+        protocol: P,
+        world_dir: &std::path::Path,
+        source: S,
+        min_y: i32,
+        height: i32,
+        mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
+        mob_center: (i32, i32),
+        mob_count: usize,
+        view_radius: i32,
+        autosave: std::time::Duration,
+        commands: CommandDispatch,
+        server_app: crate::ecs::ServerApp,
+    ) -> Result<
+        (
+            Self,
+            DuplexStream,
+            crate::region_source::RegionChunkSource<S>,
+        ),
+        crate::region_source::Error,
+    >
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+    {
+        Self::open_persistent_with_mobs_and_commands_and_server_app_with_storage(
+            protocol,
+            world_dir,
+            source,
+            min_y,
+            height,
+            mob_area,
+            mob_center,
+            mob_count,
+            view_radius,
+            autosave,
+            commands,
+            None,
+            server_app,
+        )
     }
 
     /// Opens a persistent world with a host command dispatcher and the
@@ -2688,12 +2817,10 @@ impl IntegratedServer {
     /// explicit typed-record backend for producers that can emit dirty
     /// [`lodestone_storage::RecordWrite`] values.
     ///
-    /// This does not make `LodestoneNative` a full world loader yet. The
-    /// returned terrain source and existing autosave stay Anvil-backed; only
-    /// [`write_dirty_records`](Self::write_dirty_records) reaches the selected
-    /// typed-record backend. Keeping those paths distinct makes an incomplete
-    /// native producer fail visibly instead of silently replacing a readable
-    /// Anvil world with a partial save.
+    /// The returned terrain source and established compatibility save/load stay
+    /// Anvil-backed. When `LodestoneNative` is selected, the production
+    /// autosave and shutdown lifecycle also snapshots complete dirty native
+    /// chunk records before the Anvil writer drains its shared dirty set.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -2721,7 +2848,7 @@ impl IntegratedServer {
         P: ServerProtocol + 'static,
         S: ChunkSource + 'static,
     {
-        let (mut server, client, world) = Self::open_persistent_with_mobs(
+        let (server, client, world) = Self::open_persistent_with_mobs_and_commands_and_server_app_with_storage(
             protocol,
             world_dir,
             source,
@@ -2732,9 +2859,47 @@ impl IntegratedServer {
             mob_count,
             view_radius,
             autosave,
+            CommandDispatch::none(),
+            Some(storage),
+            crate::ecs::ServerApp::bootstrap(),
         )?;
-        server.world_storage = Some(std::sync::Arc::new(storage));
         Ok((server, client, world))
+    }
+
+    /// Builds the native producer context only for a selected native backend.
+    ///
+    /// The protocol and source are the same erased handles used by the live
+    /// connection and tick loop, so a native save cannot accidentally inspect
+    /// a second generated world.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_save_context(&self) -> Option<NativeSaveContext> {
+        let storage = self.world_storage.as_ref()?.clone();
+        if !matches!(
+            storage.backend(),
+            crate::world_storage::WorldStorageBackend::LodestoneNative { .. }
+        ) {
+            return None;
+        }
+        Some(NativeSaveContext {
+            storage,
+            save: self.save.as_ref()?.clone(),
+            source: self.world_source.as_ref()?.clone(),
+            protocol: self.host.as_ref()?.protocol.clone(),
+        })
+    }
+
+    /// Saves the production world's complete dirty chunk set to native storage.
+    ///
+    /// Native records are built before the established Anvil save drains its
+    /// dirty set. This method is also the synchronous lifecycle seam used by
+    /// shutdown and focused persistence tests; periodic autosave invokes the
+    /// same function from the blocking pool.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_native_now(&self) -> Result<usize, crate::world_storage::Error> {
+        let Some(context) = self.native_save_context() else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        save_native_dirty_chunks(&context)
     }
 
     /// Commits one native backend transaction containing only the records a
@@ -2907,6 +3072,34 @@ impl IntegratedServer {
             return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
         };
         storage.load_chunk(column_x, column_z, min_y, height)
+    }
+
+    /// Reopens one native chunk and stages both persisted tick queues into the
+    /// live persistent world's scheduler.
+    ///
+    /// The returned [`NativeChunkRecord`](crate::world_storage::NativeChunkRecord)
+    /// remains available to a caller that owns the live chunk source, while the
+    /// scheduler handoff happens here so a production reopen cannot silently
+    /// decode ticks and then forget to enqueue them.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn reopen_native_chunk(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        min_y: i32,
+        height: i32,
+    ) -> Result<
+        Option<crate::world_storage::NativeChunkRecord>,
+        crate::world_storage::Error,
+    > {
+        let record = self.load_native_chunk(column_x, column_z, min_y, height)?;
+        if let Some(record) = &record {
+            let Some(save) = &self.save else {
+                return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+            };
+            record.stage_scheduled_ticks(&save.scheduled_ticks());
+        }
+        Ok(record)
     }
 
     /// The world's shared game rules, difficulty and clock.
@@ -4294,6 +4487,19 @@ impl IntegratedServer {
         if let Some(mut discovery_task) = self.discovery_task.take() {
             discovery_task.join().await;
         }
+        // Native records are flushed before the unchanged Anvil save drains
+        // the shared dirty set. This is the clean-quit equivalent of the
+        // native-first autosave ordering above.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(context) = self.native_save_context() {
+            match tokio::task::spawn_blocking(move || save_native_dirty_chunks(&context)).await {
+                Ok(Ok(written)) => {
+                    tracing::debug!("native world saved on shutdown: {written} chunk columns");
+                }
+                Ok(Err(err)) => tracing::warn!("native world save on shutdown failed: {err}"),
+                Err(err) => tracing::warn!("native world save on shutdown panicked: {err}"),
+            }
+        }
         // The final flush, **after** the tick and connection tasks have
         // stopped. Ordering is load-bearing: saving first would race a tick
         // that mutates a block between the write and the shutdown, and that
@@ -4499,6 +4705,44 @@ mod tests {
         }
     }
 
+    /// An inert protocol with the one production capability this lifecycle
+    /// test needs: deterministic canonical light for a dirty column.
+    #[derive(Debug)]
+    struct LightSilent;
+
+    impl ServerProtocol for LightSilent {
+        fn decode(&self, _state: State, _packet_id: i32, _payload: &[u8]) -> ServerBound {
+            ServerBound::Ignored
+        }
+        fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+        fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            ServerDirective::None
+        }
+        fn encode_chunk(&self, _cx: i32, _cz: i32, _column: &ChunkColumn) -> ServerDirective {
+            ServerDirective::None
+        }
+        fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
+            ServerDirective::None
+        }
+        fn compute_column_light(
+            &self,
+            column: &ChunkColumn,
+        ) -> Option<lodestone_world::ColumnLight> {
+            let mut light = lodestone_world::ColumnLight::new(column.section_count());
+            *light.sky_mut(0) = lodestone_world::LightData::Uniform(7);
+            *light.block_mut(1) = lodestone_world::LightData::Uniform(3);
+            Some(light)
+        }
+    }
+
     /// A [`ChunkSource`] that hands out an all-air column instantly and records
     /// **per-coordinate** how many times it was asked for one.
     ///
@@ -4560,6 +4804,63 @@ mod tests {
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
             // No storage; edits are discarded by design for this counting stub.
         }
+    }
+
+    /// One complete source column for the production native lifecycle test.
+    /// It deliberately carries a non-default biome, heightmap, and block
+    /// state so the integrated producer cannot pass by emitting an empty
+    /// placeholder record.
+    #[derive(Debug, Clone)]
+    struct NativeLifecycleSource {
+        column: Arc<Mutex<ChunkColumn>>,
+    }
+
+    impl NativeLifecycleSource {
+        fn new() -> Self {
+            let mut column = ChunkColumn::new(0, 16);
+            column.set_block(2, 3, 4, "minecraft:stone");
+            column.set_block(9, 14, 10, "minecraft:oak_log[axis=z]");
+            column.set_biome_cell(0, 0, 0, "minecraft:desert");
+            column.set_biome_cell(3, 3, 3, "minecraft:deep_dark");
+            let mut surface = vec!["minecraft:plains".to_string(); 16];
+            surface[10] = "minecraft:cherry_grove".to_string();
+            column.set_biome_quarts(&surface);
+            column.set_motion_blocking(std::array::from_fn(|index| {
+                let x = index % 16;
+                let z = index / 16;
+                (64 + x * 3 + z * 11) as u16
+            }));
+            Self {
+                column: Arc::new(Mutex::new(column)),
+            }
+        }
+    }
+
+    impl ChunkSource for NativeLifecycleSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            self.column
+                .lock()
+                .expect("native lifecycle source lock poisoned")
+                .clone()
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(x.div_euclid(16), z.div_euclid(16))
+                .block_state(lx, y, lz)
+                .to_string()
+        }
+
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            let lx = x.rem_euclid(16);
+            let lz = z.rem_euclid(16);
+            self.column(x.div_euclid(16), z.div_euclid(16))
+                .biome_state_at(lx, y, lz)
+                .to_string()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
     }
 
     /// A retained two-column water fixture for the scheduled-fluid consumer
@@ -5508,6 +5809,124 @@ mod tests {
             "only the submitted dirty record may have produced a transaction"
         );
         drop(reopened);
+        std::fs::remove_dir_all(&world_dir).expect("remove test world");
+    }
+
+    /// The production lifecycle consumer: the running persistent source marks
+    /// one column dirty, the integrated save builds its complete native record,
+    /// and a fresh server reopens the same record while staging both tick
+    /// queues into its live scheduler.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn persistent_server_native_dirty_save_and_reopen_uses_complete_record() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "lodestone-native-production-lifecycle-{}-{unique}",
+            std::process::id()
+        ));
+        let native_dir = world_dir.join("native");
+        let storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir.clone(),
+            },
+        )
+        .expect("open native lifecycle segment");
+        let (server, _client, world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            LightSilent,
+            &world_dir,
+            NativeLifecycleSource::new(),
+            0,
+            16,
+            (0..=0, 0..=0),
+            (0, 0),
+            0,
+            0,
+            std::time::Duration::from_secs(3600),
+            storage,
+        )
+        .expect("open persistent server with native lifecycle storage");
+
+        // This mutation goes through the real RegionChunkSource, which is the
+        // same source wrapped by the running connection and save context.
+        world.set_block(2, 3, 4, "minecraft:gold_block");
+        let entities = world.block_entities();
+        entities.with(|registry| {
+            registry.insert(
+                lodestone_model::BlockPos::new(2, 3, 4),
+                crate::block_entities::BlockEntity::Beacon(Default::default()),
+            );
+        });
+        let scheduled = world.scheduled_ticks();
+        scheduled.with(|queues| {
+            assert!(queues.block.schedule(
+                (2, 3, 4),
+                "redstone:torch".to_owned(),
+                1_000_000,
+                crate::scheduled_tick::TickPriority::Normal,
+            ));
+            assert!(queues.fluid.schedule(
+                (2, 3, 4),
+                "lodestone:fluid".to_owned(),
+                1_000_001,
+                crate::scheduled_tick::TickPriority::Low,
+            ));
+        });
+
+        assert_eq!(server.save_native_now().expect("native production save"), 1);
+        server.shutdown().await;
+
+        let reopened_storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir,
+            },
+        )
+        .expect("reopen native lifecycle segment");
+        let (reopened, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            LightSilent,
+            &world_dir,
+            NativeLifecycleSource::new(),
+            0,
+            16,
+            (0..=0, 0..=0),
+            (0, 0),
+            0,
+            0,
+            std::time::Duration::from_secs(3600),
+            reopened_storage,
+        )
+        .expect("open fresh server for native lifecycle reopen");
+        let loaded = reopened
+            .reopen_native_chunk(0, 0, 0, 16)
+            .expect("reopen complete native record")
+            .expect("native lifecycle record is present");
+        assert_eq!(loaded.column.block_state(2, 3, 4), "minecraft:gold_block");
+        assert_eq!(loaded.column.biome_state_at(0, 0, 0), "minecraft:desert");
+        assert!(loaded.column.motion_blocking().is_some());
+        assert_eq!(loaded.column.block_entities().len(), 1);
+        assert_eq!(loaded.light.sky(0), &lodestone_world::LightData::Uniform(7));
+        assert_eq!(loaded.light.block(1), &lodestone_world::LightData::Uniform(3));
+        assert_eq!(loaded.block_scheduled_ticks.len(), 1);
+        assert_eq!(loaded.fluid_scheduled_ticks.len(), 1);
+        assert!(reopened
+            .world_source
+            .as_ref()
+            .expect("persistent world source")
+            .world_registries()
+            .expect("persistent world registries")
+            .scheduled
+            .with(|queues| {
+                queues.block.has_scheduled(
+                    (2, 3, 4),
+                    &"redstone:torch".to_owned(),
+                ) && queues.fluid.has_scheduled(
+                    (2, 3, 4),
+                    &"lodestone:fluid".to_owned(),
+                )
+            }));
+        reopened.shutdown().await;
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
     }
 
