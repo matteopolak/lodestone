@@ -353,6 +353,16 @@ What exists:
   control omits ejection from the model and must fail after shrinking, so a
   comparison that only observes suction or accepts every trace cannot pass.
 
+- `tests/differential_brewing_model.rs` — a bounded, hermetic state-machine
+  comparison for `lodestone_server::BrewingStand`. It drives production slot
+  writes and ticks, then compares all three bottle slots, ingredient and fuel
+  stacks, charges, progress, lock state, and tick outcomes with an independent
+  enum model. The fixed prefix forces fuel refill, an ingredient-swap abort,
+  an ordinary potion transition, and a container promotion at the exact
+  400-tick boundary; a fixed ChaCha seed adds at most 24 shrinkable slot or
+  tick operations per case across 160 cases. The detector control ignores the
+  locked-ingredient cancellation and must fail on the fixed swap witness.
+
 - `tests/differential_generated_text_nbt.rs` — a bounded fixed-seed model
   check for the modern NBT text fold. A grammar independently builds scalar,
   list, and compound `text`/`extra` values, and a separate plain-text fold is
