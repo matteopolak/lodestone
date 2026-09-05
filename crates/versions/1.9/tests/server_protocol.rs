@@ -1,6 +1,7 @@
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
+use lodestone_model::{BlockFace, BlockPos, Vec3f};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_9::{V110ServerProtocol, V210ServerProtocol, V316ServerProtocol, V340ServerProtocol};
 use lodestone_v1_9::packet_ids::handshaking;
@@ -399,6 +400,129 @@ fn hosted_client_settings_lift_each_protocols_view_distance() {
     settings_wire_control(
         &V340ServerProtocol,
         lodestone_v1_9::packet_ids::play::serverbound::SETTINGS,
+    );
+}
+
+#[test]
+fn hosted_block_place_lifts_both_cursor_encodings_into_server_consumed_actions() {
+    fn assert_block_use(
+        protocol: &dyn ServerProtocol,
+        packet_id: i32,
+        body: &[u8],
+        expected_cursor: Vec3f,
+    ) {
+        // Position (1, 64, -2), East, off hand. These bodies are literals so
+        // the decoder cannot share a wrong field order with an encoder.
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, body),
+            ServerBound::UseItemOn {
+                pos: BlockPos::new(1, 64, -2),
+                face: BlockFace::East,
+                cursor: expected_cursor,
+                sequence: 0,
+                hand: 1,
+            }
+        );
+
+        let mut trailing = body.to_vec();
+        trailing.push(0);
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &trailing),
+            ServerBound::Ignored,
+            "a trailing byte must not reach the block-use consumer"
+        );
+    }
+
+    // 110 and 210 carry cursor coordinates as sixteenths. 15 is deliberately
+    // not 1.0, distinguishing the old three-byte shape from float decoding.
+    let byte_cursor = [
+        0, 0, 0, 0x41, 0x03, 0xff, 0xff, 0xfe, 5, 1, 8, 15, 4,
+    ];
+    assert_block_use(
+        &V110ServerProtocol,
+        lodestone_v1_9::packet_ids_110::play::serverbound::BLOCK_PLACE,
+        &byte_cursor,
+        Vec3f::new(0.5, 15.0 / 16.0, 0.25),
+    );
+    assert_block_use(
+        &V210ServerProtocol,
+        lodestone_v1_9::packet_ids_210::play::serverbound::BLOCK_PLACE,
+        &byte_cursor,
+        Vec3f::new(0.5, 15.0 / 16.0, 0.25),
+    );
+
+    // 316 and 340 changed exactly the cursor fields to three big-endian f32s.
+    let float_cursor = [
+        0, 0, 0, 0x41, 0x03, 0xff, 0xff, 0xfe, 5, 1, 0x3f, 0, 0, 0,
+        0x3f, 0x70, 0, 0, 0x3e, 0x80, 0, 0,
+    ];
+    assert_block_use(
+        &V316ServerProtocol,
+        lodestone_v1_9::packet_ids_316::play::serverbound::BLOCK_PLACE,
+        &float_cursor,
+        Vec3f::new(0.5, 15.0 / 16.0, 0.25),
+    );
+    assert_block_use(
+        &V340ServerProtocol,
+        lodestone_v1_9::packet_ids::play::serverbound::BLOCK_PLACE,
+        &float_cursor,
+        Vec3f::new(0.5, 15.0 / 16.0, 0.25),
+    );
+
+    let mut invalid_hand = float_cursor;
+    invalid_hand[9] = 2;
+    assert_eq!(
+        V340ServerProtocol.decode(
+            State::Play,
+            lodestone_v1_9::packet_ids::play::serverbound::BLOCK_PLACE,
+            &invalid_hand,
+        ),
+        ServerBound::Ignored,
+        "only the two protocol hand ordinals may reach the server"
+    );
+}
+
+#[test]
+fn hosted_block_place_sentinel_reaches_the_use_item_consumer() {
+    // The same packet is use-in-air only for this position/direction pair.
+    // It has no rotation in this era, so the canonical action gets explicit
+    // zeroes rather than stale movement state.
+    let byte_cursor = [
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // position
+        0xff, 0xff, 0xff, 0xff, 0x0f, // direction -1 VarInt
+        0, // main hand
+        0, 0, 0, // three byte cursor
+    ];
+    assert_eq!(
+        V110ServerProtocol.decode(
+            State::Play,
+            lodestone_v1_9::packet_ids_110::play::serverbound::BLOCK_PLACE,
+            &byte_cursor,
+        ),
+        ServerBound::UseItem {
+            hand: 0,
+            yaw: 0.0,
+            pitch: 0.0,
+        }
+    );
+
+    let float_cursor = [
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // position
+        0xff, 0xff, 0xff, 0xff, 0x0f, // direction -1 VarInt
+        0, // main hand
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // three f32 cursor
+    ];
+    assert_eq!(
+        V340ServerProtocol.decode(
+            State::Play,
+            lodestone_v1_9::packet_ids::play::serverbound::BLOCK_PLACE,
+            &float_cursor,
+        ),
+        ServerBound::UseItem {
+            hand: 0,
+            yaw: 0.0,
+            pitch: 0.0,
+        }
     );
 }
 
