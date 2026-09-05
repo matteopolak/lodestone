@@ -347,12 +347,13 @@ heavy-server-emit scenario="mixed" seed="1" scale="1":
     cargo build --release -p lodestone-server --example heavy-scene-server
     target/release/examples/heavy-scene-server --emit-scene /tmp/lodestone-heavy-scene.json --scenario {{scenario}} --seed {{seed}} --scale {{scale}}
 
-samply-heavy-server scenario="palette" seed="1" scale="1":
+samply-heavy-server:
     cargo build --release -p lodestone-server --example heavy-scene-server
-    samply record --save-only --unstable-presymbolicate -o bench-results/heavy-server.json.gz -- target/release/examples/heavy-scene-server --scenario {{scenario}} --seed {{seed}} --scale {{scale}} --phase ready --ticks 0 --camera-plan stationary --wall-deadline-secs 180 --output bench-results/heavy-server.jsonl
-    test -s bench-results/heavy-server.json.gz
-    test -s bench-results/heavy-server.json.syms.json
-    test -s bench-results/heavy-server.jsonl
+    python3 scripts/samply-heavy-server.py
+
+samply-heavy-server-smoke:
+    cargo build --release -p lodestone-server --example heavy-scene-server
+    python3 scripts/samply-heavy-server.py --smoke --wall-deadline-secs 12
 
 profile-heavy-server capture:
     python3 scripts/profile-cost-table.py {{capture}}
