@@ -251,6 +251,7 @@ lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 # bench pulls no new code into any non-bench build. Dev-only, so it never
 # reaches this crate's wasm32 surface.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+tempfile = "3"
 
 # What a server tick costs and how it scales with the population being ticked
 # — the client-side benches measure everything but the simulation, and
