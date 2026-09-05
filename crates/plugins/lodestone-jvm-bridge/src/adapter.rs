@@ -20,7 +20,9 @@ use jni::sys::{jint, jlong, jobject, jstring};
 use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
 
 use crate::runtime::{JvmConfig, JvmRuntime};
-use crate::{CallbackDepthGuard, PortServicer, WorldPort, channel};
+use crate::{
+    CallbackDepthGuard, ObjectKind, ObjectRef, ObjectRegistry, PortServicer, WorldPort, channel,
+};
 
 /// A block query in the host's primary world, in absolute block coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +89,10 @@ thread_local! {
     static CALLBACK_PORT: RefCell<Option<BlockPort>> = const { RefCell::new(None) };
     static BLOCK_WRITE_PORT: RefCell<Option<BlockWritePort>> = const { RefCell::new(None) };
     static SERVER_TICK_PORT: RefCell<Option<TickPort>> = const { RefCell::new(None) };
+    static RESIDENT_BLOCK_HANDLES: RefCell<Option<ObjectRegistry<(LifecycleIdentity, (i32, i32, i32))>>> = const {
+        RefCell::new(None)
+    };
+    static CURRENT_RESIDENT_BLOCK_HANDLE: RefCell<Option<ObjectRef>> = const { RefCell::new(None) };
     static LIFECYCLE_IDENTITY: RefCell<Vec<LifecycleIdentity>> = const {
         RefCell::new(Vec::new())
     };
@@ -100,7 +106,7 @@ thread_local! {
 /// This is deliberately worker-local rather than a JVM property or a static
 /// field: another plugin cannot observe it between callbacks, and nested Java
 /// calls restore the outer identity when they return.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct LifecycleIdentity {
     name: String,
     version: String,
@@ -129,6 +135,13 @@ pub struct ResidentBlockChangeListenerFailure {
 /// request ports: a misbehaving entry gets a named error instead of growing a
 /// process-lifetime collection without limit.
 const MAX_RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS: usize = 64;
+
+/// Maximum number of live block references retained by one adapter worker.
+///
+/// References are worker-local values, so this bound covers all retained
+/// plugin entries on that worker. Releasing an entry's references returns the
+/// slots to the same generation-safe registry for reuse.
+pub const MAX_RESIDENT_BLOCK_HANDLES: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ResidentBlockChangeRegistration {
@@ -225,6 +238,85 @@ fn dispatch_isolated_listeners<T>(
 }
 
 struct LifecycleIdentityGuard;
+
+/// Restores the previous callback handle when a listener returns, including
+/// when it recursively calls back into Java.
+struct ResidentBlockHandleGuard(Option<ObjectRef>);
+
+impl ResidentBlockHandleGuard {
+    fn enter(handle: Option<ObjectRef>) -> Self {
+        let previous = CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| slot.replace(handle));
+        Self(previous)
+    }
+}
+
+impl Drop for ResidentBlockHandleGuard {
+    fn drop(&mut self) {
+        CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+
+fn current_resident_block_handle() -> Result<ObjectRef, AdapterError> {
+    CURRENT_RESIDENT_BLOCK_HANDLE
+        .with(|slot| *slot.borrow())
+        .ok_or_else(|| {
+            AdapterError::new(
+                "currentBlockHandle requires an active resident block-change callback",
+            )
+        })
+}
+
+fn resident_block_handle(
+    identity: &LifecycleIdentity,
+    change: BlockStateWrite,
+) -> Result<ObjectRef, AdapterError> {
+    RESIDENT_BLOCK_HANDLES.with(|slot| {
+        let mut handles = slot.borrow_mut();
+        let handles = handles.as_mut().ok_or_else(|| {
+            AdapterError::new("block reference registry requires the adapter worker thread")
+        })?;
+        handles
+            .try_handle_for(
+                ObjectKind::Block,
+                (identity.clone(), (change.x, change.y, change.z)),
+            )
+            .map_err(|error| AdapterError::new(error.to_string()))
+    })
+}
+
+fn resolve_resident_block_handle(
+    bits: i64,
+) -> Result<(i32, i32, i32), AdapterError> {
+    let handle = ObjectRef::from_bits(bits, ObjectKind::Block);
+    RESIDENT_BLOCK_HANDLES.with(|slot| {
+        let handles = slot.borrow();
+        let handles = handles.as_ref().ok_or_else(|| {
+            AdapterError::new("blockHandlePosition requires the adapter worker thread")
+        })?;
+        handles
+            .resolve(handle, ObjectKind::Block)
+            .map(|(_, position)| *position)
+            .map_err(|error| AdapterError::new(format!("blockHandlePosition: {error}")))
+    })
+}
+
+fn release_resident_block_handles(identity: &LifecycleIdentity) -> usize {
+    RESIDENT_BLOCK_HANDLES.with(|slot| {
+        slot.borrow_mut().as_mut().map_or(0, |handles| {
+            handles.release_matching(|kind, payload| {
+                kind == ObjectKind::Block && &payload.0 == identity
+            })
+        })
+    })
+}
+
+fn clear_resident_block_handles() -> usize {
+    RESIDENT_BLOCK_HANDLES.with(|slot| {
+        slot.borrow_mut().as_mut().map_or(0, |handles| handles.clear())
+    })
+}
 
 #[derive(Clone, Copy)]
 enum LifecycleIdentityField {
@@ -593,6 +685,12 @@ fn run_java<S>(
             CALLBACK_PORT.with(|slot| *slot.borrow_mut() = Some(port.clone()));
             BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = Some(block_write_port.clone()));
             SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = Some(server_tick_port.clone()));
+            RESIDENT_BLOCK_HANDLES.with(|slot| {
+                *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(
+                    MAX_RESIDENT_BLOCK_HANDLES,
+                ))
+            });
+            CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
             RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS
                 .with(|slot| *slot.borrow_mut() = Some(Default::default()));
             let surface = NativeServerSurface::from_ports(
@@ -670,6 +768,8 @@ fn run_java<S>(
             drop(setup_state);
             Ok(())
         })();
+        clear_resident_block_handles();
+        CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
         CALLBACK_PORT.with(|slot| *slot.borrow_mut() = None);
         BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = None);
         SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = None);
@@ -841,6 +941,50 @@ pub(crate) fn register_resident_block_change_subscription(
     }
 }
 
+#[allow(unsafe_code)]
+pub(crate) fn register_current_block_handle_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts no arguments and returns a
+    // jlong. The callback returns only an opaque generation-checked handle;
+    // it never publishes a host pointer or an ECS value.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_current_block_handle as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
+pub(crate) fn register_block_handle_position_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts one jlong and returns a
+    // Java string. Resolution returns copied coordinates from the worker-local
+    // value registry, never a pointer into the server ECS.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_block_handle_position as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
 extern "system" fn native_block_state_id<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -933,6 +1077,34 @@ extern "system" fn native_subscribe_resident_block_changes<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+extern "system" fn native_current_block_handle<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        Ok::<_, AdapterError>(current_resident_block_handle()?.to_bits())
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_block_handle_position<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jstring {
+    env.with_env(|env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        let position = resolve_resident_block_handle(bits)?;
+        env.new_string(format!("{},{},{}", position.0, position.1, position.2))
+            .map(|value| value.into_raw())
+            .map_err(|error| AdapterError::new(format!("blockHandlePosition: {error}")))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 fn subscribe_resident_block_changes(
     env: &mut Env<'_>,
     listener: JObject<'_>,
@@ -997,6 +1169,7 @@ pub(crate) fn clear_resident_block_change_subscriptions(
     main_class: &str,
 ) -> usize {
     let identity = lifecycle_identity(name, version, main_class);
+    release_resident_block_handles(&identity);
     RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS.with(|slot| {
         slot.borrow_mut()
             .as_mut()
@@ -1019,7 +1192,20 @@ fn dispatch_resident_block_change(
         };
         for (registration, identity, listener) in subscriptions.active_entries() {
             match env.new_local_ref(listener.as_obj()) {
-                Ok(listener) => listeners.push((registration, identity.clone(), listener)),
+                Ok(listener) => {
+                    let handle = match resident_block_handle(identity, change) {
+                        Ok(handle) => Some(handle),
+                        Err(error) => {
+                            failures.push(ResidentBlockChangeListenerFailure {
+                                registration,
+                                plugin_name: identity.name.clone(),
+                                detail: error.to_string(),
+                            });
+                            None
+                        }
+                    };
+                    listeners.push((registration, identity.clone(), listener, handle));
+                }
                 Err(error) => failures.push(ResidentBlockChangeListenerFailure {
                     registration,
                     plugin_name: identity.name.clone(),
@@ -1031,15 +1217,16 @@ fn dispatch_resident_block_change(
         }
     });
     failures.extend(dispatch_isolated_listeners(
-        listeners.into_iter().map(|(registration, identity, listener)| {
-            (registration, identity.name.clone(), (identity, listener))
+        listeners.into_iter().map(|(registration, identity, listener, handle)| {
+            (registration, identity.name.clone(), (identity, listener, handle))
         }),
-        |(identity, listener)| {
+        |(identity, listener, handle)| {
             with_lifecycle_identity(
                 &identity.name,
                 &identity.version,
                 &identity.main_class,
                 || {
+                    let _block_handle = ResidentBlockHandleGuard::enter(*handle);
                     let result = env.with_local_frame(16, |env| {
                         env.call_method(
                             listener,
@@ -1447,5 +1634,91 @@ mod tests {
             .register(identity, ())
             .expect_err("the worker bound must reject another listener");
         assert!(error.to_string().contains("subscription limit 64 exceeded"));
+    }
+
+    #[test]
+    fn callback_block_handles_are_opaque_and_cleanup_makes_old_bits_stale() {
+        let identity = lifecycle_identity("alpha", "one", "alpha.Main");
+        let other_identity = lifecycle_identity("bravo", "one", "bravo.Main");
+        let change = BlockStateWrite {
+            x: 11,
+            y: 1,
+            z: 4,
+            state_id: 1234,
+        };
+        RESIDENT_BLOCK_HANDLES.with(|slot| {
+            *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(2));
+        });
+        CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
+
+        let first = resident_block_handle(&identity, change).expect("first block handle");
+        let other = resident_block_handle(
+            &other_identity,
+            BlockStateWrite { x: 12, ..change },
+        )
+        .expect("other owner's block handle");
+        assert_eq!(first.kind(), ObjectKind::Block);
+        assert_eq!(
+            RESIDENT_BLOCK_HANDLES.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .expect("registry")
+                    .resolve(first, ObjectKind::Block)
+                    .map(|(_, position)| *position)
+            }),
+            Ok((11, 1, 4)),
+        );
+        assert_eq!(
+            current_resident_block_handle(),
+            Err(AdapterError::new(
+                "currentBlockHandle requires an active resident block-change callback",
+            )),
+        );
+        {
+            let _guard = ResidentBlockHandleGuard::enter(Some(first));
+            assert_eq!(current_resident_block_handle().expect("callback handle"), first);
+        }
+        assert_eq!(
+            current_resident_block_handle(),
+            Err(AdapterError::new(
+                "currentBlockHandle requires an active resident block-change callback",
+            )),
+        );
+        assert_eq!(
+            resolve_resident_block_handle(first.to_bits()).expect("live handle position"),
+            (11, 1, 4),
+        );
+
+        assert_eq!(release_resident_block_handles(&identity), 1);
+        assert_eq!(
+            resolve_resident_block_handle(first.to_bits()),
+            Err(AdapterError::new(
+                "blockHandlePosition: the referenced object no longer exists",
+            )),
+        );
+        assert_eq!(
+            RESIDENT_BLOCK_HANDLES.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .expect("registry")
+                    .resolve(first, ObjectKind::Block)
+            }),
+            Err(ResolveError::Stale),
+        );
+        assert_eq!(
+            RESIDENT_BLOCK_HANDLES.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .expect("registry")
+                    .resolve(other, ObjectKind::Block)
+                    .map(|(_, position)| *position)
+            }),
+            Ok((12, 1, 4)),
+            "disabling one entry must not invalidate another entry's handle",
+        );
+        let replacement = resident_block_handle(&identity, change).expect("replacement handle");
+        assert_ne!(replacement, first);
+        RESIDENT_BLOCK_HANDLES.with(|slot| *slot.borrow_mut() = None);
+        CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
     }
 }

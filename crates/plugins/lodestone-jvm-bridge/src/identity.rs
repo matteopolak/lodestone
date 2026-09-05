@@ -63,6 +63,13 @@
 
 use std::collections::HashMap;
 
+/// Default maximum number of live object handles in one registry.
+///
+/// The default is deliberately finite: a plugin must not be able to turn a
+/// long-running server into an unbounded host-side allocation. Hosts with a
+/// smaller, measured budget can use [`ObjectRegistry::with_capacity`].
+pub const DEFAULT_OBJECT_REGISTRY_CAPACITY: usize = 1024;
+
 /// What a handle refers to.
 ///
 /// Carried inside the ref itself so that a mixed-up handle is rejected at the
@@ -170,6 +177,41 @@ impl std::fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
+/// Why a new object handle could not be minted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectRegistryError {
+    /// The registry has reached its configured live-object bound.
+    CapacityExceeded {
+        /// The maximum number of live objects this registry accepts.
+        capacity: usize,
+    },
+}
+
+impl ObjectRegistryError {
+    /// The configured live-object bound that was reached.
+    #[must_use]
+    pub const fn capacity(self) -> usize {
+        match self {
+            Self::CapacityExceeded { capacity } => capacity,
+        }
+    }
+}
+
+impl std::fmt::Display for ObjectRegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CapacityExceeded { capacity } => {
+                write!(f, "object handle capacity {capacity} exceeded")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ObjectRegistryError {}
+
+/// Backwards-compatible short name for [`ObjectRegistryError`].
+pub type RegistryError = ObjectRegistryError;
+
 /// One registry slot.
 #[derive(Debug)]
 struct Slot<T> {
@@ -193,13 +235,14 @@ impl<T> Slot<T> {
 /// testable without an ECS.
 #[derive(Debug)]
 pub struct ObjectRegistry<T> {
+    capacity: usize,
     slots: Vec<Slot<T>>,
     free: Vec<u32>,
     /// Reverse index, so re-exposing an object a plugin already holds yields
     /// the **same** handle rather than a second one. Bukkit plugins compare
     /// entity references for identity, and two live handles to one entity would
     /// break `equals` in a way that presents as a plugin bug.
-    by_payload: HashMap<T, ObjectRef>,
+    by_payload: HashMap<(ObjectKind, T), ObjectRef>,
 }
 
 impl<T> Default for ObjectRegistry<T>
@@ -218,11 +261,31 @@ where
     /// An empty registry.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_OBJECT_REGISTRY_CAPACITY)
+    }
+
+    /// An empty registry with an explicit live-object capacity.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
+            capacity,
             slots: Vec::new(),
             free: Vec::new(),
             by_payload: HashMap::new(),
         }
+    }
+
+    /// Alias for [`Self::with_capacity`] for callers that prefer a constructor
+    /// name which distinguishes the bounded form from [`Self::new`].
+    #[must_use]
+    pub fn new_with_capacity(capacity: usize) -> Self {
+        Self::with_capacity(capacity)
+    }
+
+    /// The maximum number of live object handles this registry accepts.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// How many live objects the registry holds.
@@ -243,8 +306,26 @@ where
     /// [`ObjectRef`] both times, so Java-side reference equality behaves the
     /// way a plugin author expects.
     pub fn handle_for(&mut self, kind: ObjectKind, payload: T) -> ObjectRef {
-        if let Some(existing) = self.by_payload.get(&payload) {
-            return *existing;
+        self.try_handle_for(kind, payload)
+            .expect("object registry capacity must be sized for its caller")
+    }
+
+    /// Get or mint a handle, reporting capacity exhaustion instead of
+    /// panicking. Native callback boundaries should use this method so a
+    /// misbehaving plugin receives a bounded Java error.
+    pub fn try_handle_for(
+        &mut self,
+        kind: ObjectKind,
+        payload: T,
+    ) -> Result<ObjectRef, ObjectRegistryError> {
+        let key = (kind, payload.clone());
+        if let Some(existing) = self.by_payload.get(&key) {
+            return Ok(*existing);
+        }
+        if self.by_payload.len() >= self.capacity {
+            return Err(ObjectRegistryError::CapacityExceeded {
+                capacity: self.capacity,
+            });
         }
         let index = match self.free.pop() {
             Some(index) => index,
@@ -265,8 +346,8 @@ where
             generation: slot.generation,
             kind,
         };
-        self.by_payload.insert(payload, handle);
-        handle
+        self.by_payload.insert(key, handle);
+        Ok(handle)
     }
 
     /// Resolve a handle the way a JNI call site needs it: checked for
@@ -302,7 +383,20 @@ where
     /// Returns whether anything was live. Bumping the generation here is what
     /// makes every outstanding ref fail from this moment on.
     pub fn release(&mut self, payload: &T) -> bool {
-        let Some(handle) = self.by_payload.remove(payload) else {
+        let keys: Vec<_> = self
+            .by_payload
+            .keys()
+            .filter(|(_, candidate)| candidate == payload)
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .map(|(kind, payload)| self.release_kind(kind, &payload))
+            .fold(false, |released, current| released || current)
+    }
+
+    /// Release one object of one kind.
+    pub fn release_kind(&mut self, kind: ObjectKind, payload: &T) -> bool {
+        let Some(handle) = self.by_payload.remove(&(kind, payload.clone())) else {
             return false;
         };
         let Some(slot) = self.slots.get_mut(handle.index as usize) else {
@@ -316,5 +410,90 @@ where
             self.free.push(handle.index);
         }
         true
+    }
+
+    /// Release every live object matching `predicate`.
+    ///
+    /// This is the lifecycle cleanup hook: an owner can invalidate all of its
+    /// handles without learning or storing slot indices. Every invalidated
+    /// slot advances its generation before it can be reused.
+    pub fn release_matching(
+        &mut self,
+        mut predicate: impl FnMut(ObjectKind, &T) -> bool,
+    ) -> usize {
+        let keys: Vec<_> = self
+            .by_payload
+            .keys()
+            .filter(|(kind, payload)| predicate(*kind, payload))
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter(|(kind, payload)| self.release_kind(*kind, payload))
+            .count()
+    }
+
+    /// Release every live object and leave the registry reusable.
+    pub fn clear(&mut self) -> usize {
+        let keys: Vec<_> = self.by_payload.keys().cloned().collect();
+        keys.into_iter()
+            .filter(|(kind, payload)| self.release_kind(*kind, payload))
+            .count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capacity_is_fallible_and_released_slots_are_reusable() {
+        let mut registry = ObjectRegistry::with_capacity(1);
+        let first = registry
+            .try_handle_for(ObjectKind::World, 11_u64)
+            .expect("the first object fits");
+        assert_eq!(
+            registry.try_handle_for(ObjectKind::Player, 22),
+            Err(ObjectRegistryError::CapacityExceeded { capacity: 1 }),
+        );
+        assert_eq!(
+            registry
+                .try_handle_for(ObjectKind::World, 11)
+                .expect("re-exposing a live object does not consume capacity"),
+            first,
+        );
+        assert!(registry.release_kind(ObjectKind::World, &11));
+        let replacement = registry
+            .try_handle_for(ObjectKind::Player, 22)
+            .expect("released capacity is reusable");
+        assert_eq!(registry.resolve(first, ObjectKind::World), Err(ResolveError::Stale));
+        assert_eq!(registry.resolve(replacement, ObjectKind::Player), Ok(&22));
+    }
+
+    #[test]
+    fn same_payload_in_different_kinds_has_independent_identity() {
+        let mut registry = ObjectRegistry::with_capacity(2);
+        let world = registry.handle_for(ObjectKind::World, 7_u8);
+        let player = registry.handle_for(ObjectKind::Player, 7_u8);
+        assert_ne!(world, player);
+        assert_eq!(registry.resolve(world, ObjectKind::World), Ok(&7));
+        assert_eq!(registry.resolve(player, ObjectKind::Player), Ok(&7));
+        assert_eq!(registry.release(&7), true);
+        assert_eq!(registry.resolve(world, ObjectKind::World), Err(ResolveError::Stale));
+        assert_eq!(registry.resolve(player, ObjectKind::Player), Err(ResolveError::Stale));
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn clear_invalidates_every_live_handle_before_reuse() {
+        let mut registry = ObjectRegistry::with_capacity(2);
+        let old_world = registry.handle_for(ObjectKind::World, 1_u8);
+        let old_block = registry.handle_for(ObjectKind::Block, 2_u8);
+        assert_eq!(registry.clear(), 2);
+        assert_eq!(registry.len(), 0);
+        assert_eq!(registry.resolve(old_world, ObjectKind::World), Err(ResolveError::Stale));
+        assert_eq!(registry.resolve(old_block, ObjectKind::Block), Err(ResolveError::Stale));
+        let new_world = registry.handle_for(ObjectKind::World, 3_u8);
+        assert_ne!(new_world, old_world);
+        assert_eq!(registry.resolve(old_world, ObjectKind::World), Err(ResolveError::Stale));
     }
 }

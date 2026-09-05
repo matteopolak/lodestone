@@ -100,7 +100,10 @@ pub mod paper;
 pub use callback::{
     CallbackDepthError, CallbackDepthGuard, DEFAULT_CALLBACK_DEPTH_LIMIT,
 };
-pub use identity::{ObjectKind, ObjectRef, ObjectRegistry, ResolveError};
+pub use identity::{
+    DEFAULT_OBJECT_REGISTRY_CAPACITY, ObjectKind, ObjectRef, ObjectRegistry,
+    ObjectRegistryError, RegistryError, ResolveError,
+};
 pub use port::{
     DEFAULT_REQUEST_DEADLINE, PortError, PortServicer, WorldPort, channel, service_with_world,
 };
