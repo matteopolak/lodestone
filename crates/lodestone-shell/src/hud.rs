@@ -617,6 +617,10 @@ pub struct DebugStats {
     /// `ServerDifficulty` reached a real, tested ECS fold in `44485e4` but
     /// nothing in the shell read it; this is that last hop.
     pub difficulty: Option<(lodestone_model::Difficulty, bool)>,
+    /// The server-reported simulation distance, in chunks. Unlike render
+    /// distance, this is an authoritative server decision; `None` means the
+    /// current session has not received that packet.
+    pub simulation_distance: Option<i32>,
     /// Sky and block light at the player's feet, as the client's own world
     /// reports them — `None` before login or for an unloaded section, which is
     /// the honest "no data" state and is drawn as such.
@@ -1083,9 +1087,14 @@ impl DebugStats {
                 "C: {}/{} sections, {} columns, {} quads",
                 self.section_count, self.occlusion_graph_sections, self.chunk_count, self.quads
             ),
-            // `LevelExtractor.entityStatistics`, `"E: " + rendered + "/" + total
-            // + ", SD: " + simulationDistance`. We track only the drawn count.
-            format!("E: {}", self.entities_drawn),
+            // The entity statistic includes the server's simulation-distance
+            // scalar. We track only drawn entities, but preserve `SD` after the
+            // packet actually arrives rather than guessing it from render/view
+            // distance.
+            self.simulation_distance.map_or_else(
+                || format!("E: {}", self.entities_drawn),
+                |distance| format!("E: {}, SD: {distance}", self.entities_drawn),
+            ),
             // `DebugEntryParticleRenderStats`, `"P: " + countParticles()`. The
             // unresolved count is ours and stays on the line: a zero draw
             // against a non-zero alive count is the "renders nothing, reports
@@ -8009,6 +8018,38 @@ mod tests {
             };
             assert_eq!(difficulty_line(&stats), format!("Difficulty: {name}"));
         }
+    }
+
+    /// The server's simulation distance has a precise visible destination on
+    /// the F3 entity line. A missing report must not be fabricated from the
+    /// render distance, while a reported value must survive alongside a
+    /// pairwise-distinct entity count.
+    #[test]
+    fn debug_overlay_shows_only_reported_simulation_distance() {
+        fn entity_line(stats: &DebugStats) -> String {
+            stats
+                .right_lines()
+                .into_iter()
+                .find(|line| line.starts_with("E:"))
+                .expect("the F3 overlay must carry an entity line")
+        }
+
+        let absent = DebugStats {
+            entities_drawn: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            entity_line(&absent),
+            "E: 3",
+            "control: no server report must not invent an SD value"
+        );
+
+        let reported = DebugStats {
+            entities_drawn: 3,
+            simulation_distance: Some(11),
+            ..Default::default()
+        };
+        assert_eq!(entity_line(&reported), "E: 3, SD: 11");
     }
 
     /// `RenderState::weather_columns`/`weather_rain_columns` reach the F3

@@ -1434,6 +1434,10 @@ impl WindowApp {
         // shell read it — this is that last hop, onto the F3 overlay's own
         // `Difficulty:` line (`hud.rs`'s `DebugStats::left_lines`).
         self.sim.stats.difficulty = self.sim.difficulty();
+        // Keep the F3 entity line tied to the server's report, not the local
+        // render-distance preference: streaming and simulation are independent
+        // server decisions.
+        self.sim.stats.simulation_distance = self.sim.simulation_distance();
         // The F3+B / F3+G state, for the overlay's own `Debug overlays:` line —
         // vanilla's `Debug charts:` block, carrying the two toggles that exist
         // here. Copied from the `Arc<AtomicBool>`s the world-line source closure

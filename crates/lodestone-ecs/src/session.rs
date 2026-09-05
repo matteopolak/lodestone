@@ -421,6 +421,17 @@ pub struct ServerGameMode(pub Option<GameMode>);
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ServerDifficulty(pub Option<(Difficulty, bool)>);
 
+/// The simulation distance most recently reported by the server, in chunks.
+///
+/// It is deliberately separate from the streamed-view radius: the latter
+/// controls which columns the client receives, while this scalar governs which
+/// loaded columns the server advances. The client does not simulate server
+/// chunks, so retaining it as a session fact and exposing it in the F3 panel is
+/// the honest consumer. `None` means this protocol family has not reported a
+/// value yet; a visible `0` would falsely claim a report arrived.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerSimulationDistance(pub Option<i32>);
+
 /// The local player's server-granted **abilities** — `Abilities.Packed` on the
 /// wire, `ClientboundPlayerAbilitiesPacket`.
 ///
@@ -906,6 +917,7 @@ pub fn apply_block_destruction(
 /// [`Vitals`], [`Xp`], [`ServerEntityId`], [`ServerGameMode`],
 /// [`ServerDimension`], [`ServerDimensionType`], [`ServerBiomeSkyColors`],
 /// [`ServerAlive`], [`Abilities`], [`ServerDifficulty`],
+/// [`ServerSimulationDistance`],
 /// [`SelectedSlot`](crate::player::SelectedSlot).
 ///
 /// # Why this is one system over five event families and not five systems
@@ -939,6 +951,7 @@ pub fn apply_local_player_state(
             &mut Abilities,
             &mut Riding,
             &mut ServerDifficulty,
+            &mut ServerSimulationDistance,
             // `Option`, not required: `crate::player::SelectedSlot` is inserted
             // by `spawn_local_player`, not by `insert_session_components`, so a
             // harness that installs `SessionPlugin` alone (`spawn_session`, with
@@ -964,6 +977,7 @@ pub fn apply_local_player_state(
             mut abilities,
             mut riding,
             mut difficulty,
+            mut simulation_distance,
             mut selected_slot,
         ) in &mut players
         {
@@ -1150,6 +1164,13 @@ pub fn apply_local_player_state(
                 ClientEvent::DifficultyChanged { difficulty: d, locked } => {
                     difficulty.0 = Some((*d, *locked));
                 }
+                // Keep the raw server report rather than deriving a distance
+                // from chunk traffic: a server may stream farther than it
+                // simulates, and the F3 line exists to make that distinction
+                // visible.
+                ClientEvent::SimulationDistanceChanged { distance } => {
+                    simulation_distance.0 = Some(*distance);
+                }
                 // The other. `HudState::select_slot`'s clamp, reproduced here:
                 // an out-of-range wire value (negative, or `>= 9`) is ignored
                 // rather than corrupting the selection with a value the hotbar
@@ -1215,6 +1236,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
         // set above is already at that ceiling, not a meaningful grouping.
         entity.insert((
             ServerDifficulty::default(),
+            ServerSimulationDistance::default(),
             SessionBlockDestruction::default(),
             // Also the quit-to-title reset path (see this function's docs). A
             // stale world border is the one of these three with a visible
@@ -1279,28 +1301,42 @@ impl Plugin for SessionPlugin {
         }
         app.add_systems(
             NetIngest,
+            // Bevy implements tuple scheduling only through a bounded arity.
+            // Keep the old one-by-one global order, but nest contiguous runs so
+            // adding a session fold cannot turn this registration into a
+            // method-resolution compile error. The schedule test below proves a
+            // later consumer observes this final fold after all three groups.
             (
-                apply_scoreboard,
-                apply_tab_list,
-                apply_boss_bars,
-                apply_menus,
-                apply_block_destruction,
-                apply_world_border,
-                apply_spawn_point,
-                apply_game_rules,
-                apply_recipe_book_settings,
-                apply_maps,
-                apply_advancements,
-                apply_advancement_tab,
-                apply_statistics,
-                apply_registry_order,
-                apply_recipe_book_sync,
-                apply_trades,
-                apply_debug_feeds,
-                apply_server_info,
-                apply_item_cooldowns,
-                apply_waypoints,
-                apply_local_player_state,
+                (
+                    apply_scoreboard,
+                    apply_tab_list,
+                    apply_boss_bars,
+                    apply_menus,
+                    apply_block_destruction,
+                    apply_world_border,
+                    apply_spawn_point,
+                )
+                    .chain(),
+                (
+                    apply_game_rules,
+                    apply_recipe_book_settings,
+                    apply_maps,
+                    apply_advancements,
+                    apply_advancement_tab,
+                    apply_statistics,
+                    apply_registry_order,
+                )
+                    .chain(),
+                (
+                    apply_recipe_book_sync,
+                    apply_trades,
+                    apply_debug_feeds,
+                    apply_server_info,
+                    apply_item_cooldowns,
+                    apply_waypoints,
+                    apply_local_player_state,
+                )
+                    .chain(),
             )
                 .chain()
                 .in_set(SessionSet::Fold)
@@ -1610,6 +1646,22 @@ mod tests {
     };
     use lodestone_model::{BossAction, BossColor, BossOverlay, GameMode, PlayerListEntry, Text};
     use uuid::Uuid;
+
+    #[derive(bevy_ecs::prelude::Resource, Debug, Default, PartialEq, Eq)]
+    struct ObservedSimulationDistance(Option<i32>);
+
+    /// A consumer ordered after the complete fold set. Kept outside the test
+    /// body so the scheduler validates the exact function signature when the
+    /// registration tuple changes.
+    fn observe_simulation_distance_after_fold(
+        distances: Query<&ServerSimulationDistance, With<LocalPlayer>>,
+        mut observed: bevy_ecs::prelude::ResMut<ObservedSimulationDistance>,
+    ) {
+        observed.0 = distances
+            .single()
+            .expect("the test owns exactly one local session")
+            .0;
+    }
 
     fn dim(path: &str) -> DimensionId {
         format!("minecraft:{path}")
@@ -2702,6 +2754,84 @@ mod tests {
         );
     }
 
+    /// This must enter through the real scheduled session fold: an adapter can
+    /// decode the scalar perfectly while an omitted registration leaves F3 with
+    /// no server decision to display.
+    #[test]
+    fn simulation_distance_reaches_its_session_component_through_the_real_schedule() {
+        let (mut app, entity) = session_app();
+        assert_eq!(
+            app.world()
+                .get::<ServerSimulationDistance>(entity)
+                .unwrap()
+                .0,
+            None,
+            "control: no report must not masquerade as a zero distance"
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::SimulationDistanceChanged { distance: 11 },
+        );
+        assert_eq!(
+            app.world()
+                .get::<ServerSimulationDistance>(entity)
+                .unwrap()
+                .0,
+            Some(11),
+            "the scheduled fold must preserve the server's exact scalar"
+        );
+
+        fold(&mut app, ClientEvent::PlayerCombatEntered);
+        assert_eq!(
+            app.world()
+                .get::<ServerSimulationDistance>(entity)
+                .unwrap()
+                .0,
+            Some(11),
+            "control: a remaining terminal event must not overwrite the scalar"
+        );
+    }
+
+    /// The production registration uses three nested chains to stay beneath
+    /// the scheduler's tuple-arity limit. A consumer after `SessionSet::Fold`
+    /// must still observe the final group's local-player write in the same
+    /// `NetIngest` run; otherwise the arity repair has changed global order.
+    #[test]
+    fn nested_session_fold_registration_runs_before_later_consumers() {
+        let (mut app, entity) = session_app();
+        app.insert_resource(ObservedSimulationDistance::default());
+        app.add_systems(
+            NetIngest,
+            observe_simulation_distance_after_fold.after(SessionSet::Fold),
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::SimulationDistanceChanged { distance: 13 },
+        );
+        assert_eq!(
+            app.world().resource::<ObservedSimulationDistance>().0,
+            Some(13),
+            "the observer after SessionSet::Fold must see the final nested group's write"
+        );
+
+        fold(&mut app, ClientEvent::PlayerCombatEntered);
+        assert_eq!(
+            app.world().resource::<ObservedSimulationDistance>().0,
+            Some(13),
+            "control: an unrelated terminal event must not create an observer value"
+        );
+        assert_eq!(
+            app.world()
+                .get::<ServerSimulationDistance>(entity)
+                .unwrap()
+                .0,
+            Some(13),
+            "the observer must report the real component rather than a test-only copy"
+        );
+    }
+
     /// The third: `BlockDestruction` reached
     /// `lodestone_game::mining::BlockDestructionOverlays::apply`, which
     /// nothing called outside its own file and tests.
@@ -3571,13 +3701,14 @@ mod tests {
         assert!(handles_event(&ClientEvent::BiomeVisuals {
             sky_colors: Vec::new(),
         }));
-        // HeldSlotChanged / DifficultyChanged — the two ex-`HudState` islands;
-        // see the dedicated tests below this one in the file.
+        // HeldSlotChanged / DifficultyChanged / SimulationDistanceChanged —
+        // local session scalars; see the dedicated schedule tests below.
         assert!(handles_event(&ClientEvent::HeldSlotChanged { slot: 0 }));
         assert!(handles_event(&ClientEvent::DifficultyChanged {
             difficulty: Difficulty::Normal,
             locked: false,
         }));
+        assert!(handles_event(&ClientEvent::SimulationDistanceChanged { distance: 8 }));
         // BlockDestruction — apply_block_destruction; see the dedicated tests
         // above this one.
         assert!(handles_event(&ClientEvent::BlockDestruction {

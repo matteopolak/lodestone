@@ -25,7 +25,8 @@ use lodestone_ecs::player::{
 };
 use lodestone_ecs::session::{
     ActionBarOverlay, HudEffects, Phase, Riding, RespawnCount, ServerDifficulty, ServerEntityId,
-    ServerGameMode, SessionBlockDestruction, SessionChat, TitleOverlay, Vitals, Xp,
+    ServerGameMode, ServerSimulationDistance, SessionBlockDestruction, SessionChat, TitleOverlay,
+    Vitals, Xp,
 };
 use lodestone_ecs::{
     ChunkWorld, ChunkWorldWrite, EcsHandle, Extract, FrameClock, GameTick, Update, VersionData,

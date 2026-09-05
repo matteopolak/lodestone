@@ -1472,8 +1472,8 @@ mod tests {
     use super::*;
     use lodestone_ecs::player::SelectedSlot;
     use lodestone_ecs::session::{
-        ServerDifficulty, SessionBlockDestruction, SessionGameRules, SessionRecipeBookSettings,
-        SessionSpawnPoint, SessionTabList, SessionWorldBorder,
+        ServerDifficulty, ServerSimulationDistance, SessionBlockDestruction, SessionGameRules,
+        SessionRecipeBookSettings, SessionSpawnPoint, SessionTabList, SessionWorldBorder,
     };
     use lodestone_model::Difficulty;
 
@@ -1637,6 +1637,33 @@ mod tests {
             Some((Difficulty::Hard, true)),
             "DifficultyChanged must reach ServerDifficulty through the real \
              SharedState::apply path, not just through a hand-run schedule"
+        );
+    }
+
+    /// The real route detector for the F3 simulation-distance line: unlike the
+    /// component test, this enters through `SharedState::apply`, the method the
+    /// client driver invokes after an adapter emits an event.
+    #[test]
+    fn apply_routes_simulation_distance_through_the_real_path() {
+        let state = SharedState::default();
+        state.apply(&ClientEvent::SimulationDistanceChanged { distance: 11 });
+        {
+            let ecs = state.ecs.read();
+            assert_eq!(
+                ecs.get::<ServerSimulationDistance>(state.session).unwrap().0,
+                Some(11),
+                "the adapter's scalar must reach the session component through route()"
+            );
+        }
+
+        // Exact negative control: a remaining terminal event must neither be
+        // routed into this fold nor overwrite the already observed value.
+        state.apply(&ClientEvent::PlayerCombatEntered);
+        let ecs = state.ecs.read();
+        assert_eq!(
+            ecs.get::<ServerSimulationDistance>(state.session).unwrap().0,
+            Some(11),
+            "combat enter is not a simulation-distance update"
         );
     }
 
@@ -2016,21 +2043,17 @@ mod tests {
     /// merely decorative: it pins that `SharedState::apply` really does consult
     /// `route()` rather than folding everything it is handed.
     ///
-    /// `SimulationDistanceChanged` is a *deliberately* stranded world-scalar
-    /// event — the same shape and the same subsystem family as the nine above,
-    /// still `Route::NOWHERE`. If it were to start mutating any of the three new
-    /// components, the folds would be matching too broadly.
+    /// `PlayerCombatEntered` is a deliberately stranded event. If it were to
+    /// start mutating any of the three new components, the folds would be
+    /// matching too broadly.
     #[test]
-    fn a_still_stranded_world_scalar_reaches_none_of_the_new_components() {
+    fn a_still_stranded_combat_event_reaches_none_of_the_new_components() {
         let state = SharedState::default();
         assert!(
-            lodestone_model::event::route(&ClientEvent::SimulationDistanceChanged {
-                distance: 12
-            })
-            .is_island(),
+            lodestone_model::event::route(&ClientEvent::PlayerCombatEntered).is_island(),
             "premise: this control is only meaningful while the variant is still an island"
         );
-        state.apply(&ClientEvent::SimulationDistanceChanged { distance: 12 });
+        state.apply(&ClientEvent::PlayerCombatEntered);
         let ecs = state.ecs.read();
         let b = ecs.get::<SessionWorldBorder>(state.session).unwrap().0;
         assert!(!b.initialized, "border must be untouched");

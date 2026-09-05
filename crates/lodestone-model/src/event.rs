@@ -4383,8 +4383,12 @@ pub fn route(event: &ClientEvent) -> Route {
         ClientEvent::ChunkCacheCenterChanged { .. } => SHELL,
         ClientEvent::ProjectilePowerChanged { .. } => INGEST,
         ClientEvent::ItemCooldown { .. } => SESSION,
-        ClientEvent::SimulationDistanceChanged { .. }
-        | ClientEvent::PlayerCombatEntered
+        // This is a server-owned world scalar, but it is only a local client
+        // fact: the session fold retains it and the F3 instrument panel reads
+        // that one value. It is not the streamed view radius, which remains a
+        // shell route because it sizes the loading-grid consumer.
+        ClientEvent::SimulationDistanceChanged { .. } => SESSION,
+        ClientEvent::PlayerCombatEntered
         | ClientEvent::PlayerCombatEnded { .. }
         | ClientEvent::MountScreenOpened { .. }
         | ClientEvent::ServerDataReceived { .. } => Route::NOWHERE,
@@ -4759,6 +4763,23 @@ mod route_tests {
         assert!(r.shell, "the shell owns the live camera and movement pose");
         assert!(r.must_forward(), "the look target needs a NetUpdate arm");
         assert!(!r.is_island());
+    }
+
+    /// The simulation distance is a server-reported scalar, distinct from the
+    /// streamed-view radius. The session component owns it and the F3 panel
+    /// reads that component; forwarding it to the loading-grid path would make
+    /// that panel report a different server decision.
+    #[test]
+    fn simulation_distance_reaches_the_session_instrument_panel() {
+        let r = route(&ClientEvent::SimulationDistanceChanged { distance: 11 });
+        assert!(r.session, "the F3 panel reads the session scalar");
+        assert!(!r.ingest && !r.shell && !r.client);
+        assert!(!r.is_island());
+
+        assert!(
+            route(&ClientEvent::PlayerCombatEntered).is_island(),
+            "control: combat enter still has no consumer and must not be claimed by this scalar fold"
+        );
     }
 
     /// `Driver::emit` withdraws a deleted full signature from its pending
