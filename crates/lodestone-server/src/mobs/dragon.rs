@@ -48,6 +48,65 @@ use crate::mob_spawn::SpawnRng;
 
 use super::{MobSim, TrackedDragon};
 
+/// The tick-start chunk owner of one dragon.
+///
+/// This is a deterministic hand-off boundary, not a worker assignment. The
+/// shared phase RNG remains serial while planning, and the central application
+/// retains entity-id order before it changes live dragon state or spawns a
+/// fireball.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DragonTickOwner {
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl DragonTickOwner {
+    fn for_position(position: Vec3) -> Self {
+        Self::Chunk {
+            cx: (position.x.floor() as i32).div_euclid(16),
+            cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+}
+
+/// One completed dragon-owner batch.
+///
+/// The expected batch count and serial slots originate at tick start. The
+/// central writer validates them before a completion can update a dragon,
+/// announce a death, or allocate a fireball entity id.
+#[derive(Debug, Clone)]
+pub(crate) struct DragonTickOwnerBatch {
+    owner: DragonTickOwner,
+    expected_batch_count: usize,
+    effects: Vec<DragonTickEffect>,
+}
+
+impl DragonTickOwnerBatch {
+    #[cfg(test)]
+    fn owner(&self) -> DragonTickOwner {
+        self.owner
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DragonTickEffect {
+    owner: DragonTickOwner,
+    serial: usize,
+    id: i32,
+    dragon: TrackedDragon,
+    action: DragonTickAction,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DragonTickAction {
+    None,
+    Death { fight_origin: Vec3 },
+    FireFireball {
+        origin: Vec3,
+        yaw: f32,
+        target: Option<Vec3>,
+    },
+}
+
 /// `EnderDragon.createMobAttributes`'s `Attributes.MAX_HEALTH` value.
 pub const MAX_HEALTH: f32 = 200.0;
 
@@ -277,25 +336,138 @@ impl<'w> MobSim<'w> {
     /// not (see this module's doc for exactly which fields are
     /// approximated).
     pub fn tick_dragons(&mut self) {
-        let ids: Vec<i32> = self.dragons.keys().copied().collect();
-        for id in ids {
-            self.tick_one_dragon(id);
+        let batches = self.tick_dragon_owner_batches();
+        self.apply_dragon_tick_owner_batches(batches);
+    }
+
+    /// Produces independent dragon-owner completions from cloned tick-start
+    /// state. Phase-RNG draws stay serial here because one shared stream
+    /// defines the old entity-id sequence; no completion mutates the live map
+    /// or allocates a projectile before central application.
+    pub(crate) fn tick_dragon_owner_batches(&mut self) -> Vec<DragonTickOwnerBatch> {
+        let crystals = self.end_crystals();
+        let players: Vec<_> = self
+            .players
+            .iter()
+            .filter_map(|player| player.identity.map(|identity| (identity.entity_id, player.perception.position)))
+            .collect();
+        let tick_count = self.tick_count;
+        let mut ids: Vec<i32> = self.dragons.keys().copied().collect();
+        ids.sort_unstable();
+        let mut batches = Vec::<DragonTickOwnerBatch>::new();
+        for (serial, id) in ids.into_iter().enumerate() {
+            let dragon = self
+                .dragons
+                .get(&id)
+                .cloned()
+                .expect("a tick-start dragon id must remain live while planning");
+            let owner = DragonTickOwner::for_position(dragon.position);
+            let (dragon, action) = ticked_dragon(
+                &mut self.dragon_rng,
+                dragon,
+                &crystals,
+                &players,
+                tick_count,
+            );
+            let effect = DragonTickEffect {
+                owner,
+                serial,
+                id,
+                dragon,
+                action,
+            };
+            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
+                batch.effects.push(effect);
+            } else {
+                batches.push(DragonTickOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects: vec![effect],
+                });
+            }
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
+
+    /// Validates and centrally applies completed dragon-owner batches.
+    ///
+    /// This is the only owner-batch path that writes the live dragon map,
+    /// records a dragon death, or allocates a dragon-fireball entity id. The
+    /// serial slots prevent owner completion order from changing any of those
+    /// observable actions.
+    pub(crate) fn apply_dragon_tick_owner_batches(&mut self, batches: Vec<DragonTickOwnerBatch>) {
+        if batches.is_empty() {
+            return;
+        }
+        let effects = merge_dragon_tick_owner_batches(batches);
+        assert_eq!(
+            effects.len(),
+            self.dragons.len(),
+            "dragon owner completion must retain every live tick-start entity"
+        );
+        let mut ids = std::collections::HashSet::new();
+        for effect in effects {
+            assert!(
+                ids.insert(effect.id),
+                "dragon owner completion may update one live entity only once"
+            );
+            assert!(
+                self.dragons.contains_key(&effect.id),
+                "a dragon owner completion may update only a live tick-start dragon"
+            );
+            match effect.action {
+                DragonTickAction::None => {
+                    self.dragons.insert(effect.id, effect.dragon);
+                }
+                DragonTickAction::Death { fight_origin } => {
+                    self.record_dragon_death(fight_origin);
+                    self.dragons.remove(&effect.id);
+                }
+                DragonTickAction::FireFireball { origin, yaw, target } => {
+                    self.dragons.insert(effect.id, effect.dragon);
+                    self.spawn_dragon_fireball(effect.id, origin, yaw, target);
+                }
+            }
         }
     }
 
-    fn tick_one_dragon(&mut self, id: i32) {
+    fn spawn_dragon_fireball(&mut self, id: i32, origin: Vec3, yaw: f32, target: Option<Vec3>) {
+        // No resolvable target position (the strafe lock's player disconnected
+        // or moved out of the perception list this same tick): fall back to
+        // straight ahead along the current heading rather than dropping the
+        // shot silently.
+        let heading = f64::from(yaw).to_radians();
+        let aim = target.unwrap_or(origin + Vec3::new(heading.cos(), 0.0, heading.sin()));
+        let delta = aim - origin;
+        let dir = if delta.length() > 1e-6 { delta.normalize() } else { Vec3::new(0.0, 0.0, 1.0) };
+        let projectile = lodestone_entity::projectile::Projectile::throwable(origin, dir.scale(1.0));
+        self.spawn_projectile_from(
+            "minecraft:dragon_fireball".parse().expect("valid key"),
+            projectile,
+            Some(id),
+        );
+    }
+
+}
+
+fn ticked_dragon(
+    dragon_rng: &mut SpawnRng,
+    mut dragon: TrackedDragon,
+    crystals: &[(i32, Vec3)],
+    players: &[(i32, Vec3)],
+    tick_count: u64,
+) -> (TrackedDragon, DragonTickAction) {
         // Crystal rescan roll — `random.nextInt(10) == 0`, using this sim's
         // own seeded dragon stream so it never perturbs any other roll.
         let rescan_roll = {
-            let mut adapter = SpawnRngAdapter(&mut self.dragon_rng);
+            let mut adapter = SpawnRngAdapter(dragon_rng);
             crystal::should_rescan_crystals(adapter.next_below(10))
         };
-        let crystals = self.end_crystals();
         let alive_crystals = crystals.len() as i32;
-
-        let Some(dragon) = self.dragons.get_mut(&id) else {
-            return;
-        };
 
         // `checkCrystals`: clear a removed nearest crystal, then (on the
         // roll) rescan for the real nearest by distance.
@@ -316,7 +488,7 @@ impl<'w> MobSim<'w> {
         // The heal proc — exact 1.0 HP / 10 ticks, gated on a live nearest
         // crystal and health below max.
         if let Some(new_health) = crystal::crystal_heal_tick(
-            self.tick_count as i64,
+            tick_count as i64,
             dragon.nearest_crystal.id().is_some(),
             dragon.health,
             dragon.max_health,
@@ -343,20 +515,19 @@ impl<'w> MobSim<'w> {
         // doc). Used for every `phase::DragonInputs` targeting field —
         // vanilla's several different ranges collapse to one
         // `NEARBY_PLAYER_RANGE_SQ` here.
-        let nearest_player = self
-            .players
+        let nearest_player = players
             .iter()
-            .filter_map(|p| p.identity.map(|id| (id.entity_id, p.perception.position)))
-            .map(|(pid, pos)| (pid, dist_sq(dragon.fight_origin, pos)))
-            .filter(|(_, d)| *d <= NEARBY_PLAYER_RANGE_SQ)
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).expect("distances are always finite"));
+            .copied()
+            .map(|(pid, pos)| (pid, pos, dist_sq(dragon.fight_origin, pos)))
+            .filter(|(_, _, distance)| *distance <= NEARBY_PLAYER_RANGE_SQ)
+            .min_by(|(_, _, a), (_, _, b)| a.partial_cmp(b).expect("distances are always finite"));
 
         let mut inputs = phase::DragonInputs {
             alive_crystals,
             leg_complete,
             ..Default::default()
         };
-        if let Some((pid, dist)) = nearest_player {
+        if let Some((pid, _, dist)) = nearest_player {
             let sighting = phase::TargetSighting { id: pid };
             inputs.player_near_egg = Some(sighting);
             // `egg.distToCenterSqr(...) / 512.0` — the real formula, fed the
@@ -374,7 +545,7 @@ impl<'w> MobSim<'w> {
             inputs.egg_distance_scaled = 64.0; // vanilla's own no-player fallback
         }
 
-        let mut adapter = SpawnRngAdapter(&mut self.dragon_rng);
+        let mut adapter = SpawnRngAdapter(dragon_rng);
         let effect = dragon.phase.tick(&inputs, &mut adapter);
 
         // The death-phase health update is a separate call because it drives
@@ -398,9 +569,7 @@ impl<'w> MobSim<'w> {
         // `record_dragon_death` records the fight result and emits the
         // egg, exit-portal, and gateway signals.
         if just_died {
-            self.record_dragon_death(fight_origin);
-            self.dragons.remove(&id);
-            return;
+            return (dragon, DragonTickAction::Death { fight_origin });
         }
 
         // `PhaseEffect::FireFireball` spawns a real `minecraft:dragon_fireball`
@@ -413,26 +582,60 @@ impl<'w> MobSim<'w> {
         // strafe lock and firing falls back to straight ahead along the
         // dragon's current heading rather than dropping the shot silently.
         if effect == Some(phase::PhaseEffect::FireFireball) {
-            let target_pos = nearest_player
-                .and_then(|(pid, _)| self.players.iter().find(|p| p.identity.is_some_and(|i| i.entity_id == pid)))
-                .map(|p| p.perception.position);
-            // No resolvable target position (the strafe lock's player
-            // disconnected or moved out of the perception list this same
-            // tick): fall back to straight ahead along the current heading
-            // rather than dropping the shot silently.
-            let heading = f64::from(dragon_yaw).to_radians();
-            let aim = target_pos.unwrap_or(fire_origin + Vec3::new(heading.cos(), 0.0, heading.sin()));
-            let delta = aim - fire_origin;
-            let dir = if delta.length() > 1e-6 { delta.normalize() } else { Vec3::new(0.0, 0.0, 1.0) };
-            let projectile = lodestone_entity::projectile::Projectile::throwable(fire_origin, dir.scale(1.0));
-            self.spawn_projectile_from(
-                "minecraft:dragon_fireball".parse().expect("valid key"),
-                projectile,
-                Some(id),
+            let target = nearest_player.map(|(_, position, _)| position);
+            return (
+                dragon,
+                DragonTickAction::FireFireball {
+                    origin: fire_origin,
+                    yaw: dragon_yaw,
+                    target,
+                },
             );
         }
-    }
+    (dragon, DragonTickAction::None)
+}
 
+fn merge_dragon_tick_owner_batches(
+    mut batches: Vec<DragonTickOwnerBatch>,
+) -> Vec<DragonTickEffect> {
+    let expected_batch_count = batches
+        .first()
+        .map(|batch| batch.expected_batch_count)
+        .expect("dragon owner completion must contain every tick-start owner batch");
+    let mut owners = std::collections::HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.expected_batch_count, expected_batch_count,
+            "dragon owner completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "dragon owner completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "a dragon owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(), expected_batch_count,
+        "dragon owner completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "dragon owner completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
+}
+
+impl<'w> MobSim<'w> {
     /// Applies `damage` to a live dragon through
     /// [`phase::PhaseManager::on_sitting_damage`]/`on_killing_blow` — the
     /// `EnderDragon.hurt` clauses that are phase-state rather than plain
@@ -446,7 +649,7 @@ impl<'w> MobSim<'w> {
     ///
     /// A killing blow while **not** sitting redirects into `Dying` at
     /// `1.0` health, matching `handleKillingBlow` — the dragon is not
-    /// removed here; [`tick_one_dragon`] finishes it off (and removes it)
+    /// removed here; [`tick_dragons`](Self::tick_dragons) finishes it off (and removes it)
     /// once the death-flight health-drive clause reaches `0.0`, see that
     /// method's own doc. A killing blow while **sitting** is `EnderDragon`'s
     /// one undisguised surprise — it dies outright, same tick, no redirect —
@@ -468,7 +671,7 @@ impl<'w> MobSim<'w> {
         dragon.phase.on_sitting_damage(delta, dragon.max_health);
         let health = dragon.health;
         if health <= 0.0 {
-            // See `tick_one_dragon`'s identical capture-before-remove
+            // See `tick_dragons`' identical capture-before-remove
             // comment: `dragon` cannot survive `record_dragon_death`'s
             // `&mut self`, so the origin is read out first.
             let fight_origin = dragon.fight_origin;
@@ -579,7 +782,7 @@ impl<'w> MobSim<'w> {
     ///
     /// Carries a real [`crate::protocol::MetadataField::DragonPhase`] now —
     /// `d.phase.current().id()`, the same [`phase::PhaseManager`] this file's
-    /// own [`tick_one_dragon`] drives every tick. `EntityStreamer::sync`
+    /// own [`tick_dragons`](Self::tick_dragons) drives every tick. `EntityStreamer::sync`
     /// diffs it exactly like every other snapshot field, so a phase
     /// transition (holding pattern → strafing → sitting → …) reaches the
     /// wire on the very next streaming pass after it happens.
@@ -623,7 +826,7 @@ impl<'w> MobSim<'w> {
     ///   [`fight::FightState`] [`record_dragon_death`](Self::record_dragon_death)
     ///   maintains. A removed dragon's own uuid still stops appearing in
     ///   this method's output when it dies (see
-    ///   [`damage_dragon`](Self::damage_dragon)/[`tick_one_dragon`]'s own
+    ///   [`damage_dragon`](Self::damage_dragon)/[`tick_dragons`](Self::tick_dragons)'s own
     ///   docs), so `visible` reaches `false` on removal. The fight-state
     ///   branch also supplies a full, hidden bar to a player entering after
     ///   victory.
@@ -699,6 +902,63 @@ mod tests {
         );
     }
 
+    fn owner_batch_fixture() -> MobSim<'static> {
+        let mut sim = sim();
+        sim.spawn_dragon(Vec3::new(-0.5, 64.0, -0.5));
+        sim.spawn_dragon(Vec3::new(16.5, 64.0, 0.5));
+        sim
+    }
+
+    #[test]
+    fn dragon_owner_batches_restore_serial_state_after_reversed_completion() {
+        let mut serial = owner_batch_fixture();
+        serial.tick_dragons();
+        let expected: Vec<_> = serial
+            .dragons
+            .iter()
+            .map(|(&id, dragon)| (id, dragon.position, dragon.yaw))
+            .collect();
+
+        let mut completed = owner_batch_fixture();
+        let mut batches = completed.tick_dragon_owner_batches();
+        assert_eq!(
+            batches.iter().map(DragonTickOwnerBatch::owner).collect::<Vec<_>>(),
+            vec![
+                DragonTickOwner::Chunk { cx: -1, cz: -1 },
+                DragonTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "tick-start dragon positions must determine distinct negative and positive chunk owners"
+        );
+        batches.reverse();
+        completed.apply_dragon_tick_owner_batches(batches);
+        let actual: Vec<_> = expected
+            .iter()
+            .map(|(id, _, _)| {
+                let dragon = completed.dragons.get(id).expect("central owner merge retained dragon");
+                (*id, dragon.position, dragon.yaw)
+            })
+            .collect();
+        assert_eq!(actual, expected, "reversed owners must restore tick-start entity-id state order");
+    }
+
+    #[test]
+    #[should_panic(expected = "every tick-start owner batch exactly once")]
+    fn dragon_owner_batch_merge_rejects_a_missing_owner() {
+        let mut sim = owner_batch_fixture();
+        let mut batches = sim.tick_dragon_owner_batches();
+        batches.pop();
+        sim.apply_dragon_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "one owner twice")]
+    fn dragon_owner_batch_merge_rejects_a_duplicate_owner() {
+        let mut sim = owner_batch_fixture();
+        let mut batches = sim.tick_dragon_owner_batches();
+        batches.push(batches.first().expect("two owner batches").clone());
+        sim.apply_dragon_tick_owner_batches(batches);
+    }
+
     #[test]
     fn a_dragon_heals_from_a_nearby_crystal() {
         let mut sim = sim();
@@ -768,7 +1028,7 @@ mod tests {
     /// zero production callers — a killing blow redirected a flying dragon
     /// into `Dying` at `1.0` health and then nothing ever finished it off.
     /// This drives `tick_dragons` with no player nearby (`dying_flying_cleanly`
-    /// resolves `false` — see `tick_one_dragon`'s own `inputs.dying_flying_cleanly`
+    /// resolves `false` — see `ticked_dragon`'s own `inputs.dying_flying_cleanly`
     /// assignment, which needs a real nearby player to read `true`) so the
     /// health-drive clause takes its zero branch on the very next tick, and
     /// asserts the dragon actually leaves the sim — not just that its health
@@ -828,7 +1088,7 @@ mod tests {
             }),
             perception: crate::PlayerPerception {
                 // Within `NEARBY_PLAYER_RANGE_SQ` (`64.0` blocks) of the fight
-                // *origin* `(0, 64, 0)` — `tick_one_dragon` measures every
+                // *origin* `(0, 64, 0)` — `ticked_dragon` measures every
                 // targeting distance from `fight_origin`, not the dragon's own
                 // (much higher, orbiting) position.
                 position: Vec3::new(0.0, 64.0, 10.0),
@@ -844,7 +1104,7 @@ mod tests {
         // Five ticks: `fireball_charge` must reach `5` with the target in
         // range/cone (the real player above sits well inside both
         // `NEARBY_PLAYER_RANGE_SQ` and the `100.0`-block "in range" gate
-        // `tick_one_dragon` derives `strafe_in_range_and_los` from).
+        // `ticked_dragon` derives `strafe_in_range_and_los` from).
         for _ in 0..5 {
             sim.tick_dragons();
         }
@@ -990,7 +1250,7 @@ mod tests {
         assert!(sim.take_dragon_deaths().is_empty(), "drained, not merely read");
     }
 
-    /// The *other* death path — `tick_one_dragon`'s death-flight health-drive
+    /// The *other* death path — `ticked_dragon`'s death-flight health-drive
     /// clause, not a direct `attack_from_player` call — must reach the same
     /// controller. Reuses
     /// `a_killing_blow_while_flying_now_actually_finishes_the_dragon_off`'s

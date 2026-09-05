@@ -117,6 +117,15 @@ each tick-start wither under its source chunk owner, and
 before restoring entity-id slots. It is the only owner-batch writer to the
 live wither map and the skull RNG, so an owner completing early cannot change
 the order of an emergence blast or a spawned skull projectile.
+Dragon ticking uses the equivalent boundary inside `MobSim::tick_dragons`,
+which remains the live tick-loop consumer. `MobSim::tick_dragon_owner_batches`
+clones each tick-start dragon under its source chunk owner, while retaining the
+shared phase-RNG draws in serial entity-id order during planning. The central
+`MobSim::apply_dragon_tick_owner_batches` requires every unique owner and
+restores those slots before it writes a dragon, records a death, or allocates a
+dragon-fireball id. Thus completion order cannot change a visible transform,
+death outcome, or projectile identity even though the shared RNG prevents the
+planning phase from becoming a worker yet.
 Experience orbs have a separate motion ownership boundary inside
 `MobSim::tick_orbs`, reached from the live `MobSim::tick_with_terrain` pass.
 `MobSim::tick_orb_owner_batches` clones each tick-start orb under its source
@@ -244,6 +253,16 @@ update a live wither, trigger an emergence blast, or consume the skull RNG.
 The central writer must reject missing or duplicate owners and restore every
 slot before those actions become visible. Keep `MobSim::tick_withers` as the
 live consumer so the tick loop has one production path.
+
+Keep dragon simulation behind `MobSim::tick_dragon_owner_batches` and
+`MobSim::apply_dragon_tick_owner_batches`. A completion carries cloned
+tick-start state, its source owner, and an entity-id serial slot; it must not
+write a dragon, record a death, or allocate a fireball. Preserve the serial
+phase-RNG draws while planning: that stream is shared across dragons and is
+not independent owner work. The central writer must reject missing or duplicate
+owners and restore every slot before state or actions become visible. Keep
+`MobSim::tick_dragons` as the live consumer so the tick loop has one production
+path.
 
 Keep experience-orb motion behind `MobSim::tick_orb_owner_batches` and
 `MobSim::apply_orb_tick_owner_batches`. The batch plan must retain the
