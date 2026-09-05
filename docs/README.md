@@ -639,6 +639,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   rather than scanning an ever-growing registry unconditionally, and the
   instrumentation used to measure where the tick loop's and the world generator's own
   time actually goes.
+- [Type-safety census](./type-safety-census.md) — This is the checked disposition
+  ledger for public and crate-public primitive APIs whose names imply a narrower
+  semantic domain. It bounds future type-safety work without treating protocol,
+  storage, cache, or user-authored text as accidental debt.
 - [The menu UI framework](./ui-framework.md) — The shared substrate every
   out-of-world (and paused-in-world) menu screen is built from: a `Widget` type with a
   vanilla-faithful disabled state, layout containers that arrange those widgets, a
