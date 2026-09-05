@@ -117,7 +117,7 @@ pub struct GeneralRecord {
 }
 /// Nested message and enum types in `GeneralRecord`.
 pub mod general_record {
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Record {
         #[prost(message, tag = "1")]
         WorldProperties(super::WorldProperties),
@@ -163,20 +163,48 @@ pub struct PlayerRecord {
     #[prost(sint32, tag = "7")]
     pub pitch_millidegrees: i32,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EntityRecord {
+    /// Retained only to keep the original unconsumed vocabulary wire-compatible.
+    /// The native adapter never reads or writes these registry-local fields.
+    #[deprecated]
     #[prost(uint64, tag = "1")]
     pub entity_id: u64,
+    #[deprecated]
     #[prost(uint32, tag = "2")]
     pub entity_type_id: u32,
     #[prost(enumeration = "BuiltinDimension", tag = "3")]
     pub dimension: i32,
+    #[deprecated]
     #[prost(sint32, tag = "4")]
     pub x_fixed: i32,
+    #[deprecated]
     #[prost(sint32, tag = "5")]
     pub y_fixed: i32,
+    #[deprecated]
     #[prost(sint32, tag = "6")]
     pub z_fixed: i32,
+    /// A complete UUID is the durable identity. The native adapter uses these
+    /// fields instead of the legacy runtime ID and registry ordinal above.
+    #[prost(bytes = "vec", tag = "7")]
+    pub entity_uuid: ::prost::alloc::vec::Vec<u8>,
+    /// Canonical resource key, retained as text because entity-type numeric IDs
+    /// are registry-local rather than durable storage identities.
+    #[prost(string, tag = "8")]
+    pub entity_type: ::prost::alloc::string::String,
+    /// Feet position and look direction retain their live IEEE values exactly.
+    /// The native adapter rejects non-finite values and verifies the resident
+    /// column and vertical extent before saving or returning a record.
+    #[prost(double, tag = "9")]
+    pub x: f64,
+    #[prost(double, tag = "10")]
+    pub y: f64,
+    #[prost(double, tag = "11")]
+    pub z: f64,
+    #[prost(float, tag = "12")]
+    pub yaw: f32,
+    #[prost(float, tag = "13")]
+    pub pitch: f32,
 }
 /// Extension registrations are the one place the format carries names. Core
 /// records retain only local_id, so an extension payload never repeats its

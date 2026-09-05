@@ -1,8 +1,9 @@
 use lodestone_storage_schema::generated::{general_record, storage_record};
 use lodestone_storage_schema::{
     validate_extension_table, validate_record, validate_record_with_extensions, BiomeSection,
-    BuiltinBiome, BuiltinDimension, ExtensionTable, FORMAT_VERSION_V1, GameMode, GeneralRecord,
-    PlayerRecord, ScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord,
+    BuiltinBiome, BuiltinDimension, EntityRecord, ExtensionTable, FORMAT_VERSION_V1, GameMode,
+    GeneralRecord, PlayerRecord, ScheduledTick, ScheduledTickKind, ScheduledTickPriority,
+    StorageRecord,
     ValidationError,
 };
 use prost::Message;
@@ -128,6 +129,59 @@ fn player_locator_requires_a_complete_uuid_and_a_builtin_dimension() {
         validate_record(&record),
         Err(ValidationError::UnknownBuiltinDimension(77))
     );
+}
+
+#[test]
+fn resident_entity_requires_stable_identity_type_dimension_and_finite_pose() {
+    let mut record = StorageRecord {
+        format_version: FORMAT_VERSION_V1,
+        record: Some(storage_record::Record::General(GeneralRecord {
+            record: Some(general_record::Record::Entity(EntityRecord {
+                entity_uuid: vec![0x71; 16],
+                entity_type: "minecraft:cow".to_owned(),
+                dimension: BuiltinDimension::Overworld as i32,
+                x: -1.5,
+                y: 64.0,
+                z: 31.25,
+                yaw: 135.5,
+                pitch: -12.25,
+                ..EntityRecord::default()
+            })),
+            extensions: Vec::new(),
+        })),
+    };
+    validate_record(&record).unwrap();
+
+    entity_in(&mut record).entity_uuid.pop();
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::InvalidEntityUuidLength(15))
+    );
+    entity_in(&mut record).entity_uuid.push(0x71);
+    entity_in(&mut record).entity_type.clear();
+    assert_eq!(validate_record(&record), Err(ValidationError::MissingEntityType));
+    entity_in(&mut record).entity_type = "minecraft:cow".to_owned();
+    entity_in(&mut record).x = f64::NAN;
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::NonFiniteEntityPosition)
+    );
+    entity_in(&mut record).x = -1.5;
+    entity_in(&mut record).yaw = f32::INFINITY;
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::NonFiniteEntityRotation)
+    );
+}
+
+fn entity_in(record: &mut StorageRecord) -> &mut EntityRecord {
+    let Some(storage_record::Record::General(general)) = &mut record.record else {
+        unreachable!();
+    };
+    let Some(general_record::Record::Entity(entity)) = &mut general.record else {
+        unreachable!();
+    };
+    entity
 }
 
 fn set_player_uuid_and_dimension(record: &mut StorageRecord, uuid: Vec<u8>, dimension: i32) {

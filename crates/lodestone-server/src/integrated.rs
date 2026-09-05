@@ -2822,6 +2822,51 @@ impl IntegratedServer {
         storage.load_player(uuid)
     }
 
+    /// Saves explicitly dirty bounded resident-entity poses through the native
+    /// backend.
+    ///
+    /// The batch verifies duplicate UUIDs plus the supplied chunk and vertical
+    /// extent before it commits. It does not inspect the live mob simulation or
+    /// replace the established Anvil entity save, because this typed record has
+    /// no representation for motion, health, item, AI, or opaque entity state.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_dirty_native_entities(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        min_y: i32,
+        height: i32,
+        entities: impl IntoIterator<Item = crate::world_storage::NativeEntityRecord>,
+    ) -> Result<usize, crate::world_storage::Error> {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.write_dirty_entities(column_x, column_z, min_y, height, entities)
+    }
+
+    /// Loads one native resident-entity pose by UUID and checks it against the
+    /// caller's expected chunk and vertical extent.
+    ///
+    /// This is a direct native-record consumer, not a mob-simulation restore;
+    /// missing state returns `None` and unsupported opaque fields are refused.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_native_entity(
+        &self,
+        uuid: [u8; 16],
+        column_x: i32,
+        column_z: i32,
+        min_y: i32,
+        height: i32,
+    ) -> Result<
+        Option<crate::world_storage::NativeEntityRecord>,
+        crate::world_storage::Error,
+    > {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.load_entity(uuid, column_x, column_z, min_y, height)
+    }
+
     /// Saves one dirty terrain column through the selected native record backend.
     ///
     /// This is deliberately a narrow producer, not a switch of the live world
@@ -5680,6 +5725,95 @@ mod tests {
         );
         assert!(
             reopened.load_native_player([0xff; 16]).unwrap().is_none(),
+            "a different UUID must not be served from the first server's memory"
+        );
+        reopened.shutdown().await;
+        std::fs::remove_dir_all(&world_dir).expect("remove test world");
+    }
+
+    /// The server-level native resident-entity consumer: an explicit typed
+    /// pose crosses a selected backend, then a fresh server reads it after the
+    /// first one has stopped. This deliberately exercises no Anvil entity
+    /// writer because the typed record cannot preserve full entity state.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn persistent_server_reopens_native_resident_entity_pose() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "lodestone-native-entity-server-{}-{unique}",
+            std::process::id()
+        ));
+        let native_dir = world_dir.join("native");
+        let entity = crate::world_storage::NativeEntityRecord {
+            uuid: [
+                0x24, 0xc9, 0x61, 0x89, 0x18, 0x29, 0x49, 0x78, 0x9a, 0x53, 0xf7, 0x20, 0x77,
+                0xcf, 0x24, 0x11,
+            ],
+            entity_type: "minecraft:cow".parse().expect("valid entity type"),
+            dimension: lodestone_storage_schema::BuiltinDimension::Overworld,
+            position: lodestone_model::Vec3::new(-1.5, 6.25, 31.75),
+            rotation: lodestone_model::Rotation::new(136.5, -12.25),
+        };
+        let first_storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir.clone(),
+            },
+        )
+        .expect("open first native segment");
+        let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            Silent,
+            &world_dir,
+            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+            0,
+            16,
+            (0..=0, 0..=0),
+            (0, 0),
+            0,
+            0,
+            std::time::Duration::from_secs(3600),
+            first_storage,
+        )
+        .expect("open first persistent server");
+        assert_eq!(
+            server
+                .write_dirty_native_entities(-1, 1, 0, 16, [entity.clone()])
+                .expect("save native resident entity"),
+            1
+        );
+        server.shutdown().await;
+
+        let second_storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir,
+            },
+        )
+        .expect("reopen native segment");
+        let (reopened, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            Silent,
+            &world_dir,
+            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+            0,
+            16,
+            (0..=0, 0..=0),
+            (0, 0),
+            0,
+            0,
+            std::time::Duration::from_secs(3600),
+            second_storage,
+        )
+        .expect("open second persistent server");
+        assert_eq!(
+            reopened
+                .load_native_entity(entity.uuid, -1, 1, 0, 16)
+                .expect("read reopened resident entity"),
+            Some(entity),
+            "a fresh server must read the durable typed pose rather than the first handle's memory"
+        );
+        assert!(
+            reopened.load_native_entity([0xff; 16], -1, 1, 0, 16).unwrap().is_none(),
             "a different UUID must not be served from the first server's memory"
         );
         reopened.shutdown().await;
