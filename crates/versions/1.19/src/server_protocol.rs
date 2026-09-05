@@ -17,7 +17,7 @@ use crate::canonical::wire_state_for_762;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::game::{
     BlockDig, BlockPlace, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
-    ServerboundPosition, ServerboundPositionLook,
+    ServerboundArmAnimation, ServerboundPosition, ServerboundPositionLook,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -322,6 +322,15 @@ impl ServerProtocol for V762ServerProtocol {
                     hand,
                 }
             }
+            State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
+                let Some(hand) = decode_full::<ServerboundArmAnimation>(payload)
+                    .and_then(|packet| u8::try_from(packet.hand).ok())
+                    .filter(|&hand| hand <= 1)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::Swing { hand }
+            }
             State::Play if packet_id == play::serverbound::POSITION => {
                 let Some(ServerboundPosition {
                     x,
@@ -477,6 +486,16 @@ impl ServerProtocol for V762ServerProtocol {
 
     fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
         ServerDirective::None
+    }
+
+    fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(entity_id);
+        payload.u8(action);
+        ServerDirective::Send {
+            packet_id: play::clientbound::ANIMATION,
+            payload: payload.into_vec(),
+        }
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {

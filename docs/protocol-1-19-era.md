@@ -155,7 +155,13 @@ the 762 `block_place` body reaches `ServerBound::UseItemOn`, including its
 hand, cursor, and prediction sequence, which is consumed by the integrated
 server's placement and interaction path. The literal-byte decoder test keeps
 that conversion independent of the adapter encoder and rejects an out-of-range
-face before it can enter the consumer.
+face before it can enter the consumer. Arm swings take the same complete route:
+the hosted decoder accepts only hand ordinals zero and one, appends the shared
+broadcast event, and emits the clientbound entity id plus animation byte for
+other connected players. `tests/server_protocol.rs` fixes both request bodies
+and the resulting clientbound bodies as literals. `tests/server_integration.rs`
+then joins a sender and observer through the registry-selected host and proves
+the observer receives the sender's off-hand animation event.
 `tests/server_protocol.rs` checks the packet ids present in the real 1.19.4
 capture and decodes literal movement bodies with the production codecs,
 including trailing-byte and unknown-id negative controls. This is not

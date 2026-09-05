@@ -1,13 +1,17 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
 use lodestone_data::block_states;
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
+use lodestone_model::{
+    AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
+    ConnectionState, Directive, Hand, Rotation, Vec3f, VersionAdapter,
+};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
-use lodestone_v1_19::V762ServerProtocol;
+use lodestone_v1_19::{V762Adapter, V762ServerProtocol};
 use lodestone_v1_19::packet_ids::{handshaking, play};
 use lodestone_v1_19::packets::chunk::{ChunkShape, MapChunk};
 use lodestone_v1_19::packets::game::{BlockDig, JoinGame};
 use lodestone_v1_19::packets::handshake::SetProtocol;
 use lodestone_v1_19::packets::position::Position;
+use lodestone_world::World;
 
 const CTX: Ctx = Ctx { version: 762 };
 
@@ -264,5 +268,78 @@ fn protocol_762_lifts_literal_block_use_with_its_prediction_sequence() {
         ),
         ServerBound::Ignored,
         "a malformed face must not reach placement through a plausible packet body"
+    );
+}
+
+#[test]
+fn registry_selected_protocol_762_carries_arm_swings_to_the_client_event_stream() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(762)
+        .expect("protocol 762 must resolve to its hosted server protocol");
+    let adapter = V762Adapter::new();
+
+    for (hand, body, expected_action) in [
+        (Hand::Main, &[0][..], AnimationAction::SwingMainHand),
+        (Hand::Off, &[1][..], AnimationAction::SwingOffHand),
+    ] {
+        // The hand VarInt is a literal capture-shaped request body. It keeps
+        // the hosted decoder independent of the adapter encoder below.
+        assert_eq!(
+            protocol.decode(State::Play, play::serverbound::ARM_ANIMATION, body),
+            ServerBound::Swing {
+                hand: if hand == Hand::Main { 0 } else { 1 },
+            },
+            "the literal {hand:?} request must reach the shared swing consumer"
+        );
+
+        let action = ClientAction::SwingArm { hand };
+        let Some((packet_id, payload)) = adapter
+            .encode_action(ConnectionState::Play, &action)
+            .expect("the protocol-762 adapter encodes arm swings")
+        else {
+            panic!("{action:?} must produce a protocol-762 packet");
+        };
+        assert_eq!(packet_id, play::serverbound::ARM_ANIMATION);
+        assert_eq!(payload, body);
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &payload),
+            ServerBound::Swing {
+                hand: if hand == Hand::Main { 0 } else { 1 },
+            },
+            "the adapter request must reach the registry-selected host consumer"
+        );
+
+        let animation = if hand == Hand::Main { 0 } else { 3 };
+        let ServerDirective::Send { packet_id, payload } = protocol.encode_animate(321, animation)
+        else {
+            panic!("the protocol-762 host must encode an animation broadcast");
+        };
+        assert_eq!(packet_id, play::clientbound::ANIMATION);
+        assert_eq!(payload, vec![0xc1, 0x02, animation]);
+        let mut world = World::new();
+        assert_eq!(
+            adapter
+                .handle_packet(&mut world, ConnectionState::Play, packet_id, &payload)
+                .expect("the protocol-762 client decodes the hosted animation"),
+            vec![Directive::Emit(ClientEvent::EntityAnimation {
+                entity_id: 321,
+                action: expected_action,
+            })]
+        );
+    }
+
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::ARM_ANIMATION, &[2]),
+        ServerBound::Ignored,
+        "a third hand ordinal must not become an arbitrary animation"
+    );
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::ARM_ANIMATION, &[0, 0]),
+        ServerBound::Ignored,
+        "a valid hand prefix with a trailing byte must be rejected"
+    );
+    assert_eq!(
+        protocol.decode(State::Login, play::serverbound::ARM_ANIMATION, &[0]),
+        ServerBound::Ignored,
+        "the Play request must not be accepted before Play"
     );
 }
