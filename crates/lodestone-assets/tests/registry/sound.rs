@@ -83,6 +83,34 @@ fn event_count_and_names_are_exposed() {
 }
 
 #[test]
+fn event_keys_validate_and_keep_custom_namespaces_distinct() {
+    let reg = parse(
+        r#"{
+            "minecraft:base": {"sounds":["base"]},
+            "mod:base": {"sounds":["mod-base"]}
+        }"#,
+    )
+    .unwrap();
+
+    // The default namespace is implicit in the built-in JSON shape, while the
+    // custom key remains qualified rather than colliding with it.
+    assert!(reg.event("base").is_some());
+    assert!(reg.event("minecraft:base").is_some());
+    assert!(reg.event("mod:base").is_some());
+    let mut names = reg.event_names().collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, vec!["base", "mod:base"]);
+    assert_eq!(reg.event("base").unwrap().sounds[0].name.to_string(), "minecraft:base");
+    assert_eq!(reg.event("mod:base").unwrap().sounds[0].name.to_string(), "minecraft:mod-base");
+
+    // A malformed raw key is rejected before it can become a map entry.
+    assert!(matches!(
+        parse(r#"{"bad key":{"sounds":["x"]}}"#),
+        Err(SoundError::Location(_))
+    ));
+}
+
+#[test]
 fn weighted_selection_picks_by_cumulative_weight() {
     // weights 1 (a) then 3 (b): rolls 0 -> a, rolls 1..=3 -> b.
     let reg =

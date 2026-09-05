@@ -28,6 +28,7 @@
 //! [`SoundError::ReferenceCycle`] rather than panicking. In vanilla 26.2 all 61
 //! event references are depth-1 and acyclic, but custom packs are not trusted.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
 
 use serde_json::Value;
@@ -105,10 +106,42 @@ impl ResolvedSound {
     }
 }
 
-/// A parsed `sounds.json` registry, keyed by event name (the JSON key).
+/// A validated sound-event key as it appears in the registry map.
+///
+/// `sounds.json` event keys are resource locations, but the built-in file uses
+/// the default namespace implicitly. Keeping that distinction in one private
+/// key type means parsing validates the raw JSON key once, while the map still
+/// exposes the same bare names callers use for the built-in registry. Custom
+/// namespaces remain qualified and are not narrowed to a fixed enum.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SoundEventKey(String);
+
+impl SoundEventKey {
+    fn parse(raw: &str) -> Result<Self, SoundError> {
+        let location = ResourceLocation::parse(raw)?;
+        let key = if location.namespace() == crate::location::DEFAULT_NAMESPACE {
+            location.path().to_owned()
+        } else {
+            location.to_string()
+        };
+        Ok(Self(key))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<str> for SoundEventKey {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// A parsed `sounds.json` registry, keyed by validated event names (the JSON keys).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SoundRegistry {
-    events: HashMap<String, SoundEvent>,
+    events: HashMap<SoundEventKey, SoundEvent>,
 }
 
 const MAX_CHAIN_DEPTH: usize = 64;
@@ -123,7 +156,7 @@ impl SoundRegistry {
             .ok_or_else(|| SoundError::Json("root must be an object".into()))?;
         let mut events = HashMap::with_capacity(obj.len());
         for (name, body) in obj {
-            events.insert(name.clone(), parse_event(body)?);
+            events.insert(SoundEventKey::parse(name)?, parse_event(body)?);
         }
         Ok(Self { events })
     }
@@ -145,7 +178,7 @@ impl SoundRegistry {
 
     /// Iterates the registered event names.
     pub fn event_names(&self) -> impl Iterator<Item = &str> {
-        self.events.keys().map(String::as_str)
+        self.events.keys().map(SoundEventKey::as_str)
     }
 
     /// Merges another registry into this one, honoring per-event `replace`:

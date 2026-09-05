@@ -92,6 +92,14 @@ own `"stream": true` flag — that flag selects only 98 samples but silently
 includes the nether/underwater ambience loops, which the event-based
 exclusion correctly keeps in the default fetch.
 
+The sound registry validates each raw event key at `sounds.json` parse time
+through the shared resource-location rules, then stores it behind a typed map
+key. The default `minecraft:` namespace is canonicalized to the bare event
+path used by the built-in file, while a custom namespace stays qualified. This
+keeps resource-pack event names extensible without treating the dynamic pack
+domain as a closed enum; malformed keys fail the load before resolution can
+silently miss them.
+
 ### Sound subtitle captions
 
 Vanilla's accessibility overlay — a stack of right-aligned plates fading
