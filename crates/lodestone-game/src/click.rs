@@ -75,6 +75,49 @@ pub mod drag_type {
     pub const CLONE: i32 = 2;
 }
 
+/// The closed set of drag-distribution semantics carried by a quick-craft
+/// button. Raw button values are accepted only at the click boundary; the
+/// menu state and all split arithmetic use this type so a header bit cannot
+/// accidentally be treated as a distribution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QuickCraftType {
+    /// Divide the carried stack evenly across the painted slots.
+    Even,
+    /// Place one item into each painted slot.
+    One,
+    /// Place a full stack into each painted slot (creative only).
+    Clone,
+}
+
+impl QuickCraftType {
+    /// Validates the two-bit wire value from a quick-craft button.
+    #[must_use]
+    pub const fn from_raw(raw: i32) -> Option<Self> {
+        match raw {
+            drag_type::EVEN => Some(Self::Even),
+            drag_type::ONE => Some(Self::One),
+            drag_type::CLONE => Some(Self::Clone),
+            _ => None,
+        }
+    }
+
+    /// Returns the two-bit value used in a container-click button.
+    #[must_use]
+    pub const fn raw(self) -> i32 {
+        match self {
+            Self::Even => drag_type::EVEN,
+            Self::One => drag_type::ONE,
+            Self::Clone => drag_type::CLONE,
+        }
+    }
+
+    /// Whether this distribution mode is available to the player.
+    #[must_use]
+    pub const fn allowed_for(self, infinite_materials: bool) -> bool {
+        !matches!(self, Self::Clone) || infinite_materials
+    }
+}
+
 /// Packs a drag header and type into a click button number.
 #[must_use]
 pub fn quick_craft_mask(header: i32, kind: i32) -> i32 {
@@ -569,8 +612,11 @@ impl Menu {
 
         match header {
             drag_header::START => {
-                let kind = quick_craft_type(button);
-                if is_valid_quick_craft_type(kind, ctx.infinite_materials) {
+                let Some(kind) = QuickCraftType::from_raw(quick_craft_type(button)) else {
+                    self.reset_quick_craft();
+                    return;
+                };
+                if kind.allowed_for(ctx.infinite_materials) {
                     self.set_quick_craft_status(drag_header::ADD);
                     self.set_quick_craft_type(kind);
                     // slots already cleared by a prior reset/new drag.
@@ -602,7 +648,7 @@ impl Menu {
     /// menu's own live drag state. Thin wrapper over
     /// [`can_drag_place_at`](Self::can_drag_place_at) — the `ADD` arm's view of it.
     fn can_drag_place(&self, index: usize, carried: &ItemStack) -> bool {
-        self.can_drag_place_at(
+        self.can_drag_place_at_typed(
             index,
             carried,
             self.quick_craft_type(),
@@ -629,6 +675,9 @@ impl Menu {
     /// So there is one copy, here, and `MenuInput::dragged` in the shell calls it
     /// rather than restating it. That makes the two sets equal by construction
     /// instead of by argument.
+    ///
+    /// The raw `kind` is retained for the shell boundary; an unknown value is
+    /// rejected before the predicate is evaluated.
     #[must_use]
     pub fn can_drag_place_at(
         &self,
@@ -637,7 +686,21 @@ impl Menu {
         kind: i32,
         painted_count: i32,
     ) -> bool {
-        let enough = kind == drag_type::CLONE || carried.count() > painted_count;
+        let Some(kind) = QuickCraftType::from_raw(kind) else {
+            return false;
+        };
+        self.can_drag_place_at_typed(index, carried, kind, painted_count)
+    }
+
+    /// Typed implementation of [`Self::can_drag_place_at`].
+    fn can_drag_place_at_typed(
+        &self,
+        index: usize,
+        carried: &ItemStack,
+        kind: QuickCraftType,
+        painted_count: i32,
+    ) -> bool {
+        let enough = matches!(kind, QuickCraftType::Clone) || carried.count() > painted_count;
         can_item_quick_replace(self.slot_item(index), carried, true)
             && self.may_place(index, carried)
             && enough
@@ -654,7 +717,7 @@ impl Menu {
             let only = painted[0];
             let kind = self.quick_craft_type();
             self.reset_quick_craft();
-            self.do_click(only as i32, kind, ContainerInput::Pickup, ctx);
+            self.do_click(only as i32, kind.raw(), ContainerInput::Pickup, ctx);
             let _ = outcome; // pickup produces no drops here
             return;
         }
@@ -667,7 +730,7 @@ impl Menu {
         // preview calls the same function against the same painted set, so a
         // preview that disagreed with the outcome would have to be a different
         // *input*, never a different formula. See its doc comment.
-        let plan = self.quick_craft_plan(&painted, kind, &source);
+        let plan = self.quick_craft_plan_typed(&painted, kind, &source);
         let mut remaining = source.count();
         for cell in plan {
             remaining -= cell.count - cell.existing;
@@ -697,6 +760,7 @@ impl Menu {
     /// [`drag_type`], `source` the carried stack. Cells the release would refuse
     /// ([`can_drag_place_end`](Self::can_drag_place_end)) are **absent** from the
     /// result rather than present with a zero count, mirroring vanilla's `continue`.
+    /// An unknown raw `kind` returns an empty plan.
     ///
     /// # `painted` must be the *filtered* paint set
     ///
@@ -734,6 +798,19 @@ impl Menu {
         kind: i32,
         source: &ItemStack,
     ) -> Vec<QuickCraftCell> {
+        let Some(kind) = QuickCraftType::from_raw(kind) else {
+            return Vec::new();
+        };
+        self.quick_craft_plan_typed(painted, kind, source)
+    }
+
+    /// Typed implementation of [`Self::quick_craft_plan`].
+    fn quick_craft_plan_typed(
+        &self,
+        painted: &[usize],
+        kind: QuickCraftType,
+        source: &ItemStack,
+    ) -> Vec<QuickCraftCell> {
         let painted_count = painted.len() as i32;
         painted
             .iter()
@@ -743,7 +820,7 @@ impl Menu {
                 let existing = self.slot_item(index).map_or(0, ItemStack::count);
                 let slot_cap = self.effective_max(index, source);
                 let max_size = source.max_stack_size().min(slot_cap);
-                let want = quick_craft_place_count(painted_count, kind, source) + existing;
+                let want = quick_craft_place_count_typed(painted_count, kind, source) + existing;
                 QuickCraftCell {
                     menu_index: index,
                     count: want.min(max_size),
@@ -766,12 +843,26 @@ impl Menu {
     /// Note the `CLONE` short-circuit: a creative stack-per-slot drag leaves the
     /// cursor at a full stack regardless of what it distributes (`:251-252`), so
     /// it is not the sum of anything.
+    /// An unknown raw `kind` returns zero rather than entering a distribution arm.
     #[must_use]
     pub fn quick_craft_remainder(&self, painted: &[usize], kind: i32, source: &ItemStack) -> i32 {
-        if kind == drag_type::CLONE {
+        let Some(kind) = QuickCraftType::from_raw(kind) else {
+            return 0;
+        };
+        self.quick_craft_remainder_typed(painted, kind, source)
+    }
+
+    /// Typed implementation of [`Self::quick_craft_remainder`].
+    fn quick_craft_remainder_typed(
+        &self,
+        painted: &[usize],
+        kind: QuickCraftType,
+        source: &ItemStack,
+    ) -> i32 {
+        if matches!(kind, QuickCraftType::Clone) {
             return source.max_stack_size();
         }
-        self.quick_craft_plan(painted, kind, source)
+        self.quick_craft_plan_typed(painted, kind, source)
             .iter()
             .fold(source.count(), |acc, cell| acc - (cell.count - cell.existing))
     }
@@ -797,9 +888,9 @@ impl Menu {
         index: usize,
         carried: &ItemStack,
         painted_count: i32,
-        kind: i32,
+        kind: QuickCraftType,
     ) -> bool {
-        let enough = kind == drag_type::CLONE || carried.count() >= painted_count;
+        let enough = matches!(kind, QuickCraftType::Clone) || carried.count() >= painted_count;
         can_item_quick_replace(self.slot_item(index), carried, true)
             && self.may_place(index, carried)
             && enough
@@ -941,17 +1032,31 @@ impl Menu {
     /// Runs a full drag as a start/add.../end packet sequence and applies it.
     ///
     /// `kind` is one of [`drag_type`]; `slots` are the painted menu indices.
+    /// Unknown raw kinds are rejected without starting a packet sequence.
     pub fn perform_drag(&mut self, kind: i32, slots: &[usize], ctx: PlayerCtx) -> ClickOutcome {
+        let Some(kind) = QuickCraftType::from_raw(kind) else {
+            return ClickOutcome::default();
+        };
+        self.perform_drag_typed(kind, slots, ctx)
+    }
+
+    /// Runs a validated drag as a start/add…/end packet sequence.
+    fn perform_drag_typed(
+        &mut self,
+        kind: QuickCraftType,
+        slots: &[usize],
+        ctx: PlayerCtx,
+    ) -> ClickOutcome {
         let mut outcome = self.do_click(
             OUTSIDE_SLOT,
-            quick_craft_mask(drag_header::START, kind),
+            quick_craft_mask_typed(drag_header::START, kind),
             ContainerInput::QuickCraft,
             ctx.clone(),
         );
         for &slot in slots {
             let add = self.do_click(
                 slot as i32,
-                quick_craft_mask(drag_header::ADD, kind),
+                quick_craft_mask_typed(drag_header::ADD, kind),
                 ContainerInput::QuickCraft,
                 ctx.clone(),
             );
@@ -959,7 +1064,7 @@ impl Menu {
         }
         let end = self.do_click(
             OUTSIDE_SLOT,
-            quick_craft_mask(drag_header::END, kind),
+            quick_craft_mask_typed(drag_header::END, kind),
             ContainerInput::QuickCraft,
             ctx,
         );
@@ -972,29 +1077,37 @@ impl Menu {
 /// requires infinite materials.
 #[must_use]
 pub fn is_valid_quick_craft_type(kind: i32, infinite_materials: bool) -> bool {
-    match kind {
-        t if t == drag_type::EVEN || t == drag_type::ONE => true,
-        t if t == drag_type::CLONE => infinite_materials,
-        _ => false,
-    }
+    QuickCraftType::from_raw(kind).is_some_and(|kind| kind.allowed_for(infinite_materials))
 }
 
 /// Per-slot amount a drag places, before adding what is already there. Mirrors
 /// vanilla `getQuickCraftPlaceCount`.
 #[must_use]
 pub fn quick_craft_place_count(slots: i32, kind: i32, stack: &ItemStack) -> i32 {
+    let Some(kind) = QuickCraftType::from_raw(kind) else {
+        return 0;
+    };
+    quick_craft_place_count_typed(slots, kind, stack)
+}
+
+/// Typed implementation of [`quick_craft_place_count`].
+fn quick_craft_place_count_typed(slots: i32, kind: QuickCraftType, stack: &ItemStack) -> i32 {
     match kind {
-        t if t == drag_type::EVEN => {
+        QuickCraftType::Even => {
             if slots <= 0 {
                 0
             } else {
                 stack.count() / slots
             }
         }
-        t if t == drag_type::ONE => 1,
-        t if t == drag_type::CLONE => stack.max_stack_size(),
-        _ => stack.count(),
+        QuickCraftType::One => 1,
+        QuickCraftType::Clone => stack.max_stack_size(),
     }
+}
+
+/// Packs a validated distribution mode and header into a click button.
+fn quick_craft_mask_typed(header: i32, kind: QuickCraftType) -> i32 {
+    (header & 3) | ((kind.raw() & 3) << 2)
 }
 
 /// Whether `stack` may be quick-replaced into `slot` — empty, or the same item

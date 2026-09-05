@@ -27,6 +27,7 @@
 //! swap-addressable through their native indices.
 
 use crate::{
+    click::QuickCraftType,
     container::{Container, EquipmentSlot, Slot, SlotKind},
     item::ItemStack,
     recipe::CraftingGrid,
@@ -238,7 +239,7 @@ pub struct Menu {
     state_id: u32,
     /// Drag (quick-craft) accumulator state; see [`crate::click`].
     quick_craft_status: i32,
-    quick_craft_type: i32,
+    quick_craft_type: QuickCraftType,
     quick_craft_slots: Vec<usize>,
 }
 
@@ -297,7 +298,7 @@ impl Menu {
             special_layout: None,
             state_id: 0,
             quick_craft_status: 0,
-            quick_craft_type: 0,
+            quick_craft_type: QuickCraftType::Even,
             quick_craft_slots: Vec::new(),
         }
     }
@@ -350,7 +351,7 @@ impl Menu {
             special_layout: None,
             state_id: 0,
             quick_craft_status: 0,
-            quick_craft_type: 0,
+            quick_craft_type: QuickCraftType::Even,
             quick_craft_slots: Vec::new(),
         }
     }
@@ -383,7 +384,7 @@ impl Menu {
             special_layout: None,
             state_id: 0,
             quick_craft_status: 0,
-            quick_craft_type: 0,
+            quick_craft_type: QuickCraftType::Even,
             quick_craft_slots: Vec::new(),
         }
     }
@@ -1366,11 +1367,11 @@ impl Menu {
         self.quick_craft_status = status;
     }
 
-    pub(crate) fn quick_craft_type(&self) -> i32 {
+    pub(crate) fn quick_craft_type(&self) -> QuickCraftType {
         self.quick_craft_type
     }
 
-    pub(crate) fn set_quick_craft_type(&mut self, kind: i32) {
+    pub(crate) fn set_quick_craft_type(&mut self, kind: QuickCraftType) {
         self.quick_craft_type = kind;
     }
 

@@ -98,6 +98,13 @@ each cell would receive), computed from the exact same split arithmetic used to 
 than a second copy — a preview that could disagree with the real outcome would be worse than no
 preview.
 
+The drag distribution field has one closed internal domain: `QuickCraftType::{Even, One, Clone}`.
+`Menu::do_click` validates the raw two-bit button value before arming a drag, and `Menu` stores the
+validated type through the ADD/END state machine and preview arithmetic. The public preview and
+stateful drag entry points retain raw integers for the shell's input layer, but reject an unknown
+value instead of falling through to a distribution formula. `Clone` is additionally gated on infinite
+materials; `3` remains unused and cannot arm or paint a drag.
+
 Quick-move (shift-click) destination order is per-menu-kind and transcribed exactly: a generic
 container moves backwards into the player inventory (hotbar first) and forwards out of it; a crafting
 table tries to load its grid before falling back to the main/hotbar hop; the player's own inventory
