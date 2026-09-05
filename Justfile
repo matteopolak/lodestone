@@ -457,6 +457,11 @@ bench-client-heavy:
 profile-client-heavy:
     python3 scripts/client-frame-benchmark.py --workload heavyweight --heavy-scenario mixed --samply
 
+# Validate a saved heavyweight capture, Samply sidecar, and emitted scene record
+# without launching the client, server, GPU, or Samply.
+validate-client-heavy-profile capture:
+    python3 scripts/client-frame-benchmark.py --validate-heavy-profile {{capture}}
+
 # Turn a saved capture into CPU-delta-weighted inclusive and self-time tables.
 profile-cost-table capture:
     python3 scripts/profile-cost-table.py {{capture}}

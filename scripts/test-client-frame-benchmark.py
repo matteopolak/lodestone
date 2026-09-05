@@ -2,8 +2,11 @@
 """Unit tests for the live client benchmark runner and summarizer."""
 
 import importlib.util
+import json
+import os
 import pathlib
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -83,6 +86,62 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(record["scene_hash"], "0" * 64)
         self.assertEqual(record["requested_scale"], 3)
         self.assertNotIn("p50_ms", record)
+
+    def test_heavy_profile_artifact_requires_matching_complete_sidecars(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = pathlib.Path(directory) / "heavyweight-closed-fixed.json.gz"
+            artifact.write_bytes(b"capture")
+            MODULE._samply_sidecar_path(artifact).write_text("symbols", encoding="utf-8")
+            scene = self.emitted_scene()
+            with mock.patch.object(MODULE, "_git_sha", return_value="abc"):
+                record = MODULE._heavy_record(
+                    "heavyweight", 1, pathlib.Path("/tmp/lodestone"), (2, 7, 2, 3), "closed",
+                    2, scene, {"stationary": {}, "moving": {}},
+                )
+            MODULE._heavy_profile_record_path(artifact).write_text(
+                json.dumps({**record, "capture": str(artifact)}), encoding="utf-8"
+            )
+            self.assertEqual(
+                MODULE.validate_heavy_profile_artifact(artifact)["scene_hash"], scene["scene_hash"]
+            )
+            self.assertEqual(
+                MODULE.validate_heavy_profile_artifact(pathlib.Path(os.path.relpath(artifact)))["scene_hash"],
+                scene["scene_hash"],
+            )
+
+            MODULE._heavy_profile_record_path(artifact).write_text(
+                json.dumps({**record, "capture": "/wrong/profile.json.gz"}), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(RuntimeError, "does not describe this capture"):
+                MODULE.validate_heavy_profile_artifact(artifact)
+
+            MODULE._heavy_profile_record_path(artifact).write_text(
+                json.dumps({**record, "capture": str(artifact)}), encoding="utf-8"
+            )
+            MODULE._samply_sidecar_path(artifact).unlink()
+            with self.assertRaisesRegex(RuntimeError, "symbol sidecar"):
+                MODULE.validate_heavy_profile_artifact(artifact)
+
+    def test_heavy_profile_validator_is_a_no_workload_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = pathlib.Path(directory) / "profile.json.gz"
+            artifact.write_bytes(b"capture")
+            MODULE._samply_sidecar_path(artifact).write_text("symbols", encoding="utf-8")
+            record = {
+                "schema": 1,
+                "workload": "heavyweight",
+                "profile": "release",
+                "capture": str(artifact),
+                "scene_hash": "a" * 64,
+                "scenario": "mixed",
+                "seed": 17,
+                "scale": 1,
+                "requested_scale": 1,
+                "durations_seconds": {"warmup": 2, "mutation": 1, "stationary": 2, "moving": 3},
+                "segments": {"stationary": {}, "moving": {}},
+            }
+            MODULE._heavy_profile_record_path(artifact).write_text(json.dumps(record), encoding="utf-8")
+            self.assertEqual(MODULE.main(["--validate-heavy-profile", str(artifact)]), 0)
     @staticmethod
     def fullscreen_log(width=3024, height=1898):
         return (
