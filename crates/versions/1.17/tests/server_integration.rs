@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent, ConnectionState,
-    Rotation, Vec3, Vec3f, VersionAdapter,
+    AnimationAction, BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent,
+    ConnectionState, Hand, Rotation, Vec3, Vec3f, VersionAdapter,
 };
-use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
+use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, PLAYER_ENTITY_ID_BASE};
 use lodestone_v1_17::adapter_for;
 
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
@@ -175,6 +175,97 @@ async fn registry_selected_protocol_756_echoes_legacy_chat_to_the_client_event_s
 #[tokio::test]
 async fn registry_selected_protocol_758_echoes_legacy_chat_to_the_client_event_stream() {
     assert_registry_selected_host_echoes_legacy_chat(758).await;
+}
+
+async fn assert_registry_selected_host_broadcasts_arm_swing(protocol_version: i32) {
+    let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .expect("the hosted protocol must resolve from the registry");
+    let source = Arc::new(FixtureSource::new());
+    let (mut server, sender_io) = IntegratedServer::open_in_memory_with_mobs(
+        protocol,
+        source,
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+    );
+    let address = server
+        .publish(("127.0.0.1", 0), None)
+        .await
+        .expect("the shared in-memory world must accept a second client");
+    let sender_profile = LoginProfile {
+        username: format!("SwingSender{protocol_version}"),
+        uuid: uuid::Uuid::new_v4(),
+    };
+    let observer_profile = LoginProfile {
+        username: format!("SwingObserver{protocol_version}"),
+        uuid: uuid::Uuid::new_v4(),
+    };
+    let (mut sender, _sender_events) = ClientBuilder::new(
+        ServerAddress {
+            host: "memory".to_owned(),
+            port: 0,
+        },
+        sender_profile,
+        Box::new(adapter_for(protocol_version)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(sender_io);
+    let (mut observer, mut observer_events) = ClientBuilder::new(
+        ServerAddress {
+            host: "127.0.0.1".to_owned(),
+            port: address.port(),
+        },
+        observer_profile,
+        Box::new(adapter_for(protocol_version)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect()
+    .await
+    .expect("the observer must connect through the published shared host");
+
+    sender
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("the swing sender must reach Play");
+    observer
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("the swing observer must reach Play");
+    sender
+        .send_action(ClientAction::SwingArm { hand: Hand::Off })
+        .expect("the joined sender accepts an off-hand swing");
+
+    let (entity_id, action) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::EntityAnimation { entity_id, action }) =
+                observer_events.recv().await
+            {
+                return (entity_id, action);
+            }
+        }
+    })
+    .await
+    .expect("the observer must receive the hosted swing broadcast");
+    assert_eq!(
+        entity_id, PLAYER_ENTITY_ID_BASE,
+        "the first shared-world player must retain the registry's first entity id"
+    );
+    assert_eq!(action, AnimationAction::SwingOffHand);
+
+    sender.shutdown();
+    observer.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_756_broadcasts_an_arm_swing_to_another_client() {
+    assert_registry_selected_host_broadcasts_arm_swing(756).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_758_broadcasts_an_arm_swing_to_another_client() {
+    assert_registry_selected_host_broadcasts_arm_swing(758).await;
 }
 
 impl ChunkSource for FixtureSource {

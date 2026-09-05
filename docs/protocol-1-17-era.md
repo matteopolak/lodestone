@@ -117,6 +117,15 @@ stream for both 756 and 758. The wire tests use literal bodies and reject a
 truncated body, trailing bytes, and the wrong connection state; the manual
 external-client gate above is still the only real-client acceptance evidence.
 
+Arm animation uses the era's one-VarInt `arm_animation` body: `0` becomes the
+main-hand and `1` the off-hand `ServerBound::Swing`; every other ordinal,
+trailing input, and non-Play input is ignored. The shared player registry
+broadcasts the resulting action to other connections, and each hosted protocol
+encodes it as the clientbound animation id with a VarInt entity id followed by
+the action byte (`0` for main, `3` for off hand). The protocol tests pin the
+literal request and reply bytes through the registry-selected host and client
+adapter; the in-memory integration has a second client observe the broadcast.
+
 ### One block-state table and one entity table, which is not what the era below needs
 
 The 1.14 era needs three of each, because every release inserts blocks and
