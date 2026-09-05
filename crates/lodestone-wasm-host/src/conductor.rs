@@ -98,6 +98,32 @@ pub struct WasmPlugins {
 #[derive(Resource, Default, Debug)]
 pub struct PendingWasmIntents(Vec<IntentAction>);
 
+/// Bounded inventory-click requests awaiting the shell's live menu predictor.
+///
+/// This contains only copied, fixed-size values. It never contains a menu,
+/// cursor stack, world handle, or prebuilt container packet: the shell owns all
+/// of those and drains this after the game-tick world guard is gone.
+#[derive(Resource, Default, Debug)]
+pub struct PendingWasmMenuClicks(Vec<crate::abi::InventoryClickIntent>);
+
+impl PendingWasmMenuClicks {
+    const MAX_PENDING: usize = 64;
+
+    /// Remove every request accumulated during this tick.
+    #[must_use]
+    pub fn take(&mut self) -> Vec<crate::abi::InventoryClickIntent> {
+        std::mem::take(&mut self.0)
+    }
+
+    fn push(&mut self, click: crate::abi::InventoryClickIntent) -> bool {
+        if self.0.len() == Self::MAX_PENDING {
+            return false;
+        }
+        self.0.push(click);
+        true
+    }
+}
+
 /// The command roots currently owned by the WASM conductor.
 ///
 /// The native registry intentionally knows nothing about guest stores. Keeping
@@ -382,6 +408,7 @@ pub fn reload_wasm_plugins(
     };
     app.world_mut().insert_resource(WasmCommandRoots(roots));
     app.world_mut().resource_mut::<PendingWasmIntents>().0.clear();
+    app.world_mut().resource_mut::<PendingWasmMenuClicks>().0.clear();
     Ok(())
 }
 
@@ -431,6 +458,7 @@ impl Plugin for WasmHostPlugin {
         };
         app.insert_resource(WasmCommandRoots(roots));
         app.init_resource::<PendingWasmIntents>();
+        app.init_resource::<PendingWasmMenuClicks>();
         app.add_systems(
             GameTick,
             drive_wasm_plugins
@@ -473,6 +501,7 @@ pub fn drive_wasm_plugins(
     mut events: MessageReader<GameEvent>,
     mut queue: ResMut<ActionQueue>,
     mut intents: ResMut<PendingWasmIntents>,
+    mut menu_clicks: ResMut<PendingWasmMenuClicks>,
     players: Query<(Entity, &BreakOutcome, &PlaceOutcome), With<LocalPlayer>>,
 ) {
     let batch: Vec<lodestone_model::ClientEvent> = events.read().map(|e| e.0.clone()).collect();
@@ -486,10 +515,11 @@ pub fn drive_wasm_plugins(
         .map(|(player, outcome, _)| (player, abi::lift_break_outcome(outcome)));
 
     let mut refused = 0_u64;
-    let (lowered, lowered_intents) = plugins.with_host(|host| {
+    let (lowered, lowered_intents, lowered_menu_clicks) = plugins.with_host(|host| {
         let fuel = host.fuel_per_tick();
         let mut out = Vec::new();
         let mut intent_out = Vec::new();
+        let mut menu_click_out = Vec::new();
         for plugin in host.plugins_mut() {
             let granted = plugin.granted().clone();
             let lifted: Vec<Event> = batch
@@ -512,6 +542,9 @@ pub fn drive_wasm_plugins(
             for action in plugin.tick(&lifted, fuel) {
                 match abi::lower_action(action, &granted) {
                     Ok(LoweredAction::Client(client_action)) => out.push(client_action),
+                    Ok(LoweredAction::Intent(IntentAction::InventoryClick(click))) => {
+                        menu_click_out.push(click)
+                    }
                     Ok(LoweredAction::Intent(intent)) => intent_out.push(intent),
                     Err(missing) => {
                         refused += 1;
@@ -524,14 +557,20 @@ pub fn drive_wasm_plugins(
                 }
             }
         }
-        (out, intent_out)
+        (out, intent_out, menu_click_out)
     });
 
-    plugins.refused = plugins.refused.saturating_add(refused);
     // Appended, not assigned: `ActionQueue` is shared with every native system in
     // the tick, and order is send order on the wire.
     queue.0.extend(lowered);
     intents.0.extend(lowered_intents);
+    for click in lowered_menu_clicks {
+        if !menu_clicks.push(click) {
+            refused += 1;
+            tracing::warn!("refused a WASM inventory click: the bounded shell handoff is full");
+        }
+    }
+    plugins.refused = plugins.refused.saturating_add(refused);
 }
 
 /// Apply guest-owned look updates before the existing ECS look consumer.
@@ -551,7 +590,8 @@ fn apply_wasm_intents(
         IntentAction::Movement(_)
         | IntentAction::Break(_)
         | IntentAction::Place(_)
-        | IntentAction::SelectSlot(_) => None,
+        | IntentAction::SelectSlot(_)
+        | IntentAction::InventoryClick(_) => None,
     });
     let Some(look) = last else {
         return;
@@ -581,7 +621,8 @@ fn apply_wasm_break_intents(
         IntentAction::Look(_)
         | IntentAction::Movement(_)
         | IntentAction::Place(_)
-        | IntentAction::SelectSlot(_) => None,
+        | IntentAction::SelectSlot(_)
+        | IntentAction::InventoryClick(_) => None,
     });
     let Some(break_intent) = break_intent else {
         return;
@@ -616,7 +657,8 @@ fn apply_wasm_place_intents(
         IntentAction::Look(_)
         | IntentAction::Movement(_)
         | IntentAction::Break(_)
-        | IntentAction::SelectSlot(_) => None,
+        | IntentAction::SelectSlot(_)
+        | IntentAction::InventoryClick(_) => None,
     });
     let Some(place) = place else {
         return;
@@ -640,7 +682,8 @@ fn apply_wasm_select_slot_intents(
         IntentAction::Look(_)
         | IntentAction::Movement(_)
         | IntentAction::Break(_)
-        | IntentAction::Place(_) => None,
+        | IntentAction::Place(_)
+        | IntentAction::InventoryClick(_) => None,
     });
     let Some(slot) = slot else {
         return;
@@ -662,7 +705,8 @@ fn apply_wasm_movement_intents(
         IntentAction::Look(_)
         | IntentAction::Break(_)
         | IntentAction::Place(_)
-        | IntentAction::SelectSlot(_) => None,
+        | IntentAction::SelectSlot(_)
+        | IntentAction::InventoryClick(_) => None,
     });
     pending.0.clear();
 

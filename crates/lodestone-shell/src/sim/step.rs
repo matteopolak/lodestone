@@ -54,6 +54,8 @@
 //! no need to enumerate any of it.
 
 use super::*;
+#[cfg(not(target_arch = "wasm32"))]
+use lodestone_game::click::{Click, PlayerCtx};
 
 /// `LivingEntity.tick`'s per-tick candidate for the body yaw *before* easing:
 /// `yBodyRotT`. Defaults to the body's own unchanged yaw (no candidate this
@@ -569,6 +571,8 @@ impl Sim {
                 w.insert_resource(glider);
                 w.run_schedule(GameTick);
             });
+            #[cfg(not(target_arch = "wasm32"))]
+            self.drain_wasm_menu_clicks();
             // The completion becomes visible when `tick_item_use` advances the
             // fixed-tick clock. Re-enter the existing live use path outside the
             // ECS guard, so holding food starts the next bite without another OS
@@ -1002,6 +1006,202 @@ impl Sim {
         if self.stats.status != self.status {
             self.stats.status.clone_from(&self.status);
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Sim {
+    /// Feed bounded WASM inventory clicks to the one client path that owns menu
+    /// prediction. The host cannot construct `ClientAction::ContainerClick`: its
+    /// changed-slot list, cursor stack, and state id must come from the live
+    /// `SessionMenus` owned by `ClientHandle::menu_click`.
+    fn drain_wasm_menu_clicks(&mut self) {
+        let clicks = self.write(|world| {
+            world
+                .get_resource_mut::<lodestone_wasm_host::PendingWasmMenuClicks>()
+                .map(|mut pending| pending.take())
+                .unwrap_or_default()
+        });
+        if clicks.is_empty() {
+            return;
+        }
+        let Some(net) = self.net() else { return };
+        let shared = net.shared_handle();
+        let Some(handle) = shared.get() else { return };
+        submit_wasm_menu_clicks(handle, clicks);
+    }
+}
+
+/// Submit copied guest clicks through the client-owned menu predictor.
+///
+/// The function is deliberately outside [`Sim::drain_wasm_menu_clicks`] so its
+/// real consumer can be exercised with a live [`lodestone_client::ClientHandle`]
+/// without constructing the shell's network broker in a test.
+#[cfg(not(target_arch = "wasm32"))]
+fn submit_wasm_menu_clicks(
+    handle: &lodestone_client::ClientHandle,
+    clicks: Vec<lodestone_wasm_host::InventoryClickIntent>,
+) {
+    let menu = handle
+        .open_menu()
+        .map(|open| open.menu)
+        .unwrap_or_else(|| handle.player_menu());
+
+    for request in clicks {
+        let slot = usize::from(request.slot);
+        if slot >= menu.slot_count() {
+            tracing::warn!(slot, "refused a WASM inventory click outside the active menu");
+            continue;
+        }
+        let click = match request.button {
+            lodestone_wasm_host::InventoryClickButton::Left => Click::left(slot),
+            lodestone_wasm_host::InventoryClickButton::Right => Click::right(slot),
+        };
+        let _ = handle.menu_click(click, PlayerCtx::survival());
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod wasm_menu_click_tests {
+    use std::time::Duration;
+
+    use lodestone_client::{
+        ClientAction, ClientBuilder, ConnectionState, Directive, LoginProfile, ServerAddress,
+        VersionAdapter,
+    };
+    use lodestone_model::AdapterError;
+    use lodestone_net::{Connection, memory_pair};
+    use lodestone_wasm_host::{InventoryClickButton, InventoryClickIntent};
+    use lodestone_world::WorldSink;
+    use uuid::Uuid;
+
+    use super::submit_wasm_menu_clicks;
+
+    const CONTAINER_CLICK_PACKET: i32 = 0x31;
+    const BARRIER_PACKET: i32 = 0x32;
+
+    /// A protocol-free encoder that makes the client action queue observable.
+    #[derive(Debug)]
+    struct ClickAdapter;
+
+    impl VersionAdapter for ClickAdapter {
+        fn protocol_version(&self) -> i32 {
+            0
+        }
+
+        fn minecraft_versions(&self) -> &'static [&'static str] {
+            &["test"]
+        }
+
+        fn supports(&self, _protocol: i32) -> bool {
+            true
+        }
+
+        fn begin_login(
+            &self,
+            _profile: &LoginProfile,
+            _server: &ServerAddress,
+        ) -> Result<Vec<Directive>, AdapterError> {
+            Ok(vec![Directive::SetState(ConnectionState::Play)])
+        }
+
+        fn handle_packet(
+            &self,
+            _world: &mut dyn WorldSink,
+            _state: ConnectionState,
+            _packet_id: i32,
+            _payload: &[u8],
+        ) -> Result<Vec<Directive>, AdapterError> {
+            Ok(Vec::new())
+        }
+
+        fn encode_action(
+            &self,
+            _state: ConnectionState,
+            action: &ClientAction,
+        ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+            match action {
+                ClientAction::ContainerClick {
+                    window_id,
+                    state_id,
+                    slot,
+                    button,
+                    ..
+                } => Ok(Some((
+                    CONTAINER_CLICK_PACKET,
+                    [*window_id, *state_id, *slot, *button]
+                        .into_iter()
+                        .flat_map(i32::to_be_bytes)
+                        .collect(),
+                ))),
+                ClientAction::KeepAliveResponse { id } => {
+                    Ok(Some((BARRIER_PACKET, id.to_be_bytes().to_vec())))
+                }
+                _ => Ok(None),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_clicks_reach_the_live_menu_predictor_and_invalid_slots_do_not() {
+        let (client_io, server_io) = memory_pair();
+        let (handle, events) = ClientBuilder::new(
+            ServerAddress {
+                host: "memory".into(),
+                port: 0,
+            },
+            LoginProfile {
+                username: "PluginTest".into(),
+                uuid: Uuid::nil(),
+            },
+            Box::new(ClickAdapter),
+        )
+        .connect_with(client_io);
+        let mut peer = Connection::new(server_io);
+
+        submit_wasm_menu_clicks(
+            &handle,
+            vec![
+                InventoryClickIntent {
+                    slot: 36,
+                    button: InventoryClickButton::Left,
+                },
+                InventoryClickIntent {
+                    slot: u16::MAX,
+                    button: InventoryClickButton::Right,
+                },
+            ],
+        );
+        handle
+            .send_action(ClientAction::KeepAliveResponse { id: 77 })
+            .expect("the barrier action must enter the same live queue");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the valid click must reach the client action queue")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the valid click");
+        assert_eq!(first.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            first.1,
+            [0_i32, 0, 36, 0]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the real predictor supplies the player window, its live state id, and the left-click button"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the queue barrier must arrive")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the barrier");
+        assert_eq!(
+            second,
+            (BARRIER_PACKET, 77_i64.to_be_bytes().to_vec()),
+            "if the invalid slot reached ClientHandle::menu_click, it would precede this barrier"
+        );
+        drop(events);
     }
 }
 

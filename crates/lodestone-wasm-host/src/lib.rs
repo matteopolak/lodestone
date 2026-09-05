@@ -110,12 +110,14 @@ pub mod host;
 pub mod manifest;
 
 pub use abi::{
-    IntentAction, LoweredAction, MovementOverride, capability_for, lift_break_outcome,
-    lift_command_context, lift_event, lift_place_outcome, lift_verdict_context, lower_action,
+    IntentAction, InventoryClickButton, InventoryClickIntent, LoweredAction, MovementOverride,
+    capability_for, lift_break_outcome, lift_command_context, lift_event, lift_place_outcome,
+    lift_verdict_context, lower_action,
 };
 pub use capability::{Capability, CapabilitySet};
 pub use conductor::{
-    WasmHostPlugin, WasmPlugins, WasmReloadError, drive_wasm_plugins, reload_wasm_plugins,
+    PendingWasmMenuClicks, WasmHostPlugin, WasmPlugins, WasmReloadError, drive_wasm_plugins,
+    reload_wasm_plugins,
 };
 pub use host::{
     ABI_WORLD, Action, BlockFace, BlockOffset, BreakIntent, BreakOutcome, BreakRejection, BreakStatus,
