@@ -24,9 +24,16 @@ phase, timing, status, and failure metadata. A wall deadline bounds the run;
 peer, readiness, serialization, and output failures are returned instead of
 leaving a server task running.
 
-The supported runtime slices are `palette` and `entity` in `ready` phase.
-Palette measures setup block placements and the resulting joined chunk wire
-traffic. Entity waits for the real mob-seeding handoff, inserts each bounded
+The supported runtime slices are `palette`, `transparency`, `light`, `liquid`,
+and `entity` in `ready` phase. Palette measures setup block placements and the
+resulting joined chunk wire traffic. The three terrain variants count the
+states actually installed in the retained source, then count only the matching
+cells from chunk coordinates decoded off the join wire: stained glass/panes,
+sea lanterns, and water respectively. Runtime mode expands its in-memory join
+view only far enough to include each generated producer; it does not change the
+client plan's camera contract. These ready-phase counters prove source-to-wire
+reachability, not client-side translucent mesh, water mesh, or relight/remesh
+completion. Entity waits for the real mob-seeding handoff, inserts each bounded
 summon through `IntegratedServer::spawn_mob`, and counts the resulting
 population snapshots and add-entity packets after the integrated tick loop has
 published them. The wire reader also checks that every observed spawn lies in
@@ -41,7 +48,10 @@ results.
 
 Consumed setup counters are restricted to the coordinates decoded from each
 wire chunk packet. Prefetched source columns therefore contribute to installed
-counts but cannot make an out-of-view setup pass the palette witness.
+counts but cannot make an out-of-view setup pass a runtime witness. The terrain
+regression control removes every transparency producer and must fail the
+translucent encoded-cell witness while chunk payloads remain non-empty; this
+proves the counter is not merely reporting that a join happened.
 
 The witness columns are anti-vacuity controls for the separate client runner:
 opaque terrain, translucent terrain, water, signs, block entities, entities,
