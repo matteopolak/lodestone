@@ -73,6 +73,29 @@ fixes the *latency* side; a plausible-looking shortcut that skips the pool by ca
 instead panics outright on that runtime, since it explicitly requires a multi-threaded one — this
 matters because it is exactly the runtime shape production uses.
 
+### Progressive generation is a streaming request, not a gameplay shortcut
+
+`ChunkSource::column` always asks for a complete `ChunkGenerationStage::Full` column. Ticks,
+commands, collision and block edits therefore never receive terrain missing decoration. The
+streaming scheduler may instead call `ChunkSource::column_at` with `Shaped` outside its complete
+near band. An overworld shaped column includes terrain through carving and structures, but omits
+ores, vegetation, top-layer work and generation-time spawn candidates. It remains a valid chunk
+packet and needs no special client decoder.
+
+The tier is monotone. A full or edited column satisfies a shaped request, while a later full
+request upgrades a shaped cache entry with the lock released; no path downgrades a column. Disk
+columns also win over a shaped request, so saved player changes cannot disappear at distance.
+`ColumnPipeline::with_generation_band` computes the band in Chebyshev chunk distance and defaults
+to all-full until its caller opts in. `DEFAULT_FULL_GENERATION_RADIUS` is 8: it contains the
+simulation and interaction areas with margin, but is not an allocation cap.
+
+Raising a render-distance slider does not by itself make every corresponding real column
+affordable. At render distance 256 the streamed square is 265,225 columns; even a 31.1 KiB
+packed-column estimate is about 7.9 GiB before mesh memory and wire buffers. Progressive
+generation reduces construction work, not the number of retained meshes or packets. Any such
+ceiling must therefore pair the near band with an explicit distant-LOD/residency policy rather
+than sizing the normal chunk store to the full square.
+
 ### Encoding is offloaded too, and it must ride the same worker that generated the column
 
 Protocol-level encoding of a generated column is moved off the connection task and into the same

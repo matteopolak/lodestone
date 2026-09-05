@@ -147,6 +147,20 @@ pub(crate) fn resolve_palette_state_id(state: &str) -> lodestone_data::block_sta
         .unwrap_or_else(lodestone_data::block_states::air_state)
 }
 
+/// The amount of world generation a streamed column requires.
+///
+/// This is deliberately a monotone two-value lattice: a full column is always
+/// suitable where a shaped one was requested, but not conversely. Gameplay
+/// callers use [`ChunkSource::column`], which is permanently `Full`; only the
+/// view-streaming scheduler asks for `Shaped` outside its near band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ChunkGenerationStage {
+    /// Terrain through carving, without decoration or generation-time spawns.
+    Shaped,
+    /// The complete playable column, including decoration and spawn candidates.
+    Full,
+}
+
 /// A decoded chunk column: the block state of every block in a 16×`height`×16
 /// prism whose bottom is at `min_y`.
 ///
@@ -160,6 +174,8 @@ pub struct ChunkColumn {
     pub min_y: i32,
     /// Number of block rows (world height).
     pub height: i32,
+    /// The highest generation tier incorporated in this value.
+    generation_stage: ChunkGenerationStage,
     /// Block-state palette; `palette[0]` is always `"minecraft:air"`.
     palette: Vec<String>,
     /// Palette indices for every cell, one bit-packed 16-row section at a time
@@ -350,6 +366,7 @@ impl ChunkColumn {
         Self {
             min_y,
             height,
+            generation_stage: ChunkGenerationStage::Full,
             palette: vec![AIR.to_string()],
             blocks: SectionedBlocks::new_air(height),
             // All-air, so every section count is zero and every palette entry
@@ -402,6 +419,10 @@ impl ChunkColumn {
     /// block entities.
     #[must_use]
     pub fn from_generated(column: GeneratedColumn) -> Self {
+        let generation_stage = match column.stage() {
+            lodestone_worldgen::overworld::GenStage::Shaped => ChunkGenerationStage::Shaped,
+            lodestone_worldgen::overworld::GenStage::Full => ChunkGenerationStage::Full,
+        };
         let cells = column.biome_cells();
         let biome_palette = cells.palette().to_vec();
         let y_quarts = cells.y_quarts();
@@ -437,6 +458,7 @@ impl ChunkColumn {
         let mut column = Self {
             min_y,
             height,
+            generation_stage,
             palette,
             blocks,
             // Placeholders: this constructor *adopts* an already-populated
@@ -466,6 +488,12 @@ impl ChunkColumn {
             "generated biome grid must span the column's own height"
         );
         column
+    }
+
+    /// The highest generation tier this column contains.
+    #[must_use]
+    pub fn generation_stage(&self) -> ChunkGenerationStage {
+        self.generation_stage
     }
 
     /// Adopts a [`lodestone_worldgen::nether::NetherColumn`], padded up to
@@ -1275,6 +1303,19 @@ pub trait ChunkSource: Send + Sync {
     /// Generates the column at chunk coordinates `(cx, cz)`.
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn;
 
+    /// Generates a column through at least `stage`.
+    ///
+    /// The default is intentionally conservative for sources that have no
+    /// progressive generator: they return their normal, full column. Wrappers
+    /// around a progressive source must forward this method explicitly; the
+    /// production forwarding implementations below make that requirement
+    /// testable without forcing every small test world to implement a second
+    /// method.
+    fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
+        let _ = stage;
+        self.column(cx, cz)
+    }
+
     /// Reads a single block's canonical state string at world coordinates
     /// `(x, y, z)`, through the same data [`column`](Self::column) would
     /// return — including any edit already applied via
@@ -1569,6 +1610,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).column(cx, cz)
     }
 
+    fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
+        (**self).column_at(cx, cz, stage)
+    }
+
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
         (**self).block_state(x, y, z)
     }
@@ -1649,6 +1694,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         (**self).column(cx, cz)
+    }
+
+    fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
+        (**self).column_at(cx, cz, stage)
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -2255,12 +2304,20 @@ impl std::fmt::Debug for OverworldChunkSource {
 
 impl ChunkSource for OverworldChunkSource {
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        self.column_at(cx, cz, ChunkGenerationStage::Full)
+    }
+
+    fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if let Some(edited) = edits.get(&(cx, cz)) {
             return edited.clone();
         }
         drop(edits);
-        let mut column = ChunkColumn::from_generated(self.generator.column(cx, cz));
+        let generated = match stage {
+            ChunkGenerationStage::Shaped => self.generator.column_shaped(cx, cz),
+            ChunkGenerationStage::Full => self.generator.column(cx, cz),
+        };
+        let mut column = ChunkColumn::from_generated(generated);
         self.attach_structures(&mut column, cx, cz);
         column
     }

@@ -754,7 +754,12 @@ impl<S: ChunkSource> ChunkStore<S> {
     /// For any `capacity >= 1` the just-inserted entry carries the highest
     /// `last_used` in the map, so [`Cache::evict_down_to`] can never choose it
     /// and the following [`read`](Self::read) is guaranteed to hit.
-    fn ensure(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+    fn ensure(
+        &self,
+        cx: i32,
+        cz: i32,
+        stage: crate::chunk::ChunkGenerationStage,
+    ) -> Option<ChunkColumn> {
         // a cheap, rate-limited check-in with the ticket graph on
         // every real op through this store — see `maybe_tick_tickets`'s own
         // doc for why this piggybacks on read traffic instead of a new
@@ -766,13 +771,15 @@ impl<S: ChunkSource> ChunkStore<S> {
             let stamp = cache.next_stamp();
             if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
                 entry.last_used = stamp;
-                return None;
+                if entry.column.generation_stage() >= stage {
+                    return None;
+                }
             }
         }
 
         // Lock released: a ~909 ms generation must not serialise
         // `generate_columns_parallel`'s scoped fan-out.
-        let fresh = self.source.column(cx, cz);
+        let fresh = self.source.column_at(cx, cz, stage);
 
         let mut guard = self.lock();
         let cache = &mut *guard;
@@ -782,9 +789,16 @@ impl<S: ChunkSource> ChunkStore<S> {
             return Some(fresh);
         }
         match cache.columns.entry((cx, cz)) {
-            // Another thread won the race while this one generated. Keep
-            // theirs: it may carry a `set_block` edit this column predates.
-            MapEntry::Occupied(mut occupied) => occupied.get_mut().last_used = stamp,
+            // Another thread won the race while this one generated. Keep an
+            // equal-or-higher result (it may carry an edit); otherwise replace
+            // a shaped entry with the requested full upgrade.
+            MapEntry::Occupied(mut occupied) => {
+                let entry = occupied.get_mut();
+                entry.last_used = stamp;
+                if fresh.generation_stage() > entry.column.generation_stage() {
+                    entry.column = fresh;
+                }
+            }
             MapEntry::Vacant(vacant) => {
                 vacant.insert(Entry {
                     column: fresh,
@@ -1008,9 +1022,18 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     }
 
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        self.column_at(cx, cz, crate::chunk::ChunkGenerationStage::Full)
+    }
+
+    fn column_at(
+        &self,
+        cx: i32,
+        cz: i32,
+        stage: crate::chunk::ChunkGenerationStage,
+    ) -> ChunkColumn {
         // `Some` means retention is off (the negative-control configuration) —
         // the column was just generated and there is nothing to read it from.
-        if let Some(fresh) = self.ensure(cx, cz) {
+        if let Some(fresh) = self.ensure(cx, cz, stage) {
             return fresh;
         }
         // The fallback below is reachable only if another thread evicted this
@@ -1018,7 +1041,8 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         // capacity-worth of concurrent misses. Correct rather than dead, and it
         // costs a regeneration, never a wrong block.
         self.read(cx, cz, ChunkColumn::clone)
-            .unwrap_or_else(|| self.source.column(cx, cz))
+            .filter(|column| column.generation_stage() >= stage)
+            .unwrap_or_else(|| self.source.column_at(cx, cz, stage))
     }
 
     /// One block, without regenerating or cloning a column.
@@ -1033,7 +1057,11 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        if let Some(fresh) = self.ensure(cx, cz) {
+        if let Some(fresh) = self.ensure(
+            cx,
+            cz,
+            crate::chunk::ChunkGenerationStage::Full,
+        ) {
             return fresh.block_state(lx, y, lz).to_string();
         }
         self.read(cx, cz, |column| column.block_state(lx, y, lz).to_string())
@@ -1048,7 +1076,11 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        if let Some(fresh) = self.ensure(cx, cz) {
+        if let Some(fresh) = self.ensure(
+            cx,
+            cz,
+            crate::chunk::ChunkGenerationStage::Full,
+        ) {
             return fresh.biome_state_at(lx, y, lz).to_string();
         }
         self.read(cx, cz, |column| column.biome_state_at(lx, y, lz).to_string())
@@ -1069,7 +1101,11 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 .find(|(at, _)| *at == pos)
                 .map(|(_, entity)| entity.clone())
         };
-        if let Some(fresh) = self.ensure(cx, cz) {
+        if let Some(fresh) = self.ensure(
+            cx,
+            cz,
+            crate::chunk::ChunkGenerationStage::Full,
+        ) {
             return find(&fresh);
         }
         self.read(cx, cz, find)

@@ -1015,6 +1015,15 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
     }
 
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        self.column_at(cx, cz, crate::chunk::ChunkGenerationStage::Full)
+    }
+
+    fn column_at(
+        &self,
+        cx: i32,
+        cz: i32,
+        stage: crate::chunk::ChunkGenerationStage,
+    ) -> ChunkColumn {
         {
             let edits = self.state.edits.lock().expect("world edit lock poisoned");
             if let Some(edited) = edits.get(&(cx, cz)) {
@@ -1044,7 +1053,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
             return loaded.column;
         }
         self.state.stats.generated.fetch_add(1, Ordering::Relaxed);
-        self.inner.column(cx, cz)
+        self.inner.column_at(cx, cz, stage)
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
