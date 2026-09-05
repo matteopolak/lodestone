@@ -7,7 +7,7 @@
 use lodestone_core::{
     Ctx, Decode, Encode, Nbt, NbtTag, Reader, State, Writer, encode_body, write_named_nbt,
 };
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -15,7 +15,10 @@ use uuid::Uuid;
 use crate::PROTOCOL_1_19_4;
 use crate::canonical::wire_state_for_762;
 use crate::packet_ids::{handshaking, login, play};
-use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGame};
+use crate::packets::game::{
+    BlockDig, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
+    ServerboundPosition, ServerboundPositionLook,
+};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
@@ -283,6 +286,65 @@ impl ServerProtocol for V762ServerProtocol {
                     face,
                     sequence,
                 }
+            }
+            State::Play if packet_id == play::serverbound::POSITION => {
+                let Some(ServerboundPosition {
+                    x,
+                    y,
+                    z,
+                    on_ground,
+                }) = decode_full(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::PlayerMoved {
+                    x,
+                    y,
+                    z,
+                    rotation: None,
+                    on_ground,
+                }
+            }
+            State::Play if packet_id == play::serverbound::POSITION_LOOK => {
+                let Some(ServerboundPositionLook {
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch,
+                    on_ground,
+                }) = decode_full(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::PlayerMoved {
+                    x,
+                    y,
+                    z,
+                    rotation: Some(Rotation { yaw, pitch }),
+                    on_ground,
+                }
+            }
+            State::Play if packet_id == play::serverbound::LOOK => {
+                let Some(ServerboundLook {
+                    yaw,
+                    pitch,
+                    on_ground,
+                }) = decode_full(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::PlayerRotated {
+                    yaw,
+                    pitch,
+                    on_ground,
+                }
+            }
+            State::Play if packet_id == play::serverbound::FLYING => {
+                let Some(ServerboundFlying { on_ground }) = decode_full(payload) else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::PlayerStatusOnly { on_ground }
             }
             _ => ServerBound::Ignored,
         }

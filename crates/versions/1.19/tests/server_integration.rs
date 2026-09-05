@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, Rotation, Vec3};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_19::adapter_for;
 
@@ -90,6 +90,18 @@ async fn registry_selected_protocol_762_reaches_play_and_confirms_a_block_break(
         .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air))
         .await
         .expect("block update reaches the protocol-762 client");
+
+    // `move_to` takes the position-and-look path here. The registry-selected
+    // host must lift it, update the view centre, and serve the newly centred
+    // column; without the serverbound movement decoder this times out at the
+    // original spawn column even though the client predicts the move locally.
+    handle
+        .move_to(Vec3::new(40.0, 100.0, 8.0), Rotation::new(90.0, 0.0), true, false)
+        .expect("joined client accepts a movement action");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(2, 0), Duration::from_secs(10))
+        .await
+        .expect("serverbound movement recentres the protocol-762 view stream");
 
     handle.shutdown();
     server.shutdown().await;
