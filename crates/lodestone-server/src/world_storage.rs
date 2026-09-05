@@ -86,8 +86,6 @@ pub struct UnsupportedChunkFields {
     pub block_entities: bool,
     /// The column has structure starts or references.
     pub structures: bool,
-    /// The column retains a generator-produced heightmap.
-    pub motion_blocking: bool,
     /// The column is only shaped terrain, not a full playable column.
     pub shaped_generation: bool,
     /// The column owns not-yet-consumed one-shot spawn candidates.
@@ -98,7 +96,6 @@ impl UnsupportedChunkFields {
     fn any(self) -> bool {
         self.block_entities
             || self.structures
-            || self.motion_blocking
             || self.shaped_generation
             || self.pending_generation_spawns
     }
@@ -138,6 +135,10 @@ pub enum ChunkRecordError {
     InvalidBiomeCellCount { expected: usize, actual: usize },
     /// The stored surface-biome answer is not its required four-by-four grid.
     InvalidSurfaceBiomeCount { actual: usize },
+    /// The optional stored motion-blocking map has the wrong fixed grid size.
+    InvalidMotionBlockingHeightCount { actual: usize },
+    /// A stored motion-blocking value cannot fit the server's u16 representation.
+    MotionBlockingHeightOutOfRange(u32),
     /// A section carries light or extension payloads this adapter cannot retain.
     UnsupportedStoredSectionData,
     /// A source column names a biome not available in this built-in census.
@@ -189,6 +190,12 @@ impl fmt::Display for ChunkRecordError {
             }
             Self::InvalidSurfaceBiomeCount { actual } => {
                 write!(formatter, "expected 16 surface biome cells, found {actual}")
+            }
+            Self::InvalidMotionBlockingHeightCount { actual } => {
+                write!(formatter, "expected 256 motion-blocking heights, found {actual}")
+            }
+            Self::MotionBlockingHeightOutOfRange(height) => {
+                write!(formatter, "motion-blocking height {height} exceeds u16")
             }
             Self::UnsupportedStoredSectionData => {
                 formatter.write_str("stored section carries unsupported light or extension data")
@@ -280,9 +287,10 @@ impl WorldStorage {
     /// Saves one independently dirty server chunk through the native typed
     /// record path.
     ///
-    /// The adapter is intentionally bounded: it stores block-state sections
-    /// only and refuses a column carrying any state the version-1 record cannot
-    /// preserve. `Anvil` stays unchanged and refuses this method just as it
+    /// The adapter is intentionally bounded: it stores block-state sections,
+    /// built-in biome grids, and the optional motion-blocking heightmap, while
+    /// refusing a column carrying any other state it cannot preserve. `Anvil`
+    /// stays unchanged and refuses this method just as it
     /// refuses [`Self::write_dirty`].
     pub fn write_dirty_chunk(
         &self,
@@ -402,6 +410,10 @@ fn encode_chunk(
             sections,
             biome_sections,
             surface_biome_ids,
+            motion_blocking_heights: column
+                .motion_blocking()
+                .map(|heights| heights.iter().map(|&height| u32::from(height)).collect())
+                .unwrap_or_default(),
             extensions: Vec::new(),
         })),
     })
@@ -520,6 +532,21 @@ fn decode_chunk(
             .collect::<Result<Vec<_>, _>>()?;
         column.set_biome_quarts(&surface);
     }
+    if !chunk.motion_blocking_heights.is_empty() {
+        let actual = chunk.motion_blocking_heights.len();
+        let heights: [u16; 256] = chunk
+            .motion_blocking_heights
+            .iter()
+            .copied()
+            .map(|height| {
+                u16::try_from(height)
+                    .map_err(|_| ChunkRecordError::MotionBlockingHeightOutOfRange(height))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .try_into()
+            .map_err(|_| ChunkRecordError::InvalidMotionBlockingHeightCount { actual })?;
+        column.set_motion_blocking(heights);
+    }
     Ok(column)
 }
 
@@ -528,7 +555,6 @@ fn unsupported_fields(column: &crate::chunk::ChunkColumn) -> UnsupportedChunkFie
         block_entities: !column.block_entities().is_empty(),
         structures: !column.structure_starts().is_empty()
             || !column.structure_references().is_empty(),
-        motion_blocking: column.motion_blocking().is_some(),
         shaped_generation: column.generation_stage() == crate::chunk::ChunkGenerationStage::Shaped,
         pending_generation_spawns: column.has_pending_generation_spawns(),
     }
@@ -689,6 +715,7 @@ mod tests {
                     }],
                     biome_sections: Vec::new(),
                     surface_biome_ids: Vec::new(),
+                    motion_blocking_heights: Vec::new(),
                     extensions: Vec::new(),
                 })),
             },

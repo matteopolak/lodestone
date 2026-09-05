@@ -134,6 +134,43 @@ fn complete_builtin_biome_grids_validate_and_an_unknown_value_does_not() {
     );
 }
 
+#[test]
+fn motion_blocking_heightmap_is_optional_but_never_partial_or_wide() {
+    let mut record = StorageRecord::decode(fixture(CHUNK_V1).as_slice()).unwrap();
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        chunk.motion_blocking_heights = (0..256).map(|index| index as u32).collect();
+    }
+    validate_record(&record).unwrap();
+
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        chunk.motion_blocking_heights.pop();
+    }
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::InvalidMotionBlockingHeightCount(255))
+    );
+
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        chunk.motion_blocking_heights = vec![0; 256];
+        chunk.motion_blocking_heights[255] = u32::from(u16::MAX) + 1;
+    }
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::MotionBlockingHeightOutOfRange(
+            u32::from(u16::MAX) + 1
+        ))
+    );
+}
+
 fn fixture(source: &str) -> Vec<u8> {
     source
         .split_whitespace()

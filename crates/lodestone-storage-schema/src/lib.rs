@@ -128,6 +128,20 @@ fn validate_chunk(chunk: &ChunkRecord) -> Result<(), ValidationError> {
         }
         validate_builtin_biomes(&chunk.surface_biome_ids)?;
     }
+    if !chunk.motion_blocking_heights.is_empty() {
+        if chunk.motion_blocking_heights.len() != 16 * 16 {
+            return Err(ValidationError::InvalidMotionBlockingHeightCount(
+                chunk.motion_blocking_heights.len(),
+            ));
+        }
+        if let Some(&height) = chunk
+            .motion_blocking_heights
+            .iter()
+            .find(|&&height| height > u32::from(u16::MAX))
+        {
+            return Err(ValidationError::MotionBlockingHeightOutOfRange(height));
+        }
+    }
     validate_extension_values(&chunk.extensions)
 }
 
@@ -171,6 +185,8 @@ pub enum ValidationError {
     InvalidBiomeCellCount { expected: usize, actual: usize },
     InvalidSurfaceBiomeCount(usize),
     UnknownBuiltinBiome(i32),
+    InvalidMotionBlockingHeightCount(usize),
+    MotionBlockingHeightOutOfRange(u32),
     ZeroExtensionId,
     DuplicateExtensionId(u32),
     UnregisteredExtensionId(u32),
@@ -208,6 +224,12 @@ impl std::fmt::Display for ValidationError {
                 write!(formatter, "expected 16 surface biomes, found {actual}")
             }
             Self::UnknownBuiltinBiome(id) => write!(formatter, "unknown built-in biome {id}"),
+            Self::InvalidMotionBlockingHeightCount(actual) => {
+                write!(formatter, "expected 256 motion-blocking heights, found {actual}")
+            }
+            Self::MotionBlockingHeightOutOfRange(height) => {
+                write!(formatter, "motion-blocking height {height} exceeds u16")
+            }
             Self::ZeroExtensionId => formatter.write_str("extension local ID zero is reserved"),
             Self::DuplicateExtensionId(id) => write!(formatter, "duplicate extension local ID {id}"),
             Self::UnregisteredExtensionId(id) => {

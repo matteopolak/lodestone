@@ -754,6 +754,16 @@ impl ChunkColumn {
         self.motion_blocking.as_deref()
     }
 
+    /// Restores the generator's stored `MOTION_BLOCKING` answer.
+    ///
+    /// The values use the persisted `top_y + 1` convention and are indexed by
+    /// `local_x + local_z * 16`. This is intentionally a whole-map replacement:
+    /// the heightmap is a derived snapshot, not an edit-time cache, so callers
+    /// that load it must restore all 256 cells or leave the answer absent.
+    pub fn set_motion_blocking(&mut self, heights: [u16; 256]) {
+        self.motion_blocking = Some(Box::new(heights));
+    }
+
     /// Structure starts originating in this column.
     #[must_use]
     pub fn structure_starts(

@@ -562,6 +562,7 @@ mod tests {
                 }],
                 biome_sections: vec![],
                 surface_biome_ids: vec![],
+                motion_blocking_heights: vec![],
                 extensions: vec![],
             })),
         }
