@@ -80,6 +80,7 @@ use glam::{Mat4, Quat, Vec3};
 use lodestone_assets::ResourceLocation;
 use lodestone_assets::block_entity_models::{BLOCK_ENTITY_MODELS, BlockEntityModelEntry};
 use lodestone_assets::entity::{EntityModelDef, PartPose, bake_entity_parts};
+use lodestone_model::{CampfireSlot, ShelfSlot};
 
 use crate::banner_pattern::{DyeColor, StoredPatternLayer, banner_pattern_layers};
 use crate::camera::Frustum;
@@ -2038,7 +2039,7 @@ pub const CAMPFIRE_ITEM_LIFT: f32 = 0.449_218_75;
 /// `(data2d & 3) * 90` in vanilla's own direction type, so the two are one
 /// expression and there is no second table to keep in sync.
 #[must_use]
-pub fn campfire_item_matrix(pos: [i32; 3], facing_yaw_deg: f32, slot: usize) -> Mat4 {
+pub fn campfire_item_matrix(pos: [i32; 3], facing_yaw_deg: f32, slot: CampfireSlot) -> Mat4 {
     // `(slot + facing's 2D index) % 4`, then back through the yaw formula.
     #[expect(
         clippy::cast_possible_truncation,
@@ -2046,7 +2047,7 @@ pub fn campfire_item_matrix(pos: [i32; 3], facing_yaw_deg: f32, slot: usize) -> 
         reason = "the four horizontal facing yaws are exact non-negative multiples of 90"
     )]
     let facing_2d = (facing_yaw_deg / 90.0) as usize;
-    let slot_yaw = ((slot + facing_2d) % 4) as f32 * 90.0;
+    let slot_yaw = ((slot.index() + facing_2d) % 4) as f32 * 90.0;
     let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
     Mat4::from_translation(origin + Vec3::new(0.5, CAMPFIRE_ITEM_LIFT, 0.5))
         * Mat4::from_rotation_y(-slot_yaw.to_radians())
@@ -2129,8 +2130,8 @@ pub const SHELF_ALIGN_BOTTOM_OFFSET: f32 = -0.25;
 /// `0.3125` blocks apart in the *pre-scale* local frame (so `0.3125 * 0.25 =
 /// 0.078125` world blocks).
 #[must_use]
-pub fn shelf_item_offset(slot: usize, align_to_bottom: bool) -> Vec3 {
-    let item_slot_position = (slot as f32 - 1.0) * 0.3125;
+pub fn shelf_item_offset(slot: ShelfSlot, align_to_bottom: bool) -> Vec3 {
+    let item_slot_position = (slot.index() as f32 - 1.0) * 0.3125;
     Vec3::new(
         item_slot_position,
         if align_to_bottom {
@@ -2165,7 +2166,7 @@ pub fn shelf_item_offset(slot: usize, align_to_bottom: bool) -> Vec3 {
 pub fn shelf_slot_matrix(
     pos: [i32; 3],
     facing_yaw_deg: f32,
-    slot: usize,
+    slot: ShelfSlot,
     align_to_bottom: bool,
 ) -> Mat4 {
     let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
@@ -3418,7 +3419,7 @@ pub struct CampfireItemSpawn {
     /// Which of the four cooking slots (`0..CAMPFIRE_SLOTS`) this item is in.
     /// Vanilla offsets it by the facing, so this is *not* a world corner —
     /// see [`campfire_item_matrix`].
-    pub slot: usize,
+    pub slot: CampfireSlot,
     /// The item id whose baked geometry to draw, from the block entity's NBT
     /// `Items` list.
     pub item: ResourceLocation,
@@ -3479,7 +3480,7 @@ pub struct ShelfItemSpawn {
     /// The shelf block's `facing`, in [`horizontal_facing_yaw`]'s convention.
     pub facing_yaw_deg: f32,
     /// Which of the three slots (`0..SHELF_SLOTS`) this item is in.
-    pub slot: usize,
+    pub slot: ShelfSlot,
     /// Vanilla's own align-items-to-bottom accessor's own NBT flag.
     pub align_to_bottom: bool,
     /// The item id whose baked geometry to draw, from the block entity's
@@ -4413,12 +4414,13 @@ mod tests {
             Vec3::new(0.8125, CAMPFIRE_ITEM_LIFT, 0.8125),
             Vec3::new(0.1875, CAMPFIRE_ITEM_LIFT, 0.8125),
         ];
-        for slot in 0..CAMPFIRE_SLOTS {
+        for raw_slot in 0..CAMPFIRE_SLOTS {
+            let slot = CampfireSlot::new(raw_slot as u8).expect("bounded campfire loop");
             let origin = campfire_item_matrix(POS, 0.0, slot).transform_point3(Vec3::ZERO);
-            let want = base + expected[slot];
+            let want = base + expected[slot.index()];
             assert!(
                 origin.distance(want) < 1e-5,
-                "slot {slot} pose origin {origin:?}, expected {want:?}"
+                "slot {raw_slot} pose origin {origin:?}, expected {want:?}"
             );
         }
     }
@@ -4522,9 +4524,9 @@ mod tests {
     /// the constant, not restated.
     #[test]
     fn shelf_slots_are_evenly_spaced_about_the_centre_slot() {
-        let s0 = shelf_item_offset(0, false);
-        let s1 = shelf_item_offset(1, false);
-        let s2 = shelf_item_offset(2, false);
+        let s0 = shelf_item_offset(ShelfSlot::new(0).expect("fixed shelf slot"), false);
+        let s1 = shelf_item_offset(ShelfSlot::new(1).expect("fixed shelf slot"), false);
+        let s2 = shelf_item_offset(ShelfSlot::new(2).expect("fixed shelf slot"), false);
         assert!((s1.x - 0.0).abs() < 1e-6, "slot 1 must sit on centre, got {}", s1.x);
         assert!(
             (s0.x - (-0.3125)).abs() < 1e-6,
@@ -4547,7 +4549,8 @@ mod tests {
     /// the pre-scale local frame, and leaves `x`/`z` untouched.
     #[test]
     fn shelf_align_to_bottom_only_changes_the_y_offset() {
-        for slot in 0..SHELF_SLOTS {
+        for raw_slot in 0..SHELF_SLOTS {
+            let slot = ShelfSlot::new(raw_slot as u8).expect("bounded shelf loop");
             let top = shelf_item_offset(slot, false);
             let bottom = shelf_item_offset(slot, true);
             assert!((bottom.x - top.x).abs() < 1e-6);
@@ -4567,7 +4570,7 @@ mod tests {
     #[test]
     fn shelf_matrix_rotates_by_the_negated_facing_yaw() {
         const POS: [i32; 3] = [2, 64, 9];
-        let south = shelf_slot_matrix(POS, 0.0, 1, false);
+        let south = shelf_slot_matrix(POS, 0.0, ShelfSlot::new(1).expect("fixed shelf slot"), false);
         let origin = south.transform_point3(Vec3::ZERO);
         // Slot 1's offset is `(0, 0, -0.25)` and the offset translate happens
         // *before* the `0.25x` scale in the pose stack, so it lands unscaled:
@@ -4584,8 +4587,8 @@ mod tests {
         // A 90-degree facing turns the local x-offset direction; south vs west
         // must therefore disagree, which a dropped rotation term cannot
         // produce.
-        let west = shelf_slot_matrix(POS, 90.0, 0, false);
-        let south0 = shelf_slot_matrix(POS, 0.0, 0, false);
+        let west = shelf_slot_matrix(POS, 90.0, ShelfSlot::new(0).expect("fixed shelf slot"), false);
+        let south0 = shelf_slot_matrix(POS, 0.0, ShelfSlot::new(0).expect("fixed shelf slot"), false);
         assert!(
             south0.transform_point3(Vec3::ZERO).distance(west.transform_point3(Vec3::ZERO)) > 1e-3,
             "a 90 degree facing change must move slot 0's world position"
@@ -4681,10 +4684,10 @@ mod tests {
         const POS: [i32; 3] = [0, 70, 0];
         let mut seen = Vec::new();
         for facing_2d in 0..CAMPFIRE_SLOTS {
-            let turned = campfire_item_matrix(POS, facing_2d as f32 * 90.0, 0)
+            let turned = campfire_item_matrix(POS, facing_2d as f32 * 90.0, CampfireSlot::new(0).expect("fixed campfire slot"))
                 .transform_point3(Vec3::ZERO);
             let offset_slot =
-                campfire_item_matrix(POS, 0.0, facing_2d).transform_point3(Vec3::ZERO);
+                campfire_item_matrix(POS, 0.0, CampfireSlot::new(facing_2d as u8).expect("bounded facing index")).transform_point3(Vec3::ZERO);
             assert!(
                 turned.distance(offset_slot) < 1e-5,
                 "facing {}: slot 0 at {turned:?} but slot {facing_2d} of a south \
@@ -4709,7 +4712,7 @@ mod tests {
     /// (`+Z`) becomes vertical, and its width axis (`+X`) stays horizontal.
     #[test]
     fn a_cooking_item_lies_flat_at_three_eighths_scale() {
-        let m = campfire_item_matrix([0, 0, 0], 0.0, 0);
+        let m = campfire_item_matrix([0, 0, 0], 0.0, CampfireSlot::new(0).expect("fixed campfire slot"));
         let normal = m.transform_vector3(Vec3::Z);
         let across = m.transform_vector3(Vec3::X);
         assert!(

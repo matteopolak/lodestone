@@ -7,40 +7,8 @@
 
 use lodestone_model::{ClientEvent, Difficulty, GameMode, Identifier, Text, TextSpan};
 
-/// One of the nine selectable hotbar positions.
-///
-/// Construct this at the boundary that receives a raw slot number. Once the
-/// value is a `HotbarSlot`, it can index the nine-slot HUD view without a
-/// modulo fallback or another range check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct HotbarSlot(u8);
+pub use lodestone_model::HotbarSlot;
 
-impl HotbarSlot {
-    /// The number of selectable hotbar positions.
-    pub const COUNT: u8 = 9;
-
-    /// Validates a native hotbar index in `0..`[`Self::COUNT`].
-    #[must_use]
-    pub const fn new(raw: u8) -> Option<Self> {
-        if raw < Self::COUNT {
-            Some(Self(raw))
-        } else {
-            None
-        }
-    }
-
-    /// This slot's native hotbar index, for a wire or UI boundary.
-    #[must_use]
-    pub const fn raw(self) -> u8 {
-        self.0
-    }
-
-    /// This slot's index into a nine-element hotbar array.
-    #[must_use]
-    pub const fn index(self) -> usize {
-        self.0 as usize
-    }
-}
 
 /// Player vitals and progression shown on the HUD.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,7 +55,7 @@ impl Default for HudState {
             xp_level: 0,
             xp_progress: 0.0,
             xp_total: 0,
-            selected_slot: HotbarSlot(0),
+            selected_slot: HotbarSlot::new(0).expect("zero is a valid hotbar slot"),
             game_mode: GameMode::Survival,
             previous_game_mode: None,
             difficulty: Difficulty::Normal,

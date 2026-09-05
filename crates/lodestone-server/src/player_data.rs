@@ -234,7 +234,7 @@ impl PlayerData {
             air_supply,
             experience,
             game_mode: Some(game_mode),
-            selected_slot: inventory.selected_hotbar_slot(),
+            selected_slot: inventory.selected_hotbar_slot().raw(),
             inventory: (0..PLAYER_NATIVE_SIZE)
                 .map(|slot| inventory.native(slot).cloned())
                 .collect(),
@@ -261,7 +261,9 @@ impl PlayerData {
         for (slot, stack) in self.inventory.iter().enumerate() {
             inventory.set_native(slot, stack.clone());
         }
-        inventory.set_selected_hotbar_slot(self.selected_slot);
+        if let Some(slot) = lodestone_model::HotbarSlot::new(self.selected_slot) {
+            inventory.select_hotbar_slot(slot);
+        }
         inventory
     }
 

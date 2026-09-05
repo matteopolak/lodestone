@@ -2697,7 +2697,13 @@ pub fn campfire_spawns(
         };
         let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
-        for (slot, item) in items {
+        for (raw_slot, item) in items {
+            let Some(slot) = u8::try_from(raw_slot)
+                .ok()
+                .and_then(lodestone_model::CampfireSlot::new)
+            else {
+                continue;
+            };
             out.push(lodestone_render::CampfireItemSpawn {
                 pos: block,
                 facing_yaw_deg,
@@ -6870,7 +6876,13 @@ pub fn shelf_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<ShelfItemSpawn> {
         }
         let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
-        for (slot, item) in items {
+        for (raw_slot, item) in items {
+            let Some(slot) = u8::try_from(raw_slot)
+                .ok()
+                .and_then(lodestone_model::ShelfSlot::new)
+            else {
+                continue;
+            };
             out.push(ShelfItemSpawn {
                 pos: block,
                 facing_yaw_deg,

@@ -30,6 +30,7 @@ pub mod item;
 pub mod math;
 pub mod path;
 pub mod registry;
+pub mod slot;
 pub mod text;
 
 pub use action::*;
@@ -43,6 +44,7 @@ pub use item::*;
 pub use math::*;
 pub use path::*;
 pub use registry::*;
+pub use slot::*;
 pub use text::*;
 
 #[cfg(test)]

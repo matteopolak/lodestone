@@ -1178,8 +1178,10 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             // entry readable by the standard client rather than namespaced
             // like the composter above.
             let mut slots: Vec<Option<ItemStack>> = Vec::with_capacity(5);
-            for index in 0..3 {
-                slots.push(b.bottle(index).map(|bottle| {
+            for raw in 0..lodestone_model::BrewingBottleSlot::COUNT {
+                let index = lodestone_model::BrewingBottleSlot::new(raw)
+                    .expect("bounded bottle loop");
+                slots.push(b.bottle_at(index).map(|bottle| {
                     ItemStack::new(
                         bottle_item_id(bottle.kind)
                             .parse()
@@ -1199,10 +1201,12 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             // The potion *identity* each bottle holds is a data component
             // (`minecraft:potion_contents`) that `items_to_nbt` deliberately
             // does not write, so it is carried alongside as three strings.
-            let potions: Vec<Nbt> = (0..3)
-                .map(|index| {
+            let potions: Vec<Nbt> = (0..lodestone_model::BrewingBottleSlot::COUNT)
+                .map(|raw| {
+                    let index = lodestone_model::BrewingBottleSlot::new(raw)
+                        .expect("bounded bottle loop");
                     Nbt::String(
-                        b.bottle(index)
+                        b.bottle_at(index)
                             .map(|bottle| bottle.potion.clone())
                             .unwrap_or_default(),
                     )

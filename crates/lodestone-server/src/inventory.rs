@@ -29,7 +29,7 @@
 use std::collections::{HashMap, HashSet};
 
 use lodestone_entity::equipment::EquipmentSlot;
-use lodestone_model::{ItemStack, RecipeBookType};
+use lodestone_model::{BundleItemSlot, HotbarSlot, ItemStack, MenuSlot, RecipeBookType};
 
 use crate::crafting::CraftingState;
 use lodestone_game::recipe::RecipeBookSettings;
@@ -46,7 +46,7 @@ pub const PLAYER_NATIVE_SIZE: usize = 41;
 pub const OFFHAND_NATIVE: usize = 40;
 
 /// Number of hotbar slots (vanilla's own selection-size constant).
-pub const HOTBAR_SIZE: u8 = 9;
+pub const HOTBAR_SIZE: u8 = HotbarSlot::COUNT;
 
 /// Native index of the boots slot (`EQUIPMENT_SLOT_MAPPING`, see the module doc).
 pub const FEET_NATIVE: usize = 36;
@@ -62,7 +62,7 @@ pub const HEAD_NATIVE: usize = 39;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerInventory {
     slots: Vec<Option<ItemStack>>,
-    selected_hotbar_slot: u8,
+    selected_hotbar_slot: HotbarSlot,
     /// The inventory screen's own 2×2 crafting grid. The menu keeps this in
     /// per-connection scratch space rather than in the native inventory, and
     /// this struct already reaches every caller that needs it.
@@ -122,14 +122,14 @@ pub struct PlayerInventory {
     /// `dispatch_play_packet`. A missing entry (never selected, or the last
     /// select cleared it with `-1`) reads as "nothing selected," matching
     /// a missing or out-of-range selection fallback.
-    selected_bundle: HashMap<i32, u32>,
+    selected_bundle: HashMap<MenuSlot, BundleItemSlot>,
 }
 
 impl Default for PlayerInventory {
     fn default() -> Self {
         Self {
             slots: vec![None; PLAYER_NATIVE_SIZE],
-            selected_hotbar_slot: 0,
+            selected_hotbar_slot: HotbarSlot::new(0).expect("zero is a valid hotbar slot"),
             crafting: CraftingState::player(),
             click_state: crate::container_click::ClickState::default(),
             table_crafting: None,
@@ -171,7 +171,7 @@ impl PlayerInventory {
 
     /// The currently selected hotbar slot, `0..HOTBAR_SIZE`.
     #[must_use]
-    pub fn selected_hotbar_slot(&self) -> u8 {
+    pub fn selected_hotbar_slot(&self) -> HotbarSlot {
         self.selected_hotbar_slot
     }
 
@@ -183,18 +183,22 @@ impl PlayerInventory {
     /// this crate's "malformed packet drops the effect, not the connection"
     /// convention — e.g. `WorldAdminState`'s difficulty/game-rule decode).
     pub fn set_selected_hotbar_slot(&mut self, slot: u8) -> bool {
-        if slot < HOTBAR_SIZE {
-            self.selected_hotbar_slot = slot;
-            true
-        } else {
-            false
-        }
+        let Some(slot) = HotbarSlot::new(slot) else {
+            return false;
+        };
+        self.select_hotbar_slot(slot);
+        true
+    }
+
+    /// Stores a hotbar position already validated at a caller's boundary.
+    pub fn select_hotbar_slot(&mut self, slot: HotbarSlot) {
+        self.selected_hotbar_slot = slot;
     }
 
     /// The item in the currently selected hotbar slot.
     #[must_use]
     pub fn selected_item(&self) -> Option<&ItemStack> {
-        self.native(usize::from(self.selected_hotbar_slot))
+        self.native(self.selected_hotbar_slot.index())
     }
 
     /// Every combat-relevant equipment slot and the item in it, ready to feed
@@ -213,7 +217,7 @@ impl PlayerInventory {
         // Native indices per this module's own doc comment: feet 36, legs 37,
         // chest 38, head 39, off-hand 40, main hand = the *selected* hotbar slot.
         let pairs = [
-            (EquipmentSlot::MainHand, usize::from(self.selected_hotbar_slot)),
+            (EquipmentSlot::MainHand, self.selected_hotbar_slot.index()),
             (EquipmentSlot::OffHand, OFFHAND_NATIVE),
             (EquipmentSlot::Head, HEAD_NATIVE),
             (EquipmentSlot::Chest, CHEST_NATIVE),
@@ -265,6 +269,14 @@ impl PlayerInventory {
     /// Returns whether the slot was recognised, so a caller can log a dropped
     /// entry rather than silently discarding it.
     pub fn apply_menu_slot_change(&mut self, menu_slot: i32, item: Option<ItemStack>) -> bool {
+        let Some(menu_slot) = MenuSlot::from_raw(menu_slot) else {
+            return false;
+        };
+        self.apply_menu_slot(menu_slot, item)
+    }
+
+    /// Applies a change to an already validated menu slot.
+    pub fn apply_menu_slot(&mut self, menu_slot: MenuSlot, item: Option<ItemStack>) -> bool {
         if menu_slot == PLAYER_CRAFT_RESULT_MENU_SLOT {
             return false;
         }
@@ -310,24 +322,28 @@ impl PlayerInventory {
     /// `selected < 0` clears it, using `-1` as the no-selection value,
     /// matching [`Self::selected_bundle_item`]'s read side.
     pub fn set_selected_bundle_item(&mut self, slot: i32, selected: i32) {
-        match u32::try_from(selected) {
-            Ok(selected) => {
-                self.selected_bundle.insert(slot, selected);
-            }
-            Err(_) => {
-                self.selected_bundle.remove(&slot);
-            }
+        let Some(slot) = MenuSlot::from_raw(slot) else {
+            return;
+        };
+        let selected = BundleItemSlot::from_wire(selected);
+        self.set_bundle_item_selection(slot, selected);
+    }
+
+    /// Stores a bundle selection whose menu slot and non-sentinel item index
+    /// were validated at the packet boundary.
+    pub fn set_bundle_item_selection(&mut self, slot: MenuSlot, selected: Option<BundleItemSlot>) {
+        if let Some(selected) = selected {
+            self.selected_bundle.insert(slot, selected);
+        } else {
+            self.selected_bundle.remove(&slot);
         }
     }
 
     /// The last selected bundle-content index for menu slot `slot`, if any —
     /// [`crate::container_click::SelectedBundleIndex`]'s read side.
     #[must_use]
-    pub fn selected_bundle_item(&self, slot: usize) -> Option<usize> {
-        i32::try_from(slot)
-            .ok()
-            .and_then(|slot| self.selected_bundle.get(&slot))
-            .map(|&selected| selected as usize)
+    pub fn selected_bundle_item(&self, slot: MenuSlot) -> Option<BundleItemSlot> {
+        self.selected_bundle.get(&slot).copied()
     }
 
     /// Clears every tracked bundle selection — a menu close, mirroring
@@ -693,28 +709,28 @@ const ITEMS_SIZE: usize = 36;
 /// doc comment for the table this implements.
 /// Menu slot of the player inventory screen's crafting **result**
 /// (`0`). Server-derived; never client-writable.
-pub const PLAYER_CRAFT_RESULT_MENU_SLOT: i32 = 0;
+pub const PLAYER_CRAFT_RESULT_MENU_SLOT: MenuSlot = MenuSlot::from_index(0).expect("zero fits a menu slot");
 
 /// The 2×2 grid cell a player-inventory menu slot addresses, if any.
 ///
 /// The player-inventory menu lays the grid out as menu slots `1..=4` in row-major
 /// order immediately after the result, so cell index is `menu_slot - 1`.
 #[must_use]
-pub fn player_craft_grid_cell(menu_slot: i32) -> Option<usize> {
-    match menu_slot {
-        1..=4 => usize::try_from(menu_slot - 1).ok(),
+pub fn player_craft_grid_cell(menu_slot: MenuSlot) -> Option<usize> {
+    match menu_slot.index() {
+        1..=4 => Some(menu_slot.index() - 1),
         _ => None,
     }
 }
 
-fn player_menu_native_index(menu_slot: i32) -> Option<usize> {
-    match menu_slot {
+fn player_menu_native_index(menu_slot: MenuSlot) -> Option<usize> {
+    match menu_slot.index() {
         5 => Some(39), // head
         6 => Some(38), // chest
         7 => Some(37), // legs
         8 => Some(36), // feet
-        9..=35 => usize::try_from(menu_slot).ok(),
-        36..=44 => usize::try_from(menu_slot - 36).ok(),
+        9..=35 => Some(menu_slot.index()),
+        36..=44 => Some(menu_slot.index() - 36),
         45 => Some(OFFHAND_NATIVE),
         _ => None,
     }
@@ -914,7 +930,7 @@ mod tests {
             let menu = window_zero_menu_slot(native)
                 .unwrap_or_else(|| panic!("native {native} has no window-0 menu slot"));
             assert_eq!(
-                player_menu_native_index(menu),
+                player_menu_native_index(MenuSlot::from_raw(menu).expect("menu mapping is non-negative")),
                 Some(native),
                 "native {native} -> menu {menu} must map back to itself"
             );

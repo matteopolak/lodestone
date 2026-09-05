@@ -432,7 +432,7 @@ fn find_slot_matching_item(inventory: &PlayerInventory, stack: &ItemStack) -> Op
 /// wrapping. This crate has no enchantment model, so there is no second pass
 /// for an unenchanted slot; the first candidate is also the final fallback.
 fn suitable_hotbar_slot(inventory: &PlayerInventory) -> u8 {
-    let selected = inventory.selected_hotbar_slot();
+    let selected = inventory.selected_hotbar_slot().raw();
     for offset in 0..HOTBAR_SIZE {
         let index = (selected + offset) % HOTBAR_SIZE;
         if inventory.native(usize::from(index)).is_none() {
@@ -466,11 +466,15 @@ pub(crate) fn try_pick_item(
     match find_slot_matching_item(inventory, &stack) {
         Some(native) if native < usize::from(HOTBAR_SIZE) => {
             let slot = u8::try_from(native).expect("native < HOTBAR_SIZE always fits u8");
-            inventory.set_selected_hotbar_slot(slot);
+            inventory.select_hotbar_slot(
+                lodestone_model::HotbarSlot::new(slot).expect("hotbar scan stays in range"),
+            );
         }
         Some(native) => {
             let suitable = suitable_hotbar_slot(inventory);
-            inventory.set_selected_hotbar_slot(suitable);
+            inventory.select_hotbar_slot(
+                lodestone_model::HotbarSlot::new(suitable).expect("hotbar scan stays in range"),
+            );
             let suitable_native = usize::from(suitable);
             let displaced = inventory.native(suitable_native).cloned();
             let picked = inventory.native(native).cloned();
@@ -481,7 +485,9 @@ pub(crate) fn try_pick_item(
         }
         None if creative => {
             let suitable = suitable_hotbar_slot(inventory);
-            inventory.set_selected_hotbar_slot(suitable);
+            inventory.select_hotbar_slot(
+                lodestone_model::HotbarSlot::new(suitable).expect("hotbar scan stays in range"),
+            );
             let suitable_native = usize::from(suitable);
             if let Some(displaced) = inventory.native(suitable_native).cloned() {
                 // The first empty slot in `0..36` receives a displaced stack.
@@ -502,7 +508,7 @@ pub(crate) fn try_pick_item(
         None => {}
     }
     PickOutcome {
-        selected: inventory.selected_hotbar_slot(),
+        selected: inventory.selected_hotbar_slot().raw(),
         changed,
     }
 }

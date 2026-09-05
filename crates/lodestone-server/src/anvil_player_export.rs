@@ -143,7 +143,7 @@ fn to_anvil_player(player: &NativePlayerData) -> PlayerData {
         selected_slot: player
             .inventory
             .as_ref()
-            .map_or(0, crate::inventory::PlayerInventory::selected_hotbar_slot),
+            .map_or(0, |inventory| inventory.selected_hotbar_slot().raw()),
         inventory: player
             .inventory
             .as_ref()

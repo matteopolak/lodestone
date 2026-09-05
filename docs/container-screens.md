@@ -33,6 +33,12 @@ player's own inventory (window 0) is `0` result, `1..=4` 2×2 craft, `5..=8` arm
 `36..=44` hotbar, `45` offhand. Special layouts reposition slots pixel-for-pixel (e.g. the anvil's two
 inputs and result do not sit in a row) but keep the same generic quick-move regions underneath.
 
+Bounded slot domains live in `lodestone_model`: `HotbarSlot` covers the nine native selections,
+`MenuSlot` names a non-negative protocol-sized menu cell, and `BundleItemSlot`, `BrewingBottleSlot`,
+and `CrafterSlot` keep their distinct fixed or dynamic ranges from being mixed. Raw packet values and
+the outside-click sentinel remain at the protocol/UI boundary; validate them there, then pass the
+typed `*_at` or selection APIs through gameplay and rendering code.
+
 The panel background is real vanilla art — `ContainerBackground` stitches the actual
 `textures/gui/container/*.png` sheets (these are hand-placed sub-rect blits at native size, not
 `GuiScaling`-driven sprites, and are not part of `GuiAtlas`). With no background attached, a flat
