@@ -75,6 +75,10 @@ Protocols 498, 578, and 754 enforce the same boundary through their own packet-i
 Protocol 404 applies that boundary at the same shared consumer after its own registry selection.
 Protocol 47 completes the same held-item action across the remaining hosted family.
 
+Hosted protocols 498, 578, and 754 use their own clientbound and serverbound packet ids for the
+shared signed 64-bit keep-alive body. Challenges and exact replies reach the common connection
+liveness state; malformed, trailing, or pre-Play replies cannot acknowledge a challenge.
+
 ## Client compatibility roadmap
 
 - **Secure chat and sessions are wired.** The client obtains and announces a signing session,

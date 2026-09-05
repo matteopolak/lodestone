@@ -310,6 +310,70 @@ fn registry_selected_14_era_hotbar_selection_reaches_the_inventory_consumer() {
 }
 
 #[test]
+fn registry_selected_14_era_keep_alive_round_trip_reaches_the_liveness_consumer() {
+    const ID: i64 = 0x0102_0304_0506_0708;
+    const BODY: [u8; 8] = ID.to_be_bytes();
+
+    for (protocol_version, clientbound_id, serverbound_id) in [
+        (
+            498,
+            packet_ids_498::play::clientbound::KEEP_ALIVE,
+            packet_ids_498::play::serverbound::KEEP_ALIVE,
+        ),
+        (
+            578,
+            play::clientbound::KEEP_ALIVE,
+            play::serverbound::KEEP_ALIVE,
+        ),
+        (
+            754,
+            packet_ids::play::clientbound::KEEP_ALIVE,
+            packet_ids::play::serverbound::KEEP_ALIVE,
+        ),
+    ] {
+        let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+            .expect("every hosted 1.14-era protocol must select a server protocol");
+        let ServerDirective::Send { packet_id, payload } = protocol.encode_keep_alive(ID) else {
+            panic!("protocol {protocol_version} must emit a keep-alive challenge");
+        };
+        assert_eq!(packet_id, clientbound_id);
+        assert_eq!(payload, BODY);
+        assert_eq!(
+            protocol.decode(State::Play, serverbound_id, &BODY),
+            ServerBound::KeepAlive { id: ID },
+        );
+        assert_eq!(
+            protocol.decode(State::Play, serverbound_id, &[BODY.as_slice(), &[0]].concat()),
+            ServerBound::Ignored,
+            "a trailing byte must not acknowledge the outstanding challenge",
+        );
+        assert_eq!(
+            protocol.decode(State::Login, serverbound_id, &BODY),
+            ServerBound::Ignored,
+            "the reply must not bypass the Play-state boundary",
+        );
+
+        let adapter = adapter_for(protocol_version);
+        let Some((encoded_id, encoded_body)) = adapter
+            .encode_action(
+                ConnectionState::Play,
+                &ClientAction::KeepAliveResponse { id: ID },
+            )
+            .expect("the era adapter must encode keep-alive replies")
+        else {
+            panic!("keep-alive response must produce a packet");
+        };
+        assert_eq!(encoded_id, serverbound_id);
+        assert_eq!(encoded_body, BODY);
+        assert_eq!(
+            protocol.decode(State::Play, encoded_id, &encoded_body),
+            ServerBound::KeepAlive { id: ID },
+            "the client response must reach the registry-selected liveness consumer",
+        );
+    }
+}
+
+#[test]
 fn protocol_498_lifts_its_literal_block_use_body() {
     assert_block_use_lift(&V498ServerProtocol, packet_ids_498::play::serverbound::BLOCK_PLACE);
 }
