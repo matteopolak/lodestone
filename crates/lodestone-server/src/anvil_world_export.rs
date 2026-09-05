@@ -85,13 +85,12 @@ impl WorldExportInput {
     }
 }
 
-/// One complete all-native terrain selection captured for reviewed export.
+/// One complete native terrain selection captured for reviewed export.
 ///
 /// The snapshot owns decoded records rather than just their keys. A later
 /// native write therefore cannot replace a reviewed column between preflight
-/// and [`export_native_world_snapshot`]. It covers every committed native
-/// terrain record at capture time; a caller needing a narrower export should
-/// continue to use [`WorldExportInput`] with [`export_world_directory`].
+/// and [`export_native_world_snapshot`]. Callers can capture either an
+/// explicit [`WorldExportInput`] selection or every committed terrain record.
 #[derive(Debug)]
 pub struct NativeWorldExportSnapshot {
     input: WorldExportInput,
@@ -286,6 +285,46 @@ pub fn preflight_world_export(
     input: &WorldExportInput,
 ) -> Result<WorldExportReport, Error> {
     Ok(report_for(&load_selected(storage, input)?))
+}
+
+/// Captures one explicit native terrain selection for reviewed export.
+///
+/// Unlike [`preflight_world_export`] followed by [`export_world_directory`],
+/// this holds the storage lock from the reviewed selection through every typed
+/// decode, then owns the resulting records. A later incremental native write
+/// cannot replace a selected column before [`export_native_world_snapshot`]
+/// publishes it. The supplied input remains the snapshot's complete output
+/// contract and was already validated by [`WorldExportInput::new`].
+pub fn snapshot_world_export(
+    storage: &WorldStorage,
+    input: &WorldExportInput,
+) -> Result<NativeWorldExportSnapshot, Error> {
+    let coordinates = input
+        .chunks
+        .iter()
+        .map(|coordinate| lodestone_storage::NativeChunkCoordinate {
+            column_x: coordinate.x,
+            column_z: coordinate.z,
+        })
+        .collect::<Vec<_>>();
+    let selected = storage
+        .native_chunk_records_for(&coordinates, input.min_y, input.height)
+        .map_err(Error::Storage)?
+        .into_iter()
+        .map(|snapshot| {
+            (
+                ChunkCoordinate {
+                    x: snapshot.coordinate.column_x,
+                    z: snapshot.coordinate.column_z,
+                },
+                snapshot.record,
+            )
+        })
+        .collect();
+    Ok(NativeWorldExportSnapshot {
+        input: input.clone(),
+        selected,
+    })
 }
 
 /// Captures every complete committed native terrain record for a reviewed export.
