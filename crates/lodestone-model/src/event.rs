@@ -4155,7 +4155,11 @@ pub fn route(event: &ClientEvent) -> Route {
         // (`NetUpdate::SignEditorOpened`, consumed by `sim/net_apply.rs`); this
         // entry used to live in the "claimed by nothing" block below, stale
         // from before that consumer landed.
-        | ClientEvent::SignEditorOpened { .. } => SHELL,
+        | ClientEvent::SignEditorOpened { .. }
+        // The book-open signal follows the same shell-only path: `forward`
+        // turns it into `NetUpdate::BookOpened`, and `Sim` holds it until the
+        // app projects the selected hand into the book screen.
+        | ClientEvent::BookOpened { .. } => SHELL,
         // Chat reaches the shell feed *and* the driver's signed-message
         // acknowledgement valve.
         ClientEvent::Chat { .. } => Route {
@@ -4324,7 +4328,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::ItemCooldown { .. }
         | ClientEvent::PlayerRotationSet { .. }
         | ClientEvent::CameraSet { .. }
-        | ClientEvent::BookOpened { .. }
         | ClientEvent::SoundStopped { .. }
         | ClientEvent::PlayerCombatEntered
         | ClientEvent::PlayerCombatEnded { .. }
