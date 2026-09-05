@@ -549,7 +549,7 @@ also requests the isolated native shim, the shared bootstrap loader first resolv
 `lodestone.bridge.IsolatedPaperShim`, verifies its exact static native
 `blockStateId(int, int, int): int`, `serverTickCount(): long`, and
 `setBlockStateId(int, int, int, int): int`, `currentPluginName(): String`, and
-`currentPluginVersion(): String`, and
+`currentPluginVersion(): String`, `currentPluginMainClass(): String`, and
 `currentPluginDescriptor(): IsolatedPluginDescriptor` declarations, then registers the full
 generated callback list before it loads the bootstrap or plugin entry. Each plugin child inherits
 that one registration and definition, preventing the same Java API type from being separately
@@ -601,14 +601,15 @@ defining loader. It supplies **no** server object, plugin metadata object, callb
 system, or compatibility contract. It exists to prove the retained-object and failure-isolation
 mechanics, not to make an ordinary plugin usable.
 The native-surface input permits that same bounded construction path after its shim is installed.
-Its name and version queries, plus `currentPluginDescriptor()`, are available only while the matching
-entry's constructor, `onEnable`, or `onDisable` is executing on the adapter worker. The descriptor is
-a shim-defined `lodestone.bridge.IsolatedPluginDescriptor` value whose checked constructor and three
-accessors carry the validated name, version, and main-class binary name. It is not a Bukkit or Paper
-metadata class and the bridge requires no server, event, lifecycle, or mutating method on it. Each
-query reads a worker-local stack, not a JVM property, field, world port, or server object; outside one
-of those calls it fails with a Java error. This gives a retained entry truthful identity metadata
-without implying a Bukkit/Paper metadata or server facade.
+Its name, version, and main-class queries, plus `currentPluginDescriptor()`, are available only
+while the matching entry's constructor, `onEnable`, or `onDisable` is executing on the adapter
+worker. The descriptor is a shim-defined `lodestone.bridge.IsolatedPluginDescriptor` value whose
+checked constructor and three accessors carry the validated name, version, and main-class binary
+name. It is not a Bukkit or Paper metadata class and the bridge requires no server, event,
+lifecycle, or mutating method on it. Each query reads a worker-local stack, not a JVM property,
+field, world port, or server object; outside one of those calls it fails with a Java error. This
+gives a retained entry truthful identity metadata without implying a Bukkit/Paper metadata or
+server facade.
 `construct_entries` attempts eligible entries in discovery order; a constructor exception changes only
 that entry to `Failed` with a `Construct` diagnostic and later eligible entries still run. The status
 sequence can continue through the equally narrow retained-object callbacks: `enable_entries` calls
