@@ -3857,7 +3857,8 @@ pub struct Route {
     /// rather than "nothing I happened to check". Exactly three such places:
     ///
     /// * `Driver::emit`'s auto-response switch (keep-alive, chat acknowledgement,
-    ///   `player_loaded`, auto-respawn) — a protocol reply, not screen state.
+    ///   `player_loaded`, auto-respawn, transfer outcome) — a protocol reply or
+    ///   session result, not screen state.
     /// * `LocalEcho::apply`, which is down to `TeleportPlayer` alone.
     /// * `SharedState::apply`'s own `TimeChanged` arm, which writes `WorldTime`
     ///   ahead of consulting either `handles_event`.
@@ -4210,6 +4211,10 @@ pub fn route(event: &ClientEvent) -> Route {
         // before the shell event loop runs, so this is a client-internal
         // consumer rather than an island.
         ClientEvent::Ping { .. } => CLIENT,
+        // `Driver::emit` records the existing `SessionOutcome::Transferred`
+        // result before surfacing this event, so a caller can reconnect with
+        // the target and the driver's preserved cookie store.
+        ClientEvent::TransferRequested { .. } => CLIENT,
         // `SharedState::apply`'s own arm, ahead of both `handles_event` calls:
         // straight into the `WorldTime` resource.
         ClientEvent::TimeChanged { .. } => CLIENT,
@@ -4336,7 +4341,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::PlayerCombatEnded { .. }
         | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
-        | ClientEvent::TransferRequested { .. }
         | ClientEvent::CookieRequested { .. }
         | ClientEvent::CookieStored { .. }
         | ClientEvent::ResourcePackPushed { .. }
@@ -4590,6 +4594,15 @@ mod route_tests {
         let r = route(&time);
         assert!(!r.ingest && !r.session && !r.shell, "no router claims it");
         assert!(r.client, "but `SharedState::apply` has its own arm for it");
+        assert!(!r.is_island(), "so it is not an island");
+
+        let transfer = ClientEvent::TransferRequested {
+            host: "backend.example".into(),
+            port: 25565,
+        };
+        let r = route(&transfer);
+        assert!(!r.ingest && !r.session && !r.shell, "no router claims it");
+        assert!(r.client, "but `Driver::emit` records the transfer outcome");
         assert!(!r.is_island(), "so it is not an island");
 
         assert!(
