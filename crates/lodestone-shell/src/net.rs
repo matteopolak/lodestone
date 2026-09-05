@@ -151,6 +151,22 @@ impl EcsCommandSink {
         lodestone_ecs::commands::CommandSource::player(caller.uuid, caller.username.clone())
     }
 
+    /// Publish the server's already-authenticated level to the permission
+    /// resource before resolving a plugin command. The registry keeps grants,
+    /// groups, and custom resolver policy; this only supplies the op-status
+    /// input that its default-node fallback needs.
+    fn sync_direct_permission_level(
+        world: &mut lodestone_ecs::ecs::world::World,
+        caller: &lodestone_server::CommandCaller,
+    ) {
+        if let Some(mut permissions) = world.get_resource_mut::<lodestone_ecs::Permissions>() {
+            permissions.store.set_level(
+                caller.uuid,
+                lodestone_ecs::PermissionLevel::by_id(i32::from(caller.permission_level)),
+            );
+        }
+    }
+
     fn contextual_source(
         request: &lodestone_server::ContextualCommandRequest,
     ) -> lodestone_ecs::commands::CommandSource {
@@ -195,6 +211,7 @@ impl lodestone_server::CommandSink for EcsCommandSink {
     ) -> lodestone_server::CommandResponse {
         let source = Self::direct_source(caller);
         lodestone_ecs::hold_write(&self.ecs, |world| {
+            Self::sync_direct_permission_level(world, caller);
             match lodestone_ecs::commands::dispatch(world, &source, command) {
                 Ok(lodestone_ecs::commands::CommandOutcome::Success(_)) => {
                     lodestone_server::CommandResponse::ran()
@@ -5219,6 +5236,7 @@ fn forward(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // `unique_username` is a `lodestone-testsupport` helper and this crate now
     // depends on that crate **only** as a dev dependency, so this `use` is
@@ -5227,6 +5245,64 @@ mod tests {
     // `crate::offline_identity`'s module docs and
     // `tests/no_production_source_names_testsupport.rs`.
     use lodestone_testsupport::unique_username;
+
+    #[test]
+    fn integrated_plugin_commands_use_the_server_callers_permission_level() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut command = lodestone_ecs::PluginCommand::new("bridge");
+        command.permission("bridge.use");
+        let root = command.root();
+        let calls_for_handler = Arc::clone(&calls);
+        command.on_execute(root, move |_| {
+            calls_for_handler.fetch_add(1, Ordering::SeqCst);
+            lodestone_ecs::CommandOutcome::ok()
+        });
+        let ecs = lodestone_ecs::new_handle();
+        lodestone_ecs::hold_write(&ecs, |world| {
+            world.insert_resource(lodestone_ecs::CommandRegistry::default());
+            world.insert_resource(lodestone_ecs::Permissions::default());
+            world
+                .resource_mut::<lodestone_ecs::CommandRegistry>()
+                .register(command)
+                .expect("one command must register");
+        });
+        let sink = EcsCommandSink { ecs };
+        let caller = lodestone_server::CommandCaller::with_permission_level(
+            Uuid::from_u128(47),
+            "operator",
+            2,
+        );
+
+        assert!(matches!(
+            lodestone_server::CommandSink::run(&sink, &caller, "bridge"),
+            lodestone_server::CommandResponse::Ran { .. }
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the permission-gated handler must have run"
+        );
+        lodestone_ecs::hold_read(&sink.ecs, |world| {
+            assert_eq!(
+                world.resource::<lodestone_ecs::Permissions>().level(
+                    lodestone_ecs::PermissionSubject::Player(caller.uuid),
+                ),
+                lodestone_ecs::PermissionLevel::Gamemasters,
+                "the bridge must preserve the server level, not merely infer a boolean op state",
+            );
+        });
+
+        let non_op = lodestone_server::CommandCaller::new(caller.uuid, "operator");
+        assert!(matches!(
+            lodestone_server::CommandSink::run(&sink, &non_op, "bridge"),
+            lodestone_server::CommandResponse::Refused { .. }
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a subsequent level-zero call must revoke the default-op node"
+        );
+    }
 
     /// Every preset must refuse uniformly once the hosting protocol's
     /// declared worldgen scope stops matching what this crate's embedded
