@@ -34,6 +34,16 @@ the scheduled delay, gravity, drag, and landing arithmetic separately from the
 server implementation, so it exercises production tick scheduling and falling
 entities rather than an encode/decode round trip.
 
+`differential_generated_text_json` is a separate parser lane. It builds a
+bounded grammar for literal, scalar, sequence, and `extra` chat components,
+serializes each value with `serde_json`, and compares production
+`Text::from_json(...).to_plain_string()` to an independent left-to-right plain
+text fold. The fixed seed and bounded case count make its corpus repeatable;
+the test's wrong-reader control verifies that a mismatch produces a shrunk,
+nonempty grammar value. It deliberately excludes translation and styling:
+those require a language-table or rendering oracle, while this lane isolates
+the JSON tree shape, scalar conversion, ordering, and escaping boundary.
+
 The falling-block generator deliberately gives every generated step a zero
 tick gap. Its source is a setup fixture, while the server retains a chunk
 column after its first tick; extending this lane with later edits requires a
