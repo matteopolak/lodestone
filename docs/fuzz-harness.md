@@ -25,6 +25,20 @@ the `rcon-oracle` feature is enabled. Both return a state only from the
 region's caller-supplied candidate list, so the constrained server probe and
 the in-process reader compare the same alphabet.
 
+Generated scenarios use the test-only `GenerationDomain` and `SearchBudget`
+above that replay layer. A fixed ChaCha seed produces bounded, nondecreasing
+tick sequences; the first disagreement is semantically shrunk without an
+elapsed-time cutoff. The falling-block scenario uses this against an
+`IntegratedServer` with two independent columns. Its expected world computes
+the scheduled delay, gravity, drag, and landing arithmetic separately from the
+server implementation, so it exercises production tick scheduling and falling
+entities rather than an encode/decode round trip.
+
+The falling-block generator deliberately gives every generated step a zero
+tick gap. Its source is a setup fixture, while the server retains a chunk
+column after its first tick; extending this lane with later edits requires a
+public world-mutation path rather than writing the fixture source directly.
+
 ## How to change it
 
 Add a new fixed case by constructing `BlockStateRegion` and
@@ -37,8 +51,11 @@ comparison is capable of observing a mismatch.
 
 Do not create a second replay loop for live tests. Implement `WorldOracle` or
 use `RconOracle`, so real and hermetic cases share the tick ordering and
-first-divergence semantics. Random generation and shrinking belong above this fixed
-replay layer and are intentionally out of scope here.
+first-divergence semantics. Put a generated case above this fixed replay layer:
+give `GenerationDomain` a finite, independently justified action alphabet and
+set every `SearchBudget` field explicitly. Keep a generated test's case and
+tick bounds small enough for an ordinary foreground test run, and retain a
+wrong-read detector control for its comparison path.
 
 ## Configuration
 
@@ -48,6 +65,10 @@ work. `settle_ticks` is part of the replay and allows delayed world reactions
 to be compared after the last action. Enable Cargo feature `rcon-oracle` only
 for a real-server `RconOracle` run; hermetic replay tests require no container
 or network service.
+
+`SearchBudget` fixes a generated test's seed, case count, and shrink-attempt
+limit. `GenerationDomain` bounds step count and tick gaps before any oracle is
+created; its generated and replayed horizons are capped at 4,096 ticks.
 
 ## Dependencies
 
