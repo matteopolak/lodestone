@@ -373,10 +373,10 @@ impl Sim {
     /// record is dropped by that arm's `sync_block_entity` — it only clears the
     /// prediction from [`Placement`]'s ledger and asks whether the server agreed.
     ///
-    /// Both halves matter. Without the clear the ledger grows without bound for the
-    /// whole session, one entry per right-click, because nothing else drains it (the
-    /// `block_changed_ack` sequence is decoded by the adapter but has no shell
-    /// consumer). Without the answer a refusal is invisible.
+    /// Both halves matter. A same-position block update compares a prediction to
+    /// the server's actual block; the sequence acknowledgement separately retires
+    /// processed predictions that need no correction. Without either, the ledger
+    /// grows for the whole session, one entry per optimistic placement.
     pub(crate) fn reconcile_predictions(&mut self, sx: i32, sy: i32, sz: i32, blocks: &[[u8; 3]]) {
         let pending: Vec<BlockPos> = self.read(|w| {
             w.resource::<PlacementPredictor>()
@@ -419,6 +419,32 @@ impl Sim {
                     server_block
                 );
             }
+        }
+    }
+
+    /// Retire placement predictions the server has acknowledged through
+    /// `sequence`.
+    ///
+    /// `BlockChangedAck` carries no block state, so it cannot replace
+    /// [`Self::reconcile_predictions`]: the latter owns the disagreement check
+    /// after an authoritative block write. This is the other half of the protocol
+    /// contract. It clears processed predictions whose state already agrees in
+    /// the client-owned world and releases every older snapshot in the same
+    /// acknowledgement window.
+    pub(crate) fn settle_placement_predictions(&mut self, sequence: i32) {
+        let settled = self.write(|world| {
+            world
+                .resource_mut::<PlacementPredictor>()
+                .0
+                .acknowledge(sequence)
+        });
+        if !settled.is_empty() {
+            tracing::debug!(
+                target: "placement",
+                sequence,
+                settled = settled.len(),
+                "server processed optimistic block placements"
+            );
         }
     }
 }

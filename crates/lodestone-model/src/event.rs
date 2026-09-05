@@ -4353,12 +4353,22 @@ pub fn route(event: &ClientEvent) -> Route {
         // Do not "fix" one by flipping a flag: the flag only says who is *asked*,
         // and a router that is asked but has no system for the event drops it just
         // as silently. Write the system, then the flag, in one commit.
-        ClientEvent::BlockChangedAck { .. }
-        | ClientEvent::ChunkCacheCenterChanged { .. }
+        // The placement predictor owns the single prediction sequence and its
+        // pending snapshot ledger. `net::forward` carries this acknowledgement
+        // to `Sim::settle_placement_predictions`, which retires every snapshot
+        // the server has processed; leaving the event unclaimed made that ledger
+        // grow once for every optimistic placement for the whole session.
+        ClientEvent::BlockChangedAck { .. } => SHELL,
+        // This is a local-player correction, but it belongs on the shell stream
+        // rather than `session`: `PhysicsState` is the camera/raycast/egress pose
+        // owner, and `net::forward` gives its frame-thread consumer both the
+        // absolute-versus-relative flags. A session scalar would compile and leave
+        // the rendered view pointed at the old direction.
+        ClientEvent::PlayerRotationSet { .. } => SHELL,
+        ClientEvent::ChunkCacheCenterChanged { .. }
         | ClientEvent::ChunkCacheRadiusChanged { .. }
         | ClientEvent::SimulationDistanceChanged { .. }
         | ClientEvent::ItemCooldown { .. }
-        | ClientEvent::PlayerRotationSet { .. }
         | ClientEvent::CameraSet { .. }
         | ClientEvent::SoundStopped { .. }
         | ClientEvent::PlayerCombatEntered
@@ -4604,6 +4614,34 @@ mod route_tests {
             "the pop is consumed before generic forwarding"
         );
         assert!(!r.must_forward());
+        assert!(!r.is_island());
+    }
+
+    /// A block-change acknowledgement is not merely protocol bookkeeping: it
+    /// releases the placement predictor's pending snapshots after the server has
+    /// applied their authoritative block writes. The shell route makes that
+    /// lifecycle consumer visible to the exhaustive table.
+    #[test]
+    fn block_changed_ack_reaches_the_placement_prediction_consumer() {
+        let r = route(&ClientEvent::BlockChangedAck { sequence: 7 });
+        assert!(r.shell, "the shell owns the placement prediction ledger");
+        assert!(r.must_forward(), "the acknowledgement needs a NetUpdate arm");
+        assert!(!r.is_island());
+    }
+
+    /// The rotation correction travels to the frame-thread pose owner. Its
+    /// relative flags are meaningful only against that live pose, so the route
+    /// must be the shell stream rather than a passive session record.
+    #[test]
+    fn player_rotation_set_reaches_the_shell_pose_consumer() {
+        let r = route(&ClientEvent::PlayerRotationSet {
+            y_rot: 20.0,
+            relative_y: true,
+            x_rot: -5.0,
+            relative_x: false,
+        });
+        assert!(r.shell, "the shell owns the drawn and egress pose");
+        assert!(r.must_forward(), "the correction needs a NetUpdate arm");
         assert!(!r.is_island());
     }
 
