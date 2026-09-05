@@ -144,9 +144,15 @@ is an error rather than a substitution.
 
 `tests/server_integration.rs` is the consumer-path control: a registry-selected
 server and the 762 adapter complete login, render the fixture chunk, and apply
-a block-break update over an in-memory connection. `tests/server_protocol.rs`
-also checks the packet ids present in the real 1.19.4 capture and decodes the
-hosted join and chunk bodies with the production codecs. This is not
+a block-break update over an in-memory connection. It also moves across a chunk
+boundary, proving the host's four serverbound movement shapes reach the view
+recentre consumer rather than merely decoding into an unused value. The host
+lifts `position`, `position_look`, `look`, and status-only `flying`; position
+samples update streaming, fall tracking, and the server's player snapshot,
+while look-only and status-only samples preserve their narrower consumers.
+`tests/server_protocol.rs` checks the packet ids present in the real 1.19.4
+capture and decodes literal movement bodies with the production codecs,
+including trailing-byte and unknown-id negative controls. This is not
 real-client validation; a separately run 1.19.4 client remains the proof that
 the complete join registry and empty-light handling are accepted outside the
 in-process adapter.

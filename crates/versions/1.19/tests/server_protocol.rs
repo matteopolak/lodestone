@@ -1,6 +1,6 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
 use lodestone_data::block_states;
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_19::V762ServerProtocol;
 use lodestone_v1_19::packet_ids::{handshaking, play};
@@ -139,4 +139,84 @@ fn protocol_762_uses_its_capture_ids_and_encodes_a_registry_shaped_chunk() {
         .try_encode_block_update(3, 100, 5, "minecraft:creaking_heart")
         .expect_err("a newer state must not substitute into a protocol-762 packet");
     assert!(error.to_string().contains("protocol-762"));
+}
+
+#[test]
+fn protocol_762_lifts_all_four_movement_shapes_from_literal_bodies() {
+    let protocol = V762ServerProtocol;
+
+    // Captured-width wire bodies, written independently of the packet codecs:
+    // f64 x/y/z, then (where present) f32 yaw/pitch, then on-ground.
+    let position = [
+        0x40, 0x31, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // 17.25
+        0x40, 0x51, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, // 70.0
+        0xc0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // -2.5
+        0x01,
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::POSITION, &position),
+        ServerBound::PlayerMoved {
+            x: 17.25,
+            y: 70.0,
+            z: -2.5,
+            rotation: None,
+            on_ground: true,
+        }
+    );
+
+    let position_look = [
+        0x40, 0x40, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, // 33.5
+        0x40, 0x51, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 68.0
+        0xc0, 0x31, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // -17.25
+        0x42, 0xb4, 0x00, 0x00, // 90.0
+        0xc1, 0x48, 0x00, 0x00, // -12.5
+        0x00,
+    ];
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::POSITION_LOOK,
+            &position_look
+        ),
+        ServerBound::PlayerMoved {
+            x: 33.5,
+            y: 68.0,
+            z: -17.25,
+            rotation: Some(Rotation::new(90.0, -12.5)),
+            on_ground: false,
+        }
+    );
+
+    let look = [
+        0xc2, 0xb4, 0x00, 0x00, // -90.0
+        0x41, 0x70, 0x00, 0x00, // 15.0
+        0x01,
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::LOOK, &look),
+        ServerBound::PlayerRotated {
+            yaw: -90.0,
+            pitch: 15.0,
+            on_ground: true,
+        }
+    );
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::FLYING, &[0x00]),
+        ServerBound::PlayerStatusOnly { on_ground: false }
+    );
+
+    let mut trailing = position;
+    let mut malformed = trailing.to_vec();
+    malformed.push(0x00);
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::POSITION, &malformed),
+        ServerBound::Ignored,
+        "a position decoder must not accept a body that shifts the next frame"
+    );
+    trailing[0] = 0;
+    assert_eq!(
+        protocol.decode(State::Play, -1, &trailing),
+        ServerBound::Ignored,
+        "an unknown packet id must not turn plausible movement bytes into a move"
+    );
 }
