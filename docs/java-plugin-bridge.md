@@ -562,6 +562,41 @@ To extend the boundary, change the adapter's native declaration and the correspo
 registration together, then add an independently predicted end-to-end fixture. Add concrete public
 host queries on demand rather than enumerating a speculative compatibility surface.
 
+### 4.5 Dedicated-host connection
+
+The dedicated binary enables the bridge only with its default-off `jvm` feature. Set both
+`LODESTONE_JAVA_ADAPTER_CLASS` (dotted class name) and `LODESTONE_JAVA_CLASSPATH` (platform path list
+of compiled class directories or jars); `LODESTONE_JAVA_DEADLINE_MS` optionally overrides the
+5000 ms startup/callback deadline. Without configuration, no JVM worker or poll timer starts.
+Configuration supplied to a build without `jvm` is a reported error followed by clean shutdown.
+
+The admin loop services at most 64 block queries per 1 ms poll, using
+`IntegratedServer::resident_block_state_id`. That accessor reaches the live primary `ChunkStore`,
+which checks presence and reads the cell under one cache lock. It never invokes generation, reads
+disk, clones a whole column, or returns air for unavailable terrain. `Arc`, borrowed-source and
+dimension wrappers forward this capability. A source with no retained read capability returns
+`None`; the host converts this into a named Java error. Extreme and out-of-height Y coordinates are
+also unavailable. The Rust API returns validated `StateId`; conversion to a raw integer happens
+only at the Java wire boundary.
+
+The adapter observes the latest completed server tick whenever it becomes idle. Intervening server
+ticks are **coalesced**, not replayed with historical state; the same tick is never dispatched twice.
+This is a read-only bootstrap observation contract, not Paper's per-tick event semantics. Readiness
+and failures are logged; an asynchronous failure disables the adapter while the server continues.
+Shutdown drops the adapter before saving. Closed stdin suspends only the console-input future, so
+adapter polling and termination signals continue under a supervisor.
+
+The dedicated test `java_adapter_reads_the_running_persistent_world` compiles a repository-owned
+adapter, opens a temporary persistent server through the production constructor, and drives the
+production `JavaAdapter::poll` consumer. Its first callback requires the real resident air state
+`0` and prints `LIVE-WORLD`; its next callback requires a far-away unavailable-cell exception. It
+does not bind TCP or load Paper. Run it separately with `JAVA_HOME` set:
+
+```bash
+cargo test -p lodestone-dedicated-server --features jvm \
+    java_adapter_reads_the_running_persistent_world -- --ignored --nocapture
+```
+
 ---
 
 ## 5. The ABI decision

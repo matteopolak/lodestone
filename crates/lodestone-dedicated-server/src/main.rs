@@ -35,6 +35,9 @@ use lodestone_server::dimension::Dimension;
 use lodestone_server::ecs::ServerApp;
 use lodestone_server::{eula, parse_seed};
 
+#[cfg(feature = "jvm")]
+mod java_adapter;
+
 /// How often the world autosaves while running. Vanilla has no
 /// `server.properties` key for this (its own autosave cadence is
 /// hard-coded), so this crate has none either — the same value
@@ -303,9 +306,33 @@ async fn main() {
 /// close the world through [`IntegratedServer::shutdown`] rather than exiting
 /// the process out from under it.
 async fn run_until_shutdown(server: IntegratedServer) {
+    #[cfg(not(feature = "jvm"))]
+    if ["LODESTONE_JAVA_ADAPTER_CLASS", "LODESTONE_JAVA_CLASSPATH", "LODESTONE_JAVA_DEADLINE_MS"]
+        .iter().any(|key| std::env::var_os(key).is_some())
+    {
+        tracing::error!("Java adapter configuration requires a build with --features jvm; saving and stopping");
+        server.shutdown().await;
+        return;
+    }
+    #[cfg(feature = "jvm")]
+    let mut java_adapter = match java_adapter::JavaAdapter::from_environment() {
+        Ok(adapter) => adapter,
+        Err(error) => {
+            tracing::error!(%error, "invalid experimental Java adapter configuration; saving and stopping");
+            server.shutdown().await;
+            return;
+        }
+    };
+    #[cfg(feature = "jvm")]
+    let mut java_poll = java_adapter.as_ref().map(|_| {
+        let mut interval = tokio::time::interval(Duration::from_millis(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval
+    });
     let world_state = server.world_state().clone();
     let players = server.players().cloned();
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    let mut stdin_open = true;
 
     // SIGTERM has no portable `tokio::signal` equivalent — `ctrl_c()` alone
     // answers SIGINT, but a supervisor (systemd, Docker, a hosting panel's
@@ -336,6 +363,23 @@ async fn run_until_shutdown(server: IntegratedServer) {
 
     loop {
         tokio::select! {
+            _ = async {
+                #[cfg(feature = "jvm")]
+                if let Some(interval) = java_poll.as_mut() {
+                    interval.tick().await;
+                    return;
+                }
+                std::future::pending::<()>().await;
+            } => {
+                #[cfg(feature = "jvm")]
+                if let Some(adapter) = java_adapter.as_mut() {
+                    if let Err(error) = adapter.poll(&server) {
+                        tracing::error!(%error, "experimental Java adapter disabled");
+                        java_adapter = None;
+                        java_poll = None;
+                    }
+                }
+            },
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("received Ctrl-C, saving and stopping");
                 break;
@@ -344,44 +388,48 @@ async fn run_until_shutdown(server: IntegratedServer) {
                 tracing::info!("received a termination signal, saving and stopping");
                 break;
             },
-            line = lines.next_line() => {
-                match line {
-                    Ok(Some(command)) => {
-                        let trimmed = command.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if trimmed.eq_ignore_ascii_case("stop") {
-                            tracing::info!("stop command received, saving and stopping");
-                            break;
-                        }
-                        let response = lodestone_server::console::run(&world_state, players.as_ref(), trimmed);
-                        if !response.is_empty() {
-                            println!("{response}");
-                        }
-                    }
-                    // stdin closed (e.g. running under a supervisor with no
-                    // console attached) — keep serving; only a signal or an
-                    // explicit `stop` ends the loop from here on.
-                    Ok(None) => {
-                        std::future::pending::<()>().await;
-                    }
-                    Err(err) => {
-                        tracing::warn!("console stdin error: {err}");
-                        std::future::pending::<()>().await;
-                    }
+            command = next_console_line(&mut lines, &mut stdin_open) => {
+                let trimmed = command.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed.eq_ignore_ascii_case("stop") {
+                    tracing::info!("stop command received, saving and stopping");
+                    break;
+                }
+                let response = lodestone_server::console::run(&world_state, players.as_ref(), trimmed);
+                if !response.is_empty() {
+                    println!("{response}");
                 }
             },
         }
     }
 
+    #[cfg(feature = "jvm")]
+    drop(java_adapter);
     server.shutdown().await;
     tracing::info!("world saved, server stopped");
 }
 
-/// The directory to serve, from `argv[1]`, defaulting to the current
-/// directory — matching vanilla's own `server.jar` (run it from wherever the
-/// world should live).
+/// Reads commands while allowing the caller's other futures to progress at EOF.
+async fn next_console_line<R: tokio::io::AsyncBufRead + Unpin>(
+    lines: &mut tokio::io::Lines<R>,
+    open: &mut bool,
+) -> String {
+    if *open {
+        match lines.next_line().await {
+            Ok(Some(line)) => return line,
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "console stdin error"),
+        }
+        *open = false;
+    }
+    // Suspend this input future, leaving the surrounding select free to poll
+    // shutdown signals and adapter work after a supervisor closes stdin.
+    std::future::pending().await
+}
+
+/// The directory to serve, from `argv[1]`, defaulting to the current directory.
 fn server_directory() -> PathBuf {
     std::env::args()
         .nth(1)
@@ -444,6 +492,62 @@ mod tests {
     use lodestone_server::{ChunkColumn, ChunkSource};
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_console_preserves_timer_progress() {
+        let mut control = tokio::io::BufReader::new(&b"list\n"[..]).lines();
+        let mut open = true;
+        assert_eq!(next_console_line(&mut control, &mut open).await, "list");
+        let mut closed = tokio::io::BufReader::new(&b""[..]).lines();
+        tokio::select! {
+            _ = next_console_line(&mut closed, &mut open) => panic!("EOF is not a command"),
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {}
+        }
+        assert!(!open);
+    }
+
+    #[cfg(feature = "jvm")]
+    #[tokio::test]
+    #[ignore = "requires JAVA_HOME JDK; runs one JVM against a temporary persistent world"]
+    async fn java_adapter_reads_the_running_persistent_world() {
+        use std::process::Command;
+        let jdk = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME"));
+        let classes = tempfile::tempdir().unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/java/WorldAdapter.java");
+        let compile = Command::new(jdk.join("bin/javac"))
+            .arg("-d").arg(classes.path()).arg(source).output().unwrap();
+        assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
+        let temp = tempfile::tempdir().unwrap();
+        let protocol = lodestone_registry::server_protocol_for_protocol(776).unwrap();
+        let (server, client, _world) = open_persistent_server(protocol, temp.path(), AirWorld,
+            (0..=0, 0..=0), (0, 0), 1, dedicated_server_app()).unwrap();
+        drop(client);
+        let limit = std::time::Instant::now() + Duration::from_secs(10);
+        while server.resident_block_state_id(11, 7, 13).is_none() {
+            assert!(std::time::Instant::now() < limit, "primary column did not become resident");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(server.resident_block_state_id(11, 7, 13).map(|state| state.raw()), Some(0));
+        let mut adapter = java_adapter::JavaAdapter::start(
+            lodestone_jvm_bridge::runtime::JvmConfig::new().with_classpath(classes.path()),
+            "lodestone.fixture.WorldAdapter", Duration::from_secs(5)).unwrap();
+        let mut completed = false;
+        let error = loop {
+            assert!(std::time::Instant::now() < limit, "adapter did not finish");
+            match adapter.poll(&server) {
+                Ok(Some(_)) => completed = true,
+                Err(error) => break error,
+                Ok(None) => {}
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        };
+        assert!(completed, "registered world read never completed: {error}");
+        assert!(error.contains("primary-world block unavailable at 1000000,7,1000000"), "{error}");
+        assert!(error.contains("onTick(J)V"), "{error}");
+        assert_eq!(server.resident_block_state_id(1000000, 7, 1000000), None);
+        drop(adapter);
+        server.shutdown().await;
+    }
 
     struct AirWorld;
 

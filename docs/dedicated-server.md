@@ -243,6 +243,16 @@ lost if the world is stopped before a player ever visits.
 
 ## Configuration
 
+Experimental Java adapters require `cargo run -p lodestone-dedicated-server --features jvm` and
+both `LODESTONE_JAVA_ADAPTER_CLASS` and `LODESTONE_JAVA_CLASSPATH`. The latter uses the platform's
+path-list separator. `LODESTONE_JAVA_DEADLINE_MS` is a positive integer, default `5000`. No configured
+adapter means no JVM startup or polling timer. A default build rejects Java configuration explicitly.
+See [Java plugin bridge](java-plugin-bridge.md) for the bootstrap class contract and live fixture.
+This loads an explicit adapter, not arbitrary Paper plugins or Fabric mods. Adapter callbacks observe
+the newest completed server tick while idle, coalescing intervening ticks; resident block reads never
+generate missing terrain. Callback errors are logged and disable the adapter. Closed stdin leaves
+adapter polling and signal handling active.
+
 - `server.properties` and `eula.txt` at the server root (dedicated server only); `ops.json`/
   `whitelist.json`/`banned-players.json`/`banned-ips.json` alongside them, vanilla's own layout.
 - `LanConfig` — the open-to-LAN/publish surface (view radius, RCON, query, discovery, online mode,
