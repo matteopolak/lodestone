@@ -125,6 +125,9 @@ release-use-item = []
 # A one-shot piercing-weapon stab through the normal client action queue. The
 # host owns the selected item and protocol encoding.
 stab = []
+# A one-shot respawn request through the normal client action queue. The server
+# remains authoritative over whether the request is legal.
+respawn = []
 # A denied-by-default filesystem write import. The fixture writes one file inside
 # the configured root and attempts one path outside it for the confinement gate.
 fs-write = []
