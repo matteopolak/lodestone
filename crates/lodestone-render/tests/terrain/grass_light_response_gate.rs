@@ -103,6 +103,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_assets::{BakedQuad, Direction, ResourceManager, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
 use lodestone_render::{
     BlockModels, GpuAtlas, GpuModelMesh, ModelPipeline, ModelSectionView, blocks_json_registry,
@@ -500,10 +501,14 @@ fn build_models() -> (BlockModels, Box<dyn BlockStateRegistry>) {
     (models, Box::new(registry))
 }
 
+fn state_id(raw: u32) -> StateId {
+    StateId::new(raw).expect("state id from the canonical blocks report")
+}
+
 /// Pick a representative quad for a block state: the `Up` face when it has one
 /// (grass/leaves/stone tops), otherwise the first quad (a cross plant's blade).
 fn representative<'a>(models: &'a BlockModels, state: u32) -> &'a BakedQuad {
-    let quads = models.quads(state);
+    let quads = models.quads(state_id(state));
     assert!(!quads.is_empty(), "state {state} baked to no geometry");
     quads
         .iter()

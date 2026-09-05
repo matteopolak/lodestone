@@ -63,6 +63,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_assets::{Image, ResourceManager, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
 use lodestone_render::{BlockModels, RenderLayer, blocks_json_registry, is_full_cube,
     is_packed_cube};
@@ -87,6 +88,10 @@ fn find_state(reg: &dyn BlockStateRegistry, block: &str, want: &[(&str, &str)]) 
             .iter()
             .all(|(k, v)| state.properties.get(*k).map(String::as_str) == Some(*v))
     })
+}
+
+fn state_id(raw: u32) -> StateId {
+    StateId::new(raw).expect("state id from the canonical blocks report")
 }
 
 /// The real per-texel-alpha `RenderLayer` of one or more raw PNGs
@@ -209,7 +214,7 @@ fn packed_cube_requires_solid_layer_on_real_vanilla_data() {
             failures.push(format!("{}: state not found in registry", c.block));
             continue;
         };
-        let sm = models.state(id);
+        let sm = models.state(state_id(id));
 
         if c.expect_full_cube && !is_full_cube(&sm.quads) {
             failures.push(format!(

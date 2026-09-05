@@ -67,6 +67,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use lodestone_assets::{BakedQuad, Direction, ResourceManager, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
 use lodestone_render::{BlockModels, ModelSectionView, blocks_json_registry, mesh_models};
 
@@ -116,6 +117,10 @@ fn build_models() -> (BlockModels, Box<dyn BlockStateRegistry>) {
     let registry = blocks_json_registry(&report).expect("parse blocks.json into a registry");
     let models = BlockModels::build(&manager, &registry).expect("bake block models");
     (models, Box::new(registry))
+}
+
+fn state_id(raw: u32) -> StateId {
+    StateId::new(raw).expect("state id from the canonical blocks report")
 }
 
 /// The block-local bounding box of a quad's four corners — the diagnostic
@@ -227,12 +232,12 @@ impl ModelSectionView for View {
 
 fn short_grass_quads(models: &BlockModels, reg: &dyn BlockStateRegistry) -> Vec<BakedQuad> {
     let state = find_state(reg, "minecraft:short_grass", &[]);
-    models.quads(state).to_vec()
+    models.quads(state_id(state)).to_vec()
 }
 
 fn stone_quads(models: &BlockModels, reg: &dyn BlockStateRegistry) -> Vec<BakedQuad> {
     let state = find_state(reg, "minecraft:stone", &[]);
-    models.quads(state).to_vec()
+    models.quads(state_id(state)).to_vec()
 }
 
 /// The falsifiable prediction from the diagnosis: every one of

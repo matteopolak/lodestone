@@ -66,6 +66,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use lodestone_assets::{ResourceManager, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
 use lodestone_render::block_models::{FluidCell, FluidKind, FluidSprites};
 use lodestone_render::fluid_grid::FluidNeighborCell;
@@ -80,6 +81,10 @@ use gate_harness::{require_blocks_report, require_client_jar};
 
 /// Where the expected checksums live, relative to the crate root.
 const GOLDEN: &str = "tests/support/fluid_mesh_identity.txt";
+
+fn state_id(raw: u32) -> StateId {
+    StateId::new(raw).expect("state id from the canonical blocks report")
+}
 
 // ---------------------------------------------------------------------------
 // FNV-1a/64 — a deterministic checksum that survives toolchain bumps
@@ -450,15 +455,15 @@ impl SceneView<'_> {
 
 impl FluidSectionView for SceneView<'_> {
     fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell> {
-        self.models.fluid(self.state(x, y, z))
+        self.models.fluid(state_id(self.state(x, y, z)))
     }
 
     fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
-        self.models.occludes(self.state(x, y, z))
+        self.models.occludes(state_id(self.state(x, y, z)))
     }
 
     fn overlay_at(&self, x: i32, y: i32, z: i32) -> bool {
-        self.models.fluid_overlay(self.state(x, y, z))
+        self.models.fluid_overlay(state_id(self.state(x, y, z)))
     }
 
     /// Mirrors the shell mesher's own override, which is the implementation
@@ -478,7 +483,7 @@ impl FluidSectionView for SceneView<'_> {
         use lodestone_assets::fluid::SelfOcclusion;
 
         let id = self.state(x, y, z);
-        if self.models.layer(id) != lodestone_render::RenderLayer::Solid {
+        if self.models.layer(state_id(id)) != lodestone_render::RenderLayer::Solid {
             return SelfOcclusion::default();
         }
         let Some(state) = lodestone_data::block_states::StateId::new(id) else {
@@ -510,9 +515,9 @@ impl FluidSectionView for SceneView<'_> {
         // Production's shape: one state resolution, three derivations.
         let id = self.state(x, y, z);
         FluidNeighborCell {
-            fluid: self.models.fluid(id),
-            occludes: self.models.occludes(id),
-            overlay: self.models.fluid_overlay(id),
+            fluid: self.models.fluid(state_id(id)),
+            occludes: self.models.occludes(state_id(id)),
+            overlay: self.models.fluid_overlay(state_id(id)),
         }
     }
 }

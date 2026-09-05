@@ -70,8 +70,12 @@ impl CrackResolver {
     /// setup; the model set can then be dropped.
     #[must_use]
     pub fn from_models(models: &crate::BlockModels) -> Self {
+        // Keep the snapshot's dense shape, including rows from a dynamic
+        // extension registry. The crate-private accessor preserves those rows
+        // during capture, while the public resolver methods still require a
+        // validated canonical `StateId` before indexing them.
         let quads = (0..models.state_count() as u32)
-            .map(|id| models.quads(id).to_vec())
+            .map(|raw| models.quads_raw(raw).to_vec())
             .collect();
         let mut stage_rects = [[0.0; 4]; CRACK_STAGE_COUNT];
         for (stage, rect) in stage_rects.iter_mut().enumerate() {

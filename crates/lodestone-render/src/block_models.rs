@@ -101,6 +101,7 @@ use lodestone_assets::{
     ModelResolver, ModelTransform, ResolvedModel, ResourceLocation,
     ResourceManager, SpriteLayer, TextureBinding, bake_model_with,
 };
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
 
 use crate::anim::{AnimFrame, AnimSlotUniform, SpriteAnimation};
@@ -2291,17 +2292,39 @@ impl BlockModels {
         out
     }
 
-    /// The baked geometry of a state, or an empty model for air / out-of-range
-    /// ids.
+    /// The baked geometry of a validated built-in state.
+    ///
+    /// A [`StateId`] is the canonical 26.2 census proof for this table. Raw
+    /// values from a chunk palette must be validated at the wire/data ingress
+    /// before reaching this method. Protocol-local or dynamic extension ids
+    /// are intentionally not coerced into this canonical space; their owning
+    /// registry decides how to render them.
     #[must_use]
-    pub fn state(&self, state_id: u32) -> &StateModel {
-        self.models.get(state_id as usize).unwrap_or(&self.empty)
+    pub fn state(&self, state_id: StateId) -> &StateModel {
+        self.models.get(state_id.raw() as usize).unwrap_or(&self.empty)
     }
 
-    /// The baked quads of a state (empty for air / unknown).
+    /// The baked quads of a validated built-in state.
+    ///
+    /// An empty slice means that the known state has no block-model quads
+    /// (air, fluids, or a tolerated bake miss). An unknown extension never
+    /// reaches this lookup: it remains outside [`StateId`] until a
+    /// source-specific resolver can identify it.
     #[must_use]
-    pub fn quads(&self, state_id: u32) -> &[BakedQuad] {
+    pub fn quads(&self, state_id: StateId) -> &[BakedQuad] {
         &self.state(state_id).quads
+    }
+
+    /// The raw row accessor used while capturing this table into another
+    /// renderer-owned snapshot. It is crate-private so raw ids cannot cross
+    /// the model/render API; unlike [`Self::quads`], it also preserves rows a
+    /// dynamic registry added beyond the built-in census until that source has
+    /// its own validated resolver.
+    #[must_use]
+    pub(crate) fn quads_raw(&self, raw: u32) -> &[BakedQuad] {
+        self.models
+            .get(raw as usize)
+            .map_or(&[], |model| model.quads.as_slice())
     }
 
     /// The baked geometry of an item (`minecraft:stone`), or `None` for an item
@@ -2395,7 +2418,7 @@ impl BlockModels {
     /// Whether a state fully occludes its neighbours (every one of its six
     /// boundary faces is a full opaque face).
     #[must_use]
-    pub fn occludes(&self, state_id: u32) -> bool {
+    pub fn occludes(&self, state_id: StateId) -> bool {
         self.state(state_id).occludes
     }
 
@@ -2404,14 +2427,14 @@ impl BlockModels {
     /// instead — see [`StateModel::ambient_occlusion`] for exactly which half
     /// of vanilla's gate this reflects.
     #[must_use]
-    pub fn ambient_occlusion(&self, state_id: u32) -> bool {
+    pub fn ambient_occlusion(&self, state_id: StateId) -> bool {
         self.state(state_id).ambient_occlusion
     }
 
     /// Whether this state is one of vanilla's leaves-family blocks — see
     /// [`StateModel::is_leaves`].
     #[must_use]
-    pub fn is_leaves(&self, state_id: u32) -> bool {
+    pub fn is_leaves(&self, state_id: StateId) -> bool {
         self.state(state_id).is_leaves
     }
 
@@ -2443,16 +2466,17 @@ impl BlockModels {
     /// (`!cutoutLeaves && neighborState.getBlock()` is an instance of that family) is
     /// a **different** vanilla rule this does not implement.
     #[must_use]
-    pub fn skips_rendering_against(&self, state_id: u32, neighbour_id: u32) -> bool {
+    pub fn skips_rendering_against(&self, state_id: StateId, neighbour_id: StateId) -> bool {
         let here = self.state(state_id).half_transparent_class;
         here.is_some() && here == self.state(neighbour_id).half_transparent_class
     }
 
     /// Normalised atlas UVs `[u0, v0, u1, v1]` of a state's `#particle` sprite —
-    /// the texture break and hit particles sample. `None` for air, unknown
-    /// states, and models that declare no `particle` variable.
+    /// the texture break and hit particles sample. `None` for an air-like
+    /// state, a tolerated bake miss, and models that declare no `particle`
+    /// variable. Unknown extension values are rejected before this API.
     #[must_use]
-    pub fn particle_uv(&self, state_id: u32) -> Option<[f32; 4]> {
+    pub fn particle_uv(&self, state_id: StateId) -> Option<[f32; 4]> {
         self.state(state_id).particle_uv
     }
 
@@ -2500,7 +2524,7 @@ impl BlockModels {
     /// [`StateModel::particle_tint`] for why this is a separate lookup from the
     /// quads' tint indices, and why leaving it out renders foliage debris white.
     #[must_use]
-    pub fn particle_tint(&self, state_id: u32) -> Option<[f32; 3]> {
+    pub fn particle_tint(&self, state_id: StateId) -> Option<[f32; 3]> {
         self.state(state_id).particle_tint
     }
 
@@ -2528,7 +2552,7 @@ impl BlockModels {
     /// for "which pass does this quad draw in", which vanilla decides per quad
     /// from that quad's own sprite; use [`Self::sprite_layer`] for that.
     #[must_use]
-    pub fn layer(&self, state_id: u32) -> RenderLayer {
+    pub fn layer(&self, state_id: StateId) -> RenderLayer {
         self.state(state_id).layer
     }
 
@@ -2573,7 +2597,7 @@ impl BlockModels {
     /// liquid texture is partially alpha, otherwise the liquid is drawn
     /// through the body on the translucent pass.
     #[must_use]
-    pub fn is_cauldron(&self, state_id: u32) -> bool {
+    pub fn is_cauldron(&self, state_id: StateId) -> bool {
         self.state(state_id).is_cauldron
     }
 
@@ -2597,8 +2621,8 @@ impl BlockModels {
     /// block). Fluids have empty [`quads`](Self::quads); the mesher renders them
     /// from this classification via [`bake_fluid`](lodestone_assets::fluid::bake_fluid).
     #[must_use]
-    pub fn fluid(&self, state_id: u32) -> Option<FluidCell> {
-        self.fluids.get(state_id as usize).copied().flatten()
+    pub fn fluid(&self, state_id: StateId) -> Option<FluidCell> {
+        self.fluids.get(state_id.raw() as usize).copied().flatten()
     }
 
     /// The still + flow (+ overlay, for water) sprite UVs for a fluid kind, into
@@ -2615,9 +2639,9 @@ impl BlockModels {
     /// fluid neighbour that should use the `water_overlay` material. See
     /// [`is_fluid_overlay_neighbor`].
     #[must_use]
-    pub fn fluid_overlay(&self, state_id: u32) -> bool {
+    pub fn fluid_overlay(&self, state_id: StateId) -> bool {
         self.fluid_overlay
-            .get(state_id as usize)
+            .get(state_id.raw() as usize)
             .copied()
             .unwrap_or(false)
     }
@@ -2994,6 +3018,32 @@ mod tests {
         assert!(!e.occludes);
         assert!(e.quads.is_empty());
         assert_eq!(e.layer, RenderLayer::Solid);
+    }
+
+    /// All state-keyed model lookups accept the validated census type. Keeping
+    /// this as function-pointer assertions makes an accidental raw-id API
+    /// regression fail at compile time rather than relying on a large jar gate.
+    #[test]
+    fn state_model_lookups_require_validated_state_ids() {
+        let _: fn(&BlockModels, StateId) -> &StateModel = BlockModels::state;
+        let _: fn(&BlockModels, StateId) -> &[BakedQuad] = BlockModels::quads;
+        let _: fn(&BlockModels, u32) -> &[BakedQuad] = BlockModels::quads_raw;
+        let _: fn(&BlockModels, StateId) -> bool = BlockModels::occludes;
+        let _: fn(&BlockModels, StateId) -> bool = BlockModels::ambient_occlusion;
+        let _: fn(&BlockModels, StateId) -> bool = BlockModels::is_leaves;
+        let _: fn(&BlockModels, StateId, StateId) -> bool =
+            BlockModels::skips_rendering_against;
+        let _: fn(&BlockModels, StateId) -> Option<[f32; 4]> = BlockModels::particle_uv;
+        let _: fn(&BlockModels, StateId) -> Option<[f32; 3]> = BlockModels::particle_tint;
+        let _: fn(&BlockModels, StateId) -> RenderLayer = BlockModels::layer;
+        let _: fn(&BlockModels, StateId) -> bool = BlockModels::is_cauldron;
+        let _: fn(&BlockModels, StateId) -> Option<FluidCell> = BlockModels::fluid;
+        let _: fn(&BlockModels, StateId) -> bool = BlockModels::fluid_overlay;
+
+        // The first raw id beyond the built-in census cannot be smuggled into
+        // the table merely because it has a convenient integer representation.
+        assert!(StateId::new(lodestone_data::block_states::STATE_COUNT).is_none());
+        assert!(StateId::new(u32::MAX).is_none());
     }
 
     fn props(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
