@@ -699,7 +699,8 @@ mod real_collision {
         }
 
         fn block_collision(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
-            lodestone_data::collision_shapes::collision_boxes(state_id)
+            lodestone_data::block_states::StateId::new(state_id)
+                .map(lodestone_data::collision_shapes::collision_boxes)
         }
 
         fn block_name(&self, state_id: u32) -> Option<&'static str> {
@@ -788,9 +789,10 @@ mod real_collision {
             } else {
                 self.air
             };
-            let Some(boxes) = lodestone_data::collision_shapes::collision_boxes(state) else {
+            let Some(state) = lodestone_data::block_states::StateId::new(state) else {
                 return;
             };
+            let boxes = lodestone_data::collision_shapes::collision_boxes(state);
             for b in boxes {
                 out.push(lodestone_physics::Aabb {
                     min_x: f64::from(x) + f64::from(b.min[0]),
@@ -820,11 +822,19 @@ mod real_collision {
         // this test proves nothing (this is the "predict the value, do not
         // merely assert the sign" discipline — know the two numbers apart
         // before the assertion that depends on the gap between them).
-        let stone_top = lodestone_data::collision_shapes::collision_boxes(stone)
-            .and_then(|b| b.iter().map(|b| b.max[1]).reduce(f32::max))
+        let stone_top = lodestone_data::collision_shapes::collision_boxes(
+            lodestone_data::block_states::StateId::new(stone).expect("fixture state validates"),
+        )
+            .iter()
+            .map(|b| b.max[1])
+            .reduce(f32::max)
             .expect("stone has a real collision shape");
-        let slab_top = lodestone_data::collision_shapes::collision_boxes(slab)
-            .and_then(|b| b.iter().map(|b| b.max[1]).reduce(f32::max))
+        let slab_top = lodestone_data::collision_shapes::collision_boxes(
+            lodestone_data::block_states::StateId::new(slab).expect("fixture state validates"),
+        )
+            .iter()
+            .map(|b| b.max[1])
+            .reduce(f32::max)
             .expect("the bottom slab has a real collision shape");
         assert!(
             (stone_top - 1.0).abs() < 1e-4,
@@ -1002,9 +1012,10 @@ mod real_collision {
                 return;
             }
             let state = stepped_floor_state_at(x, y, self.stone, self.air);
-            let Some(boxes) = lodestone_data::collision_shapes::collision_boxes(state) else {
+            let Some(state) = lodestone_data::block_states::StateId::new(state) else {
                 return;
             };
+            let boxes = lodestone_data::collision_shapes::collision_boxes(state);
             for b in boxes {
                 out.push(lodestone_physics::Aabb {
                     min_x: f64::from(x) + f64::from(b.min[0]),
@@ -1035,8 +1046,12 @@ mod real_collision {
     fn a_goal_past_a_real_one_block_riser_is_reached_by_stepping_up() {
         let stone = real_state_id("minecraft:stone");
         let air = real_state_id("minecraft:air");
-        let stone_top = lodestone_data::collision_shapes::collision_boxes(stone)
-            .and_then(|b| b.iter().map(|b| b.max[1]).reduce(f32::max))
+        let stone_top = lodestone_data::collision_shapes::collision_boxes(
+            lodestone_data::block_states::StateId::new(stone).expect("fixture state validates"),
+        )
+            .iter()
+            .map(|b| b.max[1])
+            .reduce(f32::max)
             .expect("stone has a real collision shape");
         assert!(
             (stone_top - 1.0).abs() < 1e-4,
@@ -1162,9 +1177,10 @@ mod real_collision {
                 return;
             }
             let state = dropped_floor_state_at(x, y, self.stone, self.air);
-            let Some(boxes) = lodestone_data::collision_shapes::collision_boxes(state) else {
+            let Some(state) = lodestone_data::block_states::StateId::new(state) else {
                 return;
             };
+            let boxes = lodestone_data::collision_shapes::collision_boxes(state);
             for b in boxes {
                 out.push(lodestone_physics::Aabb {
                     min_x: f64::from(x) + f64::from(b.min[0]),
@@ -1197,8 +1213,12 @@ mod real_collision {
     fn a_goal_past_a_real_two_cell_drop_is_reached_by_falling() {
         let stone = real_state_id("minecraft:stone");
         let air = real_state_id("minecraft:air");
-        let stone_top = lodestone_data::collision_shapes::collision_boxes(stone)
-            .and_then(|b| b.iter().map(|b| b.max[1]).reduce(f32::max))
+        let stone_top = lodestone_data::collision_shapes::collision_boxes(
+            lodestone_data::block_states::StateId::new(stone).expect("fixture state validates"),
+        )
+            .iter()
+            .map(|b| b.max[1])
+            .reduce(f32::max)
             .expect("stone has a real collision shape");
         assert!(
             (stone_top - 1.0).abs() < 1e-4,

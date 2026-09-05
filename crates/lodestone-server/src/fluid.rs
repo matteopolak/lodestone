@@ -644,8 +644,14 @@ const NEVER_HOLDS_FLUID: [&str; 6] = [
 /// carry — [`crate::chunk::resolve_palette_state_id`], deliberately not a
 /// re-derivation of it (CLAUDE.md: two test helpers hand-duplicated an older
 /// version of that fallback and became silent callers when it changed).
-fn state_id(state: &str) -> u32 {
-    crate::chunk::resolve_palette_state_id(state)
+fn state_id(state: &str) -> Option<lodestone_data::block_states::StateId> {
+    lodestone_data::block_states::StateId::new(crate::chunk::resolve_palette_state_id(state))
+}
+
+fn collision_boxes_for(state: &str) -> &'static [lodestone_data::collision_shapes::Aabb] {
+    state_id(state)
+        .map(lodestone_data::collision_shapes::collision_boxes)
+        .unwrap_or(&[])
 }
 
 /// The real blocks-motion query, out of `lodestone_data`'s jar-derived census.
@@ -654,7 +660,7 @@ fn state_id(state: &str) -> u32 {
 /// answer is **yes it blocks** — a gap must stop fluid rather than let it
 /// through a block we failed to classify.
 fn blocks_motion(state: &str) -> bool {
-    lodestone_data::block_states::StateId::new(state_id(state))
+    state_id(state)
         .map(lodestone_data::block_solidity::blocks_motion)
         .unwrap_or(true)
 }
@@ -791,12 +797,12 @@ fn merged_face_occludes(source_state: &str, target_state: &str, direction: Direc
         1 => (0, 2),
         _ => (0, 1),
     };
-    for aabb in lodestone_data::collision_shapes::collision_boxes(state_id(first)).unwrap_or(&[]) {
+    for aabb in collision_boxes_for(first) {
         if (aabb.max[axis] - 1.0).abs() <= 1.0e-7 {
             rects.push((aabb.min[u], aabb.min[v], aabb.max[u], aabb.max[v]));
         }
     }
-    for aabb in lodestone_data::collision_shapes::collision_boxes(state_id(second)).unwrap_or(&[]) {
+    for aabb in collision_boxes_for(second) {
         if aabb.min[axis].abs() <= 1.0e-7 {
             rects.push((aabb.min[u], aabb.min[v], aabb.max[u], aabb.max[v]));
         }
@@ -851,8 +857,7 @@ fn covers_unit_square(rects: &[FaceRect]) -> bool {
 /// `true` iff the state's collision shape is exactly the full cube —
 /// the real full-block-shape identity test.
 fn is_full_cube(state: &str) -> bool {
-    let boxes =
-        lodestone_data::collision_shapes::collision_boxes(state_id(state)).unwrap_or(&[]);
+    let boxes = collision_boxes_for(state);
     boxes.len() == 1
         && boxes[0].min.iter().all(|&c| c.abs() <= 1.0e-7)
         && boxes[0].max.iter().all(|&c| (c - 1.0).abs() <= 1.0e-7)
@@ -868,10 +873,8 @@ fn can_pass_through_wall(direction: Direction, source_state: &str, target_state:
     if is_full_cube(target_state) || is_full_cube(source_state) {
         return false;
     }
-    let source_empty = lodestone_data::collision_shapes::collision_boxes(state_id(source_state))
-        .is_none_or(<[_]>::is_empty);
-    let target_empty = lodestone_data::collision_shapes::collision_boxes(state_id(target_state))
-        .is_none_or(<[_]>::is_empty);
+    let source_empty = collision_boxes_for(source_state).is_empty();
+    let target_empty = collision_boxes_for(target_state).is_empty();
     if source_empty && target_empty {
         return true;
     }

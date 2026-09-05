@@ -12,7 +12,7 @@
 //! the dominant defect shape in this repo. Modelled on `block_hardness_seam.rs`.
 
 use lodestone_model::{EquipmentSlot, VersionAdapter};
-use lodestone_data::{block_states, item_prototypes, outline_shapes};
+use lodestone_data::{block_states, collision_shapes, item_prototypes, outline_shapes};
 use lodestone_v26_2::V770Adapter;
 
 /// Binds the concrete adapter behind the trait object, so every assertion below
@@ -111,6 +111,24 @@ fn shape_seams_agree_with_the_version_tables_for_every_state() {
             "interaction seam disagrees with the version table at state {id}"
         );
     }
+}
+
+#[test]
+fn collision_seam_preserves_total_shapes_and_rejects_unknown_ids() {
+    let adapter = seam();
+    for id in 0..collision_shapes::STATE_COUNT {
+        let state = block_states::StateId::new(id).expect("census state validates");
+        let direct = collision_shapes::collision_boxes(state);
+        let through = adapter.block_collision(id).expect("seam resolves");
+        assert!(std::ptr::eq(direct, through), "collision seam differs at state {id}");
+    }
+    let stone = adapter.block_collision(first_id_named("minecraft:stone")).expect("stone exists");
+    assert_eq!(stone.len(), 1);
+    assert_eq!(stone[0].min, [0.0; 3]);
+    assert_eq!(stone[0].max, [1.0; 3]);
+    assert!(adapter.block_collision(block_states::air_state_id()).expect("air exists").is_empty());
+    assert!(adapter.block_collision(collision_shapes::STATE_COUNT).is_none());
+    assert!(adapter.block_collision(u32::MAX).is_none());
 }
 
 #[test]

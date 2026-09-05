@@ -44,6 +44,13 @@ has been validated with `StateId::new`. Raw compatibility entry points retain `O
 own an unvalidated wire id; `PathTypeRegistry` and `VersionAdapter` are version-free boundaries. Keep
 that conversion at the boundary so generated-table indexing cannot receive an out-of-range value.
 
+`collision_shapes::collision_boxes` follows the same boundary and returns a static box slice for
+every validated state. An empty slice means no collision, not an invalid ID. Version adapters keep
+their fallible raw-ID contract, while server string/palette readers and the shell shadow classifier
+validate before lookup. Keep the collision census's state count equal to the block-state table and
+update its committed-dump comparisons when regenerating geometry; physics consumers must preserve
+their own unknown-state fallback instead of inventing geometry inside the data lookup.
+
 The block-break hardness census follows the same rule: `hardness(StateId)` returns its complete
 `Hardness` record without an `Option`, while `hardness_raw` is the explicit fallible boundary for
 unvalidated ids. Consumers such as tool evaluation, server break validation, and the 26.2 adapter

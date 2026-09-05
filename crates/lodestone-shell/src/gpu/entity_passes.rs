@@ -793,7 +793,8 @@ const SHADOW_RADIUS_FALLBACK: f32 = 0.5;
 #[must_use]
 fn is_full_solid_ground(id: u32) -> bool {
     const EPS: f32 = 1e-4;
-    lodestone_data::collision_shapes::collision_boxes(id).is_some_and(|boxes| {
+    lodestone_data::block_states::StateId::new(id).is_some_and(|state| {
+        let boxes = lodestone_data::collision_shapes::collision_boxes(state);
         boxes.iter().any(|b| {
             b.min[0] <= EPS
                 && b.max[0] >= 1.0 - EPS

@@ -37,7 +37,7 @@
 //! this is lossless versus the game's `double`s while halving the rodata. A
 //! consumer wanting `f64` can widen at the seam — `f32 -> f64` is exact.
 
-use crate::generated_collision_shapes as table;
+use crate::{block_states::StateId, generated_collision_shapes as table};
 
 pub use table::STATE_COUNT;
 
@@ -55,14 +55,13 @@ pub use table::STATE_COUNT;
 /// [`VersionAdapter::block_collision`]: lodestone_model::VersionAdapter::block_collision
 pub type Aabb = lodestone_model::BlockAabb;
 
-/// The collision boxes for block-state `id`, or `None` if `id` is not in
-/// `0..`[`STATE_COUNT`].
+/// The collision boxes for a validated block-state `id`.
 ///
 /// An empty slice is a valid, meaningful result: the block has no collision
 /// (e.g. air, water, lava, cobweb). Zero-heap: returns a `&'static [Aabb]`
 /// straight from rodata. O(1) indexing, no search.
 #[must_use]
-pub fn collision_boxes(id: u32) -> Option<&'static [Aabb]> {
-    let &shape = table::STATE_SHAPE.get(id as usize)?;
-    Some(table::SHAPES[shape as usize])
+pub fn collision_boxes(id: StateId) -> &'static [Aabb] {
+    let shape = table::STATE_SHAPE[id.raw() as usize];
+    table::SHAPES[shape as usize]
 }

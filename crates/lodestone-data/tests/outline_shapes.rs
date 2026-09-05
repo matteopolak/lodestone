@@ -589,7 +589,7 @@ fn outline_differs_from_collision_for_half_of_all_states() {
     let mut real_collision_empty_outline = 0usize;
     for id in 0..outline_shapes::STATE_COUNT {
         let outline = outline_shapes::outline_boxes(validated(id));
-        let collision = collision_shapes::collision_boxes(id).expect("collision resolves");
+        let collision = collision_shapes::collision_boxes(validated(id));
         let same = outline.len() == collision.len()
             && outline.iter().zip(collision).all(|(a, b)| {
                 a.min[0] == b.min[0]
@@ -672,8 +672,7 @@ fn kelp_outlines_to_nine_sixteenths_and_collides_with_nothing() {
             "kelp (state {id}) outline"
         );
         assert!(
-            collision_shapes::collision_boxes(id)
-                .expect("resolves")
+            collision_shapes::collision_boxes(validated(id))
                 .is_empty(),
             "kelp (state {id}) must have no collision"
         );
@@ -706,8 +705,7 @@ fn cobweb_outlines_to_a_full_cube_and_collides_with_nothing() {
         "cobweb outline"
     );
     assert!(
-        collision_shapes::collision_boxes(id)
-            .expect("resolves")
+        collision_shapes::collision_boxes(validated(id))
             .is_empty(),
         "cobweb must have no collision"
     );
@@ -765,7 +763,7 @@ fn wall_outlines_stop_at_one_while_collision_reaches_one_and_a_half() {
         for b in outline {
             outline_top = outline_top.max(b.max[1]);
         }
-        for b in collision_shapes::collision_boxes(id).expect("resolves") {
+        for b in collision_shapes::collision_boxes(validated(id)) {
             collision_top = collision_top.max(b.max[1]);
         }
     }

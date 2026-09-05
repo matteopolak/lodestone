@@ -473,7 +473,8 @@ fn face_full_up_disagrees_with_a_unit_box_derivation() {
     let dump = parse_dump(DUMP);
     let column = dump.column('U');
     let is_unit_box = |id: u32| -> bool {
-        let boxes = collision_shapes::collision_boxes(id).expect("every state has a shape");
+        let state = block_states::StateId::new(id).expect("every census state validates");
+        let boxes = collision_shapes::collision_boxes(state);
         boxes.len() == 1 && boxes[0].min == [0.0, 0.0, 0.0] && boxes[0].max == [1.0, 1.0, 1.0]
     };
 

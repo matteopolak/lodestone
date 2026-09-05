@@ -287,7 +287,8 @@ mod tests {
         // the moving-piston block's collision-shape getter returns an empty shape in
         // exactly that case).
         let state_id = lodestone_data::block_states::state_id(&moving).expect("a real 26.2 state");
-        let boxes = lodestone_data::collision_shapes::collision_boxes(state_id).expect("a known state id");
+        let state = lodestone_data::block_states::StateId::new(state_id).expect("a known state id");
+        let boxes = lodestone_data::collision_shapes::collision_boxes(state);
         assert!(
             boxes.is_empty(),
             "control: moving_piston's own per-state collision table must be empty — \

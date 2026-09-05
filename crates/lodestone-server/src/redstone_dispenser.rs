@@ -393,7 +393,9 @@ pub fn plain_toss(
 /// default answer is its *lowest* state id, not its default state).
 fn collision_top(state: &str) -> Option<f64> {
     let id = crate::mobs::block_state_id(state).or_else(|| block_states::state_id(state));
-    let boxes = id.and_then(collision_shapes::collision_boxes).unwrap_or(&[]);
+    let boxes = id.and_then(block_states::StateId::new)
+        .map(collision_shapes::collision_boxes)
+        .unwrap_or(&[]);
     boxes
         .iter()
         .map(|b| f64::from(b.max[1]))
