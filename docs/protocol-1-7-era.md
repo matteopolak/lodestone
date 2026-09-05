@@ -69,6 +69,12 @@ keep-alive challenge and lifts the exact serverbound echo to
 Protocol 5 uses a fixed signed `i32` body in both directions; the server
 protocol test pins literal bytes and rejects a trailing byte instead of
 acknowledging a malformed response.
+The host also emits `update_health` whenever the shared vitals path reports
+damage or completes a respawn. Its frame is `f32` health, big-endian `i16`
+food, then `f32` saturation; newer legacy families use a VarInt food field, so
+the encoder stays local to this era. The focused control pins a literal body
+and feeds the emitted packet into `V5Adapter`, where it becomes the HUD's
+`ClientEvent::HealthChanged`; a truncated body is the negative control.
 Its serverbound `settings` packet also reaches the shared view tracker as
 `ClientInformationChanged`: the signed one-byte view distance is the only
 field the host consumes, while locale, chat settings, difficulty, and cape

@@ -111,6 +111,53 @@ fn join_position_chunk_and_block_update_match_protocol_5_layout() {
 }
 
 #[test]
+fn hosted_health_update_reaches_the_client_hud_with_protocol_5_fixed_width_food() {
+    let protocol = V5ServerProtocol;
+    let ServerDirective::Send { packet_id, payload } = protocol
+        .encode_set_health(12.5, 18, 3.0)
+    else {
+        panic!("health update must produce a Play packet");
+    };
+    assert_eq!(packet_id, play::clientbound::UPDATE_HEALTH);
+    // This literal is independent of the packet derive: f32 health, big-endian
+    // i16 food, then f32 saturation. A protocol-47 VarInt food field would
+    // instead place 0x12 directly after the health bytes.
+    assert_eq!(
+        payload,
+        vec![0x41, 0x48, 0x00, 0x00, 0x00, 0x12, 0x40, 0x40, 0x00, 0x00]
+    );
+
+    let directives = V5Adapter::new()
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            packet_id,
+            &payload,
+        )
+        .expect("the hosted health frame must be accepted by the protocol-5 adapter");
+    assert!(matches!(
+        directives.as_slice(),
+        [Directive::Emit(ClientEvent::HealthChanged {
+            health,
+            food: 18,
+            saturation,
+        })] if *health == 12.5 && *saturation == 3.0
+    ));
+
+    // A short food field is part of this era's wire contract. The truncated
+    // body is a control proving this boundary is decoded rather than assumed.
+    let malformed = [0x41, 0x48, 0x00, 0x00, 0x12, 0x40, 0x40, 0x00, 0x00];
+    assert!(V5Adapter::new()
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::UPDATE_HEALTH,
+            &malformed,
+        )
+        .is_err());
+}
+
+#[test]
 fn projects_the_legacy_window_and_decodes_break_actions() {
     let protocol = V5ServerProtocol;
     let mut covering = ChunkColumn::new(-64, 384);
