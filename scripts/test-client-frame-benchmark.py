@@ -20,6 +20,26 @@ SPEC.loader.exec_module(MODULE)
 
 class SummaryTests(unittest.TestCase):
     @staticmethod
+    def segment_summary(frames=3):
+        return {
+            "frames": frames,
+            "p50_ms": 4.0,
+            "p95_ms": 5.0,
+            "p99_ms": 6.0,
+            "mean_ms": 4.5,
+            "over_16_67": 0,
+            "over_33_3": 0,
+            "phases_ms": {},
+            "workload_counts": {
+                "world.model_sections_visited": {
+                    "median": 2.0,
+                    "p95": 2.0,
+                    "max": 2.0,
+                },
+            },
+        }
+
+    @staticmethod
     def emitted_scene(**overrides):
         scene = {
             "schema": 1,
@@ -98,7 +118,8 @@ class SummaryTests(unittest.TestCase):
             with mock.patch.object(MODULE, "_git_sha", return_value="abc"):
                 record = MODULE._heavy_record(
                     "heavyweight", 1, pathlib.Path("/tmp/lodestone"), (2, 7, 2, 3), "closed",
-                    2, "orbit", scene, {"stationary": {}, "moving": {}},
+                    2, "orbit", scene,
+                    {"stationary": self.segment_summary(), "moving": self.segment_summary()},
                 )
             MODULE._heavy_profile_record_path(artifact).write_text(
                 json.dumps({**record, "capture": str(artifact)}), encoding="utf-8"
@@ -141,10 +162,45 @@ class SummaryTests(unittest.TestCase):
                 "requested_scale": 1,
                 "camera_plan": "stationary",
                 "durations_seconds": {"warmup": 2, "mutation": 1, "stationary": 2, "moving": 3},
-                "segments": {"stationary": {}, "moving": {}},
+                "segments": {
+                    "stationary": self.segment_summary(),
+                    "moving": self.segment_summary(),
+                },
             }
             MODULE._heavy_profile_record_path(artifact).write_text(json.dumps(record), encoding="utf-8")
             self.assertEqual(MODULE.main(["--validate-heavy-profile", str(artifact)]), 0)
+
+    def test_heavy_profile_validator_rejects_noop_segment_summary(self):
+        """Negative controls: an empty or zero-frame phase is not a capture."""
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = pathlib.Path(directory) / "profile.json.gz"
+            artifact.write_bytes(b"capture")
+            MODULE._samply_sidecar_path(artifact).write_text("symbols", encoding="utf-8")
+            for moving, expected in (
+                ({}, "moving.*missing summary fields.*frames"),
+                (self.segment_summary(frames=0), "moving.*positive integer frames"),
+            ):
+                record = {
+                    "schema": 2,
+                    "workload": "heavyweight",
+                    "profile": "release",
+                    "capture": str(artifact),
+                    "scene_hash": "a" * 64,
+                    "scenario": "mixed",
+                    "seed": 17,
+                    "scale": 1,
+                    "requested_scale": 1,
+                    "camera_plan": "stationary",
+                    "durations_seconds": {"warmup": 2, "mutation": 1, "stationary": 2, "moving": 3},
+                    "segments": {
+                        "stationary": self.segment_summary(),
+                        "moving": moving,
+                    },
+                }
+                MODULE._heavy_profile_record_path(artifact).write_text(json.dumps(record), encoding="utf-8")
+                with self.subTest(moving=moving):
+                    with self.assertRaisesRegex(RuntimeError, expected):
+                        MODULE.validate_heavy_profile_artifact(artifact)
 
     def test_heavy_profile_validator_rejects_underidentified_camera_and_dense_scale(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -163,7 +219,10 @@ class SummaryTests(unittest.TestCase):
                 "requested_scale": 1,
                 "camera_plan": "orbit",
                 "durations_seconds": {"warmup": 2, "mutation": 1, "stationary": 2, "moving": 3},
-                "segments": {"stationary": {}, "moving": {}},
+                "segments": {
+                    "stationary": self.segment_summary(),
+                    "moving": self.segment_summary(),
+                },
             }
             record_path = MODULE._heavy_profile_record_path(artifact)
             record_path.write_text(json.dumps(record), encoding="utf-8")
