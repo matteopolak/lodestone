@@ -18,9 +18,10 @@ use lodestone_storage::{
 };
 use lodestone_storage_schema::{
     BiomeSection, BuiltinDimension, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1,
-    EntityRecord, GeneralRecord, PlayerRecord, RegisteredExtension,
+    EntityRecord, GeneralRecord, LightData as StoredLightData, LightSection, PlayerRecord,
+    RegisteredExtension,
     ScheduledTick as StoredScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord,
-    generated::{general_record, storage_record},
+    generated::{general_record, light_data, storage_record},
 };
 
 const GAME_DATA_VERSION: u32 = 46_002;
@@ -212,6 +213,17 @@ pub enum ChunkRecordError {
     MotionBlockingHeightOutOfRange(u32),
     /// A section carries light or extension payloads this adapter cannot retain.
     UnsupportedStoredSectionData,
+    /// A caller requested the fast light-aware reopen for an older record that
+    /// did not persist any light state.
+    MissingStoredLight,
+    /// A stored light layer has a value outside the four-bit range.
+    InvalidLightUniform(u32),
+    /// A stored light layer has an invalid packed nibble-array length.
+    InvalidLightArrayLength(usize),
+    /// A source light column does not match the requested block-section extent.
+    LightSectionCount { expected: usize, actual: usize },
+    /// A stored light section is not the next coordinate in the canonical range.
+    UnexpectedLightSectionY { expected: i32, actual: i32 },
     /// A source column names a biome not available in this built-in census.
     UnsupportedBiome(String),
     /// A stored integer is not one of this format version's biome enum values.
@@ -304,6 +316,21 @@ impl fmt::Display for ChunkRecordError {
             }
             Self::UnsupportedStoredSectionData => {
                 formatter.write_str("stored section carries unsupported light or extension data")
+            }
+            Self::MissingStoredLight => {
+                formatter.write_str("chunk record has no persisted light state")
+            }
+            Self::InvalidLightUniform(value) => {
+                write!(formatter, "light uniform value {value} exceeds the four-bit range")
+            }
+            Self::InvalidLightArrayLength(actual) => {
+                write!(formatter, "expected 2048 light bytes, found {actual}")
+            }
+            Self::LightSectionCount { expected, actual } => {
+                write!(formatter, "expected {expected} light sections, found {actual}")
+            }
+            Self::UnexpectedLightSectionY { expected, actual } => {
+                write!(formatter, "expected light section Y {expected}, found {actual}")
             }
             Self::UnsupportedBiome(name) => write!(formatter, "unsupported built-in biome {name}"),
             Self::UnknownBuiltinBiome(id) => write!(formatter, "unknown built-in biome ID {id}"),
@@ -785,6 +812,25 @@ impl WorldStorage {
         Ok(())
     }
 
+    /// Saves one dirty chunk together with its canonical sky/block light.
+    ///
+    /// The light column is supplied separately because the server's
+    /// `ChunkColumn` owns block and biome state while `lodestone_world` owns
+    /// the copy-on-write light representation. The native record retains all
+    /// `section_count + 2` light sections, including the boundary sections,
+    /// and uses uniform tags instead of expanding common arrays.
+    pub fn write_dirty_chunk_with_light(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        column: &crate::chunk::ChunkColumn,
+        light: &lodestone_world::ColumnLight,
+    ) -> Result<(), Error> {
+        let record = encode_chunk_with_light(column_x, column_z, column, light, None)?;
+        self.write_dirty([RecordWrite::new(RecordKey::chunk(column_x, column_z), record)])?;
+        Ok(())
+    }
+
     /// Saves one dirty chunk and its pending typed scheduled ticks together.
     ///
     /// The queue snapshot is non-destructive. Anvil continues to use its
@@ -807,9 +853,10 @@ impl WorldStorage {
     ///
     /// `min_y` and `height` remain an explicit dimension contract because the
     /// version-1 record stores section coordinates, not a dimension definition.
-    /// A mismatch, a future data version, extensions, light bytes, malformed
-    /// block-entity NBT, or block entities outside this record's extent is an
-    /// error rather than a partial load.
+    /// A mismatch, a future data version, extensions, persisted light state,
+    /// malformed block-entity NBT, or block entities outside this record's
+    /// extent is an error rather than a partial load. Use
+    /// [`Self::load_chunk_with_light`] when the light stream is wanted.
     pub fn load_chunk(
         &self,
         column_x: i32,
@@ -825,10 +872,42 @@ impl WorldStorage {
             .lock()
             .expect("world storage lock poisoned")
             .get(RecordKey::chunk(column_x, column_z))?;
-        record
-            .map(|record| decode_chunk(column_x, column_z, min_y, height, record).map(|(column, _)| column))
-            .transpose()
-            .map_err(Into::into)
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        let (column, _, light) = decode_chunk(column_x, column_z, min_y, height, record)?;
+        if light.is_some() {
+            return Err(ChunkRecordError::UnsupportedStoredSectionData.into());
+        }
+        Ok(Some(column))
+    }
+
+    /// Reopens a native chunk and its complete canonical sky/block light.
+    ///
+    /// Records written by [`Self::write_dirty_chunk`] intentionally have no
+    /// light stream and return [`ChunkRecordError::MissingStoredLight`]; this
+    /// prevents a fast reload from silently treating unknown light as dark.
+    pub fn load_chunk_with_light(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        min_y: i32,
+        height: i32,
+    ) -> Result<Option<(crate::chunk::ChunkColumn, lodestone_world::ColumnLight)>, Error> {
+        validate_extent(min_y, height)?;
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        let record = native
+            .lock()
+            .expect("world storage lock poisoned")
+            .get(RecordKey::chunk(column_x, column_z))?;
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        let (column, _, light) = decode_chunk(column_x, column_z, min_y, height, record)?;
+        let light = light.ok_or(ChunkRecordError::MissingStoredLight)?;
+        Ok(Some((column, light)))
     }
 
     /// Reopens one typed chunk and stages its pending ticks for the supplied
@@ -853,7 +932,10 @@ impl WorldStorage {
         let Some(record) = record else {
             return Ok(None);
         };
-        let (column, (block, fluid)) = decode_chunk(column_x, column_z, min_y, height, record)?;
+        let (column, (block, fluid), light) = decode_chunk(column_x, column_z, min_y, height, record)?;
+        if light.is_some() {
+            return Err(ChunkRecordError::UnsupportedStoredSectionData.into());
+        }
         scheduled.stage_persisted(block, fluid);
         Ok(Some(column))
     }
@@ -863,6 +945,26 @@ fn encode_chunk(
     column_x: i32,
     column_z: i32,
     column: &crate::chunk::ChunkColumn,
+    scheduled_ticks: Option<(Vec<crate::scheduled_tick::PersistedScheduledTick>, Vec<crate::scheduled_tick::PersistedScheduledTick>)>,
+) -> Result<StorageRecord, ChunkRecordError> {
+    encode_chunk_inner(column_x, column_z, column, None, scheduled_ticks)
+}
+
+fn encode_chunk_with_light(
+    column_x: i32,
+    column_z: i32,
+    column: &crate::chunk::ChunkColumn,
+    light: &lodestone_world::ColumnLight,
+    scheduled_ticks: Option<(Vec<crate::scheduled_tick::PersistedScheduledTick>, Vec<crate::scheduled_tick::PersistedScheduledTick>)>,
+) -> Result<StorageRecord, ChunkRecordError> {
+    encode_chunk_inner(column_x, column_z, column, Some(light), scheduled_ticks)
+}
+
+fn encode_chunk_inner(
+    column_x: i32,
+    column_z: i32,
+    column: &crate::chunk::ChunkColumn,
+    light: Option<&lodestone_world::ColumnLight>,
     scheduled_ticks: Option<(Vec<crate::scheduled_tick::PersistedScheduledTick>, Vec<crate::scheduled_tick::PersistedScheduledTick>)>,
 ) -> Result<StorageRecord, ChunkRecordError> {
     validate_extent(column.min_y, column.height)?;
@@ -978,6 +1080,10 @@ fn encode_chunk(
         })
         .transpose()?
         .unwrap_or_default();
+    let light_sections = light
+        .map(|light| encode_light_sections(column, light))
+        .transpose()?
+        .unwrap_or_default();
     Ok(StorageRecord {
         format_version: FORMAT_VERSION_V1,
         record: Some(storage_record::Record::Chunk(ChunkRecord {
@@ -995,8 +1101,53 @@ fn encode_chunk(
             block_scheduled_ticks,
             extensions: Vec::new(),
             fluid_scheduled_ticks,
+            light_sections,
         })),
     })
+}
+
+fn encode_light_sections(
+    column: &crate::chunk::ChunkColumn,
+    light: &lodestone_world::ColumnLight,
+) -> Result<Vec<LightSection>, ChunkRecordError> {
+    let expected = column.section_count() + 2;
+    if light.light_section_count() != expected {
+        return Err(ChunkRecordError::LightSectionCount {
+            expected,
+            actual: light.light_section_count(),
+        });
+    }
+    let first_y = column.min_y.div_euclid(16) - 1;
+    (0..expected)
+        .map(|index| {
+            Ok(LightSection {
+                section_y: first_y + index as i32,
+                sky_light: encode_light_data(light.sky(index))?,
+                block_light: encode_light_data(light.block(index))?,
+            })
+        })
+        .collect()
+}
+
+fn encode_light_data(
+    data: &lodestone_world::LightData,
+) -> Result<Option<StoredLightData>, ChunkRecordError> {
+    let data = match data {
+        lodestone_world::LightData::Missing => None,
+        lodestone_world::LightData::Uniform(value) => {
+            if *value > 15 {
+                return Err(ChunkRecordError::InvalidLightUniform(u32::from(*value)));
+            }
+            Some(light_data::Data::Uniform(u32::from(*value)))
+        }
+        lodestone_world::LightData::Values(array) => {
+            match array.uniform_value() {
+                Some(value) => Some(light_data::Data::Uniform(u32::from(value))),
+                None => Some(light_data::Data::Values(array.as_bytes().to_vec())),
+            }
+        }
+    };
+    Ok(data.map(|data| StoredLightData { data: Some(data) }))
 }
 
 fn decode_chunk(
@@ -1005,7 +1156,14 @@ fn decode_chunk(
     min_y: i32,
     height: i32,
     record: StorageRecord,
-) -> Result<(crate::chunk::ChunkColumn, (Vec<crate::scheduled_tick::PersistedScheduledTick>, Vec<crate::scheduled_tick::PersistedScheduledTick>)), ChunkRecordError> {
+) -> Result<(
+    crate::chunk::ChunkColumn,
+    (
+        Vec<crate::scheduled_tick::PersistedScheduledTick>,
+        Vec<crate::scheduled_tick::PersistedScheduledTick>,
+    ),
+    Option<lodestone_world::ColumnLight>,
+), ChunkRecordError> {
     if record.format_version != FORMAT_VERSION_V1 {
         return Err(ChunkRecordError::InvalidPackedStates("unsupported record format version"));
     }
@@ -1060,6 +1218,31 @@ fn decode_chunk(
             &local_indices,
         );
     }
+    let light = if chunk.light_sections.is_empty() {
+        None
+    } else {
+        let expected_light_sections = expected_sections + 2;
+        if chunk.light_sections.len() != expected_light_sections {
+            return Err(ChunkRecordError::LightSectionCount {
+                expected: expected_light_sections,
+                actual: chunk.light_sections.len(),
+            });
+        }
+        let first_y = min_y.div_euclid(16) - 1;
+        let mut light = lodestone_world::ColumnLight::new(expected_sections);
+        for (index, section) in chunk.light_sections.iter().enumerate() {
+            let expected_section_y = first_y + index as i32;
+            if section.section_y != expected_section_y {
+                return Err(ChunkRecordError::UnexpectedLightSectionY {
+                    expected: expected_section_y,
+                    actual: section.section_y,
+                });
+            }
+            *light.sky_mut(index) = decode_light_data(section.sky_light.as_ref())?;
+            *light.block_mut(index) = decode_light_data(section.block_light.as_ref())?;
+        }
+        Some(light)
+    };
     // Older terrain-only records intentionally omitted both biome fields. They
     // decode to `ChunkColumn::new`'s all-default biome state, while a record
     // that carries either field must carry the complete paired representation.
@@ -1164,7 +1347,33 @@ fn decode_chunk(
     }
     column.set_block_entities(block_entities);
     let scheduled_ticks = decode_scheduled_ticks(expected_x, expected_z, &chunk)?;
-    Ok((column, scheduled_ticks))
+    Ok((column, scheduled_ticks, light))
+}
+
+fn decode_light_data(
+    data: Option<&StoredLightData>,
+) -> Result<lodestone_world::LightData, ChunkRecordError> {
+    let Some(data) = data else {
+        return Ok(lodestone_world::LightData::Missing);
+    };
+    match data.data.as_ref() {
+        None => Ok(lodestone_world::LightData::Missing),
+        Some(light_data::Data::Uniform(value)) => {
+            if *value > 15 {
+                return Err(ChunkRecordError::InvalidLightUniform(*value));
+            }
+            Ok(lodestone_world::LightData::Uniform(*value as u8))
+        }
+        Some(light_data::Data::Values(values)) => {
+            let array = lodestone_world::NibbleArray::from_bytes(values)
+                .map_err(|_| ChunkRecordError::InvalidLightArrayLength(values.len()))?;
+            if let Some(value) = array.uniform_value() {
+                Ok(lodestone_world::LightData::Uniform(value))
+            } else {
+                Ok(lodestone_world::LightData::Values(array))
+            }
+        }
+    }
 }
 
 fn encode_scheduled_tick(
@@ -1738,6 +1947,7 @@ mod tests {
                     block_scheduled_ticks: Vec::new(),
                     extensions: Vec::new(),
                     fluid_scheduled_ticks: Vec::new(),
+                    light_sections: Vec::new(),
                 })),
             },
         )
@@ -2082,6 +2292,72 @@ mod tests {
             reopened.load_chunk(-8, 11, -16, 32).unwrap().is_none(),
             "a distinct key is the independent absence control"
         );
+        drop(reopened);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_chunk_reopens_canonical_light_without_expanding_uniform_layers() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-chunk-light-{}-{unique}",
+            std::process::id()
+        ));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        let mut source = crate::chunk::ChunkColumn::new(-16, 32);
+        source.set_block(1, -16, 2, "minecraft:stone");
+        let mut light = lodestone_world::ColumnLight::new(source.section_count());
+        *light.sky_mut(1) = lodestone_world::LightData::Uniform(15);
+        *light.block_mut(1) = lodestone_world::LightData::Uniform(0);
+        let mut sky_values = lodestone_world::NibbleArray::filled(0);
+        sky_values.set(
+            lodestone_world::NibbleArray::index(2, 3, 4),
+            9,
+        );
+        *light.sky_mut(2) = lodestone_world::LightData::Values(sky_values);
+        let mut block_values = lodestone_world::NibbleArray::filled(0);
+        block_values.set(
+            lodestone_world::NibbleArray::index(5, 6, 7),
+            12,
+        );
+        *light.block_mut(2) = lodestone_world::LightData::Values(block_values);
+
+        storage
+            .write_dirty_chunk_with_light(-3, 8, &source, &light)
+            .expect("write terrain and canonical light");
+        drop(storage);
+
+        let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("reopen native store");
+        let (loaded, loaded_light) = reopened
+            .load_chunk_with_light(-3, 8, -16, 32)
+            .expect("decode reopened chunk and light")
+            .expect("stored chunk is present");
+        assert_eq!(loaded.block_state(1, -16, 2), "minecraft:stone");
+        assert_eq!(loaded_light.sky(1), &lodestone_world::LightData::Uniform(15));
+        assert_eq!(loaded_light.block(1), &lodestone_world::LightData::Uniform(0));
+        assert_eq!(
+            loaded_light.sky(2).get(lodestone_world::NibbleArray::index(2, 3, 4)),
+            Some(9)
+        );
+        assert_eq!(
+            loaded_light
+                .block(2)
+                .get(lodestone_world::NibbleArray::index(5, 6, 7)),
+            Some(12)
+        );
+        assert!(matches!(
+            reopened.load_chunk(-3, 8, -16, 32),
+            Err(Error::Chunk(ChunkRecordError::UnsupportedStoredSectionData))
+        ));
         drop(reopened);
         std::fs::remove_dir_all(directory).expect("remove native test segment");
     }

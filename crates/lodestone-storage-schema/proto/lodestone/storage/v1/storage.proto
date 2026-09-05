@@ -42,6 +42,30 @@ message ChunkRecord {
   repeated ScheduledTick block_scheduled_ticks = 9;
   repeated ExtensionValue extensions = 10;
   repeated ScheduledTick fluid_scheduled_ticks = 11;
+  // The complete canonical light column, including one section below and one
+  // section above the block range. An absent repeated field means this record
+  // predates native light persistence; when present it must contain the full
+  // contiguous light-section range for the requested dimension.
+  repeated LightSection light_sections = 12;
+}
+
+// Sky and block light for one canonical light-section coordinate. The section
+// coordinate is independent of ChunkSection: light section zero sits below
+// the world's lowest block section.
+message LightSection {
+  sint32 section_y = 1;
+  LightData sky_light = 2;
+  LightData block_light = 3;
+}
+
+// A light layer uses no `data` member for Missing, a compact uniform value for
+// common all-zero/full sections, or exactly 2048 packed nibbles for Values.
+// The adapter validates the 0..15 uniform range and exact array length.
+message LightData {
+  oneof data {
+    uint32 uniform = 1;
+    bytes values = 2;
+  }
 }
 
 // Only built-in server actions have a native representation. Custom actions

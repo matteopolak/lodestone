@@ -2,8 +2,8 @@ use lodestone_storage_schema::generated::{general_record, storage_record};
 use lodestone_storage_schema::{
     validate_extension_table, validate_record, validate_record_with_extensions, BiomeSection,
     BuiltinBiome, BuiltinDimension, EntityRecord, ExtensionTable, FORMAT_VERSION_V1, GameMode,
-    GeneralRecord, PlayerRecord, ScheduledTick, ScheduledTickKind, ScheduledTickPriority,
-    StorageRecord,
+    GeneralRecord, LightData, LightSection, PlayerRecord, ScheduledTick, ScheduledTickKind,
+    ScheduledTickPriority, StorageRecord,
     ValidationError,
 };
 use prost::Message;
@@ -32,6 +32,89 @@ fn chunk_fixture_is_the_specified_v1_wire_record() {
     assert_eq!(section.block_state_indices, [1, 2, 3]);
 
     assert_eq!(record.encode_to_vec(), expected);
+}
+
+#[test]
+fn typed_light_layers_preserve_missing_uniform_and_values_compactly() {
+    let mut record = StorageRecord::decode(fixture(CHUNK_V1).as_slice()).unwrap();
+    let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+        panic!("fixture must contain a chunk record");
+    };
+    let values = (0..2048).map(|index| (index as u8).wrapping_mul(3)).collect();
+    chunk.light_sections = vec![
+        LightSection {
+            section_y: -5,
+            sky_light: Some(LightData {
+                data: Some(lodestone_storage_schema::generated::light_data::Data::Uniform(15)),
+            }),
+            block_light: Some(LightData {
+                data: Some(lodestone_storage_schema::generated::light_data::Data::Values(values)),
+            }),
+        },
+        // Both absent oneofs are the canonical Missing representation.
+        LightSection {
+            section_y: -4,
+            sky_light: None,
+            block_light: None,
+        },
+    ];
+    validate_record(&record).unwrap();
+    let encoded = record.encode_to_vec();
+    assert!(encoded.len() < 2300, "uniform light must not expand to a second 2 KiB array");
+    let decoded = StorageRecord::decode(encoded.as_slice()).unwrap();
+    assert_eq!(decoded, record);
+
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        let Some(light) = &mut chunk.light_sections[0].sky_light else {
+            unreachable!();
+        };
+        light.data = Some(lodestone_storage_schema::generated::light_data::Data::Uniform(16));
+    }
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::InvalidLightUniform(16))
+    );
+
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        chunk.light_sections[0].sky_light = Some(LightData {
+            data: Some(
+                lodestone_storage_schema::generated::light_data::Data::Values(vec![0; 2047]),
+            ),
+        });
+    }
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::InvalidLightArrayLength(2047))
+    );
+
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        chunk.light_sections[0].sky_light = None;
+        chunk.light_sections[1].section_y = -5;
+    }
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::UnorderedLightSections {
+            previous: -5,
+            actual: -5,
+        })
+    );
+
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        chunk.sections[0].sky_light = vec![0; 2048];
+    }
+    assert_eq!(validate_record(&record), Err(ValidationError::LegacyLightBytes));
 }
 
 #[test]

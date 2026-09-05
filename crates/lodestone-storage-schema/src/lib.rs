@@ -9,8 +9,9 @@ pub mod generated {
 
 pub use generated::{
     BiomeSection, BuiltinBiome, BuiltinDimension, ChunkRecord, ChunkSection, EntityRecord,
-    ExtensionTable, ExtensionValue, GameMode, GeneralRecord, PlayerRecord, RegisteredExtension,
-    ScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord, WorldProperties,
+    ExtensionTable, ExtensionValue, GameMode, GeneralRecord, LightData, LightSection,
+    PlayerRecord, RegisteredExtension, ScheduledTick, ScheduledTickKind, ScheduledTickPriority,
+    StorageRecord, WorldProperties,
 };
 
 /// The only storage-record format understood by the initial schema.
@@ -92,6 +93,29 @@ fn validate_chunk(chunk: &ChunkRecord) -> Result<(), ValidationError> {
         if section.palette_state_ids.is_empty() {
             return Err(ValidationError::EmptyPalette);
         }
+        // These fields were present in the initial vocabulary but had no
+        // representation for Missing versus Uniform. Native v1 light data
+        // uses the typed `light_sections` stream below; accepting both would
+        // create two disagreeing sources of truth.
+        if !section.sky_light.is_empty() || !section.block_light.is_empty() {
+            return Err(ValidationError::LegacyLightBytes);
+        }
+    }
+    if !chunk.light_sections.is_empty() {
+        let mut previous_y = None;
+        for section in &chunk.light_sections {
+            if let Some(previous_y) = previous_y {
+                if section.section_y <= previous_y {
+                    return Err(ValidationError::UnorderedLightSections {
+                        previous: previous_y,
+                        actual: section.section_y,
+                    });
+                }
+            }
+            previous_y = Some(section.section_y);
+            validate_light_data(section.sky_light.as_ref())?;
+            validate_light_data(section.block_light.as_ref())?;
+        }
     }
     if !chunk.biome_sections.is_empty() || !chunk.surface_biome_ids.is_empty() {
         if chunk.biome_sections.len() != chunk.sections.len() {
@@ -167,6 +191,29 @@ fn validate_builtin_biomes(ids: &[i32]) -> Result<(), ValidationError> {
     Ok(())
 }
 
+fn validate_light_data(data: Option<&LightData>) -> Result<(), ValidationError> {
+    let Some(data) = data else {
+        return Ok(());
+    };
+    match &data.data {
+        None => Ok(()),
+        Some(generated::light_data::Data::Uniform(value)) => {
+            if *value <= 15 {
+                Ok(())
+            } else {
+                Err(ValidationError::InvalidLightUniform(*value))
+            }
+        }
+        Some(generated::light_data::Data::Values(values)) => {
+            if values.len() == 2048 {
+                Ok(())
+            } else {
+                Err(ValidationError::InvalidLightArrayLength(values.len()))
+            }
+        }
+    }
+}
+
 fn validate_general(general: &GeneralRecord) -> Result<(), ValidationError> {
     match &general.record {
         Some(generated::general_record::Record::Player(player)) => validate_player(player)?,
@@ -232,6 +279,10 @@ pub enum ValidationError {
     MissingGameDataVersion,
     InvalidPaletteBits(u32),
     EmptyPalette,
+    LegacyLightBytes,
+    UnorderedLightSections { previous: i32, actual: i32 },
+    InvalidLightUniform(u32),
+    InvalidLightArrayLength(usize),
     BiomeSectionCount { expected: usize, actual: usize },
     BiomeSectionCoordinateMismatch { expected: i32, actual: i32 },
     InvalidBiomeQuartRows(u32),
@@ -269,6 +320,19 @@ impl std::fmt::Display for ValidationError {
             Self::MissingGameDataVersion => formatter.write_str("chunk has no game data version"),
             Self::InvalidPaletteBits(bits) => write!(formatter, "invalid palette width {bits}"),
             Self::EmptyPalette => formatter.write_str("chunk section has an empty palette"),
+            Self::LegacyLightBytes => formatter.write_str(
+                "chunk section uses legacy raw light bytes; use the typed light-section stream",
+            ),
+            Self::UnorderedLightSections { previous, actual } => write!(
+                formatter,
+                "light sections must be strictly ordered: {actual} follows {previous}",
+            ),
+            Self::InvalidLightUniform(value) => {
+                write!(formatter, "light uniform value {value} exceeds the four-bit range")
+            }
+            Self::InvalidLightArrayLength(actual) => {
+                write!(formatter, "expected 2048 light bytes, found {actual}")
+            }
             Self::BiomeSectionCount { expected, actual } => {
                 write!(formatter, "expected {expected} biome sections, found {actual}")
             }

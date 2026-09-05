@@ -5516,6 +5516,7 @@ mod tests {
                 block_scheduled_ticks: Vec::new(),
                 extensions: Vec::new(),
                 fluid_scheduled_ticks: Vec::new(),
+                light_sections: Vec::new(),
             })),
         };
 
