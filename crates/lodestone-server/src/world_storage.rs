@@ -263,6 +263,11 @@ pub enum Error {
     Native(StoreError),
     /// A native chunk record cannot be represented by this server build.
     Chunk(ChunkRecordError),
+    /// An explicitly selected native terrain column was not committed.
+    MissingNativeChunk {
+        /// The absent native chunk coordinate.
+        coordinate: NativeChunkCoordinate,
+    },
     /// A native player locator record is malformed, unsupported, or ambiguous.
     Player(PlayerRecordError),
     /// A native resident-entity record is malformed, unsupported, or ambiguous.
@@ -281,6 +286,11 @@ impl fmt::Display for Error {
             }
             Self::Native(error) => write!(formatter, "native world storage failed: {error}"),
             Self::Chunk(error) => write!(formatter, "native chunk record failed: {error}"),
+            Self::MissingNativeChunk { coordinate } => write!(
+                formatter,
+                "selected native chunk ({}, {}) is absent",
+                coordinate.column_x, coordinate.column_z
+            ),
             Self::Player(error) => write!(formatter, "native player record failed: {error}"),
             Self::Entity(error) => write!(formatter, "native entity record failed: {error}"),
             Self::WorldProperties(error) => {
@@ -997,23 +1007,36 @@ impl WorldStorage {
         };
         validate_extent(min_y, height)?;
         let mut native = native.lock().expect("world storage lock poisoned");
-        native
-            .committed_chunk_coordinates()
-            .into_iter()
-            .map(|coordinate| {
-                let record = native
-                    .get(RecordKey::chunk(coordinate.column_x, coordinate.column_z))?
-                    .expect("a coordinate copied from the native index must remain readable while locked");
-                let record = decode_native_chunk(
-                    coordinate.column_x,
-                    coordinate.column_z,
-                    min_y,
-                    height,
-                    record,
-                )?;
-                Ok(NativeChunkSnapshot { coordinate, record })
-            })
-            .collect()
+        let coordinates = native.committed_chunk_coordinates();
+        snapshot_native_chunk_records(native.as_mut(), coordinates, min_y, height)
+    }
+
+    /// Snapshots explicitly selected committed terrain records in caller order.
+    ///
+    /// The native backend lock covers every selected lookup and typed decode,
+    /// so a writer cannot replace a selected column between one member of the
+    /// batch and the next. The supplied coordinates are deliberately copied
+    /// rather than rediscovered: callers that reviewed a narrow selection can
+    /// retain that exact set without scanning unrelated terrain. A missing
+    /// selected column fails the complete snapshot instead of becoming a
+    /// silently smaller export candidate.
+    pub fn native_chunk_records_for(
+        &self,
+        coordinates: &[NativeChunkCoordinate],
+        min_y: i32,
+        height: i32,
+    ) -> Result<Vec<NativeChunkSnapshot>, Error> {
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        validate_extent(min_y, height)?;
+        let mut native = native.lock().expect("world storage lock poisoned");
+        snapshot_native_chunk_records(
+            native.as_mut(),
+            coordinates.iter().copied(),
+            min_y,
+            height,
+        )
     }
 
     /// Snapshots every committed supported native general record in key order.
@@ -1406,6 +1429,30 @@ impl WorldStorage {
             column_x, column_z, min_y, height, record,
         )?))
     }
+}
+
+fn snapshot_native_chunk_records(
+    native: &mut dyn DirtyRecordStore,
+    coordinates: impl IntoIterator<Item = NativeChunkCoordinate>,
+    min_y: i32,
+    height: i32,
+) -> Result<Vec<NativeChunkSnapshot>, Error> {
+    coordinates
+        .into_iter()
+        .map(|coordinate| {
+            let record = native
+                .get(RecordKey::chunk(coordinate.column_x, coordinate.column_z))?
+                .ok_or(Error::MissingNativeChunk { coordinate })?;
+            let record = decode_native_chunk(
+                coordinate.column_x,
+                coordinate.column_z,
+                min_y,
+                height,
+                record,
+            )?;
+            Ok(NativeChunkSnapshot { coordinate, record })
+        })
+        .collect()
 }
 
 fn decode_native_chunk(

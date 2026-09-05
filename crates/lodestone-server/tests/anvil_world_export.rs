@@ -14,7 +14,7 @@ use lodestone_server::{
     anvil_world_export::{
         ChunkCoordinate, Error, WorldExportInput, WorldExportLossDecision, export_world_directory,
         export_native_world_snapshot, preflight_native_world_export, preflight_world_export,
-        snapshot_native_world_export,
+        snapshot_native_world_export, snapshot_world_export,
     },
     world_storage::{NativeDirtyChunkRecord, WorldStorage, WorldStorageBackend},
 };
@@ -207,6 +207,68 @@ fn all_native_snapshot_exports_the_reviewed_records_after_a_later_native_write()
     assert!(
         !contains_string(&chunk, "minecraft:emerald_block"),
         "re-reading the later native replacement would fail this control"
+    );
+
+    drop(storage);
+    std::fs::remove_dir_all(native_directory).expect("remove native fixture store");
+    std::fs::remove_dir_all(destination).expect("remove published fixture world");
+}
+
+#[test]
+fn explicit_snapshot_exports_its_reviewed_selection_after_later_native_writes() {
+    let native_directory = scratch("selected-snapshot-native");
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_directory.clone(),
+    })
+    .expect("open native fixture store");
+    write_chunk(&storage, 0, 0, "minecraft:diamond_block", false);
+    write_chunk(&storage, 32, 0, "minecraft:gold_block", false);
+    let input = WorldExportInput::new(
+        vec![ChunkCoordinate { x: 0, z: 0 }],
+        0,
+        16,
+        400,
+        CompressionScheme::Zlib,
+        1_700_000_000,
+    )
+    .expect("one selected chunk is valid");
+    let snapshot = snapshot_world_export(&storage, &input)
+        .expect("capture the explicit reviewed selection");
+    let report = preflight_native_world_export(&snapshot);
+    assert_eq!(report.unsupported_count(), 0);
+
+    write_chunk(&storage, 0, 0, "minecraft:emerald_block", false);
+    write_chunk(&storage, 32, 0, "minecraft:netherite_block", false);
+    let changed = storage
+        .load_chunk(0, 0, 0, 16)
+        .expect("read changed source")
+        .expect("changed source remains present");
+    assert_eq!(
+        changed.column.block_state(1, 1, 2),
+        "minecraft:emerald_block",
+        "the control proves the selected source was replaced after capture"
+    );
+
+    let destination = scratch("selected-snapshot-published");
+    let result = export_native_world_snapshot(
+        &snapshot,
+        &destination,
+        Some(report.decide(WorldExportLossDecision::ProceedAndDiscardUnsupported)),
+    )
+    .expect("the captured explicit selection publishes");
+    assert_eq!((result.chunks_exported, result.regions_published), (1, 1));
+    let chunk = read_chunk(&destination.join("region/r.0.0.mca"), 0, 0);
+    assert!(
+        contains_string(&chunk, "minecraft:diamond_block"),
+        "publication must consume the selected reviewed record"
+    );
+    assert!(
+        !contains_string(&chunk, "minecraft:emerald_block"),
+        "re-reading the selected replacement would fail this control"
+    );
+    assert!(
+        !destination.join("region/r.1.0.mca").exists(),
+        "the snapshot must not expand to terrain outside its explicit selection"
     );
 
     drop(storage);
