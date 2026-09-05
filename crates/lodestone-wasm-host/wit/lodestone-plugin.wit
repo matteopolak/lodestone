@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.23.0;
+package lodestone:plugin@0.24.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -482,7 +482,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.23.0"`.
+        /// `"lodestone:plugin@0.24.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.
@@ -544,6 +544,21 @@ interface scheduler {
     cancel: func(id: task-id);
 }
 
+/// Capability `world:read` — a bounded, copied block-state snapshot. The guest
+/// receives values only: it never receives a world, an ECS borrow, or a callback
+/// through which it could retain either.
+interface world-snapshot {
+    use types.{block-pos};
+
+    /// Reads at most 128 positions from one momentary chunk-store snapshot.
+    ///
+    /// The output has exactly one entry per input position, in the same order.
+    /// `none` is distinct from state `0`: it means the column is not loaded or
+    /// the position is outside its vertical extent, while `some(0)` is a loaded
+    /// air cell.
+    read-blocks: func(positions: list<block-pos>) -> result<list<option<u32>>, string>;
+}
+
 world plugin {
     use types.{action, command-context, command-outcome, event, plugin-info, plugin-verdict, task-id, verdict-context};
 
@@ -551,6 +566,7 @@ world plugin {
     import filesystem;
     import filesystem-write;
     import scheduler;
+    import world-snapshot;
 
     /// Called once, immediately after instantiation. The returned
     /// [`plugin-info`] is cross-checked against the manifest.

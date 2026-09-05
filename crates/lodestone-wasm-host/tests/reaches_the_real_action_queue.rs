@@ -25,19 +25,53 @@ mod support;
 
 use std::sync::Arc;
 
+use bevy_ecs::prelude::{Res, ResMut, Resource};
 use lodestone_ecs::events::GameEvent;
 use lodestone_ecs::player::{
     ActionQueue, BreakIntent, BreakOutcome, BreakStatus, CollisionSource, Egress, LocalPlayer,
     PhysicsState, PlayerCollision, SelectedSlot,
 };
-use lodestone_ecs::{GameTick, app::App};
+use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, GameTick, app::App};
 use lodestone_model::{ClientAction, ClientEvent, PlayerInput, Text};
 use lodestone_physics::{Aabb, CollisionView, PlayerState, Vec3d};
+use lodestone_world::{ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World};
 use lodestone::{config::Config, sim::Sim};
 use lodestone_wasm_host::{
     Capability, CapabilitySet, InventoryClickButton, InventoryClickIntent, InventoryClickMode,
     InventoryThrowMode, PendingWasmMenuClicks, PluginHost, WasmHostPlugin, WasmPlugins,
 };
+
+#[derive(Resource, Default, Debug, PartialEq, Eq)]
+struct NativeWorldSnapshot(Vec<Option<u32>>);
+
+/// A compiled-in plugin-shaped consumer of the same session `ChunkWorld` the
+/// WASM host receives. It deliberately records copied values rather than
+/// retaining a guard, matching the guest boundary's snapshot contract.
+fn read_native_world_snapshot(world: Res<ChunkWorld>, mut observed: ResMut<NativeWorldSnapshot>) {
+    let world = world.read();
+    observed.0 = [[2, 60, 2], [17, 60, 2], [2, 320, 2]]
+        .into_iter()
+        .map(|[x, y, z]| world.block_state_at(x, y, z))
+        .collect();
+}
+
+fn populated_chunk_world() -> ChunkWorldWrite {
+    let mut world = World::new();
+    let column = ChunkColumn::new(
+        -64,
+        24,
+        PaletteKind::block_states(),
+        PaletteKind::biomes(),
+        0,
+        0,
+    );
+    world.load(
+        ChunkPos::new(0, 0),
+        LoadedChunk::new(column, ColumnLight::new(24), Heightmaps::new(), Vec::new()),
+    );
+    world.set_block(2, 60, 2, 42);
+    ChunkWorldWrite::new(world)
+}
 
 fn chat(text: &str) -> GameEvent {
     GameEvent(ClientEvent::Chat {
@@ -50,6 +84,16 @@ fn chat(text: &str) -> GameEvent {
 
 fn responder_capabilities() -> CapabilitySet {
     CapabilitySet::from_iter([Capability::Log, Capability::ObserveChat, Capability::ActChat])
+}
+
+fn world_read_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActChat, Capability::ReadWorld])
+}
+
+fn world_read_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ReadWorld);
+    policy
 }
 
 fn command_capabilities() -> CapabilitySet {
@@ -315,6 +359,62 @@ fn a_runtime_loaded_wasm_plugin_pushes_a_real_client_action_onto_the_real_queue(
         0,
         "nothing should have been refused: the plugin holds `act:chat`"
     );
+}
+
+/// The native and runtime-loaded tiers observe the same populated session store.
+///
+/// This is deliberately a composed client `App`, not a hand-built `World`: the
+/// native system and `WasmHostPlugin` are both scheduled on the actual `GameTick`
+/// route. The guest's result proves the `world` import reaches the paired
+/// `ChunkWorld`; the native resource is the parity control on that exact store.
+#[test]
+fn native_and_wasm_plugins_read_the_same_bounded_chunk_snapshot() {
+    let wasm = support::build_example_plugin(&["world-read"]);
+    let mut host = PluginHost::new(world_read_host_policy()).expect("engine");
+    host.load_file("world-read", &wasm, &world_read_capabilities())
+        .expect("the explicit world-read grant must link the guest import");
+
+    let mut app = client_app_with_host(false);
+    let write = populated_chunk_world();
+    let read = write.read_handle();
+    app.insert_resource(write);
+    app.insert_resource(read);
+    app.insert_resource(NativeWorldSnapshot::default());
+    app.add_systems(GameTick, read_native_world_snapshot);
+    app.add_plugins(WasmHostPlugin::new(host));
+
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world().resource::<NativeWorldSnapshot>().0,
+        vec![Some(42), None, None],
+        "the native consumer must distinguish loaded air/state from absent cells"
+    );
+    assert_eq!(
+        chat_actions(&app),
+        vec![ClientAction::SendChat {
+            text: "world:42,none,none".to_owned(),
+        }],
+        "the separately built guest must report the same copied values through the real conductor"
+    );
+}
+
+#[test]
+fn world_read_is_default_denied_before_guest_instantiation() {
+    let wasm = support::build_example_plugin(&["world-read"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    let error = host
+        .load_file("world-read", &wasm, &world_read_capabilities())
+        .expect_err("world snapshots must require an operator grant");
+    assert!(
+        matches!(error, lodestone_wasm_host::HostError::CapabilityDenied { .. }),
+        "the policy refusal must happen before a world-capable component is instantiated: {error:?}"
+    );
+    assert!(
+        error.to_string().contains("world:read"),
+        "the refusal must name the missing authority: {error}"
+    );
+    assert!(host.is_empty(), "a denied guest must not remain loaded");
 }
 
 #[test]

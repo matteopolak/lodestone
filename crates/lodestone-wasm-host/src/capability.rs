@@ -63,6 +63,10 @@ pub enum Capability {
     ObserveInventory,
     /// Receive `ClientEvent::SectionBlocksChanged`.
     ObserveBlocks,
+    /// Read a bounded, copied block-state snapshot from the current client
+    /// chunk store. This is an import capability, so an ungranted guest cannot
+    /// instantiate if it references the `world` interface at all.
+    ReadWorld,
     /// Push `ClientAction::SendChat` / `SendCommand` onto `ActionQueue`.
     ///
     /// One capability for both because they are the same power: `SendCommand`
@@ -211,6 +215,7 @@ impl Capability {
         Self::ObserveHealth,
         Self::ObserveInventory,
         Self::ObserveBlocks,
+        Self::ReadWorld,
         Self::ActChat,
         Self::ActCommand,
         Self::ActInteract,
@@ -249,6 +254,7 @@ impl Capability {
             Self::ObserveHealth => "observe:health",
             Self::ObserveInventory => "observe:inventory",
             Self::ObserveBlocks => "observe:blocks",
+            Self::ReadWorld => "world:read",
             Self::ActChat => "act:chat",
             Self::ActCommand => "act:command",
             Self::ActInteract => "act:interact",
@@ -297,7 +303,11 @@ impl Capability {
     #[must_use]
     pub const fn is_import(self) -> bool {
         match self {
-            Self::Log | Self::FsRead | Self::FsWrite | Self::ScheduleTasks => true,
+            Self::Log
+            | Self::FsRead
+            | Self::FsWrite
+            | Self::ScheduleTasks
+            | Self::ReadWorld => true,
             Self::ObserveChat
             | Self::ObserveHealth
             | Self::ObserveInventory
@@ -500,6 +510,10 @@ mod tests {
             "schedule:tasks must not be granted by default"
         );
         assert!(
+            !policy.contains(Capability::ReadWorld),
+            "world:read must not be granted by default"
+        );
+        assert!(
             !policy.contains(Capability::RegisterCommands),
             "commands:register must not be granted by default"
         );
@@ -561,6 +575,7 @@ mod tests {
         assert!(CapabilitySet::permissive().contains(Capability::FsRead));
         assert!(CapabilitySet::permissive().contains(Capability::FsWrite));
         assert!(CapabilitySet::permissive().contains(Capability::ScheduleTasks));
+        assert!(CapabilitySet::permissive().contains(Capability::ReadWorld));
         assert!(CapabilitySet::permissive().contains(Capability::RegisterCommands));
         assert!(CapabilitySet::permissive().contains(Capability::ActSelectSlot));
     }
@@ -586,6 +601,7 @@ mod tests {
         assert!(Capability::FsRead.is_import());
         assert!(Capability::FsWrite.is_import());
         assert!(Capability::ScheduleTasks.is_import());
+        assert!(Capability::ReadWorld.is_import());
         assert!(!Capability::ObserveChat.is_import());
         assert!(!Capability::ActChat.is_import());
     }

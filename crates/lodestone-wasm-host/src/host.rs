@@ -45,8 +45,11 @@ use wasmtime::component::{Component, Linker, TypedFunc};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use bevy_ecs::entity::Entity;
 
-use crate::bindings::lodestone::plugin::{filesystem, filesystem_write, logging, scheduler, types};
+use crate::bindings::lodestone::plugin::{
+    filesystem, filesystem_write, logging, scheduler, types, world_snapshot,
+};
 use crate::capability::{Capability, CapabilitySet};
+use lodestone_ecs::ChunkWorld;
 
 /// The WIT vocabulary, re-exported from the generated bindings so that nothing
 /// outside this crate spells a `bindings::lodestone::plugin::…` path.
@@ -72,7 +75,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.23.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.24.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
@@ -86,6 +89,12 @@ pub const DEFAULT_FUEL_PER_VERDICT: u64 = 500_000;
 
 /// Default per-guest linear-memory ceiling.
 pub const DEFAULT_MEMORY_LIMIT: usize = 32 * 1024 * 1024;
+
+/// Maximum number of positions a guest may read in one copied world snapshot.
+///
+/// This bounds both the chunk-lock hold and guest allocation. A guest wanting a
+/// larger scan must spread it across ticks, keeping the host tick cooperative.
+pub const MAX_BLOCK_SNAPSHOT_POSITIONS: usize = 128;
 
 /// How many *core* wasm instances one plugin may create. See the comment at the
 /// `StoreLimitsBuilder` call site for why this is not 1.
@@ -305,6 +314,10 @@ pub struct GuestState {
     /// respective capabilities are granted. `None` refuses both, while still
     /// recording attempts.
     fs_root: Option<PathBuf>,
+    /// The current client chunk store, installed by the conductor before a guest
+    /// callback. The guest never receives this handle: [`world_snapshot::Host`] copies a
+    /// bounded result under its lock and drops the guard before returning.
+    chunk_world: Option<ChunkWorld>,
     current_tick: u64,
     next_task_id: types::TaskId,
     scheduled_tasks: Vec<ScheduledTask>,
@@ -481,6 +494,31 @@ impl scheduler::Host for GuestState {
     }
 }
 
+impl world_snapshot::Host for GuestState {
+    fn read_blocks(
+        &mut self,
+        positions: Vec<types::BlockPos>,
+    ) -> Result<Vec<Option<u32>>, String> {
+        if positions.len() > MAX_BLOCK_SNAPSHOT_POSITIONS {
+            return Err(format!(
+                "world snapshot requested {} positions; the limit is {MAX_BLOCK_SNAPSHOT_POSITIONS}",
+                positions.len()
+            ));
+        }
+        let Some(chunk_world) = self.chunk_world.as_ref() else {
+            return Err("world snapshot is unavailable before a session installs its chunk store".to_owned());
+        };
+        // Do not move this guard into a callback or retain it in GuestState. The
+        // returned Vec is the boundary: by the time guest code sees it, no world
+        // lock is held and no host-world handle crossed the ABI.
+        let snapshot = chunk_world.read();
+        Ok(positions
+            .into_iter()
+            .map(|position| snapshot.block_state_at(position.x, position.y, position.z))
+            .collect())
+    }
+}
+
 /// One instantiated guest: its own `Store` (so its linear memory, and therefore
 /// its state, persists across ticks — the host owns dispatch but a guest may
 /// keep its own state between calls rather than being purely stateless) and
@@ -518,6 +556,14 @@ impl fmt::Debug for LoadedPlugin {
 }
 
 impl LoadedPlugin {
+    /// Set the source for the next guest world-query callback.
+    ///
+    /// This is crate-visible because only the ECS conductor may attach a live
+    /// store. Keeping it out of the public host API prevents an embedding caller
+    /// from accidentally treating a stale offline store as authoritative.
+    pub(crate) fn set_chunk_world(&mut self, chunk_world: Option<ChunkWorld>) {
+        self.store.data_mut().chunk_world = chunk_world;
+    }
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
@@ -801,6 +847,15 @@ impl fmt::Debug for PluginHost {
 }
 
 impl PluginHost {
+    /// Attach the composed client's current chunk store to every loaded guest.
+    ///
+    /// The handle is copied, not locked. Each guest query acquires and releases
+    /// the chunk lock around its own bounded value snapshot.
+    pub(crate) fn set_chunk_world(&mut self, chunk_world: Option<ChunkWorld>) {
+        for plugin in &mut self.plugins {
+            plugin.set_chunk_world(chunk_world.clone());
+        }
+    }
     /// A host granting `policy`.
     ///
     /// Use [`CapabilitySet::default_policy`] unless you mean something else; it
@@ -1028,6 +1083,13 @@ impl PluginHost {
                     message: format!("linking scheduler: {e:?}"),
                 })?;
         }
+        if granted.contains(Capability::ReadWorld) {
+            world_snapshot::add_to_linker::<_, wasmtime::component::HasSelf<_>>(&mut linker, |s| s)
+                .map_err(|e| HostError::Compile {
+                    name: name.to_owned(),
+                    message: format!("linking world: {e:?}"),
+                })?;
+        }
 
         let state = GuestState {
             name: name.to_owned(),
@@ -1054,6 +1116,7 @@ impl PluginHost {
             } else {
                 None
             },
+            chunk_world: None,
             current_tick: 0,
             next_task_id: 0,
             scheduled_tasks: Vec::new(),
