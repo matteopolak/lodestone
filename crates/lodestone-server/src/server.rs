@@ -3630,6 +3630,10 @@ where
                             (join_cx, join_cz),
                             None,
                         )
+                        .with_generation_band(
+                            (join_cx, join_cz),
+                            crate::join_scheduler::DEFAULT_FULL_GENERATION_RADIUS,
+                        )
                         .encoding_with(if proto.uses_cross_column_light() {
                             None
                         } else {
