@@ -128,7 +128,7 @@ async fn server_harness_rejects_a_removed_palette_producer() {
     let error = HeavyServerHarness::run(args, plan, V770ServerProtocol)
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("world.opaque_sections_drawn"));
+    assert!(error.to_string().contains("server.opaque_cells_encoded"));
     assert!(error.to_string().contains("installed opaque_cells=1"));
     assert!(error.to_string().contains("consumed opaque_cells=0"));
     assert!(!error.to_string().contains("chunk_payload_bytes=0"));
