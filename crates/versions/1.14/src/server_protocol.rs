@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::{PROTOCOL_1_14_4, PROTOCOL_1_15_2, PROTOCOL_1_16_5};
 use crate::canonical::{wire_state_for_498, wire_state_for_578, wire_state_for_754};
+use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packet_ids_578::{handshaking, login, play};
 use crate::packet_ids::{handshaking as handshaking_754, login as login_754, play as play_754};
 use crate::packet_ids_498::{handshaking as handshaking_498, login as login_498, play as play_498};
@@ -611,6 +612,11 @@ impl ServerProtocol for V578ServerProtocol {
                 };
                 ServerBound::CarriedItemChanged { slot }
             }
+            State::Play if packet_id == play::serverbound::KEEP_ALIVE => {
+                decode_full::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {
+                    ServerBound::KeepAlive { id: response.id }
+                })
+            }
             // The four movement forms have distinct payloads. Position-bearing
             // forms are what drive view recentering and the integrated server's
             // chunk stream; look and grounded-only updates still carry real
@@ -720,6 +726,10 @@ impl ServerProtocol for V578ServerProtocol {
         encode_animate(play::clientbound::ANIMATION, entity_id, action)
     }
 
+    fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+        send(play::clientbound::KEEP_ALIVE, &KeepAliveRequest { id })
+    }
+
     fn encode_disconnect(&self, state: State, reason: &Text) -> ServerDirective {
         if state != State::Play {
             return ServerDirective::None;
@@ -817,6 +827,11 @@ impl ServerProtocol for V754ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 ServerBound::CarriedItemChanged { slot }
+            }
+            State::Play if packet_id == play_754::serverbound::KEEP_ALIVE => {
+                decode_full_754::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {
+                    ServerBound::KeepAlive { id: response.id }
+                })
             }
             State::Play if packet_id == play_754::serverbound::POSITION => {
                 decode_full_754::<ServerboundPosition>(payload).map_or(
@@ -943,6 +958,10 @@ impl ServerProtocol for V754ServerProtocol {
         encode_animate(play_754::clientbound::ANIMATION, entity_id, action)
     }
 
+    fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+        send_754(play_754::clientbound::KEEP_ALIVE, &KeepAliveRequest { id })
+    }
+
     fn encode_disconnect(&self, state: State, reason: &Text) -> ServerDirective {
         if state != State::Play {
             return ServerDirective::None;
@@ -1027,6 +1046,11 @@ impl ServerProtocol for V498ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 ServerBound::CarriedItemChanged { slot }
+            }
+            State::Play if packet_id == play_498::serverbound::KEEP_ALIVE => {
+                decode_full_498::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {
+                    ServerBound::KeepAlive { id: response.id }
+                })
             }
             State::Play if packet_id == play_498::serverbound::POSITION => {
                 decode_full_498::<ServerboundPosition>(payload).map_or(
@@ -1145,6 +1169,10 @@ impl ServerProtocol for V498ServerProtocol {
 
     fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
         encode_animate(play_498::clientbound::ANIMATION, entity_id, action)
+    }
+
+    fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+        send_498(play_498::clientbound::KEEP_ALIVE, &KeepAliveRequest { id })
     }
 
     fn encode_disconnect(&self, state: State, reason: &Text) -> ServerDirective {
