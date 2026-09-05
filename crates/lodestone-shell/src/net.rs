@@ -834,6 +834,11 @@ pub enum NetUpdate {
         /// Chunk Z.
         z: i32,
     },
+    /// The server changed the radius of the client's streamed chunk view.
+    ChunkCacheRadiusChanged {
+        /// New streamed radius, in chunks.
+        radius: i32,
+    },
     /// Blocks changed inside one already-loaded section (a break, a place,
     /// another player's edits). The client has applied them to its world;
     /// `blocks` carries only the section-relative coordinates, so a consumer can
@@ -5054,6 +5059,9 @@ fn forward(
         // follows it while the renderer must discard any geometry it holds for
         // blocks the client no longer has.
         ClientEvent::ChunkUnloaded { pos, .. } => NetUpdate::ChunkUnloaded { x: pos.x, z: pos.z },
+        ClientEvent::ChunkCacheRadiusChanged { radius } => {
+            NetUpdate::ChunkCacheRadiusChanged { radius }
+        }
         ClientEvent::SectionBlocksChanged { section, blocks } => NetUpdate::SectionBlocks {
             x: section.x,
             y: section.y,
@@ -5917,6 +5925,28 @@ mod tests {
         match rx.try_recv().expect("OPEN_BOOK must reach the shell") {
             NetUpdate::BookOpened { main_hand } => assert!(!main_hand),
             other => panic!("expected BookOpened, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_preserves_the_server_chunk_cache_radius() {
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::ChunkCacheRadiusChanged { radius: 13 },
+        )
+        .expect("a cache-radius update does not end the session");
+
+        match rx
+            .try_recv()
+            .expect("the cache radius must cross the NetUpdate channel")
+        {
+            NetUpdate::ChunkCacheRadiusChanged { radius } => assert_eq!(radius, 13),
+            other => panic!("expected ChunkCacheRadiusChanged, got {other:?}"),
         }
     }
 

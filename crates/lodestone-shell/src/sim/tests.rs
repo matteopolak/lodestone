@@ -1380,6 +1380,35 @@ fn player_rotation_set_reaches_the_drawn_camera_with_relative_flags() {
     );
 }
 
+/// The server, rather than the launcher, owns the streamed view radius. Its
+/// update reaches the exact value the loading screen turns into both a progress
+/// denominator and a chunk-status grid side length.
+#[test]
+fn chunk_cache_radius_update_replaces_the_loading_views_radius() {
+    use crate::net::NetUpdate;
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+
+    feed.send(NetUpdate::ChunkCacheRadiusChanged { radius: 7 })
+        .expect("loopback accepts the server view radius");
+    sim.poll_net();
+
+    assert_eq!(
+        sim.terrain_progress().expect("attached client has progress").expected,
+        225,
+        "the server radius 7 must make the loading denominator (2 * 7 + 1)^2"
+    );
+    assert_eq!(
+        sim.terrain_chunk_grid()
+            .expect("attached client has a chunk-status grid")
+            .radius,
+        7,
+        "the same server radius must size the visible loading grid"
+    );
+}
+
 #[test]
 fn move_is_withheld_until_connected() {
     // A sim that is merely Connecting (attached, not yet logged in) must send
