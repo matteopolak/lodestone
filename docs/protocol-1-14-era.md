@@ -58,8 +58,8 @@ Protocol 498 writes 256 fixed biome integers inside the length-prefixed
 `chunkData` buffer after its straddling section palettes; protocol 578 writes
 1,024 fixed biome integers before the buffer and also uses straddling palettes;
 protocol 754 writes a length-prefixed VarInt biome array and padded palettes.
-Light-update encoding and the remaining serverbound play actions are still
-outside this host slice and require their own protocol evidence.
+Light-update encoding and many interaction/inventory serverbound actions are
+still outside this host slice and require their own protocol evidence.
 
 The host tests anchor packet ids in the committed generated tables and exercise
 each differing chunk framing against the crate's independent decoder. Every
@@ -72,6 +72,17 @@ prove the local consumer chain from registry selection through server wire and
 client state, but a live client/server acceptance capture for these host
 selectors is not yet committed, so it remains a gate before calling this host
 production-ready.
+
+All three hosts also decode the four ordinary Play movement bodies. Position
+and position-with-look lift to `ServerBound::PlayerMoved`; look-only lifts to
+`PlayerRotated`; and the grounded-only body lifts to `PlayerStatusOnly`. The
+position-bearing forms reach `lodestone_server::dispatch_play_packet`, which
+recenters `ViewTracker`, moves the connection's chunk tickets, publishes the
+tick anchor, and streams the newly visible chunk strip. The literal protocol
+tests use negative and fractional coordinates rather than the client encoder,
+and the registry-selected in-memory tests cross from chunk `(0, 0)` to `(1,
+0)` and wait for that chunk to arrive. That proves the local action-to-stream
+consumer chain; it does not replace the outstanding real-client gate.
 
 ### Three data sets, not one
 

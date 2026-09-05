@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, Rotation, Vec3};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_14::adapter_for;
 
@@ -113,6 +113,18 @@ async fn assert_hosted_protocol_reaches_play_and_confirms_a_block_break(protocol
         .unwrap_or_else(|error| {
             panic!(
                 "protocol {protocol_version} block update must replace the known block with air: {error}"
+            )
+        });
+
+    handle
+        .move_to(Vec3::new(24.0, 100.0, 8.0), Rotation::default(), true, false)
+        .expect("joined client emits a position packet");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "protocol {protocol_version} host must recenter its stream after movement: {error}"
             )
         });
 

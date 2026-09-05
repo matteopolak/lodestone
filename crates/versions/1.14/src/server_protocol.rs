@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, State, Writer, encode_body, write_named_nbt};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Text};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Text};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -20,7 +20,10 @@ use crate::canonical::{wire_state_for_498, wire_state_for_578, wire_state_for_75
 use crate::packet_ids_578::{handshaking, login, play};
 use crate::packet_ids::{handshaking as handshaking_754, login as login_754, play as play_754};
 use crate::packet_ids_498::{handshaking as handshaking_498, login as login_498, play as play_498};
-use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGameLegacy, KickDisconnect};
+use crate::packets::game::{
+    BlockDig, ClientboundPositionLook, JoinGameLegacy, KickDisconnect, ServerboundFlying,
+    ServerboundLook, ServerboundPosition, ServerboundPositionLook,
+};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccessString, SetCompression};
 use crate::packets::position::{Position, pack_position};
@@ -537,6 +540,52 @@ impl ServerProtocol for V578ServerProtocol {
                 };
                 ServerBound::BlockAction { action, pos, face, sequence: 0 }
             }
+            // The four movement forms have distinct payloads. Position-bearing
+            // forms are what drive view recentering and the integrated server's
+            // chunk stream; look and grounded-only updates still carry real
+            // player state for their own consumers.
+            State::Play if packet_id == play::serverbound::POSITION => {
+                decode_full::<ServerboundPosition>(payload).map_or(ServerBound::Ignored, |move_| {
+                    ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: None,
+                        on_ground: move_.on_ground,
+                    }
+                })
+            }
+            State::Play if packet_id == play::serverbound::POSITION_LOOK => {
+                decode_full::<ServerboundPositionLook>(payload).map_or(
+                    ServerBound::Ignored,
+                    |move_| ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: Some(Rotation {
+                            yaw: move_.yaw,
+                            pitch: move_.pitch,
+                        }),
+                        on_ground: move_.on_ground,
+                    },
+                )
+            }
+            State::Play if packet_id == play::serverbound::LOOK => {
+                decode_full::<ServerboundLook>(payload).map_or(ServerBound::Ignored, |look| {
+                    ServerBound::PlayerRotated {
+                        yaw: look.yaw,
+                        pitch: look.pitch,
+                        on_ground: look.on_ground,
+                    }
+                })
+            }
+            State::Play if packet_id == play::serverbound::FLYING => {
+                decode_full::<ServerboundFlying>(payload).map_or(ServerBound::Ignored, |status| {
+                    ServerBound::PlayerStatusOnly {
+                        on_ground: status.on_ground,
+                    }
+                })
+            }
             _ => ServerBound::Ignored,
         }
     }
@@ -673,6 +722,51 @@ impl ServerProtocol for V754ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 ServerBound::BlockAction { action, pos, face, sequence: 0 }
+            }
+            State::Play if packet_id == play_754::serverbound::POSITION => {
+                decode_full_754::<ServerboundPosition>(payload).map_or(
+                    ServerBound::Ignored,
+                    |move_| ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: None,
+                        on_ground: move_.on_ground,
+                    },
+                )
+            }
+            State::Play if packet_id == play_754::serverbound::POSITION_LOOK => {
+                decode_full_754::<ServerboundPositionLook>(payload).map_or(
+                    ServerBound::Ignored,
+                    |move_| ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: Some(Rotation {
+                            yaw: move_.yaw,
+                            pitch: move_.pitch,
+                        }),
+                        on_ground: move_.on_ground,
+                    },
+                )
+            }
+            State::Play if packet_id == play_754::serverbound::LOOK => {
+                decode_full_754::<ServerboundLook>(payload).map_or(
+                    ServerBound::Ignored,
+                    |look| ServerBound::PlayerRotated {
+                        yaw: look.yaw,
+                        pitch: look.pitch,
+                        on_ground: look.on_ground,
+                    },
+                )
+            }
+            State::Play if packet_id == play_754::serverbound::FLYING => {
+                decode_full_754::<ServerboundFlying>(payload).map_or(
+                    ServerBound::Ignored,
+                    |status| ServerBound::PlayerStatusOnly {
+                        on_ground: status.on_ground,
+                    },
+                )
             }
             _ => ServerBound::Ignored,
         }
@@ -814,6 +908,51 @@ impl ServerProtocol for V498ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 ServerBound::BlockAction { action, pos, face, sequence: 0 }
+            }
+            State::Play if packet_id == play_498::serverbound::POSITION => {
+                decode_full_498::<ServerboundPosition>(payload).map_or(
+                    ServerBound::Ignored,
+                    |move_| ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: None,
+                        on_ground: move_.on_ground,
+                    },
+                )
+            }
+            State::Play if packet_id == play_498::serverbound::POSITION_LOOK => {
+                decode_full_498::<ServerboundPositionLook>(payload).map_or(
+                    ServerBound::Ignored,
+                    |move_| ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: Some(Rotation {
+                            yaw: move_.yaw,
+                            pitch: move_.pitch,
+                        }),
+                        on_ground: move_.on_ground,
+                    },
+                )
+            }
+            State::Play if packet_id == play_498::serverbound::LOOK => {
+                decode_full_498::<ServerboundLook>(payload).map_or(
+                    ServerBound::Ignored,
+                    |look| ServerBound::PlayerRotated {
+                        yaw: look.yaw,
+                        pitch: look.pitch,
+                        on_ground: look.on_ground,
+                    },
+                )
+            }
+            State::Play if packet_id == play_498::serverbound::FLYING => {
+                decode_full_498::<ServerboundFlying>(payload).map_or(
+                    ServerBound::Ignored,
+                    |status| ServerBound::PlayerStatusOnly {
+                        on_ground: status.on_ground,
+                    },
+                )
             }
             _ => ServerBound::Ignored,
         }
