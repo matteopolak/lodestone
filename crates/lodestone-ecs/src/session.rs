@@ -245,6 +245,10 @@ pub struct SessionDebugFeeds(pub lodestone_game::debug_feeds::DebugFeedStore);
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct SessionServerInfo(pub lodestone_game::serverinfo::ServerInfoStore);
 
+/// Server-announced item-use cooldown groups, read by the hotbar cooldown veil.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionItemCooldowns(pub lodestone_game::cooldown::ItemCooldowns);
+
 /// The center of the chunk square the server is currently streaming.
 ///
 /// This is deliberately separate from the local player's position. During a
@@ -847,6 +851,18 @@ pub fn apply_server_info(batch: Res<IngestBatch>, mut info: Query<&mut SessionSe
     }
 }
 
+/// `IngestSet::Apply`: `ItemCooldown` -> [`SessionItemCooldowns`].
+pub fn apply_item_cooldowns(
+    batch: Res<IngestBatch>,
+    mut cooldowns: Query<&mut SessionItemCooldowns>,
+) {
+    for event in batch.events() {
+        for mut store in &mut cooldowns {
+            let _ = store.0.apply(event);
+        }
+    }
+}
+
 /// `IngestSet::Apply`: `WaypointUpdated` -> [`SessionWaypoints`].
 pub fn apply_waypoints(batch: Res<IngestBatch>, mut waypoints: Query<&mut SessionWaypoints>) {
     for event in batch.events() {
@@ -1220,6 +1236,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             SessionStatistics::default(),
             SessionDebugFeeds::default(),
             SessionServerInfo::default(),
+            SessionItemCooldowns::default(),
             ServerChunkCacheCenter::default(),
             SessionWaypoints::default(),
             SessionRegistryOrder::default(),
@@ -1281,6 +1298,7 @@ impl Plugin for SessionPlugin {
                 apply_trades,
                 apply_debug_feeds,
                 apply_server_info,
+                apply_item_cooldowns,
                 apply_waypoints,
                 apply_local_player_state,
             )
@@ -1484,17 +1502,21 @@ pub fn tick_hud_overlays(
             &mut ActionBarOverlay,
             &mut HudEffects,
             &mut HeldItemOverlay,
+            Option<&mut SessionItemCooldowns>,
             Option<&SelectedSlot>,
             Option<&SessionMenus>,
         ),
         With<LocalPlayer>,
     >,
 ) {
-    for (mut title, mut action_bar, mut effects, mut held_item, selected_slot, menus) in &mut players
+    for (mut title, mut action_bar, mut effects, mut held_item, cooldowns, selected_slot, menus) in &mut players
     {
         title.0.tick(1);
         action_bar.0.tick(1);
         effects.0.tick(1);
+        if let Some(mut cooldowns) = cooldowns {
+            cooldowns.0.tick();
+        }
         // `SelectedSlot`/`SessionMenus` are `Option` here, not required
         // query terms: this module's own docs establish that
         // `SessionHudPlugin` and `SessionPlugin` are separate plugins a

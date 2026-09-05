@@ -4382,8 +4382,8 @@ pub fn route(event: &ClientEvent) -> Route {
         // than a predicted player position.
         ClientEvent::ChunkCacheCenterChanged { .. } => SHELL,
         ClientEvent::ProjectilePowerChanged { .. } => INGEST,
+        ClientEvent::ItemCooldown { .. } => SESSION,
         ClientEvent::SimulationDistanceChanged { .. }
-        | ClientEvent::ItemCooldown { .. }
         | ClientEvent::PlayerCombatEntered
         | ClientEvent::PlayerCombatEnded { .. }
         | ClientEvent::MountScreenOpened { .. }
@@ -4906,6 +4906,13 @@ mod route_tests {
         assert!(!r.ingest && !r.session && !r.shell, "no router claims it");
         assert!(r.client, "the client preserves the echoed ping timestamp");
         assert!(!r.is_island(), "the F3 latency reader consumes it");
+
+        let cooldown = route(&ClientEvent::ItemCooldown {
+            group: "minecraft:ender_pearl".parse().unwrap(),
+            duration_ticks: 80,
+        });
+        assert!(cooldown.session, "the hotbar cooldown veil reads the session fold");
+        assert!(!cooldown.is_island());
 
         assert!(
             route(&ClientEvent::PlayerCombatEntered).is_island(),

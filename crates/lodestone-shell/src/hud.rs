@@ -1643,6 +1643,12 @@ pub struct HudFrame<'a> {
     /// occupied. Icons are drawn from the [`ItemAtlas`] supplied to
     /// [`HudRenderer::attach_items`]; without that atlas the wells stay empty.
     pub hotbar_items: Option<&'a [Option<HotbarSlot>]>,
+    /// Remaining server item-use cooldown fraction for each hotbar slot. This
+    /// is index-aligned with [`Self::hotbar_items`]: `0.0` leaves the icon
+    /// untouched and a positive value draws a dark veil from the bottom up.
+    /// The app resolves it from the session cooldown groups once per frame;
+    /// the HUD only draws the supplied projection.
+    pub hotbar_cooldowns: &'a [f32],
     /// The XP bar `(level, progress 0..=1)`, `Some` once the server has sent
     /// experience. Drawn as a green progress bar above the hotbar with the level
     /// centred above it. Off a live server this is `None` — no bar is drawn.
@@ -1811,6 +1817,7 @@ impl<'a> HudFrame<'a> {
             air: None,
             hotbar: None,
             hotbar_items: None,
+            hotbar_cooldowns: &[],
             xp: None,
             locator: &[],
             title: None,
@@ -3297,6 +3304,7 @@ impl HudGeometry {
         // Item icons sit inside the hotbar cells, drawn over whichever hotbar
         // frame (real atlas or procedural) was emitted above.
         draw_hotbar_items(&mut b, frame, &anim);
+        draw_hotbar_cooldowns(&mut b, frame);
 
         // The **hotbar-anchored** attack-strength gauge — vanilla's
         // `AttackIndicatorStatus::HOTBAR` branch, which sits in `Hud`'s hotbar
@@ -4539,6 +4547,45 @@ fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) {
             let x = icon0_x + i as f32 * pitch;
             let pop = anim.hotbar_pop.get(i).copied().unwrap_or(0.0);
             b.item_icon_popped(item, x, icon_y, size, pop);
+        }
+    }
+}
+
+/// Draw the server-authoritative item-use cooldown veil over occupied hotbar
+/// icons. This shares the icon rectangles rather than the 20px wells: the
+/// cooldown belongs to the item, not to an empty slot or the selection chrome.
+fn draw_hotbar_cooldowns(b: &mut Builder, frame: &HudFrame) {
+    let Some(slots) = frame.hotbar_items else {
+        return;
+    };
+    let cx = b.w * 0.5;
+    let (icon0_x, icon_y, pitch, size) = if b.gui.is_some() {
+        let hw = 182.0;
+        let hh = 22.0;
+        let hx = cx - hw * 0.5;
+        let hy = b.h - hh - HOTBAR_MARGIN;
+        (hx + 3.0, hy + 3.0, 20.0, 16.0)
+    } else {
+        let cell = 22.0;
+        let hw = 9.0 * cell;
+        let hx = cx - hw * 0.5;
+        let hy = b.h - HOTBAR_MARGIN - cell;
+        (hx + 3.0, hy + 3.0, cell, 16.0)
+    };
+    for (i, slot) in slots.iter().enumerate().take(9) {
+        if slot.is_none() {
+            continue;
+        }
+        let fraction = frame.hotbar_cooldowns.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        if fraction > 0.0 {
+            let height = size * fraction;
+            b.rect_px(
+                icon0_x + i as f32 * pitch,
+                icon_y + size - height,
+                size,
+                height,
+                [0.0, 0.0, 0.0, 0.5],
+            );
         }
     }
 }
@@ -8381,6 +8428,60 @@ mod tests {
             geo.vertex_count() > base,
             "the '64' stack count must add colour-stream verts"
         );
+    }
+
+    #[test]
+    fn item_cooldown_veil_draws_only_for_an_occupied_positive_fraction_slot() {
+        let stats = DebugStats::default();
+        let slots = [
+            Some(HotbarSlot {
+                item: ResourceLocation::parse("minecraft:ender_pearl").unwrap(),
+                count: 1,
+                damage: None,
+                max_damage: None,
+                enchanted: false,
+                custom_model_data: None,
+                dyed_color: None,
+                potion_color: None,
+                banner_patterns: Vec::new(),
+                base_color: None,
+                skin: None,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ];
+        let mut frame = HudFrame::new(&stats);
+        frame.hotbar = Some(0);
+        frame.hotbar_items = Some(&slots);
+
+        let zero_cooldown = [0.0];
+        let half_cooldown = [0.5];
+        let full_cooldown = [1.0];
+        let no_cooldowns: [f32; 0] = [];
+        frame.hotbar_cooldowns = &zero_cooldown;
+        let zero = HudGeometry::build(&frame, 640, 480).vertex_count();
+        frame.hotbar_cooldowns = &half_cooldown;
+        let half = HudGeometry::build(&frame, 640, 480).vertex_count();
+        frame.hotbar_cooldowns = &full_cooldown;
+        let full = HudGeometry::build(&frame, 640, 480).vertex_count();
+
+        assert_eq!(half, zero + 6, "one positive cooldown must add one veil quad");
+        assert_eq!(full, half, "fraction changes veil height, not its quad count");
+
+        // Negative control: the same positive fraction must not paint an empty
+        // slot merely because the parallel cooldown slice names its index.
+        let empty_slots: [Option<HotbarSlot>; 9] = Default::default();
+        frame.hotbar_items = Some(&empty_slots);
+        let empty = HudGeometry::build(&frame, 640, 480).vertex_count();
+        frame.hotbar_cooldowns = &no_cooldowns;
+        let empty_control = HudGeometry::build(&frame, 640, 480).vertex_count();
+        assert_eq!(empty, empty_control, "an empty slot must not receive a cooldown veil");
     }
 
     #[test]

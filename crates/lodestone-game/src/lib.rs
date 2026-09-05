@@ -50,6 +50,7 @@ pub mod chat;
 pub mod chat_ack;
 pub mod click;
 pub mod consumable;
+pub mod cooldown;
 pub mod container;
 pub mod custom_item;
 pub mod debug_feeds;
