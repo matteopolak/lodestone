@@ -30,6 +30,12 @@ captured on) and installed on `RenderState`; `prepare_block_entities` (or the mo
 equivalents) resolves it into instances and hands them to `EntityPipeline`, which is generic over
 `(model, texture)` — most new types need **no new pipeline**, only a new resolver arm.
 
+World snapshots still carry raw state numbers because imported or protocol-local values can fall
+outside the built-in census. Renderer-specific resolvers must validate those numbers at snapshot
+ingress and retain `lodestone_data::block_states::StateId` while reading canonical names and
+properties. The lectern source is the reference shape: an out-of-census candidate is skipped before
+`lectern_spawn`, while a valid non-lectern remains a normal typed negative match.
+
 Most types are a cuboid rig through `EntityPipeline`, batched with everything else in
 `prepare_block_entities`. Several other seams exist, chosen by what the vanilla renderer actually
 does — the cheap discriminator is **"does the vanilla constructor call `bakeLayer`?"**: if it does not,
