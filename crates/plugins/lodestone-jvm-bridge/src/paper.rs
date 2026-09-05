@@ -79,9 +79,9 @@ impl PaperBootstrapConfig {
     /// Requires the bridge's narrow native surface from the configured shim paths.
     ///
     /// This does not claim a plugin API. It asks every fresh lifecycle loader
-    /// to resolve `lodestone.bridge.IsolatedPaperShim`, validate its one static
-    /// native declaration, and register it before that loader sees a bootstrap
-    /// or plugin entry class.
+    /// to resolve `lodestone.bridge.IsolatedPaperShim`, validate its exact
+    /// native declarations, and register them before that loader sees a
+    /// bootstrap or plugin entry class.
     #[must_use]
     pub fn with_isolated_native_shim(mut self) -> Self {
         self.native_shim = true;
@@ -408,9 +408,11 @@ impl PaperPluginLifecycleStatusSet {
 /// block-state read/write and tick-count declarations in the shared server loader, where
 /// every isolated plugin loader inherits them, and will service their requests
 /// from live server state. It is useful to retain as an exact, real
-/// Java-facing capability, but cannot safely construct a plugin:
-/// construction also needs loader-owned plugin metadata and a much broader
-/// server facade.
+/// Java-facing capability. It can support only the narrow retained-entry
+/// construction experiment, not compatible plugin construction: the latter
+/// still needs loader-owned plugin metadata and a much broader server facade.
+/// It additionally makes its retained descriptor identity available only
+/// during that descriptor's constructor or narrow callback.
 #[derive(Debug)]
 pub enum PaperServerFacadeInput {
     /// No Java-facing server capability is available to a retained loader.
@@ -465,9 +467,7 @@ impl PaperServerFacadeInput {
             #[cfg(feature = "jvm")]
             Self::EntryConstructionOnly(_) => None,
             #[cfg(feature = "jvm")]
-            Self::NativeServerSurface(_) => {
-                Some(PaperPluginConstructionBlocker::PluginConstructionUnsupported)
-            }
+            Self::NativeServerSurface(_) => None,
         }
     }
 }
@@ -485,7 +485,8 @@ pub enum PaperServerFacadeState {
     /// Construction is deliberately limited to a retained Java entry object;
     /// no compatible server facade has been supplied.
     EntryConstructionOnly,
-    /// The private loader has only the narrow native server mutation seam.
+    /// The private loader has only the narrow native server seam: bounded
+    /// server-state requests plus the active entry's descriptor identity.
     NativeServerSurface,
 }
 
@@ -497,7 +498,7 @@ impl fmt::Display for PaperServerFacadeState {
                 "entry-only construction is enabled without a compatible server facade",
             ),
             Self::NativeServerSurface => {
-                formatter.write_str("the isolated native server mutation seam is installed")
+                formatter.write_str("the isolated native server and descriptor seam is installed")
             }
         }
     }
@@ -512,8 +513,6 @@ pub enum PaperPluginConstructionBlocker {
     EntryConstructorUninspectable,
     /// The entry loaded, but its loader has no compatible server facade.
     ServerFacadeUnavailable,
-    /// A narrow Java-facing capability exists, but cannot construct a plugin.
-    PluginConstructionUnsupported,
     /// The isolated entry load failed, so there is no retained class to construct.
     EntryLoadFailed,
 }
@@ -530,9 +529,6 @@ impl fmt::Display for PaperPluginConstructionBlocker {
             Self::ServerFacadeUnavailable => {
                 formatter.write_str("no compatible server facade is installed")
             }
-            Self::PluginConstructionUnsupported => formatter.write_str(
-                "the installed server capability cannot supply plugin construction semantics",
-            ),
             Self::EntryLoadFailed => formatter.write_str("the isolated plugin entry did not load"),
         }
     }
@@ -593,8 +589,8 @@ impl PaperPluginConstructionStatus {
 ///
 /// This records every descriptor, including failed loads, so an operator can
 /// distinguish a bad entry jar, no facade, and a deliberately narrow facade
-/// input. `EntryConstructionOnly` permits only a retained Java object on the
-/// same worker; it is expressly not a compatible server facade.
+/// input. Both permitted modes retain a Java object only on the same worker;
+/// neither is a compatible server facade.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaperPluginConstructionReadiness {
     facade: PaperServerFacadeState,
@@ -913,8 +909,8 @@ impl PaperPluginConstructionPlan {
     /// Each constructor is attempted once, in deterministic descriptor order.
     /// A constructor exception changes only that descriptor to `Failed` with a
     /// `Construct` failure; later eligible entries still run. This is available
-    /// only after the caller explicitly selected `EntryConstructionOnly`, so it
-    /// does not manufacture a server facade or imply Bukkit/Paper support.
+    /// only after the caller explicitly selected a worker-owned narrow input,
+    /// so it does not manufacture a server facade or imply Bukkit/Paper support.
     pub fn construct_entries(mut self, env: &mut Env<'_>) -> PaperPluginEntryConstruction {
         let mut entries = Vec::new();
         let mut loaded = self.lifecycle.plugins.iter();
@@ -929,7 +925,11 @@ impl PaperPluginConstructionPlan {
             if !self.readiness.plugins()[index].is_eligible() {
                 continue;
             }
-            match plugin.construct(env) {
+            match crate::adapter::with_lifecycle_identity(
+                plugin.descriptor.name(),
+                plugin.descriptor.version(),
+                || plugin.construct(env),
+            ) {
                 Ok(instance) => {
                     self.lifecycle.status.constructed(index);
                     entries.push(PaperConstructedPlugin {
@@ -998,7 +998,11 @@ impl PaperPluginEntryConstruction {
                 self.lifecycle.status.plugins()[index].phase(),
                 PaperPluginLifecyclePhase::Constructed,
             );
-            match plugin.callback(env, "onEnable") {
+            match crate::adapter::with_lifecycle_identity(
+                plugin.descriptor.name(),
+                plugin.descriptor.version(),
+                || plugin.callback(env, "onEnable"),
+            ) {
                 Ok(()) => {
                     self.lifecycle.status.enabled(index);
                     entries.push(plugin);
@@ -1059,7 +1063,11 @@ impl PaperPluginEntryEnablement {
                 self.lifecycle.status.plugins()[index].phase(),
                 PaperPluginLifecyclePhase::Enabled,
             );
-            match plugin.callback(env, "onDisable") {
+            match crate::adapter::with_lifecycle_identity(
+                plugin.descriptor.name(),
+                plugin.descriptor.version(),
+                || plugin.callback(env, "onDisable"),
+            ) {
                 Ok(()) => self.lifecycle.status.disabled(index),
                 Err(error) => self.lifecycle.status.failed_to_disable(
                     index,
