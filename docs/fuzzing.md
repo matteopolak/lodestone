@@ -331,6 +331,17 @@ What exists:
   and exists purely as the control that proves a cross-seam assertion has a
   detector behind it.
 
+- `tests/differential_container_click_model.rs` — a bounded, hermetic
+  server-side transaction-state comparison. It drives the production
+  `lodestone_server::container_click::do_click` consumer over a three-slot
+  generic container and compares every pickup, quick-move, swap, throw,
+  pickup-all and drag packet with an independent item/count/cursor model. A
+  fixed prefix exercises merge-before-place ordering and multi-slot drag
+  distribution; a fixed ChaCha seed adds at most 32 shrinkable clicks per case
+  across 160 cases. The detector control removes quick-move's merge pass and
+  must fail on the fixed partial-stack witness, proving that the comparison
+  reads real slot state rather than accepting an inert model.
+
 - `tests/differential_client_state.rs` — a bounded hermetic client-state
   comparison. It replays fixed block, entity and inventory packet scripts
   through the public `ClientBuilder` over `lodestone_net::memory_pair`, with a
@@ -819,15 +830,16 @@ test.
   not stop at the decoder's emitted event.
 - **Generated live cases cover fluids and redstone.** Both have bounded
   generated action domains. Falling blocks and source-water waterlogging each
-  additionally have a bounded hermetic `IntegratedServer` action proof, but no
-  generated live piston or container action domain exists. Every generated live
-  comparison still covers only block states over a caller-named region. The
-  client read-model has no scheduled-tick queue to compare: inbound ticking
-  metadata folds into session server information, while world reactions belong
-  to the server-side scheduler rather than the client state exposed by
-  `ClientHandle`. The server-side queue itself is covered by the separate
-  fixed-seed model lane above; this does not claim a live client packet oracle
-  for scheduled ticks.
+  additionally have a bounded hermetic `IntegratedServer` action proof. The
+  container click lane is hermetic and drives the production transaction
+  consumer directly; no generated live piston or container action domain
+  exists. Every generated live comparison still covers only block states over
+  a caller-named region. The client read-model has no scheduled-tick queue to
+  compare: inbound ticking metadata folds into session server information,
+  while world reactions belong to the server-side scheduler rather than the
+  client state exposed by `ClientHandle`. The server-side queue itself is
+  covered by the separate fixed-seed model lane above; this does not claim a
+  live client packet oracle for scheduled ticks.
 - **Entity effect simulation has a bounded hermetic model lane.**
   `tests/differential_generated_effects.rs` generates at most 24 operations
   after a fixed stronger/shorter stacking prefix, then compares the production
