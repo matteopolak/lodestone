@@ -108,6 +108,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::Vec3;
+use lodestone_data::block_states::StateId;
 use lodestone_render::{
     BannerAttachment, BannerSpawn, BeaconSpawn, BeamSection, BellShakeDirection, BellSpawn,
     BrushableItemSpawn, ChestHalf, ChestMaterial, ChestSpawn, ConduitFrame, ConduitSpawn,
@@ -2295,15 +2296,13 @@ pub(crate) fn shulker_spawns_from_snapshot(
 /// the facing rotated clockwise, and the plain facing lays the book across
 /// the shelf at right angles to the reader.
 #[must_use]
-pub fn lectern_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<LecternSpawn> {
-    let name = lodestone_data::block_states::block_name(state_id)?;
-    if name != "minecraft:lectern" {
+pub fn lectern_spawn(block: [i32; 3], state_id: StateId, light: u8) -> Option<LecternSpawn> {
+    if state_id.name() != "minecraft:lectern" {
         return None;
     }
-    let props = lodestone_data::block_states::properties(state_id)?;
     let mut yaw = None;
     let mut has_book = false;
-    for (name, value) in props {
+    for (name, value) in state_id.properties() {
         match *name {
             "facing" => yaw = horizontal_facing_clockwise_yaw(value),
             "has_book" => has_book = *value == "true",
@@ -2336,7 +2335,10 @@ pub(crate) fn lectern_spawns_from_snapshot(
 ) -> Vec<LecternSpawn> {
     let mut out = Vec::new();
     for candidate in &snapshot.candidates {
-        if let Some(spawn) = lectern_spawn(candidate.pos, candidate.state_id, candidate.light) {
+        let Some(state_id) = StateId::new(candidate.state_id) else {
+            continue;
+        };
+        if let Some(spawn) = lectern_spawn(candidate.pos, state_id, candidate.light) {
             out.push(spawn);
         }
     }
@@ -4926,7 +4928,8 @@ mod shulker_tests {
                 .iter()
                 .any(|(n, v)| *n == "has_book" && *v == "true");
 
-            match lectern_spawn([1, 2, 3], id, lodestone_render::ENTITY_FULLBRIGHT) {
+            let state_id = StateId::new(id).expect("iterated state id is in the census");
+            match lectern_spawn([1, 2, 3], state_id, lodestone_render::ENTITY_FULLBRIGHT) {
                 None => {
                     assert!(!has_book, "a lectern with a book must spawn");
                     without_book += 1;
@@ -4954,10 +4957,24 @@ mod shulker_tests {
         }
         assert_eq!(yaws.len(), 4, "all four facings, saw {yaws:?}");
         assert!(with_book > 0 && without_book > 0, "{with_book}/{without_book}");
+        let bell = StateId::new(state_named("minecraft:bell")).expect("bell state is canonical");
         assert!(
-            lectern_spawn([0, 0, 0], state_named("minecraft:bell"), 0).is_none(),
+            lectern_spawn([0, 0, 0], bell, 0).is_none(),
             "a bell is not a lectern"
         );
+    }
+
+    #[test]
+    fn an_out_of_census_lectern_candidate_stops_at_the_snapshot_boundary() {
+        let snapshot = BlockEntityFrameSnapshot {
+            candidates: vec![BlockEntityFrameCandidate {
+                pos: [1, 2, 3],
+                state_id: u32::MAX,
+                light: lodestone_render::ENTITY_FULLBRIGHT,
+            }],
+        };
+
+        assert!(lectern_spawns_from_snapshot(&snapshot).is_empty());
     }
 
     /// **The suffix-order trap, and the two angle conventions.**
