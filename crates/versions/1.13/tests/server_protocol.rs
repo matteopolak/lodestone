@@ -1,7 +1,8 @@
 use lodestone_core::{Ctx, Reader, State, encode_body};
+use lodestone_model::{ClientAction, ConnectionState, VersionAdapter};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
-use lodestone_v1_13::V404ServerProtocol;
-use lodestone_v1_13::packet_ids::handshaking;
+use lodestone_v1_13::{V404Adapter, V404ServerProtocol};
+use lodestone_v1_13::packet_ids::{handshaking, play};
 use lodestone_v1_13::packets::handshake::SetProtocol;
 
 const CTX: Ctx = Ctx { version: 404 };
@@ -156,6 +157,72 @@ fn client_settings_lift_the_protocol_404_view_distance() {
         ),
         ServerBound::Ignored,
         "a settings packet with a trailing byte must not resize the client view"
+    );
+}
+
+#[test]
+fn block_dig_non_breaking_statuses_reach_their_server_consumers() {
+    let protocol = V404ServerProtocol;
+    let adapter = V404Adapter::new();
+    // Independent literal bodies: status VarInt, pre-1.14 packed zero
+    // position, then the signed-byte direction. These actions ignore the
+    // position/direction, but they remain part of the protocol-404 body and
+    // prove the decoder does not accidentally use a later packet shape.
+    let body = |status| {
+        let mut payload = vec![status];
+        payload.extend_from_slice(&[0; 8]);
+        payload.push(0);
+        payload
+    };
+
+    for (status, expected) in [
+        (3, ServerBound::ItemDropped { whole_stack: true }),
+        (4, ServerBound::ItemDropped { whole_stack: false }),
+        (5, ServerBound::ReleaseUseItem),
+        (6, ServerBound::SwapItemInHand),
+    ] {
+        assert_eq!(
+            protocol.decode(State::Play, play::serverbound::BLOCK_DIG, &body(status)),
+            expected,
+            "status {status} must survive protocol-404 decoding"
+        );
+    }
+
+    // Exercise the production hand-off as well: input action -> adapter's
+    // protocol-404 body -> server decoder -> a concrete version-free
+    // consumer variant. The literal rows above remain the wire-shape oracle;
+    // this loop proves the two independently-owned endpoints are connected.
+    for (action, expected) in [
+        (ClientAction::DropSelectedItemStack, ServerBound::ItemDropped { whole_stack: true }),
+        (ClientAction::DropSelectedItem, ServerBound::ItemDropped { whole_stack: false }),
+        (ClientAction::ReleaseUseItem, ServerBound::ReleaseUseItem),
+        (ClientAction::SwapItemWithOffhand, ServerBound::SwapItemInHand),
+    ] {
+        let Some((packet_id, payload)) = adapter
+            .encode_action(ConnectionState::Play, &action)
+            .expect("protocol-404 adapter encodes the supported action")
+        else {
+            panic!("{action:?} must produce a protocol-404 packet");
+        };
+        assert_eq!(packet_id, play::serverbound::BLOCK_DIG, "{action:?}");
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &payload),
+            expected,
+            "{action:?} must reach its server consumer variant"
+        );
+    }
+
+    // The control keeps the break path distinct: a decoder that labels every
+    // block-dig status as an item action would still make the four rows above
+    // pass while making normal mining unusable.
+    assert!(matches!(
+        protocol.decode(State::Play, play::serverbound::BLOCK_DIG, &body(2)),
+        ServerBound::BlockAction { .. }
+    ));
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::BLOCK_DIG, &body(7)),
+        ServerBound::Ignored,
+        "an unmodelled status must stay ignored rather than selecting a neighbouring action"
     );
 }
 

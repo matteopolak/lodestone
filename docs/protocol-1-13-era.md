@@ -78,6 +78,13 @@ arrival of that column proves the acknowledgement and movement chain reached
 view streaming. A real 1.13.2 client session remains the external wire
 compatibility gate.
 
+The same host also lifts the non-breaking `block_dig` statuses rather than
+only its mining phases: drop-one, drop-stack, release-use, and off-hand swap
+become the server's inventory/drop, use-release, and hand-swap inputs. The
+404 adapter already emits those wire bodies, so this decode is the link that
+makes those input paths reach their existing consumers instead of disappearing
+after encoding. Statuses outside the model remain ignored.
+
 The packed `position` row is the widest single difference from the era above:
 fifteen of the twenty-eight packets whose shape changes between 1.13.2 and
 1.14.4 change *only* because they carry a position. That is why

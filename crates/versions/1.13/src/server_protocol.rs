@@ -248,14 +248,28 @@ impl ServerProtocol for V404ServerProtocol {
                 else {
                     return ServerBound::Ignored;
                 };
-                let (Some(action), Some(face)) = (block_action(status), block_face(face)) else {
-                    return ServerBound::Ignored;
-                };
-                ServerBound::BlockAction {
-                    action,
-                    pos,
-                    face,
-                    sequence: 0,
+                match status {
+                    0..=2 => {
+                        let (Some(action), Some(face)) = (block_action(status), block_face(face)) else {
+                            return ServerBound::Ignored;
+                        };
+                        ServerBound::BlockAction {
+                            action,
+                            pos,
+                            face,
+                            sequence: 0,
+                        }
+                    }
+                    // The four non-breaking actions share 1.13.2's
+                    // `block_dig` body. The client adapter already emits
+                    // these statuses, and each has a version-free server
+                    // consumer; dropping them here made the input keys inert
+                    // after successful wire encoding.
+                    3 => ServerBound::ItemDropped { whole_stack: true },
+                    4 => ServerBound::ItemDropped { whole_stack: false },
+                    5 => ServerBound::ReleaseUseItem,
+                    6 => ServerBound::SwapItemInHand,
+                    _ => ServerBound::Ignored,
                 }
             }
             State::Play if packet_id == play::serverbound::TELEPORT_CONFIRM => {
