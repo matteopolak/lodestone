@@ -56,6 +56,13 @@ final indexed lookup. An out-of-census or custom state fails closed before spawn
 introduced by a plugin or data pack remain in their registry/import owners rather than being coerced into
 a built-in state.
 
+Item crumbs follow the same ownership rule. `SpriteSource::Item` carries the generated
+`lodestone_data::item::Item` enum, not a numeric registry value. The only two producers are a local
+consumable after resolving its item name and three fixed built-in particle types; both validate before
+emitting. The shell lowers the enum to `Item::registry_id()` only when indexing the baked item-UV table.
+A custom or dynamically registered item has no entry in that built-in model census, so it remains at its
+import/registry boundary rather than being made into a misleading particle.
+
 The ambient world probe has the same boundary before it chooses a block-specific animation: it converts
 the returned numeric state to `StateId`, then dispatches on the typed `Block` and reads properties only
 through that validated state. An unknown or custom probe result produces no particle; a built-in block

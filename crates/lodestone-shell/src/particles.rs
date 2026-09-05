@@ -1201,16 +1201,14 @@ impl Particles {
     /// — the *seven*-argument sibling, which damps the jitter to a tenth and
     /// would leave these crumbs motionless.
     fn item_burst(&mut self, pos: [f64; 3], item: &str) {
-        let Some(id) = Item::from_name(item).map(|item| u32::from(item.registry_id()))
-        else {
+        let Some(item) = Item::from_name(item) else {
             tracing::debug!(
                 target: "particles",
                 "no registry id for {item:?}; item particle dropped"
             );
             return;
         };
-        let particle =
-            emit::item_burst_particle(pos[0], pos[1], pos[2], id, self.engine.rng());
+        let particle = emit::item_burst_particle(pos[0], pos[1], pos[2], item, self.engine.rng());
         self.engine.add(particle);
     }
 
@@ -1443,9 +1441,9 @@ impl Particles {
                 .map(|rect| (rect, SpriteAtlas::Block)),
             // `SpriteAtlas::Block`, not a third selector: `BlockModels` bakes item
             // geometry against the *same* stitch as block states.
-            SpriteSource::Item(id) => self
+            SpriteSource::Item(item) => self
                 .item_uv
-                .get(id as usize)
+                .get(item.registry_id() as usize)
                 .copied()
                 .flatten()
                 .map(|rect| (rect, SpriteAtlas::Block)),
@@ -1458,15 +1456,15 @@ impl Particles {
     }
 }
 
-/// Builds the network-item-id → UV rect table [`Particles::new`] installs, by
+/// Builds the built-in-item-id → UV rect table [`Particles::new`] installs, by
 /// walking [`Item`]s in registry order and asking `models` for each
 /// item's `BreakingItemParticle` sprite.
 ///
-/// Keyed by the **network registry id**, which is what
-/// [`SpriteSource::Item`](lodestone_particle::SpriteSource::Item) carries, so the
-/// emitter never has to hold a name. An item with no baked GUI geometry (a `special`
-/// renderer, or one missing from a stripped pack) has no entry and its crumbs count
-/// as unresolved — the same visible-gap discipline `state_uv` gets.
+/// Keyed by the built-in registry id, which the validated
+/// [`SpriteSource::Item`](lodestone_particle::SpriteSource::Item) exposes only at
+/// this indexed lookup. An item with no baked GUI geometry (a `special` renderer,
+/// or one missing from a stripped pack) has no entry and its crumbs count as
+/// unresolved — the same visible-gap discipline `state_uv` gets.
 fn item_uv_table(models: &BlockModels) -> Vec<Option<[f32; 4]>> {
     let mut table =
         Vec::with_capacity(lodestone_data::item_prototypes::ITEM_COUNT as usize);
@@ -2273,13 +2271,9 @@ mod tests {
             ("item_cobweb", "minecraft:cobweb"),
             ("item_snowball", "minecraft:snowball"),
         ];
-        let mut seen: Vec<u32> = Vec::new();
+        let mut seen: Vec<Item> = Vec::new();
         for &(kind, item) in cases {
-            let expected = u32::from(
-                Item::from_name(item)
-                    .expect("a vanilla item is in the registry")
-                    .registry_id(),
-            );
+            let expected = Item::from_name(item).expect("a built-in item is in the registry");
             let mut p = resolvable();
             p.spawn_particles(
                 kind,
@@ -2298,7 +2292,7 @@ mod tests {
             assert_eq!(
                 particles[0].sprite,
                 SpriteSource::Item(expected),
-                "{kind:?} must carry {item:?}'s own registry id"
+                "{kind:?} must carry {item:?}'s validated item identity"
             );
             // The four-argument `BreakingItemParticle` constructor, not the
             // seven-argument one: `gravity = 1.0` and the quad size halved,
@@ -2310,7 +2304,7 @@ mod tests {
             seen.push(expected);
         }
         let mut distinct = seen.clone();
-        distinct.sort_unstable();
+        distinct.sort_unstable_by_key(|item| item.registry_id());
         distinct.dedup();
         assert_eq!(
             distinct.len(),
