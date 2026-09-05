@@ -1347,7 +1347,7 @@ impl WindowApp {
     /// same sequence, including the entity light sampler — which must be
     /// installed at connect time, not after login (see the long note at the
     /// `resumed` call site for why).
-    pub(super) fn connect_to(&mut self, host: String, port: u16) {
+    pub(super) fn connect_to(&mut self, host: String, port: Option<u16>) {
         // Leave the menu for the `Connecting` screen *before*
         // dialing, mirroring `begin_singleplayer`. Without this, multiplayer
         // never shows a loading screen for the handshake/configuration phase —

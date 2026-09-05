@@ -470,6 +470,8 @@ impl<T: Transport> Driver<T> {
 
         let read_timeout = self.read_timeout;
         let mut actions_open = true;
+        let mut received_packets = 0_u64;
+        let mut last_packet_id = None;
 
         loop {
             tokio::select! {
@@ -500,7 +502,14 @@ impl<T: Transport> Driver<T> {
                 read = read_packet_timed(&mut self.conn, read_timeout) => {
                     match read {
                         Err(ReadError::TimedOut) => {
-                            tracing::warn!("read timed out");
+                            tracing::warn!(
+                                target: "net_join",
+                                state = ?self.state,
+                                timeout_seconds = read_timeout.map_or(0, |timeout| timeout.as_secs()),
+                                received_packets,
+                                last_packet_id = ?last_packet_id,
+                                "server stopped sending packets"
+                            );
                             return SessionOutcome::Failed(ClientError::Timeout);
                         }
                         Err(ReadError::Transport(error)) => {
@@ -508,6 +517,8 @@ impl<T: Transport> Driver<T> {
                             return SessionOutcome::Failed(ClientError::Transport(error));
                         }
                         Ok(Some((packet_id, payload))) => {
+                            received_packets = received_packets.saturating_add(1);
+                            last_packet_id = Some(packet_id);
                             // Publish the exact packet before version-specific
                             // decoding can consume it.
                             self.read_model

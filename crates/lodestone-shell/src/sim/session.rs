@@ -92,7 +92,7 @@ impl Sim {
     /// [`NetClient::connect`]. A **live gate must use [`Self::connect_as`]**
     /// instead: a shared offline name is a shared player file, and a dead player
     /// is held on the death screen, which sends no chunks.
-    pub fn connect(&mut self, host: String, port: u16, protocol: i32) {
+    pub fn connect(&mut self, host: String, port: Option<u16>, protocol: i32) {
         let net = NetClient::connect(
             host,
             port,

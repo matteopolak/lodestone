@@ -213,7 +213,12 @@ pub(crate) fn run_connect(_owned: lodestone_auth::Entitlement, config: Config) -
     // `None`: `--connect` is the event-stream diagnostic. It has no `Sim`, no
     // renderer and no `World` of its own, so the client mints one — there is
     // nothing for it to be shared *with*.
-    let net = NetClient::connect(config.host.clone(), config.port, config.protocol, None);
+    let net = NetClient::connect(
+        config.host.clone(),
+        Some(config.port),
+        config.protocol,
+        None,
+    );
     let deadline = Instant::now() + config.connect_for;
     let mut seen = 0usize;
 

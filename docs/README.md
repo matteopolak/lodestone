@@ -346,6 +346,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   numbers this project tracks per Minecraft release, and the packet-framing shape
   (length prefix, compression, the one frame that carries no packet) all four families
   share underneath `lodestone-net`.
+- [Multiplayer connections and join diagnostics](./multiplayer-connections.md) — The
+  multiplayer connection path turns a saved or command-line server address into a
+  concrete TCP endpoint while preserving the address presented during the protocol
+  handshake. It also separates failures to establish TCP from silence after a session
+  has started.
 - [Native chunk records](./native-chunk-record.md) — The native server storage seam
   persists one complete typed chunk replacement through `NativeDirtyChunkRecord` and
   reopens it as `NativeChunkRecord`. The boundary keeps block, biome, heightmap,
