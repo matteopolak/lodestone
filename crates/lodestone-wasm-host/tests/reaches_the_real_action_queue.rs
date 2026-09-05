@@ -186,6 +186,16 @@ fn release_use_host_policy() -> CapabilitySet {
     policy
 }
 
+fn stab_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActStab])
+}
+
+fn stab_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActStab);
+    policy
+}
+
 fn inventory_event() -> GameEvent {
     GameEvent(ClientEvent::InventorySlotChanged {
         slot: 4,
@@ -556,6 +566,64 @@ fn a_wasm_held_use_release_without_its_capability_is_refused() {
             .iter()
             .any(|action| matches!(action, ClientAction::ReleaseUseItem)),
         "a refused held-use release must not reach the action queue: {:?}",
+        action_queue(&app)
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+/// A piercing-weapon stab reaches the ordinary client queue without exposing
+/// the selected item or its attack state to the guest.
+#[test]
+fn a_wasm_stab_reaches_the_real_action_queue() {
+    let wasm = support::build_example_plugin(&["stab"]);
+    let mut host = PluginHost::new(stab_host_policy()).expect("engine");
+    host.load_file("stab", &wasm, &stab_capabilities())
+        .expect("the explicitly granted stab fixture must load");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(
+        &mut app,
+        PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0),
+    );
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        action_queue(&app)
+            .iter()
+            .any(|action| matches!(action, ClientAction::Stab)),
+        "the guest stab must reach the real action queue: {:?}",
+        action_queue(&app)
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// The same guest output is refused when its dedicated mutation capability is
+/// absent, proving that an arm-swing grant cannot authorize a stab.
+#[test]
+fn a_wasm_stab_without_its_capability_is_refused() {
+    let wasm = support::build_example_plugin(&["stab"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "stab",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log, Capability::ActInteract]),
+    )
+    .expect("the guest remains loadable when the stab grant is withheld");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(
+        &mut app,
+        PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0),
+    );
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        !action_queue(&app)
+            .iter()
+            .any(|action| matches!(action, ClientAction::Stab)),
+        "a refused stab must not reach the action queue: {:?}",
         action_queue(&app)
     );
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
