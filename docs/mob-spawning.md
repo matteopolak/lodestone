@@ -104,6 +104,11 @@ one roll can't shift another's outcome. Not modelled: enchanted spawn gear (no e
 exists at all) and equipment surviving save/load (no equipment NBT); the iron spear has no
 entry in `equipment::weapon_attack_damage` (a combat-stats gap, not an equipping one).
 
+`EquipmentSlots` stores `lodestone_data::item::Item`, not item-name text: every result of this
+closed default-equipment table is a known built-in registry entry. `equipment::apply_equipment`
+accepts that typed path directly; its string form remains the explicit dynamic player-inventory
+boundary, where an unknown name contributes no built-in modifiers.
+
 ### Species-aware spawning
 
 `MobSim::spawn_species` resolves a mob's body, combat stats and baseline goals from its real

@@ -76,6 +76,7 @@
 
 use crate::attribute::{AttributeMap, Modifier, Operation};
 use crate::damage::Defenses;
+use lodestone_data::item::Item;
 use lodestone_model::Identifier;
 use std::str::FromStr;
 
@@ -343,8 +344,8 @@ fn trident_or_mace(path: &str) -> Option<f64> {
 /// The single row-table this module is built around: add an item here and it
 /// flows through [`apply_equipment`] with no other change.
 #[must_use]
-pub fn item_modifiers(path: &str) -> Vec<ItemModifier> {
-    let path = path.strip_prefix("minecraft:").unwrap_or(path);
+pub fn item_modifiers(item: Item) -> Vec<ItemModifier> {
+    let path = item.path();
     if let Some((material, slot)) = armor_piece(path) {
         let id = armor_modifier_id(slot);
         // Vanilla emits ARMOR and ARMOR_TOUGHNESS unconditionally and
@@ -389,18 +390,43 @@ pub fn item_modifiers(path: &str) -> Vec<ItemModifier> {
     Vec::new()
 }
 
-/// Folds a set of `(slot, item id)` pairs into `attrs` as real
+/// A source of an equipment item. Built-in [`Item`] values already establish
+/// their registry identity; strings are the dynamic boundary and are resolved
+/// once before the modifier table runs.
+pub trait EquipmentItem {
+    /// Resolves the input to one built-in item, if this registry knows it.
+    fn built_in_item(self) -> Option<Item>;
+}
+
+impl EquipmentItem for Item {
+    fn built_in_item(self) -> Option<Item> {
+        Some(self)
+    }
+}
+
+impl EquipmentItem for &str {
+    fn built_in_item(self) -> Option<Item> {
+        Item::from_name(self)
+    }
+}
+
+/// Folds a set of `(slot, item)` pairs into `attrs` as real
 /// [`Modifier`]s, skipping any modifier whose slot does not match the slot the
 /// item is actually in.
 ///
-/// Item ids may be namespaced or bare. An unrecognised item contributes nothing,
-/// which is the honest answer for a block in the hotbar.
-pub fn apply_equipment<'a, I>(attrs: &mut AttributeMap, equipped: I)
+/// Built-in [`Item`] values do not need lookup. A string is accepted only at
+/// the dynamic boundary; namespaced and bare spellings resolve identically,
+/// while an unrecognised item contributes nothing.
+pub fn apply_equipment<I, T>(attrs: &mut AttributeMap, equipped: I)
 where
-    I: IntoIterator<Item = (EquipmentSlot, &'a str)>,
+    I: IntoIterator<Item = (EquipmentSlot, T)>,
+    T: EquipmentItem,
 {
-    for (slot, path) in equipped {
-        for m in item_modifiers(path) {
+    for (slot, item) in equipped {
+        let Some(item) = item.built_in_item() else {
+            continue;
+        };
+        for m in item_modifiers(item) {
             if m.slot != slot {
                 continue;
             }
@@ -743,16 +769,23 @@ mod tests {
         );
     }
 
-    /// Namespaced and bare ids resolve identically, and an unknown item is a
-    /// silent no-contribution rather than a panic.
+    /// Validated items reach the modifier table directly; namespaced and bare
+    /// strings resolve identically only at the explicit dynamic boundary.
+    /// Unknown dynamic items remain a silent no-contribution rather than a
+    /// panic.
     #[test]
-    fn ids_accept_both_forms_and_unknown_items_contribute_nothing() {
-        assert_eq!(
-            item_modifiers("minecraft:diamond_helmet"),
-            item_modifiers("diamond_helmet")
+    fn typed_items_bypass_lookup_while_dynamic_names_stay_at_the_boundary() {
+        let helmet = Item::from_name("diamond_helmet").expect("built-in helmet");
+        assert!(!item_modifiers(helmet).is_empty());
+        assert!(
+            item_modifiers(Item::from_name("cobblestone").expect("built-in block")).is_empty()
         );
-        assert!(item_modifiers("minecraft:cobblestone").is_empty());
-        assert!(item_modifiers("").is_empty());
+
+        let bare = player_combat_stats(vec![(EquipmentSlot::Head, "diamond_helmet")]);
+        let namespaced = player_combat_stats(vec![(EquipmentSlot::Head, "minecraft:diamond_helmet")]);
+        assert_eq!(bare.defenses.armor, namespaced.defenses.armor);
+        assert!((bare.defenses.armor - 3.0).abs() < 1e-6);
+
         let nothing = player_combat_stats(vec![(EquipmentSlot::Head, "cobblestone")]);
         assert!(nothing.defenses.armor.abs() < 1e-6);
     }

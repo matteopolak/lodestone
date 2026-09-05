@@ -67,7 +67,8 @@ pub use damage::{
     DamageFlags, DamageOutcome, Defenses, HurtCooldown, HurtDecision, apply_reductions,
 };
 pub use equipment::{
-    EquipmentSlot, ItemModifier, PlayerCombatStats, apply_equipment, player_combat_stats,
+    EquipmentItem, EquipmentSlot, ItemModifier, PlayerCombatStats, apply_equipment,
+    player_combat_stats,
 };
 pub use explosion::{Aabb, OpenAir, RayView, entity_damage, knockback_power, seen_percent};
 pub use interpolation::Interpolated;
