@@ -1,19 +1,22 @@
-//! Authorization-gated conversion of one Anvil world-properties or chunk record.
+//! Authorization-gated conversion of Anvil metadata, one chunk, or one region file.
 //!
 //! This is deliberately a small consumer of [`crate::world_storage::WorldStorage`],
-//! not a world walker. It reads the two source records that carry the native
-//! world's supported metadata, reruns the payload-free preflight, and emits
-//! one typed general record. It also has one field-bounded chunk consumer:
-//! block states, biomes, the motion-blocking heightmap, and per-section light
-//! are mapped into one complete native chunk input while entities, ticks,
-//! structures, and other unsupported payloads are reported and dropped.
-//! Players, entities, auxiliary files, and a filesystem walker remain on their
-//! existing Anvil paths until each has a lossless native destination.
+//! not a complete world migrator. It reads the two source records that carry
+//! the native world's supported metadata, reruns the payload-free preflight,
+//! and emits one typed general record. It also has a field-bounded region-file
+//! walker: block states, biomes, the motion-blocking heightmap, and
+//! per-section light are mapped into complete native chunk inputs while
+//! entities, ticks, structures, and other unsupported payloads are reported
+//! and dropped. Players, entity regions, auxiliary files, and multi-directory
+//! world discovery remain on their existing Anvil paths until each has a
+//! lossless native destination.
 
 use lodestone_anvil::import_preflight::{
     ImportAuthorization, LossDecision, PreflightReport,
 };
-use lodestone_anvil::{level_dat, world_gen_settings};
+use std::path::Path;
+
+use lodestone_anvil::{level_dat, region::RegionFile, world_gen_settings};
 use lodestone_core::{Nbt, Reader, read_named_nbt};
 use lodestone_storage::{RecordKey, RecordWrite};
 use lodestone_storage_schema::{
@@ -48,6 +51,22 @@ pub struct ChunkImportResult {
     /// The field-level preflight used to authorize this write.
     pub report: PreflightReport,
     /// Number of native records committed; this consumer writes exactly one.
+    pub records_written: usize,
+}
+
+/// The result of importing every present chunk from one region file.
+///
+/// `report` is one aggregate, payload-free inventory for the complete source
+/// file. Its loss count is the count the caller explicitly accepted before
+/// any native write was prepared, not a collection of independently approved
+/// single-chunk conversions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegionImportResult {
+    /// The aggregate field-level preflight used to authorize this batch.
+    pub report: PreflightReport,
+    /// Number of present source chunks discovered in the region file.
+    pub chunks_seen: usize,
+    /// Number of native chunk records committed in the one batch.
     pub records_written: usize,
 }
 
@@ -126,6 +145,22 @@ pub enum Error {
     /// A packed heightmap value cannot fit the native u16 representation.
     #[error("chunk heightmap value {value} at index {index} exceeds u16")]
     HeightmapValue { index: usize, value: u32 },
+    /// The region coordinate and its local table index cannot be represented
+    /// as an absolute signed chunk coordinate.
+    #[error("region ({region_x}, {region_z}) local chunk ({local_x}, {local_z}) overflows i32 coordinates")]
+    RegionCoordinateOverflow {
+        /// Region X coordinate supplied by the caller.
+        region_x: i32,
+        /// Region Z coordinate supplied by the caller.
+        region_z: i32,
+        /// Region-local X table index.
+        local_x: u8,
+        /// Region-local Z table index.
+        local_z: u8,
+    },
+    /// Reading, parsing, or decompressing the region container failed.
+    #[error("Anvil region read error: {0}")]
+    Region(#[source] lodestone_anvil::Error),
     /// The requested native chunk extent is not a positive section-aligned
     /// window.
     #[error("invalid chunk extent min_y={min_y}, height={height}")]
@@ -226,8 +261,240 @@ pub fn import_chunk(
             required,
         });
     }
-    if !is_builtin_dimension(&dimension) {
-        return Err(Error::UnsupportedChunkDimension(dimension));
+    let prepared = prepare_chunk(&dimension, column_x, column_z, chunk, min_y, height)?;
+    storage.write_dirty_chunk(prepared.dirty()).map_err(Error::Storage)?;
+    Ok(ChunkImportResult {
+        report,
+        records_written: 1,
+    })
+}
+
+/// Builds one aggregate preflight report for every present chunk in a region
+/// file.
+///
+/// The caller supplies the region coordinates instead of inferring them from
+/// a filename, so a copied or renamed file cannot silently shift every native
+/// key. Oversized chunks are resolved from the region file's parent directory.
+/// Empty table entries contribute neither a report item nor a native record.
+pub fn preflight_region_file(
+    dimension: impl Into<String>,
+    region_x: i32,
+    region_z: i32,
+    region_path: impl AsRef<Path>,
+) -> Result<PreflightReport, Error> {
+    let dimension = dimension.into();
+    let chunks = read_region_chunks(region_x, region_z, region_path.as_ref())?;
+    Ok(preflight_region_chunks(&dimension, &chunks))
+}
+
+/// Converts every present chunk in one authorized region file as one native
+/// batch.
+///
+/// The file is fully decoded and classified before its aggregate report is
+/// compared with `authorization`. Every typed native input is then prepared
+/// before `WorldStorage::write_dirty_chunks` opens its transaction, so an
+/// invalid later chunk cannot leave an earlier one imported. This deliberately
+/// walks only the supplied terrain region file; it neither discovers other
+/// dimensions nor treats entity, POI, player, or auxiliary files as imported.
+pub fn import_region_file(
+    storage: &world_storage::WorldStorage,
+    dimension: impl Into<String>,
+    region_x: i32,
+    region_z: i32,
+    region_path: impl AsRef<Path>,
+    min_y: i32,
+    height: i32,
+    authorization: Option<ImportAuthorization>,
+) -> Result<RegionImportResult, Error> {
+    if height <= 0 || min_y.rem_euclid(16) != 0 {
+        return Err(Error::InvalidChunkExtent { min_y, height });
+    }
+    let Some(authorization) = authorization else {
+        return Err(Error::MissingAuthorization);
+    };
+    if !authorization.permits_conversion() {
+        return Err(Error::AuthorizationDenied { authorization });
+    }
+
+    let dimension = dimension.into();
+    let chunks = read_region_chunks(region_x, region_z, region_path.as_ref())?;
+    let report = preflight_region_chunks(&dimension, &chunks);
+    let required = report.decide(LossDecision::ProceedAndDiscardUnsupported);
+    if authorization != required {
+        return Err(Error::AuthorizationMismatch {
+            supplied: authorization,
+            required,
+        });
+    }
+
+    let mut prepared = Vec::with_capacity(chunks.len());
+    for chunk in &chunks {
+        prepared.push(prepare_chunk(
+            &dimension,
+            chunk.column_x,
+            chunk.column_z,
+            &chunk.nbt,
+            min_y,
+            height,
+        )?);
+    }
+    let records_written = storage
+        .write_dirty_chunks(prepared.iter().map(PreparedChunk::dirty))
+        .map_err(Error::Storage)?;
+    Ok(RegionImportResult {
+        report,
+        chunks_seen: chunks.len(),
+        records_written,
+    })
+}
+
+/// Decodes one complete named-NBT chunk root and passes it to [`import_chunk`].
+///
+/// This helper consumes no filesystem paths; a region caller supplies bytes it
+/// has already selected. A trailing byte or non-empty root name is rejected so
+/// a concatenated or differently framed payload cannot be imported as a valid
+/// chunk.
+pub fn import_chunk_bytes(
+    storage: &world_storage::WorldStorage,
+    dimension: impl Into<String>,
+    column_x: i32,
+    column_z: i32,
+    bytes: &[u8],
+    min_y: i32,
+    height: i32,
+    authorization: Option<ImportAuthorization>,
+) -> Result<ChunkImportResult, Error> {
+    let chunk = decode_chunk_bytes(bytes)?;
+    import_chunk(
+        storage,
+        dimension,
+        column_x,
+        column_z,
+        &chunk,
+        min_y,
+        height,
+        authorization,
+    )
+}
+
+#[derive(Debug)]
+struct RegionChunk {
+    column_x: i32,
+    column_z: i32,
+    nbt: Nbt,
+}
+
+#[derive(Debug)]
+struct PreparedChunk {
+    column_x: i32,
+    column_z: i32,
+    column: crate::ChunkColumn,
+    light: ColumnLight,
+    scheduled: scheduled_tick::ScheduledTickHandle,
+}
+
+impl PreparedChunk {
+    fn dirty(&self) -> world_storage::NativeDirtyChunkRecord<'_> {
+        world_storage::NativeDirtyChunkRecord::new(
+            self.column_x,
+            self.column_z,
+            &self.column,
+            &self.light,
+            &self.scheduled,
+        )
+    }
+}
+
+fn read_region_chunks(
+    region_x: i32,
+    region_z: i32,
+    region_path: &Path,
+) -> Result<Vec<RegionChunk>, Error> {
+    let region = RegionFile::read_from_file(region_path).map_err(Error::Region)?;
+    let external_dir = region_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut chunks = Vec::new();
+    for local_z in 0..32u8 {
+        for local_x in 0..32u8 {
+            let (column_x, column_z) = absolute_chunk_coordinate(
+                region_x, region_z, local_x, local_z,
+            )?;
+            let Some(bytes) = region
+                .read_chunk_nbt_bytes_resolving_external(
+                    local_x,
+                    local_z,
+                    column_x,
+                    column_z,
+                    external_dir,
+                )
+                .map_err(Error::Region)?
+            else {
+                continue;
+            };
+            chunks.push(RegionChunk {
+                column_x,
+                column_z,
+                nbt: decode_chunk_bytes(&bytes)?,
+            });
+        }
+    }
+    Ok(chunks)
+}
+
+fn absolute_chunk_coordinate(
+    region_x: i32,
+    region_z: i32,
+    local_x: u8,
+    local_z: u8,
+) -> Result<(i32, i32), Error> {
+    let coordinate = |region: i32, local: u8| {
+        region
+            .checked_mul(32)
+            .and_then(|base| base.checked_add(i32::from(local)))
+    };
+    match (coordinate(region_x, local_x), coordinate(region_z, local_z)) {
+        (Some(x), Some(z)) => Ok((x, z)),
+        _ => Err(Error::RegionCoordinateOverflow {
+            region_x,
+            region_z,
+            local_x,
+            local_z,
+        }),
+    }
+}
+
+fn preflight_region_chunks(dimension: &str, chunks: &[RegionChunk]) -> PreflightReport {
+    let mut builder = PreflightReport::builder();
+    for chunk in chunks {
+        builder.inspect_native_chunk(
+            dimension,
+            chunk.column_x,
+            chunk.column_z,
+            &chunk.nbt,
+        );
+    }
+    builder.finish()
+}
+
+fn decode_chunk_bytes(bytes: &[u8]) -> Result<Nbt, Error> {
+    let mut reader = Reader::new(bytes);
+    let (name, chunk) = read_named_nbt(&mut reader).map_err(Error::ChunkNbt)?;
+    if !name.is_empty() {
+        return Err(Error::ChunkRootName(name));
+    }
+    reader.ensure_empty().map_err(Error::ChunkNbt)?;
+    Ok(chunk)
+}
+
+fn prepare_chunk(
+    dimension: &str,
+    column_x: i32,
+    column_z: i32,
+    chunk: &Nbt,
+    min_y: i32,
+    height: i32,
+) -> Result<PreparedChunk, Error> {
+    if !is_builtin_dimension(dimension) {
+        return Err(Error::UnsupportedChunkDimension(dimension.to_owned()));
     }
 
     let actual_x = chunk_int(chunk, "xPos")?;
@@ -255,53 +522,13 @@ pub fn import_chunk(
         column.set_motion_blocking(heights);
     }
     let light = light_from_nbt(chunk, min_y, column.section_count())?;
-    let scheduled = scheduled_tick::ScheduledTickHandle::new();
-    let dirty = world_storage::NativeDirtyChunkRecord::new(
+    Ok(PreparedChunk {
         column_x,
         column_z,
-        &column,
-        &light,
-        &scheduled,
-    );
-    storage.write_dirty_chunk(dirty).map_err(Error::Storage)?;
-    Ok(ChunkImportResult {
-        report,
-        records_written: 1,
+        column,
+        light,
+        scheduled: scheduled_tick::ScheduledTickHandle::new(),
     })
-}
-
-/// Decodes one complete named-NBT chunk root and passes it to [`import_chunk`].
-///
-/// This helper consumes no filesystem paths; a region caller supplies bytes it
-/// has already selected. A trailing byte or non-empty root name is rejected so
-/// a concatenated or differently framed payload cannot be imported as a valid
-/// chunk.
-pub fn import_chunk_bytes(
-    storage: &world_storage::WorldStorage,
-    dimension: impl Into<String>,
-    column_x: i32,
-    column_z: i32,
-    bytes: &[u8],
-    min_y: i32,
-    height: i32,
-    authorization: Option<ImportAuthorization>,
-) -> Result<ChunkImportResult, Error> {
-    let mut reader = Reader::new(bytes);
-    let (name, chunk) = read_named_nbt(&mut reader).map_err(Error::ChunkNbt)?;
-    if !name.is_empty() {
-        return Err(Error::ChunkRootName(name));
-    }
-    reader.ensure_empty().map_err(Error::ChunkNbt)?;
-    import_chunk(
-        storage,
-        dimension,
-        column_x,
-        column_z,
-        &chunk,
-        min_y,
-        height,
-        authorization,
-    )
 }
 
 fn is_builtin_dimension(dimension: &str) -> bool {
