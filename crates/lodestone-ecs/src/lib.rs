@@ -230,6 +230,7 @@ pub use session::{
     Abilities, ActionBarOverlay, HudEffects, Phase, RespawnCount, Riding, ServerAlive,
     ServerDifficulty, ServerDimension, ServerEntityId, ServerGameMode, SessionBlockDestruction,
     SessionBossBars, SessionChat, SessionDebugFeeds, SessionEnd, SessionEndKind, SessionHudPlugin,
+    SessionItemCooldowns,
     SessionMenus, SessionPhase,
     ServerChunkCacheCenter, SessionPlugin, SessionRecipeBook, SessionRegistryOrder,
     SessionScoreboard, SessionServerInfo, SessionSet, SessionStatistics, SessionTrades,

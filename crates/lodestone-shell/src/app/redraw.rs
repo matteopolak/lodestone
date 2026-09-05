@@ -639,6 +639,13 @@ impl WindowApp {
         // `Sim::player_menu` clones all 46 slots, and a second call per frame is
         // exactly the cost the mining-freeze fix removed from the tick path.
         let player_menu = self.sim.player_menu();
+        let hotbar_cooldowns: Vec<f32> = (0..9)
+            .map(|i| {
+                player_menu
+                    .player_native(i)
+                    .map_or(0.0, |stack| self.sim.item_cooldown_fraction(stack.item()))
+            })
+            .collect();
         let hotbar_records: Vec<Option<HotbarSlot>> = (0..9)
             .map(|i| {
                 player_menu.player_native(i).and_then(|st| {
@@ -1908,6 +1915,7 @@ impl WindowApp {
         hud_frame.air = air;
         hud_frame.hotbar = world_hud.then(|| self.sim.selected_slot());
         hud_frame.hotbar_items = world_hud.then_some(hotbar_records.as_slice());
+        hud_frame.hotbar_cooldowns = world_hud.then_some(hotbar_cooldowns.as_slice()).unwrap_or(&[]);
         hud_frame.xp = self.sim.xp();
         hud_frame.locator = &locator_dots;
         hud_frame.title = self.sim.title_overlay();

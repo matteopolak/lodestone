@@ -1237,6 +1237,17 @@ impl Sim {
         })
     }
 
+    /// The remaining server cooldown fraction for an item whose default group is
+    /// its item identifier. The HUD reads this once per hotbar slot; it does not
+    /// own or advance the cooldown clock.
+    #[must_use]
+    pub fn item_cooldown_fraction(&self, item: &lodestone_model::Identifier) -> f32 {
+        self.read(|w| {
+            w.get::<lodestone_ecs::SessionItemCooldowns>(self.local)
+                .map_or(0.0, |cooldowns| cooldowns.0.fraction_for(item))
+        })
+    }
+
     /// The currently open server menu, if any.
     #[must_use]
     pub fn open_menu(&self) -> Option<OpenMenuSnapshot> {
@@ -2287,7 +2298,7 @@ impl Sim {
         let chunk = world.get(chunk_pos)?;
         let rel_x = pos.x.rem_euclid(16) as usize;
         let rel_z = pos.z.rem_euclid(16) as usize;
-        let state_id = chunk.column.get_block(rel_x, pos.y, rel_z);
+        let raw_state_id = chunk.column.get_block(rel_x, pos.y, rel_z);
         // The block state is the truth about *whether* this is a command
         // block; the record is only where the payload lives. So this resolves
         // the state first and treats a missing record as an empty payload
@@ -2295,7 +2306,8 @@ impl Sim {
         // state-wins-over-record rule `crate::block_entities` follows, and the
         // reason a freshly placed command block (state written, no record yet)
         // still opens.
-        crate::command_block_source::mode_for_state(state_id)?;
+        let state = lodestone_data::block_states::StateId::new(raw_state_id)?;
+        crate::command_block_source::mode_for_state(state)?;
         let nbt = chunk
             .block_entities
             .iter()
@@ -2305,7 +2317,7 @@ impl Sim {
                     && i32::from(be.y) == pos.y
             })
             .map_or(&lodestone_core::Nbt::End, |be| &be.nbt);
-        crate::command_block_source::command_block_open(pos, state_id, nbt)
+        crate::command_block_source::command_block_open(pos, state, nbt)
     }
 
     /// The sign at `pos`'s currently-synced text — `SignText::parse` on the
