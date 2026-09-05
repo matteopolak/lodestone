@@ -28,7 +28,7 @@ use std::sync::Arc;
 use lodestone_ecs::events::GameEvent;
 use lodestone_ecs::player::{
     ActionQueue, BreakIntent, BreakOutcome, BreakStatus, CollisionSource, Egress, LocalPlayer,
-    PhysicsState, PlayerCollision,
+    PhysicsState, PlayerCollision, SelectedSlot,
 };
 use lodestone_ecs::{GameTick, app::App};
 use lodestone_model::{ClientAction, ClientEvent, PlayerInput, Text};
@@ -82,6 +82,16 @@ fn break_host_policy() -> CapabilitySet {
     let mut policy = CapabilitySet::default_policy();
     policy.insert(Capability::ActBreak);
     policy.insert(Capability::ObserveBreak);
+    policy
+}
+
+fn select_slot_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActSelectSlot])
+}
+
+fn select_slot_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActSelectSlot);
     policy
 }
 
@@ -478,4 +488,98 @@ fn a_wasm_break_lifecycle_reaches_the_shell_mining_consumer_and_returns_a_bounde
         );
         assert_eq!(world.resource::<WasmPlugins>().refused_actions(), 0);
     }
+}
+
+/// A separately-built guest selects one hotbar slot through the production
+/// shell consumer. The assertion is both ends of the contract: the real
+/// selected component changes and the server-facing carried-item echo joins the
+/// normal action queue. No outcome event is expected because selection has no
+/// legality vocabulary beyond the consumer's finite no-op gates.
+#[test]
+fn a_wasm_hotbar_intent_reaches_the_shell_selection_and_echo_consumers() {
+    let wasm = support::build_example_plugin(&["select-slot"]);
+    let mut host = PluginHost::new(select_slot_host_policy()).expect("engine");
+    host.load_file("select-slot", &wasm, &select_slot_capabilities())
+        .expect("the selection fixture must load");
+
+    let mut app = Sim::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    let sim = Sim::from_app(app, Config::default());
+
+    let actions = {
+        let mut world = sim.ecs().write();
+        world.run_schedule(GameTick);
+        let mut players = world.query_filtered::<&SelectedSlot, bevy_ecs::query::With<LocalPlayer>>();
+        assert_eq!(
+            players.single(&world).expect("one local player").0,
+            6,
+            "the shell consumer must commit the guest's selection"
+        );
+        world.resource::<ActionQueue>().0.clone()
+    };
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, ClientAction::SetCarriedItem { slot: 6 })),
+        "the shell consumer must echo the changed selection to the ordered server queue: {actions:?}"
+    );
+}
+
+/// Capability denial happens before the guest can claim the selection intent;
+/// this proves the normal hotbar state remains under human/shell control rather
+/// than merely showing that a fixture happened to return no action.
+#[test]
+fn a_wasm_hotbar_intent_without_its_capability_is_refused_before_shell_selection() {
+    let wasm = support::build_example_plugin(&["select-slot"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file("select-slot", &wasm, &CapabilitySet::from_iter([Capability::Log]))
+        .expect("the guest remains valid when its data-flow grant is withheld");
+
+    let mut app = Sim::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    let sim = Sim::from_app(app, Config::default());
+    let mut world = sim.ecs().write();
+    world.run_schedule(GameTick);
+
+    let mut players = world.query_filtered::<&SelectedSlot, bevy_ecs::query::With<LocalPlayer>>();
+    assert_eq!(players.single(&world).expect("one local player").0, 0);
+    assert!(
+        !world
+            .resource::<ActionQueue>()
+            .0
+            .iter()
+            .any(|action| matches!(action, ClientAction::SetCarriedItem { .. })),
+        "a refused guest action must not enter the shell's carried-item echo path"
+    );
+    assert_eq!(world.resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+/// The component model allows any `u8`, so the production consumer remains the
+/// authority for the `0..=8` hotbar range. A malformed guest request is consumed
+/// as the same finite no-op the native intent receives: no selection mutation and
+/// no carried-item echo.
+#[test]
+fn a_wasm_out_of_range_hotbar_intent_is_a_shell_validated_no_op() {
+    let wasm = support::build_example_plugin(&["select-slot-invalid"]);
+    let mut host = PluginHost::new(select_slot_host_policy()).expect("engine");
+    host.load_file("select-slot-invalid", &wasm, &select_slot_capabilities())
+        .expect("the malformed selection fixture must still load");
+
+    let mut app = Sim::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    let sim = Sim::from_app(app, Config::default());
+    let mut world = sim.ecs().write();
+    world.run_schedule(GameTick);
+
+    let mut players = world.query_filtered::<&SelectedSlot, bevy_ecs::query::With<LocalPlayer>>();
+    assert_eq!(players.single(&world).expect("one local player").0, 0);
+    assert!(
+        !world
+            .resource::<ActionQueue>()
+            .0
+            .iter()
+            .any(|action| matches!(action, ClientAction::SetCarriedItem { .. })),
+        "an out-of-range slot must never be echoed to the server"
+    );
+    assert_eq!(world.resource::<WasmPlugins>().refused_actions(), 0);
 }

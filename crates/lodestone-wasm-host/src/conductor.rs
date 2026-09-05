@@ -54,6 +54,7 @@ use lodestone_ecs::commands::{CommandOutcome, CommandRegistry, PluginCommand, Pl
 use lodestone_ecs::events::{GameEvent, GameEventBusPlugin};
 use lodestone_ecs::player::{
     ActionQueue, BreakIntent, BreakOutcome, LocalPlayer, LookIntent, MovementIntent, PlaceOutcome,
+    SelectSlotIntent,
 };
 use lodestone_ecs::veto::{ActionVetoPlugin, ActionVetoes, Verdict};
 // `TickSet` via the crate root, not `lodestone_ecs::sets::TickSet`: the `sets` module
@@ -438,7 +439,13 @@ impl Plugin for WasmHostPlugin {
         );
         app.add_systems(
             GameTick,
-            (apply_wasm_intents, apply_wasm_break_intents, apply_wasm_place_intents, ApplyDeferred)
+            (
+                apply_wasm_intents,
+                apply_wasm_break_intents,
+                apply_wasm_place_intents,
+                apply_wasm_select_slot_intents,
+                ApplyDeferred,
+            )
                 .chain()
                 .in_set(TickSet::Intent)
                 .before(lodestone_ecs::player::apply_look_intent),
@@ -447,6 +454,7 @@ impl Plugin for WasmHostPlugin {
             GameTick,
             apply_wasm_movement_intents
                 .in_set(TickSet::Intent)
+                .after(apply_wasm_select_slot_intents)
                 .after(lodestone_controller::ecs::compute_movement_intent),
         );
     }
@@ -540,7 +548,10 @@ fn apply_wasm_intents(
 ) {
     let last = pending.0.iter().rev().find_map(|intent| match intent {
         IntentAction::Look(look) => Some(*look),
-        IntentAction::Movement(_) | IntentAction::Break(_) | IntentAction::Place(_) => None,
+        IntentAction::Movement(_)
+        | IntentAction::Break(_)
+        | IntentAction::Place(_)
+        | IntentAction::SelectSlot(_) => None,
     });
     let Some(look) = last else {
         return;
@@ -567,7 +578,10 @@ fn apply_wasm_break_intents(
 ) {
     let break_intent = pending.0.iter().rev().find_map(|intent| match intent {
         IntentAction::Break(break_intent) => Some(*break_intent),
-        IntentAction::Look(_) | IntentAction::Movement(_) | IntentAction::Place(_) => None,
+        IntentAction::Look(_)
+        | IntentAction::Movement(_)
+        | IntentAction::Place(_)
+        | IntentAction::SelectSlot(_) => None,
     });
     let Some(break_intent) = break_intent else {
         return;
@@ -599,13 +613,40 @@ fn apply_wasm_place_intents(
 ) {
     let place = pending.0.iter().rev().find_map(|intent| match intent {
         IntentAction::Place(place) => Some(*place),
-        IntentAction::Look(_) | IntentAction::Movement(_) | IntentAction::Break(_) => None,
+        IntentAction::Look(_)
+        | IntentAction::Movement(_)
+        | IntentAction::Break(_)
+        | IntentAction::SelectSlot(_) => None,
     });
     let Some(place) = place else {
         return;
     };
     for entity in &players {
         commands.entity(entity).insert(place);
+    }
+}
+
+/// Submit the final guest hotbar-selection request through the shell-owned
+/// selection lifecycle. The shell's later `TickSet::Send` consumer performs the
+/// range and same-slot gates, writes `SelectedSlot`, and emits its ordered
+/// carried-item echo; the host never constructs that packet itself.
+fn apply_wasm_select_slot_intents(
+    pending: Res<PendingWasmIntents>,
+    players: Query<Entity, With<LocalPlayer>>,
+    mut commands: Commands,
+) {
+    let slot = pending.0.iter().rev().find_map(|intent| match intent {
+        IntentAction::SelectSlot(slot) => Some(*slot),
+        IntentAction::Look(_)
+        | IntentAction::Movement(_)
+        | IntentAction::Break(_)
+        | IntentAction::Place(_) => None,
+    });
+    let Some(slot) = slot else {
+        return;
+    };
+    for entity in &players {
+        commands.entity(entity).insert(SelectSlotIntent(slot));
     }
 }
 
@@ -618,7 +659,10 @@ fn apply_wasm_movement_intents(
 ) {
     let movement = pending.0.iter().rev().find_map(|intent| match intent {
         IntentAction::Movement(movement) => Some(*movement),
-        IntentAction::Look(_) | IntentAction::Break(_) | IntentAction::Place(_) => None,
+        IntentAction::Look(_)
+        | IntentAction::Break(_)
+        | IntentAction::Place(_)
+        | IntentAction::SelectSlot(_) => None,
     });
     pending.0.clear();
 

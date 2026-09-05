@@ -81,7 +81,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.9.0".to_string(),
+            abi: "lodestone:plugin@0.10.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -118,7 +118,13 @@ impl Guest for ChatResponder {
         #[cfg(feature = "break")]
         return break_once_then_report(events);
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break")))]
+        #[cfg(feature = "select-slot")]
+        return vec![Action::SelectSlot(6)];
+
+        #[cfg(feature = "select-slot-invalid")]
+        return vec![Action::SelectSlot(9)];
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid")))]
         return respond(events);
     }
 

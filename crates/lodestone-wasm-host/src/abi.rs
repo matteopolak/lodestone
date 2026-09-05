@@ -17,7 +17,7 @@
 //! |---|---|---|
 //! | `Text`, the styled component tree | a plain `String` | `Text` is recursive, with translation keys, hover/click events and per-node style. Lifting it faithfully means a recursive WIT variant plus a translation table the guest cannot resolve anyway. So [`lift_event`] flattens with `Text::to_plain_string`, and this is **lossy**: a guest cannot see colour, cannot see a translation key, and cannot distinguish a translated message from a literal one that happens to render the same. |
 //! | `ChatAckInfo` on `ClientEvent::Chat` | dropped | signed-chat acknowledgement is the *driver's* bookkeeping — a guest that echoed an `offset` back would fork a sequence counter the driver owns, which is clause 2 of the doctrine. Deliberately unreachable. |
-//! | intent components (`BreakIntent`, `PlaceIntent`, `MovementIntent`, `LookIntent`) and their outcome components | `set-look(option<look-intent>)`, `set-movement(option<movement-intent>)`, `set-break(option<break-intent>)`, `place-block(place-intent)`, and bounded outcome events | look owns an optional component; movement overrides the normal controller's copied input for one tick, then flows through the existing physics and egress consumers. Break owns a persistent target until explicit release, while the shell owns validation, prediction and sequence. Placement crosses as only a target and face, then the shell owns its one-shot lifecycle. See `docs/wasm-plugin-intents.md`. |
+//! | intent components (`BreakIntent`, `PlaceIntent`, `SelectSlotIntent`, `MovementIntent`, `LookIntent`) and their outcome components | `set-look(option<look-intent>)`, `set-movement(option<movement-intent>)`, `set-break(option<break-intent>)`, `place-block(place-intent)`, `select-slot(hotbar-slot)`, and bounded outcome events | look owns an optional component; movement overrides the normal controller's copied input for one tick, then flows through the existing physics and egress consumers. Break owns a persistent target until explicit release, while the shell owns validation, prediction and sequence. Placement crosses as only a target and face, then the shell owns its one-shot lifecycle. Selection crosses as only the candidate slot; the shell owns range validation and its carried-item echo. See `docs/wasm-plugin-intents.md`. |
 //! | ~110 `ClientEvent` variants | 3 | the curated subset. Not an oversight and not a TODO: a full mirror is the staleness factory `lodestone_ecs::events`'s own module doc refuses. |
 //!
 //! # The staleness question, and the honest answer to it
@@ -59,6 +59,8 @@ pub enum IntentAction {
     Place(lodestone_ecs::player::PlaceIntent),
     /// Install, retarget, or release the persistent mining intent.
     Break(Option<lodestone_ecs::player::BreakIntent>),
+    /// Request one shell-owned selected-hotbar-slot change.
+    SelectSlot(usize),
 }
 
 /// A guest movement request after the boundary has enforced finite, digital axes.
@@ -318,6 +320,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::SetMovement(_) => Capability::ActMovement,
         Action::SetBreak(_) => Capability::ActBreak,
         Action::PlaceBlock(_) => Capability::ActPlace,
+        Action::SelectSlot(_) => Capability::ActSelectSlot,
     }
 }
 
@@ -384,6 +387,7 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
                 },
             },
         )),
+        Action::SelectSlot(slot) => LoweredAction::Intent(IntentAction::SelectSlot(usize::from(slot))),
     })
 }
 
@@ -512,6 +516,17 @@ mod tests {
             Ok(LoweredAction::Client(ClientAction::SwingArm {
                 hand: lodestone_model::common::Hand::Off
             }))
+        );
+    }
+
+    /// Selection crosses as an intent, never as a hand-built carried-item
+    /// packet. The shell keeps both its range gate and the ordered echo.
+    #[test]
+    fn a_selected_slot_lowers_onto_the_shell_owned_intent() {
+        let granted = CapabilitySet::from_iter([Capability::ActSelectSlot]);
+        assert_eq!(
+            lower_action(Action::SelectSlot(6), &granted),
+            Ok(LoweredAction::Intent(IntentAction::SelectSlot(6)))
         );
     }
 
@@ -700,6 +715,10 @@ mod tests {
             lower_action(Action::SetBreak(None), &CapabilitySet::empty()),
             Err(Capability::ActBreak)
         );
+        assert_eq!(
+            lower_action(Action::SelectSlot(6), &CapabilitySet::empty()),
+            Err(Capability::ActSelectSlot)
+        );
     }
 
     /// Every action variant is gated by something. Trivial-looking, and it is the
@@ -718,6 +737,7 @@ mod tests {
                 pos: BlockPos { x: 0, y: 0, z: 0 },
                 face: BlockFace::Up,
             }),
+            Action::SelectSlot(6),
         ] {
             assert!(
                 lower_action(action.clone(), &CapabilitySet::empty()).is_err(),

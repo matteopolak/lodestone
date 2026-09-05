@@ -6,7 +6,7 @@ The desktop WASM plugin host exposes copied local-player look, movement, block-b
 
 ## How it works
 
-`lodestone:plugin@0.9.0` provides `action.set-look(option<look-intent>)`, guarded by `act:look`, `action.set-movement(option<movement-intent>)`, guarded by `act:movement`, `action.set-break(option<break-intent>)`, guarded by `act:break`, and `action.place-block(place-intent)`, guarded by `act:place`. `lodestone_wasm_host::abi::lower_action` turns look into `lodestone_ecs::player::LookIntent`; the conductor applies the final look request in load order during `TickSet::Intent`, before `apply_look_intent`.
+`lodestone:plugin@0.10.0` provides `action.set-look(option<look-intent>)`, guarded by `act:look`, `action.set-movement(option<movement-intent>)`, guarded by `act:movement`, `action.set-break(option<break-intent>)`, guarded by `act:break`, `action.place-block(place-intent)`, guarded by `act:place`, and `action.select-slot(hotbar-slot)`, guarded by `act:select-slot`. `lodestone_wasm_host::abi::lower_action` turns look into `lodestone_ecs::player::LookIntent`; the conductor applies the final look request in load order during `TickSet::Intent`, before `apply_look_intent`.
 
 For movement, the conductor runs after `lodestone_controller::ecs::compute_movement_intent` and before physics. It overwrites only copied axes and button state; item-use effects stay owned by the controller. Finite axes are clamped to `[-1, 1]`, and non-finite axes become neutral. Physics then resolves the request and the existing controller sends the ordinary movement and player-input actions. This is deliberately an intent rather than a raw packet: a guest cannot forge position, collision, or sequence state.
 
@@ -15,6 +15,8 @@ The guest output list is ordered. If multiple guest actions set look or set move
 `set-break(some(break-intent))` installs or retargets a persistent `BreakIntent`; returning no break action leaves that claim alone, and `set-break(none)` releases it. The shell's existing `drive_mining` consumer owns reach and obstruction checks, live-state lookup, tool speed, vetoes, crack progress, local air prediction, the packet sequence, and the idempotent abort. Human attack input wins. `observe:break` supplies only changed `idle`, `progressing`, or finite rejection states per local-player session, so a long dig cannot turn into an unbounded every-tick event feed.
 
 `place-block` is deliberately one-shot rather than a packet constructor or a component handle. The guest gives only a clicked block position and face. The conductor installs the last placement request from that tick on the local player before `TickSet::Send`; `lodestone_shell::interact::drive_placement` then runs its normal reach/obstruction, inventory, collision, veto, prediction, sequence, and egress path. Human use input continues to win under that lifecycle's existing rule.
+
+`select-slot` is also one-shot. The guest provides an unsigned candidate slot; the conductor installs the final request from a tick as `SelectSlotIntent`, and `lodestone_shell::interact::drive_select_slot` later validates the `0..=8` range, ignores an already-selected value, updates `SelectedSlot`, and queues `SetCarriedItem` only for a real change. That shell-owned echo is the authority boundary: a guest never writes the selected component directly or manufactures a carried-item packet. There is no `observe:select-slot` capability or outcome event because selection has no world legality state: valid values always succeed, and an out-of-range or no-op request is deliberately consumed as a finite no-op.
 
 `observe:place` grants one `event.place-outcome` per resolved `PlaceOutcome::generation` and per local-player session. Its finite status is `predicted`, `sent-unpredicted`, or a finite rejection reason. No idle event repeats every tick, no world handle crosses the ABI, and no arbitrary host error string is exposed. A reconnect is a new player identity, so a first result at generation `1` is not hidden by the previous session's generation `1`.
 
@@ -26,7 +28,7 @@ Any WIT change requires increasing `host::ABI_WORLD`, rebuilding guests, and upd
 
 ## Configuration
 
-The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, and `observe:place`. A guest manifest must request every capability it uses; a request alone never changes the policy.
+The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, `observe:place`, and `act:select-slot`. A guest manifest must request every capability it uses; a request alone never changes the policy.
 
 ```toml
 capabilities = ["act:movement"]
@@ -38,6 +40,10 @@ capabilities = ["act:place", "observe:place"]
 
 ```toml
 capabilities = ["act:break", "observe:break"]
+```
+
+```toml
+capabilities = ["act:select-slot"]
 ```
 
 For desktop directory discovery, use `PluginGrantPolicy` to add a narrow exception

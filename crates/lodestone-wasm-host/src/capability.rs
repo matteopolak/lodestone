@@ -91,6 +91,12 @@ pub enum Capability {
     /// applies its normal reach, inventory, collision, veto, prediction, and
     /// egress checks.
     ActPlace,
+    /// Request a one-shot selected-hotbar-slot update through the shell-owned
+    /// selection and carried-item echo path.
+    ///
+    /// The guest supplies only a slot number. The shell still owns the range
+    /// gate, selected-slot write, and protocol egress.
+    ActSelectSlot,
     /// Receive a generation-bounded outcome after a WASM or native placement
     /// attempt resolves.
     ///
@@ -138,6 +144,7 @@ impl Capability {
         Self::ActMovement,
         Self::ActBreak,
         Self::ActPlace,
+        Self::ActSelectSlot,
         Self::ObservePlace,
         Self::ObserveBreak,
         Self::VetoActions,
@@ -160,6 +167,7 @@ impl Capability {
             Self::ActMovement => "act:movement",
             Self::ActBreak => "act:break",
             Self::ActPlace => "act:place",
+            Self::ActSelectSlot => "act:select-slot",
             Self::ObservePlace => "observe:place",
             Self::ObserveBreak => "observe:break",
             Self::VetoActions => "veto:actions",
@@ -197,6 +205,7 @@ impl Capability {
             | Self::ActMovement
             | Self::ActBreak
             | Self::ActPlace
+            | Self::ActSelectSlot
             | Self::ObservePlace
             | Self::ObserveBreak
             | Self::VetoActions
@@ -373,6 +382,10 @@ mod tests {
             !policy.contains(Capability::RegisterCommands),
             "commands:register must not be granted by default"
         );
+        assert!(
+            !policy.contains(Capability::ActSelectSlot),
+            "act:select-slot must not be granted by default"
+        );
         assert!(policy.contains(Capability::ObserveChat));
         assert!(policy.contains(Capability::ActChat));
         assert!(policy.contains(Capability::Log));
@@ -383,6 +396,7 @@ mod tests {
         assert!(CapabilitySet::permissive().contains(Capability::FsRead));
         assert!(CapabilitySet::permissive().contains(Capability::ScheduleTasks));
         assert!(CapabilitySet::permissive().contains(Capability::RegisterCommands));
+        assert!(CapabilitySet::permissive().contains(Capability::ActSelectSlot));
     }
 
     /// `missing_from` reports every shortfall, not just the first.
