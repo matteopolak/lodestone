@@ -147,7 +147,7 @@ fn render_pixel(gpu: &Gpu, cracked: u8, center: bool, draw: bool, surface: f32) 
 
     let pipeline = CrackPipeline::new(device, FORMAT);
     let atlas = GpuAtlas::from_rgba(device, queue, 4, 4, &crack_atlas_rgba(cracked), &[]);
-    let atlas_bg = pipeline.atlas_bind_group(device, &atlas);
+    let atlas_bg = pipeline.atlas_bind_group(device, &atlas.view);
 
     let cam_buffer = model_camera_buffer(
         device,

@@ -205,7 +205,7 @@ impl RenderState {
             // and camera bind groups (its layouts differ from the model pass's).
             let crack_pipeline = CrackPipeline::new(device, color_format);
             let crack_resolver = CrackResolver::from_models(models);
-            let crack_atlas_bind_group = crack_pipeline.atlas_bind_group(device, &atlas);
+            let crack_atlas_bind_group = crack_pipeline.atlas_bind_group(device, &atlas.view);
             let crack_cam_buffer = model_camera_buffer(
                 device,
                 CameraUniform {
@@ -1346,7 +1346,7 @@ impl RenderState {
                 let new_model_atlas_bind_group =
                     model.pipeline.atlas_bind_group(device, &new_model_atlas);
                 let new_crack_atlas_bind_group =
-                    model.crack_pipeline.atlas_bind_group(device, &new_model_atlas);
+                    model.crack_pipeline.atlas_bind_group(device, &new_model_atlas.view);
                 let new_palette_buffer =
                     lodestone_render::model_palette_buffer(device, models.tint_palette());
                 let new_palette_bind_group =
