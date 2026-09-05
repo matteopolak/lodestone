@@ -5,9 +5,8 @@ use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, ChatMode, ClientAction, ClientSettings, Hand,
-    DisplayedSkinParts, MainHand, ParticleStatus, Rotation, Vec3,
-    Vec3f,
+    BlockActionKind, BlockFace, BlockPos, ChatKind, ChatMode, ClientAction, ClientEvent,
+    ClientSettings, DisplayedSkinParts, Hand, MainHand, ParticleStatus, Rotation, Vec3, Vec3f,
 };
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_8::adapter;
@@ -223,6 +222,39 @@ async fn position_look_recenters_the_hosted_protocol_47_view() {
         .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
         .await
         .expect("position/look must recenter the hosted view");
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_47_echoes_legacy_chat_to_the_client_event_stream() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
+        .expect("protocol 47 must resolve to a hosted family");
+    let source = Arc::new(LegacyFixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, mut events) = ClientBuilder::new(address(), profile(), Box::new(adapter()))
+        .player_loaded_policy(PlayerLoadedPolicy::Manual)
+        .connect_with(client_io);
+
+    handle.wait_for_spawn(Duration::from_secs(10)).await.expect("must join Play");
+    handle
+        .send_action(ClientAction::SendChat {
+            text: "legacy chat \"escapes\"".to_owned(),
+        })
+        .expect("joined legacy client accepts chat");
+
+    let (text, kind) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::Chat { text, kind, .. }) = events.recv().await {
+                return (text.to_plain_string(), kind);
+            }
+        }
+    })
+    .await
+    .expect("the hosted server must echo legacy chat through the real adapter");
+    assert_eq!(text, "<LegacyFixture> legacy chat \"escapes\"");
+    assert_eq!(kind, ChatKind::System);
+
     handle.shutdown();
     server.shutdown().await;
 }

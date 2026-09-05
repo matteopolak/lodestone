@@ -63,6 +63,17 @@ rejected rather than clamped into a plausible placement. The separate
 `(-1, -1, -1), -1` in-air sentinel remains ignored: this packet does not carry
 the click-time look direction required by the shared in-air-use consumer.
 
+The protocol-47 `chat` packet now connects its one bounded string to the shared
+text and command consumers. Ordinary text becomes unsigned `ServerBound::Chat`
+with explicit zero timestamp and salt; a leading slash becomes
+`ServerBound::ChatCommand` with the prefix removed. The shared server decorates
+and broadcasts accepted text, and `V47ServerProtocol::encode_system_chat` sends
+that reply as a JSON literal component with position byte `1` (normal system
+chat). Literal input and reply bodies pin the bounded-string and JSON/position
+shapes, including trailing-byte rejection; the in-memory protocol-47 control
+selects the host through the registry, sends the real client action, and
+observes the decorated reply through the adapter's `ClientEvent` stream.
+
 ### External-client acceptance
 
 The opt-in release-client gate covers hosted protocol **47** (1.8.9). Run it with

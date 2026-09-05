@@ -16,8 +16,8 @@ use crate::PROTOCOL;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
-    ServerboundPosition, ServerboundPositionLook,
+    BlockDig, BlockPlace, ClientboundChat, ClientboundPositionLook, JoinGame, ServerboundChat,
+    ServerboundFlying, ServerboundLook, ServerboundPosition, ServerboundPositionLook,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -51,6 +51,32 @@ fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
     let value = T::decode(&mut reader, CTX).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
+}
+
+/// Wraps server text in the JSON component carried by this era's chat packet.
+///
+/// Position `1` selects normal chat history below; the component must escape
+/// control characters so the text cannot become JSON structure.
+fn legacy_text_component(message: &str) -> String {
+    let mut json = String::with_capacity(message.len() + 11);
+    json.push_str("{\"text\":\"");
+    for ch in message.chars() {
+        match ch {
+            '\"' => json.push_str("\\\""),
+            '\\' => json.push_str("\\\\"),
+            '\n' => json.push_str("\\n"),
+            '\r' => json.push_str("\\r"),
+            '\t' => json.push_str("\\t"),
+            ch if ch <= '\u{001f}' => {
+                use std::fmt::Write as _;
+                write!(json, "\\u{:04x}", ch as u32)
+                    .expect("writing into a String cannot fail");
+            }
+            ch => json.push(ch),
+        }
+    }
+    json.push_str("\"}");
+    json
 }
 
 fn block_action(status: i32) -> Option<BlockActionKind> {
@@ -271,6 +297,26 @@ impl ServerProtocol for V47ServerProtocol {
                     sequence: 0,
                 }
             }
+            State::Play if packet_id == play::serverbound::CHAT => {
+                decode_full::<ServerboundChat>(payload).map_or(ServerBound::Ignored, |chat| {
+                    // The one string carries both text and commands in this
+                    // era. The shared command boundary receives no slash.
+                    if let Some(command) = chat.message.strip_prefix('/') {
+                        ServerBound::ChatCommand {
+                            command: command.to_owned(),
+                        }
+                    } else {
+                        // This wire form predates signing, so it can only
+                        // represent the shared server's unsigned chat input.
+                        ServerBound::Chat {
+                            message: chat.message,
+                            timestamp_millis: 0,
+                            salt: 0,
+                            signature: None,
+                        }
+                    }
+                })
+            }
             // Protocol 47 confirms a placement by echoing position/look; it
             // deliberately has no separate teleport id or confirmation frame.
             State::Play if packet_id == play::serverbound::POSITION => {
@@ -411,6 +457,17 @@ impl ServerProtocol for V47ServerProtocol {
         let id = i32::try_from(id)
             .expect("protocol-47 keep-alive id must fit its signed VarInt wire field");
         send(play::clientbound::KEEP_ALIVE, &KeepAliveRequest { id })
+    }
+
+    fn encode_system_chat(&self, message: &str) -> ServerDirective {
+        send(
+            play::clientbound::CHAT,
+            &ClientboundChat {
+                message: legacy_text_component(message),
+                // Protocol 47 uses position 1 for ordinary system chat.
+                position: 1,
+            },
+        )
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
