@@ -3,7 +3,7 @@
 
 This runner deliberately does not contain a protocol client. A launch driver must
 control a separately installed, unmodified release client and leave its own
-join/action witness. That separation prevents an adapter round trip from being
+session witness. That separation prevents an adapter round trip from being
 reported as external-client evidence.
 """
 
@@ -24,7 +24,20 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 ACTION = "start_destroy_block"
-SCHEMA = 1
+SCHEMA = 2
+
+# This is intentionally a small modern-host gate. The remaining hosted rows stay
+# in ROWS so `--list` remains a registry cross-check, but they are not silently
+# reported as passing this configuration/chunk-batch contract.
+GATE_PROTOCOLS = (766, 774)
+STAGES = (
+    "configuration",
+    "chunk_batch_acknowledgement",
+    "join",
+    "movement",
+    "play_action",
+    "disconnect",
+)
 
 
 @dataclass(frozen=True)
@@ -103,6 +116,61 @@ def artifact(value: Any, evidence: pathlib.Path, name: str) -> pathlib.Path:
     return path
 
 
+def _observed_stage(stage: Any, expected: str) -> dict[str, Any]:
+    if not isinstance(stage, dict):
+        raise RuntimeError(f"evidence stage {expected} must be an object")
+    if stage.get("name") != expected:
+        raise RuntimeError(
+            f"evidence stages must be ordered {','.join(STAGES)}; expected {expected!r}, "
+            f"got {stage.get('name')!r}"
+        )
+    if stage.get("observed") is not True:
+        raise RuntimeError(f"evidence stage {expected}.observed must be true")
+    observation = stage.get("observation")
+    if not isinstance(observation, str) or not observation.strip():
+        raise RuntimeError(f"evidence stage {expected}.observation must be a non-empty string")
+    return {"name": expected, "observed": True, "observation": observation}
+
+
+def validate_stages(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) != len(STAGES):
+        raise RuntimeError(f"evidence stages must contain exactly {len(STAGES)} ordered entries")
+    stages = [_observed_stage(stage, expected) for stage, expected in zip(value, STAGES)]
+
+    batch = value[1]
+    batch_count = batch.get("batch_count")
+    if isinstance(batch_count, bool) or not isinstance(batch_count, int) or batch_count < 1:
+        raise RuntimeError("evidence stage chunk_batch_acknowledgement.batch_count must be positive")
+    stages[1]["batch_count"] = batch_count
+
+    movement = value[3]
+    movement_count = movement.get("movement_count")
+    if isinstance(movement_count, bool) or not isinstance(movement_count, int) or movement_count < 1:
+        raise RuntimeError("evidence stage movement.movement_count must be positive")
+    stages[3]["movement_count"] = movement_count
+
+    action = value[4]
+    if action.get("kind") != ACTION:
+        raise RuntimeError(f"evidence stage play_action.kind must be {ACTION!r}")
+    action_count = action.get("action_count")
+    if action_count != 1:
+        raise RuntimeError("evidence stage play_action.action_count must be exactly 1")
+    if action.get("result_observed") is not True:
+        raise RuntimeError("evidence stage play_action.result_observed must be true")
+    stages[4]["kind"] = ACTION
+    stages[4]["action_count"] = 1
+    stages[4]["result_observed"] = True
+
+    disconnect = value[5]
+    if disconnect.get("clean") is not True:
+        raise RuntimeError("evidence stage disconnect.clean must be true")
+    if disconnect.get("initiated_by") != "client":
+        raise RuntimeError("evidence stage disconnect.initiated_by must be 'client'")
+    stages[5]["clean"] = True
+    stages[5]["initiated_by"] = "client"
+    return stages
+
+
 def validate_evidence(evidence: pathlib.Path, row: Row, started_at: float) -> dict[str, Any]:
     if not evidence.is_file() or evidence.stat().st_mtime < started_at:
         raise RuntimeError(f"no fresh evidence at {evidence}")
@@ -116,13 +184,8 @@ def validate_evidence(evidence: pathlib.Path, row: Row, started_at: float) -> di
     for key, wanted in expected.items():
         if value.get(key) != wanted:
             raise RuntimeError(f"evidence {key} must be {wanted!r}, got {value.get(key)!r}")
-    join = value.get("join")
-    action = value.get("play_action")
+    stages = validate_stages(value.get("stages"))
     provenance = value.get("provenance")
-    if not isinstance(join, dict) or join.get("observed") is not True:
-        raise RuntimeError("evidence join.observed must be true")
-    if not isinstance(action, dict) or action.get("kind") != ACTION or action.get("observed") is not True:
-        raise RuntimeError(f"evidence play_action must record observed {ACTION}")
     if not isinstance(provenance, dict):
         raise RuntimeError("evidence provenance must be an object")
     for key in ("client_binary", "client_build", "capture_method"):
@@ -132,6 +195,7 @@ def validate_evidence(evidence: pathlib.Path, row: Row, started_at: float) -> di
     client_log = artifact(provenance.get("client_log"), evidence, "client_log")
     return {
         "evidence": str(evidence),
+        "stages": stages,
         "capture": str(capture),
         "capture_sha256": sha256(capture),
         "client_log": str(client_log),
@@ -179,6 +243,7 @@ def run_row(row: Row, args: argparse.Namespace) -> dict[str, Any]:
                 client = [
                     args.driver, "--release", row.release, "--protocol", str(row.protocol),
                     "--host", "127.0.0.1", "--port", str(port), "--action", ACTION,
+                    "--required-stages", ",".join(STAGES), "--evidence-schema", str(SCHEMA),
                     "--evidence", str(evidence), "--deadline-seconds", str(args.deadline_seconds),
                 ]
                 result = subprocess.run(client, cwd=ROOT, timeout=args.deadline_seconds, check=False)
@@ -186,7 +251,10 @@ def run_row(row: Row, args: argparse.Namespace) -> dict[str, Any]:
                     raise RuntimeError(f"external client driver exited with {result.returncode}")
             else:
                 print(f"Attach release {row.release} (protocol {row.protocol}) to 127.0.0.1:{port}.")
-                print(f"Perform {ACTION}, then write the driver evidence to {evidence}.")
+                print(
+                    f"Perform {' -> '.join(STAGES)} ({ACTION} is the play action), "
+                    f"then write the driver evidence to {evidence}."
+                )
                 end = time.monotonic() + args.deadline_seconds
                 while time.monotonic() < end and not evidence.exists():
                     time.sleep(0.2)
@@ -203,7 +271,7 @@ def run_row(row: Row, args: argparse.Namespace) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list", action="store_true", help="print the hosted acceptance matrix and exit")
-    parser.add_argument("--protocol", type=int, action="append", help="run only this hosted protocol (repeatable)")
+    parser.add_argument("--protocol", type=int, action="append", help="run only this gate protocol (repeatable)")
     parser.add_argument("--mode", choices=("launch", "attach"), default="launch")
     parser.add_argument("--driver", default=os.environ.get("LODESTONE_EXTERNAL_CLIENT_DRIVER"))
     parser.add_argument("--output", type=pathlib.Path, help="empty directory for evidence and logs")
@@ -222,13 +290,21 @@ def main() -> int:
     args.output = args.output.resolve()
     if args.output.exists():
         parser.error(f"--output must not already exist: {args.output}")
-    selected = tuple(row for row in ROWS if not args.protocol or row.protocol in args.protocol)
-    unknown = set(args.protocol or ()) - {row.protocol for row in ROWS}
+    selected_protocols = tuple(args.protocol or GATE_PROTOCOLS)
+    unknown = set(selected_protocols) - set(GATE_PROTOCOLS)
     if unknown:
-        parser.error(f"not hosted: {sorted(unknown)}")
+        parser.error(f"not in the external-client gate: {sorted(unknown)}; choose 766 or 774")
+    selected = tuple(row for row in ROWS if row.protocol in selected_protocols)
     args.output.mkdir(parents=True)
     results = [run_row(row, args) for row in selected]
-    report = {"schema": SCHEMA, "action": ACTION, "mode": args.mode, "results": results}
+    report = {
+        "schema": SCHEMA,
+        "gate_protocols": list(GATE_PROTOCOLS),
+        "required_stages": list(STAGES),
+        "action": ACTION,
+        "mode": args.mode,
+        "results": results,
+    }
     report_path = args.output / "report.json"
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     for result in results:
