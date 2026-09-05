@@ -2979,6 +2979,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-hotbar-lock"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "lodestone-ecs",
+ "lodestone-model",
+ "lodestone-shell",
+]
+
+[[package]]
 name = "lodestone-javarandom"
 version = "0.1.0"
 dependencies = [
