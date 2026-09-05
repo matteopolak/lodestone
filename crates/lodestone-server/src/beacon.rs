@@ -109,10 +109,10 @@ fn is_base_block(state: &str) -> bool {
 /// `name[prop=value,...]`), resolved to a global id via
 /// [`lodestone_data::block_states::state_id`] — the same resolution
 /// `crate::chunk::resolve_palette_state_id` already uses for this exact
-/// string shape. An id this crate cannot resolve reads as dampening `0`
-/// ([`lodestone_data::light_props::dampening`]'s own "unknown id" default),
-/// which is the same fail-open direction [`is_base_block`] already takes for
-/// an unrecognised state, not a new failure mode this function invents.
+/// string shape. An unresolvable state returns before accessing the complete
+/// census, which is the same fail-open direction [`is_base_block`] already
+/// takes for an unrecognised state, not a new failure mode this function
+/// invents.
 fn is_beam_transparent(state: &str) -> bool {
     if base_name(state) == "minecraft:bedrock" {
         return true;
@@ -120,6 +120,8 @@ fn is_beam_transparent(state: &str) -> bool {
     let Some(id) = lodestone_data::block_states::state_id(state) else {
         return true;
     };
+    let id = lodestone_data::block_states::StateId::new(id)
+        .expect("state-id resolution returns a generated state");
     lodestone_data::light_props::dampening(id) < 15
 }
 

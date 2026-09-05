@@ -80,29 +80,18 @@ pub fn light_props(id: StateId) -> (u8, u8) {
     table::ENTRIES[entry as usize]
 }
 
-/// The raw-id boundary for callers that have not validated a block-state id.
+/// The raw light dampening for a validated block-state id.
 ///
-/// New code should construct [`StateId`] at the wire/data boundary and call
-/// [`light_props`] so the complete table's lookup remains total.
+/// This is the value before the engine applies its own `max(1, ·)` floor.
 #[must_use]
-fn light_props_raw(id: u32) -> Option<(u8, u8)> {
-    StateId::new(id).map(light_props)
+pub fn dampening(id: StateId) -> u8 {
+    light_props(id).0
 }
 
-/// Vanilla's own "get light dampening" accessor for a raw state id — the
-/// **raw** dampening, `0..=15`, before the engine's `max(1, ·)`. `0` for an id
-/// out of range, which is the transparent (and therefore harmless) default.
-/// New callers with a validated [`StateId`] should use [`light_props`] directly.
+/// The light emission for a validated block-state id.
 #[must_use]
-pub fn dampening(id: u32) -> u8 {
-    light_props_raw(id).map_or(0, |(dampening, _)| dampening)
-}
-
-/// Vanilla's own "get light emission" accessor for a raw state id, `0..=15`.
-/// `0` for an id out of range — never invent light for an id we cannot resolve.
-#[must_use]
-pub fn emission(id: u32) -> u8 {
-    light_props_raw(id).map_or(0, |(_, emission)| emission)
+pub fn emission(id: StateId) -> u8 {
+    light_props(id).1
 }
 
 #[cfg(test)]
@@ -119,5 +108,7 @@ mod tests {
         let (dampening, emission) = light_props(valid);
         assert!(dampening <= 15);
         assert!(emission <= 15);
+        assert_eq!(dampening, super::dampening(valid));
+        assert_eq!(emission, super::emission(valid));
     }
 }

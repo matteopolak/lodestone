@@ -146,7 +146,11 @@
 /// an ordinary placement.
 #[must_use]
 pub fn emission(state: &str) -> u8 {
-    lodestone_data::light_props::emission(crate::chunk::resolve_palette_state_id(state))
+    let id = lodestone_data::block_states::StateId::new(
+        crate::chunk::resolve_palette_state_id(state),
+    )
+    .expect("palette-state resolution returns either a generated state or generated air");
+    lodestone_data::light_props::emission(id)
 }
 
 /// The block-light **dampening** of one canonical block-state string, `0..=15` —
@@ -160,7 +164,11 @@ pub fn emission(state: &str) -> u8 {
 /// this census darkens or occludes rather than brightening.
 #[must_use]
 pub fn dampening(state: &str) -> u8 {
-    lodestone_data::light_props::dampening(crate::chunk::resolve_palette_state_id(state))
+    let id = lodestone_data::block_states::StateId::new(
+        crate::chunk::resolve_palette_state_id(state),
+    )
+    .expect("palette-state resolution returns either a generated state or generated air");
+    lodestone_data::light_props::dampening(id)
 }
 
 /// `true` iff replacing `old` with `new` changes the light the cell **emits or

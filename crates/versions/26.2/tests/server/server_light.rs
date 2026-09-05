@@ -105,11 +105,18 @@ struct Props;
 
 impl LightProperties for Props {
     fn opacity(&self, state: u32) -> u8 {
-        lodestone_data::light_props::dampening(state)
+        block_states::StateId::new(state)
+            .map_or(0, lodestone_data::light_props::dampening)
     }
     fn emission(&self, state: u32) -> u8 {
-        lodestone_data::light_props::emission(state)
+        block_states::StateId::new(state)
+            .map_or(0, lodestone_data::light_props::emission)
     }
+}
+
+fn dampening(id: u32) -> u8 {
+    let id = block_states::StateId::new(id).expect("resolved fixture state is generated");
+    lodestone_data::light_props::dampening(id)
 }
 
 /// Resolves a served column into the version-free column the engine walks.
@@ -278,7 +285,7 @@ fn expectations<'a>(
         let mut open_y = None;
         for y in (min_y..=top).rev() {
             let id = resolve_state_id(state_at(x, y, z));
-            if lodestone_data::light_props::dampening(id) != 0 {
+            if dampening(id) != 0 {
                 open_y = Some(y + 1);
                 break;
             }
@@ -301,7 +308,7 @@ fn expectations<'a>(
             for x in 2..14usize {
                 let capped = (0..=16i32).all(|dy| {
                     let id = resolve_state_id(state_at(x, y + dy, z));
-                    lodestone_data::light_props::dampening(id) == 15
+                    dampening(id) == 15
                 });
                 let walled = (1..=16i32).all(|d| {
                     [(d, 0), (-d, 0), (0, d), (0, -d)].iter().all(|&(dx, dz)| {
@@ -314,7 +321,7 @@ fn expectations<'a>(
                             return true;
                         }
                         let id = resolve_state_id(state_at(nx as usize, y, nz as usize));
-                        lodestone_data::light_props::dampening(id) == 15
+                        dampening(id) == 15
                     })
                 });
                 if capped && walled {

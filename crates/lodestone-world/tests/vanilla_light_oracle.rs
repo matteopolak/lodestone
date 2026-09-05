@@ -125,10 +125,12 @@ struct CensusProps;
 
 impl LightProperties for CensusProps {
     fn opacity(&self, state: u32) -> u8 {
-        lodestone_data::light_props::dampening(state)
+        lodestone_data::block_states::StateId::new(state)
+            .map_or(0, lodestone_data::light_props::dampening)
     }
     fn emission(&self, state: u32) -> u8 {
-        lodestone_data::light_props::emission(state)
+        lodestone_data::block_states::StateId::new(state)
+            .map_or(0, lodestone_data::light_props::emission)
     }
 }
 
