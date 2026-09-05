@@ -138,6 +138,12 @@ impl Plugin for ServerCorePlugin {
         // tick body will live in.
         app.add_systems(GameTick, advance_server_tick.in_set(TickSet::Simulate));
         app.add_systems(GameTick, super::run_server_tasks.in_set(TickSet::Drain));
+        // The server never runs Bevy's frame schedules. Age every registered
+        // plugin message before any gameplay reader or scheduled callback runs.
+        app.add_systems(
+            GameTick,
+            bevy_ecs::message::message_update_system.before(TickSet::Drain),
+        );
     }
 }
 

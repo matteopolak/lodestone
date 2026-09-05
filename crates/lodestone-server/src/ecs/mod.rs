@@ -95,6 +95,8 @@ use bevy_ecs::world::World;
 
 #[cfg(test)]
 mod gate;
+#[cfg(test)]
+mod messages;
 pub(crate) mod plugin;
 pub(crate) mod schedules;
 mod scheduler;

@@ -14,6 +14,26 @@ hooks already discovered available to everything else, instead of being reinvent
 
 ## How it works
 
+### Plugin-defined typed messages
+
+Native server plugins share observation types with `#[derive(Message)]` and register each type
+through `App::add_message::<T>()`. Producers use `MessageWriter<T>` or `World::write_message`;
+independent consumers use `MessageReader<T>`. Registration is idempotent, so a consumer can register
+the shared type before the producer plugin is installed. Order producer and consumer systems using
+the server tick sets when delivery must happen in the same tick.
+
+`ServerCorePlugin` runs Bevy's `message_update_system` before `TickSet::Drain`. The server drives
+`GameTick` directly, so Bevy's frame-based maintenance schedule is never responsible for message
+retention here. A message survives two maintenance boundaries: one written during a tick is readable
+for the remainder of that tick and throughout the next. A reader that misses that window loses the
+message; messages are not a durable queue. Each reader cursor sees a retained message at most once.
+Scheduler callbacks run after maintenance, so their messages have the same lifetime as system writes.
+
+Do not install another aging system for a type registered with `add_message`; that would shorten its
+delivery window. Merely inserting `Messages<T>` as a resource does not register its maintenance.
+This surface supports plugin-defined observations; it does not expose built-in gameplay proposals,
+event cancellation, cross-plugin priority tiers, or a read-only monitor tier.
+
 ### Native tick scheduling
 
 `lodestone_server::ecs::ServerTaskScheduler` is a resource installed by `ServerCorePlugin`.
@@ -147,6 +167,11 @@ re-running `scripts/wasm-size.sh`"*). Flagged rather than fixed here — `docs/d
 outside this session's file ownership.
 
 ## How to change it
+
+Message maintenance belongs in `ServerCorePlugin`, before the first gameplay set. The `ecs::messages`
+tests assert exact retention boundaries, and `independent_plugins_exchange_bounded_messages_on_the_primary_tick_task`
+tests delivery between two separately registered plugins against the production server constructor.
+Add shared observation types in the plugin's public API and keep their contents version-free.
 
 The synchronous scheduler lives in `ecs/scheduler.rs`; registration and its schedule anchor live in
 `ServerCorePlugin`. Systems sharing resources with scheduled callbacks must order themselves before
