@@ -125,17 +125,16 @@ here would misdirect every design decision downstream of it:
     — but it also means **the ordering discipline is already a live hazard today**, independent
     of regionisation, and the self-deadlock incident above is
     evidence it is not yet fully disciplined.
-- **The ECS substrate has landed further than the last re-verification recorded, but
-  still does not drive the tick loop.** `docs/plans/server-ecs-migration.md`'s own status note
-  (2026-08-15): Phase 0 landed — `crates/lodestone-server/src/ecs/{mod,plugin,schedules,gate}.rs`
-  exist, `ServerCorePlugin` installs `ServerTick`/`ServerTickWitness` and opens
-  `ServerBoot`/`NetIngest`/`GameTick` — but **Phase 1 (the tick loop actually running the
-  `GameTick` schedule) has not landed**: the `World` `ServerApp::bootstrap()` returns is bound
-  once at construction and never threaded into `run_tick_loop`. `grep -n run_schedule
-  crates/lodestone-server/src/tick.rs` is empty. So there is a `bevy_ecs::World` in the process,
-  but the ~4,100-line hand-rolled `run_tick_loop` is still what actually executes every tick —
-  regionisation today would partition *that* loop's own locks and data structures (the census
-  above), not an ECS schedule's query system, because the schedule does not run the game yet.
+- **The primary tick loop now owns and runs a server ECS world, but it does not yet hold the
+  simulation.** `ServerApp::bootstrap()` produces the primary world's `bevy_ecs::World`, and
+  `IntegratedServer` moves it into `run_primary_tick_loop_with_weather`. That loop runs
+  `GameTick` once after its scheduled-and-physics timing sample and before it records the
+  completed tick. `ServerTickWitness` gives code outside the unshared world a one-way count of
+  those schedule runs. This establishes task ownership and cadence without treating an inert
+  schedule as the simulation: the existing tick body still owns mobs, block entities, scheduled
+  ticks, and world mutation through the handles above. Regionisation would therefore have to
+  partition those live handles and their hand-offs first; the ECS world is now a real scheduling
+  boundary, not yet a partitionable replacement for the world state.
 
 **What this means for the region model below**: a region split's natural partition axis is
 **`ChunkStore`'s resident-column set**, since that is where "which chunks does a region own" is
@@ -156,14 +155,15 @@ that it would cost something.
 
 ### Partitioning: one `bevy_ecs::World` per region, or one partitioned `World`
 
-Re-examined against the current state above: since **the ECS `World` does not drive gameplay yet**
-(Phase 1 of the ECS migration is
-still open), this question is not currently answerable against real code — it is a question
-about a substrate that has not yet been asked to hold game state at all. The honest sequencing
-is: land ECS Phase 1 (single `World`, single-threaded, driving the real tick) first, and let
-*that* migration's own experience with query/resource partitioning inform whether N worlds or
-one partitioned world is cheaper — building the region-partitioning answer against a `World`
-that is not yet load-bearing risks answering a question the eventual real migration invalidates.
+The primary ECS world now runs at the real tick cadence, but it remains a scheduling shell: its
+current resources coordinate proposals and expose the tick witness, while the existing callback
+handles still hold the simulation data. That means the partitioning choice is still premature,
+but for a narrower reason than before. Moving immediately to one world per region would duplicate
+the current shell while leaving the actual global handles untouched; one partitioned world would
+make the same unproven assumption in a different shape. First move a real, independently
+measured simulation concern through `GameTick` while preserving its single-thread behavior, then
+use that ownership and contention evidence to decide whether several worlds or one partitioned
+world is the cheaper region boundary.
 
 ### Cross-region hand-off: what actually crosses a boundary
 
@@ -268,9 +268,10 @@ from an assumption.
 
 ## Dependencies
 
-- `docs/plans/server-ecs-migration.md` — the ECS substrate this plan's partitioning question
-  (one `World` per region vs. one partitioned `World`) is downstream of; Phase 1 there is a
-  precondition for answering it against real code.
+- `docs/plans/server-ecs-migration.md` — the ECS substrate whose primary-loop ownership is now
+  established. Further migration of measured simulation state, rather than another empty
+  schedule, is the precondition for answering this plan's partitioning question against real
+  code.
 - [`docs/tick-scheduling.md`](../tick-scheduling.md#profiling-the-tick-loop-and-world-generation)
   — the two profiling instruments this plan's "profile first" step would extend to a
   populated-world reading.
