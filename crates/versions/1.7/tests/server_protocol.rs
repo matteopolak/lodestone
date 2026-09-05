@@ -268,6 +268,66 @@ fn registry_selected_arm_animation_connects_protocol_5_to_the_shared_swing_broad
 }
 
 #[test]
+fn hosted_held_item_slot_reaches_the_shared_inventory_consumer() {
+    let protocol = V5ServerProtocol;
+
+    // A protocol-5 held-slot body is one big-endian i16. These bytes are
+    // independent of the family encoder, and slot 8 distinguishes the last
+    // legal hotbar position from the rejection control below.
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::HELD_ITEM_SLOT,
+            &[0, 8],
+        ),
+        ServerBound::CarriedItemChanged { slot: 8 }
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::HELD_ITEM_SLOT,
+            &[0, 9],
+        ),
+        ServerBound::Ignored,
+        "an out-of-range held slot must not change the server inventory"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::HELD_ITEM_SLOT,
+            &[0xff, 0xff],
+        ),
+        ServerBound::Ignored,
+        "a negative held slot must not become a hotbar selection"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::HELD_ITEM_SLOT,
+            &[0, 8, 0],
+        ),
+        ServerBound::Ignored,
+        "a held-slot prefix with trailing bytes must not reach the inventory consumer"
+    );
+
+    let (packet_id, payload) = V5Adapter::new()
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::SetCarriedItem { slot: 4 },
+        )
+        .expect("protocol-5 selection must encode")
+        .expect("selection is a Play packet");
+    assert_eq!(packet_id, play::serverbound::HELD_ITEM_SLOT);
+    let registry_protocol = lodestone_registry::server_protocol_for_protocol(5)
+        .expect("protocol 5 must resolve to the hosted family");
+    assert_eq!(
+        registry_protocol.decode(State::Play, packet_id, &payload),
+        ServerBound::CarriedItemChanged { slot: 4 },
+        "the registry-selected protocol must pass the client action to the server consumer"
+    );
+}
+
+#[test]
 fn block_place_lifts_the_protocol_5_body_to_the_shared_placement_consumer() {
     let protocol = V5ServerProtocol;
     // x=258, y=64, z=-3, East face, empty inline stack, and cursor quarters.

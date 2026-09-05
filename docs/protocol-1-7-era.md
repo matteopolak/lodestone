@@ -88,6 +88,13 @@ a believable block click. The focused protocol test uses an independent
 literal body and also follows an adapter-emitted main-hand use through the
 same shared `UseItemOn` boundary that `lodestone_server::server` consumes.
 
+The serverbound `held_item_slot` frame selects the authoritative hotbar stack
+used by block use, placement, and combat. Its one big-endian signed `i16` is
+accepted only for slots `0..=8` and becomes `ServerBound::CarriedItemChanged`;
+negative, out-of-range, malformed, and trailing-byte forms are ignored. The
+protocol test uses literal final-slot and rejection bodies, then passes the
+real adapter's selection action through the registry-selected hosted decoder.
+
 The same legacy `chat` frame now drives both hosted text and commands. Its
 only field is a length-prefixed string: ordinary text becomes unsigned
 `ServerBound::Chat` with explicit zero timestamp and salt, while a leading
