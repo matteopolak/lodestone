@@ -235,8 +235,9 @@ was discovered only because a codegen change surfaced it.
 ### Track B: the differential-fuzzing harness (`differential.rs`)
 
 **Status: two fixed live comparisons, plus generated and shrunk fluid cases on
-both hermetic and live oracle paths, and a fixed-seed scheduled-tick queue
-model check.**
+both hermetic and live oracle paths, fixed-seed scheduled-tick queue and
+block-entity state-machine model checks, and a bounded hermetic entity-effect
+model.**
 What exists:
 
 - `tests/support/tick_corpus.rs` and
@@ -362,6 +363,17 @@ What exists:
   400-tick boundary; a fixed ChaCha seed adds at most 24 shrinkable slot or
   tick operations per case across 160 cases. The detector control ignores the
   locked-ingredient cancellation and must fail on the fixed swap witness.
+
+- `tests/differential_composter_model.rs` — a bounded, hermetic state-machine
+  comparison for `lodestone_server::Composter`. It drives production inserts,
+  scheduled ticks, and extraction, then compares the insert outcome, fill
+  level, ready countdown, and readiness flag with an independent item/chance
+  model. The fixed prefix covers the level-zero unconditional advance, a
+  consumed-but-unsuccessful roll, level-seven admission blocking, the exact
+  20-tick ready transition, extraction, and an unlisted item. A fixed ChaCha
+  seed adds at most 24 shrinkable operations per case across 160 cases. The
+  detector control leaves a ready composter full after extraction and must
+  fail after shrinking.
 
 - `tests/differential_generated_text_nbt.rs` — a bounded fixed-seed model
   check for the modern NBT text fold. A grammar independently builds scalar,
