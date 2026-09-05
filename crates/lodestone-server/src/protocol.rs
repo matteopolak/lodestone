@@ -79,11 +79,9 @@ impl Abilities {
     /// See [`DEFAULT_FLYING_SPEED`](Self::DEFAULT_FLYING_SPEED).
     pub const DEFAULT_WALKING_SPEED: f32 = 0.1;
 
-    /// The real "update player abilities" derivation, verbatim:
-    /// creative may fly and instabuilds and is invulnerable; spectator may fly,
-    /// *is* flying and is invulnerable but does not instabuild; survival and
-    /// adventure get none of it. `may_build` is `!isBlockPlacingRestricted()`,
-    /// which is false for adventure and spectator.
+    /// Constructs initial abilities with default speeds. Creative starts
+    /// grounded; spectator starts flying. Use [`Self::set_game_mode`] for a
+    /// live transition that must retain permitted flight and configured speeds.
     #[must_use]
     pub fn for_mode(mode: GameMode) -> Self {
         let (may_fly, instabuild, invulnerable, flying) = match mode {
@@ -100,6 +98,19 @@ impl Abilities {
             flying_speed: Self::DEFAULT_FLYING_SPEED,
             walking_speed: Self::DEFAULT_WALKING_SPEED,
         }
+    }
+
+    /// Applies a mode change without discarding the current flight state or
+    /// configured speeds. Creative preserves flight; spectator forces it on;
+    /// survival and adventure revoke it.
+    pub fn set_game_mode(&mut self, mode: GameMode) {
+        let previous = *self;
+        *self = Self::for_mode(mode);
+        if mode == GameMode::Creative {
+            self.flying = previous.flying;
+        }
+        self.flying_speed = previous.flying_speed;
+        self.walking_speed = previous.walking_speed;
     }
 }
 
@@ -1081,6 +1092,11 @@ pub enum ServerBound {
     /// The client completed its initial placement and is ready for movement
     /// dependent simulation.
     PlayerLoaded,
+    /// The client changed its flight toggle; permission remains server-owned.
+    PlayerAbilitiesChanged {
+        /// Requested current flight state.
+        flying: bool,
+    },
     /// Requests the authoritative block-entity data for operator inspection.
     BlockEntityTagQuery {
         /// Correlation id echoed in the response.
@@ -3903,6 +3919,21 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ability_mode_changes_preserve_configured_speeds_and_revoke_flight() {
+        let mut abilities = Abilities::for_mode(GameMode::Spectator);
+        abilities.flying_speed = 0.075;
+        abilities.walking_speed = 0.145;
+        abilities.set_game_mode(GameMode::Creative);
+        assert!(abilities.flying && abilities.may_fly && abilities.instabuild);
+        abilities.set_game_mode(GameMode::Adventure);
+        assert!(!abilities.flying && !abilities.may_fly && !abilities.may_build);
+        abilities.set_game_mode(GameMode::Creative);
+        assert!(!abilities.flying && abilities.may_fly && abilities.instabuild);
+        assert_eq!(abilities.flying_speed, 0.075);
+        assert_eq!(abilities.walking_speed, 0.145);
+    }
 
     /// A protocol whose every method answers with a *distinct* directive, so
     /// "the box forwarded" and "the box fell back to the trait default" are

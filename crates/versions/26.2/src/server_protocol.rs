@@ -3702,13 +3702,13 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // `SERVERBOUND_ABILITY_FLAG_FLYING` is decoded so the value is
-            // ready the moment a consumer exists; the flag itself is the one
-            // vanilla actually reads server-side (vanilla's own player-abilities record's own flying echo).
             State::Play if packet_id == play::serverbound::PLAYER_ABILITIES => {
-                let _ = decode_full::<ServerboundPlayerAbilities>(payload)
-                    .map(|p| p.flags & SERVERBOUND_ABILITY_FLAG_FLYING != 0);
-                ServerBound::Ignored
+                match decode_full::<ServerboundPlayerAbilities>(payload) {
+                    Some(p) => ServerBound::PlayerAbilitiesChanged {
+                        flying: p.flags & SERVERBOUND_ABILITY_FLAG_FLYING != 0,
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::PLAYER_LOADED => {
                 match decode_full::<PlayerLoaded>(payload) {
