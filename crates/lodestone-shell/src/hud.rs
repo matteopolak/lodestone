@@ -621,6 +621,9 @@ pub struct DebugStats {
     /// distance, this is an authoritative server decision; `None` means the
     /// current session has not received that packet.
     pub simulation_distance: Option<i32>,
+    /// The public message of the day the connected server announced during
+    /// play, flattened to one line for F3. `None` means no packet has arrived.
+    pub server_motd: Option<String>,
     /// Sky and block light at the player's feet, as the client's own world
     /// reports them — `None` before login or for an unloaded section, which is
     /// the honest "no data" state and is drawn as such.
@@ -1076,6 +1079,9 @@ impl DebugStats {
         // which draws as a double gap rather than as an absent line.
         if !self.status.is_empty() {
             out.push(self.status.clone());
+        }
+        if let Some(motd) = &self.server_motd {
+            out.push(format!("MOTD: {motd}"));
         }
         out.extend([
             // `LevelExtractor.sectionStatistics`, `"C: %d/%d %sD: %d, %s"` —
@@ -8050,6 +8056,32 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(entity_line(&reported), "E: 3, SD: 11");
+    }
+
+    /// A server-data packet has an actual HUD destination. The absent case is
+    /// separate from an empty string: F3 must not claim a server announced a
+    /// message before that packet exists.
+    #[test]
+    fn debug_overlay_shows_only_reported_server_motd() {
+        fn motd_line(stats: &DebugStats) -> Option<String> {
+            stats
+                .right_lines()
+                .into_iter()
+                .find(|line| line.starts_with("MOTD:"))
+        }
+
+        assert_eq!(
+            motd_line(&DebugStats::default()),
+            None,
+            "control: no server-data packet must draw no MOTD line"
+        );
+        assert_eq!(
+            motd_line(&DebugStats {
+                server_motd: Some("Copper Canyon".to_owned()),
+                ..Default::default()
+            }),
+            Some("MOTD: Copper Canyon".to_owned())
+        );
     }
 
     /// `RenderState::weather_columns`/`weather_rain_columns` reach the F3

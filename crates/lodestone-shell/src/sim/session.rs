@@ -1741,6 +1741,23 @@ impl Sim {
         })
     }
 
+    /// The latest server message of the day, formatted for the one-line F3
+    /// overlay. `None` means the server has not announced public data yet.
+    ///
+    /// The full styled message and optional icon remain in
+    /// [`SessionServerData`]; this projection only removes embedded line breaks
+    /// so untrusted server text cannot add arbitrary debug-overlay rows.
+    #[must_use]
+    pub fn server_motd(&self) -> Option<String> {
+        self.read(|w| {
+            w.get::<SessionServerData>(self.local)
+                .expect("the local player always carries SessionServerData")
+                .0
+                .as_ref()
+                .map(|data| data.motd.to_plain_string().replace(['\r', '\n'], " "))
+        })
+    }
+
     /// The server's own recipe-book panel state, as `RECIPE_BOOK_SETTINGS` (76)
     /// last reported it (`SessionRecipeBookSettings` island).
     ///

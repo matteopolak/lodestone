@@ -4388,10 +4388,10 @@ pub fn route(event: &ClientEvent) -> Route {
         // that one value. It is not the streamed view radius, which remains a
         // shell route because it sizes the loading-grid consumer.
         ClientEvent::SimulationDistanceChanged { .. } => SESSION,
+        ClientEvent::ServerDataReceived { .. } => SESSION,
         ClientEvent::PlayerCombatEntered
         | ClientEvent::PlayerCombatEnded { .. }
-        | ClientEvent::MountScreenOpened { .. }
-        | ClientEvent::ServerDataReceived { .. } => Route::NOWHERE,
+        | ClientEvent::MountScreenOpened { .. } => Route::NOWHERE,
         // A stop packet names a sound/category filter, while the mixer owns
         // live voices by opaque handles. `net::forward` carries the filters to
         // `ShellAudio`, which keeps the packet-created name/category-to-handle
@@ -4779,6 +4779,30 @@ mod route_tests {
         assert!(
             route(&ClientEvent::PlayerCombatEntered).is_island(),
             "control: combat enter still has no consumer and must not be claimed by this scalar fold"
+        );
+    }
+
+    /// Public server data is a server-owned session fact. The F3 overlay reads
+    /// the folded message, while the session retains the optional icon for a
+    /// later in-session identity screen.
+    #[test]
+    fn server_data_reaches_the_session_hud_consumer() {
+        let r = route(&ClientEvent::ServerDataReceived {
+            motd: crate::Text::literal("Copper Canyon"),
+            icon: Some(vec![0x89, 0x50, 0x4e, 0x47]),
+        });
+        assert!(r.session, "the F3 overlay reads the session record");
+        assert!(!r.ingest && !r.shell && !r.client);
+        assert!(!r.is_island());
+
+        assert!(
+            route(&ClientEvent::MountScreenOpened {
+                container_id: 1,
+                inventory_columns: 3,
+                entity_id: 7,
+            })
+            .is_island(),
+            "control: mount-screen opening still has no menu consumer"
         );
     }
 

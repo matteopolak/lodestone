@@ -1438,6 +1438,10 @@ impl WindowApp {
         // render-distance preference: streaming and simulation are independent
         // server decisions.
         self.sim.stats.simulation_distance = self.sim.simulation_distance();
+        // Server-data is a play packet, not just a menu-ping response. Read the
+        // session fold every frame so the F3 line proves the live adapter route
+        // reached a player-visible consumer.
+        self.sim.stats.server_motd = self.sim.server_motd();
         // The F3+B / F3+G state, for the overlay's own `Debug overlays:` line —
         // vanilla's `Debug charts:` block, carrying the two toggles that exist
         // here. Copied from the `Arc<AtomicBool>`s the world-line source closure

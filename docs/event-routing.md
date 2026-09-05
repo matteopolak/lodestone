@@ -58,7 +58,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**4 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**3 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -69,10 +69,12 @@ exactly `Route::NOWHERE`, excluding the `..Route::NOWHERE` struct-update spread 
 that set other flags) and fails if this line drifts from the real count — update the number and
 the source together whenever a variant is added or wired.
 
-The current terminal routes are `PlayerCombatEntered`, `PlayerCombatEnded`, `MountScreenOpened`,
-and `ServerDataReceived`. `SimulationDistanceChanged` folds into a session component and the F3
-entity line shows the reported `SD` value only after that packet arrives; it stays distinct from
-the streamed-view radius that sizes the loading grid. `ItemCooldown` folds into
+The current terminal routes are `PlayerCombatEntered`, `PlayerCombatEnded`, and `MountScreenOpened`.
+`ServerDataReceived` folds its styled message of the day and optional favicon into session state;
+the F3 overlay reads its one-line text projection, so a play-state announcement is visible without
+mistaking an unreported message for an empty one. `SimulationDistanceChanged` folds into a session
+component and the F3 entity line shows the reported `SD` value only after that packet arrives; it
+stays distinct from the streamed-view radius that sizes the loading grid. `ItemCooldown` folds into
 session state and the app projects its remaining fraction onto matching occupied hotbar slots;
 the HUD then draws the dark item-use veil without owning a second clock.
 `SoundStopped` now crosses the shell route to the same audio boundary that starts server
