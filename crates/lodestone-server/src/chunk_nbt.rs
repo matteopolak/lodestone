@@ -1327,10 +1327,16 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
         BlockEntity::Beacon(beacon) => {
             let mut fields = vec![("Levels".to_owned(), Nbt::Int(i32::from(beacon.levels)))];
             if let Some(primary) = &beacon.primary_effect {
-                fields.push(("primary_effect".to_owned(), Nbt::String(primary.clone())));
+                fields.push((
+                    "primary_effect".to_owned(),
+                    Nbt::String(primary.key().to_owned()),
+                ));
             }
             if let Some(secondary) = &beacon.secondary_effect {
-                fields.push(("secondary_effect".to_owned(), Nbt::String(secondary.clone())));
+                fields.push((
+                    "secondary_effect".to_owned(),
+                    Nbt::String(secondary.key().to_owned()),
+                ));
             }
             ("minecraft:beacon", fields)
         }
@@ -1578,8 +1584,10 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
         }
         "minecraft:beacon" => BlockEntity::Beacon(crate::block_entities::BeaconData {
             levels: int_field(nbt, "Levels").unwrap_or(0).clamp(0, 4) as u8,
-            primary_effect: string_field(nbt, "primary_effect").map(str::to_owned),
-            secondary_effect: string_field(nbt, "secondary_effect").map(str::to_owned),
+            primary_effect: string_field(nbt, "primary_effect")
+                .and_then(crate::beacon::BeaconPower::from_key),
+            secondary_effect: string_field(nbt, "secondary_effect")
+                .and_then(crate::beacon::BeaconPower::from_key),
             payment: None,
         }),
         // The inverse of the `BlockEntity::Crafter` write arm above.
@@ -1740,6 +1748,7 @@ mod sign_nbt_tests {
 #[cfg(test)]
 mod beacon_nbt_tests {
     use super::{block_entity_from_nbt, block_entity_to_nbt};
+    use crate::beacon::BeaconPower;
     use crate::block_entities::{BeaconData, BlockEntity};
     use lodestone_model::BlockPos;
 
@@ -1755,8 +1764,12 @@ mod beacon_nbt_tests {
     fn a_beacons_nbt_round_trips_through_this_files_own_decoder() {
         let beacon = BeaconData {
             levels: 3,
-            primary_effect: Some("minecraft:strength".to_owned()),
-            secondary_effect: Some("minecraft:regeneration".to_owned()),
+            primary_effect: Some(
+                BeaconPower::from_key("minecraft:strength").expect("beacon power"),
+            ),
+            secondary_effect: Some(
+                BeaconPower::from_key("minecraft:regeneration").expect("beacon power"),
+            ),
             payment: None,
         };
         let nbt = block_entity_to_nbt(BlockPos::new(4, 70, -2), &BlockEntity::Beacon(beacon.clone()));
@@ -1773,13 +1786,41 @@ mod beacon_nbt_tests {
     fn an_unset_secondary_effect_round_trips_to_none() {
         let beacon = BeaconData {
             levels: 1,
-            primary_effect: Some("minecraft:speed".to_owned()),
+            primary_effect: Some(
+                BeaconPower::from_key("minecraft:speed").expect("beacon power"),
+            ),
             secondary_effect: None,
             payment: None,
         };
         let nbt = block_entity_to_nbt(BlockPos::new(0, 64, 0), &BlockEntity::Beacon(beacon.clone()));
         let (_, decoded) = block_entity_from_nbt(&nbt).expect("must decode");
         assert_eq!(decoded, BlockEntity::Beacon(beacon));
+    }
+
+    /// Saved NBT is an external boundary, even when its key names a known
+    /// mob effect: poison is not one of the six legal beacon powers and must
+    /// not become a selectable stored value.
+    #[test]
+    fn beacon_nbt_drops_a_known_non_power_effect_key() {
+        let nbt = lodestone_core::Nbt::Compound(vec![
+            (
+                "id".to_owned(),
+                lodestone_core::Nbt::String("minecraft:beacon".to_owned()),
+            ),
+            ("x".to_owned(), lodestone_core::Nbt::Int(4)),
+            ("y".to_owned(), lodestone_core::Nbt::Int(70)),
+            ("z".to_owned(), lodestone_core::Nbt::Int(-2)),
+            ("Levels".to_owned(), lodestone_core::Nbt::Int(4)),
+            (
+                "primary_effect".to_owned(),
+                lodestone_core::Nbt::String("minecraft:poison".to_owned()),
+            ),
+        ]);
+        let (_, decoded) = block_entity_from_nbt(&nbt).expect("beacon NBT must decode");
+        let BlockEntity::Beacon(beacon) = decoded else {
+            panic!("must decode a beacon")
+        };
+        assert_eq!(beacon.primary_effect, None);
     }
 
     /// The `id` field must name the beacon's own block-entity type, the same

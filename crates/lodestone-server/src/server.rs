@@ -8689,13 +8689,27 @@ fn apply_set_beacon<P: ServerProtocol>(
     if tracked.shape != MenuKind::Beacon {
         return Vec::new();
     }
+    let primary = match primary {
+        Some(key) => match crate::beacon::BeaconPower::from_key(&key) {
+            Some(power) => Some(power),
+            None => return Vec::new(),
+        },
+        None => None,
+    };
+    let secondary = match secondary {
+        Some(key) => match crate::beacon::BeaconPower::from_key(&key) {
+            Some(power) => Some(power),
+            None => return Vec::new(),
+        },
+        None => None,
+    };
     let pos = tracked.pos;
     let updated = block_entities.with(|reg| {
         let Some(BlockEntity::Beacon(beacon)) = reg.get_mut(pos) else {
             return None;
         };
         beacon.payment.as_ref()?;
-        if !crate::beacon::validate_beacon_effects(primary.as_deref(), secondary.as_deref(), beacon.levels) {
+        if !crate::beacon::validate_beacon_effects(primary, secondary, beacon.levels) {
             return None;
         }
         beacon.primary_effect = primary;
@@ -8724,12 +8738,12 @@ fn apply_set_beacon<P: ServerProtocol>(
         proto.encode_container_data(
             tracked.window_id,
             1,
-            crate::beacon::encode_beacon_effect(primary.as_deref()),
+            crate::beacon::encode_beacon_effect(primary),
         ),
         proto.encode_container_data(
             tracked.window_id,
             2,
-            crate::beacon::encode_beacon_effect(secondary.as_deref()),
+            crate::beacon::encode_beacon_effect(secondary),
         ),
     ]
 }
@@ -14050,7 +14064,11 @@ where
                 if let Some((px, py, pz)) = player_pos
                     && world.time().game_time % 80 == 0
                 {
-                    let candidates: Vec<(BlockPos, Option<String>, Option<String>)> = block_entities
+                    let candidates: Vec<(
+                        BlockPos,
+                        Option<crate::beacon::BeaconPower>,
+                        Option<crate::beacon::BeaconPower>,
+                    )> = block_entities
                         .with(|reg| {
                             reg.iter()
                                 .filter_map(|(pos, entity)| match entity {
@@ -14075,7 +14093,7 @@ where
                             continue;
                         }
                         let (range, application) =
-                            crate::beacon::beacon_effects(levels, primary.as_deref(), secondary.as_deref());
+                            crate::beacon::beacon_effects(levels, primary, secondary);
                         // The effect area reaches `range` blocks horizontally,
                         // from `range` below the beacon to the top of the
                         // world. Approximate the unbounded upper edge as
@@ -14090,7 +14108,11 @@ where
                             continue;
                         }
                         for grant in &application {
-                            effects.apply(&grant.effect, grant.duration_ticks, grant.amplifier);
+                            effects.apply(
+                                grant.effect.key(),
+                                grant.duration_ticks,
+                                grant.amplifier,
+                            );
                             apply(
                                 conn,
                                 &mut state,
@@ -14099,7 +14121,7 @@ where
                                     // `encode_update_mob_effect`-adjacent
                                     // call in this loop.
                                     LOCAL_PLAYER_ENTITY_ID,
-                                    &grant.effect,
+                                    grant.effect.key(),
                                     grant.amplifier,
                                     grant.duration_ticks,
                                     true,
@@ -15083,7 +15105,11 @@ where
     if let Some((px, py, pz)) = player_pos
         && world.time().game_time % 80 == 0
     {
-        let candidates: Vec<(BlockPos, Option<String>, Option<String>)> = block_entities.with(|reg| {
+        let candidates: Vec<(
+            BlockPos,
+            Option<crate::beacon::BeaconPower>,
+            Option<crate::beacon::BeaconPower>,
+        )> = block_entities.with(|reg| {
             reg.iter()
                 .filter_map(|(pos, entity)| match entity {
                     BlockEntity::Beacon(b) if b.primary_effect.is_some() => {
@@ -15099,7 +15125,7 @@ where
                 continue;
             }
             let (range, application) =
-                crate::beacon::beacon_effects(levels, primary.as_deref(), secondary.as_deref());
+                crate::beacon::beacon_effects(levels, primary, secondary);
             let dx = px - f64::from(pos.x);
             let dz = pz - f64::from(pos.z);
             let dy = py - f64::from(pos.y);
@@ -15107,13 +15133,17 @@ where
                 continue;
             }
             for grant in &application {
-                effects.apply(&grant.effect, grant.duration_ticks, grant.amplifier);
+                effects.apply(
+                    grant.effect.key(),
+                    grant.duration_ticks,
+                    grant.amplifier,
+                );
                 apply(
                     conn,
                     state,
                     proto.encode_update_mob_effect(
                         LOCAL_PLAYER_ENTITY_ID,
-                        &grant.effect,
+                        grant.effect.key(),
                         grant.amplifier,
                         grant.duration_ticks,
                         true,
@@ -17749,7 +17779,13 @@ mod tests {
             Some(BlockEntity::Beacon(b)) => b.clone(),
             _ => panic!("beacon must still be there"),
         });
-        assert_eq!(after.primary_effect.as_deref(), Some("minecraft:speed"));
+        assert_eq!(
+            after.primary_effect,
+            Some(
+                crate::beacon::BeaconPower::from_key("minecraft:speed")
+                    .expect("beacon power")
+            )
+        );
         assert_eq!(after.secondary_effect, None);
         assert_eq!(after.payment, Some(stack("minecraft:emerald", 2)), "exactly one payment item is spent");
     }
@@ -17835,6 +17871,49 @@ mod tests {
             _ => panic!("beacon must still be there"),
         });
         assert_eq!(after.payment, Some(stack("minecraft:diamond", 1)), "a refused submission must not spend payment");
+    }
+
+    /// A raw serverbound key crosses into `BeaconPower` before it reaches the
+    /// persisted block entity. `poison` is a real mob effect but not a beacon
+    /// power, so this distinguishes the closed-domain boundary from merely
+    /// rejecting an unknown string.
+    #[test]
+    fn set_beacon_rejects_a_known_non_power_key_at_the_boundary() {
+        let block_entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(0, 64, 0);
+        block_entities.with(|reg| {
+            reg.insert(
+                pos,
+                BlockEntity::Beacon(crate::block_entities::BeaconData {
+                    levels: 4,
+                    primary_effect: None,
+                    secondary_effect: None,
+                    payment: Some(stack("minecraft:diamond", 1)),
+                }),
+            );
+        });
+        let mut open = OpenContainer {
+            window_id: 7,
+            pos,
+            shape: MenuKind::Beacon,
+            container_size: 1,
+            state_id: 0,
+        };
+
+        let directives = apply_set_beacon(
+            &ContainerTagProto,
+            &block_entities,
+            Some(&mut open),
+            Some("minecraft:poison".to_owned()),
+            None,
+        );
+        assert!(directives.is_empty());
+        let after = block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::Beacon(b)) => b.clone(),
+            _ => panic!("beacon must still be there"),
+        });
+        assert_eq!(after.primary_effect, None);
+        assert_eq!(after.payment, Some(stack("minecraft:diamond", 1)));
     }
 
     /// The crafting **table**'s 3×3 menu, which has no block entity at all:
