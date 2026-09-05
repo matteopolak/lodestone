@@ -1830,6 +1830,11 @@ pub struct WorldRegistries {
     /// no backing store to lose.
     #[cfg(not(target_arch = "wasm32"))]
     pub player_data: Option<crate::player_data::PlayerDataStore>,
+    /// The selected native typed-record backend, when this persistent source
+    /// has one. The connection uses it only for the bounded player locator;
+    /// complete player state remains in [`Self::player_data`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub native_storage: Option<std::sync::Arc<crate::world_storage::WorldStorage>>,
 }
 
 /// Generates every column in `coords` across scoped OS threads over `&source`,

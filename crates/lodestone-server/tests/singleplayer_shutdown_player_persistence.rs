@@ -41,11 +41,22 @@
 
 use std::time::Duration;
 
-use lodestone_core::{Reader, State, Writer};
+use lodestone_core::{Nbt, Reader, State, Writer};
 use lodestone_model::{GameMode, Vec3};
 use lodestone_net::Connection;
-use lodestone_server::player_data::PlayerDataStore;
-use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective, ServerProtocol};
+use lodestone_server::player_data::{PlayerData, PlayerDataStore};
+use lodestone_server::world_storage::{
+    Error as WorldStorageError, NativePlayerRecord, PlayerRecordError, WorldStorage,
+    WorldStorageBackend,
+};
+use lodestone_server::{
+    ChunkColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective, ServerProtocol,
+};
+use lodestone_storage::{ExtensionRegistration, RecordKey, RecordWrite};
+use lodestone_storage_schema::{
+    BuiltinDimension, ExtensionValue, GeneralRecord, PlayerRecord, StorageRecord,
+    generated::{general_record, storage_record},
+};
 use tokio::io::DuplexStream;
 use uuid::Uuid;
 
@@ -237,7 +248,7 @@ impl ServerProtocol for FakeProtocol {
 /// what this gate needs from `tests/serve_play.rs`'s identically-named
 /// helper — no chunk-batch accounting beyond draining the one column a
 /// `view_radius: 0` join produces.
-async fn drive_login_and_join(client: &mut Connection<DuplexStream>, username: &str) {
+async fn drive_login_and_join(client: &mut Connection<DuplexStream>, username: &str) -> (i32, i32) {
     client.write_packet(HANDSHAKE, &[2]).await.expect("handshake");
     let mut w = Writer::default();
     w.string(username);
@@ -266,10 +277,14 @@ async fn drive_login_and_join(client: &mut Connection<DuplexStream>, username: &
     // `view_radius: 0` — exactly one column, batched.
     let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
     assert_eq!(id, CHUNK_BATCH_START);
-    let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
+    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
     assert_eq!(id, CHUNK);
+    let mut chunk = Reader::new(&payload);
+    let cx = chunk.var_i32().expect("chunk x");
+    let cz = chunk.var_i32().expect("chunk z");
     let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
     assert_eq!(id, CHUNK_BATCH_FINISHED);
+    (cx, cz)
 }
 
 async fn send_player_moved(client: &mut Connection<DuplexStream>, x: f64, y: f64, z: f64) {
@@ -461,6 +476,348 @@ async fn a_session_that_never_moved_or_changed_mode_saves_the_join_time_defaults
         "control: an idle session must not coincidentally save the gate's own moved-to position"
     );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A native locator is a live consumer, not just an isolated writer: the first
+/// join reads its position, shutdown writes the last packet-driven position,
+/// and a second server reads that exact record back into the join view. The
+/// established Anvil player file is checked at the same boundary to prove the
+/// locator did not become a replacement for complete player persistence.
+#[tokio::test]
+async fn native_locator_survives_join_restart_and_cancelled_shutdown() {
+    let dir = tempdir("native-restart");
+    let native_dir = dir.join("native");
+    let username = format!("Native{:08x}", Uuid::new_v4().as_u128() as u32);
+    let uuid = test_uuid_for(&username);
+    let uuid_bytes = *uuid.as_bytes();
+    let anvil = PlayerDataStore::new(&dir).expect("create complete player store");
+    anvil
+        .write(
+            uuid,
+            &PlayerData {
+                pos: Vec3::new(7.25, 63.0, -4.5),
+                preserved: vec![(
+                    "example:opaque".to_owned(),
+                    Nbt::String("keep-me".to_owned()),
+                )],
+                ..PlayerData::default()
+            },
+        )
+        .expect("seed complete player state");
+    let initial_locator = NativePlayerRecord {
+        uuid: uuid_bytes,
+        dimension: BuiltinDimension::Overworld,
+        x_fixed: 32_000,
+        y_fixed: 71_000,
+        z_fixed: 32_000,
+        yaw_millidegrees: 90_000,
+        pitch_millidegrees: -1_000,
+    };
+    WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir.clone(),
+    })
+    .expect("open native seed store")
+    .write_dirty_player(initial_locator)
+    .expect("seed typed locator");
+
+    let (server, client_end, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+        FakeProtocol,
+        &dir,
+        FlatWorld,
+        MIN_Y,
+        HEIGHT,
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+        Duration::from_secs(3600),
+        WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: native_dir.clone(),
+        })
+        .expect("open native runtime store"),
+    )
+    .expect("open native persistent world");
+    let mut client = Connection::new(client_end);
+    assert_eq!(
+        drive_login_and_join(&mut client, &username).await,
+        (2, 2),
+        "the first join must consume the native locator rather than the Anvil seed"
+    );
+    const MOVED_TO: (f64, f64, f64) = (-101.125, 71.875, 202.25);
+    send_player_moved(&mut client, MOVED_TO.0, MOVED_TO.1, MOVED_TO.2).await;
+    ping_pong(&mut client, 711).await;
+    std::mem::forget(client);
+    server.shutdown().await;
+
+    let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir.clone(),
+    })
+    .expect("reopen native locator after shutdown");
+    let expected_locator = NativePlayerRecord {
+        uuid: uuid_bytes,
+        dimension: BuiltinDimension::Overworld,
+        x_fixed: -101_125,
+        y_fixed: 71_875,
+        z_fixed: 202_250,
+        yaw_millidegrees: 90_000,
+        pitch_millidegrees: -1_000,
+    };
+    assert_eq!(
+        reopened.load_player(uuid_bytes).expect("read native locator"),
+        Some(expected_locator),
+        "shutdown must commit the latest typed locator, including its explicit fixed-point conversion"
+    );
+    let saved = anvil
+        .read(uuid)
+        .expect("read complete player state")
+        .expect("complete player file remains present");
+    assert_eq!(saved.pos, Vec3::new(MOVED_TO.0, MOVED_TO.1, MOVED_TO.2));
+    assert_eq!(
+        saved.preserved,
+        vec![(
+            "example:opaque".to_owned(),
+            Nbt::String("keep-me".to_owned()),
+        )],
+        "complete Anvil state remains the authority for unsupported fields"
+    );
+
+    let (restarted, client_end, _world) =
+        IntegratedServer::open_persistent_with_mobs_and_storage(
+            FakeProtocol,
+            &dir,
+            FlatWorld,
+            MIN_Y,
+            HEIGHT,
+            (0..=0, 0..=0),
+            (8, 8),
+            0,
+            0,
+            Duration::from_secs(3600),
+            reopened,
+        )
+        .expect("reopen native persistent world");
+    let mut client = Connection::new(client_end);
+    assert_eq!(
+        drive_login_and_join(&mut client, &username).await,
+        (-7, 12),
+        "a restarted server must stream the chunk containing the native locator"
+    );
+    std::mem::forget(client);
+    restarted.shutdown().await;
+
+    let final_locator = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir,
+    })
+    .expect("reopen native locator after second shutdown");
+    assert_eq!(
+        final_locator.load_player(uuid_bytes).expect("read final locator"),
+        Some(expected_locator)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The missing-record control proves the runtime consumer is the producer of
+/// the first locator: an empty native segment starts with `None`, then a
+/// cancelled session writes the normal spawn fallback and can reopen it.
+#[tokio::test]
+async fn missing_native_locator_is_created_from_the_join_fallback() {
+    let dir = tempdir("native-missing");
+    let native_dir = dir.join("native");
+    let username = format!("Missing{:08x}", Uuid::new_v4().as_u128() as u32);
+    let uuid = test_uuid_for(&username);
+    let uuid_bytes = *uuid.as_bytes();
+    let empty = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir.clone(),
+    })
+    .expect("open empty native store");
+    assert_eq!(
+        empty.load_player(uuid_bytes).expect("read missing locator"),
+        None,
+        "control must observe absence before the runtime producer runs"
+    );
+
+    let (server, client_end, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+        FakeProtocol,
+        &dir,
+        FlatWorld,
+        MIN_Y,
+        HEIGHT,
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+        Duration::from_secs(3600),
+        empty,
+    )
+    .expect("open native persistent world");
+    let mut client = Connection::new(client_end);
+    assert_eq!(drive_login_and_join(&mut client, &username).await, (0, 0));
+    ping_pong(&mut client, 712).await;
+    std::mem::forget(client);
+    server.shutdown().await;
+
+    let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir,
+    })
+    .expect("reopen native store after missing-record control");
+    assert_eq!(
+        reopened.load_player(uuid_bytes).expect("read created locator"),
+        Some(NativePlayerRecord {
+            uuid: uuid_bytes,
+            dimension: BuiltinDimension::Overworld,
+            x_fixed: 0,
+            y_fixed: 61_000,
+            z_fixed: 0,
+            yaw_millidegrees: 0,
+            pitch_millidegrees: 0,
+        }),
+        "missing native state must be created from the explicit world-spawn fallback"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Dimension-aware join restore is intentionally outside this slice. A valid
+/// Nether locator must therefore remain durable while an overworld connection
+/// uses the safe world-spawn fallback; this is the scope control for the
+/// non-overworld branch, not just a comment about it.
+#[tokio::test]
+async fn non_overworld_native_locator_is_not_overwritten_by_overworld_fallback() {
+    let dir = tempdir("native-dimension-gap");
+    let native_dir = dir.join("native");
+    let username = format!("Nether{:08x}", Uuid::new_v4().as_u128() as u32);
+    let uuid = test_uuid_for(&username);
+    let uuid_bytes = *uuid.as_bytes();
+    let locator = NativePlayerRecord {
+        uuid: uuid_bytes,
+        dimension: BuiltinDimension::Nether,
+        x_fixed: -12_345,
+        y_fixed: 64_000,
+        z_fixed: 98_765,
+        yaw_millidegrees: -179_999,
+        pitch_millidegrees: 89_999,
+    };
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir.clone(),
+    })
+    .expect("open native dimension-gap store");
+    storage
+        .write_dirty_player(locator)
+        .expect("seed non-overworld locator");
+
+    let (server, client_end, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+        FakeProtocol,
+        &dir,
+        FlatWorld,
+        MIN_Y,
+        HEIGHT,
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+        Duration::from_secs(3600),
+        storage,
+    )
+    .expect("open native persistent world with non-overworld locator");
+    let mut client = Connection::new(client_end);
+    assert_eq!(
+        drive_login_and_join(&mut client, &username).await,
+        (0, 0),
+        "unsupported dimension restore must use the overworld fallback"
+    );
+    ping_pong(&mut client, 714).await;
+    std::mem::forget(client);
+    server.shutdown().await;
+
+    let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir,
+    })
+    .expect("reopen native dimension-gap store");
+    assert_eq!(
+        reopened.load_player(uuid_bytes).expect("read preserved locator"),
+        Some(locator),
+        "overworld fallback must not overwrite a non-overworld locator"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The corrupt-record control writes a syntactically valid typed record with
+/// an extension this bounded runtime does not consume. Login must fail closed,
+/// and cancellation must leave the original unsupported record available for
+/// recovery instead of replacing it with a partial locator.
+#[tokio::test]
+async fn corrupt_native_locator_is_not_overwritten_on_cancelled_shutdown() {
+    let dir = tempdir("native-corrupt");
+    let native_dir = dir.join("native");
+    let username = format!("Corrupt{:08x}", Uuid::new_v4().as_u128() as u32);
+    let uuid = test_uuid_for(&username);
+    let uuid_bytes = *uuid.as_bytes();
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir.clone(),
+    })
+    .expect("open native corrupt-record store");
+    storage
+        .register_native_extensions([ExtensionRegistration::new("example", "opaque", 1)])
+        .expect("register extension table");
+    let key = RecordKey::general(
+        i32::from_le_bytes(uuid_bytes[..4].try_into().expect("uuid prefix")),
+        i32::from_le_bytes(uuid_bytes[4..8].try_into().expect("uuid prefix")),
+        u32::from_le_bytes(uuid_bytes[8..12].try_into().expect("uuid prefix")),
+    );
+    let record = StorageRecord {
+        format_version: 1,
+        record: Some(storage_record::Record::General(GeneralRecord {
+            extensions: vec![ExtensionValue {
+                local_id: 1,
+                payload: vec![0xde, 0xad],
+            }],
+            record: Some(general_record::Record::Player(PlayerRecord {
+                player_uuid: uuid_bytes.to_vec(),
+                dimension: BuiltinDimension::Overworld as i32,
+                x_fixed: 12_000,
+                y_fixed: 65_000,
+                z_fixed: -4_000,
+                yaw_millidegrees: 4_000,
+                pitch_millidegrees: -2_000,
+            })),
+        })),
+    };
+    storage
+        .write_dirty([RecordWrite::new(key, record)])
+        .expect("write corrupt native record");
+
+    let (server, client_end, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+        FakeProtocol,
+        &dir,
+        FlatWorld,
+        MIN_Y,
+        HEIGHT,
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+        Duration::from_secs(3600),
+        storage,
+    )
+    .expect("open native persistent world with corrupt locator");
+    let mut client = Connection::new(client_end);
+    assert_eq!(
+        drive_login_and_join(&mut client, &username).await,
+        (0, 0),
+        "a corrupt native locator must fall back to world spawn"
+    );
+    ping_pong(&mut client, 713).await;
+    std::mem::forget(client);
+    server.shutdown().await;
+
+    let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_dir,
+    })
+    .expect("reopen corrupt native store");
+    assert!(matches!(
+        reopened.load_player(uuid_bytes),
+        Err(WorldStorageError::Player(PlayerRecordError::UnsupportedExtensions))
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

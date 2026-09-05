@@ -93,6 +93,18 @@ pub struct LiveSaveSlot(
             )>,
         >,
     >,
+    /// Latest bounded native locator, independent from the complete Anvil
+    /// snapshot above. Keeping a second slot means the locator can survive
+    /// cancellation without changing or replacing full player persistence.
+    #[cfg(not(target_arch = "wasm32"))]
+    std::sync::Arc<
+        std::sync::Mutex<
+            Option<(
+                std::sync::Arc<crate::world_storage::WorldStorage>,
+                crate::world_storage::NativePlayerRecord,
+            )>,
+        >,
+    >,
 );
 
 impl LiveSaveSlot {
@@ -139,5 +151,40 @@ impl LiveSaveSlot {
         crate::player_data::PlayerData,
     )> {
         self.0.lock().expect("live save slot lock poisoned").take()
+    }
+
+    /// Publishes the latest bounded native player locator, replacing the
+    /// previous value. A missing storage handle is a no-op for Anvil and
+    /// in-memory worlds; no typed payload is retained in those modes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn publish_native(
+        &self,
+        storage: Option<std::sync::Arc<crate::world_storage::WorldStorage>>,
+        record: crate::world_storage::NativePlayerRecord,
+    ) {
+        let Some(storage) = storage else {
+            return;
+        };
+        *self
+            .1
+            .lock()
+            .expect("native live save slot lock poisoned") = Some((storage, record));
+    }
+
+    /// Takes the latest bounded native locator, if one was published. The
+    /// integrated shutdown path calls this only after joining the connection
+    /// task, so no newer cancelled snapshot can race the final write.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn take_native(
+        &self,
+    ) -> Option<(
+        std::sync::Arc<crate::world_storage::WorldStorage>,
+        crate::world_storage::NativePlayerRecord,
+    )> {
+        self.1
+            .lock()
+            .expect("native live save slot lock poisoned")
+            .take()
     }
 }

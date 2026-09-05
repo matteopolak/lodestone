@@ -2505,6 +2505,17 @@ impl IntegratedServer {
             }
             poi_storage.insert(dimension, storage);
         }
+        let storage = storage.map(std::sync::Arc::new);
+        let native_storage = storage
+            .as_ref()
+            .filter(|storage| {
+                matches!(
+                    storage.backend(),
+                    crate::world_storage::WorldStorageBackend::LodestoneNative { .. }
+                )
+            })
+            .cloned();
+        persistent.set_native_storage(native_storage);
         let (mut server, client_end) = Self::open_in_memory_with_mobs_using(
             protocol,
             persistent,
@@ -2538,7 +2549,7 @@ impl IntegratedServer {
         server.level_dat = Some(std::sync::Arc::clone(&level_dat));
         server.entity_storage = Some(entity_storage.clone());
         server.poi_storage = Some(poi_storage.clone());
-        server.world_storage = storage.map(std::sync::Arc::new);
+        server.world_storage = storage;
         let native_save_context = server.native_save_context();
         let autosave_handle = save.clone();
         let autosave_level_dat = std::sync::Arc::clone(&level_dat);
@@ -4432,6 +4443,18 @@ impl IntegratedServer {
         if let Some((store, uuid, data)) = self.live_save.take() {
             if let Err(err) = store.write(uuid, &data) {
                 tracing::warn!("player data flush on shutdown failed for {uuid}: {err}");
+            }
+        }
+        // The bounded native locator has its own cancellation-safe slot. Read
+        // it only after the connection task joined above, then append the typed
+        // record without touching the complete Anvil player file.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((storage, record)) = self.live_save.take_native() {
+            if let Err(err) = storage.write_dirty_player(record) {
+                tracing::warn!(
+                    "native player locator flush on shutdown failed for {:?}: {err}",
+                    record.uuid
+                );
             }
         }
         if let Some(mut tick_task) = self.tick_task.take() {
