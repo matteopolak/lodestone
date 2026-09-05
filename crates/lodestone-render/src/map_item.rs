@@ -107,10 +107,10 @@ impl PackedMapColour {
 /// Resolve one packed map colour byte to RGBA8.
 ///
 /// The packed-id-to-colour resolver: `byte >> 2` is the base id, `byte & 3` the
-/// brightness. An id past the table (vanilla's `null` tail) resolves to `NONE`
-/// at the grid boundary, so a malformed byte draws nothing rather than
-/// indexing out of range. Callers that already hold a [`PackedMapColour`]
-/// cannot reach that malformed path.
+/// brightness. [`map_texture_rgba`] turns an id past the populated table into
+/// `NONE` at the grid boundary, so malformed grid data draws nothing rather
+/// than indexing out of range. This function only accepts a validated
+/// [`PackedMapColour`], so its table access is total.
 #[must_use]
 pub fn map_color_rgba(packed: PackedMapColour) -> [u8; 4] {
     let id = usize::from(packed.raw() >> 2);
