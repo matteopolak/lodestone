@@ -7,7 +7,7 @@ use lodestone_game::effect::{ActiveEffects, StatusEffect};
 use lodestone_game::hud::{HudInputs, HudSnapshot};
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::Menu;
-use lodestone_game::player_state::{ActionBar, HudState, TitleState};
+use lodestone_game::player_state::{ActionBar, HotbarSlot, HudState, TitleState};
 use lodestone_game::scoreboard::{DisplaySlot, Objective, Scoreboard};
 use lodestone_game::tablist::{GameProfile, PlayerListEntry, TabList};
 use lodestone_model::{GameMode, Text};
@@ -74,7 +74,8 @@ fn hotbar_reflects_selected_slot_and_contents() {
     menu.set_slot_item(40, Some(ItemStack::new(id("minecraft:torch"), 12)));
 
     let mut hud = HudState::new();
-    hud.select_slot(4); // native hotbar index 4 == menu slot 40
+    let selected = HotbarSlot::new(4).expect("native hotbar index 4 is valid");
+    hud.select_slot(selected); // native hotbar index 4 == menu slot 40
 
     let effects = ActiveEffects::new();
     let bars = BossBarSet::new();
@@ -94,7 +95,7 @@ fn hotbar_reflects_selected_slot_and_contents() {
     };
     let snap = HudSnapshot::assemble(&inputs);
 
-    assert_eq!(snap.hotbar.selected, 4);
+    assert_eq!(snap.hotbar.selected, selected);
     assert_eq!(
         snap.hotbar.slots[0].unwrap().item().to_string(),
         "minecraft:stone"

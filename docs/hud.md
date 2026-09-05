@@ -31,6 +31,15 @@ health row is present, and a rowOffset correction inside the bubble draw itself)
 single flat offset for an unmounted player. Reading only the first step gives the wrong answer; the
 full three-step derivation is what the bubble row's position must be reproduced from.
 
+### Hotbar selection boundary
+
+`lodestone_game::player_state::HotbarSlot` represents one of the nine native hotbar positions. The
+raw `i32` from `ClientEvent::HeldSlotChanged` is validated once while `HudState` folds the event;
+negative, oversized, and ninth-or-later values leave the current selection unchanged. The HUD snapshot
+then carries `HotbarSlot` into `HotbarView`, whose `held` production read indexes the fixed nine-slot
+array directly. Keep raw integers at protocol/UI boundaries and pass `HotbarSlot` through game-state
+code so an invalid wire value cannot become an unrelated selected item.
+
 ### Vanilla text: the font stack every HUD surface shares
 
 Every string the HUD draws — chat, the F3 overlay, titles, the action bar, the scoreboard, the tab
