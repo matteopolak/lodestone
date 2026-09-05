@@ -729,17 +729,14 @@ pub struct Equipment(pub Vec<EntityEquipment>);
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct DisplayItem(pub Option<ItemStack>);
 
-/// A `Display` entity's billboard-constraint byte
-/// (vanilla's own billboard-render-constraints metadata index, raw wire ordinal —
-/// `0`=fixed, `1`=vertical, `2`=horizontal, `3`=center), folded from
+/// A `Display` entity's typed billboard constraint, folded from
 /// [`lodestone_model::event::EntityMetadataUpdate::display_billboard`].
 ///
 /// **Absent** until first reported, on every `text_display`/`item_display`/
 /// `block_display` — a consumer reading absence should fall back to `Fixed`
-/// (wire id `0`, the accessor's own default), matching
-/// `lodestone_render::display::BillboardMode::from_wire`'s own fallback.
+/// (wire id `0`, the accessor's own default).
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DisplayBillboard(pub u8);
+pub struct DisplayBillboard(pub lodestone_model::BillboardMode);
 
 /// A `Display` entity's own translation metadata index, in blocks — one quarter of the
 /// shared transform every subtype carries, folded from

@@ -356,6 +356,68 @@ impl<T> Default for Reported<T> {
     }
 }
 
+/// Which axes of a display entity follow the camera rather than its own rotation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BillboardMode {
+    /// Keep the entity's own yaw and pitch. Wire ordinal `0`.
+    #[default]
+    Fixed,
+    /// Follow camera yaw while retaining entity pitch. Wire ordinal `1`.
+    Vertical,
+    /// Retain entity yaw while following camera pitch. Wire ordinal `2`.
+    Horizontal,
+    /// Follow both camera axes. Wire ordinal `3`.
+    Center,
+}
+
+impl BillboardMode {
+    /// Decodes the wire ordinal, including the protocol's out-of-range fallback
+    /// to [`Self::Fixed`].
+    #[must_use]
+    pub const fn from_wire(raw: u8) -> Self {
+        match raw {
+            1 => Self::Vertical,
+            2 => Self::Horizontal,
+            3 => Self::Center,
+            _ => Self::Fixed,
+        }
+    }
+
+    /// The protocol ordinal for this mode.
+    #[must_use]
+    pub const fn wire_id(self) -> u8 {
+        match self {
+            Self::Fixed => 0,
+            Self::Vertical => 1,
+            Self::Horizontal => 2,
+            Self::Center => 3,
+        }
+    }
+}
+
+#[cfg(test)]
+mod billboard_mode_tests {
+    use super::BillboardMode;
+
+    #[test]
+    fn every_defined_wire_ordinal_round_trips() {
+        for mode in [
+            BillboardMode::Fixed,
+            BillboardMode::Vertical,
+            BillboardMode::Horizontal,
+            BillboardMode::Center,
+        ] {
+            assert_eq!(BillboardMode::from_wire(mode.wire_id()), mode);
+        }
+    }
+
+    #[test]
+    fn unknown_wire_ordinals_use_the_fixed_fallback() {
+        assert_eq!(BillboardMode::from_wire(4), BillboardMode::Fixed);
+        assert_eq!(BillboardMode::from_wire(u8::MAX), BillboardMode::Fixed);
+    }
+}
+
 /// An incremental, version-free update to an entity's metadata.
 ///
 /// Vanilla transmits metadata as a sparse `(index, value)` list applied
@@ -725,16 +787,9 @@ pub struct EntityMetadataUpdate {
     /// beside its two siblings, because the three are one feature and a future
     /// jar could add a second `FLOAT` there.
     pub vehicle_damage: Option<f32>,
-    /// The display entity's billboard-constraint field, as its
-    /// raw wire ordinal (`0`=fixed, `1`=vertical, `2`=horizontal, `3`=center),
+    /// The display entity's billboard constraint, decoded from its wire ordinal
     /// when present and the entity is known to be one of the three display
     /// subtypes (`text_display`/`item_display`/`block_display`).
-    ///
-    /// Kept as the raw ordinal rather than a decoded enum because this crate
-    /// carries no renderer-facing billboard type — see
-    /// `lodestone_render::display::BillboardMode::from_wire` for the
-    /// downstream conversion, which reproduces the real client's own
-    /// out-of-range fallback to `Fixed`.
     ///
     /// # Why this can be absent on a packet that carried the byte
     ///
@@ -742,7 +797,7 @@ pub struct EntityMetadataUpdate {
     /// a mob's flags field and an armor stand's client-flags field. `None`
     /// means "not known to be a display billboard byte", which a consumer
     /// must treat as "no billboard reported yet", never as a cleared value.
-    pub display_billboard: Option<u8>,
+    pub display_billboard: Option<BillboardMode>,
     /// The display entity's translation field, in blocks — one quarter of the
     /// shared transformation every display subtype carries (see
     /// `lodestone_render::display::DisplayTransformation`).
