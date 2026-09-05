@@ -48,7 +48,9 @@ live-entity = []
 live-interaction = []
 
 [dev-dependencies]
+lodestone-client = { workspace = true }
 lodestone-net = { workspace = true }
+lodestone-registry = { workspace = true, features = ["v1-14"] }
 lodestone-testsupport = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }

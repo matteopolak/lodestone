@@ -62,8 +62,12 @@ Light-update encoding and the remaining serverbound play actions are still
 outside this host slice and require their own protocol evidence.
 
 The host tests anchor packet ids in the committed generated tables and exercise
-each differing chunk framing against the crate's independent decoder. A live
-client/server acceptance capture for these host selectors is not yet
+each differing chunk framing against the crate's independent decoder. Protocol
+498 also has a literal reference join body and an in-memory client/server test:
+the registry selects the host, the 498 adapter reaches Play, receives the
+fixture chunk, and observes its block-break update. This proves the local
+consumer chain from registry selection through server wire and client state,
+but a live client/server acceptance capture for these host selectors is not yet
 committed, so it remains a gate before calling this host production-ready.
 
 ### Three data sets, not one

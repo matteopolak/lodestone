@@ -50,6 +50,32 @@ fn protocol_498_accepts_its_handshake_and_emits_legacy_join() {
     assert_eq!(join.view_distance, 8);
 }
 
+/// The hosted 498 join has no seed hash or respawn-screen byte. Keep the
+/// reference body literal so a shared codec regression cannot bless a shifted
+/// field by encoding and decoding the same mistaken layout.
+#[test]
+fn protocol_498_emits_the_reference_legacy_join_body() {
+    let protocol = V498ServerProtocol;
+    let ServerDirective::Send { packet_id, payload } = &protocol.begin_play(8)[0] else {
+        panic!("begin_play must start with a join packet");
+    };
+
+    assert_eq!(*packet_id, packet_ids_498::play::clientbound::LOGIN);
+    assert_eq!(
+        payload,
+        &[
+            0, 0, 0, 1, // entity id
+            0, // survival game mode
+            0, 0, 0, 0, // overworld dimension
+            20, // max players
+            7, b'd', b'e', b'f', b'a', b'u', b'l', b't', // level type
+            8, // view distance
+            0, // reduced debug info
+        ],
+        "protocol 498's join layout ends after reduced-debug-info",
+    );
+}
+
 #[test]
 fn protocol_498_emits_a_decodable_straddling_chunk_with_embedded_biomes() {
     let protocol = V498ServerProtocol;
