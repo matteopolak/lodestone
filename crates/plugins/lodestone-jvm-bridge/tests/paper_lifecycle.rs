@@ -62,6 +62,9 @@ fn lifecycle_entries_load_without_initialization() {
         let lifecycle = plan.load_lifecycle_entries_in_runtime(&runtime, env)
             .expect("load classes without running static initializers");
         assert_eq!(lifecycle.loader_count(), 2, "retain bootstrap and plugin loaders");
+        assert!(lifecycle.retains_bootstrap_loader());
+        assert_eq!(lifecycle.loaded_plugins()[0].descriptor().name(), "Fixture");
+        assert!(lifecycle.loaded_plugins()[0].retains_entry_association());
         Ok(())
     })
     .expect("attach fixture JVM thread");

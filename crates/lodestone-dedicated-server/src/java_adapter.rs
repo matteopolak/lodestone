@@ -1,9 +1,12 @@
 //! Operator-configured experimental Java adapter over the public server read API.
 
+use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::Duration;
 
 use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost};
-use lodestone_jvm_bridge::paper::{PaperBootstrapConfig, PaperBootstrapPlan};
+use lodestone_jvm_bridge::paper::{
+    PaperBootstrapConfig, PaperBootstrapPlan, PaperPluginLifecycleStatusSet,
+};
 use lodestone_jvm_bridge::runtime::JvmConfig;
 use lodestone_server::IntegratedServer;
 
@@ -11,6 +14,8 @@ use lodestone_server::IntegratedServer;
 pub(crate) struct JavaAdapter {
     host: AdapterHost,
     paper_plan: Option<PaperBootstrapPlan>,
+    paper_lifecycle: Option<PaperPluginLifecycleStatusSet>,
+    paper_lifecycle_receiver: Option<Receiver<PaperPluginLifecycleStatusSet>>,
     last_dispatched: Option<u64>,
 }
 
@@ -70,13 +75,17 @@ impl JavaAdapter {
         deadline: Duration,
         paper_plan: Option<PaperBootstrapPlan>,
     ) -> Result<Self, String> {
-        let host = if let Some(plan) = paper_plan.clone() {
+        let (host, paper_lifecycle_receiver) = if let Some(plan) = paper_plan.clone() {
+            let (lifecycle_sender, lifecycle_receiver) = sync_channel(1);
             AdapterHost::start_with_setup(config, class, deadline, move |runtime, env| {
-                plan.load_lifecycle_entries_in_runtime(runtime, env)
-                    .map_err(|error| format!("could not load configured Paper lifecycle entries: {error}"))
-            })
+                let lifecycle = plan.load_lifecycle_entries_in_runtime(runtime, env)
+                    .map_err(|error| format!("could not load configured Paper lifecycle entries: {error}"))?;
+                lifecycle_sender.send(lifecycle.status().clone())
+                    .map_err(|error| format!("could not retain configured Paper lifecycle status: {error}"))?;
+                Ok(lifecycle)
+            }).map(|host| (host, Some(lifecycle_receiver)))
         } else {
-            AdapterHost::start(config, class, deadline)
+            AdapterHost::start(config, class, deadline).map(|host| (host, None))
         }.map_err(|error| error.to_string())?;
         if let Some(plan) = &paper_plan {
             tracing::info!(
@@ -88,7 +97,13 @@ impl JavaAdapter {
         } else {
             tracing::info!(adapter = class, "starting experimental Java adapter; Paper plugin loading is not enabled");
         }
-        Ok(Self { host, paper_plan, last_dispatched: None })
+        Ok(Self {
+            host,
+            paper_plan,
+            paper_lifecycle: None,
+            paper_lifecycle_receiver,
+            last_dispatched: None,
+        })
     }
 
     pub(crate) fn requires_paper_bootstrap(&self) -> bool {
@@ -100,10 +115,35 @@ impl JavaAdapter {
         match event {
             Some(AdapterEvent::Ready) => {
                 if let Some(plan) = &self.paper_plan {
+                    let lifecycle = self.paper_lifecycle_receiver.take()
+                        .ok_or_else(|| "configured Paper lifecycle did not report its Load status".to_owned())?
+                        .try_recv()
+                        .map_err(|error| format!("configured Paper lifecycle status disconnected: {error}"))?;
+                    let failed = lifecycle.plugins().iter()
+                        .filter(|plugin| plugin.failure().is_some())
+                        .count();
+                    for plugin in lifecycle.plugins().iter().filter(|plugin| plugin.failure().is_some()) {
+                        let failure = plugin.failure().expect("filtered plugin lifecycle failure");
+                        tracing::warn!(
+                            plugin = plugin.descriptor().name(),
+                            phase = ?plugin.phase(),
+                            step = ?failure.step(),
+                            error = failure.message(),
+                            "configured Paper plugin Load failed in an isolated lifecycle entry; it remains disabled"
+                        );
+                    }
+                    self.paper_lifecycle = Some(lifecycle);
+                    let loaded_plugins = self.paper_lifecycle.as_ref()
+                        .expect("stored Paper lifecycle status")
+                        .plugins().iter()
+                        .filter(|plugin| plugin.failure().is_none())
+                        .count();
                     tracing::info!(
                         paper_jar = %plan.paper_jar().display(),
                         plugins = plan.plugins().len(),
-                        "configured Paper bootstrap and plugin entry classes loaded; Paper is not initialized and plugins are not instantiated or enabled"
+                        loaded_plugins,
+                        failed_plugins = failed,
+                        "configured Paper lifecycle Load completed; Paper is not initialized and plugins are not instantiated or enabled"
                     );
                 } else {
                     tracing::info!("experimental Java adapter ready");

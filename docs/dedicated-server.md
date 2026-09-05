@@ -258,10 +258,12 @@ host validates and registers it in every fresh loader before that loader sees a 
 Invalid paths, declarations, plugin descriptors, or declared main-class archive entries stop cleanly
 before readiness. Each plugin entry gets a fresh shim-first isolated loader that sees only the shim,
 server, and that plugin jar. The Java adapter worker retains those loaders until it stops, preserving
-their class definitions and shim-native registrations. A lifecycle-load failure also saves and stops
-the server, so a requested Paper intake cannot silently degrade into an ordinary adapter run. These
-loads do not initialize Paper, retain an entry class or plugin object, instantiate or enable a plugin,
-or provide Paper-plugin compatibility.
+their class definitions and shim-native registrations. The dedicated host also owns one lifecycle
+record per descriptor: Load is the only implemented operation; the later order is Load, Enable, then
+Disable. A bootstrap-load failure saves and stops the server, so a requested Paper intake cannot
+silently degrade into an ordinary adapter run. A plugin-entry Load failure is isolated, logged with
+that descriptor, and remains disabled while later entries are checked. These loads do not initialize
+Paper, construct or enable a plugin, or provide Paper-plugin compatibility.
 See [Java plugin bridge](java-plugin-bridge.md) for its explicit boundary and live
 fixture.
 
