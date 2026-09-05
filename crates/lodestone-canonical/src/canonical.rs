@@ -58,7 +58,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use lodestone_data::block_states;
+use lodestone_data::block_states::{self, StateId};
 
 use crate::flattening::{self, LegacyBlockState, ResolvedState};
 
@@ -75,9 +75,16 @@ pub const SLOT_COUNT: usize = flattening::SLOT_COUNT;
 /// single "failed".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CanonicalBlockState {
-    /// A canonical 26.2 [`block_states`] id, reachable either directly or
-    /// after this module's rename/property bridging.
-    Resolved(u32),
+    /// A validated canonical 26.2 [`block_states`] id, reachable either
+    /// directly or after this module's rename/property bridging.
+    ///
+    /// This translation only ever produces entries from the compiled-in
+    /// canonical census, so retaining a raw `u32` here would let a consumer
+    /// accidentally use a biome, item, or session-local palette value as a
+    /// block state. Dynamic state spaces remain raw at their protocol/world
+    /// boundaries; a consumer crossing back to one must explicitly call
+    /// [`StateId::raw`].
+    Resolved(StateId),
     /// [`LegacyBlockState::NoTableEntry`] passed through unchanged: vanilla's
     /// own flattening table never assigned this pair a target.
     NoTableEntry,
@@ -198,12 +205,14 @@ fn build_slot_table() -> [CanonicalBlockState; SLOT_COUNT] {
 /// index this crate's translation direction needs, built the same way
 /// `lodestone-render`'s `BlockAtlas` and `v26-2`'s `resolve_state_id` build
 /// theirs (iterate `0..STATE_COUNT` once).
-fn canonical_reverse_index() -> HashMap<(&'static str, Vec<(&'static str, &'static str)>), u32> {
+fn canonical_reverse_index(
+) -> HashMap<(&'static str, Vec<(&'static str, &'static str)>), StateId> {
     let mut index = HashMap::with_capacity(block_states::STATE_COUNT as usize);
     for id in 0..block_states::STATE_COUNT {
         let name = block_states::block_name(id).expect("id in 0..STATE_COUNT");
         let properties = block_states::properties(id).expect("id in 0..STATE_COUNT");
-        index.insert((name, properties.to_vec()), id);
+        let state = StateId::new(id).expect("generated state-table index is valid");
+        index.insert((name, properties.to_vec()), state);
     }
     index
 }
@@ -215,7 +224,7 @@ fn canonical_reverse_index() -> HashMap<(&'static str, Vec<(&'static str, &'stat
 /// generic fallback is safe).
 fn resolve_canonical(
     state: ResolvedState,
-    reverse: &HashMap<(&'static str, Vec<(&'static str, &'static str)>), u32>,
+    reverse: &HashMap<(&'static str, Vec<(&'static str, &'static str)>), StateId>,
 ) -> CanonicalBlockState {
     let (name, properties) = bridge(state.name, state.properties);
 
@@ -504,7 +513,7 @@ pub fn resolve_or_air(old_block_id: u8, meta: u8, tally: &mut FallbackTally) -> 
     let outcome = resolve(old_block_id, meta);
     tally.record(outcome);
     match outcome {
-        CanonicalBlockState::Resolved(id) => id,
+        CanonicalBlockState::Resolved(id) => id.raw(),
         CanonicalBlockState::NoTableEntry
         | CanonicalBlockState::RequiresAdditionalContext
         | CanonicalBlockState::OutOfBounds

@@ -1985,9 +1985,7 @@ impl V340Adapter {
         // correct for every id this packet has been observed to carry.
         let block = (0u8..16)
             .find_map(|meta| match canonical::resolve(block_id, meta) {
-                canonical::CanonicalBlockState::Resolved(state) => {
-                    block_states::StateId::new(state)
-                }
+                canonical::CanonicalBlockState::Resolved(state) => Some(state),
                 _ => None,
             })
             .unwrap_or_else(block_states::air_state)

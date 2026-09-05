@@ -33,7 +33,7 @@ const STONE_WIRE: u32 = 1 << 4; // block id 1, meta 0
 /// meta)` produces, for asserting decoded output against.
 fn canonical_id(old_block_id: u8, meta: u8) -> u32 {
     match canonical::resolve(old_block_id, meta) {
-        CanonicalBlockState::Resolved(id) => id,
+        CanonicalBlockState::Resolved(id) => id.raw(),
         other => panic!("expected a resolved canonical state, got {other:?}"),
     }
 }

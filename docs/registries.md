@@ -63,7 +63,11 @@ private copy of a large generated table. Two modules in series:
   (`lodestone_data::block_states`), via a small hand-verified rename table (a few names are
   stale even relative to 1.13.2's own final registry, and a few more relative to later 26.2
   renames) and property fixups for properties 26.2 added that pre-1.13 storage cannot
-  express.
+  express. A successful `CanonicalBlockState::Resolved` carries `StateId`, not a primitive:
+  it is necessarily a member of the compiled-in canonical census. The family converts it to a
+  raw palette value only at the protocol/world boundary. Session-local or extension states do
+  not enter this bridge as forged `StateId`s; unresolved legacy input remains an explicit
+  fallback outcome for the consuming family to handle.
 
 Neither module collapses a failure into air itself — the decision to substitute air belongs
 to the **consuming family**, made in its own chunk decoder and counted on a `FallbackTally`
