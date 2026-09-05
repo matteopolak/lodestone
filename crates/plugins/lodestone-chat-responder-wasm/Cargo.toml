@@ -82,6 +82,12 @@ place = []
 # The multi-tick mining lifecycle fixture. It starts a copied break claim,
 # observes one bounded rejection from the shell, then explicitly releases it.
 break = []
+# The hotbar-selection conformance fixture. It asks for a valid slot; the host
+# must route it through the shell's selected-slot and carried-item-echo path.
+select-slot = []
+# Same route, but deliberately outside the valid 0..=8 range so the composed
+# shell gate proves it rejects malformed guest input without an echo.
+select-slot-invalid = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is

@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.9.0;
+package lodestone:plugin@0.10.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -270,6 +270,11 @@ interface types {
         generation: u64,
     }
 
+    /// A one-shot request to select one of the nine hotbar slots. The host
+    /// validates the range through the normal local-player selection consumer;
+    /// it never exposes a direct selected-slot write or packet constructor.
+    type hotbar-slot = u8;
+
     /// One thing a guest wants done. Protocol actions lower onto `ClientAction`
     /// and preserve submission order in `lodestone_ecs::player::ActionQueue`;
     /// copied intent actions are applied through their existing local-player
@@ -293,6 +298,9 @@ interface types {
         /// Request exactly one main-hand placement through the existing
         /// local-player lifecycle — capability `act:place`.
         place-block(place-intent),
+        /// Request one selected-hotbar-slot update through the shell's normal
+        /// write-and-carried-item-echo lifecycle — capability `act:select-slot`.
+        select-slot(hotbar-slot),
     }
 
     /// A root command a guest wants the host to register. The host supplies one
@@ -362,7 +370,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.9.0"`.
+        /// `"lodestone:plugin@0.10.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.
