@@ -328,6 +328,98 @@ fn hosted_held_item_slot_reaches_the_shared_inventory_consumer() {
 }
 
 #[test]
+fn hosted_entity_action_lifts_leave_bed_through_the_registry_selected_boundary() {
+    let protocol = V5ServerProtocol;
+    // Protocol 5's entity-action body is fixed-width: sender i32, action
+    // byte, and jump boost i32. The nonzero sender and boost make this
+    // literal independent of the adapter and prove neither field selects the
+    // wake action.
+    let leave_bed = [0x01, 0x02, 0x03, 0x04, 3, 0x05, 0x06, 0x07, 0x08];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::ENTITY_ACTION, &leave_bed),
+        ServerBound::PlayerCommand { action: 0 },
+        "the old ordinal three is the shared wake action"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::ENTITY_ACTION,
+            &[0x01, 0x02, 0x03, 0x04, 2, 0, 0, 0, 0],
+        ),
+        ServerBound::Ignored,
+        "uncrouch must not be mistaken for leaving bed"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::ENTITY_ACTION,
+            &[0x01, 0x02, 0x03, 0x04, 3, 0, 0, 0, 0, 0],
+        ),
+        ServerBound::Ignored,
+        "a complete entity-action frame cannot have trailing bytes"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Login,
+            play::serverbound::ENTITY_ACTION,
+            &leave_bed,
+        ),
+        ServerBound::Ignored,
+        "entity actions are never accepted before Play"
+    );
+
+    let (packet_id, body) = V5Adapter::new()
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::PlayerCommand {
+                entity_id: 0,
+                command: lodestone_model::PlayerCommand::StopSleeping,
+            },
+        )
+        .expect("protocol-5 leave-bed action must encode")
+        .expect("leave-bed is one Play frame");
+    assert_eq!(packet_id, play::serverbound::ENTITY_ACTION);
+    assert_eq!(body, vec![0, 0, 0, 0, 3, 0, 0, 0, 0]);
+    let registry_protocol = lodestone_registry::server_protocol_for_protocol(5)
+        .expect("protocol 5 must resolve to its hosted family");
+    assert_eq!(
+        registry_protocol.decode(State::Play, packet_id, &body),
+        ServerBound::PlayerCommand { action: 0 },
+        "the registry-selected host must pass the client leave-bed action to the shared wake consumer"
+    );
+
+    // The same one-based table applies to the remaining representable
+    // entity actions. Keep these adapter values pinned here because action
+    // two would otherwise look plausible while meaning a different action.
+    for (command, action_id, jump_boost) in [
+        (lodestone_model::PlayerCommand::StartSprinting, 4, 0_i32),
+        (lodestone_model::PlayerCommand::StopSprinting, 5, 0_i32),
+        (
+            lodestone_model::PlayerCommand::StartRidingJump {
+                boost: 0x0102_0304,
+            },
+            6,
+            0x0102_0304_i32,
+        ),
+        (lodestone_model::PlayerCommand::OpenInventory, 7, 0_i32),
+    ] {
+        let (_, body) = V5Adapter::new()
+            .encode_action(
+                ConnectionState::Play,
+                &ClientAction::PlayerCommand {
+                    entity_id: 0,
+                    command,
+                },
+            )
+            .expect("representable protocol-5 entity action must encode")
+            .expect("entity action is one Play frame");
+        let mut expected = vec![0, 0, 0, 0, action_id];
+        expected.extend(jump_boost.to_be_bytes());
+        assert_eq!(body, expected, "{command:?}");
+    }
+}
+
+#[test]
 fn block_place_lifts_the_protocol_5_body_to_the_shared_placement_consumer() {
     let protocol = V5ServerProtocol;
     // x=258, y=64, z=-3, East face, empty inline stack, and cursor quarters.

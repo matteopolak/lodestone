@@ -19,8 +19,8 @@ use crate::PROTOCOL;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::game::{
     ClientboundChat, ClientboundPositionLook, JoinGame, KeepAliveRequest, KeepAliveResponse,
-    ServerboundArmAnimation, ServerboundChat, ServerboundFlying, ServerboundLook,
-    ServerboundPosition, ServerboundPositionLook,
+    EntityAction, ServerboundArmAnimation, ServerboundChat, ServerboundFlying,
+    ServerboundLook, ServerboundPosition, ServerboundPositionLook,
 };
 use crate::packets::entity::Animation;
 use crate::packets::handshake::SetProtocol;
@@ -403,6 +403,16 @@ impl ServerProtocol for V5ServerProtocol {
                 } else {
                     ServerBound::Ignored
                 }
+            }
+            // This era's entity-action ordinals start at one. The shared
+            // wake consumer represents leave-bed as action zero, so only its
+            // wire ordinal three crosses this version boundary. The sender id
+            // belongs to the connection and is intentionally not trusted.
+            State::Play if packet_id == play::serverbound::ENTITY_ACTION => {
+                let Some(EntityAction { action_id: 3, .. }) = decode_full(payload) else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::PlayerCommand { action: 0 }
             }
             State::Play if packet_id == play::serverbound::HELD_ITEM_SLOT => {
                 let Some(slot) = decode_full::<ServerboundHeldItemSlot>(payload)

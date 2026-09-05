@@ -118,6 +118,16 @@ the shared off-hand action (`3`) is degraded to the era's main-hand swing
 focused control follows both adapter directions through the registry-selected
 host and back to `ClientEvent::EntityAnimation`.
 
+The old fixed-width `entity_action` frame carries leave-bed into the shared
+wake consumer. Its action ordinals begin at one: `3` is leave-bed, whereas
+`2` is merely the end of crouching. The host discards the untrusted sender id
+and accepts only ordinal `3`, converting it to the shared wake action `0`.
+The client adapter uses the same old numbering for leave-bed, sprint, riding
+jump, and ridden-inventory commands. Literal bodies, including a nonzero
+sender id and jump boost, plus trailing-byte and wrong-state controls, pin the
+boundary; the adapter frame then passes through the registry-selected protocol
+5 host to the shared consumer.
+
 Hosted movement now lifts all four serverbound shapes into the shared server:
 `position` and `position_look` update the authoritative player sample,
 `look` updates rotation alone, and `flying` updates the grounded state alone.
