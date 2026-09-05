@@ -69,13 +69,15 @@ after work completes, so they are not a second unbounded chunk-residency map.
 Independent coordinates remain free to generate in parallel. The current
 `ChunkStore` path closes its source hand-off synchronously when the source has
 accepted its queued request; the wrapped `RegionChunkSource` then creates a
-second, coordinate-scoped durable-save token. `WorldSaveHandle::save` snapshots
-those bounded tokens, acknowledges each one only after all owned region writes
-succeed, and releases the source's authoritative edit only from the durable
-phase. A failed save leaves the token queued for retry; a newer unload of the
-same coordinate supersedes the old token, so a delayed reply is stale rather
-than able to release the wrong ownership. This is still a serial hand-off, not
-an unload worker, storage-format change, or I/O change.
+second, coordinate-scoped durable-save token. `WorldSaveHandle::begin_save`
+creates a single-use `WorldSaveJob` before the owner dispatches it to the
+blocking writer. The job carries only that bounded token snapshot,
+acknowledges each token only after its owned region writes succeed, and
+releases the source's authoritative edit only from the durable phase. A failed
+save leaves the token queued for retry; a newer unload of the same coordinate
+supersedes the old token, so a delayed worker reply is stale rather than able
+to release the wrong ownership. This is still a serial hand-off, not an unload
+worker, storage-format change, or I/O change.
 Entities outside this ambient-effect hand-off, natural-spawn planning, world
 border, game rules, time, weather and other cross-column work remain global.
 For a named populated scene,
@@ -136,9 +138,10 @@ a global acknowledgement history: an old reply must be stale, not a permanent
 resident record. Preserve `(cx, cz)` selection order, including negative
 coordinates, before dispatching any workers. The remaining gap is deeper
 regionization: the `ChunkSource` contract still exposes unload as a synchronous
-queue-acceptance hint, so a future asynchronous region owner must carry the
-durable token through its own worker/message boundary instead of treating the
-source-side acknowledgement as disk completion.
+queue-acceptance hint. `WorldSaveJob` carries the durable token across the
+current save worker boundary, but a future region owner must propagate that
+same job/result contract through its own message boundary instead of treating
+the source-side acknowledgement as disk completion.
 
 When recording a candidate report, name the populated scene and the explicit
 edge passed to `candidate_region_workload`. Compare total chunks, the number of

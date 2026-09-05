@@ -2605,9 +2605,9 @@ impl IntegratedServer {
                         );
                     }
                 }
-                let handle = autosave_handle.clone();
+                let save_job = autosave_handle.begin_save();
                 // The whole point: the write happens on the blocking pool.
-                let result = tokio::task::spawn_blocking(move || handle.save()).await;
+                let result = tokio::task::spawn_blocking(move || save_job.save()).await;
                 if let Ok(Err(err)) = result {
                     tracing::warn!("autosave failed, chunks stay dirty for the next attempt: {err}");
                 }
@@ -4520,9 +4520,10 @@ impl IntegratedServer {
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(handle) = self.save.take() {
+            let save_job = handle.begin_save();
             // `spawn_blocking` rather than a direct call: `shutdown` is an
             // `async fn` and may well be running on the runtime's core thread.
-            match tokio::task::spawn_blocking(move || handle.save()).await {
+            match tokio::task::spawn_blocking(move || save_job.save()).await {
                 Ok(Ok(written)) => {
                     tracing::debug!("world saved on shutdown: {written} chunk columns");
                 }

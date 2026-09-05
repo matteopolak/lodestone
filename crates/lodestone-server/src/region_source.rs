@@ -1287,6 +1287,20 @@ pub struct WorldSaveHandle {
     state: Arc<WorldState>,
 }
 
+/// One save invocation prepared by the world owner and consumed by a worker.
+///
+/// The job carries the durable-unload tokens that were current when the owner
+/// handed work off. It is deliberately not `Clone`: running one prepared job
+/// twice would turn a completion message into an implicit retry, which hides
+/// the one acknowledgement boundary that a later region worker must retain.
+/// A token superseded before this job runs is stale and cannot release the
+/// newer unload.
+#[derive(Debug)]
+pub(crate) struct WorldSaveJob {
+    handle: WorldSaveHandle,
+    unload_tokens: Vec<DurableUnloadToken>,
+}
+
 /// An owned snapshot of one complete production column awaiting persistence.
 ///
 /// The source is consulted for a column that is pending only because it owns a
@@ -1304,6 +1318,21 @@ pub struct NativeDirtyChunkSnapshot {
 }
 
 impl WorldSaveHandle {
+    /// Prepares one save for execution outside the world owner's thread.
+    ///
+    /// This is the worker hand-off boundary: the token snapshot is taken
+    /// before a caller puts the job on a blocking pool, while the job itself
+    /// owns the only route that can acknowledge those tokens after its writes
+    /// finish. The save's dirty-column snapshot remains inside [`WorldSaveJob::save`]
+    /// so edits made before the worker starts are still included.
+    #[must_use]
+    pub(crate) fn begin_save(&self) -> WorldSaveJob {
+        WorldSaveJob {
+            handle: self.clone(),
+            unload_tokens: self.pending_unload_tokens(),
+        }
+    }
+
     /// How many chunks are waiting to be written.
     #[must_use]
     pub fn dirty_count(&self) -> usize {
@@ -1464,10 +1493,17 @@ impl WorldSaveHandle {
     /// On failure the affected chunks are put **back** into the dirty set, so
     /// a transient disk error costs a retry rather than the player's work.
     pub fn save(&self) -> Result<usize, Error> {
+        self.begin_save().save()
+    }
+
+    /// Executes a prepared save using the durable tokens owned by its worker.
+    fn save_with_unload_tokens(
+        &self,
+        unload_tokens: &[DurableUnloadToken],
+    ) -> Result<usize, Error> {
         // A token remains queued while this save is in flight. A later unload
         // of the same coordinate supersedes this snapshot and is rejected as
         // stale below, leaving the current token for the next save.
-        let unload_tokens = self.pending_unload_tokens();
         let mut pending: HashSet<(i32, i32)> = {
             let mut dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
             dirty.drain().collect()
@@ -1499,7 +1535,7 @@ impl WorldSaveHandle {
             // whose evicted columns should be released, and an early return
             // here would mean memory is only ever reclaimed while the player
             // is placing blocks.
-            for token in unload_tokens {
+            for &token in unload_tokens {
                 let _ = self.acknowledge_unload(token);
             }
             self.release_unloaded();
@@ -1537,7 +1573,7 @@ impl WorldSaveHandle {
         // After the writes, never before: the sweep's whole safety argument is
         // that anything it drops is already on disk. A token replaced by a
         // newer unload is stale and remains queued for that newer save.
-        for token in unload_tokens {
+        for &token in unload_tokens {
             let _ = self.acknowledge_unload(token);
         }
         self.release_unloaded();
@@ -1789,6 +1825,16 @@ impl WorldSaveHandle {
     }
 }
 
+impl WorldSaveJob {
+    /// Runs this job's disk work and, only after success, its token hand-off.
+    ///
+    /// Consuming `self` makes completion linear: a caller must prepare a new
+    /// job for a retry rather than replaying an old worker result.
+    pub(crate) fn save(self) -> Result<usize, Error> {
+        self.handle.save_with_unload_tokens(&self.unload_tokens)
+    }
+}
+
 /// Unload-driven saving, gated over the real composition.
 ///
 /// # The control, run and observed
@@ -1858,6 +1904,55 @@ mod tests {
         );
         assert!(ledger.release(second));
         assert!(ledger.pending.is_empty());
+    }
+
+    /// A blocking save job must carry its token snapshot from the world owner
+    /// to the worker, rather than reading whatever unload happens to be
+    /// queued once that worker eventually starts. The second unload is the
+    /// discriminator: an implementation that looks up the token in the
+    /// worker would acknowledge it and release the edit one save too early.
+    #[test]
+    fn a_prepared_save_job_cannot_acknowledge_a_newer_same_chunk_unload() {
+        let dir = tempdir("save-job-token");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("open world");
+        let handle = source.save_handle();
+
+        source.set_block(1, 70, 1, MARKER);
+        source.unload(0, 0);
+        let first_job = handle.begin_save();
+        // The owner releases this column again before the worker gets CPU.
+        // That must replace, not become, the token the first worker owns.
+        source.unload(0, 0);
+
+        let first_written = std::thread::spawn(move || first_job.save())
+            .join()
+            .expect("save worker must not panic")
+            .expect("first save worker must write the edit");
+        assert_eq!(first_written, 1);
+        assert_eq!(
+            (
+                source.retained_columns(),
+                handle.stats().unloaded.load(Ordering::Relaxed)
+            ),
+            (1, 0),
+            "the delayed first worker must not complete the newer unload"
+        );
+
+        assert_eq!(
+            handle.begin_save().save().expect("second save worker"),
+            0,
+            "the next worker has no new dirty column, only the current token"
+        );
+        assert_eq!(
+            (
+                source.retained_columns(),
+                handle.stats().unloaded.load(Ordering::Relaxed)
+            ),
+            (0, 1),
+            "only the job that captured the current token may release the edit"
+        );
+        assert_eq!(source.block_state(1, 70, 1), MARKER);
     }
 
     #[derive(Debug)]
