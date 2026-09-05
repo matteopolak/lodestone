@@ -56,6 +56,15 @@ Chat's Tab and the in-world player-list overlay's Tab share one key and cannot s
 whichever context is open handles the key, by construction of the input-gating layer rather than by any
 special-cased binding.
 
+### Command-tree traversal
+
+The packet decode boundary initially has flat integer node positions, but `CommandTree::new` validates
+them before the shell sees the tree. Chat starts at `CommandTree::root_id` and advances only through
+`CommandNodeId` values returned by `effective_children_from`; it looks nodes up with `node_for`. This
+keeps a command-node position distinct from a byte offset in the input, a packet id, or another raw
+integer. A handle describes a position, not ownership of a particular tree, so chat keeps it only for
+one synchronous walk and never carries it over a command-tree replacement.
+
 ### Word wrap and scrollback layout
 
 Received lines are greedily word-wrapped against real font metrics (the same metrics the draw itself
@@ -153,6 +162,9 @@ surfaced as a local message rather than touching the filesystem.
 - **Selection highlighting and the caret draw must derive their pixel positions from the same width
   measurement the glyph draw uses**, clamped to both the string and the visible input strip, so a stale
   or out-of-range selection can never emit an invalid fill.
+- **Keep command-tree wire indices at the adapter boundary.** Consumers should use
+  `CommandTree::root_id`, `effective_children_from`, and `node_for`; only an encoder or diagnostic
+  should call `CommandNodeId::index`. Do not retain a `CommandNodeId` after replacing its tree.
 
 ## Configuration
 

@@ -282,6 +282,31 @@ pub enum NodeKind {
     },
 }
 
+/// A node position that a [`CommandTree`] has already range-checked.
+///
+/// A commands packet names nodes with plain integer positions while it is
+/// decoded. [`CommandTree::new`] validates those positions once, then
+/// [`CommandTree::root_id`] and [`CommandTree::effective_children_from`] keep
+/// consumers on this nominal type. It has no public constructor: wire adapters
+/// stay at the raw boundary, while a consumer cannot accidentally pass a text
+/// offset, packet id, or another raw integer to a tree traversal.
+///
+/// The type deliberately does not claim tree ownership: callers must not
+/// retain an id across a command-tree replacement. [`CommandTree::node_for`]
+/// still returns `None` when a checked position is too large for the tree it
+/// is asked about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CommandNodeId(usize);
+
+impl CommandNodeId {
+    /// Returns the raw flat-list position for a protocol encoder or diagnostic
+    /// at the explicit wire boundary.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
+
 /// One node exactly as vanilla's commands-packet entry carries it: flags,
 /// a redirect target, and a child index list, all as flat indices into the
 /// owning [`CommandTree`]'s node list.
@@ -374,10 +399,29 @@ impl CommandTree {
         self.root
     }
 
+    /// The root node's checked identity for consumers that traverse this tree.
+    ///
+    /// Prefer this over [`Self::root`] outside a protocol decode or encode
+    /// boundary so a node position cannot be confused with another integer.
+    #[must_use]
+    pub const fn root_id(&self) -> CommandNodeId {
+        CommandNodeId(self.root)
+    }
+
     /// Looks up a node by index.
     #[must_use]
     pub fn node(&self, index: usize) -> Option<&RawCommandNode> {
         self.nodes.get(index)
+    }
+
+    /// Looks up a node by its checked identity.
+    ///
+    /// The optional result keeps a checked position from indexing a tree that
+    /// is shorter than the tree which minted it. Do not retain ids across a
+    /// command-tree replacement: this nominal type cannot express ownership.
+    #[must_use]
+    pub fn node_for(&self, id: CommandNodeId) -> Option<&RawCommandNode> {
+        self.nodes.get(id.0)
     }
 
     /// How many nodes the tree has.
@@ -410,6 +454,16 @@ impl CommandTree {
         let mut out = Vec::new();
         self.effective_children_into(start, &mut visited, &mut out);
         out
+    }
+
+    /// The checked identities reachable from `start` without consuming a
+    /// token. This is [`Self::effective_children`] for consumers after decode.
+    #[must_use]
+    pub fn effective_children_from(&self, start: CommandNodeId) -> Vec<CommandNodeId> {
+        self.effective_children(start.0)
+            .into_iter()
+            .map(CommandNodeId)
+            .collect()
     }
 
     fn effective_children_into(
@@ -650,6 +704,29 @@ mod tests {
         let nodes = vec![root(vec![1, 2]), literal("a", vec![]), literal("b", vec![])];
         let tree = CommandTree::new(nodes, 0).unwrap();
         assert_eq!(tree.effective_children(0), vec![1, 2]);
+    }
+
+    #[test]
+    fn checked_node_ids_follow_the_validated_tree_edges() {
+        let nodes = vec![root(vec![1]), literal("help", vec![])];
+        let tree = CommandTree::new(nodes, 0).unwrap();
+
+        let root = tree.root_id();
+        assert!(matches!(
+            tree.node_for(root).map(|node| &node.kind),
+            Some(NodeKind::Root)
+        ));
+        let children = tree.effective_children_from(root);
+        assert_eq!(children.len(), 1);
+        assert_eq!(
+            children[0].index(),
+            1,
+            "the explicit encoder boundary sees the wire index"
+        );
+        assert!(matches!(
+            tree.node_for(children[0]).map(|node| &node.kind),
+            Some(NodeKind::Literal { name }) if name == "help"
+        ));
     }
 
     #[test]
