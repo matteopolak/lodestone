@@ -64,6 +64,12 @@ exercised this at all, which is why every gate built against a fresh or in-memor
 regardless — the discriminating input is specifically a **saved** chunk that also carries a pending
 tick, and every existing test happened to use worlds with neither.
 
+The broader callback-held-handle order is checked in debug and test builds by
+`lodestone_server::lock_order`: the scheduled queue is before the staged queue, block-entity
+registry, and mob simulation. It is a thread-local diagnostic rather than a runtime coordinator,
+so release builds add no lock-tracking contention. A new callback-held handle must be placed in
+that order before it can be acquired from scheduled work.
+
 ### Block-entity ticking is gated by residency, not by distance
 
 Block entities (hoppers foremost, since only that kind actually probes world state each tick) used

@@ -9957,6 +9957,7 @@ impl MobHandle {
     /// established, for the identical "no caller can forget to handle a
     /// poisoned lock inconsistently" reason.
     pub fn with<R>(&self, f: impl FnOnce(&mut MobSim<'static>) -> R) -> R {
+        let _order = crate::lock_order::acquire(crate::lock_order::LockClass::Mobs);
         let mut guard = self.0.lock().expect("mob sim lock poisoned");
         f(&mut guard)
     }

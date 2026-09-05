@@ -711,6 +711,7 @@ impl AccessHandle {
 
     /// Runs `f` against the locked lists.
     pub fn with<R>(&self, f: impl FnOnce(&mut AccessLists) -> R) -> R {
+        let _order = crate::lock_order::acquire(crate::lock_order::LockClass::AccessLists);
         let mut guard = self.lists.lock().expect("access list lock poisoned");
         f(&mut guard)
     }

@@ -624,6 +624,7 @@ impl GameRulesHandle {
     /// `.await`, so the compiler guarantees the `MutexGuard` never crosses a
     /// suspension point and the holding task stays `Send`.
     pub fn with<R>(&self, f: impl FnOnce(&mut GameRules) -> R) -> R {
+        let _order = crate::lock_order::acquire(crate::lock_order::LockClass::GameRules);
         f(&mut self.0.lock().expect("game rules lock poisoned"))
     }
 

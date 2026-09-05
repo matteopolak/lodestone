@@ -436,11 +436,15 @@ impl ScheduledTickHandle {
     /// the queues in a state where a loaded chunk's ticks are staged but not
     /// scheduled: every read of the queues in the crate goes through here.
     pub fn with<R>(&self, f: impl FnOnce(&mut ScheduledTickQueues) -> R) -> R {
+        let _queues_order =
+            crate::lock_order::acquire(crate::lock_order::LockClass::ScheduledQueues);
         let mut guard = self.queues.lock().expect("scheduled tick lock poisoned");
         // Lock order is always `queues` then `staged`, never the reverse —
         // `stage` takes `staged` alone. Inverting it here would reintroduce a
         // deadlock of a different shape.
         let staged: Vec<StagedTick> = {
+            let _staged_order =
+                crate::lock_order::acquire(crate::lock_order::LockClass::ScheduledStaged);
             let mut pending = self.staged.lock().expect("staged tick lock poisoned");
             if pending.is_empty() {
                 Vec::new()
@@ -482,6 +486,7 @@ impl ScheduledTickHandle {
             return 0;
         }
         let count = ticks.len() as u64;
+        let _order = crate::lock_order::acquire(crate::lock_order::LockClass::ScheduledStaged);
         self.staged
             .lock()
             .expect("staged tick lock poisoned")

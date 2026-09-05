@@ -1089,6 +1089,7 @@ impl BlockEntityHandle {
     /// below, matching [`crate::mobs::LiveMobSource`]'s own
     /// "poisoned lock is a bug, not a recoverable condition" precedent.
     pub fn with<R>(&self, f: impl FnOnce(&mut BlockEntityRegistry) -> R) -> R {
+        let _order = crate::lock_order::acquire(crate::lock_order::LockClass::BlockEntities);
         let mut guard = self.0.lock().expect("block entity registry lock poisoned");
         f(&mut guard)
     }

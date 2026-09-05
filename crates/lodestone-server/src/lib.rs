@@ -477,6 +477,7 @@ mod weather;
 /// both happen outside this module, in `crate::mobs` — this module only
 /// decides, and hands its decision off through [`lightning::LightningFeed`].
 pub mod lightning;
+mod lock_order;
 /// Vanilla's regional difficulty (`DifficultyInstance`) — the scalar grown
 /// from world difficulty, elapsed game time and moon phase
 /// (`docs/regional-difficulty.md`). Public because [`lightning`]'s

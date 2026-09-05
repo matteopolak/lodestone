@@ -452,6 +452,7 @@ impl BorderFeed {
     /// resize entry point (`set_size`, `lerp_size_between`, `set_center`,
     /// `set_damage_per_block`, ...) both go through this.
     pub fn with<R>(&self, f: impl FnOnce(&mut WorldBorder) -> R) -> R {
+        let _order = crate::lock_order::acquire(crate::lock_order::LockClass::Border);
         f(&mut *self.0.lock().expect("border feed lock poisoned"))
     }
 }
