@@ -40,6 +40,8 @@ use lodestone::plugin::types::{InventoryClick, InventoryClickButton};
 use lodestone::plugin::types::InventoryHotbarSwap;
 #[cfg(any(feature = "inventory-throw", feature = "inventory-throw-invalid"))]
 use lodestone::plugin::types::{InventoryThrow, InventoryThrowMode};
+#[cfg(feature = "drop-selected-item")]
+use lodestone::plugin::types::SelectedItemDropMode;
 #[cfg(feature = "commands")]
 use lodestone::plugin::types::CommandAnchor;
 #[cfg(feature = "look")]
@@ -66,6 +68,8 @@ static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0)
 static PLACEMENT_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "break")]
 static BREAK_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "drop-selected-item")]
+static DROP_SELECTED_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "scheduler")]
 static REPEATS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(feature = "scheduler")]
@@ -93,7 +97,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.17.0".to_string(),
+            abi: "lodestone:plugin@0.18.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -184,10 +188,17 @@ impl Guest for ChatResponder {
         #[cfg(feature = "inventory-drop-cursor")]
         return vec![Action::InventoryDropCursor];
 
+        #[cfg(feature = "drop-selected-item")]
+        return if !DROP_SELECTED_SENT.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            vec![Action::DropSelectedItem(SelectedItemDropMode::Stack)]
+        } else {
+            Vec::new()
+        };
+
         #[cfg(feature = "fs-write")]
         return write_files();
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "fs-write")))]
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "fs-write")))]
         return respond(events);
     }
 
@@ -464,7 +475,7 @@ fn attempt_network() -> Vec<Action> {
     ))]
 }
 
-#[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "fs-write")))]
+#[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "drop-selected-item", feature = "fs-write")))]
 fn respond(events: Vec<Event>) -> Vec<Action> {
     {
         let mut actions = Vec::new();

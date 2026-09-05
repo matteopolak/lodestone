@@ -132,6 +132,9 @@ pub enum Capability {
     /// This does not follow from any slot-click capability: it removes an item
     /// from the cursor and needs its own explicitly granted authority.
     ActInventoryDropCursor,
+    /// Drop one item or the complete selected stack through the normal client
+    /// action queue. The live client owns the selected stack and wire encoding.
+    ActDropSelectedItem,
     /// Receive a generation-bounded outcome after a WASM or native placement
     /// attempt resolves.
     ///
@@ -191,6 +194,7 @@ impl Capability {
         Self::ActInventoryHotbarSwap,
         Self::ActInventoryThrow,
         Self::ActInventoryDropCursor,
+        Self::ActDropSelectedItem,
         Self::ObservePlace,
         Self::ObserveBreak,
         Self::VetoActions,
@@ -221,6 +225,7 @@ impl Capability {
             Self::ActInventoryHotbarSwap => "act:inventory-hotbar-swap",
             Self::ActInventoryThrow => "act:inventory-throw",
             Self::ActInventoryDropCursor => "act:inventory-drop-cursor",
+            Self::ActDropSelectedItem => "act:drop-selected-item",
             Self::ObservePlace => "observe:place",
             Self::ObserveBreak => "observe:break",
             Self::VetoActions => "veto:actions",
@@ -266,6 +271,7 @@ impl Capability {
             | Self::ActInventoryHotbarSwap
             | Self::ActInventoryThrow
             | Self::ActInventoryDropCursor
+            | Self::ActDropSelectedItem
             | Self::ObservePlace
             | Self::ObserveBreak
             | Self::VetoActions
@@ -462,6 +468,10 @@ mod tests {
         assert!(
             !policy.contains(Capability::ActInventoryThrow),
             "act:inventory-throw must not be granted by default"
+        );
+        assert!(
+            !policy.contains(Capability::ActDropSelectedItem),
+            "act:drop-selected-item must not be granted by default"
         );
         assert!(policy.contains(Capability::ObserveChat));
         assert!(policy.contains(Capability::ActChat));

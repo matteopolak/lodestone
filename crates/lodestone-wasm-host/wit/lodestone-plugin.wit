@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.17.0;
+package lodestone:plugin@0.18.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -288,6 +288,14 @@ interface types {
         generation: u64,
     }
 
+    /// Whether to drop one item or the complete selected stack. The host queues
+    /// the corresponding client action; the guest cannot provide an item or
+    /// inventory slot, so the live client remains the authority on what is held.
+    enum selected-item-drop-mode {
+        one,
+        stack,
+    }
+
     /// A one-shot request to select one of the nine hotbar slots. The host
     /// validates the range through the normal local-player selection consumer;
     /// it never exposes a direct selected-slot write or packet constructor.
@@ -385,6 +393,9 @@ interface types {
         /// chooses the outside-click representation and owns prediction,
         /// veto, changed slots, and egress.
         inventory-drop-cursor,
+        /// Drop one item or the complete selected stack through the normal
+        /// client action queue — capability `act:drop-selected-item`.
+        drop-selected-item(selected-item-drop-mode),
     }
 
     /// A root command a guest wants the host to register. The host supplies one
@@ -454,7 +465,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.17.0"`.
+        /// `"lodestone:plugin@0.18.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.
