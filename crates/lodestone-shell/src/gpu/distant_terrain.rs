@@ -46,7 +46,8 @@ struct TileUniform {
     origin_cell: [i32; 2],
     atlas_origin: [i32; 2],
     cell_blocks: u32,
-    _padding: [u32; 3],
+    near_field_radius_blocks: f32,
+    _padding: [u32; 2],
 }
 
 /// Tracks which fixed atlas slots contain real surface samples.
@@ -121,6 +122,7 @@ pub(crate) struct DistantTerrainRenderer {
     tile_bind_group: wgpu::BindGroup,
     tile_uniform_stride: u32,
     tile_uniform_bytes: RefCell<Vec<u8>>,
+    near_field_radius_blocks: f32,
     pipeline: wgpu::RenderPipeline,
 }
 
@@ -331,6 +333,7 @@ impl DistantTerrainRenderer {
                     * HORIZON_TILES_PER_AXIS
                     * HORIZON_TILES_PER_AXIS
             ]),
+            near_field_radius_blocks: 0.0,
             pipeline,
         })
     }
@@ -343,6 +346,15 @@ impl DistantTerrainRenderer {
         if self.terrain.centre() != before {
             self.residency.clear();
         }
+    }
+
+    /// Exclude the normal streamed-chunk disk from the coarse pass.
+    ///
+    /// This is a visual transition only: it neither changes the normal camera
+    /// far plane nor requests a chunk. The clamp makes a malformed option no
+    /// more expensive than the fixed 256-chunk representation can be.
+    pub(crate) fn set_near_field_radius_chunks(&mut self, chunks: u32) {
+        self.near_field_radius_blocks = (chunks.min(256) * HORIZON_CELL_BLOCKS as u32) as f32;
     }
 
     /// Query and upload one still-empty tile. Returns false once the fixed
@@ -413,7 +425,8 @@ impl DistantTerrainRenderer {
                 ],
                 atlas_origin: atlas_origin(slot),
                 cell_blocks: HORIZON_CELL_BLOCKS as u32,
-                _padding: [0; 3],
+                near_field_radius_blocks: self.near_field_radius_blocks,
+                _padding: [0; 2],
             };
             let start = slot * self.tile_uniform_stride as usize;
             bytes[start..start + TILE_UNIFORM_BYTES as usize]
@@ -525,5 +538,12 @@ mod tests {
     fn first_query_tile_is_the_camera_tile_not_a_far_corner() {
         let residency = TileResidency::empty();
         assert_eq!(residency.next_omitted(), Some(40));
+    }
+
+    #[test]
+    fn near_field_clip_cannot_exceed_the_fixed_horizon() {
+        let set = |chunks: u32| (chunks.min(256) * HORIZON_CELL_BLOCKS as u32) as f32;
+        assert_eq!(set(8), 128.0);
+        assert_eq!(set(u32::MAX), 4096.0);
     }
 }
