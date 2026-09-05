@@ -1092,6 +1092,13 @@ pub enum ServerBound {
     /// The client completed its initial placement and is ready for movement
     /// dependent simulation.
     PlayerLoaded,
+    /// The client applied a server-issued position correction and echoed its
+    /// teleport id. The connection accepts movement again only when this id
+    /// matches its latest outstanding correction.
+    TeleportationAccepted {
+        /// The id copied from the clientbound player-position packet.
+        id: i32,
+    },
     /// The client changed its flight toggle; permission remains server-owned.
     PlayerAbilitiesChanged {
         /// Requested current flight state.
@@ -2145,6 +2152,27 @@ pub trait ServerProtocol: Send + Sync {
         self.begin_play(view_radius)
     }
 
+    /// Whether this family attaches an acknowledgement id to clientbound player
+    /// position packets. The server only waits for confirmations when this is
+    /// true, so older families retain their existing movement contract.
+    fn uses_teleport_acknowledgements(&self) -> bool {
+        false
+    }
+
+    /// Like [`begin_play_at`](Self::begin_play_at), but gives an
+    /// acknowledgement-capable family the id its initial position packet must
+    /// carry. The default deliberately retains the legacy join sequence.
+    fn begin_play_at_with_teleport_id(
+        &self,
+        view_radius: i32,
+        spawn: Vec3,
+        mode: GameMode,
+        teleport_id: i32,
+    ) -> Vec<ServerDirective> {
+        let _ = teleport_id;
+        self.begin_play_at(view_radius, spawn, mode)
+    }
+
     /// Encodes a game-mode change for the local player (vanilla
     /// `ClientboundGameEventPacket` with `CHANGE_GAME_MODE`, whose float
     /// parameter is the `GameType` id).
@@ -3000,6 +3028,42 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes a same-dimension position correction with the server-selected
+    /// acknowledgement id. Families without acknowledgement ids delegate to
+    /// [`encode_teleport`](Self::encode_teleport).
+    fn encode_teleport_with_id(
+        &self,
+        teleport_id: i32,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+    ) -> ServerDirective {
+        let _ = teleport_id;
+        self.encode_teleport(x, y, z, yaw, pitch)
+    }
+
+    /// Encodes a death respawn with the id on its placement correction. The
+    /// default preserves families whose respawn packet carries no such id.
+    fn encode_respawn_with_teleport_id(&self, teleport_id: i32, spawn: Vec3) -> Vec<ServerDirective> {
+        let _ = teleport_id;
+        self.encode_respawn(spawn)
+    }
+
+    /// Encodes a dimension change with the id on its placement correction. An
+    /// empty result still means the destination is unsupported.
+    fn encode_dimension_change_with_teleport_id(
+        &self,
+        teleport_id: i32,
+        dimension: &str,
+        spawn: Vec3,
+        mode: GameMode,
+    ) -> Vec<ServerDirective> {
+        let _ = teleport_id;
+        self.encode_dimension_change(dimension, spawn, mode)
+    }
+
     /// Encodes `ClientboundAnimatePacket` — the arm-swing animation, the
     /// [`ServerBound::Swing`] consumer's whole output. `action` is vanilla's
     /// own byte constant (`0` main-hand swing, `3` off-hand swing); this
@@ -3511,6 +3575,20 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).begin_play_at(view_radius, spawn, mode)
     }
 
+    fn uses_teleport_acknowledgements(&self) -> bool {
+        (**self).uses_teleport_acknowledgements()
+    }
+
+    fn begin_play_at_with_teleport_id(
+        &self,
+        view_radius: i32,
+        spawn: Vec3,
+        mode: GameMode,
+        teleport_id: i32,
+    ) -> Vec<ServerDirective> {
+        (**self).begin_play_at_with_teleport_id(view_radius, spawn, mode, teleport_id)
+    }
+
     // Forwarded for the same reason `begin_play_at` is: both have defaults that
     // emit nothing, so a missing forward here would silently mute the game-mode
     // and abilities packets on the singleplayer (boxed) path alone.
@@ -3893,6 +3971,32 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_teleport(&self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> ServerDirective {
         (**self).encode_teleport(x, y, z, yaw, pitch)
+    }
+
+    fn encode_teleport_with_id(
+        &self,
+        teleport_id: i32,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+    ) -> ServerDirective {
+        (**self).encode_teleport_with_id(teleport_id, x, y, z, yaw, pitch)
+    }
+
+    fn encode_respawn_with_teleport_id(&self, teleport_id: i32, spawn: Vec3) -> Vec<ServerDirective> {
+        (**self).encode_respawn_with_teleport_id(teleport_id, spawn)
+    }
+
+    fn encode_dimension_change_with_teleport_id(
+        &self,
+        teleport_id: i32,
+        dimension: &str,
+        spawn: Vec3,
+        mode: GameMode,
+    ) -> Vec<ServerDirective> {
+        (**self).encode_dimension_change_with_teleport_id(teleport_id, dimension, spawn, mode)
     }
 
     fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {

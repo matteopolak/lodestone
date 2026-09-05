@@ -39,13 +39,13 @@ tags; structured dimension/clock data and opaque payloads share the same orderin
 
 The remaining server work is consumer connectivity and hardening:
 
-1. **Serverbound consumers.** The 47/69 connected result leaves 22 cases without an end-to-end
-   consumer: 19 decode to `Ignored`, and three still need decode arms. Move applicable cases to
-   specific `ServerBound` values and server effects. The outstanding cases cover teleport
-   acknowledgement, tag queries, tick/configuration markers, click and ability controls, pong,
-   recipe/advancement/resource-pack state, minecart and structure/jigsaw administration, and the
-   test-block action. A capability with no server meaning should remain explicitly side-effect-only;
-   otherwise it needs a dispatcher and integration test.
+1. **Serverbound consumers.** The 54/69 connected result leaves 15 cases without an end-to-end
+   consumer: 12 decode to `Ignored`, and three still need decode arms. The teleport acknowledgement
+   is now connection state: every 26.2 player-position producer receives a unique pending id, and
+   movement remains gated until its matching reply arrives. The remaining cases cover tick/
+   configuration markers, click controls, pong, recipe/advancement state, minecart and
+   structure/jigsaw administration, and the test-block action. A capability with no server meaning
+   should remain explicitly side-effect-only; otherwise it needs a dispatcher and integration test.
 2. **Chat relay fidelity.** The server validates an inbound signed message but broadcasts it as
    system chat. Implement relay as signed player chat, a receiver-visible signature cache, and
    `chat_ack` handling before treating social/reporting behaviour as complete.
