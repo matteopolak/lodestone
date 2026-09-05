@@ -1421,6 +1421,8 @@ impl WindowApp {
         self.sim.stats.occlusion_walks = stats.occlusion_walks;
         self.sim.stats.frame_ms = frame_ms;
         self.sim.stats.fps = self.pacer.fps() as f32;
+        let ping_rtt_ms = self.sim.ping_rtt_ms();
+        self.sim.stats.ping_rtt_ms = ping_rtt_ms;
         // `ServerDifficulty` reached a real, tested ECS fold but nothing in the
         // shell read it — this is that last hop, onto the F3 overlay's own
         // `Difficulty:` line (`hud.rs`'s `DebugStats::left_lines`).

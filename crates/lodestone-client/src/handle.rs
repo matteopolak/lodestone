@@ -125,6 +125,17 @@ impl ClientHandle {
         self.state.rotation()
     }
 
+    /// Returns the most recent play-state pong's echoed request timestamp.
+    ///
+    /// This is the exact epoch-millisecond value the caller supplied in its
+    /// [`ClientAction::PingRequest`], not a latency value by itself. Keeping the
+    /// clock comparison at the consumer lets native and browser shells share one
+    /// wire-level read-model value.
+    #[must_use]
+    pub fn last_ping_echo_ms(&self) -> Option<i64> {
+        self.state.last_ping_echo_ms()
+    }
+
     /// Returns the player's current health in half-hearts, or `None` if the
     /// server has not reported it yet.
     #[must_use]

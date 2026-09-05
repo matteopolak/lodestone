@@ -325,6 +325,11 @@ struct LocalEcho {
     rotation: Rotation,
     /// Whether we last reported ourselves on the ground.
     on_ground: bool,
+    /// The timestamp a play-state pong echoed from the client's own ping request.
+    ///
+    /// This is an acknowledgement, not a clock: the shell compares it with its
+    /// portable current epoch when it draws the F3 round-trip-time line.
+    last_ping_echo_ms: Option<i64>,
 }
 
 /// A snapshot of the currently open non-player menu.
@@ -740,6 +745,17 @@ impl SharedState {
     #[must_use]
     pub(crate) fn rotation(&self) -> Rotation {
         self.local_echo().rotation
+    }
+
+    /// The most recent timestamp echoed by a play-state pong, if one arrived.
+    ///
+    /// The value is exactly the `time` the caller put in
+    /// [`ClientAction::PingRequest`](lodestone_model::ClientAction::PingRequest),
+    /// not a driver-side receipt time. This keeps the clock choice with the
+    /// caller that displays or measures the round trip, including wasm builds.
+    #[must_use]
+    pub(crate) fn last_ping_echo_ms(&self) -> Option<i64> {
+        self.local_echo().last_ping_echo_ms
     }
 
     /// Builds the current player snapshot.
@@ -1309,9 +1325,10 @@ impl SharedState {
 }
 
 impl LocalEcho {
-    /// Applies the server's authoritative correction to our own pose.
+    /// Applies the server's authoritative correction to our own pose and the
+    /// echoed timestamp for the client-initiated latency probe.
     ///
-    /// **`TeleportPlayer` is the only event left here.** This used to be the
+    /// **`TeleportPlayer` and `PongReceived` are the only events left here.** This used to be the
     /// scalar read-model's whole fold; everything else it folded now lives in
     /// components:
     ///
@@ -1334,16 +1351,17 @@ impl LocalEcho {
     /// `PlayerListRemove` arm, so a player who left the server never left this
     /// read-model. `lodestone_game::tablist::TabList::apply` handles both.
     ///
-    /// Chat, `KeepAlive` and `Disconnect` carry no scalar read-model state.
+    /// `PongReceived` is a client-initiated latency acknowledgement rather than
+    /// a session component: it preserves the client-supplied timestamp for the
+    /// shell's portable-clock display. Chat, `KeepAlive` and `Disconnect` carry
+    /// no scalar read-model state.
     /// `ChunkLoaded`/`ChunkUnloaded` are applied by the adapter through the
     /// `WorldSink`, so their heavy payload never reaches this fold at all.
     fn apply(&mut self, event: &ClientEvent) {
-        let ClientEvent::TeleportPlayer {
-            pos,
-            rotation,
-            flags,
-        } = event
-        else {
+        let ClientEvent::TeleportPlayer { pos, rotation, flags } = event else {
+            if let ClientEvent::PongReceived { time } = event {
+                self.last_ping_echo_ms = Some(*time);
+            }
             return;
         };
         let base = self.position.unwrap_or_default();
@@ -1690,6 +1708,27 @@ mod tests {
         state.apply(&ClientEvent::HeldSlotChanged { slot: 4 });
         let ecs = state.ecs.read();
         assert_eq!(ecs.get::<SelectedSlot>(state.session).unwrap().0, 4);
+    }
+
+    /// The play-state pong carries the timestamp chosen by the F3 latency
+    /// probe, not a server clock. Keeping it in the client read-model is what
+    /// lets the shell calculate a round trip with its portable local clock.
+    #[test]
+    fn apply_retains_the_latest_play_pong_timestamp() {
+        let state = SharedState::default();
+        assert_eq!(state.last_ping_echo_ms(), None, "no pong before a probe replies");
+
+        state.apply(&ClientEvent::PongReceived { time: 1_700_000_123_456 });
+        assert_eq!(state.last_ping_echo_ms(), Some(1_700_000_123_456));
+
+        // A server-initiated ping is the nearby but distinct packet family: it
+        // asks the driver for an immediate pong response and must not overwrite
+        // the client-initiated probe's sample.
+        state.apply(&ClientEvent::Ping { id: 17 });
+        assert_eq!(state.last_ping_echo_ms(), Some(1_700_000_123_456));
+
+        state.apply(&ClientEvent::PongReceived { time: 1_700_000_124_017 });
+        assert_eq!(state.last_ping_echo_ms(), Some(1_700_000_124_017));
     }
 
     // ---- the nine world-level admin variants, through the real path ---------

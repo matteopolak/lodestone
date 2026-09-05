@@ -67,6 +67,16 @@ use super::*;
 // type comes from.
 use lodestone_model::text::TextSpan;
 
+/// Subtracts a client-chosen epoch-millisecond ping timestamp from a current
+/// portable epoch reading.
+///
+/// A pong with a negative or future timestamp cannot be a response to this
+/// client's current probe, so it must not become a huge wrapped latency value.
+fn ping_round_trip_ms(now_ms: u128, echoed_ms: Option<i64>) -> Option<u64> {
+    let echoed_ms = u128::try_from(echoed_ms?).ok()?;
+    u64::try_from(now_ms.checked_sub(echoed_ms)?).ok()
+}
+
 impl Sim {
     /// Open a live connection to `host:port` and attach it, threading this `Sim`'s
     /// one `World` into the client so ingest folds where these systems read.
@@ -1896,6 +1906,24 @@ impl Sim {
         }
     }
 
+    /// The latest F3 ping probe's round-trip time, in milliseconds.
+    ///
+    /// `PongReceived` preserves the timestamp that this client put in its
+    /// request; this method supplies the matching portable current clock. It
+    /// returns `None` before a pong arrives and if a clock adjustment puts the
+    /// echoed timestamp in the future, so the debug overlay never invents a
+    /// plausible latency value.
+    #[must_use]
+    pub fn ping_rtt_ms(&self) -> Option<u64> {
+        let echoed_ms = self
+            .net
+            .as_ref()?
+            .shared_handle()
+            .get()?
+            .last_ping_echo_ms();
+        ping_round_trip_ms(crate::platform::epoch_duration().as_millis(), echoed_ms)
+    }
+
     pub fn send_set_beacon_effects(
         &self,
         primary: Option<lodestone_model::ResourceKey>,
@@ -2367,4 +2395,22 @@ pub(crate) fn border_warning(
     #[allow(clippy::cast_possible_truncation)]
     let strength = (1.0 - dist / warning_distance).clamp(0.0, 1.0) as f32;
     (dist, warning_distance, strength)
+}
+
+#[cfg(test)]
+mod ping_round_trip_tests {
+    use super::ping_round_trip_ms;
+
+    #[test]
+    fn ping_round_trip_uses_the_echoed_epoch_millis_and_rejects_impossible_samples() {
+        // Non-round numbers make a seconds/milliseconds mix-up visibly wrong:
+        // `10_000_923 - 10_000_111` is 812 ms, not zero or 812 seconds.
+        assert_eq!(ping_round_trip_ms(10_000_923, Some(10_000_111)), Some(812));
+
+        // The response cannot have been sent from a future local clock, and a
+        // negative wire value cannot represent the client's epoch timestamp.
+        assert_eq!(ping_round_trip_ms(10_000_923, Some(10_000_924)), None);
+        assert_eq!(ping_round_trip_ms(10_000_923, Some(-1)), None);
+        assert_eq!(ping_round_trip_ms(10_000_923, None), None);
+    }
 }
