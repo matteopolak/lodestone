@@ -216,6 +216,35 @@ impl Sim {
                         };
                     });
                 }
+                NetUpdate::PlayerLookAt {
+                    from_anchor,
+                    target,
+                } => {
+                    // This packet directs the local view, not an entity. The
+                    // adapter has already resolved an entity target to this
+                    // world point, leaving the current local anchor as the
+                    // only pose-dependent input. Writing the live physics pose
+                    // reaches the rendered camera, interaction ray, audio
+                    // listener, and next outbound movement packet together.
+                    self.player_mut(|player| {
+                        let origin_y = player.position.y
+                            + match from_anchor {
+                                lodestone_model::event::LookAnchor::Feet => 0.0,
+                                lodestone_model::event::LookAnchor::Eyes => {
+                                    f64::from(player.eye_height)
+                                }
+                            };
+                        let forward = glam::Vec3::new(
+                            (target.x - player.position.x) as f32,
+                            (target.y - origin_y) as f32,
+                            (target.z - player.position.z) as f32,
+                        );
+                        if let Some(forward) = forward.try_normalize() {
+                            (player.yaw, player.pitch) =
+                                crate::camera_rig::yaw_pitch_from_forward_or(forward, player.yaw);
+                        }
+                    });
+                }
                 NetUpdate::BlockEvent { pos, b0, b1 } => {
                     // Chest lids. `ChestBlockEntity.triggerEvent`
                     // takes `b0 == 1` and `b1 > 0` as "somebody is looking in

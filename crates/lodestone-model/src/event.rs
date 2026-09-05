@@ -4385,8 +4385,12 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::PlayerCombatEnded { .. }
         | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
-        | ClientEvent::ServerDataReceived { .. }
-        | ClientEvent::PlayerLookAt { .. } => Route::NOWHERE,
+        | ClientEvent::ServerDataReceived { .. } => Route::NOWHERE,
+        // The target is already server-resolved, so the shell can derive the
+        // local view direction from the current feet or eye anchor. `PhysicsState`
+        // is the existing camera, raycast, audio-listener, and movement-egress
+        // consumer; retaining a second target record would reach none of them.
+        ClientEvent::PlayerLookAt { .. } => SHELL,
         // The server's actual streamed radius, not the launcher's request.
         // `net::forward` carries it to `Sim::set_view_radius`, which sets the
         // loading screen's chunk-grid size and progress denominator.
@@ -4477,7 +4481,7 @@ mod route_tests {
     use super::{
         ClientEvent, Difficulty, LevelEventData, PackedMessageSignature, Route, Uuid, route,
     };
-    use crate::{ids::Identifier, math::BlockPos};
+    use crate::{LookAnchor, Vec3, ids::Identifier, math::BlockPos};
 
     /// **The guard that protects the guard.**
     ///
@@ -4716,6 +4720,20 @@ mod route_tests {
         });
         assert!(r.shell, "the shell owns the drawn and egress pose");
         assert!(r.must_forward(), "the correction needs a NetUpdate arm");
+        assert!(!r.is_island());
+    }
+
+    /// A server-directed look is not session history: it immediately changes
+    /// the local pose the camera and outgoing movement read.
+    #[test]
+    fn player_look_at_reaches_the_shell_pose_consumer() {
+        let r = route(&ClientEvent::PlayerLookAt {
+            from_anchor: LookAnchor::Eyes,
+            target: Vec3::new(4.0, 70.0, -8.0),
+            at_entity: None,
+        });
+        assert!(r.shell, "the shell owns the live camera and movement pose");
+        assert!(r.must_forward(), "the look target needs a NetUpdate arm");
         assert!(!r.is_island());
     }
 

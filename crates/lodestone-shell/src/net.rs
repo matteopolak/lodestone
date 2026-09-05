@@ -124,7 +124,9 @@ use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::TabList;
 use lodestone_model::Vec3f;
 use lodestone_model::action::ResourcePackResponseKind;
-use lodestone_model::event::{BlockStateRef, LevelEventData, ParticleOptions, SoundCategory};
+use lodestone_model::event::{
+    BlockStateRef, LevelEventData, LookAnchor, ParticleOptions, SoundCategory,
+};
 // `SectionLight` is imported anonymously: it is the trait carrying
 // `sky_light`/`block_light` on `WorldSectionLight`, and naming it would collide
 // with `lodestone_world::SectionLight`, the *storage* type of the same name that
@@ -872,6 +874,15 @@ pub enum NetUpdate {
         x_rot: f32,
         /// Whether `x_rot` is relative to the current pitch.
         relative_x: bool,
+    },
+    /// The server directed the local player to look at an already-resolved
+    /// world-space target. The anchor decides whether that direction starts at
+    /// the player's feet or current eye.
+    PlayerLookAt {
+        /// Local origin anchor selected by the server.
+        from_anchor: LookAnchor,
+        /// Absolute target position.
+        target: Vec3,
     },
     /// A `block_event` (vanilla's `ClientboundBlockEventPacket`): two opaque
     /// parameter bytes for the block at `pos`.
@@ -5080,6 +5091,15 @@ fn forward(
             x_rot,
             relative_x,
         },
+        // `target` is already resolved for both position and entity packet
+        // forms. Keeping just the anchor and target avoids a second entity
+        // lookup path while preserving the one detail that changes the angle.
+        ClientEvent::PlayerLookAt {
+            from_anchor, target, ..
+        } => NetUpdate::PlayerLookAt {
+            from_anchor,
+            target,
+        },
         // Block events, forwarded raw. Until this arm existed the
         // event reached the terminal `_ =>` below and was dropped, which is why
         // chest lids never moved. The two bytes are per-block-type and are
@@ -5947,6 +5967,38 @@ mod tests {
         {
             NetUpdate::ChunkCacheRadiusChanged { radius } => assert_eq!(radius, 13),
             other => panic!("expected ChunkCacheRadiusChanged, got {other:?}"),
+        }
+    }
+
+    /// The look target must traverse the real router with its anchor intact:
+    /// eyes and feet produce different pitches for the same world target.
+    #[test]
+    fn forward_preserves_the_player_look_at_anchor_and_target() {
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        let target = Vec3::new(3.0, 70.0, -9.0);
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::PlayerLookAt {
+                from_anchor: LookAnchor::Eyes,
+                target,
+                at_entity: None,
+            },
+        )
+        .expect("a look target does not end the session");
+
+        match rx.try_recv().expect("the look target must reach the shell") {
+            NetUpdate::PlayerLookAt {
+                from_anchor,
+                target: forwarded,
+            } => {
+                assert_eq!(from_anchor, LookAnchor::Eyes);
+                assert_eq!(forwarded, target);
+            }
+            other => panic!("expected PlayerLookAt, got {other:?}"),
         }
     }
 
