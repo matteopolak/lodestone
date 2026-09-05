@@ -176,18 +176,24 @@ global entity that cannot be regionised at all without a special case). **Any on
 implies an explicit hand-off queue between regions**, analogous to `ScheduledTickQueues` today
 but per-region-pair rather than global — this is real new complexity, not a detail to defer.
 
-### Lock ordering: the `hold_read`/`hold_write` tripwire needs to become a real ordering assertion
+### Lock ordering: a real ordering assertion now guards callback-held handles
 
-The design already names this. Concretely, given the census above already has six-plus
-independent locks (`ChunkStore`'s cache, ticket store, access lists, block entities, world
-border, game rules, scheduled ticks, world state) **before** regionisation adds N more
-per-region locks, the ordering discipline needed is not hypothetical future work — a real
-ordering assertion (a debug-only "this thread already holds lock B, acquiring lock A after B is
-allowed/forbidden" check, keyed by a fixed global order) would catch violations **today**, and
-building it before regionisation adds more locks to order is strictly easier than building it
-after. Recommend this as an independent, immediately-actionable piece of work regardless of
-whether regionisation itself proceeds — it de-risks the eventual region work and pays for itself
-against the self-deadlock class this repo has already hit once.
+The independent-lock census made an ordering tripwire immediately useful, rather than a future
+region-only concern. `lodestone_server::lock_order` maintains a thread-local stack in debug and
+test builds only; release builds carry no tracking state. The callback-held production handles
+(`ScheduledTickHandle`, `BlockEntityHandle`, `MobHandle`, `BorderFeed`, `GameRulesHandle`,
+`WorldStateHandle`, and `AccessHandle`) acquire their class before their mutex and retain the
+guard through the synchronous callback. The current ascending order is scheduled queues, staged
+ticks, block entities, mobs, border, game rules, world state, then access lists. In particular,
+the scheduled queue precedes the block-entity and mob stores because the scheduled-and-physics
+pass can acquire both while it is held. The module's control takes real `GameRulesHandle` then
+`ScheduledTickHandle` callbacks and must panic with a lock-order violation; the ascending
+`ScheduledTickHandle` then `BlockEntityHandle` counterpart is allowed.
+
+This does not regionise any tick or make `ChunkStore`/the ticket graph callback-held locks. It
+only makes the existing order visible where the handles already keep a mutex through arbitrary
+server work. Any future handle that calls another such handle while locked must receive a class
+and be placed in this table before its acquisition path is added.
 
 ### Global vs. regionised state, concretely
 

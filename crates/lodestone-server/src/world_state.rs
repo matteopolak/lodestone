@@ -248,6 +248,7 @@ impl WorldStateHandle {
     /// closure cannot contain an `.await`, so the compiler guarantees the guard
     /// never crosses a suspension point.
     pub fn with<R>(&self, f: impl FnOnce(&mut WorldState) -> R) -> R {
+        let _order = crate::lock_order::acquire(crate::lock_order::LockClass::WorldState);
         f(&mut self.state.lock().expect("world state lock poisoned"))
     }
 
