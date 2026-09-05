@@ -329,7 +329,7 @@ wasm-size:
 # Gate for scripts/profile-cost-table.py, the samply join the whole worldgen
 # perf record was measured through (docs/roadmap/benchmarks.md). It rotted
 # undetected across a samply upgrade because nothing ran it: the script had no
-# test, and `cargo test --workspace` cannot see a Python file. 20 checks over
+# test, and `cargo test --workspace` cannot see a Python file. 23 checks over
 # three committed fixtures, stdlib only, no capture needed.
 #
 # NOT part of `just health`, and that is the remaining gap rather than a
