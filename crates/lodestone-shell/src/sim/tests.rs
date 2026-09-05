@@ -4437,6 +4437,10 @@ fn every_container_is_interactable_and_plain_terrain_is_not() {
             .find(|&id| lodestone_data::block_states::block_name(id) == Some(name))
             .unwrap_or_else(|| panic!("{name} is not in the 26.2 census"))
     };
+    let typed_state = |name| {
+        lodestone_data::block_states::StateId::new(state(name))
+            .unwrap_or_else(|| panic!("{name} must be a generated state"))
+    };
     for name in [
         "minecraft:chest",
         "minecraft:barrel",
@@ -4446,18 +4450,43 @@ fn every_container_is_interactable_and_plain_terrain_is_not() {
         "minecraft:crafting_table",
     ] {
         assert!(
-            is_interactable_state(state(name)),
+            is_interactable_state(typed_state(name)),
             "{name} must suppress the placement prediction"
         );
     }
     for name in ["minecraft:stone", "minecraft:dirt", "minecraft:oak_planks"] {
         assert!(
-            !is_interactable_state(state(name)),
+            !is_interactable_state(typed_state(name)),
             "{name} must not suppress it — this is the 95% case"
         );
     }
-    assert!(is_air_state(state("minecraft:air")));
-    assert!(!is_air_state(state("minecraft:water")));
+    assert!(is_air_state(typed_state("minecraft:air")));
+    assert!(!is_air_state(typed_state("minecraft:water")));
+}
+
+#[test]
+fn placement_facts_validate_raw_chunk_states_before_classification() {
+    let clicked = BlockPos::new(4, 64, 9);
+    let face = BlockFace::Up;
+    let invalid = placement_facts(
+        clicked,
+        face,
+        |_| Some(lodestone_data::block_states::STATE_COUNT),
+        |_| false,
+    );
+    assert!(
+        !invalid.clicked_replaceable && !invalid.clicked_interactable && !invalid.target_replaceable,
+        "an out-of-census chunk value must decline prediction rather than borrow a built-in row"
+    );
+
+    let air = lodestone_data::block_states::air_state_id();
+    let valid = placement_facts(clicked, face, |_| Some(air), |_| false);
+    assert!(valid.clicked_replaceable, "canonical air remains replaceable");
+    assert!(valid.target_replaceable, "in-place air uses the same validated value");
+    assert!(
+        !valid.clicked_interactable,
+        "the valid-air control must not pass by turning every accepted state into an interaction"
+    );
 }
 
 #[test]
