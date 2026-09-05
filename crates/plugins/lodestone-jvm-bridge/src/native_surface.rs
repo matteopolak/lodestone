@@ -26,7 +26,7 @@ pub struct NativeMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 5] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 3] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -39,14 +39,6 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 5] = [
         name: "setBlockStateId",
         descriptor: "(IIII)I",
     },
-    NativeMethodSpec {
-        name: "currentPluginName",
-        descriptor: "()Ljava/lang/String;",
-    },
-    NativeMethodSpec {
-        name: "currentPluginVersion",
-        descriptor: "()Ljava/lang/String;",
-    },
 ];
 
 /// One non-interchangeable phase of native registration.
@@ -58,17 +50,13 @@ pub enum NativeRegistrationStep {
     Register(NativeMethodSpec),
 }
 
-const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 10] = [
+const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 6] = [
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[2]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[3]),
-    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[4]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[0]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[2]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[3]),
-    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[4]),
 ];
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -175,16 +163,6 @@ fn method_id(
         ("setBlockStateId", "(IIII)I") => {
             env.get_static_method_id(class, jni_str!("setBlockStateId"), jni_sig!("(IIII)I"))
         }
-        ("currentPluginName", "()Ljava/lang/String;") => env.get_static_method_id(
-            class,
-            jni_str!("currentPluginName"),
-            jni_sig!("()Ljava/lang/String;"),
-        ),
-        ("currentPluginVersion", "()Ljava/lang/String;") => env.get_static_method_id(
-            class,
-            jni_str!("currentPluginVersion"),
-            jni_sig!("()Ljava/lang/String;"),
-        ),
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -204,18 +182,6 @@ fn register_method(
         ("setBlockStateId", "(IIII)I") => {
             adapter::register_block_state_write(env, class, method.name, method.descriptor)
         }
-        ("currentPluginName", "()Ljava/lang/String;") => adapter::register_lifecycle_plugin_name_query(
-            env,
-            class,
-            method.name,
-            method.descriptor,
-        ),
-        ("currentPluginVersion", "()Ljava/lang/String;") => adapter::register_lifecycle_plugin_version_query(
-            env,
-            class,
-            method.name,
-            method.descriptor,
-        ),
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -264,34 +230,20 @@ mod tests {
                 NativeMethodSpec { name: "blockStateId", descriptor: "(III)I" },
                 NativeMethodSpec { name: "serverTickCount", descriptor: "()J" },
                 NativeMethodSpec { name: "setBlockStateId", descriptor: "(IIII)I" },
-                NativeMethodSpec {
-                    name: "currentPluginName",
-                    descriptor: "()Ljava/lang/String;",
-                },
-                NativeMethodSpec {
-                    name: "currentPluginVersion",
-                    descriptor: "()Ljava/lang/String;",
-                },
             ],
         );
         let block_state = isolated_shim_methods()[0];
         let server_tick = isolated_shim_methods()[1];
         let block_write = isolated_shim_methods()[2];
-        let plugin_name = isolated_shim_methods()[3];
-        let plugin_version = isolated_shim_methods()[4];
         assert_eq!(
             isolated_shim_registration_steps(),
             &[
                 NativeRegistrationStep::Validate(block_state),
                 NativeRegistrationStep::Validate(server_tick),
                 NativeRegistrationStep::Validate(block_write),
-                NativeRegistrationStep::Validate(plugin_name),
-                NativeRegistrationStep::Validate(plugin_version),
                 NativeRegistrationStep::Register(block_state),
                 NativeRegistrationStep::Register(server_tick),
                 NativeRegistrationStep::Register(block_write),
-                NativeRegistrationStep::Register(plugin_name),
-                NativeRegistrationStep::Register(plugin_version),
             ],
             "a registration must never precede declaration validation",
         );
@@ -322,9 +274,7 @@ mod tests {
             "package lodestone.bridge; public final class IsolatedPaperShim { \
              public static native int blockStateId(int x, int y, int z); \
              public static native long serverTickCount(); \
-             public static native int setBlockStateId(int x, int y, int z, int stateId); \
-             public static native String currentPluginName(); \
-             public static native String currentPluginVersion(); }",
+             public static native int setBlockStateId(int x, int y, int z, int stateId); }",
         )
         .expect("shim source");
         let output = Command::new(std::path::PathBuf::from(jdk).join("bin/javac"))
@@ -376,9 +326,7 @@ mod tests {
             "package lodestone.bridge; public final class IsolatedPaperShim { \
              public static native int blockStateId(int x, int y, int z); \
              public static native long serverTickCount(); \
-             public static native int setBlockStateId(int x, int y, int z, int stateId); \
-             public static native String currentPluginName(); \
-             public static native String currentPluginVersion(); }",
+             public static native int setBlockStateId(int x, int y, int z, int stateId); }",
         )
         .expect("shim source");
         let adapter_source = adapter_source_root.join("SurfaceAdapter.java");
