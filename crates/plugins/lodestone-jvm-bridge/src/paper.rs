@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
 #[cfg(feature = "jvm")]
-use jni::objects::{Global, JClass, JObject};
+use jni::objects::{Global, IntoAuto, JClass, JObject, JObjectArray};
 #[cfg(feature = "jvm")]
-use jni::Env;
+use jni::{Env, jni_sig, jni_str};
 #[cfg(feature = "jvm")]
 use crate::runtime::{JvmConfig, JvmRuntime};
 #[cfg(feature = "jvm")]
@@ -393,6 +393,10 @@ impl fmt::Display for PaperServerFacadeState {
 /// Why one descriptor may not yet be constructed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaperPluginConstructionBlocker {
+    /// The loaded class did not expose a public zero-argument constructor.
+    EntryConstructorUnavailable,
+    /// The host could not inspect the loaded class's constructors safely.
+    EntryConstructorUninspectable,
     /// The entry loaded, but its loader has no compatible server facade.
     ServerFacadeUnavailable,
     /// A narrow Java-facing capability exists, but cannot construct a plugin.
@@ -404,6 +408,12 @@ pub enum PaperPluginConstructionBlocker {
 impl fmt::Display for PaperPluginConstructionBlocker {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::EntryConstructorUnavailable => {
+                formatter.write_str("the isolated plugin entry has no public zero-argument constructor")
+            }
+            Self::EntryConstructorUninspectable => {
+                formatter.write_str("the isolated plugin entry constructor shape could not be inspected")
+            }
             Self::ServerFacadeUnavailable => {
                 formatter.write_str("no compatible server facade is installed")
             }
@@ -415,6 +425,23 @@ impl fmt::Display for PaperPluginConstructionBlocker {
     }
 }
 
+/// The non-initializing constructor shape observed for one entry class.
+///
+/// This is a structural preflight for a future server-owned construction path,
+/// not permission to construct a plugin.  Reflection reads only the entry
+/// class metadata; it never invokes a constructor or an entry callback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperPluginConstructorShape {
+    /// The entry did not load, so there is no class to inspect.
+    EntryLoadFailed,
+    /// A public zero-argument constructor is declared.
+    PublicNoArguments,
+    /// The class loaded, but no public zero-argument constructor is declared.
+    MissingPublicNoArguments,
+    /// The JVM could not inspect constructor metadata without running plugin code.
+    InspectionFailed,
+}
+
 /// Descriptor-backed construction state for one plugin entry.
 ///
 /// The descriptor supplies the future plugin identity and description. It is
@@ -423,6 +450,7 @@ impl fmt::Display for PaperPluginConstructionBlocker {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaperPluginConstructionStatus {
     descriptor: PaperPluginDescriptor,
+    constructor: PaperPluginConstructorShape,
     blocker: PaperPluginConstructionBlocker,
 }
 
@@ -430,6 +458,11 @@ impl PaperPluginConstructionStatus {
     /// The validated identity and description for this future construction.
     pub fn descriptor(&self) -> &PaperPluginDescriptor {
         &self.descriptor
+    }
+
+    /// The entry's non-initializing constructor preflight result.
+    pub fn constructor(&self) -> PaperPluginConstructorShape {
+        self.constructor
     }
 
     /// The explicit reason no constructor may run yet.
@@ -456,18 +489,39 @@ impl PaperPluginConstructionReadiness {
     fn from_lifecycle(
         status: &PaperPluginLifecycleStatusSet,
         facade_input: &PaperServerFacadeInput,
+        constructors: &[PaperPluginConstructorShape],
     ) -> Self {
+        assert_eq!(
+            status.plugins().len(),
+            constructors.len(),
+            "each lifecycle entry needs exactly one construction-shape result",
+        );
         Self {
             facade: facade_input.state(),
             lifecycle: status.clone(),
-            plugins: status.plugins().iter().map(|plugin| PaperPluginConstructionStatus {
-                descriptor: plugin.descriptor().clone(),
-                blocker: if plugin.phase() == PaperPluginLifecyclePhase::Loaded {
-                    facade_input.construction_blocker()
-                } else {
-                    PaperPluginConstructionBlocker::EntryLoadFailed
-                },
-            }).collect(),
+            plugins: status
+                .plugins()
+                .iter()
+                .zip(constructors)
+                .map(|(plugin, constructor)| PaperPluginConstructionStatus {
+                    descriptor: plugin.descriptor().clone(),
+                    constructor: *constructor,
+                    blocker: match constructor {
+                        PaperPluginConstructorShape::EntryLoadFailed => {
+                            PaperPluginConstructionBlocker::EntryLoadFailed
+                        }
+                        PaperPluginConstructorShape::MissingPublicNoArguments => {
+                            PaperPluginConstructionBlocker::EntryConstructorUnavailable
+                        }
+                        PaperPluginConstructorShape::InspectionFailed => {
+                            PaperPluginConstructionBlocker::EntryConstructorUninspectable
+                        }
+                        PaperPluginConstructorShape::PublicNoArguments => {
+                            facade_input.construction_blocker()
+                        }
+                    },
+                })
+                .collect(),
         }
     }
 
@@ -588,22 +642,48 @@ impl PaperLifecycleLoad {
     /// This consumes the raw lifecycle owner so later code cannot separate a
     /// construction description from the loader and class it describes. The
     /// native read input is accepted only when that same lifecycle installed
-    /// its declaration in every private loader. It does not invoke any Java
-    /// constructor or callback.
+    /// its declaration in every private loader. It inspects constructor
+    /// metadata without invoking a Java constructor or callback.
     pub fn into_construction_plan(
         self,
+        env: &mut Env<'_>,
         facade_input: PaperServerFacadeInput,
     ) -> Result<PaperPluginConstructionPlan, PaperBootstrapError> {
         validate_construction_facade(self.native_shim, &facade_input)?;
+        let constructors = self.constructor_shapes(env);
         let readiness = PaperPluginConstructionReadiness::from_lifecycle(
             &self.status,
             &facade_input,
+            &constructors,
         );
         Ok(PaperPluginConstructionPlan {
             lifecycle: self,
             readiness,
             _facade_input: facade_input,
         })
+    }
+
+    fn constructor_shapes(&self, env: &mut Env<'_>) -> Vec<PaperPluginConstructorShape> {
+        let mut loaded = self.plugins.iter();
+        let shapes: Vec<_> = self
+            .status
+            .plugins()
+            .iter()
+            .map(|status| {
+                if status.phase() != PaperPluginLifecyclePhase::Loaded {
+                    return PaperPluginConstructorShape::EntryLoadFailed;
+                }
+                let plugin = loaded
+                    .next()
+                    .expect("every loaded lifecycle status retains its entry class");
+                plugin.constructor_shape(env)
+            })
+            .collect();
+        assert!(
+            loaded.next().is_none(),
+            "every retained entry class has a lifecycle status",
+        );
+        shapes
     }
 }
 
@@ -631,6 +711,45 @@ impl PaperLoadedPlugin {
     pub fn retains_entry_association(&self) -> bool {
         let _ = (&self.loader, &self.entry_class);
         true
+    }
+
+    fn constructor_shape(&self, env: &mut Env<'_>) -> PaperPluginConstructorShape {
+        let inspection: jni::errors::Result<PaperPluginConstructorShape> =
+            env.with_local_frame(16, |env| {
+                let constructors = env
+                    .call_method(
+                        self.entry_class.as_obj(),
+                        jni_str!("getConstructors"),
+                        jni_sig!("()[Ljava/lang/reflect/Constructor;"),
+                        &[],
+                    )?
+                    .l()?;
+                let constructors = env.cast_local::<JObjectArray>(constructors)?;
+                for index in 0..constructors.len(env)? {
+                    let constructor = constructors.get_element(env, index)?.auto();
+                    let parameter_count = env
+                        .call_method(
+                            &constructor,
+                            jni_str!("getParameterCount"),
+                            jni_sig!("()I"),
+                            &[],
+                        )?
+                        .i()?;
+                    if parameter_count == 0 {
+                        return Ok(PaperPluginConstructorShape::PublicNoArguments);
+                    }
+                }
+                Ok(PaperPluginConstructorShape::MissingPublicNoArguments)
+            });
+        match inspection {
+            Ok(shape) => shape,
+            Err(_) => {
+                if env.exception_check() {
+                    let _ = env.exception_clear();
+                }
+                PaperPluginConstructorShape::InspectionFailed
+            }
+        }
     }
 }
 
@@ -1618,6 +1737,10 @@ mod tests {
         let readiness = PaperPluginConstructionReadiness::from_lifecycle(
             &status,
             &PaperServerFacadeInput::Unavailable,
+            &[
+                PaperPluginConstructorShape::EntryLoadFailed,
+                PaperPluginConstructorShape::PublicNoArguments,
+            ],
         );
         assert_eq!(readiness.facade(), PaperServerFacadeState::Unavailable);
         assert_eq!(readiness.plugins().len(), 2);
@@ -1628,7 +1751,15 @@ mod tests {
             readiness.plugins()[0].blocker(),
             PaperPluginConstructionBlocker::EntryLoadFailed,
         );
+        assert_eq!(
+            readiness.plugins()[0].constructor(),
+            PaperPluginConstructorShape::EntryLoadFailed,
+        );
         assert_eq!(readiness.plugins()[1].descriptor().name(), "Ready");
+        assert_eq!(
+            readiness.plugins()[1].constructor(),
+            PaperPluginConstructorShape::PublicNoArguments,
+        );
         assert_eq!(
             readiness.plugins()[1].blocker(),
             PaperPluginConstructionBlocker::ServerFacadeUnavailable,
@@ -1636,6 +1767,42 @@ mod tests {
         assert_eq!(
             PaperPluginConstructionBlocker::ServerFacadeUnavailable.to_string(),
             "no compatible server facade is installed",
+        );
+    }
+
+    #[test]
+    fn constructor_preflight_blocks_missing_and_uninspectable_entries_before_facade_checks() {
+        let fixture = Fixture::new();
+        fixture.paper_jar();
+        fixture.plugin_jar("missing.jar", PAPER_DESCRIPTOR, valid_descriptor("Missing", "a.Main"));
+        fixture.plugin_jar("opaque.jar", BUKKIT_DESCRIPTOR, valid_descriptor("Opaque", "b.Main"));
+        let plan = PaperBootstrapConfig::new(fixture.paper_path(), fixture.plugins_path())
+            .discover()
+            .expect("discover constructor fixture");
+        let status = plan.load_lifecycle_entries(|_| Ok::<_, &'static str>(()))
+            .expect("all fixture entries load");
+        let readiness = PaperPluginConstructionReadiness::from_lifecycle(
+            &status,
+            &PaperServerFacadeInput::Unavailable,
+            &[
+                PaperPluginConstructorShape::MissingPublicNoArguments,
+                PaperPluginConstructorShape::InspectionFailed,
+            ],
+        );
+
+        assert_eq!(readiness.plugins()[0].descriptor().name(), "Missing");
+        assert_eq!(
+            readiness.plugins()[0].blocker(),
+            PaperPluginConstructionBlocker::EntryConstructorUnavailable,
+        );
+        assert_eq!(readiness.plugins()[1].descriptor().name(), "Opaque");
+        assert_eq!(
+            readiness.plugins()[1].blocker(),
+            PaperPluginConstructionBlocker::EntryConstructorUninspectable,
+        );
+        assert_eq!(
+            PaperPluginConstructionBlocker::EntryConstructorUnavailable.to_string(),
+            "the isolated plugin entry has no public zero-argument constructor",
         );
     }
 

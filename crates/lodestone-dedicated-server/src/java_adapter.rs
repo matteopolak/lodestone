@@ -97,9 +97,11 @@ impl JavaAdapter {
                     } else {
                         PaperServerFacadeInput::Unavailable
                     };
-                    let construction = lifecycle.into_construction_plan(facade_input).map_err(|error| {
-                        format!("could not retain configured Paper construction state: {error}")
-                    })?;
+                    let construction = lifecycle
+                        .into_construction_plan(env, facade_input)
+                        .map_err(|error| {
+                            format!("could not retain configured Paper construction state: {error}")
+                        })?;
                     construction_sender
                         .send(construction.readiness().clone())
                         .map_err(|error| {
@@ -180,11 +182,7 @@ impl JavaAdapter {
                         .plugins()
                         .iter()
                         .filter(|plugin| {
-                            matches!(
-                                plugin.blocker(),
-                                PaperPluginConstructionBlocker::ServerFacadeUnavailable
-                                    | PaperPluginConstructionBlocker::PluginConstructionUnsupported
-                            )
+                            plugin.blocker() != PaperPluginConstructionBlocker::EntryLoadFailed
                         })
                         .count();
                     tracing::info!(

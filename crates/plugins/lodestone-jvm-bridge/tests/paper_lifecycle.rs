@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost};
 use lodestone_jvm_bridge::paper::{
-    PaperBootstrapConfig, PaperServerFacadeInput, PaperServerFacadeState,
+    PaperBootstrapConfig, PaperPluginConstructorShape, PaperServerFacadeInput,
+    PaperServerFacadeState,
 };
 use lodestone_jvm_bridge::runtime::JvmConfig;
 
@@ -60,7 +61,8 @@ fn lifecycle_entries_load_without_initialization() {
         "package lodestone.bridge; public final class IsolatedPaperShim { \
          static { if (System.nanoTime() != Long.MIN_VALUE) throw new AssertionError(\"shim initialized\"); } \
          public static native int blockStateId(int x, int y, int z); \
-         public static native long serverTickCount(); }",
+         public static native long serverTickCount(); \
+         public static native int setBlockStateId(int x, int y, int z, int stateId); }",
     )
     .expect("shim source");
     let adapter_package = adapter_sources.join("fixture/adapter");
@@ -115,7 +117,7 @@ fn lifecycle_entries_load_without_initialization() {
             assert_eq!(lifecycle.loaded_plugins()[0].descriptor().name(), "Fixture");
             assert!(lifecycle.loaded_plugins()[0].retains_entry_association());
             let construction = lifecycle
-                .into_construction_plan(PaperServerFacadeInput::native_server_surface(
+                .into_construction_plan(env, PaperServerFacadeInput::native_server_surface(
                     native_surface,
                 ))
                 .expect("retain worker-owned native facade state");
@@ -143,6 +145,10 @@ fn lifecycle_entries_load_without_initialization() {
         .expect("worker must publish construction state before readiness");
     assert_eq!(readiness.facade(), PaperServerFacadeState::NativeServerSurface);
     assert_eq!(readiness.plugins()[0].descriptor().name(), "Fixture");
+    assert_eq!(
+        readiness.plugins()[0].constructor(),
+        PaperPluginConstructorShape::PublicNoArguments,
+    );
     assert_eq!(
         readiness.plugins()[0].blocker().to_string(),
         "the installed server capability cannot supply plugin construction semantics",
