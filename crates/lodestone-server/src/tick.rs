@@ -3708,7 +3708,10 @@ async fn run_tick_loop_with_weather_impl<W>(
         // reaches the `take_detonations` drain above on the tick after this
         // one — the same one-tick latency `tick_vehicles`/`tick_falling_blocks`
         // already accept for their own effects.
-        mobs.with(|sim| sim.tick_tnt(&|x, y, z| world.block_state(x, y, z)));
+        let tnt_batches = mobs.with(|sim| {
+            sim.tick_tnt_owner_batches(&|x, y, z| world.block_state(x, y, z))
+        });
+        mobs.with(|sim| sim.apply_tnt_tick_owner_batches(tnt_batches));
 
         // Every live minecart, one tick — rail-following (or off-rail)
         // physics, riding, and the furnace/TNT specials
