@@ -72,9 +72,9 @@ impl JavaAdapter {
     ) -> Result<Self, String> {
         let host = if let Some(plan) = paper_plan.clone() {
             AdapterHost::start_with_setup(config, class, deadline, move |runtime, env| {
-                plan.load_bootstrap(runtime, env)
+                plan.load_lifecycle_entries_in_runtime(runtime, env)
                     .map(|_| ())
-                    .map_err(|error| format!("could not load configured Paper bootstrap: {error}"))
+                    .map_err(|error| format!("could not load configured Paper lifecycle entries: {error}"))
             })
         } else {
             AdapterHost::start(config, class, deadline)
@@ -104,7 +104,7 @@ impl JavaAdapter {
                     tracing::info!(
                         paper_jar = %plan.paper_jar().display(),
                         plugins = plan.plugins().len(),
-                        "configured Paper bootstrap class loaded; Paper is not initialized and plugins are not enabled"
+                        "configured Paper bootstrap and plugin entry classes loaded; Paper is not initialized and plugins are not instantiated or enabled"
                     );
                 } else {
                     tracing::info!("experimental Java adapter ready");

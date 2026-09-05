@@ -248,14 +248,16 @@ both `LODESTONE_JAVA_ADAPTER_CLASS` and `LODESTONE_JAVA_CLASSPATH`. The latter u
 path-list separator. `LODESTONE_JAVA_DEADLINE_MS` is a positive integer, default `5000`. No configured
 adapter means no JVM startup or polling timer. A default build rejects Java configuration explicitly.
 
-An adapter run may also validate and load an operator-supplied Paper bootstrap class: set both
+An adapter run may also validate and load, without initialization, an operator-supplied Paper
+bootstrap and each discovered plugin entry class: set both
 `LODESTONE_PAPER_JAR` and `LODESTONE_PAPER_PLUGIN_DIRECTORY`, and optionally
 `LODESTONE_PAPER_SHIM_PATH` for one shim directory or jar that precedes the Paper jar in isolated
 resolution. Invalid paths, plugin descriptors, or declared main-class archive entries stop cleanly
-before JVM startup. A bootstrap load failure also saves and stops the server, so a requested Paper
-intake cannot silently degrade into an ordinary adapter run. This is only bootstrap-class loading:
-the host does not initialize Paper, load plugin classes, enable plugins, or provide Paper-plugin
-compatibility. See [Java plugin bridge](java-plugin-bridge.md) for its explicit boundary and live
+before JVM startup. Each plugin entry gets a fresh shim-first isolated loader that sees only the shim,
+server, and that plugin jar. A lifecycle-load failure also saves and stops the server, so a requested
+Paper intake cannot silently degrade into an ordinary adapter run. These loads do not initialize
+Paper, retain a plugin loader, instantiate or enable a plugin, or provide Paper-plugin compatibility.
+See [Java plugin bridge](java-plugin-bridge.md) for its explicit boundary and live
 fixture.
 
 Adapter callbacks observe the newest completed server tick while idle, coalescing intervening ticks;
