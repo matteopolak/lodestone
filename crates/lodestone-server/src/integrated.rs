@@ -2753,6 +2753,48 @@ impl IntegratedServer {
         storage.write_dirty(writes)
     }
 
+    /// Saves one dirty terrain column through the selected native record backend.
+    ///
+    /// This is deliberately a narrow producer, not a switch of the live world
+    /// away from Anvil: the version-1 native chunk record preserves only the
+    /// block-state grid. A column with biome, block-entity, structure,
+    /// heightmap, shaped-generation, or pending-spawn state returns an explicit
+    /// loss error. Callers therefore cannot accidentally convert a richer world
+    /// into terrain-only records.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_dirty_native_chunk(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        column: &crate::chunk::ChunkColumn,
+    ) -> Result<(), crate::world_storage::Error> {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.write_dirty_chunk(column_x, column_z, column)
+    }
+
+    /// Loads one native typed terrain column from the selected backend.
+    ///
+    /// The caller provides the active dimension's vertical contract. This is a
+    /// real reopen/read consumer for the native segment, but it intentionally
+    /// does not replace `RegionChunkSource`: Anvil remains the complete terrain,
+    /// entity, metadata, and compatibility loader until native coverage reaches
+    /// that whole set.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_native_chunk(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        min_y: i32,
+        height: i32,
+    ) -> Result<Option<crate::chunk::ChunkColumn>, crate::world_storage::Error> {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.load_chunk(column_x, column_z, min_y, height)
+    }
+
     /// The world's shared game rules, difficulty and clock.
     ///
     /// The **same** store the tick loop advances and every connection reads, so a
@@ -4985,6 +5027,85 @@ mod tests {
             "only the submitted dirty record may have produced a transaction"
         );
         drop(reopened);
+        std::fs::remove_dir_all(&world_dir).expect("remove test world");
+    }
+
+    /// The server-level native terrain consumer: a real `ChunkColumn` crosses
+    /// the selected backend, the server stops, a fresh server reopens the
+    /// segment, and the recovered column is used through its normal block
+    /// accessor. The distinct-key read is the absence control, so a test that
+    /// accidentally retained the first in-memory column cannot pass.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn persistent_server_reopens_a_native_terrain_only_chunk() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "lodestone-native-chunk-server-{}-{unique}",
+            std::process::id()
+        ));
+        let native_dir = world_dir.join("native");
+        let first_storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir.clone(),
+            },
+        )
+        .expect("open first native segment");
+        let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            Silent,
+            &world_dir,
+            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+            0,
+            16,
+            (0..=0, 0..=0),
+            (0, 0),
+            0,
+            0,
+            std::time::Duration::from_secs(3600),
+            first_storage,
+        )
+        .expect("open first persistent server");
+        let mut source = crate::chunk::ChunkColumn::new(0, 16);
+        source.set_block(2, 3, 4, "minecraft:stone");
+        source.set_block(9, 14, 10, "minecraft:oak_log[axis=z]");
+        server
+            .write_dirty_native_chunk(3, -5, &source)
+            .expect("write native terrain-only chunk");
+        server.shutdown().await;
+
+        let second_storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir,
+            },
+        )
+        .expect("reopen native segment");
+        let (reopened, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            Silent,
+            &world_dir,
+            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+            0,
+            16,
+            (0..=0, 0..=0),
+            (0, 0),
+            0,
+            0,
+            std::time::Duration::from_secs(3600),
+            second_storage,
+        )
+        .expect("open second persistent server");
+        let loaded = reopened
+            .load_native_chunk(3, -5, 0, 16)
+            .expect("read reopened native terrain")
+            .expect("saved terrain is present");
+        assert_eq!(loaded.block_state(2, 3, 4), "minecraft:stone");
+        assert_eq!(loaded.block_state(9, 14, 10), "minecraft:oak_log[axis=z]");
+        assert!(
+            reopened.load_native_chunk(4, -5, 0, 16).unwrap().is_none(),
+            "a different record key must not be satisfied from the first server's memory"
+        );
+        reopened.shutdown().await;
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
     }
 

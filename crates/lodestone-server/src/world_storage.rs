@@ -11,7 +11,14 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use lodestone_storage::{NativeStore, RecordWrite, StoreError};
+use lodestone_storage::{NativeStore, RecordKey, RecordWrite, StoreError};
+use lodestone_storage_schema::{
+    ChunkRecord, ChunkSection, FORMAT_VERSION_V1, StorageRecord,
+    generated::storage_record,
+};
+
+const GAME_DATA_VERSION: u32 = 46_002;
+const SECTION_CELLS: usize = 16 * 16 * 16;
 
 /// The explicit persistent-record backend selected by a host.
 ///
@@ -37,6 +44,8 @@ pub enum Error {
     AnvilDoesNotAcceptTypedRecords,
     /// The native segment rejected or could not commit a record batch.
     Native(StoreError),
+    /// A native chunk record cannot be represented by this server build.
+    Chunk(ChunkRecordError),
 }
 
 impl fmt::Display for Error {
@@ -46,6 +55,7 @@ impl fmt::Display for Error {
                 formatter.write_str("the Anvil backend does not accept typed dirty records")
             }
             Self::Native(error) => write!(formatter, "native world storage failed: {error}"),
+            Self::Chunk(error) => write!(formatter, "native chunk record failed: {error}"),
         }
     }
 }
@@ -58,13 +68,125 @@ impl From<StoreError> for Error {
     }
 }
 
+impl From<ChunkRecordError> for Error {
+    fn from(error: ChunkRecordError) -> Self {
+        Self::Chunk(error)
+    }
+}
+
+/// Native chunk data this bounded adapter cannot safely discard.
+///
+/// Every `true` flag means a caller must retain the existing Anvil path (or a
+/// later native schema revision) rather than turn a save into a terrain-only
+/// replacement. The flags deliberately describe data, not the source that
+/// happened to create it, so a plugin-created column gets the same protection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UnsupportedChunkFields {
+    /// The column has a non-default three-dimensional biome grid.
+    pub biomes: bool,
+    /// The column has block-entity state.
+    pub block_entities: bool,
+    /// The column has structure starts or references.
+    pub structures: bool,
+    /// The column retains a generator-produced heightmap.
+    pub motion_blocking: bool,
+    /// The column is only shaped terrain, not a full playable column.
+    pub shaped_generation: bool,
+    /// The column owns not-yet-consumed one-shot spawn candidates.
+    pub pending_generation_spawns: bool,
+}
+
+impl UnsupportedChunkFields {
+    fn any(self) -> bool {
+        self.biomes
+            || self.block_entities
+            || self.structures
+            || self.motion_blocking
+            || self.shaped_generation
+            || self.pending_generation_spawns
+    }
+}
+
+/// A malformed, incompatible, or lossy native chunk conversion.
+#[derive(Debug)]
+pub enum ChunkRecordError {
+    /// Saving would omit fields represented by [`UnsupportedChunkFields`].
+    UnsupportedFields(UnsupportedChunkFields),
+    /// The column cannot be represented as whole 16-row sections.
+    UnalignedMinimumY(i32),
+    /// A caller supplied an invalid expected column extent for loading.
+    InvalidExtent { min_y: i32, height: i32 },
+    /// The envelope did not contain a chunk body.
+    MissingChunkBody,
+    /// The stored coordinates do not match the key requested from the segment.
+    CoordinateMismatch {
+        expected_x: i32,
+        expected_z: i32,
+        actual_x: i32,
+        actual_z: i32,
+    },
+    /// This build has no safe interpretation for a different game-data census.
+    UnsupportedGameDataVersion(u32),
+    /// A stored section is not the expected next 16-row window.
+    UnexpectedSectionY { expected: i32, actual: i32 },
+    /// The record contains too few or too many sections for the requested extent.
+    SectionCount { expected: usize, actual: usize },
+    /// A section carries light or extension payloads this adapter cannot retain.
+    UnsupportedStoredSectionData,
+    /// A stored numeric block-state ID is not in this build's registry.
+    UnknownBlockStateId(u32),
+    /// Packed local palette data is structurally invalid.
+    InvalidPackedStates(&'static str),
+}
+
+impl fmt::Display for ChunkRecordError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedFields(fields) => {
+                write!(formatter, "would lose unsupported chunk fields: {fields:?}")
+            }
+            Self::UnalignedMinimumY(min_y) => {
+                write!(formatter, "minimum Y {min_y} is not section-aligned")
+            }
+            Self::InvalidExtent { min_y, height } => {
+                write!(formatter, "invalid expected chunk extent min_y={min_y}, height={height}")
+            }
+            Self::MissingChunkBody => formatter.write_str("record does not contain a chunk body"),
+            Self::CoordinateMismatch { expected_x, expected_z, actual_x, actual_z } => {
+                write!(formatter, "record coordinates ({actual_x}, {actual_z}) do not match requested ({expected_x}, {expected_z})")
+            }
+            Self::UnsupportedGameDataVersion(version) => {
+                write!(formatter, "unsupported game data version {version}")
+            }
+            Self::UnexpectedSectionY { expected, actual } => {
+                write!(formatter, "expected section Y {expected}, found {actual}")
+            }
+            Self::SectionCount { expected, actual } => {
+                write!(formatter, "expected {expected} sections, found {actual}")
+            }
+            Self::UnsupportedStoredSectionData => {
+                formatter.write_str("stored section carries unsupported light or extension data")
+            }
+            Self::UnknownBlockStateId(id) => write!(formatter, "unknown built-in block-state ID {id}"),
+            Self::InvalidPackedStates(reason) => write!(formatter, "invalid packed block states: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for ChunkRecordError {}
+
 trait DirtyRecordStore: Send {
     fn write_transaction(&mut self, writes: Vec<RecordWrite>) -> Result<(), StoreError>;
+    fn get(&mut self, key: RecordKey) -> Result<Option<StorageRecord>, StoreError>;
 }
 
 impl DirtyRecordStore for NativeStore {
     fn write_transaction(&mut self, writes: Vec<RecordWrite>) -> Result<(), StoreError> {
         NativeStore::write_transaction(self, writes)
+    }
+
+    fn get(&mut self, key: RecordKey) -> Result<Option<StorageRecord>, StoreError> {
+        NativeStore::get(self, key)
     }
 }
 
@@ -126,6 +248,282 @@ impl WorldStorage {
             .write_transaction(writes)?;
         Ok(count)
     }
+
+    /// Saves one independently dirty server chunk through the native typed
+    /// record path.
+    ///
+    /// The adapter is intentionally bounded: it stores block-state sections
+    /// only and refuses a column carrying any state the version-1 record cannot
+    /// preserve. `Anvil` stays unchanged and refuses this method just as it
+    /// refuses [`Self::write_dirty`].
+    pub fn write_dirty_chunk(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        column: &crate::chunk::ChunkColumn,
+    ) -> Result<(), Error> {
+        let record = encode_chunk(column_x, column_z, column)?;
+        self.write_dirty([RecordWrite::new(RecordKey::chunk(column_x, column_z), record)])?;
+        Ok(())
+    }
+
+    /// Reopens a typed native chunk record as a real [`crate::chunk::ChunkColumn`].
+    ///
+    /// `min_y` and `height` remain an explicit dimension contract because the
+    /// version-1 record stores section coordinates, not a dimension definition.
+    /// A mismatch, a future data version, extensions, or light bytes is an
+    /// error rather than a partial load.
+    pub fn load_chunk(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        min_y: i32,
+        height: i32,
+    ) -> Result<Option<crate::chunk::ChunkColumn>, Error> {
+        validate_extent(min_y, height)?;
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        let record = native
+            .lock()
+            .expect("world storage lock poisoned")
+            .get(RecordKey::chunk(column_x, column_z))?;
+        record
+            .map(|record| decode_chunk(column_x, column_z, min_y, height, record))
+            .transpose()
+            .map_err(Into::into)
+    }
+}
+
+fn encode_chunk(
+    column_x: i32,
+    column_z: i32,
+    column: &crate::chunk::ChunkColumn,
+) -> Result<StorageRecord, ChunkRecordError> {
+    validate_extent(column.min_y, column.height)?;
+    let unsupported = unsupported_fields(column);
+    if unsupported.any() {
+        return Err(ChunkRecordError::UnsupportedFields(unsupported));
+    }
+
+    let mut cells = Vec::with_capacity(SECTION_CELLS);
+    let sections = (0..column.section_count())
+        .map(|section_index| {
+            cells.clear();
+            column.append_section_cells(section_index, &mut cells);
+            let mut palette_state_ids = Vec::new();
+            let mut local_indices = Vec::with_capacity(cells.len());
+            for &column_palette_index in &cells {
+                let state_id = column.palette_state_ids()[column_palette_index as usize].raw();
+                let local = match palette_state_ids.iter().position(|&id| id == state_id) {
+                    Some(index) => index,
+                    None => {
+                        palette_state_ids.push(state_id);
+                        palette_state_ids.len() - 1
+                    }
+                };
+                local_indices.push(
+                    u16::try_from(local).expect("one section has at most 4096 states"),
+                );
+            }
+            let palette_bits = palette_bits(palette_state_ids.len())?;
+            Ok(ChunkSection {
+                section_y: column.min_y.div_euclid(16) + section_index as i32,
+                palette_bits,
+                palette_state_ids,
+                block_state_indices: pack_indices(&local_indices, palette_bits),
+                sky_light: Vec::new(),
+                block_light: Vec::new(),
+            })
+        })
+        .collect::<Result<Vec<_>, ChunkRecordError>>()?;
+
+    Ok(StorageRecord {
+        format_version: FORMAT_VERSION_V1,
+        record: Some(storage_record::Record::Chunk(ChunkRecord {
+            column_x,
+            column_z,
+            game_data_version: GAME_DATA_VERSION,
+            sections,
+            extensions: Vec::new(),
+        })),
+    })
+}
+
+fn decode_chunk(
+    expected_x: i32,
+    expected_z: i32,
+    min_y: i32,
+    height: i32,
+    record: StorageRecord,
+) -> Result<crate::chunk::ChunkColumn, ChunkRecordError> {
+    if record.format_version != FORMAT_VERSION_V1 {
+        return Err(ChunkRecordError::InvalidPackedStates("unsupported record format version"));
+    }
+    let Some(storage_record::Record::Chunk(chunk)) = record.record else {
+        return Err(ChunkRecordError::MissingChunkBody);
+    };
+    if (chunk.column_x, chunk.column_z) != (expected_x, expected_z) {
+        return Err(ChunkRecordError::CoordinateMismatch {
+            expected_x,
+            expected_z,
+            actual_x: chunk.column_x,
+            actual_z: chunk.column_z,
+        });
+    }
+    if chunk.game_data_version != GAME_DATA_VERSION {
+        return Err(ChunkRecordError::UnsupportedGameDataVersion(chunk.game_data_version));
+    }
+    if !chunk.extensions.is_empty() {
+        return Err(ChunkRecordError::UnsupportedStoredSectionData);
+    }
+    let expected_sections = (height as usize).div_ceil(16);
+    if chunk.sections.len() != expected_sections {
+        return Err(ChunkRecordError::SectionCount {
+            expected: expected_sections,
+            actual: chunk.sections.len(),
+        });
+    }
+
+    let mut column = crate::chunk::ChunkColumn::new(min_y, height);
+    for (section_index, section) in chunk.sections.iter().enumerate() {
+        let expected_section_y = min_y.div_euclid(16) + section_index as i32;
+        if section.section_y != expected_section_y {
+            return Err(ChunkRecordError::UnexpectedSectionY {
+                expected: expected_section_y,
+                actual: section.section_y,
+            });
+        }
+        if !section.sky_light.is_empty() || !section.block_light.is_empty() {
+            return Err(ChunkRecordError::UnsupportedStoredSectionData);
+        }
+        let expected_cells = section_rows(height, section_index) * 16 * 16;
+        let local_indices = unpack_indices(section, expected_cells)?;
+        let local_palette = section
+            .palette_state_ids
+            .iter()
+            .map(|&state_id| state_string(state_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let local_palette_refs: Vec<_> = local_palette.iter().map(String::as_str).collect();
+        column.set_section_from_local_palette(
+            min_y + section_index as i32 * 16,
+            &local_palette_refs,
+            &local_indices,
+        );
+    }
+    Ok(column)
+}
+
+fn unsupported_fields(column: &crate::chunk::ChunkColumn) -> UnsupportedChunkFields {
+    UnsupportedChunkFields {
+        biomes: (0..4).any(|qz| {
+            (0..4).any(|qx| {
+                column.biome_state((qx * 4) as i32, (qz * 4) as i32)
+                    != crate::chunk::DEFAULT_BIOME
+            })
+        }) || (0..column.biome_y_quarts()).any(|qy| {
+            (0..4).any(|qz| {
+                (0..4).any(|qx| column.biome_cell(qx, qy, qz) != crate::chunk::DEFAULT_BIOME)
+            })
+        }),
+        block_entities: !column.block_entities().is_empty(),
+        structures: !column.structure_starts().is_empty()
+            || !column.structure_references().is_empty(),
+        motion_blocking: column.motion_blocking().is_some(),
+        shaped_generation: column.generation_stage() == crate::chunk::ChunkGenerationStage::Shaped,
+        pending_generation_spawns: column.has_pending_generation_spawns(),
+    }
+}
+
+fn validate_extent(min_y: i32, height: i32) -> Result<(), ChunkRecordError> {
+    if min_y.rem_euclid(16) != 0 {
+        return Err(ChunkRecordError::UnalignedMinimumY(min_y));
+    }
+    if height <= 0 {
+        return Err(ChunkRecordError::InvalidExtent { min_y, height });
+    }
+    Ok(())
+}
+
+fn section_rows(height: i32, section_index: usize) -> usize {
+    (height as usize).saturating_sub(section_index * 16).min(16)
+}
+
+fn palette_bits(palette_len: usize) -> Result<u32, ChunkRecordError> {
+    let max_index = palette_len
+        .checked_sub(1)
+        .ok_or(ChunkRecordError::InvalidPackedStates("empty palette"))?;
+    let bits = (usize::BITS - max_index.leading_zeros()).max(1);
+    if bits > 15 {
+        return Err(ChunkRecordError::InvalidPackedStates("palette needs more than 15 bits"));
+    }
+    Ok(bits)
+}
+
+fn pack_indices(indices: &[u16], bits: u32) -> Vec<u8> {
+    let mut packed = vec![0; (indices.len() * bits as usize).div_ceil(8)];
+    for (index, &value) in indices.iter().enumerate() {
+        let start = index * bits as usize;
+        for bit in 0..bits as usize {
+            if (value >> bit) & 1 != 0 {
+                packed[(start + bit) / 8] |= 1 << ((start + bit) % 8);
+            }
+        }
+    }
+    packed
+}
+
+fn unpack_indices(
+    section: &ChunkSection,
+    expected_cells: usize,
+) -> Result<Vec<u16>, ChunkRecordError> {
+    if !(1..=15).contains(&section.palette_bits) {
+        return Err(ChunkRecordError::InvalidPackedStates("palette width is outside 1..=15"));
+    }
+    if section.palette_state_ids.is_empty() {
+        return Err(ChunkRecordError::InvalidPackedStates("palette is empty"));
+    }
+    let expected_bytes = (expected_cells * section.palette_bits as usize).div_ceil(8);
+    if section.block_state_indices.len() != expected_bytes {
+        return Err(ChunkRecordError::InvalidPackedStates(
+            "packed byte length does not match section extent",
+        ));
+    }
+    let mut indices = Vec::with_capacity(expected_cells);
+    for index in 0..expected_cells {
+        let start = index * section.palette_bits as usize;
+        let mut value = 0_u16;
+        for bit in 0..section.palette_bits as usize {
+            value |= u16::from(
+                (section.block_state_indices[(start + bit) / 8] >> ((start + bit) % 8)) & 1,
+            ) << bit;
+        }
+        if value as usize >= section.palette_state_ids.len() {
+            return Err(ChunkRecordError::InvalidPackedStates("index exceeds local palette"));
+        }
+        indices.push(value);
+    }
+    Ok(indices)
+}
+
+fn state_string(state_id: u32) -> Result<String, ChunkRecordError> {
+    let state = lodestone_data::block_states::StateId::new(state_id)
+        .ok_or(ChunkRecordError::UnknownBlockStateId(state_id))?;
+    let mut value = state.name().to_string();
+    let properties = state.properties();
+    if !properties.is_empty() {
+        value.push('[');
+        for (index, (key, property)) in properties.iter().enumerate() {
+            if index != 0 {
+                value.push(',');
+            }
+            value.push_str(key);
+            value.push('=');
+            value.push_str(property);
+        }
+        value.push(']');
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -144,6 +542,10 @@ mod tests {
         fn write_transaction(&mut self, writes: Vec<RecordWrite>) -> Result<(), StoreError> {
             self.0.lock().expect("recording store lock poisoned").push(writes);
             Ok(())
+        }
+
+        fn get(&mut self, _key: RecordKey) -> Result<Option<StorageRecord>, StoreError> {
+            Ok(None)
         }
     }
 
@@ -196,5 +598,79 @@ mod tests {
             storage.write_dirty([chunk(2, 3, 9)]),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
+    }
+
+    #[test]
+    fn native_chunk_reopens_as_the_same_real_block_grid() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-chunk-record-{}-{unique}",
+            std::process::id()
+        ));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        let mut source = crate::chunk::ChunkColumn::new(-16, 32);
+        source.set_block(1, -16, 2, "minecraft:stone");
+        source.set_block(3, -1, 4, "minecraft:oak_log[axis=x]");
+        source.set_block(5, 15, 6, "minecraft:water[level=3]");
+
+        storage
+            .write_dirty_chunk(-7, 11, &source)
+            .expect("write supported terrain-only chunk");
+        drop(storage);
+
+        let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("reopen native store");
+        let loaded = reopened
+            .load_chunk(-7, 11, -16, 32)
+            .expect("decode reopened chunk")
+            .expect("stored chunk is present");
+        assert_eq!(loaded.block_state(1, -16, 2), "minecraft:stone");
+        assert_eq!(loaded.block_state(3, -1, 4), "minecraft:oak_log[axis=x]");
+        assert_eq!(loaded.block_state(5, 15, 6), "minecraft:water[level=3]");
+        assert_eq!(loaded.block_state(0, 0, 0), "minecraft:air");
+        assert!(
+            reopened.load_chunk(-8, 11, -16, 32).unwrap().is_none(),
+            "a distinct key is the independent absence control"
+        );
+        drop(reopened);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_chunk_refuses_biome_data_instead_of_dropping_it() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-chunk-loss-{}-{unique}",
+            std::process::id()
+        ));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        let mut source = crate::chunk::ChunkColumn::new(0, 16);
+        source.set_biome_cell(0, 0, 0, "minecraft:desert");
+        source.set_biome_quarts(&["minecraft:desert".to_string()]);
+
+        assert!(matches!(
+            storage.write_dirty_chunk(0, 0, &source),
+            Err(Error::Chunk(ChunkRecordError::UnsupportedFields(UnsupportedChunkFields {
+                biomes: true,
+                ..
+            })))
+        ));
+        assert!(storage.load_chunk(0, 0, 0, 16).unwrap().is_none());
+        drop(storage);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
     }
 }

@@ -157,6 +157,10 @@ lodestone-anvil = { path = "../lodestone-anvil" }
 # the native dependency set with Anvil because both selections use local files;
 # browser singleplayer deliberately has no persistence surface.
 lodestone-storage = { path = "../lodestone-storage" }
+# The bounded native chunk-record adapter turns a server `ChunkColumn` into the
+# schema's generated Protobuf type and back. It remains native-only with the
+# segment because browser singleplayer has no filesystem-backed record store.
+lodestone-storage-schema = { path = "../lodestone-storage-schema" }
 # Issue #273's online-mode half: `has_joined`, the server-side session-server
 # check, and the `AuthError` type `ServerError::AuthServiceUnavailable` wraps.
 # Target-gated for the same reason as `lodestone-anvil` above and as
