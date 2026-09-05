@@ -254,6 +254,44 @@ async fn movement_recenters_the_hosted_view_onto_the_next_chunk() {
 }
 
 #[tokio::test]
+async fn player_loaded_reaches_the_registry_selected_readiness_consumer() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(774)
+        .expect("protocol 774 must resolve to the hosted family");
+    let mut column = ChunkColumn::new(-64, 384);
+    column.set_block(8, 99, 8, "minecraft:stone");
+    let source = Arc::new(FixtureSource { column: Mutex::new(column) });
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let (mut handle, _) = ClientBuilder::new(
+        ServerAddress { host: "memory".to_owned(), port: 0 },
+        LoginProfile { username: "ReadinessFixture".to_owned(), uuid: uuid::Uuid::new_v4() },
+        Box::new(adapter_for(774)),
+    )
+    .connect_with(client_io);
+
+    handle.wait_for_spawn(Duration::from_secs(10)).await.unwrap();
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    // This exact action follows the registry-selected adapter to the shared
+    // readiness latch. The two movement samples then reach the shared fall
+    // consumer: a ten-block landing costs floor(10 - 3) = 7 health. Without
+    // the readiness decoder, the consumer deliberately ignores both samples.
+    handle.send_action(ClientAction::PlayerLoaded).unwrap();
+    let rotation = Rotation::new(0.0, 0.0);
+    handle.move_to(Vec3::new(8.5, 110.0, 8.5), rotation, false, false).unwrap();
+    handle.move_to(Vec3::new(8.5, 100.0, 8.5), rotation, true, false).unwrap();
+    handle
+        .wait_for(Duration::from_secs(10), |client| client.health() == Some(13.0))
+        .await
+        .expect("registry-selected player_loaded enables hosted fall simulation");
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn initial_and_live_border_light_use_the_open_east_column() {
     let target = BlockPos::new(15, 100, 8);
     let probe = BlockPos::new(15, 100, 7);

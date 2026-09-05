@@ -17,8 +17,8 @@ use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::configuration::RegistryData;
 use crate::packets::game::{
     ChunkBatchFinished, ChunkBatchStart, ClientboundPlayerPosition, JoinGame, MovePlayerPos,
-    MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly, PlayerAction, SpawnInfo, UseItem,
-    UseItemOn,
+    MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly, PlayerAction, PlayerLoaded, SpawnInfo,
+    SetHealth, UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginStart, LoginFinished, SetCompression};
@@ -411,6 +411,10 @@ impl ServerProtocol for V774ServerProtocol {
                         desired_chunks_per_tick: ack.chunks_per_tick,
                     })
             }
+            State::Play if packet_id == play::serverbound::PLAYER_LOADED => {
+                decode_full::<PlayerLoaded>(payload)
+                    .map_or(ServerBound::Ignored, |_| ServerBound::PlayerLoaded)
+            }
             State::Play if packet_id == play::serverbound::MOVE_PLAYER_POS => {
                 decode_full::<MovePlayerPos>(payload).map_or(
                     ServerBound::Ignored,
@@ -623,5 +627,16 @@ impl ServerProtocol for V774ServerProtocol {
             packet_id: play::clientbound::LIGHT_UPDATE,
             payload: payload.into_vec(),
         }
+    }
+
+    fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
+        send(
+            play::clientbound::SET_HEALTH,
+            &SetHealth {
+                health: health.clamp(0.0, 20.0),
+                food: food.clamp(0, 20),
+                food_saturation: saturation.clamp(0.0, 20.0),
+            },
+        )
     }
 }
