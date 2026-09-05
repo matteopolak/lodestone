@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.10.0;
+package lodestone:plugin@0.11.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -122,6 +122,22 @@ interface types {
         saturation: f32,
     }
 
+    /// The stable, gameplay-relevant identity of one inventory stack. Data
+    /// components stay in the native inventory model: copying their open-ended
+    /// vocabulary into this ABI would create a second item representation.
+    record item-stack {
+        item: string,
+        count: u32,
+    }
+
+    /// `lodestone_model::ClientEvent::InventorySlotChanged`: a change to one
+    /// native player-inventory slot outside an open container. This does not
+    /// observe container slots or the cursor item.
+    record inventory-slot-changed {
+        slot: s32,
+        item: option<item-stack>,
+    }
+
     /// Section coordinates — block coordinate `>> 4` on every axis, exactly
     /// `lodestone_model::SectionPos`.
     record section-pos {
@@ -162,6 +178,8 @@ interface types {
         chat(chat-message),
         /// `ClientEvent::HealthChanged` — capability `observe:health`.
         health-changed(health),
+        /// `ClientEvent::InventorySlotChanged` — capability `observe:inventory`.
+        inventory-slot-changed(inventory-slot-changed),
         /// `ClientEvent::SectionBlocksChanged` — capability `observe:blocks`.
         blocks-changed(section-blocks-changed),
         /// A changed local-player mining lifecycle state — capability `observe:break`.
@@ -370,7 +388,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.10.0"`.
+        /// `"lodestone:plugin@0.11.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.

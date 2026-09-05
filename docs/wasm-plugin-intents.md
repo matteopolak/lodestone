@@ -6,7 +6,7 @@ The desktop WASM plugin host exposes copied local-player look, movement, block-b
 
 ## How it works
 
-`lodestone:plugin@0.10.0` provides `action.set-look(option<look-intent>)`, guarded by `act:look`, `action.set-movement(option<movement-intent>)`, guarded by `act:movement`, `action.set-break(option<break-intent>)`, guarded by `act:break`, `action.place-block(place-intent)`, guarded by `act:place`, and `action.select-slot(hotbar-slot)`, guarded by `act:select-slot`. `lodestone_wasm_host::abi::lower_action` turns look into `lodestone_ecs::player::LookIntent`; the conductor applies the final look request in load order during `TickSet::Intent`, before `apply_look_intent`.
+`lodestone:plugin@0.11.0` provides `action.set-look(option<look-intent>)`, guarded by `act:look`, `action.set-movement(option<movement-intent>)`, guarded by `act:movement`, `action.set-break(option<break-intent>)`, guarded by `act:break`, `action.place-block(place-intent)`, guarded by `act:place`, and `action.select-slot(hotbar-slot)`, guarded by `act:select-slot`. `lodestone_wasm_host::abi::lower_action` turns look into `lodestone_ecs::player::LookIntent`; the conductor applies the final look request in load order during `TickSet::Intent`, before `apply_look_intent`.
 
 For movement, the conductor runs after `lodestone_controller::ecs::compute_movement_intent` and before physics. It overwrites only copied axes and button state; item-use effects stay owned by the controller. Finite axes are clamped to `[-1, 1]`, and non-finite axes become neutral. Physics then resolves the request and the existing controller sends the ordinary movement and player-input actions. This is deliberately an intent rather than a raw packet: a guest cannot forge position, collision, or sequence state.
 
@@ -20,6 +20,8 @@ The guest output list is ordered. If multiple guest actions set look or set move
 
 `observe:place` grants one `event.place-outcome` per resolved `PlaceOutcome::generation` and per local-player session. Its finite status is `predicted`, `sent-unpredicted`, or a finite rejection reason. No idle event repeats every tick, no world handle crosses the ABI, and no arbitrary host error string is exposed. A reconnect is a new player identity, so a first result at generation `1` is not hidden by the previous session's generation `1`.
 
+`observe:inventory` grants `event.inventory-slot-changed` only for the existing `ClientEvent::InventorySlotChanged` stream: native player-inventory slots outside an open container. Its `item-stack` is a copied canonical item key and count; item data components, open-container slots, and the cursor stay in the native session model. The client driver publishes the original `ClientEvent` once to `GameEvent`, which is also the native-plugin observation path, and the conductor filters that bus per guest. This adds no inventory cache, packet constructor, or write path.
+
 ## How to change it
 
 Add a new copied intent arm to `crates/lodestone-wasm-host/wit/lodestone-plugin.wit`, give it an explicit capability in `capability.rs`, and make `abi::lower_action` exhaustive over it. Route it through `conductor::PendingWasmIntents` only when it has an existing ECS consumer with a deliberate schedule edge; do not lower an intent into a raw `ClientAction`. For a one-shot outcome, keep a bounded generation cursor in the host as `LoadedPlugin::observe_place_outcome`; for a continuous lifecycle, keep a per-session status-edge cursor like `LoadedPlugin::observe_break_outcome`. Do not turn either component poll into an every-tick event stream.
@@ -28,7 +30,7 @@ Any WIT change requires increasing `host::ABI_WORLD`, rebuilding guests, and upd
 
 ## Configuration
 
-The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, `observe:place`, and `act:select-slot`. A guest manifest must request every capability it uses; a request alone never changes the policy.
+The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, `observe:place`, `act:select-slot`, and `observe:inventory`. A guest manifest must request every capability it uses; a request alone never changes the policy.
 
 ```toml
 capabilities = ["act:movement"]
@@ -44,6 +46,10 @@ capabilities = ["act:break", "observe:break"]
 
 ```toml
 capabilities = ["act:select-slot"]
+```
+
+```toml
+capabilities = ["observe:inventory"]
 ```
 
 For desktop directory discovery, use `PluginGrantPolicy` to add a narrow exception
