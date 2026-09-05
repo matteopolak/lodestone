@@ -38,7 +38,69 @@
 use lodestone_model::{ClientAction, ClientEvent};
 
 use crate::capability::{Capability, CapabilitySet};
-use crate::host::{Action, BlockOffset, ChatKind, ChatMessage, Event, Hand, Health, SectionBlocksChanged, SectionPos};
+use crate::host::{
+    Action, BlockBreakVerdict, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
+    EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict, PlayerInteractVerdict,
+    PlayerMoveVerdict, SectionBlocksChanged, SectionPos, VerdictContext,
+};
+
+/// Copy a native action-veto context into the synchronous guest vocabulary.
+///
+/// This is deliberately total over the six native typed ask sites. No world
+/// borrow crosses the boundary, so calling it under the tick-owned world guard
+/// cannot provide a route back into that guard.
+#[must_use]
+pub fn lift_verdict_context(
+    context: &lodestone_ecs::veto::VerbContext,
+) -> Option<VerdictContext> {
+    use lodestone_ecs::veto::VerbContext as Native;
+
+    let block_pos = |pos: lodestone_model::BlockPos| BlockPos {
+        x: pos.x,
+        y: pos.y,
+        z: pos.z,
+    };
+    match context {
+        Native::BlockBreak { pos, state_id } => Some(VerdictContext::BlockBreak(BlockBreakVerdict {
+            pos: block_pos(*pos),
+            state_id: *state_id,
+        })),
+        Native::BlockPlace { pos } => Some(VerdictContext::BlockPlace(BlockPlaceVerdict {
+            pos: block_pos(*pos),
+        })),
+        Native::EntityDamage { target_entity_id } => Some(VerdictContext::EntityDamage(EntityDamageVerdict {
+            target_entity_id: *target_entity_id,
+        })),
+        Native::InventoryClick {
+            window_id,
+            slot,
+            button,
+        } => Some(VerdictContext::InventoryClick(InventoryClickVerdict {
+            window_id: *window_id,
+            slot: *slot,
+            button: *button,
+        })),
+        Native::PlayerMove {
+            moving,
+            jumping,
+            sprinting,
+        } => Some(VerdictContext::PlayerMove(PlayerMoveVerdict {
+            moving: *moving,
+            jumping: *jumping,
+            sprinting: *sprinting,
+        })),
+        Native::PlayerInteract {
+            pos,
+            target_entity_id,
+        } => Some(VerdictContext::PlayerInteract(PlayerInteractVerdict {
+            pos: pos.map(block_pos),
+            target_entity_id: *target_entity_id,
+        })),
+        // A future native context cannot silently cross an ABI that has no
+        // representable copy of it. The host turns this into a fail-closed ask.
+        _ => None,
+    }
+}
 
 /// Lift one `ClientEvent` into the guest vocabulary, or `None`.
 ///

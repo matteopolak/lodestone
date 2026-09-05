@@ -337,6 +337,14 @@ never lifted to an ungranted guest and its actions are silently dropped, which m
 *declaration*, not the enforcement, and anything genuinely dangerous (filesystem, network, subprocess)
 must be modelled as an import rather than trusted as data-flow.
 
+`on-verdict(context)` is the synchronous cancellation half. It receives one copy-only typed context
+for each existing action veto and returns only `allow` or `deny`. The conductor brokers it into
+`ActionVetoes`, so it runs under the tick owner rather than re-entering the world. Eligible guests run
+in deterministic load order (directory loading is manifest priority then name); the first denial
+stops dispatch. A trap, fuel exhaustion, or future native context this ABI cannot represent denies the
+current action, unloads the failing guest where applicable, and lets later actions be considered by
+the remaining guests. The `veto:actions` data-flow capability gates delivery to the export.
+
 Not in the ABI yet: the intent half of the doctrine (`BreakIntent`/`PlaceIntent`/`MovementIntent`/
 `LookIntent`) — a guest can chat and observe but cannot yet mine, place, or steer, since an
 install/remove-shaped component needs paired ABI calls plus an outcome poll, a bigger surface than one

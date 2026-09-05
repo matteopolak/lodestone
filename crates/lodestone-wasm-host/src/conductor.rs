@@ -39,12 +39,13 @@
 //! confusing failure a plugin API can produce, and the `refused` counter is what
 //! makes "the capability filter is doing something" observable from outside.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::{IntoScheduleConfigs, MessageReader, ResMut, Resource};
 use lodestone_ecs::events::{GameEvent, GameEventBusPlugin};
 use lodestone_ecs::player::ActionQueue;
+use lodestone_ecs::veto::{ActionVetoPlugin, ActionVetoes, Verdict};
 // `TickSet` via the crate root, not `lodestone_ecs::sets::TickSet`: the `sets` module
 // itself is private and only its re-exports are public.
 use lodestone_ecs::{CorePlugin, GameTick, TickSet};
@@ -65,7 +66,7 @@ use crate::host::{Event, PluginHost};
 /// costs an uncontended atomic per tick and buys `Sync` honestly.
 #[derive(Resource)]
 pub struct WasmPlugins {
-    host: Mutex<PluginHost>,
+    host: Arc<Mutex<PluginHost>>,
     /// Actions refused for want of a capability, cumulative. See this module's
     /// header for why this is a counter and not a silent drop.
     refused: u64,
@@ -83,7 +84,7 @@ impl WasmPlugins {
     #[must_use]
     pub fn new(host: PluginHost) -> Self {
         Self {
-            host: Mutex::new(host),
+            host: Arc::new(Mutex::new(host)),
             refused: 0,
         }
     }
@@ -100,6 +101,23 @@ impl WasmPlugins {
     pub fn with_host<R>(&self, f: impl FnOnce(&mut PluginHost) -> R) -> R {
         let mut guard = self.host.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         f(&mut guard)
+    }
+
+    fn verdict_broker(&self) -> Arc<Mutex<PluginHost>> {
+        Arc::clone(&self.host)
+    }
+}
+
+fn ask_wasm_verdict(
+    broker: &Arc<Mutex<PluginHost>>,
+    context: &lodestone_ecs::veto::VerbContext,
+) -> Verdict {
+    let mut host = broker
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match host.verdict_all(context) {
+        crate::host::VerdictDispatch::Allow => Verdict::Allow,
+        crate::host::VerdictDispatch::Deny | crate::host::VerdictDispatch::Error => Verdict::Deny,
     }
 }
 
@@ -153,6 +171,9 @@ impl Plugin for WasmHostPlugin {
         if !app.is_plugin_added::<GameEventBusPlugin>() {
             app.add_plugins(GameEventBusPlugin);
         }
+        if !app.is_plugin_added::<ActionVetoPlugin>() {
+            app.add_plugins(ActionVetoPlugin);
+        }
         app.init_resource::<ActionQueue>();
 
         let Some(host) = self
@@ -164,7 +185,15 @@ impl Plugin for WasmHostPlugin {
             tracing::warn!("WasmHostPlugin::build ran twice; keeping the first host");
             return;
         };
-        app.insert_resource(WasmPlugins::new(host));
+        let plugins = WasmPlugins::new(host);
+        let verdict_broker = plugins.verdict_broker();
+        for verb in lodestone_ecs::veto::Verb::ALL {
+            let broker = Arc::clone(&verdict_broker);
+            app.world_mut()
+                .resource_mut::<ActionVetoes>()
+                .register(*verb, "wasm-verdicts", 0, move |context| ask_wasm_verdict(&broker, context));
+        }
+        app.insert_resource(plugins);
         app.add_systems(GameTick, drive_wasm_plugins.in_set(TickSet::Predict));
     }
 }

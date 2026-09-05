@@ -62,6 +62,9 @@ network = []
 # schedules one-shot and repeating callbacks during `init`, and cancels both a
 # pending task and a running repeating task.
 scheduler = []
+# Verdict fixtures for the host's synchronous cancellation conformance test.
+verdict-deny = []
+verdict-trap = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is
