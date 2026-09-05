@@ -3031,6 +3031,78 @@ struct ItemState {
     motion: ItemMotion,
 }
 
+/// The chunk that owns a dropped item at the start of its tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ItemTickOwner {
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl ItemTickOwner {
+    fn for_position(position: Vec3) -> Self {
+        Self::Chunk {
+            cx: (position.x.floor() as i32).div_euclid(16),
+            cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+}
+
+/// One completed dropped-item owner batch.
+#[derive(Debug, Clone)]
+pub(crate) struct ItemTickOwnerBatch {
+    owner: ItemTickOwner,
+    expected_batch_count: usize,
+    effects: Vec<ItemTickEffect>,
+}
+
+#[derive(Debug, Clone)]
+struct ItemTickEffect {
+    owner: ItemTickOwner,
+    serial: usize,
+    id: i32,
+    lifecycle: ItemLifecycle,
+    state: ItemState,
+    discard: bool,
+}
+
+fn merge_item_tick_owner_batches(mut batches: Vec<ItemTickOwnerBatch>) -> Vec<ItemTickEffect> {
+    let expected_batch_count = batches
+        .first()
+        .map(|batch| batch.expected_batch_count)
+        .expect("item owner completion must contain every tick-start owner batch");
+    let mut owners = std::collections::HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            batch.expected_batch_count, expected_batch_count,
+            "item owner completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "item owner completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "an item owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "item owner completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "item owner completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
+}
+
 /// One live experience orb.
 ///
 /// # `value` and `count` are different numbers and both are player-visible
@@ -5281,6 +5353,103 @@ impl<'w> MobSim<'w> {
         }
     }
 
+    /// Produces chunk-owner completions from dropped-item tick-start state.
+    ///
+    /// Lifecycle counters and collision motion are computed on copies. No
+    /// owner writes either live item registry; the central apply step below
+    /// validates the complete plan before publishing any result.
+    pub(crate) fn tick_item_owner_batches(
+        &self,
+        block_state: &dyn Fn(i32, i32, i32) -> String,
+    ) -> (Vec<ItemTickOwnerBatch>, u64) {
+        let view = ItemCollision {
+            block_state,
+            probe_count: std::cell::Cell::new(0),
+        };
+        let mut batches = Vec::<ItemTickOwnerBatch>::new();
+        for (serial, tracked) in self.items.iter().enumerate() {
+            let mut lifecycle = tracked.lifecycle;
+            let mut state = self
+                .item_state
+                .get(&tracked.id)
+                .cloned()
+                .expect("a tracked item lifecycle must have matching motion state");
+            let owner = ItemTickOwner::for_position(state.motion.position);
+            lifecycle.tick();
+            let mut discard = lifecycle.should_despawn();
+            if !discard {
+                let before = state.motion.position;
+                state.motion.tick();
+                settle_item(&view, &mut state.motion, before);
+                discard = state.motion.position.y < f64::from(self.world.min_y) - VOID_DESPAWN_DEPTH;
+            }
+            let effect = ItemTickEffect {
+                owner,
+                serial,
+                id: tracked.id,
+                lifecycle,
+                state,
+                discard,
+            };
+            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
+                batch.effects.push(effect);
+            } else {
+                batches.push(ItemTickOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects: vec![effect],
+                });
+            }
+        }
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        (batches, view.probe_count.get())
+    }
+
+    /// Validates and centrally applies completed dropped-item owner batches.
+    pub(crate) fn apply_item_tick_owner_batches(&mut self, batches: Vec<ItemTickOwnerBatch>) {
+        if batches.is_empty() {
+            assert!(
+                self.items.is_empty() && self.item_state.is_empty(),
+                "item owner completion must retain every live tick-start item"
+            );
+            return;
+        }
+        let effects = merge_item_tick_owner_batches(batches);
+        assert_eq!(
+            effects.len(),
+            self.items.len(),
+            "item owner completion must retain every live tick-start lifecycle"
+        );
+        assert_eq!(
+            effects.len(),
+            self.item_state.len(),
+            "item owner completion must retain every live tick-start motion state"
+        );
+        let mut ids = std::collections::HashSet::new();
+        for effect in &effects {
+            assert!(
+                ids.insert(effect.id),
+                "item owner completion may update one live item only once"
+            );
+            assert!(
+                self.items.get(effect.id).is_some() && self.item_state.contains_key(&effect.id),
+                "item owner completion may update only a live tick-start item"
+            );
+        }
+        for effect in effects {
+            self.items.remove(effect.id);
+            if effect.discard {
+                self.item_state.remove(&effect.id);
+            } else {
+                self.items.spawn(effect.id, effect.lifecycle);
+                self.item_state.insert(effect.id, effect.state);
+            }
+        }
+    }
+
     /// One tick, settling dropped items against a caller-supplied solidity
     /// oracle — the live world, when the caller has one.
     ///
@@ -5774,9 +5943,6 @@ impl<'w> MobSim<'w> {
         // carry an arrow through a wall.
         self.resolve_projectile_impacts();
         self.projectiles.tick();
-        for despawned_item_id in self.items.tick() {
-            self.item_state.remove(&despawned_item_id);
-        }
         // **items land.** `ItemMotion::tick` is the entity's own
         // motion — gravity, translate, drag — and its doc comment has always said
         // "block collision that would zero a component is the world crate's job
@@ -5791,20 +5957,8 @@ impl<'w> MobSim<'w> {
         // test could never pass for anything but two items spawned on the same
         // tick. Settling them onto a surface is what makes the merge reachable,
         // which is why the item lifecycle and inventory handoff are one operation.
-        let world = self.world;
-        let mut fell_out_of_the_world: Vec<i32> = Vec::new();
-        let view = ItemCollision {
-            block_state,
-            probe_count: std::cell::Cell::new(0),
-        };
-        for (&id, state) in &mut self.item_state {
-            let before = state.motion.position;
-            state.motion.tick();
-            settle_item(&view, &mut state.motion, before);
-            if state.motion.position.y < f64::from(world.min_y) - VOID_DESPAWN_DEPTH {
-                fell_out_of_the_world.push(id);
-            }
-        }
+        let (item_batches, item_probe_count) = self.tick_item_owner_batches(block_state);
+        self.apply_item_tick_owner_batches(item_batches);
         // **The cost of the sweep, as a counter rather than a duration.** Swept
         // collision against real shapes is strictly more work per item than one
         // boolean lookup was, and the number of items in one tick is unbounded — so
@@ -5812,22 +5966,18 @@ impl<'w> MobSim<'w> {
         // floor covered in drops can consume. A counter is what a gate can assert
         // and what survives being read on a loaded machine; see
         // `items_settled_probe_count`.
-        self.item_probe_count = view.probe_count.get();
-        // Vanilla's own "check below world" discard, and not merely tidiness: an item
-        // that escapes the world (a column the snapshot does not cover, so
-        // `is_solid` is false everywhere) would otherwise keep being ticked and
-        // streamed for its full 6000-tick life at ever-increasing depth.
-        for id in fell_out_of_the_world {
-            self.item_state.remove(&id);
-            self.items.remove(id);
-        }
+        self.item_probe_count = item_probe_count;
         self.merge_neighbouring_items();
         // Experience orbs, on the same live-terrain oracle the items above use and for
         // the same reason: an orb settled against the sim's static `ChunkWorld`
         // snapshot would fall through any block the player has placed and rest on any
         // block they have mined. `tick_orbs` reads `tick_count` for its merge phase, so
         // it runs before the increment below.
-        self.tick_orbs(&view);
+        let orb_view = ItemCollision {
+            block_state,
+            probe_count: std::cell::Cell::new(0),
+        };
+        self.tick_orbs(&orb_view);
         // A fireball's `ignite_seconds` used to reach nothing: computed by
         // `lodestone_entity::projectile::impact_effect` and read by no
         // production caller. `resolve_projectile_impacts` above is what can
@@ -10237,6 +10387,99 @@ pub const DEMO_SPECIES: &[&str] = &[
     "enderman",
     "snow_golem",
 ];
+
+#[cfg(test)]
+mod item_owner_tests {
+    use super::*;
+
+    fn fixture() -> MobSim<'static> {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -4..=20 {
+            world.set_solid(x, 0, 0, true);
+        }
+        let world = Box::leak(Box::new(world));
+        let mut sim = MobSim::new(world);
+        let item = ResourceKey::from_str("minecraft:stone").expect("valid key");
+        for position in [
+            Vec3::new(-0.5, 2.0, 0.5),
+            Vec3::new(16.5, 2.0, 0.5),
+            Vec3::new(-0.25, 3.0, 0.5),
+        ] {
+            sim.spawn_item(
+                item.clone(),
+                position,
+                Vec3::new(0.0, 0.0, 0.0),
+                ItemLifecycle::newly_dropped(1, 64),
+            );
+        }
+        sim
+    }
+
+    fn item_state(sim: &MobSim<'_>) -> Vec<(i32, ItemLifecycle, ItemMotion)> {
+        sim.items
+            .iter()
+            .map(|tracked| {
+                (
+                    tracked.id,
+                    tracked.lifecycle,
+                    sim.item_state.get(&tracked.id).expect("matching motion").motion,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn item_owner_batches_restore_registration_order_after_reversed_completion() {
+        let mut serial = fixture();
+        let (serial_batches, serial_probes) =
+            serial.tick_item_owner_batches(&|x, y, z| serial.world.block_state(x, y, z).to_owned());
+        assert_eq!(
+            serial_batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
+            [
+                ItemTickOwner::Chunk { cx: -1, cz: 0 },
+                ItemTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "negative fractional positions use Euclidean chunk ownership"
+        );
+        serial.apply_item_tick_owner_batches(serial_batches);
+        let expected = item_state(&serial);
+
+        let mut completed = fixture();
+        let (mut batches, completed_probes) = completed
+            .tick_item_owner_batches(&|x, y, z| completed.world.block_state(x, y, z).to_owned());
+        batches.reverse();
+        let raw_slots = batches
+            .iter()
+            .flat_map(|batch| batch.effects.iter())
+            .map(|effect| effect.serial)
+            .collect::<Vec<_>>();
+        assert_ne!(raw_slots, vec![0, 1, 2], "control must actually reorder owner completion");
+        completed.apply_item_tick_owner_batches(batches);
+
+        assert_eq!(item_state(&completed), expected);
+        assert_eq!(completed_probes, serial_probes);
+    }
+
+    #[test]
+    #[should_panic(expected = "every tick-start owner batch exactly once")]
+    fn item_owner_batch_merge_rejects_a_missing_owner() {
+        let sim = fixture();
+        let (mut batches, _) =
+            sim.tick_item_owner_batches(&|x, y, z| sim.world.block_state(x, y, z).to_owned());
+        batches.pop();
+        let _ = merge_item_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not contain one owner twice")]
+    fn item_owner_batch_merge_rejects_a_duplicate_owner() {
+        let sim = fixture();
+        let (mut batches, _) =
+            sim.tick_item_owner_batches(&|x, y, z| sim.world.block_state(x, y, z).to_owned());
+        batches[1] = batches[0].clone();
+        let _ = merge_item_tick_owner_batches(batches);
+    }
+}
 
 /// The `follow_range` attribute reaches the controller that bounds target
 /// acquisition, including the no-target case.

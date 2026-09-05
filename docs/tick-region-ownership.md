@@ -144,6 +144,15 @@ duplicate, or mixed-plan completions before changing the live orb map. The
 central writer restores entity-id slots before applying expiry. Its existing
 global merge scan remains afterwards, so an orb pair crossing an owner edge
 still merges in the same id order rather than the order their owners finish.
+Dropped items now cross an equivalent boundary in that same live pass.
+`MobSim::tick_item_owner_batches` copies each tick-start lifecycle and motion
+state under the chunk containing its original position, advances the counters,
+and settles motion against the live terrain oracle without writing either item
+registry. `MobSim::apply_item_tick_owner_batches` requires the complete unique
+owner set and restores registration-order slots before it publishes motion or
+removes an expired or out-of-world item. The global proximity merge remains a
+central pass afterwards, so two stacks crossing a chunk edge cannot merge in a
+different direction merely because one owner completes first.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
@@ -291,6 +300,16 @@ writer must first validate the complete unique completion set, restore serial
 slots, and only then let `MobSim::tick_orbs` run the existing id-ordered merge
 scan. Preserve the reversed-completion, missing-owner, and duplicate-owner
 controls when changing this boundary.
+
+Keep dropped-item lifecycle and collision motion behind
+`MobSim::tick_item_owner_batches` and
+`MobSim::apply_item_tick_owner_batches`. The source owner is the item's
+tick-start chunk, while the serial slot is its existing registry order. An
+owner completion may report updated lifecycle and motion or a removal, but it
+must not mutate either live item registry. Validate the complete unique owner
+set and every serial slot before applying any result, then run the global item
+merge centrally. Preserve negative-coordinate, reversed-completion, missing-
+owner, and duplicate-owner controls when changing the hand-off.
 
 Do not drain a scheduled queue directly from a future owner worker. Keep the
 world-wide queue comparator as the tick-start selector, return one completion
