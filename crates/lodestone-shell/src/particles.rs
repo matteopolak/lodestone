@@ -52,7 +52,7 @@ use std::sync::Arc;
 
 use lodestone_assets::{ParticleAtlas, ResourceLocation};
 use lodestone_data::item::Item;
-use lodestone_model::event::ParticleOptions;
+use lodestone_model::event::{BlockStateRef, ParticleOptions};
 use lodestone_particle::{
     DripKind, DripPhase, Layer, ParticleEngine, ParticleQuad, Sheet, SpriteSource, emit,
 };
@@ -1173,10 +1173,19 @@ impl Particles {
             );
             return None;
         };
-        let Some(state) = lodestone_data::block_states::StateId::new(state) else {
+        let BlockStateRef::Canonical(raw) = state else {
             tracing::debug!(
                 target: "particles",
-                "{kind} particle with an unknown or custom BlockParticleOption state; dropped"
+                raw = state.raw(),
+                "{kind} particle with a protocol-local or custom \
+                 BlockParticleOption state; not rendered by the built-in resolver"
+            );
+            return None;
+        };
+        let Some(state) = lodestone_data::block_states::StateId::new(raw) else {
+            tracing::debug!(
+                target: "particles",
+                "{kind} particle with an out-of-census canonical BlockParticleOption state; dropped"
             );
             return None;
         };
@@ -2224,8 +2233,10 @@ mod tests {
                 // would silently drop all five.
                 "block" | "block_marker" | "block_crumble" | "dust_pillar"
                 | "falling_dust" => ParticleOptions::BlockState {
-                    state: lodestone_data::block_states::state_id("minecraft:stone")
-                        .expect("stone is in the block-state registry"),
+                    state: BlockStateRef::canonical(
+                        lodestone_data::block_states::state_id("minecraft:stone")
+                            .expect("stone is in the block-state registry"),
+                    ),
                 },
                 _ => ParticleOptions::None,
             };
@@ -3246,7 +3257,9 @@ mod tests {
             vel,
             1.0,
             0,
-            ParticleOptions::BlockState { state: stone_state() },
+            ParticleOptions::BlockState {
+                state: BlockStateRef::canonical(stone_state()),
+            },
         );
         assert_eq!(
             p.engine.particles().len(),
@@ -3568,7 +3581,9 @@ mod tests {
             [0.0, 0.0, 0.0],
             0.0,
             0,
-            ParticleOptions::BlockState { state: stone_state() },
+            ParticleOptions::BlockState {
+                state: BlockStateRef::canonical(stone_state()),
+            },
         );
         assert_eq!(p.engine.particles().len(), 1);
 
@@ -3597,7 +3612,9 @@ mod tests {
                 [0.0, 0.0, 0.0],
                 0.0,
                 0,
-                ParticleOptions::BlockState { state: stone_state() },
+                ParticleOptions::BlockState {
+                    state: BlockStateRef::canonical(stone_state()),
+                },
             );
             if p.engine.particles()[0].lifetime < 60 {
                 continue;
@@ -3622,7 +3639,10 @@ mod tests {
     /// The three refusals, each with a control proving the detector fires.
     ///
     /// Air is vanilla's own (its own create-terrain-particle returns `null` for it), a missing
-    /// payload is ours, and an out-of-census payload is the registry boundary.
+    /// payload is ours, and an out-of-census canonical payload is the registry
+    /// boundary. A protocol-local value is a separate refusal: it can overlap a
+    /// generated raw number, but this renderer has no matching version or
+    /// dynamic-registry model resolver.
     /// All three are silent drops, so without the control arm below an emitter
     /// that spawned *nothing at all* would satisfy them.
     #[test]
@@ -3636,7 +3656,9 @@ mod tests {
                 [0.0, 0.0, 0.0],
                 0.0,
                 1,
-                ParticleOptions::BlockState { state: air },
+                ParticleOptions::BlockState {
+                    state: BlockStateRef::canonical(air),
+                },
             );
             assert_eq!(
                 p.engine.particles().len(),
@@ -3660,13 +3682,33 @@ mod tests {
                 0.0,
                 1,
                 ParticleOptions::BlockState {
-                    state: lodestone_data::block_states::STATE_COUNT,
+                    state: BlockStateRef::canonical(lodestone_data::block_states::STATE_COUNT),
                 },
             );
             assert_eq!(
                 p.engine.particles().len(),
                 0,
                 "{kind:?} must reject an out-of-census state before emitter lookup"
+            );
+
+            // This raw number is intentionally a valid built-in stone state.
+            // The source tag, not the number's range, decides whether this
+            // 26.2 model table may consume it.
+            let mut p = resolvable();
+            p.spawn_particles(
+                kind,
+                [0.5, 65.0, 0.5],
+                [0.0, 0.0, 0.0],
+                0.0,
+                1,
+                ParticleOptions::BlockState {
+                    state: BlockStateRef::protocol_local(stone_state()),
+                },
+            );
+            assert_eq!(
+                p.engine.particles().len(),
+                0,
+                "{kind:?} must not treat a protocol-local value as a generated 26.2 state"
             );
 
             // The control: the same call with a real state must spawn.
@@ -3677,7 +3719,9 @@ mod tests {
                 [0.0, 0.0, 0.0],
                 0.0,
                 1,
-                ParticleOptions::BlockState { state: stone_state() },
+                ParticleOptions::BlockState {
+                    state: BlockStateRef::canonical(stone_state()),
+                },
             );
             assert_eq!(
                 p.engine.particles().len(),

@@ -1686,6 +1686,55 @@ pub enum BossAction {
     },
 }
 
+/// A raw block-state id whose numbering source is known, but whose built-in
+/// census membership has not yet been checked.
+///
+/// The version-free event model cannot validate a numeric state against the
+/// generated 26.2 census: an older protocol family may use a different
+/// numbering, and a synchronized extension may own an opaque value that no
+/// built-in table can name. The adapter must therefore tag the source rather
+/// than calling `lodestone_data::block_states::StateId::new` on every raw
+/// value. A consumer that needs generated data validates only
+/// [`Self::Canonical`] at its own boundary; it leaves [`Self::ProtocolLocal`]
+/// intact until a matching version or dynamic-registry resolver is available.
+///
+/// This intentionally owns no `StateId`: `lodestone-model` stays independent
+/// of the generated-data crate, while `StateId` remains the proof that a value
+/// is one of this build's built-in states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BlockStateRef {
+    /// A raw global state id in the canonical 26.2 numbering. It still needs
+    /// generated-census validation before an indexed built-in lookup.
+    Canonical(u32),
+    /// A raw state id whose protocol family or synchronized extension owns the
+    /// numbering. This may numerically overlap the canonical range, so it must
+    /// never be range-checked as though it were a 26.2 state.
+    ProtocolLocal(u32),
+}
+
+impl BlockStateRef {
+    /// Tags a raw global state id emitted by the canonical 26.2 protocol.
+    #[must_use]
+    pub const fn canonical(raw: u32) -> Self {
+        Self::Canonical(raw)
+    }
+
+    /// Tags a raw state id from a protocol-local or dynamic registry.
+    #[must_use]
+    pub const fn protocol_local(raw: u32) -> Self {
+        Self::ProtocolLocal(raw)
+    }
+
+    /// The original numeric value, for the source-specific resolver that owns
+    /// this reference's numbering.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        match self {
+            Self::Canonical(raw) | Self::ProtocolLocal(raw) => raw,
+        }
+    }
+}
+
 /// A `minecraft:particle_type` registry entry's type-specific payload —
 /// [`ClientEvent::Particles`]'s `options`.
 ///
@@ -1784,12 +1833,12 @@ pub enum ParticleOptions {
     /// what would make a `block_marker` fall and a `falling_dust` wear the
     /// block's own texture.
     BlockState {
-        /// The block state, by **block-state** network id — the index into
-        /// the game's own block-state registry, not a block id and not an
-        /// item id. The same numbering `lodestone_data::block_states` uses and
-        /// that `lodestone_particle::SpriteSource::BlockState` resolves
-        /// against, so it can be handed straight to a particle.
-        state: u32,
+        /// The block state, by **block-state** network id — not a block id and
+        /// not an item id. [`BlockStateRef::Canonical`] is the 26.2 numbering
+        /// that a built-in renderer may validate against
+        /// `lodestone_data::block_states`; [`BlockStateRef::ProtocolLocal`]
+        /// stays opaque for a version-aware or dynamic-registry consumer.
+        state: BlockStateRef,
     },
 }
 
@@ -4298,6 +4347,34 @@ mod equipment_slot_tests {
                 "{name:?} must not resolve to a slot"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod block_state_ref_tests {
+    use super::BlockStateRef;
+
+    #[test]
+    fn canonical_and_protocol_local_state_ids_keep_the_same_raw_value_distinct() {
+        // A deliberately small value: accepting a protocol-local state just
+        // because it fits a generated census is the boundary error this type
+        // prevents.
+        const RAW: u32 = 1;
+        let canonical = BlockStateRef::canonical(RAW);
+        let local = BlockStateRef::protocol_local(RAW);
+
+        assert_eq!(canonical.raw(), RAW);
+        assert_eq!(local.raw(), RAW);
+        assert_ne!(canonical, local);
+        assert!(matches!(canonical, BlockStateRef::Canonical(RAW)));
+        assert!(matches!(local, BlockStateRef::ProtocolLocal(RAW)));
+    }
+
+    #[test]
+    fn protocol_local_state_ids_preserve_the_full_unsigned_domain() {
+        let local = BlockStateRef::protocol_local(u32::MAX);
+        assert_eq!(local.raw(), u32::MAX);
+        assert!(matches!(local, BlockStateRef::ProtocolLocal(u32::MAX)));
     }
 }
 
