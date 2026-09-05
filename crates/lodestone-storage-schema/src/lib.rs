@@ -170,10 +170,34 @@ fn validate_builtin_biomes(ids: &[i32]) -> Result<(), ValidationError> {
 fn validate_general(general: &GeneralRecord) -> Result<(), ValidationError> {
     match &general.record {
         Some(generated::general_record::Record::Player(player)) => validate_player(player)?,
+        Some(generated::general_record::Record::Entity(entity)) => validate_entity(entity)?,
         Some(_) => {}
         None => return Err(ValidationError::MissingGeneralRecord),
     }
     validate_extension_values(&general.extensions)
+}
+
+fn validate_entity(entity: &EntityRecord) -> Result<(), ValidationError> {
+    if entity.entity_uuid.len() != 16 {
+        return Err(ValidationError::InvalidEntityUuidLength(
+            entity.entity_uuid.len(),
+        ));
+    }
+    if entity.entity_type.is_empty() {
+        return Err(ValidationError::MissingEntityType);
+    }
+    if BuiltinDimension::try_from(entity.dimension).is_err()
+        || entity.dimension == BuiltinDimension::Unspecified as i32
+    {
+        return Err(ValidationError::UnknownBuiltinDimension(entity.dimension));
+    }
+    if !entity.x.is_finite() || !entity.y.is_finite() || !entity.z.is_finite() {
+        return Err(ValidationError::NonFiniteEntityPosition);
+    }
+    if !entity.yaw.is_finite() || !entity.pitch.is_finite() {
+        return Err(ValidationError::NonFiniteEntityRotation);
+    }
+    Ok(())
 }
 
 fn validate_player(player: &PlayerRecord) -> Result<(), ValidationError> {
@@ -219,6 +243,10 @@ pub enum ValidationError {
     UnknownScheduledTickKind(i32),
     UnknownScheduledTickPriority(i32),
     InvalidPlayerUuidLength(usize),
+    InvalidEntityUuidLength(usize),
+    MissingEntityType,
+    NonFiniteEntityPosition,
+    NonFiniteEntityRotation,
     UnknownBuiltinDimension(i32),
     ZeroExtensionId,
     DuplicateExtensionId(u32),
@@ -271,6 +299,16 @@ impl std::fmt::Display for ValidationError {
             }
             Self::InvalidPlayerUuidLength(actual) => {
                 write!(formatter, "expected a 16-byte player UUID, found {actual} bytes")
+            }
+            Self::InvalidEntityUuidLength(actual) => {
+                write!(formatter, "expected a 16-byte entity UUID, found {actual} bytes")
+            }
+            Self::MissingEntityType => formatter.write_str("entity has no type key"),
+            Self::NonFiniteEntityPosition => {
+                formatter.write_str("entity position contains a non-finite coordinate")
+            }
+            Self::NonFiniteEntityRotation => {
+                formatter.write_str("entity rotation contains a non-finite angle")
             }
             Self::UnknownBuiltinDimension(id) => {
                 write!(formatter, "unknown built-in dimension {id}")

@@ -208,12 +208,28 @@ message PlayerRecord {
 }
 
 message EntityRecord {
-  uint64 entity_id = 1;
-  uint32 entity_type_id = 2;
+  // Retained only to keep the original unconsumed vocabulary wire-compatible.
+  // The native adapter never reads or writes these registry-local fields.
+  uint64 entity_id = 1 [deprecated = true];
+  uint32 entity_type_id = 2 [deprecated = true];
   BuiltinDimension dimension = 3;
-  sint32 x_fixed = 4;
-  sint32 y_fixed = 5;
-  sint32 z_fixed = 6;
+  sint32 x_fixed = 4 [deprecated = true];
+  sint32 y_fixed = 5 [deprecated = true];
+  sint32 z_fixed = 6 [deprecated = true];
+  // A complete UUID is the durable identity. The native adapter uses these
+  // fields instead of the legacy runtime ID and registry ordinal above.
+  bytes entity_uuid = 7;
+  // Canonical resource key, retained as text because entity-type numeric IDs
+  // are registry-local rather than durable storage identities.
+  string entity_type = 8;
+  // Feet position and look direction retain their live IEEE values exactly.
+  // The native adapter rejects non-finite values and verifies the resident
+  // column and vertical extent before saving or returning a record.
+  double x = 9;
+  double y = 10;
+  double z = 11;
+  float yaw = 12;
+  float pitch = 13;
 }
 
 enum BuiltinDimension {

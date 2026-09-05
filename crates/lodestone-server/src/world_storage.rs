@@ -7,10 +7,10 @@
 //! `RecordWrite`s; each call writes exactly the records made dirty by that
 //! producer in one transaction.
 
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::collections::HashSet;
 
 use lodestone_core::{Reader, Writer, read_named_nbt, write_named_nbt};
 use lodestone_storage::{
@@ -18,8 +18,8 @@ use lodestone_storage::{
 };
 use lodestone_storage_schema::{
     BiomeSection, BuiltinDimension, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1,
-    GeneralRecord, PlayerRecord, RegisteredExtension, ScheduledTick as StoredScheduledTick,
-    ScheduledTickKind, ScheduledTickPriority, StorageRecord,
+    EntityRecord, GeneralRecord, PlayerRecord, RegisteredExtension,
+    ScheduledTick as StoredScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord,
     generated::{general_record, storage_record},
 };
 
@@ -50,6 +50,27 @@ pub struct NativePlayerRecord {
     pub pitch_millidegrees: i32,
 }
 
+/// One bounded native resident-entity pose.
+///
+/// The UUID and type key are durable identities; position and rotation retain
+/// the live IEEE values rather than applying an undocumented fixed-point
+/// conversion. This is deliberately not a replacement for an Anvil entity:
+/// motion, health, item state, AI state, and opaque fields have no lossless
+/// native consumer here and are therefore absent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeEntityRecord {
+    /// The complete durable entity identity.
+    pub uuid: [u8; 16],
+    /// The canonical type key, never a registry-local numeric ID.
+    pub entity_type: lodestone_model::ResourceKey,
+    /// The built-in dimension containing the resident entity.
+    pub dimension: BuiltinDimension,
+    /// Exact feet position.
+    pub position: lodestone_model::Vec3,
+    /// Exact yaw and pitch.
+    pub rotation: lodestone_model::Rotation,
+}
+
 /// The explicit persistent-record backend selected by a host.
 ///
 /// `Anvil` is the compatibility selection: existing region-file persistence
@@ -78,6 +99,8 @@ pub enum Error {
     Chunk(ChunkRecordError),
     /// A native player locator record is malformed, unsupported, or ambiguous.
     Player(PlayerRecordError),
+    /// A native resident-entity record is malformed, unsupported, or ambiguous.
+    Entity(EntityRecordError),
 }
 
 impl fmt::Display for Error {
@@ -89,6 +112,7 @@ impl fmt::Display for Error {
             Self::Native(error) => write!(formatter, "native world storage failed: {error}"),
             Self::Chunk(error) => write!(formatter, "native chunk record failed: {error}"),
             Self::Player(error) => write!(formatter, "native player record failed: {error}"),
+            Self::Entity(error) => write!(formatter, "native entity record failed: {error}"),
         }
     }
 }
@@ -110,6 +134,12 @@ impl From<ChunkRecordError> for Error {
 impl From<PlayerRecordError> for Error {
     fn from(error: PlayerRecordError) -> Self {
         Self::Player(error)
+    }
+}
+
+impl From<EntityRecordError> for Error {
+    fn from(error: EntityRecordError) -> Self {
+        Self::Entity(error)
     }
 }
 
@@ -393,6 +423,94 @@ impl fmt::Display for PlayerRecordError {
 
 impl std::error::Error for PlayerRecordError {}
 
+/// A malformed, unsupported, or ambiguous native resident-entity record.
+#[derive(Debug, PartialEq)]
+pub enum EntityRecordError {
+    /// The envelope has a format version this reader does not understand.
+    UnsupportedFormatVersion(u32),
+    /// The envelope did not contain a typed general body.
+    MissingGeneralBody,
+    /// The general body was not a resident-entity record.
+    MissingEntityBody,
+    /// The stored entity UUID did not have its required 16 bytes.
+    InvalidUuidLength { actual: usize },
+    /// The stored type is not a canonical resource key.
+    InvalidEntityType(String),
+    /// The typed record names an unknown or custom dimension.
+    UnsupportedDimension(i32),
+    /// A position coordinate is NaN or infinite.
+    NonFinitePosition,
+    /// A rotation angle is NaN or infinite.
+    NonFiniteRotation,
+    /// A finite coordinate cannot be converted to a server block coordinate.
+    CoordinateOutOfRange,
+    /// The entity is not resident in the caller's horizontal column.
+    OutsideColumn {
+        x: i32,
+        z: i32,
+        expected_x: i32,
+        expected_z: i32,
+    },
+    /// The entity's feet block is outside the caller's vertical extent.
+    OutsideExtent { y: i32, min_y: i32, height: i32 },
+    /// This bounded reader cannot preserve opaque entity extensions.
+    UnsupportedExtensions,
+    /// The compact key resolves to a different complete UUID.
+    KeyCollision {
+        requested: [u8; 16],
+        stored: [u8; 16],
+    },
+    /// A write batch listed the same complete UUID more than once.
+    DuplicateUuid([u8; 16]),
+}
+
+impl fmt::Display for EntityRecordError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedFormatVersion(version) => {
+                write!(formatter, "unsupported entity record format version {version}")
+            }
+            Self::MissingGeneralBody => formatter.write_str("record does not contain a general body"),
+            Self::MissingEntityBody => {
+                formatter.write_str("general record does not contain a resident entity body")
+            }
+            Self::InvalidUuidLength { actual } => {
+                write!(formatter, "expected a 16-byte entity UUID, found {actual} bytes")
+            }
+            Self::InvalidEntityType(entity_type) => {
+                write!(formatter, "entity type is not a valid resource key: {entity_type}")
+            }
+            Self::UnsupportedDimension(dimension) => {
+                write!(formatter, "unsupported built-in entity dimension {dimension}")
+            }
+            Self::NonFinitePosition => formatter.write_str("entity position contains a non-finite coordinate"),
+            Self::NonFiniteRotation => formatter.write_str("entity rotation contains a non-finite angle"),
+            Self::CoordinateOutOfRange => {
+                formatter.write_str("entity position cannot be converted to a block coordinate")
+            }
+            Self::OutsideColumn { x, z, expected_x, expected_z } => write!(
+                formatter,
+                "entity at ({x}, {z}) is outside chunk ({expected_x}, {expected_z})"
+            ),
+            Self::OutsideExtent { y, min_y, height } => write!(
+                formatter,
+                "entity at Y {y} is outside [{min_y}, {})",
+                min_y.saturating_add(*height)
+            ),
+            Self::UnsupportedExtensions => {
+                formatter.write_str("entity record carries unsupported extension payloads")
+            }
+            Self::KeyCollision { requested, stored } => write!(
+                formatter,
+                "entity key collision: requested UUID {requested:02x?} conflicts with stored UUID {stored:02x?}"
+            ),
+            Self::DuplicateUuid(uuid) => write!(formatter, "duplicate entity UUID in write batch: {uuid:02x?}"),
+        }
+    }
+}
+
+impl std::error::Error for EntityRecordError {}
+
 trait DirtyRecordStore: Send {
     fn write_transaction(&mut self, writes: Vec<RecordWrite>) -> Result<(), StoreError>;
     fn get(&mut self, key: RecordKey) -> Result<Option<StorageRecord>, StoreError>;
@@ -555,6 +673,96 @@ impl WorldStorage {
             .map(|record| decode_player(uuid, record))
             .transpose()
             .map_err(Into::into)
+    }
+
+    /// Saves one bounded batch of resident-entity poses for a column.
+    ///
+    /// Each UUID owns one world-wide compact key, so saving a moved entity
+    /// replaces its previous record rather than leaving a stale copy in the
+    /// former column. The explicit column and extent are checked against every
+    /// pose before any batch reaches storage. This is an opt-in typed producer,
+    /// not the Anvil entity save path, and accepts no opaque state.
+    pub fn write_dirty_entities(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        min_y: i32,
+        height: i32,
+        entities: impl IntoIterator<Item = NativeEntityRecord>,
+    ) -> Result<usize, Error> {
+        validate_extent(min_y, height)?;
+        let entities: Vec<_> = entities.into_iter().collect();
+        if entities.is_empty() {
+            return Ok(0);
+        }
+
+        let mut seen_uuids = HashSet::new();
+        let mut keys = BTreeMap::new();
+        let mut writes = Vec::with_capacity(entities.len());
+        for entity in &entities {
+            if !seen_uuids.insert(entity.uuid) {
+                return Err(EntityRecordError::DuplicateUuid(entity.uuid).into());
+            }
+            validate_entity_residency(entity, column_x, column_z, min_y, height)?;
+            let key = entity_key(entity.uuid);
+            if let Some(stored) = keys.insert(key, entity.uuid) {
+                return Err(EntityRecordError::KeyCollision {
+                    requested: entity.uuid,
+                    stored,
+                }
+                .into());
+            }
+            writes.push((key, entity.uuid, encode_entity(entity)?));
+        }
+
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        let mut native = native.lock().expect("world storage lock poisoned");
+        for (key, uuid, _) in &writes {
+            if let Some(existing) = native.get(*key)? {
+                decode_entity(*uuid, existing)?;
+            }
+        }
+        let count = writes.len();
+        native.write_transaction(
+            writes
+                .into_iter()
+                .map(|(key, _, record)| RecordWrite::new(key, record))
+                .collect(),
+        )?;
+        Ok(count)
+    }
+
+    /// Loads one resident entity by its complete UUID and verifies it is still
+    /// resident in the caller's requested column and vertical extent.
+    ///
+    /// A missing UUID returns `None`; a malformed type, extension payload,
+    /// compact-key collision, or pose outside the requested bounds is an error
+    /// rather than a partially restored entity.
+    pub fn load_entity(
+        &self,
+        uuid: [u8; 16],
+        column_x: i32,
+        column_z: i32,
+        min_y: i32,
+        height: i32,
+    ) -> Result<Option<NativeEntityRecord>, Error> {
+        validate_extent(min_y, height)?;
+        let Some(native) = &self.native else {
+            return Err(Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        let entity = native
+            .lock()
+            .expect("world storage lock poisoned")
+            .get(entity_key(uuid))?
+            .map(|record| decode_entity(uuid, record))
+            .transpose()?;
+        let Some(entity) = entity else {
+            return Ok(None);
+        };
+        validate_entity_residency(&entity, column_x, column_z, min_y, height)?;
+        Ok(Some(entity))
     }
 
     /// Saves one independently dirty server chunk through the native typed
@@ -1180,6 +1388,141 @@ fn validate_player_dimension(dimension: i32) -> Result<(), PlayerRecordError> {
     }
 }
 
+fn entity_key(uuid: [u8; 16]) -> RecordKey {
+    // This compact key carries the UUID's first 96 bits. The remaining bits
+    // stay in `EntityRecord`, and both writes and reads compare the complete
+    // body UUID before replacing or returning it.
+    RecordKey::general(
+        i32::from_le_bytes(uuid[..4].try_into().expect("four UUID bytes")),
+        i32::from_le_bytes(uuid[4..8].try_into().expect("four UUID bytes")),
+        u32::from_le_bytes(uuid[8..12].try_into().expect("four UUID bytes")),
+    )
+}
+
+fn encode_entity(entity: &NativeEntityRecord) -> Result<StorageRecord, EntityRecordError> {
+    validate_entity_dimension(entity.dimension as i32)?;
+    validate_entity_pose(entity.position, entity.rotation)?;
+    Ok(StorageRecord {
+        format_version: FORMAT_VERSION_V1,
+        record: Some(storage_record::Record::General(GeneralRecord {
+            record: Some(general_record::Record::Entity(EntityRecord {
+                entity_uuid: entity.uuid.to_vec(),
+                entity_type: entity.entity_type.to_string(),
+                dimension: entity.dimension as i32,
+                x: entity.position.x,
+                y: entity.position.y,
+                z: entity.position.z,
+                yaw: entity.rotation.yaw,
+                pitch: entity.rotation.pitch,
+                ..EntityRecord::default()
+            })),
+            extensions: Vec::new(),
+        })),
+    })
+}
+
+fn decode_entity(
+    requested_uuid: [u8; 16],
+    record: StorageRecord,
+) -> Result<NativeEntityRecord, EntityRecordError> {
+    if record.format_version != FORMAT_VERSION_V1 {
+        return Err(EntityRecordError::UnsupportedFormatVersion(record.format_version));
+    }
+    let Some(storage_record::Record::General(general)) = record.record else {
+        return Err(EntityRecordError::MissingGeneralBody);
+    };
+    if !general.extensions.is_empty() {
+        return Err(EntityRecordError::UnsupportedExtensions);
+    }
+    let Some(general_record::Record::Entity(entity)) = general.record else {
+        return Err(EntityRecordError::MissingEntityBody);
+    };
+    let actual = entity.entity_uuid.len();
+    let uuid: [u8; 16] = entity
+        .entity_uuid
+        .try_into()
+        .map_err(|_| EntityRecordError::InvalidUuidLength { actual })?;
+    if uuid != requested_uuid {
+        return Err(EntityRecordError::KeyCollision {
+            requested: requested_uuid,
+            stored: uuid,
+        });
+    }
+    let entity_type = entity
+        .entity_type
+        .parse::<lodestone_model::ResourceKey>()
+        .map_err(|_| EntityRecordError::InvalidEntityType(entity.entity_type))?;
+    validate_entity_dimension(entity.dimension)?;
+    let position = lodestone_model::Vec3::new(entity.x, entity.y, entity.z);
+    let rotation = lodestone_model::Rotation::new(entity.yaw, entity.pitch);
+    validate_entity_pose(position, rotation)?;
+    Ok(NativeEntityRecord {
+        uuid,
+        entity_type,
+        dimension: BuiltinDimension::try_from(entity.dimension)
+            .expect("validated built-in entity dimension"),
+        position,
+        rotation,
+    })
+}
+
+fn validate_entity_dimension(dimension: i32) -> Result<(), EntityRecordError> {
+    match BuiltinDimension::try_from(dimension) {
+        Ok(BuiltinDimension::Overworld | BuiltinDimension::Nether | BuiltinDimension::End) => {
+            Ok(())
+        }
+        Ok(BuiltinDimension::Unspecified) | Err(_) => {
+            Err(EntityRecordError::UnsupportedDimension(dimension))
+        }
+    }
+}
+
+fn validate_entity_pose(
+    position: lodestone_model::Vec3,
+    rotation: lodestone_model::Rotation,
+) -> Result<(), EntityRecordError> {
+    if !position.x.is_finite() || !position.y.is_finite() || !position.z.is_finite() {
+        return Err(EntityRecordError::NonFinitePosition);
+    }
+    if !rotation.yaw.is_finite() || !rotation.pitch.is_finite() {
+        return Err(EntityRecordError::NonFiniteRotation);
+    }
+    Ok(())
+}
+
+fn validate_entity_residency(
+    entity: &NativeEntityRecord,
+    column_x: i32,
+    column_z: i32,
+    min_y: i32,
+    height: i32,
+) -> Result<(), EntityRecordError> {
+    validate_entity_pose(entity.position, entity.rotation)?;
+    let x = entity_block_coordinate(entity.position.x)?;
+    let y = entity_block_coordinate(entity.position.y)?;
+    let z = entity_block_coordinate(entity.position.z)?;
+    if (x.div_euclid(16), z.div_euclid(16)) != (column_x, column_z) {
+        return Err(EntityRecordError::OutsideColumn {
+            x,
+            z,
+            expected_x: column_x,
+            expected_z: column_z,
+        });
+    }
+    if !(min_y..min_y.saturating_add(height)).contains(&y) {
+        return Err(EntityRecordError::OutsideExtent { y, min_y, height });
+    }
+    Ok(())
+}
+
+fn entity_block_coordinate(value: f64) -> Result<i32, EntityRecordError> {
+    let floored = value.floor();
+    if floored < f64::from(i32::MIN) || floored > f64::from(i32::MAX) {
+        return Err(EntityRecordError::CoordinateOutOfRange);
+    }
+    Ok(floored as i32)
+}
+
 fn validate_block_entity_position(
     index: usize,
     pos: lodestone_model::BlockPos,
@@ -1438,6 +1781,22 @@ mod tests {
             }),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
+        assert!(matches!(
+            storage.write_dirty_entities(
+                0,
+                0,
+                0,
+                16,
+                [NativeEntityRecord {
+                    uuid: [2; 16],
+                    entity_type: "minecraft:cow".parse().unwrap(),
+                    dimension: BuiltinDimension::Overworld,
+                    position: lodestone_model::Vec3::new(0.5, 1.0, 0.5),
+                    rotation: lodestone_model::Rotation::new(0.0, 0.0),
+                }],
+            ),
+            Err(Error::AnvilDoesNotAcceptTypedRecords)
+        ));
     }
 
     #[test]
@@ -1548,6 +1907,106 @@ mod tests {
         assert_eq!(
             decode_player(player.uuid, record),
             Err(PlayerRecordError::UnsupportedExtensions)
+        );
+    }
+
+    fn native_entity(position: lodestone_model::Vec3) -> NativeEntityRecord {
+        NativeEntityRecord {
+            uuid: [
+                0x71, 0x24, 0x33, 0xa7, 0x9c, 0x42, 0x40, 0x11, 0xb6, 0x85, 0x71, 0x35, 0x0f,
+                0xc2, 0xb6, 0x3e,
+            ],
+            entity_type: "minecraft:cow".parse().expect("valid type key"),
+            dimension: BuiltinDimension::Overworld,
+            position,
+            rotation: lodestone_model::Rotation::new(136.5, -12.25),
+        }
+    }
+
+    #[test]
+    fn native_resident_entity_reopens_with_stable_identity_type_and_pose() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-entity-record-{}-{unique}",
+            std::process::id()
+        ));
+        let entity = native_entity(lodestone_model::Vec3::new(-1.5, 64.25, 31.75));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        assert_eq!(
+            storage
+                .write_dirty_entities(-1, 1, -64, 384, [entity.clone()])
+                .expect("write bounded entity pose"),
+            1
+        );
+        drop(storage);
+
+        let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("reopen native store");
+        assert_eq!(
+            reopened.load_entity(entity.uuid, -1, 1, -64, 384).unwrap(),
+            Some(entity.clone()),
+            "the second handle must read the durable UUID, type, position, and rotation"
+        );
+        assert!(
+            reopened.load_entity([0x7f; 16], -1, 1, -64, 384).unwrap().is_none(),
+            "a different UUID is an independent absence control"
+        );
+        assert!(matches!(
+            reopened.load_entity(entity.uuid, 0, 1, -64, 384),
+            Err(Error::Entity(EntityRecordError::OutsideColumn { .. }))
+        ));
+        drop(reopened);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_resident_entity_rejects_duplicate_identity_and_invalid_residence_before_write() {
+        let entity = native_entity(lodestone_model::Vec3::new(0.5, 64.0, 0.5));
+        let storage = WorldStorage {
+            backend: WorldStorageBackend::LodestoneNative {
+                directory: PathBuf::from("unused-in-fake-store"),
+            },
+            native: Some(Mutex::new(Box::new(RecordingStore(Arc::new(Mutex::new(Vec::new())))))),
+        };
+        assert!(matches!(
+            storage.write_dirty_entities(0, 0, -64, 384, [entity.clone(), entity.clone()]),
+            Err(Error::Entity(EntityRecordError::DuplicateUuid(uuid))) if uuid == entity.uuid
+        ));
+        assert!(matches!(
+            storage.write_dirty_entities(0, 0, -64, 384, [native_entity(lodestone_model::Vec3::new(16.0, 64.0, 0.5))]),
+            Err(Error::Entity(EntityRecordError::OutsideColumn { .. }))
+        ));
+        assert!(matches!(
+            storage.write_dirty_entities(0, 0, -64, 384, [native_entity(lodestone_model::Vec3::new(0.5, 320.0, 0.5))]),
+            Err(Error::Entity(EntityRecordError::OutsideExtent { .. }))
+        ));
+    }
+
+    #[test]
+    fn native_resident_entity_refuses_an_extension_before_it_can_be_dropped() {
+        let entity = native_entity(lodestone_model::Vec3::new(0.5, 64.0, 0.5));
+        let mut record = encode_entity(&entity).expect("built-in entity encodes");
+        let Some(storage_record::Record::General(general)) = &mut record.record else {
+            panic!("entity encoder must produce a general record");
+        };
+        general
+            .extensions
+            .push(lodestone_storage_schema::ExtensionValue {
+                local_id: 1,
+                payload: vec![0xde, 0xad],
+            });
+
+        assert_eq!(
+            decode_entity(entity.uuid, record),
+            Err(EntityRecordError::UnsupportedExtensions)
         );
     }
 
