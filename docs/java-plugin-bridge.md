@@ -715,6 +715,40 @@ To extend the boundary, change the adapter's native declaration and the correspo
 registration together, then add an independently predicted end-to-end fixture. Add concrete public
 host queries on demand rather than enumerating a speculative compatibility surface.
 
+#### Narrow resident block-change event seam
+
+The isolated shim also has one strongly typed observation contract:
+`ResidentBlockChangeListener.onResidentBlockStateChanged(int x, int y, int z, int stateId)`. A
+plugin registers an object with `IsolatedPaperShim.subscribeResidentBlockStateChanges(listener)`.
+This is deliberately a host-confirmed resident block-state replacement callback, not a Paper event
+bus: there are no event classes, priorities, cancellation, physics, or server objects in this
+slice. The shim and listener declarations are validated in the same isolated loader before any
+native function is registered, so a missing or mismatched callback fails that loader's setup.
+
+Registrations are retained only on the dedicated adapter worker and are dispatched in insertion
+order. Each registration captures the active descriptor identity and starts inactive; the
+lifecycle owner activates that entry's registrations only after `onEnable` succeeds. A failed
+constructor or enable callback, and every attempted `onDisable` callback (including one that
+throws), removes that entry's registrations and drops their JNI global references on the attached
+worker. The worker retains at most 64 registrations at once and reports an explicit registration
+error when the bound is reached.
+
+After a host-confirmed change, the adapter invokes its existing callback and then walks the active
+listeners. A listener exception is cleared and recorded in the completion's
+`listener_failures` list with its stable registration number, descriptor name, and bounded detail;
+later listeners still run, the applied change is not rolled back, and the adapter remains usable.
+The callback still uses the existing one-slot worker command queue, and any world read or write
+from a listener must use the bounded `WorldPort` request/response seam rather than reaching an ECS
+guard. There is no additional environment variable or runtime toggle: the `jvm` feature and an
+operator-built shim containing the exact isolated declarations are the only prerequisites.
+
+To extend this event subset, update the source-of-truth declarations and validation in
+`native_surface`, the JNI registration and worker dispatch in `adapter`, and the lifecycle cleanup
+calls in `paper`. Keep the listener list ordered and bounded; do not turn it into a general event
+hierarchy. Hermetic tests cover registration order, activation and cleanup, the registration bound,
+and exception isolation without starting a JVM or server. The ignored JVM fixtures remain separate
+controls for JNI registration and should be run only in a fresh process with an explicit JDK.
+
 ### 4.6 Dedicated-host connection
 
 The dedicated binary enables the bridge only with its default-off `jvm` feature. Set both

@@ -54,7 +54,8 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native int setBlockStateId(int x, int y, int z, int stateId); \
          public static native String currentPluginName(); \
          public static native String currentPluginVersion(); \
-         public static native IsolatedPluginDescriptor currentPluginDescriptor(); }",
+         public static native IsolatedPluginDescriptor currentPluginDescriptor(); \
+         public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); }",
     )
     .expect("shim source");
     let descriptor_source = shim_package.join("IsolatedPluginDescriptor.java");
@@ -68,6 +69,13 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public String mainClass() { return mainClass; } }",
     )
     .expect("descriptor source");
+    let listener_source = shim_package.join("ResidentBlockChangeListener.java");
+    fs::write(
+        &listener_source,
+        "package lodestone.bridge; public interface ResidentBlockChangeListener { \
+         void onResidentBlockStateChanged(int x, int y, int z, int stateId); }",
+    )
+    .expect("listener source");
     let adapter_package = adapter_sources.join("fixture/adapter");
     fs::create_dir_all(&adapter_package).expect("adapter package directory");
     let adapter_source = adapter_package.join("LifecycleAdapter.java");
@@ -81,6 +89,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     .expect("adapter source");
     compile(&jdk, &paper_classes, &bootstrap_source);
     compile(&jdk, &shim_classes, &descriptor_source);
+    compile(&jdk, &shim_classes, &listener_source);
     compile_with_classpath(&jdk, &shim_classes, &shim_source, &shim_classes);
     compile(&jdk, &adapter_classes, &adapter_source);
     let manifest = fixture.path().join("MANIFEST.MF");
@@ -165,7 +174,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
         match host.poll().expect("lifecycle adapter readiness") {
             Some(AdapterEvent::Ready) => break,
             Some(AdapterEvent::TickCompleted(tick)) => panic!("unexpected adapter tick {tick}"),
-            Some(AdapterEvent::BlockStateChangedCompleted(change)) => {
+            Some(AdapterEvent::BlockStateChangedCompleted { change, .. }) => {
                 panic!("unexpected adapter block-change callback {change:?}")
             }
             None => assert!(Instant::now() < limit, "lifecycle adapter did not become ready"),
