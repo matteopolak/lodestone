@@ -143,6 +143,13 @@ current save worker boundary, but a future region owner must propagate that
 same job/result contract through its own message boundary instead of treating
 the source-side acknowledgement as disk completion.
 
+The save job also turns its global dirty-column snapshot into a bounded
+`WorldSaveRegionPlan`: each column belongs to its physical region-file owner,
+with canonical region and within-region chunk order. The current worker still
+executes those assignments serially. This is a scheduling boundary, not a
+claim that region-file writes are independently safe to parallelise; a future
+executor must retain the same per-owner assignment and durable-token result.
+
 When recording a candidate report, name the populated scene and the explicit
 edge passed to `candidate_region_workload`. Compare total chunks, the number of
 non-empty cells, and the largest-cell count across clustered and spread-out

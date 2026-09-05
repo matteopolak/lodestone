@@ -1301,6 +1301,61 @@ pub(crate) struct WorldSaveJob {
     unload_tokens: Vec<DurableUnloadToken>,
 }
 
+/// The physical region file responsible for a bounded save assignment.
+///
+/// A world save first snapshots its global dirty selection, then gives every
+/// selected column to exactly one file owner. The current worker executes
+/// these owners serially, but making the ownership explicit keeps a later
+/// per-region scheduler from reconstructing it from an unordered dirty set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SaveRegionOwner {
+    region: (i32, i32),
+}
+
+/// One complete file-owner assignment from a world-save snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SaveRegionAssignment {
+    owner: SaveRegionOwner,
+    chunks: Vec<(i32, i32)>,
+}
+
+/// Deterministic hand-off from the global dirty selection to file owners.
+///
+/// The plan owns neither columns nor I/O state. Its size is bounded by the
+/// snapshot selected for this save, and it is dropped once the save worker has
+/// visited each assignment. Region and chunk order are canonical so a
+/// hash-set-backed dirty selection cannot change which owner runs first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorldSaveRegionPlan {
+    assignments: Vec<SaveRegionAssignment>,
+}
+
+impl WorldSaveRegionPlan {
+    fn from_chunks(chunks: impl IntoIterator<Item = (i32, i32)>) -> Self {
+        let mut by_region: BTreeMap<(i32, i32), Vec<(i32, i32)>> = BTreeMap::new();
+        for chunk @ (cx, cz) in chunks {
+            let (rx, rz, _, _) = region_and_local(cx, cz);
+            by_region.entry((rx, rz)).or_default().push(chunk);
+        }
+        let assignments = by_region
+            .into_iter()
+            .map(|(region, mut chunks)| {
+                chunks.sort_unstable();
+                chunks.dedup();
+                SaveRegionAssignment {
+                    owner: SaveRegionOwner { region },
+                    chunks,
+                }
+            })
+            .collect();
+        Self { assignments }
+    }
+
+    fn into_assignments(self) -> impl Iterator<Item = SaveRegionAssignment> {
+        self.assignments.into_iter()
+    }
+}
+
 /// An owned snapshot of one complete production column awaiting persistence.
 ///
 /// The source is consulted for a column that is pending only because it owns a
@@ -1542,15 +1597,10 @@ impl WorldSaveHandle {
             return Ok(0);
         }
 
-        let mut by_region: BTreeMap<(i32, i32), Vec<(i32, i32)>> = BTreeMap::new();
-        for &(cx, cz) in &taken {
-            let (rx, rz, _, _) = region_and_local(cx, cz);
-            by_region.entry((rx, rz)).or_default().push((cx, cz));
-        }
-
         let mut written = 0usize;
-        for ((rx, rz), chunks) in by_region {
-            match self.save_region(rx, rz, &chunks) {
+        for assignment in WorldSaveRegionPlan::from_chunks(taken).into_assignments() {
+            let (rx, rz) = assignment.owner.region;
+            match self.save_region(rx, rz, &assignment.chunks) {
                 Ok(n) => {
                     written += n;
                     self.state
@@ -1561,7 +1611,7 @@ impl WorldSaveHandle {
                 Err(err) => {
                     // Re-dirty everything this region owned before bailing.
                     let mut dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
-                    dirty.extend(chunks);
+                    dirty.extend(assignment.chunks);
                     return Err(err);
                 }
             }
@@ -1904,6 +1954,46 @@ mod tests {
         );
         assert!(ledger.release(second));
         assert!(ledger.pending.is_empty());
+    }
+
+    #[test]
+    fn save_region_plan_assigns_each_chunk_once_in_canonical_negative_region_order() {
+        let plan = WorldSaveRegionPlan::from_chunks([
+            (32, 0),
+            (-1, 31),
+            (31, 0),
+            (-33, -33),
+            (0, 0),
+            (-32, -32),
+            (32, 0),
+        ]);
+
+        assert_eq!(
+            plan.assignments,
+            [
+                SaveRegionAssignment {
+                    owner: SaveRegionOwner { region: (-2, -2) },
+                    chunks: vec![(-33, -33)],
+                },
+                SaveRegionAssignment {
+                    owner: SaveRegionOwner { region: (-1, -1) },
+                    chunks: vec![(-32, -32)],
+                },
+                SaveRegionAssignment {
+                    owner: SaveRegionOwner { region: (-1, 0) },
+                    chunks: vec![(-1, 31)],
+                },
+                SaveRegionAssignment {
+                    owner: SaveRegionOwner { region: (0, 0) },
+                    chunks: vec![(0, 0), (31, 0)],
+                },
+                SaveRegionAssignment {
+                    owner: SaveRegionOwner { region: (1, 0) },
+                    chunks: vec![(32, 0)],
+                },
+            ],
+            "the global selection must become one deterministic assignment per file owner"
+        );
     }
 
     /// A blocking save job must carry its token snapshot from the world owner
