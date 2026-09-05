@@ -360,6 +360,14 @@ What exists:
   key, proving the detector observes the production result rather than merely
   accepting generated input.
 
+- `tests/legacy_status_model.rs` — a bounded fixed-ChaCha-seed model check over
+  `lodestone_net::parse_legacy_status`, the legacy server-list ping consumer.
+  An independent UTF-16BE framer and field model cover both supported layouts,
+  trimmed numeric fields, optional protocol metadata, and non-BMP text. The
+  control drops a modern protocol value and must fail after shrinking, proving
+  the comparison observes parsed status fields rather than merely accepting
+  generated packets.
+
 - `tests/differential_client_state.rs` — a bounded hermetic client-state
   comparison. It replays fixed block, entity and inventory packet scripts
   through the public `ClientBuilder` over `lodestone_net::memory_pair`, with a
