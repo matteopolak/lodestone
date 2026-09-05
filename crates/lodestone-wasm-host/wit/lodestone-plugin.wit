@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.7.0;
+package lodestone:plugin@0.8.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -164,6 +164,9 @@ interface types {
         health-changed(health),
         /// `ClientEvent::SectionBlocksChanged` — capability `observe:blocks`.
         blocks-changed(section-blocks-changed),
+        /// A newly resolved local-player placement — capability `observe:place`.
+        /// The host emits it once per generation for each observing guest.
+        place-outcome(place-outcome),
     }
 
     /// Which hand — `lodestone_model::common::Hand`.
@@ -189,6 +192,50 @@ interface types {
         sprint: bool,
     }
 
+    /// One face of a block. This is the same direction a mouse-derived ray hit
+    /// supplies; a guest cannot provide a hit point, sequence, hand, or state.
+    enum block-face {
+        down,
+        up,
+        north,
+        south,
+        west,
+        east,
+    }
+
+    /// One request to place the item in the local player's selected main-hand
+    /// slot. The host resolves reach, collision, inventory, prediction, and the
+    /// protocol sequence through the normal local-player placement lifecycle.
+    record place-intent {
+        pos: block-pos,
+        face: block-face,
+    }
+
+    /// The bounded reasons a requested placement did not reach the normal
+    /// placement path. There is deliberately no world/error string here: the
+    /// host reports only the existing lifecycle vocabulary, not engine internals.
+    enum place-rejection {
+        dead,
+        unreachable-or-obstructed,
+        no-world-data,
+        nothing-placeable-held,
+        intersects-player,
+        vetoed,
+    }
+
+    /// The last resolved placement attempt. `generation` increases once per
+    /// attempt so a guest can distinguish a fresh answer from an old one.
+    variant place-status {
+        predicted,
+        sent-unpredicted,
+        rejected(place-rejection),
+    }
+
+    record place-outcome {
+        status: place-status,
+        generation: u64,
+    }
+
     /// One thing a guest wants done. Protocol actions lower onto `ClientAction`
     /// and preserve submission order in `lodestone_ecs::player::ActionQueue`;
     /// copied intent actions are applied through their existing local-player
@@ -206,6 +253,9 @@ interface types {
         /// Override this tick's copied movement intent — capability
         /// `act:movement`. `none` leaves the normal controller input intact.
         set-movement(option<movement-intent>),
+        /// Request exactly one main-hand placement through the existing
+        /// local-player lifecycle — capability `act:place`.
+        place-block(place-intent),
     }
 
     /// A root command a guest wants the host to register. The host supplies one
@@ -275,7 +325,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.7.0"`.
+        /// `"lodestone:plugin@0.8.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.

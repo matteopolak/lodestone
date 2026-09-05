@@ -75,6 +75,10 @@ look = []
 # physics, and egress path. It is separate from `look` so each gate has one
 # intentional guest action.
 movement = []
+# The placement-lifecycle conformance fixture. It makes one intentionally
+# unresolvable request, then reports the bounded outcome delivered on a later
+# tick rather than depending on a world handle or packet result.
+place = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is
