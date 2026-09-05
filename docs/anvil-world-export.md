@@ -22,6 +22,8 @@ Keep all conversion before `publish_regions`. Publishing an existing destination
 
 There are no environment variables or implicit defaults. Callers choose chunk coordinates, `min_y`, `height`, tick `game_time`, `CompressionScheme`, and region timestamp in `WorldExportInput`, then pass a destination path that does not exist. The staging directory is a deterministic same-parent sibling named `.<destination>.lodestone-export-staging`.
 
+`lodestone-server anvil-convert export` is the operator-facing caller. It requires explicit `--source` and matching `--native-path` for the native backend, a distinct absent `--destination`, `--min-y`, `--height`, one or more `--chunk x,z`, `--game-time`, `--timestamp`, and `--compression`. The first run omits `--apply`: it prints the exact payload-free report and review token without creating a staging or destination directory. A lossless report may be applied with `--apply`; a lossy one additionally requires its exact `--acknowledge` token. The command never infers a whole-world selection or writes metadata, players, entities, POI, or opaque payloads.
+
 ## Dependencies
 
 The module composes `world_storage::WorldStorage`, `anvil_export`, and `lodestone_anvil::region`. `anvil_export` owns chunk NBT conversion and loss semantics; the Anvil crate owns compression, region layout, and external sidecars.
