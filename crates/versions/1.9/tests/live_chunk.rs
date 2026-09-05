@@ -221,7 +221,7 @@ async fn decodes_real_chunks_from_live_1_12_server() {
     // bedrock uniformly on the bottom plane, and a broken translation would
     // land air (or some other wrong id) instead of bedrock's canonical id.
     let bedrock_state = match lodestone_v1_9::canonical::resolve(7, 0) {
-        lodestone_v1_9::canonical::CanonicalBlockState::Resolved(id) => id,
+        lodestone_v1_9::canonical::CanonicalBlockState::Resolved(id) => id.raw(),
         other => panic!("legacy bedrock (7,0) did not resolve to a canonical state: {other:?}"),
     };
     let mut checked = 0usize;

@@ -252,11 +252,12 @@ fn canonical_resolve_matches_the_predicted_26_2_state_id() {
             );
         };
         assert_eq!(
-            state_id, case.canonical_id,
-            "({}, {}) resolved to 26.2 state {state_id} ({:?}), predicted {} ({})",
+            state_id.raw(), case.canonical_id,
+            "({}, {}) resolved to 26.2 state {} ({:?}), predicted {} ({})",
             case.old_block_id,
             case.meta,
-            block_states::block_name(state_id),
+            state_id.raw(),
+            block_states::block_name(state_id.raw()),
             case.canonical_id,
             case.canonical_name,
         );

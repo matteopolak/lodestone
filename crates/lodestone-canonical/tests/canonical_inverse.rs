@@ -1,6 +1,6 @@
 use lodestone_canonical::canonical::{self, CanonicalBlockState};
 use lodestone_canonical::inverse::{self, InverseError};
-use lodestone_data::block_states;
+use lodestone_data::block_states::{self, StateId};
 
 #[test]
 fn inverse_image_has_one_representative_per_reachable_state() {
@@ -14,7 +14,8 @@ fn inverse_image_has_one_representative_per_reachable_state() {
     }
     assert_eq!(image.len(), 1582, "the exact canonical image count drifted");
     for &state in &image {
-        let packed = inverse::resolve(state).expect("every image state has a representative");
+        let packed = inverse::resolve(state.raw())
+            .expect("every image state has a representative");
         let (old_id, meta) = ((packed >> 4) as u8, (packed & 0x0f) as u8);
         assert_eq!(canonical::resolve(old_id, meta), CanonicalBlockState::Resolved(state));
     }
@@ -27,7 +28,7 @@ fn inverse_alias_control_chooses_the_minimum_packed_legacy_value() {
     let CanonicalBlockState::Resolved(state) = first else {
         panic!("alias control must resolve");
     };
-    assert_eq!(inverse::resolve(state), Ok(128));
+    assert_eq!(inverse::resolve(state.raw()), Ok(128));
     assert_eq!(canonical::resolve(8, 0), CanonicalBlockState::Resolved(state));
 }
 
@@ -42,10 +43,13 @@ fn inverse_rejects_a_canonical_state_outside_the_exact_image() {
         }
     }
     let unsupported = (0..block_states::STATE_COUNT)
+        .map(|raw| StateId::new(raw).expect("generated state id is valid"))
         .find(|state| !image.contains(state))
         .expect("the pre-1.13 image must not cover the full modern registry");
     assert_eq!(
-        inverse::resolve(unsupported),
-        Err(InverseError::Unsupported { state: unsupported })
+        inverse::resolve(unsupported.raw()),
+        Err(InverseError::Unsupported {
+            state: unsupported.raw()
+        })
     );
 }

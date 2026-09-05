@@ -387,7 +387,7 @@ fn attribute_key(key: &str) -> Option<ResourceKey> {
 fn block_family_key(block_id: u8) -> ResourceKey {
     let block = (0u8..16)
         .find_map(|meta| match canonical::resolve(block_id, meta) {
-            CanonicalBlockState::Resolved(state) => block_states::StateId::new(state),
+            CanonicalBlockState::Resolved(state) => Some(state),
             _ => None,
         })
         .unwrap_or_else(block_states::air_state)

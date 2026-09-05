@@ -44,7 +44,7 @@ fn inverse_table() -> &'static [Option<u32>] {
                 let CanonicalBlockState::Resolved(state) = canonical::resolve(old_id, meta) else {
                     continue;
                 };
-                let Some(entry) = table.get_mut(state as usize) else {
+                let Some(entry) = table.get_mut(state.raw() as usize) else {
                     continue;
                 };
                 let packed = (u32::from(old_id) << 4) | u32::from(meta);
