@@ -1953,6 +1953,26 @@ mod tests {
         );
     }
 
+    /// The server's tab selection is a UI cursor, distinct from advancement
+    /// progress. It must still travel through the real session fold because a
+    /// clientbound selection otherwise decodes successfully and changes no
+    /// screen state.
+    #[test]
+    fn apply_routes_advancement_tab_selection_through_the_real_path() {
+        let state = SharedState::default();
+        let tab: lodestone_model::Identifier = "minecraft:adventure/root"
+            .parse()
+            .expect("valid identifier");
+        state.apply(&ClientEvent::AdvancementsTabSelected { tab: Some(tab.clone()) });
+        let ecs = state.ecs.read();
+        assert_eq!(
+            ecs.get::<lodestone_ecs::session::SessionAdvancementTab>(state.session)
+                .expect("local player tab component")
+                .0,
+            Some(tab),
+        );
+    }
+
     /// The negative control for the whole block above, and the reason it is not
     /// merely decorative: it pins that `SharedState::apply` really does consult
     /// `route()` rather than folding everything it is handed.

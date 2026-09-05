@@ -468,6 +468,11 @@ pub struct PlayerAdvancementState {
     /// True until the first `update_advancements` has been sent; the first
     /// flush then sends the whole tree with `reset` true.
     first_packet_pending: bool,
+    /// The tab this player most recently opened. This is session state rather
+    /// than progress: it does not change any criterion or visibility rule, but
+    /// it is the authoritative selection echoed to the client when a tab is
+    /// selected.
+    selected_tab: Option<String>,
 }
 
 impl PlayerAdvancementState {
@@ -839,6 +844,17 @@ impl AdvancementManager {
         self.players
             .get(&player)
             .is_some_and(|p| p.advancements.is_done(advancement))
+    }
+
+    /// Records the player's current advancement-screen selection and returns
+    /// the value to publish back to that connection. The tab identifier is
+    /// intentionally not restricted to this server's currently bundled tree:
+    /// a client can have a larger data-pack tree, and rejecting one of its
+    /// tabs would make the server force the screen to a different selection.
+    pub fn select_tab(&mut self, player: Uuid, tab: Option<String>) -> Option<String> {
+        let state = self.players.entry(player).or_default();
+        state.advancements.selected_tab = tab;
+        state.advancements.selected_tab.clone()
     }
 
     /// Bump a statistic for a player, returning the new value. Records the
@@ -1298,6 +1314,20 @@ mod tests {
         assert!(!manager.is_done(player, "minecraft:story/root"));
         // Nothing was dirtied by the no-ops.
         assert!(manager.flush_dirty(player, true).is_none());
+    }
+
+    /// The tab is real per-player session state, not a write-only telemetry
+    /// counter: the connection dispatcher immediately reads this return value
+    /// to produce its clientbound selection directive.
+    #[test]
+    fn selected_tab_folds_and_can_be_cleared() {
+        let mut manager = AdvancementManager::new(story_tree()).unwrap();
+        let player = Uuid::new_v4();
+        assert_eq!(
+            manager.select_tab(player, Some("minecraft:adventure/root".to_owned())),
+            Some("minecraft:adventure/root".to_owned()),
+        );
+        assert_eq!(manager.select_tab(player, None), None);
     }
 
     #[test]

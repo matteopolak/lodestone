@@ -3987,6 +3987,7 @@ where
             | ServerBound::ContainerClicked { .. }
             | ServerBound::RecipePlaced { .. }
             | ServerBound::RecipeBookSettingsChanged { .. }
+            | ServerBound::SeenAdvancements { .. }
             | ServerBound::ResourcePackResponse { .. }
             | ServerBound::PlayerLoaded
             | ServerBound::TeleportationAccepted { .. }
@@ -11034,6 +11035,10 @@ where
             filtering,
         } => {
             inventory.set_recipe_book_settings(book_type, open, filtering);
+        }
+        ServerBound::SeenAdvancements { tab } => {
+            let selected = advancements.select_tab(player_uuid, tab);
+            apply(conn, state, proto.encode_select_advancements_tab(selected.as_deref())).await?;
         }
         ServerBound::ResourcePackResponse { id, response } => {
             resource_packs.record_response(ResourcePackResponseRecord { id, response });

@@ -52,6 +52,14 @@ impl WindowApp {
     /// [`AdvancementProgress`] is a map of 126 `Copy` records, so the clone is
     /// cheaper than the read it saves.
     pub(super) fn advancement_progress(&mut self) -> AdvancementProgress {
+        if self.ui.is_advancements()
+            && let Some(selected) = self.sim.advancement_tab_selection()
+            && let Some(index) = advancement_tabs()
+                .iter()
+                .position(|tab| tab.id == selected.to_string())
+        {
+            self.nav.advancements_mut().select_tab(index);
+        }
         let now = crate::platform::Instant::now();
         let stale = self
             .advancement_feed

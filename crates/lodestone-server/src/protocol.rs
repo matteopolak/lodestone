@@ -1079,6 +1079,15 @@ pub enum ServerBound {
         /// Whether the tab shows only craftable recipes.
         filtering: bool,
     },
+    /// The client opened an advancement tab, or closed the advancements
+    /// screen. The connection keeps this selection and republishes it through
+    /// [`ServerProtocol::encode_select_advancements_tab`] so the client-side
+    /// screen and the server-owned session state stay in agreement.
+    SeenAdvancements {
+        /// The selected tab's resource location, or `None` after the screen
+        /// closed.
+        tab: Option<String>,
+    },
     /// The client reported the outcome of a server-pushed resource pack.
     /// The connection loop records this in the shared resource-pack feed so a
     /// host can decide what the report means without coupling the protocol
