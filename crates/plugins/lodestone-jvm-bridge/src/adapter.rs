@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 use jni::errors::ThrowRuntimeExAndDefault;
 use jni::objects::{JClass, JString};
 use jni::sys::jint;
-use jni::strings::JNIString;
 use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
 
 use crate::runtime::{JvmConfig, JvmRuntime};
@@ -81,7 +80,7 @@ impl AdapterHost {
         if deadline.is_zero() {
             return Err(AdapterError::new("adapter deadline must be positive"));
         }
-        let class = class.replace('.', "/");
+        let class = class.to_owned();
         Self::spawn(deadline, move |commands, events, port| {
             let result = run_java(config, &class, commands, &events, port);
             if let Err(error) = result {
@@ -223,7 +222,7 @@ fn run_java(
         .map_err(|error| AdapterError::new(format!("adapter {class_name}: {error}")))?;
     runtime.with_attached_thread(|env| {
         let result = (|| {
-            let class = env.find_class(JNIString::from(class_name))
+            let class = runtime.load_isolated_class(env, &config, class_name)
                 .map_err(|error| java_error(env, class_name, error))?;
             register_block_query(env, &class)
                 .map_err(|error| java_error(env, &format!("{class_name}.blockStateId(III)I"), error))?;
@@ -257,7 +256,7 @@ impl From<jni::errors::Error> for AdapterError {
     }
 }
 
-fn java_error(env: &mut Env<'_>, operation: &str, error: jni::errors::Error) -> AdapterError {
+fn java_error(env: &mut Env<'_>, operation: &str, error: impl fmt::Display) -> AdapterError {
     let description = env.exception_occurred().and_then(|exception| {
         env.exception_clear();
         let description = env.call_method(&exception, jni_str!("toString"),

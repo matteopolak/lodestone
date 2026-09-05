@@ -32,14 +32,21 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
     use lodestone_jvm_bridge::adapter::AdapterEvent;
 
     let jdk = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"));
-    let output = Command::new("mktemp").arg("-d").output().expect("temporary classes directory");
+    let output = Command::new("mktemp").arg("-d").output().expect("temporary fixture directory");
     assert!(output.status.success());
-    let classes = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    let root = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    let classes = root.join("classes");
+    std::fs::create_dir(&classes).expect("fixture classes directory");
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/java/BridgeAdapter.java");
     let compile = Command::new(jdk.join("bin/javac"))
         .arg("-d").arg(&classes).arg(source).output().expect("javac");
     assert!(compile.status.success(), "javac: {}", String::from_utf8_lossy(&compile.stderr));
-    let mut host = AdapterHost::start(JvmConfig::new().with_classpath(&classes),
+    let adapter_jar = root.join("adapter.jar");
+    let archive = Command::new(jdk.join("bin/jar"))
+        .arg("--create").arg("--file").arg(&adapter_jar).arg("-C").arg(&classes).arg(".")
+        .output().expect("jar");
+    assert!(archive.status.success(), "jar: {}", String::from_utf8_lossy(&archive.stderr));
+    let mut host = AdapterHost::start(JvmConfig::new().with_classpath(&adapter_jar),
         "lodestone.fixture.BridgeAdapter", Duration::from_secs(5)).expect("worker startup");
     let mut ready = false;
     let mut success = false;
@@ -78,5 +85,5 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
     assert!(failure.contains("RuntimeException"), "{failure}");
     assert!(failure.contains("blockStateId(-19,5,23): fixture chunk unavailable"), "{failure}");
     drop(host);
-    std::fs::remove_dir_all(&classes).expect("remove generated fixture classes");
+    std::fs::remove_dir_all(&root).expect("remove generated fixture directory");
 }

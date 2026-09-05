@@ -10,7 +10,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use jni::vm::{InitArgsBuilder, JavaVM, JvmError as JvmArgsError};
-use jni::{Env, JNIVersion};
+use jni::objects::{JClass, JObject};
+use jni::{Env, JNIVersion, JValue, jni_sig, jni_str};
 
 /// Configuration used when a host explicitly starts its one JVM.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -78,6 +79,83 @@ impl JvmRuntime {
         self.vm
             .attach_current_thread_for_scope(callback)
             .map_err(JvmError::from)
+    }
+
+    /// Loads one operator-supplied class through a fresh, isolated URL loader.
+    ///
+    /// The loader's parent is the platform loader, rather than the system
+    /// loader. Consequently it cannot silently resolve an application class
+    /// before consulting the ordered operator paths. A host may put its shim
+    /// directory before an operator jar, so bytecode in that jar resolves the
+    /// shim without changing either input jar. This only establishes loading;
+    /// the caller still owns native registration and the supported surface.
+    ///
+    /// `binary_name` uses Java's dotted form. The returned class retains its
+    /// defining loader for as long as the local class reference is live.
+    pub fn load_isolated_class<'local>(
+        &self,
+        env: &mut Env<'local>,
+        config: &JvmConfig,
+        binary_name: &str,
+    ) -> Result<JClass<'local>, JvmError> {
+        if config.classpath.is_empty() {
+            return Err(JvmError::new(
+                "isolated class loading requires at least one operator path",
+            ));
+        }
+        let path_count = i32::try_from(config.classpath.len())
+            .map_err(|_| JvmError::new("too many operator paths for one class loader"))?;
+        let url_class = env.find_class(jni_str!("java/net/URL"))?;
+        let urls = env.new_object_array(path_count, &url_class, JObject::null())?;
+        for (index, path) in config.classpath.iter().enumerate() {
+            if !path.exists() {
+                return Err(JvmError::new(format!(
+                    "operator path does not exist: {}",
+                    path.display()
+                )));
+            }
+            let path = path.to_str().ok_or_else(|| {
+                JvmError::new(format!("operator path is not valid UTF-8: {}", path.display()))
+            })?;
+            let path = env.new_string(path)?;
+            let file = env.new_object(
+                jni_str!("java/io/File"),
+                jni_sig!("(Ljava/lang/String;)V"),
+                &[JValue::Object(&path)],
+            )?;
+            let uri = env.call_method(
+                &file,
+                jni_str!("toURI"),
+                jni_sig!("()Ljava/net/URI;"),
+                &[],
+            )?.l()?;
+            let url = env.call_method(
+                &uri,
+                jni_str!("toURL"),
+                jni_sig!("()Ljava/net/URL;"),
+                &[],
+            )?.l()?;
+            urls.set_element(env, index, &url)?;
+        }
+        let parent = env.call_static_method(
+            jni_str!("java/lang/ClassLoader"),
+            jni_str!("getPlatformClassLoader"),
+            jni_sig!("()Ljava/lang/ClassLoader;"),
+            &[],
+        )?.l()?;
+        let loader = env.new_object(
+            jni_str!("java/net/URLClassLoader"),
+            jni_sig!("([Ljava/net/URL;Ljava/lang/ClassLoader;)V"),
+            &[JValue::Object(&urls), JValue::Object(&parent)],
+        )?;
+        let name = env.new_string(binary_name)?;
+        let class = env.call_method(
+            &loader,
+            jni_str!("loadClass"),
+            jni_sig!("(Ljava/lang/String;)Ljava/lang/Class;"),
+            &[JValue::Object(&name)],
+        )?.l()?;
+        env.cast_local::<JClass>(class).map_err(JvmError::from)
     }
 }
 
