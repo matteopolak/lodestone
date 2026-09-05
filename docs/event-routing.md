@@ -58,7 +58,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**3 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**2 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -69,7 +69,12 @@ exactly `Route::NOWHERE`, excluding the `..Route::NOWHERE` struct-update spread 
 that set other flags) and fails if this line drifts from the real count — update the number and
 the source together whenever a variant is added or wired.
 
-The current terminal routes are `PlayerCombatEntered`, `PlayerCombatEnded`, and `MountScreenOpened`.
+The current terminal routes are `PlayerCombatEntered` and `PlayerCombatEnded`.
+`MountScreenOpened` folds straight into the menu session: unlike an ordinary container it has no
+`ScreenOpened` companion, so its own window id and storage-column count build the immediately
+visible, server-owned menu and the usual content/slot updates reconcile into that same menu.
+The mount entity's display-name and preview are not available at the version-free menu boundary,
+so the current panel honestly leaves its title blank rather than fabricating either.
 `ServerDataReceived` folds its styled message of the day and optional favicon into session state;
 the F3 overlay reads its one-line text projection, so a play-state announcement is visible without
 mistaking an unreported message for an empty one. `SimulationDistanceChanged` folds into a session

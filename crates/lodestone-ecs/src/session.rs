@@ -3861,6 +3861,11 @@ mod tests {
             menu_type: key("minecraft:generic_9x1"),
             title: Text::literal("T"),
         }));
+        assert!(handles_event(&ClientEvent::MountScreenOpened {
+            container_id: 1,
+            inventory_columns: 3,
+            entity_id: 7,
+        }));
         assert!(handles_event(&ClientEvent::ScreenClosed { window_id: 1 }));
         assert!(handles_event(&ClientEvent::ContainerContent {
             window_id: 1,
