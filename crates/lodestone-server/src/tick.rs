@@ -43,7 +43,7 @@
 //! instrumented, not that every literal `50` in the crate now points at one
 //! constant.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1809,6 +1809,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // spawned here is evicted next tick rather than never proposed —
         // vanilla's own order, and it keeps the RNG stream independent of
         // difficulty.
+        let mut natural_tickets = Vec::new();
         if world_state.spawn_mobs() {
             let players: Vec<lodestone_model::Vec3> =
                 mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());
@@ -1863,18 +1864,80 @@ async fn run_tick_loop_with_weather_impl<W>(
                 // drift; both are one bool copy per tick.
                 natural_spawner.set_difficulty(world_state.difficulty().0);
                 natural_spawner.begin_cycle(spawn_world, game_tick, players.clone());
+                // Vanilla's `spawnableChunkCount` for the cap formula, read off
+                // the area actually simulated rather than a constant: `MAGIC_NUMBER`
+                // (289) worth of chunks yields caps equal to the per-chunk maxima,
+                // so a smaller follow area scales every category cap down with it.
+                //
+                // Planning holds the mob lock only long enough to take its census.
+                // Candidate selection, plugin adjudication, and the later materialize
+                // pass are separate phases. In particular, an `Adjudicate` system can
+                // neither observe nor nest the `MobHandle` lock.
+                if let Some(server_world) = server_world.as_mut() {
+                    let mut state = mobs.with(|sim| sim.census(area.spawnable_chunks()));
+                    let planned = MobSim::plan_spawn_cycle(
+                        &mut state,
+                        &mut natural_spawner,
+                        area.chunks(),
+                    );
+                    let mut proposals = server_world.resource_mut::<crate::ecs::ServerProposalQueue>();
+                    natural_tickets.extend(planned.into_iter().map(|(category, candidate)| {
+                        proposals.stage(crate::ecs::ServerProposalAction::NaturalSpawnMob {
+                            entity_type: candidate.entity_type,
+                            pos: candidate.pos,
+                            category,
+                        })
+                    }));
+                } else {
+                    mobs.with(|sim| {
+                        let mut state = sim.census(area.spawnable_chunks());
+                        sim.run_spawn_cycle(&mut state, &mut natural_spawner, area.chunks());
+                    });
+                }
+            }
+        }
+        // The primary world's shared proposal pass runs after every source has
+        // staged its actions and before any natural candidate materializes.
+        // External requests use the same pass; their oneshot replies are sent
+        // without a mob lock, and their callers preserve the legacy direct
+        // apply ownership after awaiting it. It still runs while `spawn_mobs`
+        // is off so plugin messages and scheduler callbacks retain their tick
+        // contract.
+        if let Some(server_world) = server_world.as_mut() {
+            server_world.run_schedule(crate::ecs::GameTick);
+            let tickets: HashSet<_> = natural_tickets.into_iter().collect();
+            let resolutions = server_world
+                .resource_mut::<crate::ecs::ServerProposalQueue>()
+                .take_resolutions();
+            if !tickets.is_empty() {
                 mobs.with(|sim| {
-                    // Vanilla's `spawnableChunkCount` for the cap formula, read off
-                    // the area actually simulated rather than a constant: `MAGIC_NUMBER`
-                    // (289) worth of chunks yields caps equal to the per-chunk maxima,
-                    // so a smaller follow area scales every category cap down with it.
-                    let mut state = sim.census(area.spawnable_chunks());
-                    sim.run_spawn_cycle(&mut state, &mut natural_spawner, area.chunks());
+                    for resolution in resolutions {
+                        if !tickets.contains(&resolution.ticket()) {
+                            continue;
+                        }
+                        match resolution.outcome {
+                            Ok(crate::ecs::ServerProposalAction::NaturalSpawnMob {
+                                entity_type,
+                                pos,
+                                category,
+                            }) => {
+                                sim.spawn_species(entity_type, pos)
+                                    .set_category(category)
+                                    .set_persistent(category.is_persistent());
+                            }
+                            Ok(crate::ecs::ServerProposalAction::SpawnMob { entity_type, pos }) => {
+                                sim.spawn_species(entity_type, pos);
+                            }
+                            Ok(crate::ecs::ServerProposalAction::DespawnMob { .. }) | Err(_) => {}
+                        }
+                    }
                 });
             }
-            // Nearest-player despawn runs whether or not anything spawned: it is
-            // the other half of the same accounting, and vanilla runs it every
-            // tick from `Mob.checkDespawn`.
+        }
+        if world_state.spawn_mobs() {
+            // Nearest-player despawn runs after accepted natural candidates have
+            // materialized, so the cap census and despawn state keep the same
+            // tick ordering as the direct path.
             let nearest = mobs.with(|sim| sim.players().first().map(|p| p.perception.position));
             mobs.with(|sim| sim.despawn_pass(nearest, &mut despawn_rng));
         }
@@ -3466,13 +3529,6 @@ async fn run_tick_loop_with_weather_impl<W>(
         let t_scheduled_end = tokio::time::Instant::now();
         clock.record_phase(TickPhase::ScheduledAndPhysics, t_scheduled_end.duration_since(t_weather_end));
 
-        // The primary world's ECS work is part of the total tick duration but
-        // deliberately outside the scheduled-and-physics sample above. The
-        // completed-tick counter is the barrier the production gate waits on,
-        // so this must remain immediately before its `record_tick` call.
-        if let Some(server_world) = server_world.as_mut() {
-            server_world.run_schedule(crate::ecs::GameTick);
-        }
         clock.record_tick(tick_start.elapsed());
     }
 }

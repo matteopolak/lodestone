@@ -36,12 +36,20 @@
 //! item, a projectile, the player's own avatar) cannot read as a pass either.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_core::State;
 use lodestone_net::Connection;
+use bevy_app::{App, Plugin};
+use bevy_ecs::message::MessageReader;
+use bevy_ecs::prelude::{Res, ResMut, Resource};
+use bevy_ecs::schedule::IntoScheduleConfigs;
+use lodestone_server::ecs::{
+    GameTick, ProposalVerdict, ServerApp, ServerProposal, ServerProposalAction,
+    ServerProposalDecisions, TickSet,
+};
 use lodestone_server::{
     ChunkColumn, ChunkSource, EntitySnapshot, IntegratedServer, ServerBound, ServerDirective,
     ServerProtocol,
@@ -193,18 +201,24 @@ impl ChunkSource for PlainsWorld {
 /// `spawn_mobs == false`, which is what makes the negative control travel the
 /// same wire as the gate rather than being a different program.
 async fn run(spawn_mobs: bool, deadline: Duration) -> Vec<String> {
+    run_with_server_app(spawn_mobs, deadline, None).await
+}
+
+async fn run_with_server_app(
+    spawn_mobs: bool,
+    deadline: Duration,
+    server_app: Option<ServerApp>,
+) -> Vec<String> {
     let observed = Arc::new(Observed::default());
-    let (server, client) = IntegratedServer::open_in_memory_with_mobs(
-        WatchingProtocol(Arc::clone(&observed)),
-        PlainsWorld,
-        // The same 7×7 shape the shell uses at its clamped mob radius.
-        (-3..=3, -3..=3),
-        (8, 8),
-        // **Zero seeded mobs.** Every spawn packet observed below is therefore
-        // one the natural spawner produced.
-        0,
-        3,
-    );
+    let protocol = WatchingProtocol(Arc::clone(&observed));
+    let area = (-3..=3, -3..=3);
+    let (server, client) = if let Some(server_app) = server_app {
+        IntegratedServer::open_in_memory_with_mobs_and_server_app(
+            protocol, PlainsWorld, area, (8, 8), 0, 3, server_app,
+        )
+    } else {
+        IntegratedServer::open_in_memory_with_mobs(protocol, PlainsWorld, area, (8, 8), 0, 3)
+    };
     if !spawn_mobs {
         server
             .world_state()
@@ -251,6 +265,31 @@ async fn run(spawn_mobs: bool, deadline: Duration) -> Vec<String> {
     seen
 }
 
+struct DenyNaturalSpawns(Arc<AtomicUsize>);
+
+impl Plugin for DenyNaturalSpawns {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(NaturalDenyWitness(Arc::clone(&self.0)));
+        app.add_systems(GameTick, deny_natural_spawns.in_set(TickSet::Adjudicate));
+    }
+}
+
+#[derive(Resource)]
+struct NaturalDenyWitness(Arc<AtomicUsize>);
+
+fn deny_natural_spawns(
+    mut proposals: MessageReader<ServerProposal>,
+    mut decisions: ResMut<ServerProposalDecisions>,
+    seen: Res<NaturalDenyWitness>,
+) {
+    for proposal in proposals.read() {
+        if matches!(proposal.action, ServerProposalAction::NaturalSpawnMob { .. }) {
+            seen.0.fetch_add(1, Ordering::SeqCst);
+            decisions.decide(proposal.id(), 0, ProposalVerdict::Deny);
+        }
+    }
+}
+
 /// **The gate.** A joined player standing on a lit plain must receive
 /// `ADD_ENTITY` for at least one mob nothing seeded — i.e. the natural spawn
 /// cycle reaches the wire.
@@ -278,6 +317,26 @@ async fn natural_spawning_reaches_a_client_as_add_entity() {
             "{kind} reached the wire but is not in the plains creature list {listed:?}"
         );
     }
+}
+
+/// The counter is a control: an empty packet list alone could mean natural
+/// spawning never ran. A non-zero count proves the primary tick staged real
+/// candidates through `TickSet::Adjudicate` before the plugin denied them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_plugin_denial_keeps_observed_natural_spawns_off_the_wire() {
+    let seen = Arc::new(AtomicUsize::new(0));
+    let server_app = ServerApp::bootstrap_with(|app| {
+        app.add_plugins(DenyNaturalSpawns(Arc::clone(&seen)));
+    });
+    let spawned = run_with_server_app(true, Duration::from_secs(8), Some(server_app)).await;
+    assert!(
+        seen.load(Ordering::SeqCst) > 0,
+        "control: the native plugin must observe at least one naturally planned action"
+    );
+    assert!(
+        spawned.is_empty(),
+        "denied natural candidates must not reach ADD_ENTITY: {spawned:?}"
+    );
 }
 
 /// **The negative control, and it must observe zero.** With `spawn_mobs` off and

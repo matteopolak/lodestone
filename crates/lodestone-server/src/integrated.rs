@@ -2774,11 +2774,42 @@ impl IntegratedServer {
             .as_ref()
             .ok_or(crate::ecs::SpawnProposalRefusal::Unavailable)?;
         let crate::ecs::ServerProposalAction::SpawnMob { entity_type, pos } =
-            proposals.spawn_mob(entity_type, pos).await?;
+            proposals.spawn_mob(entity_type, pos).await?
+        else {
+            return Err(crate::ecs::ProposalRefusal::MismatchedAction);
+        };
         let mobs = self
             .mobs()
             .ok_or(crate::ecs::SpawnProposalRefusal::Unavailable)?;
         Ok(mobs.with(|sim| sim.spawn_species(entity_type, pos).id()))
+    }
+
+    /// Submits a mob removal to native-plugin adjudication and removes the
+    /// final id from the live mob simulation.
+    ///
+    /// The proposal completes before [`MobHandle::with`] takes the simulation
+    /// lock, so adjudicator systems cannot run under that lock. `Ok(false)` is
+    /// the observable no-op outcome for an id that is already gone; refusal and
+    /// unavailable/timed-out tick ownership use [`crate::ecs::DespawnProposalRefusal`].
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub async fn despawn_mob_proposed(
+        &self,
+        id: i32,
+    ) -> Result<bool, crate::ecs::DespawnProposalRefusal> {
+        let proposals = self
+            .spawn_proposals
+            .as_ref()
+            .ok_or(crate::ecs::ProposalRefusal::Unavailable)?;
+        let crate::ecs::ServerProposalAction::DespawnMob { id } =
+            proposals.despawn_mob(id).await?
+        else {
+            return Err(crate::ecs::ProposalRefusal::MismatchedAction);
+        };
+        let mobs = self
+            .mobs()
+            .ok_or(crate::ecs::ProposalRefusal::Unavailable)?;
+        Ok(mobs.with(|sim| sim.remove_mob(id)))
     }
 
     /// Removes the mob `id` names from the live simulation, returning whether

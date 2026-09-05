@@ -104,8 +104,9 @@ mod scheduler;
 
 pub use plugin::{ServerCorePlugin, ServerTick, ServerTickWitness, advance_server_tick};
 pub use proposals::{
-    ProposalVerdict, ServerProposal, ServerProposalAction, ServerProposalDecisions,
-    ServerProposalHandle, ServerProposalPlugin, SpawnProposalRefusal,
+    DespawnProposalRefusal, ProposalRefusal, ProposalVerdict, ServerProposal,
+    ServerProposalAction, ServerProposalDecisions, ServerProposalHandle, ServerProposalPlugin,
+    ServerProposalQueue, ServerProposalResolution, ServerProposalTicket, SpawnProposalRefusal,
 };
 pub use schedules::{GameTick, IngestSet, NetIngest, ServerBoot, TickSet};
 pub use scheduler::{ServerTaskId, ServerTaskScheduler, run_server_tasks};

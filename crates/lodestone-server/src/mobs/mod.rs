@@ -85,7 +85,8 @@ use crate::chunk::{AIR, ChunkColumn, ChunkSource};
 use crate::gravity_tick::FallingBlockEffect;
 use crate::protocol::{EntitySnapshot, MetadataField};
 use crate::mob_spawn::{
-    DespawnOutcome, MobCategory, SpawnCandidateSource, SpawnRng, SpawnState, check_despawn,
+    DespawnOutcome, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng, SpawnState,
+    check_despawn,
 };
 use crate::server::EntitySource;
 
@@ -8138,7 +8139,28 @@ impl<'w> MobSim<'w> {
         source: &mut dyn SpawnCandidateSource,
         chunks: &[(i32, i32)],
     ) -> usize {
-        let mut spawned = 0;
+        let planned = Self::plan_spawn_cycle(state, source, chunks);
+        let spawned = planned.len();
+        for (category, candidate) in planned {
+            let mob = self.spawn_species(candidate.entity_type, candidate.pos);
+            mob.set_category(category)
+                .set_persistent(category.is_persistent());
+        }
+        spawned
+    }
+
+    /// Plans one natural-spawn cycle without mutating the simulation.
+    ///
+    /// The returned candidates retain their spawn-list category so a caller can
+    /// submit them to an external adjudication pass before it takes the mob
+    /// simulation lock to materialize accepted actions. [`run_spawn_cycle`]
+    /// remains the direct compatibility path and applies this plan immediately.
+    pub fn plan_spawn_cycle(
+        state: &mut SpawnState,
+        source: &mut dyn SpawnCandidateSource,
+        chunks: &[(i32, i32)],
+    ) -> Vec<(MobCategory, SpawnCandidate)> {
+        let mut planned = Vec::new();
         for &(cx, cz) in chunks {
             for category in MobCategory::SPAWNING {
                 if !state.can_spawn(category) {
@@ -8148,15 +8170,12 @@ impl<'w> MobSim<'w> {
                     if !state.can_spawn(category) {
                         break;
                     }
-                    let mob = self.spawn_species(candidate.entity_type, candidate.pos);
-                    mob.set_category(category)
-                        .set_persistent(category.is_persistent());
                     state.record(category);
-                    spawned += 1;
+                    planned.push((category, candidate));
                 }
             }
         }
-        spawned
+        planned
     }
 
     /// Builds a [`SpawnState`] for `spawnable_chunks` from a census of the mobs

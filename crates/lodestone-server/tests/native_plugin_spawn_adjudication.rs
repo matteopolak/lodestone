@@ -90,7 +90,9 @@ fn deny_spawns(
     mut decisions: ResMut<ServerProposalDecisions>,
 ) {
     for proposal in proposals.read() {
-        decisions.decide(proposal.id(), 20, ProposalVerdict::Deny);
+        if matches!(proposal.action, ServerProposalAction::SpawnMob { .. }) {
+            decisions.decide(proposal.id(), 20, ProposalVerdict::Deny);
+        }
     }
 }
 
@@ -99,7 +101,9 @@ fn replace_pigs(
     mut decisions: ResMut<ServerProposalDecisions>,
 ) {
     for proposal in proposals.read() {
-        let ServerProposalAction::SpawnMob { entity_type, .. } = &proposal.action;
+        let ServerProposalAction::SpawnMob { entity_type, .. } = &proposal.action else {
+            continue;
+        };
         if entity_type == &key("minecraft:pig") {
             decisions.decide(
                 proposal.id(),
@@ -152,6 +156,16 @@ async fn native_plugins_deny_or_prioritize_replacement_before_integrated_spawn()
     let spawned = spawned.expect("the resolved proposal must reach the live simulation");
     assert_eq!(spawned.entity_type, key("minecraft:cow"));
     assert_eq!(spawned.position, REPLACEMENT_POS);
+
+    assert_eq!(
+        server.despawn_mob_proposed(id).await,
+        Ok(true),
+        "the same queue must apply a checked despawn after its plugins allow it"
+    );
+    assert!(
+        mobs.with(|sim| sim.get(id).is_none()),
+        "a checked despawn must remove the resolved id from the live simulation"
+    );
 
     server.shutdown().await;
 }
