@@ -14,9 +14,9 @@ use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
 use std::time::{Duration, Instant};
 
 use jni::errors::ThrowRuntimeExAndDefault;
-use jni::objects::{JClass, JString};
+use jni::objects::{JClass, JObject, JString};
 use jni::strings::JNIString;
-use jni::sys::{jint, jlong, jstring};
+use jni::sys::{jint, jlong, jobject, jstring};
 use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
 
 use crate::runtime::{JvmConfig, JvmRuntime};
@@ -101,6 +101,7 @@ thread_local! {
 struct LifecycleIdentity {
     name: String,
     version: String,
+    main_class: String,
 }
 
 struct LifecycleIdentityGuard;
@@ -129,12 +130,14 @@ impl Drop for LifecycleIdentityGuard {
 pub(crate) fn with_lifecycle_identity<T>(
     name: &str,
     version: &str,
+    main_class: &str,
     operation: impl FnOnce() -> T,
 ) -> T {
     LIFECYCLE_IDENTITY.with(|identities| {
         identities.borrow_mut().push(LifecycleIdentity {
             name: name.to_owned(),
             version: version.to_owned(),
+            main_class: main_class.to_owned(),
         });
     });
     let _identity = LifecycleIdentityGuard;
@@ -663,6 +666,28 @@ pub(crate) fn register_lifecycle_plugin_version_query(
     }
 }
 
+#[allow(unsafe_code)]
+pub(crate) fn register_lifecycle_plugin_descriptor_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native takes no arguments and returns the
+    // isolated descriptor value. Its worker-local context has no route to
+    // world state or a server facade.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_lifecycle_plugin_descriptor as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
 extern "system" fn native_block_state_id<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -738,6 +763,14 @@ extern "system" fn native_lifecycle_plugin_version<'local>(
         .resolve::<ThrowRuntimeExAndDefault>()
 }
 
+extern "system" fn native_lifecycle_plugin_descriptor<'local>(
+    mut env: EnvUnowned<'local>,
+    class: JClass<'local>,
+) -> jobject {
+    env.with_env(|env| lifecycle_plugin_descriptor(env, &class))
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
 fn lifecycle_identity_string(
     env: &mut Env<'_>,
     field: LifecycleIdentityField,
@@ -754,6 +787,57 @@ fn lifecycle_identity_string(
         .map_err(|error| AdapterError::new(format!("plugin descriptor query: {error}")))
 }
 
+fn lifecycle_plugin_descriptor(
+    env: &mut Env<'_>,
+    shim_class: &JClass<'_>,
+) -> Result<jobject, AdapterError> {
+    let _depth = CallbackDepthGuard::enter()
+        .map_err(|error| AdapterError::new(error.to_string()))?;
+    let identity = active_lifecycle_identity()?;
+    let loader = env
+        .call_method(
+            shim_class,
+            jni_str!("getClassLoader"),
+            jni_sig!("()Ljava/lang/ClassLoader;"),
+            &[],
+        )
+        .and_then(|value| value.l())
+        .map_err(|error| AdapterError::new(format!("plugin descriptor query: {error}")))?;
+    let binary_name = env
+        .new_string(crate::native_surface::ISOLATED_PLUGIN_DESCRIPTOR_CLASS)
+        .map_err(|error| AdapterError::new(format!("plugin descriptor query: {error}")))?;
+    let descriptor_class = env
+        .call_method(
+            &loader,
+            jni_str!("loadClass"),
+            jni_sig!("(Ljava/lang/String;)Ljava/lang/Class;"),
+            &[JValue::Object(&binary_name)],
+        )
+        .and_then(|value| value.l())
+        .and_then(|class| env.cast_local::<JClass>(class))
+        .map_err(|error| AdapterError::new(format!("plugin descriptor query: {error}")))?;
+    let name = env
+        .new_string(identity.name)
+        .map_err(|error| AdapterError::new(format!("plugin descriptor query: {error}")))?;
+    let version = env
+        .new_string(identity.version)
+        .map_err(|error| AdapterError::new(format!("plugin descriptor query: {error}")))?;
+    let main_class = env
+        .new_string(identity.main_class)
+        .map_err(|error| AdapterError::new(format!("plugin descriptor query: {error}")))?;
+    env.new_object(
+        descriptor_class,
+        jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+        &[
+            JValue::Object(&name),
+            JValue::Object(&version),
+            JValue::Object(&main_class),
+        ],
+    )
+    .map(JObject::into_raw)
+    .map_err(|error| AdapterError::new(format!("plugin descriptor query: {error}")))
+}
+
 fn active_lifecycle_identity() -> Result<LifecycleIdentity, AdapterError> {
     LIFECYCLE_IDENTITY.with(|identities| identities.borrow().last().cloned())
         .ok_or_else(|| AdapterError::new(
@@ -767,22 +851,40 @@ mod tests {
 
     #[test]
     fn lifecycle_descriptor_identity_is_worker_scoped_and_restored() {
-        assert!(active_lifecycle_identity().is_err());
-        with_lifecycle_identity("outer", "one", || {
+        assert_eq!(
+            active_lifecycle_identity()
+                .expect_err("out-of-scope descriptor query must fail")
+                .to_string(),
+            "plugin descriptor queries require an active retained-entry lifecycle call",
+        );
+        with_lifecycle_identity("outer", "one", "outer.Main", || {
             let outer = active_lifecycle_identity().expect("outer identity");
             assert_eq!(outer.name, "outer");
             assert_eq!(outer.version, "one");
-            with_lifecycle_identity("inner", "two", || {
+            assert_eq!(outer.main_class, "outer.Main");
+            with_lifecycle_identity("inner", "two", "inner.Main", || {
                 let inner = active_lifecycle_identity().expect("inner identity");
                 assert_eq!(inner.name, "inner");
                 assert_eq!(inner.version, "two");
+                assert_eq!(inner.main_class, "inner.Main");
             });
             assert_eq!(
                 active_lifecycle_identity().expect("restored outer identity").name,
                 "outer",
             );
+            assert_eq!(
+                active_lifecycle_identity()
+                    .expect("restored outer identity")
+                    .main_class,
+                "outer.Main",
+            );
         });
-        assert!(active_lifecycle_identity().is_err());
+        assert_eq!(
+            active_lifecycle_identity()
+                .expect_err("descriptor context must be removed after callback")
+                .to_string(),
+            "plugin descriptor queries require an active retained-entry lifecycle call",
+        );
     }
 
     fn await_event(host: &mut AdapterHost) -> AdapterEvent {
