@@ -566,6 +566,15 @@ pub enum PlayerRecordError {
         requested: [u8; 16],
         stored: [u8; 16],
     },
+    /// A single requested batch listed one complete UUID twice.
+    DuplicateUuid([u8; 16]),
+    /// Two UUIDs in one requested batch share the compact native key.
+    BatchKeyCollision {
+        /// UUID selected first for the compact key.
+        first: [u8; 16],
+        /// UUID selected later for the same compact key.
+        second: [u8; 16],
+    },
 }
 
 impl fmt::Display for PlayerRecordError {
@@ -592,6 +601,13 @@ impl fmt::Display for PlayerRecordError {
             Self::KeyCollision { requested, stored } => write!(
                 formatter,
                 "player key collision: requested UUID {requested:02x?} conflicts with stored UUID {stored:02x?}"
+            ),
+            Self::DuplicateUuid(uuid) => {
+                write!(formatter, "duplicate player UUID in write batch: {uuid:02x?}")
+            }
+            Self::BatchKeyCollision { first, second } => write!(
+                formatter,
+                "player batch key collision: UUID {first:02x?} conflicts with UUID {second:02x?}"
             ),
         }
     }
@@ -861,17 +877,58 @@ impl WorldStorage {
     /// UUID remains in the body and is checked before any replacement, so the
     /// unkeyed final 32 bits can never cause a silent overwrite.
     pub fn write_dirty_player(&self, player: NativePlayerRecord) -> Result<(), Error> {
-        let key = player_key(player.uuid);
-        let record = encode_player(player)?;
+        self.write_dirty_players([player]).map(|_| ())
+    }
+
+    /// Atomically saves a non-empty batch of independently dirty player
+    /// locators.
+    ///
+    /// All records are encoded and every compact-key collision is checked
+    /// before the native transaction begins. This is the boundary for a
+    /// reviewed filesystem import: a malformed later player cannot leave an
+    /// earlier selected player committed. Empty batches do no I/O.
+    pub fn write_dirty_players(
+        &self,
+        players: impl IntoIterator<Item = NativePlayerRecord>,
+    ) -> Result<usize, Error> {
+        let players: Vec<_> = players.into_iter().collect();
+        if players.is_empty() {
+            return Ok(0);
+        }
+        let mut requested = HashSet::new();
+        let mut keys = BTreeMap::new();
+        let mut writes = Vec::with_capacity(players.len());
+        for player in players {
+            if !requested.insert(player.uuid) {
+                return Err(PlayerRecordError::DuplicateUuid(player.uuid).into());
+            }
+            let key = player_key(player.uuid);
+            if let Some(first) = keys.insert(key, player.uuid) {
+                return Err(PlayerRecordError::BatchKeyCollision {
+                    first,
+                    second: player.uuid,
+                }
+                .into());
+            }
+            writes.push((key, player.uuid, encode_player(player)?));
+        }
         let Some(native) = &self.native else {
             return Err(Error::AnvilDoesNotAcceptTypedRecords);
         };
         let mut native = native.lock().expect("world storage lock poisoned");
-        if let Some(existing) = native.get(key)? {
-            decode_player(player.uuid, existing)?;
+        for (key, uuid, _) in &writes {
+            if let Some(existing) = native.get(*key)? {
+                decode_player(*uuid, existing)?;
+            }
         }
-        native.write_transaction(vec![RecordWrite::new(key, record)])?;
-        Ok(())
+        let count = writes.len();
+        native.write_transaction(
+            writes
+                .into_iter()
+                .map(|(key, _, record)| RecordWrite::new(key, record))
+                .collect(),
+        )?;
+        Ok(count)
     }
 
     /// Loads one bounded native player locator record by its complete UUID.
@@ -2120,6 +2177,30 @@ mod tests {
         assert_eq!(batches.len(), 1, "an empty dirty set must not reach storage");
         assert_eq!(batches[0].len(), 1);
         assert_eq!(batches[0][0].key, RecordKey::chunk(2, 3));
+    }
+
+    #[test]
+    fn player_batch_prepares_every_locator_before_one_transaction() {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let storage = WorldStorage {
+            backend: WorldStorageBackend::LodestoneNative {
+                directory: PathBuf::from("unused-in-fake-store"),
+            },
+            native: Some(Mutex::new(Box::new(RecordingStore(Arc::clone(&recorded))))),
+        };
+        let players = [[0x11; 16], [0x22; 16]].map(|uuid| NativePlayerRecord {
+            uuid,
+            dimension: BuiltinDimension::Overworld,
+            x_fixed: 1,
+            y_fixed: 2,
+            z_fixed: 3,
+            yaw_millidegrees: 4,
+            pitch_millidegrees: 5,
+        });
+        assert_eq!(storage.write_dirty_players(players).unwrap(), 2);
+        let batches = recorded.lock().expect("recording store lock poisoned");
+        assert_eq!(batches.len(), 1, "player import needs one native commit");
+        assert_eq!(batches[0].len(), 2, "every preflighted locator is committed together");
     }
 
     #[test]
