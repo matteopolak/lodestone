@@ -15,6 +15,7 @@
 //! geometry at draw time should look here.
 
 use lodestone_assets::BakedQuad;
+use lodestone_data::block_states::StateId;
 
 use crate::block_models::{CRACK_STAGE_COUNT, ITEM_FRAME_SLOTS, item_frame_slot};
 use crate::crack::{CrackMesh, build_crack_mesh};
@@ -100,19 +101,24 @@ impl CrackResolver {
     /// snapshot this type already holds, exposed for callers that want the block's
     /// *own* geometry rather than a crack overlay over it.
     ///
-    /// Empty for air, for a state id past the table, and for any block whose model
-    /// bakes no faces. Callers should treat empty as "draw nothing", never as an
-    /// error: an invisible-render-shape block legitimately has no quads, and the
-    /// falling-block renderer guards on exactly that (it only draws a shape that
-    /// is a real model).
+    /// The [`StateId`] argument proves this is a built-in census state before it
+    /// reaches this table. Empty therefore means that state bakes no faces, not
+    /// that an arbitrary wire value happened to miss the table. Protocol-local and
+    /// dynamic ids stay outside this boundary until their source resolves them.
+    /// Callers should treat empty as "draw nothing", never as an error: an
+    /// invisible-render-shape block legitimately has no quads, and the falling-
+    /// block renderer guards on exactly that (it only draws a shape that is a real
+    /// model).
     ///
     /// Unlike [`mesh_for`](Self::mesh_for) this keeps the quads' **own** UVs, tint
     /// index, shade flag and animation slot — the crack path replaces the UVs with
     /// a `destroy_stage` rect, which is why it cannot be reused for drawing the
     /// block itself.
     #[must_use]
-    pub fn state_quads(&self, state_id: u32) -> &[BakedQuad] {
-        self.quads.get(state_id as usize).map_or(&[], Vec::as_slice)
+    pub fn state_quads(&self, state_id: StateId) -> &[BakedQuad] {
+        self.quads
+            .get(state_id.raw() as usize)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Build crack geometry for `state_id` at destroy `stage`, translated to the
@@ -216,5 +222,20 @@ mod tests {
         let resolver = CrackResolver::new(vec![vec![cube_top()]], r);
         assert!(resolver.mesh_for(0, 5, [0.0; 3]).is_none());
         assert!(resolver.mesh_for(0, 4, [0.0; 3]).is_some());
+    }
+
+    /// The function pointer records the public moving-block geometry signature at
+    /// compile time. The runtime control proves a census-valid state retrieves its
+    /// snapshot.
+    #[test]
+    fn state_quads_requires_a_validated_census_state() {
+        let _: fn(&CrackResolver, StateId) -> &[BakedQuad] = CrackResolver::state_quads;
+        let resolver = CrackResolver::new(vec![vec![cube_top()]], rects());
+        let first_state = StateId::new(0).expect("state zero is in the built-in census");
+        assert_eq!(resolver.state_quads(first_state).len(), 1);
+        assert!(
+            StateId::new(lodestone_data::block_states::STATE_COUNT).is_none(),
+            "the census boundary must reject the first out-of-range raw id"
+        );
     }
 }
