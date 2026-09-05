@@ -105,26 +105,13 @@
 //! it was never the correctness fix, and treating it as one is what kept the bug
 //! alive.
 //!
-//! **2. Light does not cross a chunk border**, so a torch at local `x = 15` does
-//! not light its eastern neighbour at all. This is *not* a gap in this module: it
-//! is the **isolated** compute, and it is the same open item
-//! `docs/server-chunk-light.md` records as a measured **Δ5** sky-light dark bias
-//! at column borders. `lodestone_world::compute_column_light_with_neighbours` is
-//! exact for a centre column and would fix it — but it costs ~9× one column, and
-//! the *neighbours'* light changes too, so answering one torch honestly means nine
-//! packets and nine 3×3 floods. That is not something to do on the connection
-//! task, and the shape that makes it affordable is the same one §12.117 already
-//! names: compute light in the chunk source, where the neighbourhood is already
-//! resident, and carry it on [`crate::ChunkColumn`] — plus one trap that plan does
-//! not mention, recorded here because it would make the fix look like it worked
-//! and serve stale light:
-//!
-//! > If `ChunkColumn` carries a precomputed `light`, then
-//! > `ChunkColumn::set_block` and `ChunkStore::set_block` **must invalidate it**.
-//! > Both write blocks into a retained column without touching anything derived
-//! > from them. A `column.light()` that survives an edit would make the resend
-//! > above serve the light the column had *before* the torch was placed — a
-//! > correct-looking wire, a re-meshed client, and no change on screen.
+//! **2. Hosted cross-column relights are current.** Families that request it receive
+//! the edited column and its eight adjacent columns. A 3×3 neighbourhood is
+//! sufficient because light loses at least one level per block and therefore
+//! cannot enter a centre column from farther away. A relevant edit recomputes
+//! and sends all nine columns: neighbouring client meshes change when a source
+//! or occluder is on a seam. The calculation is fresh rather than cached, so a
+//! retained column cannot serve light from before an edit.
 //!
 //! **3. Only the acting connection is told.** The update rides that
 //! connection's own `Connection`, like every other confirmation in
@@ -146,11 +133,7 @@
 /// an ordinary placement.
 #[must_use]
 pub fn emission(state: &str) -> u8 {
-    let id = lodestone_data::block_states::StateId::new(
-        crate::chunk::resolve_palette_state_id(state),
-    )
-    .expect("palette-state resolution returns either a generated state or generated air");
-    lodestone_data::light_props::emission(id)
+    lodestone_data::light_props::emission(crate::chunk::resolve_palette_state_id(state))
 }
 
 /// The block-light **dampening** of one canonical block-state string, `0..=15` —
@@ -164,11 +147,7 @@ pub fn emission(state: &str) -> u8 {
 /// this census darkens or occludes rather than brightening.
 #[must_use]
 pub fn dampening(state: &str) -> u8 {
-    let id = lodestone_data::block_states::StateId::new(
-        crate::chunk::resolve_palette_state_id(state),
-    )
-    .expect("palette-state resolution returns either a generated state or generated air");
-    lodestone_data::light_props::dampening(id)
+    lodestone_data::light_props::dampening(crate::chunk::resolve_palette_state_id(state))
 }
 
 /// `true` iff replacing `old` with `new` changes the light the cell **emits or
@@ -202,11 +181,10 @@ pub fn dampening(state: &str) -> u8 {
 /// This does mean it now fires on essentially every ordinary placement and
 /// break, where before it fired only for the small emissive set. That is the
 /// intended trade and it is affordable: the work behind it is one
-/// `compute_column_light` over the edited column, measured at ≈1.0 ms in release
-/// (`crates/protocol/v770/tests/server_light.rs`), plus a few KiB `light_update`
-/// — against a player edit rate of a handful per second. What is *not*
-/// affordable, and is still not attempted here, is recomputing the eight
-/// neighbours as well; see this module's doc for that gap and its shape.
+/// `compute_column_light` over the edited column, plus a few KiB `light_update`
+/// — against a player edit rate of a handful per second. Hosted families that
+/// need cross-column propagation use a bounded 3×3 recompute instead; see this
+/// module's doc for why all nine columns must be sent together.
 ///
 /// A state whose *only* change is decorative — `axis`, `facing`, `waterlogged`
 /// on a full solid — still costs nothing, because both quantities compare equal.
