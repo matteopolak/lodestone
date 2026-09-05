@@ -39,6 +39,11 @@ pub struct ChunkRecord {
     /// separately because it is not always the top row of the 3-D container.
     #[prost(enumeration = "BuiltinBiome", repeated, tag = "6")]
     pub surface_biome_ids: ::prost::alloc::vec::Vec<i32>,
+    /// The optional 16x16 MOTION_BLOCKING heightmap in stored `top_y + 1` form,
+    /// indexed by `local_x + local_z * 16`. An absent map means the source had no
+    /// retained answer; a present map must have exactly 256 unsigned 16-bit values.
+    #[prost(uint32, repeated, tag = "7")]
+    pub motion_blocking_heights: ::prost::alloc::vec::Vec<u32>,
     #[prost(message, repeated, tag = "10")]
     pub extensions: ::prost::alloc::vec::Vec<ExtensionValue>,
 }

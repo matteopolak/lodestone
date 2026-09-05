@@ -2774,7 +2774,7 @@ impl IntegratedServer {
         storage.write_dirty_chunk(column_x, column_z, column)
     }
 
-    /// Loads one native typed terrain-and-biome column from the selected backend.
+    /// Loads one native typed terrain, biome, and heightmap column from the selected backend.
     ///
     /// The caller provides the active dimension's vertical contract. This is a
     /// real reopen/read consumer for the native segment, but it intentionally
@@ -5048,6 +5048,7 @@ mod tests {
                 }],
                 biome_sections: Vec::new(),
                 surface_biome_ids: Vec::new(),
+                motion_blocking_heights: Vec::new(),
                 extensions: Vec::new(),
             })),
         };
@@ -5122,6 +5123,12 @@ mod tests {
         let mut surface = vec!["minecraft:plains".to_string(); 16];
         surface[10] = "minecraft:cherry_grove".to_string();
         source.set_biome_quarts(&surface);
+        let heights = std::array::from_fn(|index| {
+            let x = index % 16;
+            let z = index / 16;
+            (64 + x * 3 + z * 11) as u16
+        });
+        source.set_motion_blocking(heights);
         server
             .write_dirty_native_chunk(3, -5, &source)
             .expect("write native terrain-only chunk");
@@ -5156,6 +5163,11 @@ mod tests {
         assert_eq!(loaded.biome_state_at(0, 0, 0), "minecraft:desert");
         assert_eq!(loaded.biome_state_at(12, 15, 12), "minecraft:deep_dark");
         assert_eq!(loaded.biome_state(8, 8), "minecraft:cherry_grove");
+        assert_eq!(
+            loaded.motion_blocking(),
+            Some(&heights),
+            "the stored heightmap must survive a server restart, not merely the segment round trip"
+        );
         assert!(
             reopened.load_native_chunk(4, -5, 0, 16).unwrap().is_none(),
             "a different record key must not be satisfied from the first server's memory"

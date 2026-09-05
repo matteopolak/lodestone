@@ -27,6 +27,10 @@ message ChunkRecord {
   // The 4x4 surface-biome answer used by surface-facing consumers. It is kept
   // separately because it is not always the top row of the 3-D container.
   repeated BuiltinBiome surface_biome_ids = 6 [packed = true];
+  // The optional 16x16 MOTION_BLOCKING heightmap in stored `top_y + 1` form,
+  // indexed by `local_x + local_z * 16`. An absent map means the source had no
+  // retained answer; a present map must have exactly 256 unsigned 16-bit values.
+  repeated uint32 motion_blocking_heights = 7 [packed = true];
   repeated ExtensionValue extensions = 10;
 }
 
