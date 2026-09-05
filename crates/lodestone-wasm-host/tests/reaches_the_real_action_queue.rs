@@ -23,11 +23,15 @@
 
 mod support;
 
+use std::sync::Arc;
+
 use lodestone_ecs::events::GameEvent;
-use lodestone_ecs::player::{ActionQueue, Egress, LocalPlayer, PhysicsState};
+use lodestone_ecs::player::{
+    ActionQueue, CollisionSource, Egress, LocalPlayer, PhysicsState, PlayerCollision,
+};
 use lodestone_ecs::{GameTick, app::App};
 use lodestone_model::{ClientAction, ClientEvent, PlayerInput, Text};
-use lodestone_physics::{PlayerState, Vec3d};
+use lodestone_physics::{Aabb, CollisionView, PlayerState, Vec3d};
 use lodestone_wasm_host::{Capability, CapabilitySet, PluginHost, WasmHostPlugin, WasmPlugins};
 
 fn chat(text: &str) -> GameEvent {
@@ -61,6 +65,22 @@ fn movement_host_policy() -> CapabilitySet {
     let mut policy = CapabilitySet::default_policy();
     policy.insert(Capability::ActMovement);
     policy
+}
+
+/// An intentionally empty but live collision view. `PlayerCollision::NoWorld`
+/// freezes physics by contract, so the movement integration gate needs this
+/// explicit control to prove that the normal physics system read the guest input.
+#[derive(Debug)]
+struct EmptyCollision;
+
+impl CollisionView for EmptyCollision {
+    fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<Aabb>) {}
+}
+
+impl CollisionSource for EmptyCollision {
+    fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
+        f(self);
+    }
 }
 
 /// A composed client `App`, optionally with the wasm tier installed.
@@ -307,6 +327,7 @@ fn a_wasm_movement_intent_reaches_the_existing_physics_and_egress_consumers() {
     let mut app = lodestone_app::client_app();
     app.add_plugins(WasmHostPlugin::new(host));
     lodestone_app::spawn_session(&mut app, PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
+    app.insert_resource(PlayerCollision::View(Arc::new(EmptyCollision)));
     *app.world_mut().resource_mut::<Egress>() = Egress { in_world: true, live: true };
     app.world_mut().run_schedule(GameTick);
 
