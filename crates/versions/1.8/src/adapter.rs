@@ -1503,7 +1503,14 @@ impl V47Adapter {
             // vanilla (done inside the chunk's own block-state setter, no
             // packet involved) — the same reasoning `lodestone-v1-9`'s
             // `BLOCK_CHANGE` arm documents.
-            world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
+            world.sync_block_entity(
+                pos.x,
+                pos.y,
+                pos.z,
+                lodestone_data::block_states::StateId::new(state)
+                    .and_then(block_entity_type)
+                    .map(|kind| kind.raw()),
+            );
             return Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
                 section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),
                 blocks: vec![[
@@ -1584,7 +1591,14 @@ impl V47Adapter {
                 let x = origin_x + rel_x;
                 let z = origin_z + rel_z;
                 world.set_block(x, y, z, state);
-                world.sync_block_entity(x, y, z, block_entity_type(state));
+                world.sync_block_entity(
+                    x,
+                    y,
+                    z,
+                    lodestone_data::block_states::StateId::new(state)
+                        .and_then(block_entity_type)
+                        .map(|kind| kind.raw()),
+                );
                 by_section
                     .entry(y >> 4)
                     .or_default()

@@ -7196,8 +7196,9 @@ where
                 }
                 block_entities.with(|registry| registry.insert(target, entity));
             } else if let Some(type_name) = lodestone_data::block_states::state_id(&state)
+                .and_then(lodestone_data::block_states::StateId::new)
                 .and_then(lodestone_data::block_entity_types::block_entity_type)
-                .and_then(lodestone_data::block_entity_types::block_entity_type_name)
+                .map(lodestone_data::block_entity_types::block_entity_type_name)
             {
                 // State-defined block entities need a registry record even when
                 // the item has no specialized constructor. The client renders

@@ -1649,7 +1649,14 @@ impl V774Adapter {
         world.set_block(pos.x, pos.y, pos.z, state);
         // Writing a state is what creates or removes a block entity; no packet
         // is involved.
-        world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
+        world.sync_block_entity(
+            pos.x,
+            pos.y,
+            pos.z,
+            lodestone_data::block_states::StateId::new(state)
+                .and_then(block_entity_type)
+                .map(|kind| kind.raw()),
+        );
         Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
             section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),
             blocks: vec![[
@@ -1685,7 +1692,14 @@ impl V774Adapter {
             let y = body.section_y * 16 + i32::from(local[1]);
             let z = body.section_z * 16 + i32::from(local[2]);
             world.set_block(x, y, z, state);
-            world.sync_block_entity(x, y, z, block_entity_type(state));
+            world.sync_block_entity(
+                x,
+                y,
+                z,
+                lodestone_data::block_states::StateId::new(state)
+                    .and_then(block_entity_type)
+                    .map(|kind| kind.raw()),
+            );
             changed.push(*local);
         }
         if changed.is_empty() {

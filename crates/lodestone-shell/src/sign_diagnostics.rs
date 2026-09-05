@@ -198,7 +198,9 @@ pub fn classify(world: &World, block: [i32; 3], state_id: u32) -> Verdict {
         return Verdict::NoRecord;
     };
 
-    let expected = lodestone_data::block_entity_types::block_entity_type(state_id);
+    let expected = lodestone_data::block_states::StateId::new(state_id)
+        .and_then(lodestone_data::block_entity_types::block_entity_type)
+        .map(|kind| kind.raw());
     if expected != Some(record.type_id) {
         return Verdict::TypeMismatch {
             found: record.type_id,
@@ -657,7 +659,9 @@ mod tests {
             rel_x: (x & 15) as u8,
             rel_z: (z & 15) as u8,
             y: y as i16,
-            type_id: lodestone_data::block_entity_types::block_entity_type(oak_sign_state())
+            type_id: lodestone_data::block_states::StateId::new(oak_sign_state())
+                .and_then(lodestone_data::block_entity_types::block_entity_type)
+                .map(|kind| kind.raw())
                 .expect("a sign state owns a block-entity type"),
             nbt,
         }

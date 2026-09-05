@@ -347,7 +347,9 @@ fn world_with_chest() -> (World, ChunkPos) {
         CHEST[0],
         CHEST[1],
         CHEST[2],
-        lodestone_data::block_entity_types::block_entity_type(state),
+        lodestone_data::block_states::StateId::new(state)
+            .and_then(lodestone_data::block_entity_types::block_entity_type)
+            .map(|kind| kind.raw()),
     );
     (world, pos)
 }

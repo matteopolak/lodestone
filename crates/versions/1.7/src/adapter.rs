@@ -919,7 +919,14 @@ impl V5Adapter {
         world.set_block(pos.x, pos.y, pos.z, state);
         // Writing a state is what creates or removes a block entity in this
         // era; no packet announces it.
-        world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
+        world.sync_block_entity(
+            pos.x,
+            pos.y,
+            pos.z,
+            lodestone_data::block_states::StateId::new(state)
+                .and_then(block_entity_type)
+                .map(|kind| kind.raw()),
+        );
         Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
             section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),
             blocks: vec![[
@@ -959,7 +966,14 @@ impl V5Adapter {
             let z = origin_z + i32::from(record.z);
             let state = canonical::resolve_composite_or_air(record.composite(), &mut tally);
             world.set_block(x, y, z, state);
-            world.sync_block_entity(x, y, z, block_entity_type(state));
+            world.sync_block_entity(
+                x,
+                y,
+                z,
+                lodestone_data::block_states::StateId::new(state)
+                    .and_then(block_entity_type)
+                    .map(|kind| kind.raw()),
+            );
             by_section
                 .entry(y >> 4)
                 .or_default()

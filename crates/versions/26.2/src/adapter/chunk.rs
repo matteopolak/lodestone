@@ -310,7 +310,14 @@ impl V770Adapter {
             // which still *opened* because interaction reads the state.
             // `World::sync_block_entity` documents the create/keep/replace/remove
             // rule; the `Option` is the version-specific half.
-            world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
+            world.sync_block_entity(
+                pos.x,
+                pos.y,
+                pos.z,
+                lodestone_data::block_states::StateId::new(state)
+                    .and_then(block_entity_type)
+                    .map(|kind| kind.raw()),
+            );
             // Dirty exactly the section that owns the block. Without this a
             // break/place the *server* sends is applied to the world but never
             // drawn until some other event happens to dirty the column — the
@@ -370,7 +377,9 @@ impl V770Adapter {
                     (section_x << 4) | i32::from(rel_x),
                     (section_y << 4) | i32::from(rel_y),
                     (section_z << 4) | i32::from(rel_z),
-                    block_entity_type(state),
+                    lodestone_data::block_states::StateId::new(state)
+                        .and_then(block_entity_type)
+                        .map(|kind| kind.raw()),
                 );
             }
             // Dirty the owning column so a server-authoritative multi-block

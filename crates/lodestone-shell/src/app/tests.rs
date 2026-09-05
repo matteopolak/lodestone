@@ -4358,7 +4358,9 @@ fn right_clicking_a_command_block_opens_the_edit_screen() {
             block[0],
             block[1],
             block[2],
-            lodestone_data::block_entity_types::block_entity_type(state_id)
+            lodestone_data::block_states::StateId::new(state_id)
+                .and_then(lodestone_data::block_entity_types::block_entity_type)
+                .map(|kind| kind.raw())
                 .expect("a command block state owns a block entity type"),
             lodestone_core::Nbt::Compound(vec![
                 (
