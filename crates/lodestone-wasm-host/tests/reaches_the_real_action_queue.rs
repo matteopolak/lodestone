@@ -216,6 +216,16 @@ fn respawn_host_policy() -> CapabilitySet {
     policy
 }
 
+fn disconnect_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActDisconnect])
+}
+
+fn disconnect_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActDisconnect);
+    policy
+}
+
 fn inventory_event() -> GameEvent {
     GameEvent(ClientEvent::InventorySlotChanged {
         slot: 4,
@@ -704,6 +714,47 @@ fn a_wasm_respawn_request_without_its_capability_is_refused() {
         "a refused respawn request must not reach the action queue: {:?}",
         action_queue(&app)
     );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+/// A guest can request the client's orderly transport shutdown without access
+/// to a connection handle or any session internals.
+#[test]
+fn a_wasm_disconnect_request_reaches_the_real_action_queue() {
+    let wasm = support::build_example_plugin(&["disconnect"]);
+    let mut host = PluginHost::new(disconnect_host_policy()).expect("engine");
+    host.load_file("disconnect", &wasm, &disconnect_capabilities())
+        .expect("the explicitly granted disconnect fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        action_queue(&app)
+            .iter()
+            .any(|action| matches!(action, ClientAction::Disconnect)),
+        "the guest request must reach the production action queue"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+#[test]
+fn a_wasm_disconnect_request_without_its_capability_is_refused() {
+    let wasm = support::build_example_plugin(&["disconnect"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "disconnect",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log]),
+    )
+    .expect("the guest remains loadable when disconnect is withheld");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(!action_queue(&app).iter().any(|action| matches!(action, ClientAction::Disconnect)));
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
 }
 
