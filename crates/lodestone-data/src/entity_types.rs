@@ -1,4 +1,4 @@
-//! Public entity-type id→name resolution for protocol 776.
+//! Compatibility entity-type id↔name resolution for protocol 776.
 //!
 //! `add_entity` carries the entity type as a network **registry id** (a
 //! varint), not its identifier. The id→name mapping is generated from
@@ -8,10 +8,13 @@
 //! code. The older version crates (`v1-8`, `v1-9`, `v1-14`) keep their own
 //! separate copies of this table, because for them it is genuinely
 //! translation data from an old wire id to this canonical name space. The
-//! generated array is the single source of truth; this module is only the
-//! thin bounds-checked accessor over it.
+//! generated enum is the single source of truth; this module is a thin
+//! compatibility facade for callers that have not yet replaced their raw
+//! integer or string boundary with [`crate::entity_type::EntityType`]. Legacy
+//! protocol-family translation tables remain local to their own crates: their
+//! ids are not protocol-776 ids and must not be routed through this module.
 
-use crate::generated_entity_types::ENTITY_TYPE_NAMES;
+use crate::entity_type::EntityType;
 pub use crate::generated_entity_types::TYPE_COUNT;
 
 /// Resolves a network entity-type id to its canonical `minecraft:*` identifier.
@@ -21,9 +24,10 @@ pub use crate::generated_entity_types::TYPE_COUNT;
 /// silently wrong type.
 #[must_use]
 pub fn entity_type_name(id: i32) -> Option<&'static str> {
-    usize::try_from(id)
+    u8::try_from(id)
         .ok()
-        .and_then(|index| ENTITY_TYPE_NAMES.get(index).copied())
+        .and_then(EntityType::from_registry_id)
+        .map(EntityType::name)
 }
 
 /// Resolves a canonical `minecraft:*` identifier back to its network
@@ -33,10 +37,7 @@ pub fn entity_type_name(id: i32) -> Option<&'static str> {
 /// need not be a hash map.
 #[must_use]
 pub fn entity_type_id(name: &str) -> Option<i32> {
-    ENTITY_TYPE_NAMES
-        .iter()
-        .position(|&candidate| candidate == name)
-        .map(|index| index as i32)
+    EntityType::from_name(name).map(|entity_type| i32::from(entity_type.registry_id()))
 }
 
 /// Resolves a **split** identifier — namespace and path separately — back to its
@@ -57,10 +58,7 @@ pub fn entity_type_id_parts(namespace: &str, path: &str) -> Option<i32> {
     if namespace != "minecraft" {
         return None;
     }
-    ENTITY_TYPE_NAMES
-        .iter()
-        .position(|candidate| candidate.strip_prefix("minecraft:") == Some(path))
-        .map(|index| index as i32)
+    EntityType::from_name(path).map(|entity_type| i32::from(entity_type.registry_id()))
 }
 
 #[cfg(test)]

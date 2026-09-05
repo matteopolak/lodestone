@@ -122,6 +122,19 @@ block-entity packet by accident. A key not in the built-in census stays a miss;
 it must remain in the dynamic registry that supplied it rather than being
 coerced into a built-in slot.
 
+Entity writers follow the same two-stage boundary. `EntitySnapshot` deliberately
+keeps a `ResourceKey`: the server protocol trait also serves legacy families,
+and a custom/session-synchronized key cannot honestly be represented by the
+closed 26.2 enum. At the 26.2 `add_entity` and entity-stat writers,
+`EntityType::from_resource_key`/`EntityType::from_name` validate a built-in
+key, and only `EntityType::registry_id` reaches the VarInt. The older
+`entity_types` module remains a compatibility facade for raw-id consumers;
+each legacy protocol family keeps its own numeric-to-name translation table.
+An unresolved key is not converted into an arbitrary fixed enum merely to
+make the type checker happy; the entity-spawn writer preserves its documented
+recoverable fallback explicitly as `EntityType::AcaciaBoat` until the
+custom-disguise registry is supplied to that production seam.
+
 **`Block` and `StateId` are two different id spaces and conflating them is the mistake that
 surfaces late.** `Block` has 1,196 values in **registration** order (wire use: `Holder<Block>`
 in `block_event`, tool rules); `StateId` has 32,366 values in **name-sorted** order (wire use:

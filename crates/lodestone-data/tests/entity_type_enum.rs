@@ -37,6 +37,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use lodestone_data::entity_type::{CustomEntityTypeId, EntityType, EntityTypeKind, EntityTypeRef};
+use lodestone_model::ResourceKey;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -329,6 +330,17 @@ fn from_name_rejects_foreign_namespaces_and_unknown_paths() {
     assert_eq!(EntityType::from_name("minecraft:not_an_entity"), None);
     assert_eq!(EntityType::from_name(""), None);
     assert_eq!(EntityType::from_name("minecraft:"), None);
+}
+
+#[test]
+fn parsed_resource_keys_only_enter_the_fixed_registry_when_builtin() {
+    let pig = ResourceKey::new("minecraft", "pig").expect("built-in key parses");
+    let custom = ResourceKey::new("myplugin", "pig").expect("custom key parses");
+    let unknown = ResourceKey::new("minecraft", "not_an_entity").expect("unknown key parses");
+
+    assert_eq!(EntityType::from_resource_key(&pig), Some(EntityType::Pig));
+    assert_eq!(EntityType::from_resource_key(&custom), None);
+    assert_eq!(EntityType::from_resource_key(&unknown), None);
 }
 
 /// The representation claims, as numbers — mirrors `block_enum.rs`'s sibling

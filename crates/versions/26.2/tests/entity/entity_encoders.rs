@@ -134,7 +134,7 @@ fn encode_add_entity_round_trips_through_the_real_adapter() {
 }
 
 #[test]
-fn encode_add_entity_falls_back_to_id_zero_for_an_unknown_type() {
+fn encode_add_entity_falls_back_to_the_explicit_acacia_boat_type_for_an_unknown_key() {
     let proto = V770ServerProtocol;
     let mut snapshot = zombie_snapshot(1, Uuid::new_v4());
     snapshot.entity_type = ResourceKey::new("minecraft", "definitely_not_a_real_entity").unwrap();
@@ -148,9 +148,9 @@ fn encode_add_entity_falls_back_to_id_zero_for_an_unknown_type() {
     let ClientEvent::EntitySpawned { entity_type, .. } = &events[0] else {
         panic!("expected EntitySpawned");
     };
-    // Network id 0 in the generated table (not asserting the exact name here,
-    // only that *some* valid entry decoded rather than an error).
-    assert!(!entity_type.to_string().is_empty());
+    // The protocol's established recovery behavior is preserved, but the
+    // writer reaches it through `EntityType::AcaciaBoat`, not a raw `0`.
+    assert_eq!(entity_type.to_string(), "minecraft:acacia_boat");
 }
 
 #[test]
