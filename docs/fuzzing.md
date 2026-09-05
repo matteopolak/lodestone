@@ -598,15 +598,46 @@ result is accepted only when `RconOracle::missed_deadlines()` is zero, so a
 host that bursts through unobserved reference ticks cannot manufacture either
 agreement or disagreement.
 
+### Captured entity lifecycle
+
+`differential_captured_entity.rs` replays three unmodified server-authored
+payloads from `tests/fixtures/entity_lifecycle_26_2.json`: an armor stand's
+spawn, absolute position update, and removal. The expected UUID and fractional
+coordinates come from the capture commands, independently of the decoder.
+Each packet goes through the real adapter, driver and ECS before the test
+reads `ClientHandle::entity`. An omitted-movement control must retain the
+spawn position and reject the commanded endpoint; removal must still erase
+the entity. No synthesized spawn prefix participates in this lane.
+
+To acquire a fresh sequence, start the headless creative oracle, then run:
+
+```bash
+CARGO_TARGET_DIR=/private/tmp/lodestone-batch-549 cargo test -p lodestone-fuzz \
+  --no-default-features --features v26-2,rcon-oracle \
+  --test differential_captured_entity acquire_entity_lifecycle_from_external_server \
+  -j 2 --no-fail-fast -- --ignored --nocapture
+```
+
+The capture test prints `ENTITY_LIFECYCLE_CAPTURE=` followed by reviewable
+JSON after checking both live-acquired replay paths. Replace the fixture's
+protocol/id/packet fields with that output while keeping its provenance
+description. Session entity ids may differ across captures; do not normalize
+the bytes with our encoder. The workflow uses only ports `25570`/`25571`, the
+test's generated player name and the `lodestone_fuzz_lifecycle` entity tag;
+do not run two acquisitions concurrently. It bounds connection, join and
+capture waits to 5, 30 and 20 seconds respectively, with the existing bounded
+RCON transport. It removes the tagged stand after capture or a capture timeout.
+The ordinary replay needs only `v26-2`, no oracle or network, and bounds every
+expected event wait to five seconds.
+
 ### What Track B still does not do
 - **The client-state packet corpus is still small.** The captured lane covers
   three inventory slot payloads; it does not yet cover captured chunk or broader
-  inventory packet sequences. The two committed item-entity fixtures are
-  metadata-only `SET_ENTITY_DATA` payloads with session-scoped ids, not a
-  complete spawn/metadata/move/remove sequence, so they cannot independently
-  drive `ClientHandle::entity`. A future entity lane needs that paired capture;
-  manufacturing an `ADD_ENTITY` prefix would remove the corpus's independent
-  provenance. The generated block/entity/inventory/container campaign remains
+  inventory packet sequences. The captured armor-stand lane covers spawn,
+  movement and removal, but not metadata. The two committed item-entity
+  metadata fixtures remain unpaired with their own session's spawn, so they
+  cannot independently drive an item-entity lifecycle. The generated
+  block/entity/inventory/container campaign remains
   hermetic and bounded; it compares client state rather than rendered frames,
   because renderer differences are not themselves client-state bugs.
   The inventory component lane replays explicit-tool, plain-tool, potion,
