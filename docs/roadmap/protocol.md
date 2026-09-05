@@ -20,14 +20,15 @@ cargo xtask connectedness
 
 The command reports independent axes: clientbound decode and emission, serverbound client
 encoding, serverbound server decode, and server consumer connectivity. The current 26.2 result
-is **141/141 decoded, 139/141 emitted, 68/69 encoded, 66/69 serverbound decoded, and 47/69
+is **141/141 decoded, 139/141 emitted, 68/69 encoded, 66/69 serverbound decoded, and 58/69
 connected**. A decoded packet that is intentionally side-effect-only must be documented as such;
 a decoded packet that produces no action, event, or state change is an island.
 
-The registry has ten families. Five are joining-only: `v1-14`, `v1-17`, `v1-19`, `v1-20-6`, and
-`v1-21-11`. Hosted protocols are 5, 47, 340, 404 and 776; `v1-9` hosts 340 only, not every
-revision its joining adapter supports. No family is enabled by default in the registry; the live
-shell enables `v26-2`.
+The registry has ten families and every family has at least one hosted revision. Hosted protocols
+are 5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, 762, 766, 774, and 776. A family can
+still join revisions it does not host, so callers must use the registry's explicit server table
+rather than infer hosting from the family feature. No family is enabled by default in the registry;
+the live shell enables `v26-2`.
 
 ## Server compatibility roadmap
 
@@ -39,12 +40,12 @@ tags; structured dimension/clock data and opaque payloads share the same orderin
 
 The remaining server work is consumer connectivity and hardening:
 
-1. **Serverbound consumers.** The 57/69 connected result leaves 12 cases without an end-to-end
-   consumer: nine decode to `Ignored`, and three still need decode arms. The teleport acknowledgement
+1. **Serverbound consumers.** The 58/69 connected result leaves 11 cases without an end-to-end
+   consumer: eight decode to `Ignored`, and three still need decode arms. The teleport acknowledgement
    is now connection state: every 26.2 player-position producer receives a unique pending id, and
    movement remains gated until its matching reply arrives. The remaining cases cover tick/
-   configuration markers, chat acknowledgement, custom click controls, and minecart/structure/
-   jigsaw/test administration. The control-ping `pong` reply is explicitly decoded and consumed
+   configuration acknowledgement, chat acknowledgement, custom click controls, and minecart/
+   structure/jigsaw/test administration. The control-ping `pong` reply is explicitly decoded and consumed
    without state or output: the hosted server has no matching ping producer, so retaining an
    acknowledgement counter would model behaviour that does not exist. A capability with no server
    meaning should remain explicitly side-effect-only; otherwise it needs a dispatcher and integration
