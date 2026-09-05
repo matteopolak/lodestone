@@ -71,6 +71,7 @@ acknowledged-batch gate so transmission pace follows client acknowledgement.
 Protocols 756 and 758 accept the signed 16-bit held-item selection packet only for hotbar slots
 0 through 8. The selected slot enters the shared `CarriedItemChanged` inventory consumer; malformed,
 out-of-range, trailing, and pre-Play inputs are ignored without mutating player state.
+Protocols 498, 578, and 754 enforce the same boundary through their own packet-id tables.
 
 ## Client compatibility roadmap
 

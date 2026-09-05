@@ -27,6 +27,7 @@ use crate::packets::game::{
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccessString, SetCompression};
 use crate::packets::position::{Position, pack_position};
+use crate::packets::window::ServerboundHeldItemSlot;
 
 const CTX: Ctx = Ctx { version: PROTOCOL_1_15_2 };
 const CTX_498: Ctx = Ctx { version: PROTOCOL_1_14_4 };
@@ -602,6 +603,15 @@ impl ServerProtocol for V578ServerProtocol {
                 };
                 ServerBound::Swing { hand }
             }
+            State::Play if packet_id == play::serverbound::HELD_ITEM_SLOT => {
+                let Some(slot) = decode_full::<ServerboundHeldItemSlot>(payload)
+                    .and_then(|packet| u8::try_from(packet.slot).ok())
+                    .filter(|&slot| slot < 9)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::CarriedItemChanged { slot }
+            }
             // The four movement forms have distinct payloads. Position-bearing
             // forms are what drive view recentering and the integrated server's
             // chunk stream; look and grounded-only updates still carry real
@@ -800,6 +810,15 @@ impl ServerProtocol for V754ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 ServerBound::Swing { hand }
+            }
+            State::Play if packet_id == play_754::serverbound::HELD_ITEM_SLOT => {
+                let Some(slot) = decode_full_754::<ServerboundHeldItemSlot>(payload)
+                    .and_then(|packet| u8::try_from(packet.slot).ok())
+                    .filter(|&slot| slot < 9)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::CarriedItemChanged { slot }
             }
             State::Play if packet_id == play_754::serverbound::POSITION => {
                 decode_full_754::<ServerboundPosition>(payload).map_or(
@@ -1002,6 +1021,15 @@ impl ServerProtocol for V498ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 ServerBound::Swing { hand }
+            }
+            State::Play if packet_id == play_498::serverbound::HELD_ITEM_SLOT => {
+                let Some(slot) = decode_full_498::<ServerboundHeldItemSlot>(payload)
+                    .and_then(|packet| u8::try_from(packet.slot).ok())
+                    .filter(|&slot| slot < 9)
+                else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::CarriedItemChanged { slot }
             }
             State::Play if packet_id == play_498::serverbound::POSITION => {
                 decode_full_498::<ServerboundPosition>(payload).map_or(

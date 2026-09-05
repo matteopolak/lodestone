@@ -257,6 +257,59 @@ fn registry_selected_14_era_arm_animation_connects_to_the_client_event() {
 }
 
 #[test]
+fn registry_selected_14_era_hotbar_selection_reaches_the_inventory_consumer() {
+    for (protocol_version, held_item_slot) in [
+        (498, packet_ids_498::play::serverbound::HELD_ITEM_SLOT),
+        (578, play::serverbound::HELD_ITEM_SLOT),
+        (754, packet_ids::play::serverbound::HELD_ITEM_SLOT),
+    ] {
+        let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+            .expect("every hosted 1.14-era protocol must select a server protocol");
+
+        // The body is a signed big-endian i16. These literals pin both legal
+        // boundaries without asking either adapter direction for the bytes.
+        assert_eq!(
+            protocol.decode(State::Play, held_item_slot, &[0x00, 0x00]),
+            ServerBound::CarriedItemChanged { slot: 0 },
+        );
+        assert_eq!(
+            protocol.decode(State::Play, held_item_slot, &[0x00, 0x08]),
+            ServerBound::CarriedItemChanged { slot: 8 },
+        );
+        for body in [&[0xff, 0xff][..], &[0x00, 0x09], &[0x00], &[0x00, 0x08, 0x00]] {
+            assert_eq!(
+                protocol.decode(State::Play, held_item_slot, body),
+                ServerBound::Ignored,
+                "protocol {protocol_version} must reject an invalid hotbar body {body:?}",
+            );
+        }
+        assert_eq!(
+            protocol.decode(State::Login, held_item_slot, &[0x00, 0x08]),
+            ServerBound::Ignored,
+            "hotbar selection must not bypass the Play-state boundary",
+        );
+
+        let adapter = adapter_for(protocol_version);
+        let Some((packet_id, payload)) = adapter
+            .encode_action(
+                ConnectionState::Play,
+                &ClientAction::SetCarriedItem { slot: 3 },
+            )
+            .expect("the client adapter must encode hotbar selection")
+        else {
+            panic!("hotbar selection must produce a packet");
+        };
+        assert_eq!(packet_id, held_item_slot);
+        assert_eq!(payload, vec![0x00, 0x03]);
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &payload),
+            ServerBound::CarriedItemChanged { slot: 3 },
+            "the client action must reach the registry-selected hosted consumer",
+        );
+    }
+}
+
+#[test]
 fn protocol_498_lifts_its_literal_block_use_body() {
     assert_block_use_lift(&V498ServerProtocol, packet_ids_498::play::serverbound::BLOCK_PLACE);
 }
