@@ -644,19 +644,61 @@ impl AccessLists {
     }
 }
 
+/// Value-only permission context supplied to a native provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PermissionLevelContext {
+    pub uuid: Uuid,
+    pub fallback_level: u8,
+}
+
+/// Delegates the connection's command and administrative-packet permission level.
+/// Return `None` to retain the access-list fallback, or a level in `0..=4`.
+/// Invalid levels fail closed at zero. Implementations must not block or
+/// recursively call `AccessHandle::command_permission_level`.
+pub trait PermissionLevelProvider: Send + Sync {
+    fn resolve(&self, context: PermissionLevelContext) -> Option<u8>;
+}
+
+impl<F> PermissionLevelProvider for F
+where
+    F: Fn(PermissionLevelContext) -> Option<u8> + Send + Sync,
+{
+    fn resolve(&self, context: PermissionLevelContext) -> Option<u8> {
+        self(context)
+    }
+}
+
 /// A cloneable handle over one [`AccessLists`], shared by every connection and by
 /// an admin console.
 ///
 /// Same `with`-funnels-every-access shape as [`crate::BlockEntityHandle`], and for
 /// the same reason: one place handles a poisoned lock.
-#[derive(Debug, Clone, Default)]
-pub struct AccessHandle(Arc<Mutex<AccessLists>>);
+#[derive(Clone, Default)]
+pub struct AccessHandle {
+    lists: Arc<Mutex<AccessLists>>,
+    provider: Arc<Mutex<Option<Arc<dyn PermissionLevelProvider>>>>,
+}
+
+impl std::fmt::Debug for AccessHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccessHandle")
+            .field("lists", &self.lists)
+            .field("has_provider", &self.provider.lock().expect("permission provider lock poisoned").is_some())
+            .finish()
+    }
+}
 
 impl AccessHandle {
+    /// Install or remove a shared native permission provider. All handle clones
+    /// see replacements; connections already in Play retain their resolved level.
+    pub fn set_permission_provider(&self, provider: Option<Arc<dyn PermissionLevelProvider>>) {
+        *self.provider.lock().expect("permission provider lock poisoned") = provider;
+    }
+
     /// A handle over `lists`.
     #[must_use]
     pub fn new(lists: AccessLists) -> Self {
-        Self(Arc::new(Mutex::new(lists)))
+        Self { lists: Arc::new(Mutex::new(lists)), provider: Arc::default() }
     }
 
     /// Loads the four files from `dir` into a fresh handle.
@@ -669,7 +711,7 @@ impl AccessHandle {
 
     /// Runs `f` against the locked lists.
     pub fn with<R>(&self, f: impl FnOnce(&mut AccessLists) -> R) -> R {
-        let mut guard = self.0.lock().expect("access list lock poisoned");
+        let mut guard = self.lists.lock().expect("access list lock poisoned");
         f(&mut guard)
     }
 
@@ -686,11 +728,19 @@ impl AccessHandle {
         self.with(|lists| lists.permission_level(uuid))
     }
 
-    /// [`AccessLists::command_permission_level`] — what `crate::server` resolves
-    /// once, at the Play handoff, to gate the built-in command tree.
+    /// The provider's level, or [`AccessLists::command_permission_level`] when
+    /// no provider claims this identity. The connection resolves it once at the
+    /// Play handoff for command and administrative-packet gates. Provider code
+    /// runs without either handle lock held, so reading stored access is safe.
     #[must_use]
     pub fn command_permission_level(&self, uuid: Uuid) -> u8 {
-        self.with(|lists| lists.command_permission_level(uuid))
+        let fallback_level = self.with(|lists| lists.command_permission_level(uuid));
+        let provider = self.provider.lock().expect("permission provider lock poisoned").clone();
+        match provider.and_then(|provider| provider.resolve(PermissionLevelContext { uuid, fallback_level })) {
+            Some(level @ 0..=MAX_PERMISSION_LEVEL) => level,
+            Some(_) => 0,
+            None => fallback_level,
+        }
     }
 
     /// Turns whitelist enforcement on or off.

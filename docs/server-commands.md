@@ -56,6 +56,21 @@ slash command (difficulty changes, game-rule changes, command-block edits, game-
 connection's level is resolved once, at the Play handoff, from its authenticated identity — never
 from the command text itself.
 
+Native hosts can install `access::PermissionLevelProvider` through
+`AccessHandle::set_permission_provider(Some(Arc::new(provider)))` before publishing or serving
+connections. The provider receives `PermissionLevelContext { uuid, fallback_level }`, an identity
+and a snapshot of the existing access-list result. `Some(0..=4)` overrides that result, `None`
+defers to it, and an invalid numeric level resolves to zero. The same effective level gates the
+advertised command tree, command execution, and administrative packets.
+
+Handle clones share provider installation and removal. Provider callbacks run after both handle
+locks are released, so they may inspect stored access through `permission_level` or replace the
+provider. They must not block or recursively resolve the effective command level. Provider policy
+does not alter persisted ops, join bans, whitelist membership, or player-limit bypass. Removing a
+provider restores ordinary access-list resolution for future connections. Existing connections
+retain the level captured at their Play handoff; this API does not perform live privilege revocation.
+This is delegation of the five server levels, not a node/wildcard permission registry.
+
 Access control is vanilla's four JSON files (`ops.json`, `whitelist.json`, `banned-players.json`,
 `banned-ips.json`), read and written through one shared, cloneable handle every connection and the
 admin console read from. Join order matches vanilla exactly — player ban, then whitelist, then IP
@@ -151,6 +166,8 @@ and waits for a matching reply, safely over-approximating rather than risking a 
   matching vanilla's own `white-list` server property being independent of the file existing.
 - No configuration governs the command tree or permission model's shape — a plugin declares its
   own nodes and permission defaults at registration time.
+- Native permission providers are installed in code on the `AccessHandle` passed to the host's
+  publish/serve configuration. They are transient and must be reinstalled after restarting the host.
 
 ## Dependencies
 
