@@ -506,24 +506,49 @@ pub(crate) fn resident_block_handle_state_id(bits: i64) -> Result<jint, AdapterE
         .map_err(|_| AdapterError::new("blockHandleStateId exceeds Java int range"))
 }
 
-fn resolve_resident_player_handle(bits: i64) -> Result<String, AdapterError> {
+fn resolve_resident_player_handle(
+    bits: i64,
+    operation: &str,
+) -> Result<PlayerIdentity, AdapterError> {
     let handle = ObjectRef::from_bits(bits, ObjectKind::Player);
     RESIDENT_OBJECT_HANDLES.with(|slot| {
         let handles = slot.borrow();
         let handles = handles.as_ref().ok_or_else(|| {
-            AdapterError::new("playerHandleName requires the adapter worker thread")
+            AdapterError::new(format!("{operation} requires the adapter worker thread"))
         })?;
         handles
             .resolve(handle, ObjectKind::Player)
             .and_then(|object| match object {
-                ResidentObject::Player { player, .. } => Ok(player.name().to_owned()),
+                ResidentObject::Player { player, .. } => Ok(player.clone()),
                 ResidentObject::Block { .. } => Err(ResolveError::KindMismatch {
                     expected: ObjectKind::Player,
                     actual: ObjectKind::Block,
                 }),
             })
-            .map_err(|error| AdapterError::new(format!("playerHandleName: {error}")))
+            .map_err(|error| AdapterError::new(format!("{operation}: {error}")))
     })
+}
+
+fn resolve_resident_player_handle_name(bits: i64) -> Result<String, AdapterError> {
+    resolve_resident_player_handle(bits, "playerHandleName").map(|player| player.name().to_owned())
+}
+
+/// Returns a canonical UUID string copied from a generation-checked player handle.
+///
+/// The UUID never crosses the bridge as a server object: it is the sixteen
+/// profile bytes copied by the dedicated host when it observes its roster.
+fn resolve_resident_player_handle_uuid(bits: i64) -> Result<String, AdapterError> {
+    let uuid = resolve_resident_player_handle(bits, "playerHandleUuid")?.uuid();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(36);
+    for (index, byte) in uuid.into_iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            text.push('-');
+        }
+        text.push(HEX[usize::from(byte >> 4)] as char);
+        text.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    Ok(text)
 }
 
 fn release_resident_handles(identity: &LifecycleIdentity) -> usize {
@@ -1451,6 +1476,28 @@ pub(crate) fn register_player_handle_name_query(
     }
 }
 
+#[allow(unsafe_code)]
+pub(crate) fn register_player_handle_uuid_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts one jlong and returns a
+    // canonical copied UUID string from the worker-local registry, never a
+    // player pointer, connection, or ECS value.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_player_handle_uuid as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
 extern "system" fn native_block_state_id<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -1604,10 +1651,26 @@ extern "system" fn native_player_handle_name<'local>(
     env.with_env(|env| {
         let _depth = CallbackDepthGuard::enter()
             .map_err(|error| AdapterError::new(error.to_string()))?;
-        let name = resolve_resident_player_handle(bits)?;
+        let name = resolve_resident_player_handle_name(bits)?;
         env.new_string(name)
             .map(|value| value.into_raw())
             .map_err(|error| AdapterError::new(format!("playerHandleName: {error}")))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_uuid<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jstring {
+    env.with_env(|env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        let uuid = resolve_resident_player_handle_uuid(bits)?;
+        env.new_string(uuid)
+            .map(|value| value.into_raw())
+            .map_err(|error| AdapterError::new(format!("playerHandleUuid: {error}")))
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -2110,11 +2173,15 @@ mod tests {
         ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
         let first = active_player_handle(&identity, &player).expect("active player handle");
         assert_eq!(active_player_handle_for(&player), Some(first));
-        assert_eq!(resolve_resident_player_handle(first.to_bits()), Ok("Alice".to_owned()));
+        assert_eq!(resolve_resident_player_handle_name(first.to_bits()), Ok("Alice".to_owned()));
+        assert_eq!(
+            resolve_resident_player_handle_uuid(first.to_bits()),
+            Ok("05050505-0505-0505-0505-050505050505".to_owned()),
+        );
         assert_eq!(release_active_player_handle(&identity, &player), Some(first));
         assert_eq!(active_player_handle_for(&player), None);
         assert_eq!(
-            resolve_resident_player_handle(first.to_bits()),
+            resolve_resident_player_handle_name(first.to_bits()),
             Err(AdapterError::new(
                 "playerHandleName: the referenced object no longer exists",
             )),
@@ -2454,7 +2521,12 @@ mod tests {
         assert_eq!(first.kind(), ObjectKind::Player);
         assert_eq!(player.uuid(), [7; 16]);
         assert_eq!(player.name(), "Alice");
-        assert_eq!(resolve_resident_player_handle(first.to_bits()), Ok("Alice".to_owned()));
+        assert_eq!(resolve_resident_player_handle_name(first.to_bits()), Ok("Alice".to_owned()));
+        assert_eq!(
+            resolve_resident_player_handle_uuid(first.to_bits()),
+            Ok("07070707-0707-0707-0707-070707070707".to_owned()),
+            "the UUID is fixed-size copied profile data, not a Java server object",
+        );
         assert_eq!(
             RESIDENT_OBJECT_HANDLES.with(|slot| {
                 slot.borrow()
@@ -2498,10 +2570,17 @@ mod tests {
 
         assert_eq!(release_resident_handles(&identity), 1);
         assert_eq!(
-            resolve_resident_player_handle(first.to_bits()),
+            resolve_resident_player_handle_name(first.to_bits()),
             Err(AdapterError::new(
                 "playerHandleName: the referenced object no longer exists",
             )),
+        );
+        assert_eq!(
+            resolve_resident_player_handle_uuid(first.to_bits()),
+            Err(AdapterError::new(
+                "playerHandleUuid: the referenced object no longer exists",
+            )),
+            "a stale handle cannot resolve a later player's profile",
         );
         let replacement = resident_player_handle(&identity, &player).expect("slot is reusable");
         assert_ne!(replacement, first, "release must advance the player generation");

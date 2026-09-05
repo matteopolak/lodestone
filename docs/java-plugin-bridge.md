@@ -769,9 +769,16 @@ handle is live; stale, forged, out-of-range, and worker-off-thread calls fail as
 `blockHandleStateId(long)` first generation-checks that same handle, then asks the host's bounded
 resident-block query port for the state at its copied coordinate. This preserves the distinction
 between air and an unavailable column, and a stale handle fails before a host query is sent.
-The generic registry separately reports wrong-kind use. There is no additional
-environment variable or runtime toggle: the `jvm` feature and an operator-built shim containing
-the exact isolated declarations are the only prerequisites.
+The generic registry separately reports wrong-kind use. A live player handle may
+also resolve through `playerHandleName(long)` and `playerHandleUuid(long)`. The
+latter returns a canonical lowercase UUID string from the fixed sixteen profile
+bytes the dedicated roster already copied into `PlayerIdentity`; it does not
+read a world, retain a connection, or cross a server-world guard. Both resolvers
+generation-check before returning their bounded copied value, so a disconnect
+or replacement fails loudly instead of resolving a later player. There is no
+additional environment variable or runtime toggle: the `jvm` feature and an
+operator-built shim containing the exact isolated declarations are the only
+prerequisites.
 
 To extend this event subset, update the source-of-truth declarations and validation in
 `native_surface`, the JNI registration and worker dispatch in `adapter`, and the lifecycle cleanup
