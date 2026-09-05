@@ -21,12 +21,9 @@ use crate::location::ResourceLocation;
 use crate::manager::ResourceManager;
 use crate::texture::Image;
 
-/// The eight lunar phase texture names (under `environment/celestial/moon/`),
-/// in vanilla's own moon-phase enum declaration order. Index `n` is the sprite for
-/// [`crate::sky`]'s callers computing `moon_phase_index_for_time_of_day(..) ==
-/// n` — see the decompiled 26.2 tree's own moon-phase enum,
-/// whose own `startTick() == index() * 24000` is what fixes this ordering: the
-/// phase active on world-day `d` is enum index `d % 8`.
+/// The eight lunar phase texture names under `environment/celestial/moon/`.
+///
+/// Their order is the fixed day-cycle order represented by [`MoonPhase`].
 pub const MOON_PHASE_NAMES: [&str; 8] = [
     "full_moon",
     "waning_gibbous",
@@ -38,13 +35,76 @@ pub const MOON_PHASE_NAMES: [&str; 8] = [
     "waxing_gibbous",
 ];
 
+/// One of the eight fixed moon phases.
+///
+/// A phase is deliberately not an integer: only these eight values select a
+/// celestial texture. [`MoonPhase::for_day`] is the time-to-phase boundary;
+/// [`MoonPhase::index`] exists only for compact phase-indexed storage such as
+/// the renderer's UV table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[repr(u8)]
+pub enum MoonPhase {
+    /// The first phase in [`MOON_PHASE_NAMES`].
+    FullMoon = 0,
+    /// The second phase in [`MOON_PHASE_NAMES`].
+    WaningGibbous = 1,
+    /// The third phase in [`MOON_PHASE_NAMES`].
+    ThirdQuarter = 2,
+    /// The fourth phase in [`MOON_PHASE_NAMES`].
+    WaningCrescent = 3,
+    /// The fifth phase in [`MOON_PHASE_NAMES`].
+    NewMoon = 4,
+    /// The sixth phase in [`MOON_PHASE_NAMES`].
+    WaxingCrescent = 5,
+    /// The seventh phase in [`MOON_PHASE_NAMES`].
+    FirstQuarter = 6,
+    /// The eighth phase in [`MOON_PHASE_NAMES`].
+    WaxingGibbous = 7,
+}
+
+impl MoonPhase {
+    /// Every phase in the same order as [`MOON_PHASE_NAMES`].
+    pub const ALL: [Self; 8] = [
+        Self::FullMoon,
+        Self::WaningGibbous,
+        Self::ThirdQuarter,
+        Self::WaningCrescent,
+        Self::NewMoon,
+        Self::WaxingCrescent,
+        Self::FirstQuarter,
+        Self::WaxingGibbous,
+    ];
+
+    /// Resolves the active phase for a world-day number.
+    #[must_use]
+    pub fn for_day(day: i64) -> Self {
+        match day.rem_euclid(Self::ALL.len() as i64) {
+            0 => Self::FullMoon,
+            1 => Self::WaningGibbous,
+            2 => Self::ThirdQuarter,
+            3 => Self::WaningCrescent,
+            4 => Self::NewMoon,
+            5 => Self::WaxingCrescent,
+            6 => Self::FirstQuarter,
+            7 => Self::WaxingGibbous,
+            _ => unreachable!("remainder is within the moon-phase count"),
+        }
+    }
+
+    /// The phase's compact index in [`MOON_PHASE_NAMES`] and [`MoonPhase::ALL`].
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// The sun sprite's in-pack path segment (under `minecraft:`).
 pub const SUN_SPRITE_PATH: &str = "environment/celestial/sun";
 
-fn moon_sprite_path(phase_index: u8) -> String {
+fn moon_sprite_path(phase: MoonPhase) -> String {
     format!(
         "environment/celestial/moon/{}",
-        MOON_PHASE_NAMES[usize::from(phase_index) % MOON_PHASE_NAMES.len()]
+        MOON_PHASE_NAMES[phase.index()]
     )
 }
 
@@ -72,7 +132,7 @@ impl CelestialAtlas {
         builder.load(manager, &sun).map_err(convert)?;
 
         let mut moons: Vec<ResourceLocation> = Vec::with_capacity(8);
-        for phase in 0..8u8 {
+        for phase in MoonPhase::ALL {
             let loc = ResourceLocation::new("minecraft", moon_sprite_path(phase))
                 .expect("valid literal location");
             builder.load(manager, &loc).map_err(convert)?;
@@ -99,12 +159,10 @@ impl CelestialAtlas {
         self.atlas.sprite(&self.sun)
     }
 
-    /// The placed sprite for moon phase `index` (`0..8`, [`MOON_PHASE_NAMES`]
-    /// order). Out-of-range indices wrap via modulo, matching a caller deriving
-    /// `index` from `moon_phase_index_for_time_of_day(..) % 8`.
+    /// The placed sprite for `phase`.
     #[must_use]
-    pub fn moon_sprite(&self, index: u8) -> Option<&AtlasSprite> {
-        self.atlas.sprite(&self.moons[usize::from(index) % 8])
+    pub fn moon_sprite(&self, phase: MoonPhase) -> Option<&AtlasSprite> {
+        self.atlas.sprite(&self.moons[phase.index()])
     }
 }
 
@@ -188,11 +246,11 @@ mod tests {
         let sun = atlas.sun_sprite().expect("sun sprite present");
         assert!(sun.uv_max[0] > sun.uv_min[0]);
         assert!(sun.uv_max[1] > sun.uv_min[1]);
-        for phase in 0..8u8 {
+        for phase in MoonPhase::ALL {
             assert!(
                 atlas.moon_sprite(phase).is_some(),
-                "moon phase {phase} ({}) must be stitched",
-                MOON_PHASE_NAMES[phase as usize]
+                "moon phase {phase:?} ({}) must be stitched",
+                MOON_PHASE_NAMES[phase.index()]
             );
         }
     }
@@ -204,24 +262,31 @@ mod tests {
     fn moon_phases_occupy_distinct_atlas_regions() {
         let atlas = CelestialAtlas::build(&manager()).expect("build");
         let mut seen = std::collections::HashSet::new();
-        for phase in 0..8u8 {
+        for phase in MoonPhase::ALL {
             let sprite = atlas.moon_sprite(phase).expect("sprite");
             let rect = (sprite.x, sprite.y, sprite.width, sprite.height);
             assert!(
                 seen.insert(rect),
-                "phase {phase} reused another phase's atlas rect {rect:?}"
+                "phase {phase:?} reused another phase's atlas rect {rect:?}"
             );
         }
     }
 
-    /// Index wraps modulo 8 rather than panicking on an out-of-range caller.
+    /// The day-to-phase boundary cycles after the eighth phase.
     #[test]
-    fn moon_sprite_index_wraps() {
+    fn moon_phase_cycles_by_day() {
         let atlas = CelestialAtlas::build(&manager()).expect("build");
         assert_eq!(
-            atlas.moon_sprite(0).map(|s| (s.x, s.y)),
-            atlas.moon_sprite(8).map(|s| (s.x, s.y))
+            atlas.moon_sprite(MoonPhase::FullMoon).map(|s| (s.x, s.y)),
+            atlas.moon_sprite(MoonPhase::for_day(8)).map(|s| (s.x, s.y))
         );
+    }
+
+    #[test]
+    fn moon_phase_uses_euclidean_day_wrapping() {
+        assert_eq!(MoonPhase::for_day(-1), MoonPhase::WaxingGibbous);
+        assert_eq!(MoonPhase::for_day(0), MoonPhase::FullMoon);
+        assert_eq!(MoonPhase::for_day(7), MoonPhase::WaxingGibbous);
     }
 
     #[test]

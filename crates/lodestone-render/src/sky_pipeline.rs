@@ -48,11 +48,11 @@ use crate::sky::{
     build_star_field,
     celestial_quad_positions, celestial_quad_uvs, celestial_rotation_matrix, cloud_color_for_time_of_day,
     cloud_fancy_max_faces, cloud_plane_geometry, fancy_cloud_geometry_cached, fog_color_for_time_of_day,
-    moon_phase_index_for_time_of_day, quad_indices, sky_color_for_time_of_day, sky_disc_indices,
+    moon_phase_for_time_of_day, quad_indices, sky_color_for_time_of_day, sky_disc_indices,
     sky_disc_positions, star_brightness_for_time_of_day, sunrise_fan_indices, sunrise_fan_positions,
     sunrise_fan_transform, sunrise_fan_vertex_alphas, sunrise_sunset_color_for_time_of_day,
 };
-use lodestone_assets::{CelestialAtlas, ResourceManager, SkyAssetError};
+use lodestone_assets::{CelestialAtlas, MoonPhase, ResourceManager, SkyAssetError};
 
 // ---------------------------------------------------------------------------
 // Vertex types
@@ -1225,8 +1225,8 @@ impl SkyRenderer {
             .map(sprite_uv)
             .unwrap_or([0.0, 0.0, 1.0, 1.0]);
         let mut moon_uv = [[0.0, 0.0, 1.0, 1.0]; 8];
-        for (i, slot) in moon_uv.iter_mut().enumerate() {
-            if let Some(sprite) = celestial_atlas.moon_sprite(i as u8) {
+        for (phase, slot) in MoonPhase::ALL.into_iter().zip(&mut moon_uv) {
+            if let Some(sprite) = celestial_atlas.moon_sprite(phase) {
                 *slot = sprite_uv(sprite);
             }
         }
@@ -1502,8 +1502,8 @@ impl SkyRenderer {
                 uv: sun_uv[i],
             });
         }
-        let moon_index = moon_phase_index_for_time_of_day(time_of_day);
-        let moon_rect = self.moon_uv[usize::from(moon_index) % 8];
+        let moon_phase = moon_phase_for_time_of_day(time_of_day);
+        let moon_rect = self.moon_uv[moon_phase.index()];
         let moon_pos =
             celestial_quad_positions(moon_angle, crate::sky::MOON_HEIGHT, crate::sky::MOON_SIZE);
         let moon_uv = celestial_quad_uvs(moon_rect, true);
