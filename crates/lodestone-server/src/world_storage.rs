@@ -28,6 +28,9 @@ use lodestone_storage_schema::{
 
 const GAME_DATA_VERSION: u32 = 46_002;
 const SECTION_CELLS: usize = 16 * 16 * 16;
+const GENERAL_KEY_DOMAIN_BIT: u32 = 1 << 31;
+const PLAYER_KEY_DOMAIN: u32 = 0;
+const ENTITY_KEY_DOMAIN: u32 = GENERAL_KEY_DOMAIN_BIT;
 
 /// The fixed native key for the world's one typed properties record.
 ///
@@ -1849,14 +1852,24 @@ fn encode_world_properties(properties: WorldProperties) -> StorageRecord {
 }
 
 fn player_key(uuid: [u8; 16]) -> RecordKey {
-    // The compact key has exactly 96 identity bits. The complete UUID remains
-    // in `PlayerRecord`, and `write_dirty_player`/`load_player` compare it
-    // before replacing or returning a record so the remaining 32 bits cannot
-    // turn a collision into a different player's save.
+    general_uuid_key(uuid, PLAYER_KEY_DOMAIN)
+}
+
+/// Builds one compact general-record key in a disjoint typed domain.
+///
+/// A general key has 96 bits. Its most-significant local-ID bit identifies
+/// the record body family, leaving 95 UUID bits for each family. The complete
+/// UUID remains in the envelope and is compared on both reads and writes, so
+/// the omitted bit cannot turn either an in-family collision or a cross-family
+/// identity into a silent replacement.
+fn general_uuid_key(uuid: [u8; 16], domain: u32) -> RecordKey {
+    debug_assert!(matches!(domain, PLAYER_KEY_DOMAIN | ENTITY_KEY_DOMAIN));
     RecordKey::general(
         i32::from_le_bytes(uuid[..4].try_into().expect("four UUID bytes")),
         i32::from_le_bytes(uuid[4..8].try_into().expect("four UUID bytes")),
-        u32::from_le_bytes(uuid[8..12].try_into().expect("four UUID bytes")),
+        (u32::from_le_bytes(uuid[8..12].try_into().expect("four UUID bytes"))
+            & !GENERAL_KEY_DOMAIN_BIT)
+            | domain,
     )
 }
 
@@ -1959,14 +1972,7 @@ fn validate_player_dimension(dimension: i32) -> Result<(), PlayerRecordError> {
 }
 
 fn entity_key(uuid: [u8; 16]) -> RecordKey {
-    // This compact key carries the UUID's first 96 bits. The remaining bits
-    // stay in `EntityRecord`, and both writes and reads compare the complete
-    // body UUID before replacing or returning it.
-    RecordKey::general(
-        i32::from_le_bytes(uuid[..4].try_into().expect("four UUID bytes")),
-        i32::from_le_bytes(uuid[4..8].try_into().expect("four UUID bytes")),
-        u32::from_le_bytes(uuid[8..12].try_into().expect("four UUID bytes")),
-    )
+    general_uuid_key(uuid, ENTITY_KEY_DOMAIN)
 }
 
 fn encode_entity(entity: &NativeEntityRecord) -> Result<StorageRecord, EntityRecordError> {
@@ -2666,6 +2672,55 @@ mod tests {
             reopened.load_entity(entity.uuid, 0, 1, -64, 384),
             Err(Error::Entity(EntityRecordError::OutsideColumn { .. }))
         ));
+        drop(reopened);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_player_and_entity_with_the_same_uuid_use_separate_typed_keys() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-general-key-domains-{}-{unique}",
+            std::process::id()
+        ));
+        let entity = native_entity(lodestone_model::Vec3::new(0.5, 64.0, 0.5));
+        let player = NativePlayerRecord {
+            uuid: entity.uuid,
+            dimension: BuiltinDimension::Overworld,
+            x_fixed: 12_345,
+            y_fixed: 64_000,
+            z_fixed: -54_321,
+            yaw_millidegrees: 90_000,
+            pitch_millidegrees: -15_000,
+        };
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        storage
+            .write_dirty_player(player)
+            .expect("write player under its typed key domain");
+        assert_eq!(
+            storage
+                .write_dirty_entities(0, 0, -64, 384, [entity.clone()])
+                .expect("write entity under its distinct typed key domain"),
+            1
+        );
+        drop(storage);
+
+        let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("reopen native store");
+        assert_eq!(reopened.load_player(player.uuid).unwrap(), Some(player));
+        assert_eq!(
+            reopened.load_entity(entity.uuid, 0, 0, -64, 384).unwrap(),
+            Some(entity),
+            "one UUID must not make a player locator and resident entity alias"
+        );
         drop(reopened);
         std::fs::remove_dir_all(directory).expect("remove native test segment");
     }
