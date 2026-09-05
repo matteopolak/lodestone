@@ -23,7 +23,10 @@ still passes.
 
 Yaw/pitch come from the server's own `atan2(velocity)`-derived rotation, eased 20%/tick server-side and
 quantised to the wire; the client keeps a small local physics simulation to animate flight between
-reports and reconciles fully from each server packet. A projectile's `yRot` convention is the *opposite*
+reports and reconciles fully from each server packet. Direction-accelerating projectiles use their own
+rule: each tick adds `acceleration_power` along current movement, applies their inertia, then moves. A
+power packet updates that live rule without resetting the projectile's pose or velocity; `0.0` disables
+the added speed but does not freeze the existing velocity. A projectile's `yRot` convention is the *opposite*
 of a mob's body yaw (`+X` motion is `yRot = +90`, where a player facing `−X` also reads `+90`) — treat
 the sign as one fact checked against a live server, not two independent guesses.
 

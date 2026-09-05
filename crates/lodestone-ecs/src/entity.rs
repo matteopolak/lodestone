@@ -109,6 +109,14 @@ pub struct HeadYaw(pub f32);
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct Velocity(pub Vec3);
 
+/// The server-reported acceleration power for a direction-steered projectile.
+///
+/// Absent means the server has not sent a power packet for this entity. That is
+/// distinct from a reported `0.0`: a zero power deliberately removes the
+/// per-tick speed gain while preserving ordinary inertia and motion.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct ProjectilePower(pub f64);
+
 /// Whether the server last reported this entity resting on the ground.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OnGround(pub bool);

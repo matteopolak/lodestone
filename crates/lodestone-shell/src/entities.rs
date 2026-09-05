@@ -149,7 +149,7 @@ use lodestone_ecs::player::{
 use lodestone_ecs::vehicle::{ControlledVehicle, VehicleRenderPose};
 use lodestone_ecs::{CorePlugin, Extract, ExtractSet, FrameSet, GameTick, TickSet, Update};
 use lodestone_entity::item_entity::{ITEM_AIR_DRAG, ITEM_GRAVITY, ItemMotion};
-use lodestone_entity::projectile::Projectile;
+use lodestone_entity::projectile::{AcceleratingProjectile, Projectile};
 use lodestone_entity::pose::{
     ADULT_LIMB_SCALE, BABY_LIMB_SCALE, LIMB_SWING_SMOOTHING, MAX_HEAD_YAW, WalkAnimation,
     clamp_head_to_body, walk_target_speed,
@@ -438,6 +438,10 @@ struct EntityFacts {
     /// needs real physics rather than a position ease. `None` is "never
     /// reported", not "zero"; a zero velocity is reported as `Some(Vec3::ZERO)`.
     velocity: Option<Vec3>,
+    /// The last power the server sent for a direction-accelerating projectile.
+    /// `None` is distinct from `Some(0.0)`: the latter explicitly stops the
+    /// speed gain while the former leaves the type's spawn default in force.
+    projectile_power: Option<f64>,
     /// Whether the server last reported this entity resting on the ground
     /// (`on_ground` on `add_entity`/`teleport_entity`/`move_entity`).
     ///
@@ -621,11 +625,53 @@ fn sheep_wool(type_path: &str, variant: Option<&EntityVariant>) -> Option<SheepW
 /// path and draws them through the model pipeline instead.
 pub const ITEM_ENTITY_TYPE_PATH: &str = "item";
 
-/// Projectile entity paths whose vanilla client state is integrated locally.
+/// Ballistic projectile entity paths whose client state is integrated locally.
 /// Their server entity types use a 20-tick update interval, so a normal network
 /// interpolation window would leave them frozen between corrections.
 fn is_ballistic_projectile(path: &str) -> bool {
     matches!(path, "arrow" | "spectral_arrow" | "trident")
+}
+
+/// Projectile paths whose speed gains a direction-aligned amount each tick.
+///
+/// They are deliberately separate from [`is_ballistic_projectile`]: this family
+/// does not fall under gravity, and its power can change after spawning.
+fn is_accelerating_projectile(path: &str) -> bool {
+    matches!(
+        path,
+        "fireball"
+            | "small_fireball"
+            | "dragon_fireball"
+            | "wither_skull"
+            | "wind_charge"
+            | "breeze_wind_charge"
+    )
+}
+
+fn is_locally_simulated_projectile(path: &str) -> bool {
+    is_ballistic_projectile(path) || is_accelerating_projectile(path)
+}
+
+/// The default acceleration power before a server update has named one.
+/// Wind charges are the zero-power exception; all other accelerating projectile
+/// types start at `0.1`.
+fn default_projectile_power(path: &str) -> f64 {
+    if matches!(path, "wind_charge" | "breeze_wind_charge") {
+        0.0
+    } else {
+        0.1
+    }
+}
+
+/// Inertia for the locally simulated accelerating-projectile family.
+/// Wind charges retain their motion exactly while the fireball family uses the
+/// ordinary `0.95` air multiplier.
+fn projectile_inertia(path: &str) -> f64 {
+    if matches!(path, "wind_charge" | "breeze_wind_charge") {
+        1.0
+    } else {
+        0.95
+    }
 }
 
 /// The entity-type path an **experience orb** reports (`minecraft:experience_orb`).
@@ -1254,20 +1300,75 @@ pub struct ItemPhysics {
     pub grounded: bool,
 }
 
-/// Client-side ballistic state for arrows, spectral arrows, and tridents.
-/// Vanilla sends these entities at a 20-tick update interval, so simulating the
-/// same vanilla arrow-entity tick locally is required for motion between corrections.
+/// The concrete local movement rule for a projectile track.
+#[derive(Debug, Clone, Copy)]
+pub enum ProjectileMotion {
+    /// Gravity-and-drag motion for arrows, spectral arrows, and tridents.
+    Ballistic(Projectile),
+    /// Direction-aligned acceleration for fireballs, skulls, and wind charges.
+    Accelerating(AcceleratingProjectile),
+}
+
+impl ProjectileMotion {
+    fn position(self) -> lodestone_model::Vec3 {
+        match self {
+            Self::Ballistic(sim) => sim.position,
+            Self::Accelerating(sim) => sim.position,
+        }
+    }
+
+    fn velocity(self) -> lodestone_model::Vec3 {
+        match self {
+            Self::Ballistic(sim) => sim.velocity,
+            Self::Accelerating(sim) => sim.velocity,
+        }
+    }
+
+    fn set_position(&mut self, position: lodestone_model::Vec3) {
+        match self {
+            Self::Ballistic(sim) => sim.position = position,
+            Self::Accelerating(sim) => sim.position = position,
+        }
+    }
+
+    fn set_velocity(&mut self, velocity: lodestone_model::Vec3) {
+        match self {
+            Self::Ballistic(sim) => sim.velocity = velocity,
+            Self::Accelerating(sim) => sim.velocity = velocity,
+        }
+    }
+
+    fn set_acceleration_power(&mut self, acceleration_power: f64) {
+        if let Self::Accelerating(sim) = self {
+            sim.acceleration_power = acceleration_power;
+        }
+    }
+
+    fn tick(&mut self) {
+        match self {
+            Self::Ballistic(sim) => sim.tick(),
+            Self::Accelerating(sim) => sim.tick(),
+        }
+    }
+}
+
+/// Client-side projectile state for all locally integrated projectile families.
+/// Server updates are sparse, so the matching local movement rule advances the
+/// pose between corrections.
 /// The absence of this component keeps every other entity on network interpolation.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ProjectilePhysics {
     /// The locally simulated position and velocity.
-    pub sim: Projectile,
+    pub sim: ProjectileMotion,
     /// The most recently reported authoritative position.
     pub last_reported: Vec3,
     /// The most recently reported authoritative velocity. Kept separately
     /// from `sim.velocity`, which gravity and drag change every client tick,
     /// so a stale ingest snapshot cannot masquerade as a new correction.
     pub last_reported_velocity: Option<Vec3>,
+    /// The most recently reported acceleration power. `None` means no packet
+    /// has named one yet, not a reported zero-power update.
+    pub last_reported_power: Option<f64>,
     /// Whether the last server report says the projectile has landed.
     pub grounded: bool,
 }
@@ -3216,8 +3317,8 @@ pub fn tick_projectile_physics(
             continue;
         }
         physics.sim.tick();
-        let simulated = to_glam_vec3(physics.sim.position);
-        let (yaw, pitch) = projectile_angles(physics.sim.velocity);
+        let simulated = to_glam_vec3(physics.sim.position());
+        let (yaw, pitch) = projectile_angles(physics.sim.velocity());
 
         let drawn = render_feet(&from, &to, &clock);
         from.feet = drawn;
@@ -3249,15 +3350,26 @@ fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
     }
 }
 
-/// Seeds the local arrow-family simulation from the first authoritative report.
+/// Seeds the local projectile simulation from the first authoritative report.
 fn new_projectile_physics(snap: &EntityFacts) -> ProjectilePhysics {
+    let position = to_model_vec3(snap.feet);
+    let velocity = snap.velocity.map(to_model_vec3).unwrap_or_default();
+    let sim = if is_accelerating_projectile(&snap.type_path) {
+        ProjectileMotion::Accelerating(AcceleratingProjectile::new(
+            position,
+            velocity,
+            snap.projectile_power
+                .unwrap_or_else(|| default_projectile_power(&snap.type_path)),
+            projectile_inertia(&snap.type_path),
+        ))
+    } else {
+        ProjectileMotion::Ballistic(Projectile::arrow(position, velocity))
+    };
     ProjectilePhysics {
-        sim: Projectile::arrow(
-            to_model_vec3(snap.feet),
-            snap.velocity.map(to_model_vec3).unwrap_or_default(),
-        ),
+        sim,
         last_reported: snap.feet,
         last_reported_velocity: snap.velocity,
+        last_reported_power: snap.projectile_power,
         grounded: snap.on_ground,
     }
 }
@@ -3452,7 +3564,7 @@ fn resolve_entity_facts(
     use lodestone_ecs::entity::{
         Baby, CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, EntityFlags,
         EntityKind, EntityUuid, Equipment, HeadYaw, OnGround, PlayerProfileName, Position,
-        Rotation, Variant, Velocity,
+        ProjectilePower, Rotation, Variant, Velocity,
     };
 
     let type_key = entity.get::<EntityKind>()?.0.clone();
@@ -3768,6 +3880,7 @@ fn resolve_entity_facts(
         item_model,
         item_skin,
         velocity: entity.get::<Velocity>().map(|v| to_glam_vec3(v.0)),
+        projectile_power: entity.get::<ProjectilePower>().map(|power| power.0),
         on_ground: entity.get::<OnGround>().is_some_and(|grounded| grounded.0),
         equipment,
         equipment_dye,
@@ -4067,7 +4180,7 @@ pub(crate) fn fold_entities_for_local(
 /// nowhere.
 fn spawn_track(world: &mut World, snap: &EntityFacts) {
     let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
-    let is_projectile = is_ballistic_projectile(&snap.type_path);
+    let is_projectile = is_locally_simulated_projectile(&snap.type_path);
     let is_creeper = snap.type_path == "creeper";
     let window = INTERP_WINDOW;
     let mut entity = world.spawn((
@@ -4135,7 +4248,7 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
         return;
     };
     let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
-    let is_projectile = is_ballistic_projectile(&snap.type_path);
+    let is_projectile = is_locally_simulated_projectile(&snap.type_path);
 
     if let Some(mut kind) = entity.get_mut::<RenderKind>() {
         // `Arc<str>` has no `clone_from`-style in-place reuse the way `String`
@@ -4219,6 +4332,18 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
             })
     });
 
+    // A power packet changes the *next* local tick without being a position or
+    // velocity correction. Apply it before the ordinary snapshot gate so a
+    // stationary server report cannot delay the visible change by a frame.
+    if is_accelerating_projectile(&snap.type_path)
+        && let Some(power) = snap.projectile_power
+        && projectile_physics.is_some_and(|physics| physics.last_reported_power != Some(power))
+        && let Some(mut physics) = entity.get_mut::<ProjectilePhysics>()
+    {
+        physics.sim.set_acceleration_power(power);
+        physics.last_reported_power = Some(power);
+    }
+
     // A dropped item's own simulation moves `InterpTo` every real tick (see
     // `tick_item_physics`), so comparing against it here would read as "moved"
     // every single frame even when the server has said nothing new since the
@@ -4295,9 +4420,9 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
                     physics.last_reported_velocity = snap.velocity;
                 }
                 physics.grounded = snap.on_ground;
-                physics.sim.position = to_model_vec3(snap.feet);
+                physics.sim.set_position(to_model_vec3(snap.feet));
                 if let Some(v) = snap.velocity {
-                    physics.sim.velocity = to_model_vec3(v);
+                    physics.sim.set_velocity(to_model_vec3(v));
                 }
                 if let Some(mut current) = entity.get_mut::<ProjectilePhysics>() {
                     *current = physics;
@@ -4762,8 +4887,8 @@ mod tests {
     use super::*;
     use lodestone_ecs::entity::{
         CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, Equipment, EntityKind,
-        EntityFlags, EntityUuid, HeadYaw, OnGround, PlayerProfileName, Position, Rotation, Variant,
-        Velocity,
+        EntityFlags, EntityUuid, HeadYaw, OnGround, PlayerProfileName, Position, ProjectilePower,
+        Rotation, Variant, Velocity,
     };
 
     /// Test-only ingest builder with the same field shape as a network
@@ -7806,7 +7931,7 @@ mod tests {
                 .get::<ProjectilePhysics>()
                 .expect("projectile physics")
                 .sim
-                .position
+                .position()
                 .x
                 > 0.9,
             "the fixed-tick simulation itself did not advance"
@@ -7817,6 +7942,66 @@ mod tests {
             .find(|draw| draw.id == 17)
             .expect("arrow draw");
         assert!(draw.feet.x > 0.9, "arrow stayed frozen at {:?}", draw.feet);
+    }
+
+    #[test]
+    fn a_projectile_power_component_changes_the_visible_next_fireball_step() {
+        let mut interp = EntityInterpolator::new();
+        let snap = projectile_snap(18, "fireball", Vec3::ZERO, Vec3::X);
+        snap.apply(interp.world_mut());
+        interp.update(0.0);
+
+        let ingest = interp.world().resource::<EntityIndex>().get(18).unwrap();
+        interp
+            .world_mut()
+            .entity_mut(ingest)
+            .insert(ProjectilePower(0.2));
+        // Fold the component into the existing live projectile without a
+        // position correction; the next fixed tick is the first affected one.
+        interp.update(0.0);
+        interp.update(0.05);
+
+        let tracked = interp.world().resource::<TrackIndex>().0[&18];
+        let powered = interp
+            .world()
+            .entity(tracked)
+            .get::<ProjectilePhysics>()
+            .expect("fireball has locally simulated movement");
+        assert_eq!(powered.last_reported_power, Some(0.2));
+        assert!((powered.sim.velocity().x - 1.14).abs() < 1e-12);
+        assert!((powered.sim.position().x - 1.14).abs() < 1e-12);
+
+        // One sixth of the three-tick interpolation window later, the
+        // renderer's actual draw sees one sixth of the exact step, rather
+        // than the stale 1.0 velocity.
+        interp.update(0.025);
+        let draw = interp
+            .draws()
+            .into_iter()
+            .find(|draw| draw.id == 18)
+            .expect("fireball EntityDraw");
+        assert!((draw.feet.x - 0.19).abs() < 1e-6, "draw at {:?}", draw.feet);
+
+        // Control: zero still receives inertia but does not add acceleration,
+        // yielding a distinct visible sample `(1.0 * 0.95) / 6`.
+        let mut zero = EntityInterpolator::new();
+        let zero_snap = projectile_snap(19, "fireball", Vec3::ZERO, Vec3::X);
+        zero_snap.apply(zero.world_mut());
+        let ingest = zero.world().resource::<EntityIndex>().get(19).unwrap();
+        zero.world_mut().entity_mut(ingest).insert(ProjectilePower(0.0));
+        zero.update(0.0);
+        zero.update(0.05);
+        zero.update(0.025);
+        let draw = zero
+            .draws()
+            .into_iter()
+            .find(|draw| draw.id == 19)
+            .expect("zero-power fireball EntityDraw");
+        assert!(
+            (draw.feet.x - (0.95 / 6.0)).abs() < 1e-6,
+            "draw at {:?}",
+            draw.feet
+        );
     }
 
     fn stone() -> ResourceLocation {
