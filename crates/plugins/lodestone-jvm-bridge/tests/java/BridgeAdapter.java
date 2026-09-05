@@ -7,6 +7,9 @@ public final class BridgeAdapter {
 
     public static void onTick(long tick) {
         if (tick == 37) {
+            if (BridgeAdapter.class.getClassLoader() == ClassLoader.getSystemClassLoader()) {
+                throw new AssertionError("adapter unexpectedly used the system class loader");
+            }
             int state = blockStateId(11, 7, -3);
             if (state != 422) {
                 throw new AssertionError("expected state 422, got " + state);

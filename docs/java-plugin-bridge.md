@@ -497,6 +497,15 @@ tick side. Callback errors map to `JvmError`, while the existing port retains it
 panic/error mapping. This is the host-callable runtime seam, not broad event compatibility or a
 Paper redistribution.
 
+`JvmRuntime::load_isolated_class` is the production operator-jar loading primitive. It creates a
+fresh `URLClassLoader` whose parent is the platform loader and whose URLs preserve
+`JvmConfig::with_classpath` order. The platform parent is crucial: the system loader could win a
+parent-first lookup before an operator path is considered. A host can therefore put a locally built
+shim directory or jar before the user-supplied Paper and plugin jars; already-compiled bytecode
+then resolves that shim without changing, copying, or redistributing either operator jar. The
+primitive loads one named class only; it does not yet select Paper's bootstrap class, discover
+plugin descriptors, or implement its lifecycle.
+
 ### 4.4 Experimental adapter worker
 
 `adapter::AdapterHost` is the production loading and invocation boundary for an explicitly supplied
@@ -539,8 +548,9 @@ deadline is terminal even if a late completion is queued; the host must drop the
 the error. Drop disconnects channels without joining untrusted Java code. Arbitrary Java execution
 cannot be safely killed in-process, so a timed-out callback may keep running until process exit.
 There is no hot reload or JVM restart: JNI allows only one JVM startup in a process, including after
-a failed adapter load. The operator classpath uses the JVM system loader; production interception,
-Paper bootstrapping and Paper's plugin lifecycle are separate remaining work.
+a failed adapter load. The adapter class is loaded through the isolated ordered operator loader,
+not the JVM system loader. This makes shim-first interception a production capability, but Paper
+bootstrapping and the plugin lifecycle remain separate work.
 
 Hermetic tests exercise worker/host thread separation, exact block-query arithmetic, sequence
 preservation, overlap rejection, error propagation and terminal deadlines. The live test
@@ -558,6 +568,16 @@ cargo test -p lodestone-jvm-bridge --features jvm --test adapter_host \
     java_adapter_registration_world_query_and_exception_are_connected -- --ignored --exact
 ```
 
+`tests/isolated_loader.rs` independently compiles one probe against an original jar definition,
+then proves the production loader returns `REAL` with the original jar first and `SHIM` when a
+same-name shim jar is first. This control is deliberately separate from the adapter test because
+the process may start only one JVM:
+
+```bash
+cargo test -p lodestone-jvm-bridge --features jvm --test isolated_loader \
+    ordered_operator_jars_select_the_intercepting_definition -- --ignored --exact
+```
+
 To extend the boundary, change the adapter's native declaration and the corresponding Rust
 registration together, then add an independently predicted end-to-end fixture. Add concrete public
 host queries on demand rather than enumerating a speculative compatibility surface.
@@ -566,9 +586,10 @@ host queries on demand rather than enumerating a speculative compatibility surfa
 
 The dedicated binary enables the bridge only with its default-off `jvm` feature. Set both
 `LODESTONE_JAVA_ADAPTER_CLASS` (dotted class name) and `LODESTONE_JAVA_CLASSPATH` (platform path list
-of compiled class directories or jars); `LODESTONE_JAVA_DEADLINE_MS` optionally overrides the
-5000 ms startup/callback deadline. Without configuration, no JVM worker or poll timer starts.
-Configuration supplied to a build without `jvm` is a reported error followed by clean shutdown.
+of compiled class directories or jars, in shim-first resolution order); `LODESTONE_JAVA_DEADLINE_MS`
+optionally overrides the 5000 ms startup/callback deadline. Without configuration, no JVM worker or
+poll timer starts. Configuration supplied to a build without `jvm` is a reported error followed by
+clean shutdown.
 
 The admin loop services at most 64 block queries per 1 ms poll, using
 `IntegratedServer::resident_block_state_id`. That accessor reaches the live primary `ChunkStore`,
