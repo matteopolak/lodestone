@@ -29,12 +29,13 @@ Scheduler callbacks run after maintenance, so their messages have the same lifet
 
 Do not install another aging system for a type registered with `add_message`; that would shorten its
 delivery window. Merely inserting `Messages<T>` as a resource does not register its maintenance.
-`ServerProposal` is the built-in gameplay proposal vocabulary. The initial `SpawnMob` case carries
-only entity key and position; plugins observe it with `MessageReader<ServerProposal>` and call
-`ServerProposalDecisions::decide`. `Allow` leaves it unchanged, `Deny` reports a typed refusal,
-and `Replace` supplies the action the single apply path will perform. Lower numeric priorities win;
-equal priorities retain the first system to decide. The vocabulary has no durable history or
-read-only monitor tier yet.
+`ServerProposal` is the built-in gameplay proposal vocabulary. `SpawnMob` carries an entity key
+and position, while `SetResidentBlock` carries a `BlockPos` and a validated `StateId`; neither
+variant carries a world borrow, source handle, or raw registry integer. Plugins observe proposals
+with `MessageReader<ServerProposal>` and call `ServerProposalDecisions::decide`. `Allow` leaves an
+action unchanged, `Deny` reports a typed refusal, and `Replace` supplies the action the single
+apply path will perform. Lower numeric priorities win; equal priorities retain the first system to
+decide. The vocabulary has no durable history or read-only monitor tier yet.
 
 ### Native tick scheduling
 
@@ -129,6 +130,7 @@ table generalises).
 | Worldgen: custom dimension | [`lodestone_server::plugin_dimension::DimensionRegistry`] | — (a registration call, `register(dimension)`) | yes — `Option<Arc<PluginDimension>>` keyed by string, one owner per key | partial — `register` returns `None` on a duplicate key, so *that* refusal is observable; there is no other refusal shape | N/A | N/A — register once, `get`/`chunk_source` forever after |
 | Worldgen: live structure placement | [`lodestone_server::structure_placement::place_structure_live`] | — (a direct function call with a template and origin) | yes — one function, called synchronously | no — returns a plain `usize` (cells written), no verdict a second party could have vetoed | N/A — nothing else contests one placement call | N/A — one-shot, matches its own shape |
 | Entity spawn/despawn | [`lodestone_server::IntegratedServer::spawn_mob_proposed`]/[`despawn_mob_proposed`], backed by [`crate::mobs::MobSim::remove_mob`] | yes — `ServerProposalAction::{SpawnMob, NaturalSpawnMob, DespawnMob}` is observable; legacy `spawn_mob` and `despawn_mob` remain direct | yes — the checked path resolves exactly one action before `MobHandle::with` mutates | yes — checked spawn/despawn return typed `Denied`, `TimedOut`, `Unavailable`, or a mismatched replacement; a permitted missing despawn reports `Ok(false)` | yes — native plugins prioritize allow/deny/replace for checked spawn, natural candidates, and checked despawn; lower numeric priority wins and ties keep schedule order | N/A — install/remove remain one-shot actions, not long-lived subscriptions |
+| Resident block mutation | [`lodestone_server::IntegratedServer::set_resident_block_state_proposed`] | yes — `SetResidentBlock { BlockPos, StateId }` gives plugins copied coordinates plus a validated state, never a source handle or chunk guard | yes — one resolved action writes through the live source and publishes its block change | yes — `BlockMutationRefusal` distinguishes policy, timeout, availability, mismatched action, nonresident column, and vertical-bound failures | yes — server plugins may allow, deny, or replace the requested position/state before the source write | N/A — one proposal resolves once; it does not retain a mutable-world grant |
 | Crafting-station hooks | [`lodestone_server::plugin_crafting::CraftingStationHooks`], [`StationVerdict`] | **yes** — [`StationInputs`] is observation-only: the station, its input cells, vanilla's own computed result; never a menu-slot index, a raw click, or a mutable inventory borrow | **yes** — `workstation_result` is the one choke point every one of the five production entry points already passed through before this work | **yes** — `StationVerdict::{Allow, Deny, Replace(ItemStack)}`, always returned, never inferred from silence | **dropped, by name** — "there is no second, *human* source of a workstation result to arbitrate against ('human outranks a plugin' has nothing to outrank)" | **dropped, by name** — "a station evaluation has no lifecycle beyond answering the one question it was asked" |
 
 Reading the table by column rather than by row is the actual finding. Column (1): only crafting
@@ -175,6 +177,17 @@ mob census lock, stages `NaturalSpawnMob` actions, runs `GameTick`, then takes t
 materializes only accepted candidates under a fresh lock. No adjudicator runs while `MobHandle` is
 held. Automatic distance-based despawn and the remaining non-spawn capabilities do not yet submit
 `ServerProposal`s.
+
+Resident block mutation uses the same bounded route. A caller gives
+`IntegratedServer::set_resident_block_state_proposed` a `BlockPos` and a `StateId`; the state type
+has already rejected out-of-range registry values before the request enters the queue. After the
+`Drain → Adjudicate → Apply` pass resolves, the running server validates that the target column is
+already resident and that its Y coordinate is in range, writes the canonical state through the same
+source serving clients, and publishes the change through its live block-change feed. There is no
+chunk load/generation fallback. `BlockMutationRefusal` makes every stop finite: policy refusal,
+stalled/unavailable tick ownership, an incompatible replacement, absent resident source/column, or
+vertical bounds. The source write happens after adjudicators finish, so no callback runs while a
+source lock is held.
 
 ### The substrate now has one production consumer
 
@@ -254,9 +267,9 @@ Nothing above requires touching `spawn_mob`/`despawn_mob`'s existing signatures 
 
 1. **Keep `spawn_mob` direct** while callers migrate deliberately to async
    `spawn_mob_proposed`; the direct-call test remains the compatibility control.
-2. **Add a second action only with a production owner.** Checked despawn and natural spawn now use
-   the same ingress/message/decision/apply pass; future automatic despawn must follow the same
-   no-callback-under-`MobHandle` split rather than adding a direct hook.
+2. **Add a second action only with a production owner.** Checked despawn, natural spawn, and resident
+   block mutation use the same ingress/message/decision/apply pass; future automatic despawn must
+   follow the same no-callback-under-`MobHandle` split rather than adding a direct hook.
 3. **Do not pre-populate `ServerProposal`** with every capability in this document's table. Add an
    action only once a second real need appears; a speculative variant has no production consumer.
    Crafting hooks stay on `StationVerdict` regardless: `docs/plugin-crafting-hooks.md`'s own
@@ -315,6 +328,7 @@ deadline is one second.
 [`lodestone_server::IntegratedServer::spawn_mob`]: ../crates/lodestone-server/src/integrated.rs
 [`lodestone_server::IntegratedServer::spawn_mob_proposed`]: ../crates/lodestone-server/src/integrated.rs
 [`lodestone_server::IntegratedServer::despawn_mob_proposed`]: ../crates/lodestone-server/src/integrated.rs
+[`lodestone_server::IntegratedServer::set_resident_block_state_proposed`]: ../crates/lodestone-server/src/integrated.rs
 [`despawn_mob`]: ../crates/lodestone-server/src/integrated.rs
 [`crate::mobs::MobSim::remove_mob`]: ../crates/lodestone-server/src/mobs/mod.rs
 [`lodestone_server::plugin_crafting::CraftingStationHooks`]: ../crates/lodestone-server/src/plugin_crafting.rs

@@ -691,6 +691,100 @@ impl Clone for ErasedChunkSource {
     }
 }
 
+/// Why a proposed resident-block mutation did not become authoritative world
+/// state.
+///
+/// Every arm is finite and machine-readable. In particular, a caller never has
+/// to parse a source-specific error string to distinguish a policy denial from
+/// a chunk that is not resident yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockMutationRefusal {
+    /// A native server plugin denied the proposal.
+    Denied,
+    /// The primary tick task did not answer inside the bounded wait.
+    TimedOut,
+    /// No primary tick task is available, or its bounded ingress is full.
+    Unavailable,
+    /// A plugin replaced the block request with an action this entry point does
+    /// not own.
+    MismatchedAction,
+    /// This server constructor has no shared primary-world source.
+    PrimaryWorldUnavailable,
+    /// The requested column has not been retained by the authoritative source.
+    ColumnNotResident,
+    /// The requested Y coordinate lies outside the retained column's extent.
+    OutOfBounds,
+}
+
+impl From<crate::ecs::ProposalRefusal> for BlockMutationRefusal {
+    fn from(value: crate::ecs::ProposalRefusal) -> Self {
+        match value {
+            crate::ecs::ProposalRefusal::Denied => Self::Denied,
+            crate::ecs::ProposalRefusal::TimedOut => Self::TimedOut,
+            crate::ecs::ProposalRefusal::Unavailable => Self::Unavailable,
+            crate::ecs::ProposalRefusal::MismatchedAction => Self::MismatchedAction,
+        }
+    }
+}
+
+impl std::fmt::Display for BlockMutationRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Denied => "the block mutation was denied by a server plugin",
+            Self::TimedOut => "the primary tick task did not answer the block mutation in time",
+            Self::Unavailable => "the authoritative block-mutation lifecycle is unavailable",
+            Self::MismatchedAction => "a server plugin replaced the block mutation with another action",
+            Self::PrimaryWorldUnavailable => "the primary world source is unavailable",
+            Self::ColumnNotResident => "the requested column is not resident",
+            Self::OutOfBounds => "the requested Y coordinate is outside the resident column extent",
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn canonical_block_state(state: lodestone_data::block_states::StateId) -> String {
+    let mut canonical = state.name().to_string();
+    let properties = state.properties();
+    if !properties.is_empty() {
+        canonical.push('[');
+        for (index, (name, value)) in properties.iter().enumerate() {
+            if index != 0 {
+                canonical.push(',');
+            }
+            canonical.push_str(name);
+            canonical.push('=');
+            canonical.push_str(value);
+        }
+        canonical.push(']');
+    }
+    canonical
+}
+
+/// Validate and persist one state through the authoritative retained source.
+///
+/// The caller holds only a source handle. No ECS world or chunk guard can
+/// survive this function, and source-specific validation is reduced to the
+/// finite [`BlockMutationRefusal`] vocabulary before it crosses a plugin
+/// boundary.
+#[cfg(not(target_arch = "wasm32"))]
+fn set_resident_block_state(
+    source: &dyn ChunkSource,
+    pos: lodestone_model::BlockPos,
+    state: lodestone_data::block_states::StateId,
+) -> Result<String, BlockMutationRefusal> {
+    let column_x = pos.x.div_euclid(16);
+    let column_z = pos.z.div_euclid(16);
+    let column = source
+        .resident_column(column_x, column_z)
+        .ok_or(BlockMutationRefusal::ColumnNotResident)?;
+    if !column.contains_y(pos.y) {
+        return Err(BlockMutationRefusal::OutOfBounds);
+    }
+    let canonical = canonical_block_state(state);
+    source.set_block(pos.x, pos.y, pos.z, &canonical);
+    Ok(canonical)
+}
+
 /// The complete production native-save inputs, all shared with the running
 /// integrated world. Keeping this context separate from the Anvil save handle
 /// makes the ordering explicit: native records are built while the dirty set is
@@ -3186,30 +3280,49 @@ impl IntegratedServer {
             .world_source
             .as_ref()
             .ok_or_else(|| "primary world source is unavailable".to_string())?;
-        let column_x = x.div_euclid(16);
-        let column_z = z.div_euclid(16);
-        let column = source
-            .resident_column(column_x, column_z)
-            .ok_or_else(|| format!("column ({column_x}, {column_z}) is not resident"))?;
-        if !column.contains_y(y) {
-            return Err(format!("y coordinate {y} is outside the resident column extent"));
-        }
+        set_resident_block_state(&**source, lodestone_model::BlockPos::new(x, y, z), state)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
 
-        let mut canonical = state.name().to_string();
-        let properties = state.properties();
-        if !properties.is_empty() {
-            canonical.push('[');
-            for (index, (name, value)) in properties.iter().enumerate() {
-                if index != 0 {
-                    canonical.push(',');
-                }
-                canonical.push_str(name);
-                canonical.push('=');
-                canonical.push_str(value);
-            }
-            canonical.push(']');
+    /// Submit one resident-block mutation through native-plugin adjudication,
+    /// then persist and publish the resolved state through this running
+    /// server's ordinary world source.
+    ///
+    /// This is the checked counterpart to [`Self::set_resident_block_state_id`].
+    /// A caller submits only an owned position and a validated [`StateId`]; it
+    /// never receives the tick-owned ECS world, a chunk guard, or a mutable
+    /// source. The proposal completes before this method touches the source,
+    /// so adjudicator callbacks cannot re-enter under a source lock. A
+    /// successful write is published to the live block-change feed, making the
+    /// server result observable to connected clients rather than waiting for a
+    /// chunk reload.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub async fn set_resident_block_state_proposed(
+        &self,
+        pos: lodestone_model::BlockPos,
+        state: lodestone_data::block_states::StateId,
+    ) -> Result<(), BlockMutationRefusal> {
+        let proposals = self
+            .spawn_proposals
+            .as_ref()
+            .ok_or(BlockMutationRefusal::Unavailable)?;
+        let crate::ecs::ServerProposalAction::SetResidentBlock { pos, state } = proposals
+            .set_resident_block(pos, state)
+            .await
+            .map_err(BlockMutationRefusal::from)?
+        else {
+            return Err(BlockMutationRefusal::MismatchedAction);
+        };
+        let source = self
+            .world_source
+            .as_ref()
+            .ok_or(BlockMutationRefusal::PrimaryWorldUnavailable)?;
+        let canonical = set_resident_block_state(&**source, pos, state)?;
+        if let Some(block_ticks) = &self.block_ticks {
+            block_ticks.publish(pos.x, pos.y, pos.z, canonical);
         }
-        source.set_block(x, y, z, &canonical);
         Ok(())
     }
 
