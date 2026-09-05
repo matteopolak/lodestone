@@ -41,27 +41,24 @@ predicate narrowed to emission alone was a real, owner-visible bug: breaking a t
 emits nothing, same as the air replacing it) darkened nothing on the wire even though a real shaft of
 daylight had just opened up, because the check never looked at what the edit had done to *occlusion*.
 
-### The cross-chunk seam, and why it's still open
+### Cross-chunk propagation after an edit
 
-The encoder that produces a column's light has no access to the chunk source its neighboring columns
-live in, so it always runs the **isolated** compute — accurate everywhere except a thin band near a
-column's own border, where the true answer depends on terrain in the neighboring column. Measured
-against an exact 3×3 compute, the residual is small (most served columns are unaffected; the worst
-observed case affected a small fraction of one column's cells) and its direction is a hard invariant:
-the isolated compute is never brighter than the correct one at a border, only occasionally darker —
-which matters because it means the visible defect is a barely-perceptible dark seam, never a light
-leaking somewhere it shouldn't. Closing this properly needs the light to be computed where a real
-neighborhood is already available (inside the chunk source, alongside generation or loading) and
-carried on the loaded column itself, rather than recomputed in isolation at encode time. The one trap
-in that plan is real and worth stating plainly: **if a chunk column ever caches its own precomputed
-light, every code path that writes a block into an already-cached column must invalidate that cached
-light.** A block write that lands in a retained column without touching anything derived from it
-would otherwise serve visibly correct-looking wire bytes computed from stale light — a client that
-re-meshes and shows no visible change at all, which is a far harder defect to notice than an error.
+A hosted family can opt into the neighborhood compute for a relight through `ServerProtocol`. The server obtains
+the edited column and its eight adjacent columns, then passes that transient 3×3 view to the version
+adapter. The light radius is at most 15 blocks, so this view contains every possible external
+contribution to the centre column. Families that do not opt in retain the isolated path.
 
-Today, a relight resend is likewise the isolated compute and reaches only the connection that caused
-the edit — a second player sharing the same world does not see the corrected light on their own
-screen until they leave and re-enter that column.
+When an edit changes emission or dampening, the server recomputes and sends all nine columns, not
+only the edited one. That fanout matters at both edges and corners: changing one seam cell can alter
+the light a client renders in either column. The calculation is intentionally not cached on a
+`ChunkColumn`, avoiding a stale-derived-data path after a retained column is edited.
+
+Initial chunk-batch encoding still receives a single column, so it retains the isolated answer at a
+seam until the batch encoder gains the same neighborhood input. That bootstrap limitation is separate
+from the live edit path proven here.
+
+The update still travels on the acting connection. Broadcasting the result to other players sharing
+the world remains separate multiplayer work.
 
 ### Validated against a real, already-lit vanilla world
 
@@ -82,10 +79,15 @@ fail in.
 - **Adding or correcting a block's light behavior**: update its emission/dampening entry in the
   per-block-state census, from the real per-version data source, not from a value inferred by
   analogy with a similar-looking block.
-- **Closing the cross-chunk seam**: move the compute into the chunk source (generation and load),
-  where a real neighborhood already exists, cache the result on the loaded column, and make every
-  block-write path on that column invalidate the cached light — do this together, not as two
-  separate changes, or a stale cache will silently start shipping.
+- **Adding a hosted family to cross-column light**: implement
+  `ServerProtocol::uses_cross_column_light` and
+  `ServerProtocol::compute_column_light_with_neighbours` together. Preserve the 3×3 relative
+  coordinates; absent columns must use that family's ordinary generated or unloaded-column result.
+  Add a direct solver control and a client-observed edit test where the isolated result is provably
+  different.
+- **Extending cross-column light to initial chunks**: extend the chunk-batch encoding seam to obtain
+  the same 3×3 neighborhood before calling the version encoder. Do not claim that dynamic relights
+  cover this case: the initial and live packet paths are intentionally separate.
 - **Do not widen the relight predicate to fire on every placement "to be safe."** A resend recomputes
   and re-sends a whole column's worth of data; firing it on every ordinary, non-light-relevant edit
   (a block swapped for another of identical light behavior) turns routine building into a stream of

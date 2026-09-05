@@ -196,3 +196,31 @@ fn movement_shapes_preserve_position_rotation_and_ground_status() {
         ServerBound::PlayerStatusOnly { on_ground: false }
     );
 }
+
+#[test]
+fn a_loaded_neighbour_contributes_sky_light_across_the_east_border() {
+    let protocol = V774ServerProtocol;
+    let mut center = ChunkColumn::new(-64, 384);
+    for z in 0..16 {
+        for x in 0..16 {
+            center.set_block(x, 101, z, "minecraft:stone");
+        }
+    }
+    let isolated = protocol.compute_column_light(&center).unwrap();
+    let with_east = protocol
+        .compute_column_light_with_neighbours(
+            &center,
+            &[(1, 0, ChunkColumn::new(-64, 384))],
+        )
+        .unwrap();
+    assert_eq!(
+        isolated.section_sky_light(10, 15, 4, 8),
+        Some(0),
+        "the isolated control must not invent sky through its east border"
+    );
+    assert_eq!(
+        with_east.section_sky_light(10, 15, 4, 8),
+        Some(14),
+        "the adjacent open column is one horizontal step from local x=15"
+    );
+}

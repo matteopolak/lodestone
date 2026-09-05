@@ -217,8 +217,11 @@ unique exact inverse; unsupported states, non-plains biomes and block entities
 produce explicit chunk-encoding errors. Sky and block light use the shared
 solver with canonical per-state opacity and emission. Initial chunks include
 the result; block edits trigger the normal server relight path and this
-family's light-update packet. Computation is isolated to each column, so
-cross-border light contribution and external-client acceptance remain open.
+family's light-update packet. A relevant edit supplies the shared solver with
+the loaded 3×3 column neighbourhood, so adjacent columns contribute at seams;
+it recomputes and sends that whole bounded footprint. Initial chunk batches
+still use their single-column encoder input, so cross-column light at first
+load and external-client acceptance remain open.
 
 Extend the family's `server_protocol` and its `tests/server_protocol.rs` wire
 controls together. `tests/hosting_configuration.rs` records every synchronized
@@ -232,8 +235,11 @@ fixture payload before its finish signal. `tests/server_integration.rs` verifies
 registry-selected login, Play, chunk receipt, movement-driven view recentering,
 and a block break through the real integrated-server loop. Its enclosed-room
 light gate reads the client's render light snapshots, checking sky 0 inside and 15 outside, torch emission 14,
-adjacent air 13, and extinction after removing the source. Fixture properties
-are independently checked against the vendored 1.21.11 block dataset.
+adjacent air 13, and extinction after removing the source. A separate boundary
+gate starts from isolated sky 0 beneath an opaque roof, removes a border
+occluder, and observes the independent 14-level light entering from the open
+east column in the client's render-light snapshot. Fixture properties are
+independently checked against the vendored 1.21.11 block dataset.
 
 ## Dependencies
 
