@@ -98,6 +98,23 @@ impl JvmRuntime {
         config: &JvmConfig,
         binary_name: &str,
     ) -> Result<JClass<'local>, JvmError> {
+        self.with_isolated_loader(env, config, |env, loader| {
+            self.load_class_from_loader(env, loader, binary_name)
+        })
+    }
+
+    /// Runs one operation with a fresh isolated URL loader.
+    ///
+    /// The callback can load more than one class through this loader. That is
+    /// needed when an operator shim has native members: registration must name
+    /// the same class definition that the following lifecycle load will use,
+    /// rather than a same-named definition from another fresh loader.
+    pub fn with_isolated_loader<'local, T>(
+        &self,
+        env: &mut Env<'local>,
+        config: &JvmConfig,
+        operation: impl FnOnce(&mut Env<'local>, &JObject<'local>) -> Result<T, JvmError>,
+    ) -> Result<T, JvmError> {
         if config.classpath.is_empty() {
             return Err(JvmError::new(
                 "isolated class loading requires at least one operator path",
@@ -148,9 +165,22 @@ impl JvmRuntime {
             jni_sig!("([Ljava/net/URL;Ljava/lang/ClassLoader;)V"),
             &[JValue::Object(&urls), JValue::Object(&parent)],
         )?;
+        operation(env, &loader)
+    }
+
+    /// Loads one class with a loader created by [`Self::with_isolated_loader`].
+    ///
+    /// This uses `ClassLoader.loadClass`, which resolves but does not initialize
+    /// the requested class.
+    pub fn load_class_from_loader<'local>(
+        &self,
+        env: &mut Env<'local>,
+        loader: &JObject<'local>,
+        binary_name: &str,
+    ) -> Result<JClass<'local>, JvmError> {
         let name = env.new_string(binary_name)?;
         let class = env.call_method(
-            &loader,
+            loader,
             jni_str!("loadClass"),
             jni_sig!("(Ljava/lang/String;)Ljava/lang/Class;"),
             &[JValue::Object(&name)],
@@ -167,7 +197,7 @@ pub struct JvmError {
 }
 
 impl JvmError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }

@@ -534,7 +534,24 @@ but keeps plugin jars out of the server bootstrap classpath. Its `start_runtime`
 first, then every plugin entry in sorted discovery order. Each plugin request has a fresh isolated
 loader path of shim paths, the server jar, and that plugin jar only; no plugin jar appears in another
 plugin's request. The dedicated host uses `load_lifecycle_entries_in_runtime`, which turns every
-request into one fresh isolated loader and calls `loadClass` without initialization.
+request into one fresh isolated loader and calls `loadClass` without initialization. When the operator
+also requests the isolated native shim, that same loader first resolves
+`lodestone.bridge.IsolatedPaperShim`, verifies its exact static native
+`blockStateId(int, int, int): int` declaration, then registers the one Rust callback before it loads
+the bootstrap or plugin entry. A different loader never inherits that registration, so installing it
+per fresh lifecycle loader is required rather than optional bookkeeping.
+
+The native declaration list is generated from one Rust `NativeMethodSpec`, and its class, name,
+descriptor, and order have hermetic tests that need neither a JDK nor operator jars. Registration
+validation produces a typed `NativeSurfaceError`; the lifecycle host preserves its exact context in
+the terminal startup error. The ignored JDK gate compiles only a repository-owned stand-in declaration
+and proves JNI accepts that generated registration. This is a native callback seam, not a supplied
+Bukkit/Paper API or a claim that any plugin can run.
+
+Field access is deliberately not part of this surface. Reading a static field would initialize its
+declaring shim class, contradicting the non-initializing load contract; instance fields would need a
+separate object-lifetime design. The field-operation risk in §1.2 therefore remains open rather than
+being hidden behind a constant or an unvalidated reflection path.
 
 This is deliberately only the first classloader lifecycle step. It does not retain a loader or class
 reference, initialize the server or a plugin, construct a plugin object, invoke an entry point, or
@@ -644,11 +661,14 @@ Configuration supplied to a build without `jvm` is a reported error followed by 
 
 To add Paper bootstrap intake to that same worker, set `LODESTONE_PAPER_JAR` and
 `LODESTONE_PAPER_PLUGIN_DIRECTORY`; `LODESTONE_PAPER_SHIM_PATH` optionally names one shim directory
-or jar. The host discovers and retains a `PaperBootstrapPlan` before starting a JVM, then loads the
-Paper bootstrap followed by each plugin entry class through separate shim-first isolated loaders
-before the adapter can report ready. Each plugin loader sees shim paths, the server jar, and only its
-own jar. These are non-initializing class loads: the host does **not** initialize Paper, retain plugin
-class loaders, instantiate or enable plugins, dispatch Paper events, or promise plugin compatibility.
+or jar. When set, it must contain the operator-built `lodestone.bridge.IsolatedPaperShim` native
+declaration; the host registers that one block-state query callback in each fresh loader before
+loading the corresponding entry. The host discovers and retains a `PaperBootstrapPlan` before starting
+a JVM, then loads the Paper bootstrap followed by each plugin entry class through separate shim-first
+isolated loaders before the adapter can report ready. Each plugin loader sees shim paths, the server
+jar, and only its own jar. These are non-initializing class loads: the host does **not** initialize
+Paper, retain plugin class loaders, instantiate or enable plugins, dispatch Paper events, or promise
+plugin compatibility.
 A malformed Paper configuration fails before startup and saves the world; a lifecycle-load failure is
 terminal for a configured Paper run and likewise saves the world rather than quietly continuing
 without the requested operator input.
