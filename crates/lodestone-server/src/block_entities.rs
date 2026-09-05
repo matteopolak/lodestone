@@ -482,6 +482,27 @@ impl BlockEntity {
     /// `slot` is a silent no-op, matching `PlayerInventory::set_native`'s own
     /// convention for the identical "malformed index" case.
     pub fn set_container_slot(&mut self, slot: usize, item: Option<ItemStack>) {
+        let Some(slot) = self.container_slot(slot) else {
+            return;
+        };
+        self.set_container_slot_at(slot, item);
+    }
+
+    /// Validates a local slot index against this entity's actual container
+    /// layout. The length is dynamic for generic containers, so it belongs at
+    /// this entity boundary rather than in packet decoding.
+    #[must_use]
+    pub fn container_slot(&self, index: usize) -> Option<lodestone_model::ContainerSlot> {
+        lodestone_model::ContainerSlot::new(index, self.container_slot_count())
+    }
+
+    /// Writes a container position already bounded for this entity's layout.
+    pub fn set_container_slot_at(
+        &mut self,
+        slot: lodestone_model::ContainerSlot,
+        item: Option<ItemStack>,
+    ) {
+        let slot = slot.index();
         match self {
             BlockEntity::Furnace(f) => match slot {
                 0 => f.set_input(item),
@@ -517,6 +538,18 @@ impl BlockEntity {
             }
             BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {}
+        }
+    }
+
+    fn container_slot_count(&self) -> usize {
+        match self {
+            BlockEntity::Furnace(_) => 3,
+            BlockEntity::Hopper(_) => 5,
+            BlockEntity::Container { slots, .. } => slots.len(),
+            BlockEntity::Beacon(_) => 1,
+            BlockEntity::Crafter { slots, .. } => slots.len(),
+            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => 0,
         }
     }
 

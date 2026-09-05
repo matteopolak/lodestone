@@ -3016,7 +3016,9 @@ async fn run_tick_loop_with_weather_impl<W>(
                                     block_entities.with(|reg| {
                                         if let Some(entity) = reg.get_mut(front) {
                                             for (i, s) in dest.into_iter().enumerate() {
-                                                entity.set_container_slot(i, s);
+                                                if let Some(slot) = entity.container_slot(i) {
+                                                    entity.set_container_slot_at(slot, s);
+                                                }
                                             }
                                         }
                                     });
@@ -3209,7 +3211,9 @@ async fn run_tick_loop_with_weather_impl<W>(
                             };
                             block_entities.with(|reg| {
                                 if let Some(entity) = reg.get_mut(origin) {
-                                    entity.set_container_slot(slot, remainder);
+                                    if let Some(slot) = entity.container_slot(slot) {
+                                        entity.set_container_slot_at(slot, remainder);
+                                    }
                                 }
                             });
                         }
