@@ -289,6 +289,12 @@ further work. Only `en_us` exists in the jar; every other language (142 files, ~
 a separate downloadable asset-store object, fetchable the same way sound and texture objects
 already are — unbuilt, but not blocked on anything new.
 
+Disconnect ingestion also accepts one compatibility shape used by protocol-bridging proxies: a
+complete JSON component wrapped inside an otherwise plain literal component. Only disconnect
+reasons receive this bounded second parse; ordinary chat containing JSON-like text remains literal.
+The recovered tree keeps its nested colours and decorations through `SessionEnd::reason` and the
+error-screen span renderer.
+
 ## How to change it, and the gotchas
 
 - **Never let a unit test resolve a real Microsoft account, refresh a real token, or reach a

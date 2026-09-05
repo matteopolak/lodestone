@@ -2975,6 +2975,41 @@ fn disconnect_reason_is_translated_through_the_language_table() {
     }
 }
 
+/// A compatibility proxy can carry an older JSON component as the literal
+/// string inside a newer disconnect component. The outer protocol decode is
+/// valid in that case, but the shell must give the embedded component one
+/// bounded parse before drawing it instead of exposing its JSON source.
+#[test]
+fn disconnect_reason_recovers_embedded_json_and_its_styles() {
+    use crate::net::NetUpdate;
+    use lodestone_model::{Text, TextColor};
+
+    let raw = r#"{"text":"-----","strikethrough":true,"color":"gray","extra":[{"text":" kicked","strikethrough":false,"color":"red"}]}"#;
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::Disconnected(Box::new(Text::literal(raw))))
+        .unwrap();
+    sim.poll_net();
+
+    let SessionPhase::Ended(end) = sim.session_phase() else {
+        panic!("expected Ended");
+    };
+    assert_eq!(end.plain(), "----- kicked");
+    let spans = end.reason.to_spans();
+    assert_eq!(spans.len(), 2, "root text and extra child stay separate");
+    assert_eq!(spans[0].style.color, Some(TextColor::Gray));
+    assert_eq!(spans[0].style.strikethrough, Some(true));
+    assert_eq!(spans[1].style.color, Some(TextColor::Red));
+    assert_eq!(spans[1].style.strikethrough, Some(false));
+
+    let control = Text::literal(raw).resolve(&|_| None);
+    assert!(
+        control.to_plain_string().starts_with('{'),
+        "the literal control must reproduce the reported raw JSON"
+    );
+}
+
 #[test]
 fn session_phase_reports_net_error_as_ended() {
     use crate::net::NetUpdate;
