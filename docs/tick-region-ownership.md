@@ -110,6 +110,13 @@ source chunk and restores entity-id slots before it replaces transforms,
 changes a fuse, or consumes the TNT-minecart explosion stream. Consequently,
 owner completion order cannot reorder either a cart's visible transform or a
 later blast's random draw.
+Wither ticking uses the same owner hand-off inside `MobSim::tick_withers`, the
+live tick loop's existing consumer. `MobSim::tick_wither_owner_batches` clones
+each tick-start wither under its source chunk owner, and
+`MobSim::apply_wither_tick_owner_batches` validates complete, unique batches
+before restoring entity-id slots. It is the only owner-batch writer to the
+live wither map and the skull RNG, so an owner completing early cannot change
+the order of an emergence blast or a spawned skull projectile.
 Experience orbs have a separate motion ownership boundary inside
 `MobSim::tick_orbs`, reached from the live `MobSim::tick_with_terrain` pass.
 `MobSim::tick_orb_owner_batches` clones each tick-start orb under its source
@@ -229,6 +236,14 @@ the live map or queue a detonation while selecting an owner. The central
 consumer must reject missing or duplicate owners and restore every serial slot
 before changing motion, fuses, or the detonation queue. The current live tick
 call remains `MobSim::tick_tnt`, so no extra tick-loop wiring is needed.
+
+Keep wither simulation behind `MobSim::tick_wither_owner_batches` and
+`MobSim::apply_wither_tick_owner_batches`. A completion carries cloned
+tick-start state, its source owner, and an entity-id serial slot; it must not
+update a live wither, trigger an emergence blast, or consume the skull RNG.
+The central writer must reject missing or duplicate owners and restore every
+slot before those actions become visible. Keep `MobSim::tick_withers` as the
+live consumer so the tick loop has one production path.
 
 Keep experience-orb motion behind `MobSim::tick_orb_owner_batches` and
 `MobSim::apply_orb_tick_owner_batches`. The batch plan must retain the
