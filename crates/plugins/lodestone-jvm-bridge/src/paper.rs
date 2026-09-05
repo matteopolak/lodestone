@@ -22,7 +22,7 @@ use crate::runtime::{JvmConfig, JvmRuntime};
 #[cfg(feature = "jvm")]
 use crate::native_surface;
 #[cfg(feature = "jvm")]
-use crate::adapter::NativeBlockStateSurface;
+use crate::adapter::NativeServerReadSurface;
 
 const BOOTSTRAP_CLASS: &str = "io.papermc.paper.PaperBootstrap";
 const BOOTSTRAP_ENTRY: &str = "io/papermc/paper/PaperBootstrap.class";
@@ -275,38 +275,39 @@ impl PaperPluginLifecycleStatusSet {
 /// A concrete Java-facing capability supplied by the hosting server.
 ///
 /// This is deliberately an input, not a claim that a Bukkit `Server` object
-/// exists. `NativeBlockStateRead` means the host has installed the one native
-/// `blockStateId` declaration in every isolated loader and will service its
-/// requests from live server state. It is useful to retain as an exact, real
-/// Java-facing capability, but cannot safely construct a plugin: construction
-/// also needs loader-owned plugin metadata and a much broader server facade.
+/// exists. `NativeServerRead` means the host has installed the narrow native
+/// block-state and tick-count declarations in every isolated loader and will
+/// service their requests from live server state. It is useful to retain as an
+/// exact, real Java-facing capability, but cannot safely construct a plugin:
+/// construction also needs loader-owned plugin metadata and a much broader
+/// server facade.
 #[derive(Debug)]
 pub enum PaperServerFacadeInput {
     /// No Java-facing server capability is available to a retained loader.
     Unavailable,
-    /// The isolated native shim can read one loaded block-state ID through its
-    /// owning adapter worker's request port.
+    /// The isolated native shim can read a loaded block-state ID and the live
+    /// server tick through its owning adapter worker's request ports.
     #[cfg(feature = "jvm")]
-    NativeBlockStateRead(NativeBlockStateSurface),
+    NativeServerRead(NativeServerReadSurface),
 }
 
 impl PaperServerFacadeInput {
     /// Consumes the worker-owned native surface for one retained lifecycle.
     ///
     /// The surface token can originate only from `AdapterHost::start_with_setup`.
-    /// Its matching `AdapterHost::service_pending` call is therefore the live
-    /// dedicated-server producer, rather than an enum claim a lifecycle host
+    /// Its matching `AdapterHost` service calls are therefore the live
+    /// dedicated-server producers, rather than an enum claim a lifecycle host
     /// can manufacture while no native query can be answered.
     #[cfg(feature = "jvm")]
-    pub fn native_block_state_read(surface: NativeBlockStateSurface) -> Self {
-        Self::NativeBlockStateRead(surface)
+    pub fn native_server_read(surface: NativeServerReadSurface) -> Self {
+        Self::NativeServerRead(surface)
     }
 
     fn state(&self) -> PaperServerFacadeState {
         match self {
             Self::Unavailable => PaperServerFacadeState::Unavailable,
             #[cfg(feature = "jvm")]
-            Self::NativeBlockStateRead(_) => PaperServerFacadeState::NativeBlockStateRead,
+            Self::NativeServerRead(_) => PaperServerFacadeState::NativeServerRead,
         }
     }
 
@@ -314,7 +315,7 @@ impl PaperServerFacadeInput {
         match self {
             Self::Unavailable => PaperPluginConstructionBlocker::ServerFacadeUnavailable,
             #[cfg(feature = "jvm")]
-            Self::NativeBlockStateRead(_) => {
+            Self::NativeServerRead(_) => {
                 PaperPluginConstructionBlocker::PluginConstructionUnsupported
             }
         }
@@ -331,16 +332,16 @@ impl PaperServerFacadeInput {
 pub enum PaperServerFacadeState {
     /// No compatible server facade has been supplied to the retained loader.
     Unavailable,
-    /// The private loader has only the native read-only block-state seam.
-    NativeBlockStateRead,
+    /// The private loader has only the native read-only server seam.
+    NativeServerRead,
 }
 
 impl fmt::Display for PaperServerFacadeState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unavailable => formatter.write_str("no compatible server facade is installed"),
-            Self::NativeBlockStateRead => {
-                formatter.write_str("the isolated native block-state read seam is installed")
+            Self::NativeServerRead => {
+                formatter.write_str("the isolated native server-read seam is installed")
             }
         }
     }
@@ -676,7 +677,8 @@ impl PaperBootstrapPlan {
     /// This is the real JVM consumer of [`Self::load_lifecycle_entries`]. It
     /// deliberately calls `ClassLoader.loadClass`, which does not initialize
     /// the loaded class. If requested, it first validates and registers the
-    /// bridge's one native shim member in that *same* fresh loader. It retains
+    /// bridge's native server-read members in that *same* fresh loader. It
+    /// retains
     /// the non-initialized entry class with its loader and descriptor. Plugin
     /// construction, enablement, and event dispatch are later lifecycle work.
     #[cfg(feature = "jvm")]
@@ -757,13 +759,13 @@ fn validate_construction_facade(
     match (native_shim, facade_input) {
         (false, PaperServerFacadeInput::Unavailable) => Ok(()),
         #[cfg(feature = "jvm")]
-        (true, PaperServerFacadeInput::NativeBlockStateRead(_)) => Ok(()),
+        (true, PaperServerFacadeInput::NativeServerRead(_)) => Ok(()),
         #[cfg(feature = "jvm")]
-        (false, PaperServerFacadeInput::NativeBlockStateRead(_)) => Err(PaperBootstrapError::new(
-            "the native block-state facade input requires an isolated native shim in every loader",
+        (false, PaperServerFacadeInput::NativeServerRead(_)) => Err(PaperBootstrapError::new(
+            "the native server-read facade input requires an isolated native shim in every loader",
         )),
         (true, PaperServerFacadeInput::Unavailable) => Err(PaperBootstrapError::new(
-            "an isolated native shim requires the adapter worker's server-owned block-state capability",
+            "an isolated native shim requires the adapter worker's server-owned read capabilities",
         )),
     }
 }
@@ -1527,7 +1529,7 @@ mod tests {
                 .expect_err("a registered native declaration requires its server-owned input");
         assert!(missing_input
             .to_string()
-            .contains("adapter worker's server-owned block-state capability"));
+            .contains("adapter worker's server-owned read capabilities"));
     }
 
     #[test]

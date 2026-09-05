@@ -89,7 +89,7 @@ impl JavaAdapter {
                         format!("could not load configured Paper lifecycle entries: {error}")
                     })?;
                     let facade_input = if plan.requires_isolated_native_shim() {
-                        PaperServerFacadeInput::native_block_state_read(native_surface)
+                        PaperServerFacadeInput::native_server_read(native_surface)
                     } else {
                         PaperServerFacadeInput::Unavailable
                     };
@@ -203,6 +203,10 @@ impl JavaAdapter {
             server.resident_block_state_id(query.x, query.y, query.z)
                 .map(|state| state.raw())
                 .ok_or_else(|| format!("primary-world block unavailable at {},{},{}", query.x, query.y, query.z))
+        });
+        self.host.service_pending_server_tick(64, || {
+            server.server_tick_count()
+                .ok_or_else(|| "primary-world server tick is unavailable".to_owned())
         });
         if self.host.is_idle() {
             if let Some(tick) = server.server_tick_count() {
