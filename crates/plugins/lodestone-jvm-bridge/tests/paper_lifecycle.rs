@@ -7,7 +7,9 @@ use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
 use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost, BlockStateWrite};
-use lodestone_jvm_bridge::native_surface::{OperatorBlockStateMember, OperatorValueMember};
+use lodestone_jvm_bridge::native_surface::{
+    OperatorBlockStateMember, OperatorLongValueMember, OperatorValueMember,
+};
 use lodestone_jvm_bridge::paper::{
     PaperBootstrapConfig, PaperPluginLifecyclePhase, PaperPluginLifecycleStep,
     PaperServerFacadeInput,
@@ -89,6 +91,13 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native int read(); }",
     )
     .expect("intercepted source");
+    let long_value_source = intercepted_package.join("LongValue.java");
+    fs::write(
+        &long_value_source,
+        "package fixture.intercepted; public final class LongValue { \
+         public static native long read(); }",
+    )
+    .expect("long-value source");
     let descriptor_source = shim_package.join("IsolatedPluginDescriptor.java");
     fs::write(
         &descriptor_source,
@@ -125,6 +134,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     compile(&jdk, &shim_classes, &listener_source);
     compile_with_classpath(&jdk, &shim_classes, &shim_source, &shim_classes);
     compile(&jdk, &shim_classes, &intercepted_source);
+    compile(&jdk, &shim_classes, &long_value_source);
     compile(&jdk, &adapter_classes, &adapter_source);
     let manifest = fixture.path().join("MANIFEST.MF");
     fs::write(&manifest, "Manifest-Version: 1.0\nImplementation-Title: Paper\n")
@@ -169,6 +179,14 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
         .with_operator_value_member(
             OperatorValueMember::new("fixture.intercepted.Value", "read", 341)
                 .expect("operator member"),
+        )
+        .with_operator_long_value_member(
+            OperatorLongValueMember::new(
+                "fixture.intercepted.LongValue",
+                "read",
+                9_876_543_210,
+            )
+            .expect("operator long-value member"),
         )
         .discover()
         .expect("discover stand-in lifecycle inputs");
@@ -247,10 +265,10 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     assert_eq!(
         fs::read_to_string(&callback_log).expect("callback log"),
         concat!(
-            "Alpha-construct:Alpha:one:fixture.alpha.Main:value=341\n",
-            "Bravo-construct:Bravo:one:fixture.bravo.Main:value=341\n",
-            "Charlie-construct:Charlie:one:fixture.charlie.Main:value=341\n",
-            "Delta-construct:Delta:one:fixture.delta.Main:value=341\n",
+            "Alpha-construct:Alpha:one:fixture.alpha.Main:value=341:long=9876543210\n",
+            "Bravo-construct:Bravo:one:fixture.bravo.Main:value=341:long=9876543210\n",
+            "Charlie-construct:Charlie:one:fixture.charlie.Main:value=341:long=9876543210\n",
+            "Delta-construct:Delta:one:fixture.delta.Main:value=341:long=9876543210\n",
             "Alpha-enable:Alpha:one:fixture.alpha.Main\n",
             "Bravo-enable:Bravo:one:fixture.bravo.Main\n",
             "Charlie-enable:Charlie:one:fixture.charlie.Main\n",
@@ -498,7 +516,8 @@ fn callback_plugin_source(
          }} catch (java.io.IOException error) {{ throw new RuntimeException(error); }} }} \
          private static String identity() {{ lodestone.bridge.IsolatedPluginDescriptor descriptor = lodestone.bridge.IsolatedPaperShim.currentPluginDescriptor(); return descriptor.name() + \":\" + descriptor.version() + \":\" + descriptor.mainClass(); }} \
          private static int interceptedValue() {{ return fixture.intercepted.Value.read(); }} \
-         public Main() {{ log(\"{name}-construct:\" + identity() + \":value=\" + interceptedValue()); }} \
+         private static long interceptedLongValue() {{ return fixture.intercepted.LongValue.read(); }} \
+         public Main() {{ log(\"{name}-construct:\" + identity() + \":value=\" + interceptedValue() + \":long=\" + interceptedLongValue()); }} \
          public void onEnable() {{ log(\"{name}-enable:\" + identity()); {enable_failure} }} \
          public void onDisable() {{ log(\"{name}-disable:\" + identity()); {disable_failure} }} }}"
     )

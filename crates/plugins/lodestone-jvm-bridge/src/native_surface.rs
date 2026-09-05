@@ -14,7 +14,7 @@ use jni::objects::{JClass, JObject};
 use jni::errors::ThrowRuntimeExAndDefault;
 use jni::{Env, jni_sig, jni_str};
 use jni::strings::JNIString;
-use jni::sys::jint;
+use jni::sys::{jint, jlong};
 
 use crate::adapter;
 use crate::runtime::{JvmError, JvmRuntime};
@@ -96,6 +96,57 @@ impl OperatorValueMember {
     }
 }
 
+/// An operator-selected internal static long value member to intercept.
+///
+/// This is deliberately a separate ABI from [`OperatorValueMember`]. A Java
+/// `long` must not be narrowed through the existing integer contract: the
+/// exact `()J` declaration remains validated before the bridge registers its
+/// primitive-only callback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperatorLongValueMember {
+    class: String,
+    method: String,
+    value: i64,
+}
+
+impl OperatorLongValueMember {
+    /// Creates a zero-argument long value interception contract.
+    pub fn new(
+        class: impl Into<String>,
+        method: impl Into<String>,
+        value: i64,
+    ) -> Result<Self, NativeSurfaceError> {
+        let class = class.into();
+        let method = method.into();
+        if !valid_binary_name(&class) {
+            return Err(NativeSurfaceError::InvalidOperatorMember {
+                detail: format!("invalid operator class {class:?}"),
+            });
+        }
+        if !valid_member_name(&method) {
+            return Err(NativeSurfaceError::InvalidOperatorMember {
+                detail: format!("invalid operator method {method:?}"),
+            });
+        }
+        Ok(Self { class, method, value })
+    }
+
+    /// The operator-selected binary class name.
+    pub fn class(&self) -> &str {
+        &self.class
+    }
+
+    /// The operator-selected static method name.
+    pub fn method(&self) -> &str {
+        &self.method
+    }
+
+    /// The host-confirmed long returned by the intercepted member.
+    pub const fn value(&self) -> i64 {
+        self.value
+    }
+}
+
 /// An operator-selected resident block-state read member to intercept.
 ///
 /// The fixed `(J)I` shape accepts one opaque block handle and returns the
@@ -144,6 +195,9 @@ thread_local! {
     /// thread never receives this value and therefore fails loudly instead of
     /// observing a cross-thread world surrogate.
     static OPERATOR_VALUE_MEMBER: Cell<Option<i32>> = const { Cell::new(None) };
+    /// Kept separately from the integer contract so JNI never narrows an
+    /// operator-provided `long` before returning it to Java.
+    static OPERATOR_LONG_VALUE_MEMBER: Cell<Option<i64>> = const { Cell::new(None) };
 }
 
 /// One required constructor or accessor on the isolated descriptor value.
@@ -408,6 +462,27 @@ pub enum NativeSurfaceError {
         /// JNI registration error detail.
         detail: String,
     },
+    /// The selected long-value class did not resolve from the bootstrap loader.
+    OperatorLongValueMemberClassLoad {
+        /// Operator-provided binary class name.
+        class: String,
+        /// JVM loader error detail.
+        detail: String,
+    },
+    /// The selected member was absent or had a different static `()J` shape.
+    OperatorLongValueMemberMissing {
+        /// The supplied member contract.
+        member: OperatorLongValueMember,
+        /// JVM lookup error detail.
+        detail: String,
+    },
+    /// JNI rejected the selected long-value member after its shape was validated.
+    OperatorLongValueMemberRegistration {
+        /// The supplied member contract.
+        member: OperatorLongValueMember,
+        /// JNI registration error detail.
+        detail: String,
+    },
     /// The selected block-state class did not resolve from the bootstrap loader.
     OperatorBlockStateMemberClassLoad {
         /// Operator-provided binary class name.
@@ -497,6 +572,21 @@ impl fmt::Display for NativeSurfaceError {
             Self::OperatorMemberRegistration { member, detail } => write!(
                 formatter,
                 "could not register operator value member {}.{}()I: {detail}",
+                member.class,
+                member.method,
+            ),
+            Self::OperatorLongValueMemberClassLoad { class, detail } => {
+                write!(formatter, "could not load operator long-value class {class}: {detail}")
+            }
+            Self::OperatorLongValueMemberMissing { member, detail } => write!(
+                formatter,
+                "operator long-value member {}.{}()J must be static native: {detail}",
+                member.class,
+                member.method,
+            ),
+            Self::OperatorLongValueMemberRegistration { member, detail } => write!(
+                formatter,
+                "could not register operator long-value member {}.{}()J: {detail}",
                 member.class,
                 member.method,
             ),
@@ -617,6 +707,77 @@ extern "system" fn native_operator_value_member<'local>(
             slot.get().ok_or_else(|| {
                 adapter::AdapterError::new(
                     "operator value member requires the resident adapter worker thread",
+                )
+            })
+        })
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// Installs one operator-selected static long member in the bootstrap loader.
+///
+/// Its primitive-only value is copied into worker-local state before JNI
+/// registration. The callback has no route to a port, world, or mutable host
+/// value, and a plugin child can resolve the one parent-owned definition.
+pub(crate) fn install_operator_long_value_member_in_loader<'local>(
+    runtime: &JvmRuntime,
+    env: &mut Env<'local>,
+    loader: &JObject<'local>,
+    member: &OperatorLongValueMember,
+) -> Result<(), NativeSurfaceError> {
+    let class = runtime
+        .load_class_from_loader(env, loader, member.class())
+        .map_err(|error| NativeSurfaceError::OperatorLongValueMemberClassLoad {
+            class: member.class.clone(),
+            detail: error.to_string(),
+        })?;
+    let name = JNIString::new(member.method());
+    env.get_static_method_id(&class, &name, jni_sig!("()J"))
+        .map_err(|error| NativeSurfaceError::OperatorLongValueMemberMissing {
+            member: member.clone(),
+            detail: error.to_string(),
+        })?;
+    OPERATOR_LONG_VALUE_MEMBER.with(|slot| slot.set(Some(member.value())));
+    register_operator_long_value_member(env, &class, member).map_err(|error| {
+        OPERATOR_LONG_VALUE_MEMBER.with(|slot| slot.set(None));
+        NativeSurfaceError::OperatorLongValueMemberRegistration {
+            member: member.clone(),
+            detail: error.to_string(),
+        }
+    })
+}
+
+#[allow(unsafe_code)]
+fn register_operator_long_value_member(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    member: &OperatorLongValueMember,
+) -> jni::errors::Result<()> {
+    // SAFETY: validation above proves the sole supported ABI is static native
+    // `()J`, matching `native_operator_long_value_member` exactly.
+    unsafe {
+        let name = JNIString::new(member.method());
+        let signature = JNIString::new("()J");
+        let method = jni::NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_operator_long_value_member as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+extern "system" fn native_operator_long_value_member<'local>(
+    mut env: jni::EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| adapter::AdapterError::new(error.to_string()))?;
+        OPERATOR_LONG_VALUE_MEMBER.with(|slot| {
+            slot.get().ok_or_else(|| {
+                adapter::AdapterError::new(
+                    "operator long-value member requires the resident adapter worker thread",
                 )
             })
         })
@@ -1371,6 +1532,27 @@ mod tests {
             ("operator.fixture.Value", "read-value"),
         ] {
             let error = OperatorValueMember::new(class, method, 0)
+                .expect_err("malformed operator input must fail before loading");
+            assert!(error.to_string().contains("invalid operator value-member"));
+        }
+    }
+
+    #[test]
+    fn operator_long_value_member_requires_a_single_checked_static_long_shape() {
+        let member = OperatorLongValueMember::new(
+            "operator.fixture.LongValue",
+            "read",
+            9_876_543_210,
+        )
+        .expect("valid operator long-value member");
+        assert_eq!(member.class(), "operator.fixture.LongValue");
+        assert_eq!(member.method(), "read");
+        assert_eq!(member.value(), 9_876_543_210);
+        for (class, method) in [
+            ("operator..LongValue", "read"),
+            ("operator.fixture.LongValue", "read-value"),
+        ] {
+            let error = OperatorLongValueMember::new(class, method, 0)
                 .expect_err("malformed operator input must fail before loading");
             assert!(error.to_string().contains("invalid operator value-member"));
         }
