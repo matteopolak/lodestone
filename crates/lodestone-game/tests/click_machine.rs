@@ -417,5 +417,5 @@ fn every_click_bumps_state_id() {
     let mut menu = Menu::generic(27);
     let before = menu.state_id();
     Click::left(0).apply(&mut menu, survival());
-    assert_eq!(menu.state_id(), before.wrapping_add(1));
+    assert_eq!(menu.state_id(), before.next());
 }

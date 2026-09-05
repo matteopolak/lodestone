@@ -23,7 +23,9 @@ use lodestone_model::event::{
     EntityMetadataUpdate, EntityMovement, EntityPose, EquipmentSlot, TeleportFlags,
 };
 use lodestone_model::text::Text;
-use lodestone_model::{AdapterError, ClientAction, GameMode, Identifier, ItemStack, Reported};
+use lodestone_model::{
+    AdapterError, ClientAction, ContainerStateId, GameMode, Identifier, ItemStack, Reported,
+};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_world::{
     ChunkColumn, ChunkPos as WorldChunkPos, ChunkSection, ColumnLight, Heightmaps, LoadedChunk,
@@ -164,7 +166,7 @@ impl lodestone_client::VersionAdapter for FakeAdapter {
             } => {
                 let mut payload = Vec::new();
                 payload.extend_from_slice(&window_id.to_be_bytes());
-                payload.extend_from_slice(&state_id.to_be_bytes());
+                payload.extend_from_slice(&state_id.as_wire().to_be_bytes());
                 payload.extend_from_slice(&slot.to_be_bytes());
                 payload.extend_from_slice(&button.to_be_bytes());
                 Ok(Some((CONTAINER_CLICK_ID, payload)))
@@ -388,7 +390,7 @@ async fn read_model_folds_window_zero_inventory_into_player_menu() {
             TRIGGER,
             vec![Directive::Emit(ClientEvent::ContainerContent {
                 window_id: 0,
-                state_id: 7,
+                state_id: ContainerStateId::new(7),
                 items,
                 carried_item: None,
             })],
@@ -402,7 +404,7 @@ async fn read_model_folds_window_zero_inventory_into_player_menu() {
     let held = menu.slot_item(36).expect("main-hand slot should be filled");
     assert_eq!(held.item().path(), "diamond");
     assert_eq!(held.count(), 5);
-    assert_eq!(menu.state_id(), 7);
+    assert_eq!(menu.state_id(), ContainerStateId::new(7));
     assert!(
         menu.slot_item(40).is_none(),
         "an untouched slot must stay empty so slot indexing is observable"
@@ -443,7 +445,7 @@ async fn drop_selected_predicts_into_the_menu_the_ui_reads() {
             TRIGGER,
             vec![Directive::Emit(ClientEvent::ContainerContent {
                 window_id: 0,
-                state_id: 7,
+                state_id: ContainerStateId::new(7),
                 items,
                 carried_item: None,
             })],
@@ -521,7 +523,7 @@ async fn inventory_click_veto_stops_prediction_and_the_wire_while_allow_preserve
                 CONTENT,
                 vec![Directive::Emit(ClientEvent::ContainerContent {
                     window_id: 0,
-                    state_id: 7,
+                    state_id: ContainerStateId::new(7),
                     items,
                     carried_item: None,
                 })],
@@ -647,7 +649,7 @@ async fn read_model_folds_generic_container_with_player_inventory_tail() {
                 }),
                 Directive::Emit(ClientEvent::ContainerContent {
                     window_id: 4,
-                    state_id: 3,
+                    state_id: ContainerStateId::new(3),
                     items,
                     carried_item: None,
                 }),

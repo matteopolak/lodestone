@@ -1642,7 +1642,7 @@ impl V5Adapter {
             window_id: i32::from(body.window_id),
             // There is no container-synchronisation state id in this era; zero
             // is a fixed placeholder, not a sequence number.
-            state_id: 0,
+            state_id: lodestone_model::ContainerStateId::INITIAL,
             slot: i32::from(body.slot),
             item,
         })])
@@ -1656,7 +1656,7 @@ impl V5Adapter {
         let body: WindowItems = decode_body_exact(payload)?;
         Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
             window_id: i32::from(body.window_id),
-            state_id: 0,
+            state_id: lodestone_model::ContainerStateId::INITIAL,
             items: body.items.iter().map(slot_to_item_stack).collect(),
             // The carried (cursor) stack is not part of this packet here; it
             // arrives through a set-slot with window id -1.

@@ -22,6 +22,7 @@ use lodestone_model::{
     BossOverlay, ChatAckInfo, ChatCompletionsAction, ChatKind, ChatMode, ChunkPos, ClientAction,
     ClientEvent,
     ClientSettings, CollisionRule, CommandBlockMode, ConnectionState, ContainerClickType,
+    ContainerStateId,
     ContainerSlotChange, DeathLocation, DebugSampleKind, Difficulty, DimensionTypeInfo, Directive,
     DisplaySlot,
     DisplayedSkinParts,

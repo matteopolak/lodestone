@@ -3087,7 +3087,7 @@ impl VersionAdapter for V766Adapter {
                 }
                 let body = WindowClick {
                     window_id: *window_id as u8,
-                    state_id: *state_id,
+                    state_id: state_id.as_wire(),
                     slot: i16::try_from(*slot).map_err(|_| {
                         AdapterError::Encode(format!("container slot {slot} overflows i16"))
                     })?,

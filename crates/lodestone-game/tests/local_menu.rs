@@ -55,7 +55,7 @@ fn open_a_server_container(menus: &mut Menus, window_id: i32, container_size: us
     });
     menus.apply(&ClientEvent::ContainerContent {
         window_id,
-        state_id: 1,
+        state_id: lodestone_model::ContainerStateId::new(1),
         items: vec![None; container_size + 36],
         carried_item: None,
     });
@@ -125,7 +125,7 @@ fn the_one_player_inventory_survives_a_local_open_and_close() {
     // constructed by hand.
     menus.apply(&ClientEvent::ContainerSlot {
         window_id: 0,
-        state_id: 1,
+        state_id: lodestone_model::ContainerStateId::new(1),
         slot: 36, // window 0's first hotbar slot
         item: Some(lodestone_model::ItemStack::new(id("minecraft:bread"), 8)),
     });
@@ -183,7 +183,7 @@ fn a_server_slot_write_cannot_reach_a_plugin_menu() {
 
     menus.apply(&ClientEvent::ContainerSlot {
         window_id: LOCAL_MENU_WINDOW_ID,
-        state_id: 9,
+        state_id: lodestone_model::ContainerStateId::new(9),
         slot: 0,
         item: Some(lodestone_model::ItemStack::new(id("minecraft:dirt"), 64)),
     });
@@ -256,7 +256,7 @@ fn the_synthetic_event_route_cannot_supply_a_prebuilt_menu() {
     });
     menus.apply(&ClientEvent::ContainerContent {
         window_id: 7,
-        state_id: 1,
+        state_id: lodestone_model::ContainerStateId::new(1),
         items: vec![None; 27 + 36],
         carried_item: None,
     });

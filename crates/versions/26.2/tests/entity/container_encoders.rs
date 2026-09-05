@@ -169,7 +169,7 @@ fn encode_container_content_round_trips_furnace_slots_plus_player_inventory() {
         panic!("expected ContainerContent, got {:?}", events[0]);
     };
     assert_eq!(*window_id, 5);
-    assert_eq!(*state_id, 7);
+    assert_eq!(*state_id, lodestone_model::ContainerStateId::new(7));
     assert_eq!(decoded.len(), 39);
     // Compared by (item key, count) only, not full `ItemStack` equality: the
     // real decoder (`read_component_patch`) seeds `max_stack_size`/
@@ -206,7 +206,7 @@ fn encode_container_slot_round_trips_one_changed_slot() {
         panic!("expected ContainerSlot, got {:?}", events[0]);
     };
     assert_eq!(*window_id, 5);
-    assert_eq!(*state_id, 8);
+    assert_eq!(*state_id, lodestone_model::ContainerStateId::new(8));
     assert_eq!(*slot, 2);
     // See `encode_container_content_round_trips_furnace_slots_plus_player_inventory`'s
     // comment for why this compares (item, count) rather than the full

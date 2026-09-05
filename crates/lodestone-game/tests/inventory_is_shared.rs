@@ -95,7 +95,7 @@ fn open_chest(menus: &mut Menus, window_id: i32, container: Option<ModelItemStac
     items[0] = container;
     menus.apply(&ClientEvent::ContainerContent {
         window_id,
-        state_id: 1,
+        state_id: lodestone_model::ContainerStateId::new(1),
         items,
         carried_item: None,
     });
@@ -112,13 +112,13 @@ fn open_crafting_table(menus: &mut Menus, window_id: i32, result: Option<ModelIt
     });
     menus.apply(&ClientEvent::ContainerContent {
         window_id,
-        state_id: 1,
+        state_id: lodestone_model::ContainerStateId::new(1),
         items: vec![None; 10 + 36],
         carried_item: None,
     });
     menus.apply(&ClientEvent::ContainerSlot {
         window_id,
-        state_id: 2,
+        state_id: lodestone_model::ContainerStateId::new(2),
         slot: 0,
         item: result,
     });
@@ -200,7 +200,7 @@ fn window_zero_set_slot_while_a_container_is_open_reaches_both_views() {
     // 1..=4 grid, 5..=8 armour, 9..=35 main, 36..=44 hotbar, 45 off-hand).
     menus.apply(&ClientEvent::ContainerSlot {
         window_id: 0,
-        state_id: 3,
+        state_id: lodestone_model::ContainerStateId::new(3),
         slot: 36,
         item: Some(wire("minecraft:apple", 1)),
     });
@@ -343,7 +343,7 @@ fn control_a_set_slot_for_an_unknown_window_reaches_nothing() {
 
     menus.apply(&ClientEvent::ContainerSlot {
         window_id: 77,
-        state_id: 3,
+        state_id: lodestone_model::ContainerStateId::new(3),
         slot: 36,
         item: Some(wire("minecraft:apple", 1)),
     });
@@ -369,7 +369,7 @@ fn window_zero_content_forwards_the_inventory_but_not_the_craft_grid() {
     items[36] = Some(wire("minecraft:apple", 1)); // first hotbar cell
     menus.apply(&ClientEvent::ContainerContent {
         window_id: 0,
-        state_id: 4,
+        state_id: lodestone_model::ContainerStateId::new(4),
         items,
         carried_item: None,
     });

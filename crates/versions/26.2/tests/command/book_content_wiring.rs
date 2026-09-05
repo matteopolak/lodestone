@@ -231,7 +231,7 @@ fn written_book_content_reaches_a_client_container_set_slot() {
         panic!("expected ContainerSlot");
     };
     assert_eq!(window_id, 0);
-    assert_eq!(state_id, 0);
+    assert_eq!(state_id, lodestone_model::ContainerStateId::INITIAL);
     assert_eq!(slot, 45);
     let decoded = decoded.expect("stack must decode, not vanish");
     let content = decoded

@@ -3321,7 +3321,7 @@ mod tests {
             &mut app,
             ClientEvent::ContainerContent {
                 window_id: 5,
-                state_id: 1,
+                state_id: lodestone_model::ContainerStateId::new(1),
                 items,
                 carried_item: None,
             },
@@ -3341,7 +3341,7 @@ mod tests {
             &mut app,
             ClientEvent::ContainerSlot {
                 window_id: 5,
-                state_id: 1,
+                state_id: lodestone_model::ContainerStateId::new(1),
                 slot: 1,
                 item: Some(ms("minecraft:diamond", 1)),
             },
@@ -3958,13 +3958,13 @@ mod tests {
         assert!(handles_event(&ClientEvent::ScreenClosed { window_id: 1 }));
         assert!(handles_event(&ClientEvent::ContainerContent {
             window_id: 1,
-            state_id: 1,
+            state_id: lodestone_model::ContainerStateId::new(1),
             items: Vec::new(),
             carried_item: None,
         }));
         assert!(handles_event(&ClientEvent::ContainerSlot {
             window_id: 1,
-            state_id: 1,
+            state_id: lodestone_model::ContainerStateId::new(1),
             slot: 0,
             item: None,
         }));

@@ -381,7 +381,7 @@ fn stock_hotbar_slot_zero(menus: &mut lodestone_game::menus::Menus, name: &str) 
     items[36] = Some(ModelItemStack::new(id, 1));
     menus.apply(&ClientEvent::ContainerContent {
         window_id: 0,
-        state_id: 0,
+        state_id: lodestone_model::ContainerStateId::INITIAL,
         items,
         carried_item: None,
     });

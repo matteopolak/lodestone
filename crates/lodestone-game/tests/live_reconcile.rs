@@ -386,9 +386,8 @@ async fn live_reconcile_agrees_with_server() {
 
     // ---- Assertion 2 (agreement): a faithful model does not get corrected ----
     let mut agree = faithful.clone();
-    #[allow(clippy::cast_sign_loss)]
     let recon = agree.reconcile(ServerUpdate::SetContent {
-        state_id: content.state_id as u32,
+        state_id: lodestone_model::ContainerStateId::from_wire(content.state_id),
         items: content.items.clone(),
         carried: content.carried.clone(),
     });
@@ -410,9 +409,8 @@ async fn live_reconcile_agrees_with_server() {
         Some(ItemStack::new("minecraft:stone".parse().unwrap(), 64)),
     );
     let mut diverged = ClientMenu::new(wrong_menu);
-    #[allow(clippy::cast_sign_loss)]
     let recon = diverged.reconcile(ServerUpdate::SetContent {
-        state_id: content.state_id as u32,
+        state_id: lodestone_model::ContainerStateId::from_wire(content.state_id),
         items: content.items.clone(),
         carried: content.carried.clone(),
     });

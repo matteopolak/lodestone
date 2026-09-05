@@ -241,7 +241,7 @@ fn actions_absent_from_1_16_fail_loudly() {
         ClientAction::SetPlayerInput(PlayerInput::EMPTY),
         ClientAction::ContainerClick {
             window_id: 0,
-            state_id: 0,
+            state_id: lodestone_model::ContainerStateId::INITIAL,
             slot: 0,
             button: 0,
             click_type: ContainerClickType::Pickup,
@@ -443,7 +443,7 @@ fn modern_resource_pack_outcomes_fail_loudly_on_1_16() {
 fn container_click_fails_loudly_pending_transaction_id_and_registry() {
     let err = encode_err(&ClientAction::ContainerClick {
         window_id: 1,
-        state_id: 0,
+        state_id: lodestone_model::ContainerStateId::INITIAL,
         slot: 0,
         button: 0,
         click_type: ContainerClickType::Pickup,

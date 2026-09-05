@@ -12,8 +12,8 @@ use lodestone_game::menus::Menus;
 use lodestone_game::recipe::{Ingredient, Recipe, RecipeBook, ShapedRecipe};
 use lodestone_model::ids::Identifier;
 use lodestone_model::{
-    ClientAction, ClientEvent, ContainerClickType, ItemComponents, ItemStack as ModelItemStack,
-    Text,
+    ClientAction, ClientEvent, ContainerClickType, ContainerStateId, ItemComponents,
+    ItemStack as ModelItemStack, Text,
 };
 
 fn id(s: &str) -> Identifier {
@@ -348,7 +348,7 @@ fn open_table(window_id: i32) -> Menus {
     });
     menus.apply(&ClientEvent::ContainerContent {
         window_id,
-        state_id: 4,
+        state_id: ContainerStateId::new(4),
         items: vec![None; 46],
         carried_item: None,
     });
@@ -363,7 +363,7 @@ fn a_click_in_an_open_table_is_addressed_to_that_window_not_zero() {
     let mut menus = open_table(7);
     menus.apply(&ClientEvent::ContainerSlot {
         window_id: 7,
-        state_id: 5,
+        state_id: ContainerStateId::new(5),
         slot: 37,
         item: Some(model_stack("minecraft:oak_planks", 4)),
     });
@@ -399,7 +399,7 @@ fn a_predicted_click_lowers_into_a_container_click_action() {
     let mut menus = open_table(9);
     menus.apply(&ClientEvent::ContainerSlot {
         window_id: 9,
-        state_id: 5,
+        state_id: ContainerStateId::new(5),
         slot: 40,
         item: Some(model_stack("minecraft:oak_planks", 8)),
     });
@@ -455,7 +455,7 @@ fn menus_builds_a_crafting_menu_from_open_screen_plus_content() {
     items[5] = Some(model_stack("minecraft:oak_planks", 1));
     menus.apply(&ClientEvent::ContainerContent {
         window_id: 1,
-        state_id: 7,
+        state_id: ContainerStateId::new(7),
         items,
         carried_item: None,
     });
@@ -485,7 +485,7 @@ fn a_chest_is_still_a_plain_generic_menu() {
     });
     menus.apply(&ClientEvent::ContainerContent {
         window_id: 2,
-        state_id: 1,
+        state_id: ContainerStateId::new(1),
         items: vec![None; 27 + 36],
         carried_item: None,
     });
@@ -524,7 +524,7 @@ fn a_grid_the_book_knows_predicts_a_result() {
     });
     menus.apply(&ClientEvent::ContainerContent {
         window_id: 1,
-        state_id: 1,
+        state_id: ContainerStateId::new(1),
         items: vec![None; 46],
         carried_item: None,
     });
@@ -537,7 +537,7 @@ fn a_grid_the_book_knows_predicts_a_result() {
     for slot in [1, 2, 4, 5] {
         menus.apply(&ClientEvent::ContainerSlot {
             window_id: 1,
-            state_id: 2,
+            state_id: ContainerStateId::new(2),
             slot,
             item: Some(model_stack("minecraft:oak_planks", 1)),
         });
@@ -550,7 +550,7 @@ fn a_grid_the_book_knows_predicts_a_result() {
     // A stray fifth plank in an uncovered cell breaks the match, as vanilla does.
     menus.apply(&ClientEvent::ContainerSlot {
         window_id: 1,
-        state_id: 3,
+        state_id: ContainerStateId::new(3),
         slot: 9,
         item: Some(model_stack("minecraft:oak_planks", 1)),
     });
@@ -567,7 +567,7 @@ fn a_chest_predicts_nothing_because_it_has_no_grid() {
     });
     menus.apply(&ClientEvent::ContainerContent {
         window_id: 4,
-        state_id: 1,
+        state_id: ContainerStateId::new(1),
         items: vec![None; 27 + 36],
         carried_item: None,
     });
@@ -587,7 +587,7 @@ fn a_crafting_menu_type_with_an_unexpected_size_falls_back_to_generic() {
     });
     menus.apply(&ClientEvent::ContainerContent {
         window_id: 3,
-        state_id: 1,
+        state_id: ContainerStateId::new(1),
         items: vec![None; 5 + 36],
         carried_item: None,
     });
