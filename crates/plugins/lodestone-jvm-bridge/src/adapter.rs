@@ -35,6 +35,23 @@ pub type BlockStateAnswer = Result<u32, String>;
 type BlockPort = WorldPort<BlockStateQuery, BlockStateAnswer>;
 type Events = SyncSender<Result<AdapterEvent, AdapterError>>;
 
+/// Proof that setup is running beside a live native block-query producer.
+///
+/// Only [`AdapterHost`] creates this token, from the worker's request port.
+/// A lifecycle setup may consume it to install a loader-local Java surface,
+/// but cannot use it to read world state directly. The matching
+/// [`AdapterHost::service_pending`] endpoint remains the only producer.
+#[derive(Debug)]
+pub struct NativeBlockStateSurface {
+    _port: BlockPort,
+}
+
+impl NativeBlockStateSurface {
+    fn from_port(port: BlockPort) -> Self {
+        Self { _port: port }
+    }
+}
+
 thread_local! {
     static CALLBACK_PORT: RefCell<Option<BlockPort>> = const { RefCell::new(None) };
 }
@@ -77,15 +94,16 @@ impl AdapterHost {
         class: &str,
         deadline: Duration,
     ) -> Result<Self, AdapterError> {
-        Self::start_with_setup(config, class, deadline, |_, _| Ok(()))
+        Self::start_with_setup(config, class, deadline, |_, _, _| Ok(()))
     }
 
     /// Spawns the JVM worker after running one bounded setup step on it.
     ///
     /// The setup runs after the JVM starts but before the adapter class loads.
-    /// It receives no world state and must not invoke arbitrary operator code;
-    /// it exists for a lifecycle host to load and validate an operator bootstrap
-    /// class in the same JVM that will own the adapter. A successful result
+    /// It receives no world state and must not invoke arbitrary operator code.
+    /// Its [`NativeBlockStateSurface`] token proves that the same worker owns a
+    /// native request port with a host-side producer; it is the only way a
+    /// lifecycle host may claim that narrow capability. A successful result
     /// remains on that worker until the adapter stops, so setup can retain
     /// loader-owned JVM state without publishing it to the tick thread.
     pub fn start_with_setup<F, S>(
@@ -95,7 +113,10 @@ impl AdapterHost {
         setup: F,
     ) -> Result<Self, AdapterError>
     where
-        F: for<'local> FnOnce(&JvmRuntime, &mut Env<'local>) -> Result<S, String> + Send + 'static,
+        F: for<'local> FnOnce(&JvmRuntime, &mut Env<'local>, NativeBlockStateSurface)
+                -> Result<S, String>
+            + Send
+            + 'static,
         S: Send + 'static,
     {
         validate_class(class)?;
@@ -239,7 +260,8 @@ fn run_java<S>(
     commands: Receiver<u64>,
     events: &Events,
     port: BlockPort,
-    setup: impl for<'local> FnOnce(&JvmRuntime, &mut Env<'local>) -> Result<S, String>,
+    setup: impl for<'local> FnOnce(&JvmRuntime, &mut Env<'local>, NativeBlockStateSurface)
+        -> Result<S, String>,
 ) -> Result<(), AdapterError> {
     // Operator paths are supplied only to isolated loaders below. Putting
     // either the adapter or a Paper jar on the system loader would let its
@@ -248,9 +270,10 @@ fn run_java<S>(
         .map_err(|error| AdapterError::new(format!("adapter {class_name}: {error}")))?;
     runtime.with_attached_thread(|env| {
         let result = (|| {
-            let setup_state = setup(&runtime, env).map_err(|error| AdapterError::new(format!(
-                "adapter {class_name} setup: {error}"
-            )))?;
+            let surface = NativeBlockStateSurface::from_port(port.clone());
+            let setup_state = setup(&runtime, env, surface).map_err(|error| {
+                AdapterError::new(format!("adapter {class_name} setup: {error}"))
+            })?;
             let class = runtime.load_isolated_class(env, &config, class_name)
                 .map_err(|error| java_error(env, class_name, error))?;
             register_block_query(env, &class, "blockStateId", "(III)I")
