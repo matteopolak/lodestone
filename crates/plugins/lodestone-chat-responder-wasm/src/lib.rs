@@ -88,7 +88,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.14.0".to_string(),
+            abi: "lodestone:plugin@0.15.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -164,7 +164,10 @@ impl Guest for ChatResponder {
             hotbar: 9,
         })];
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid")))]
+        #[cfg(feature = "inventory-drop-cursor")]
+        return vec![Action::InventoryDropCursor];
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-drop-cursor")))]
         return respond(events);
     }
 

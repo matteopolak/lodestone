@@ -2,11 +2,11 @@
 
 ## What it is
 
-The desktop WASM plugin host exposes copied local-player look, movement, block-breaking, and one-shot placement intents without giving a guest a world handle. A guest can install a yaw/pitch target, override one tick's input axes and buttons, start or abort a block break, request a block placement, or swap a live menu slot with a hotbar position while native systems retain simulation and network ownership.
+The desktop WASM plugin host exposes copied local-player look, movement, block-breaking, and one-shot placement intents without giving a guest a world handle. A guest can install a yaw/pitch target, override one tick's input axes and buttons, start or abort a block break, request a block placement, swap a live menu slot with a hotbar position, or drop its carried cursor stack while native systems retain simulation and network ownership.
 
 ## How it works
 
-`lodestone:plugin@0.14.0` provides `action.set-look(option<look-intent>)`, guarded by `act:look`, `action.set-movement(option<movement-intent>)`, guarded by `act:movement`, `action.set-break(option<break-intent>)`, guarded by `act:break`, `action.place-block(place-intent)`, guarded by `act:place`, `action.select-slot(hotbar-slot)`, guarded by `act:select-slot`, `action.inventory-click(inventory-click)`, guarded by `act:inventory-click`, `action.inventory-quick-move(u16)`, guarded separately by `act:inventory-quick-move`, and `action.inventory-hotbar-swap(inventory-hotbar-swap)`, guarded separately by `act:inventory-hotbar-swap`. Pickup/place has a copied `u16` slot plus a left/right button; quick move has only the `u16` slot, so the shell—not the guest—chooses the shift-click mode and its transfer ordering. Hotbar swap has a copied `u16` menu slot and `u8` hotbar index; the shell rejects indices outside `0..=8`, chooses the swap click mode, and validates the live menu. The shell validates each copied request against the active live menu and then calls `ClientHandle::menu_click`, so prediction, the veto, state id, changed-slot list, and egress remain owned by the client read model. `lodestone_wasm_host::abi::lower_action` turns look into `lodestone_ecs::player::LookIntent`; the conductor applies the final look request in load order during `TickSet::Intent`, before `apply_look_intent`.
+`lodestone:plugin@0.15.0` provides `action.set-look(option<look-intent>)`, guarded by `act:look`, `action.set-movement(option<movement-intent>)`, guarded by `act:movement`, `action.set-break(option<break-intent>)`, guarded by `act:break`, `action.place-block(place-intent)`, guarded by `act:place`, `action.select-slot(hotbar-slot)`, guarded by `act:select-slot`, `action.inventory-click(inventory-click)`, guarded by `act:inventory-click`, `action.inventory-quick-move(u16)`, guarded separately by `act:inventory-quick-move`, `action.inventory-hotbar-swap(inventory-hotbar-swap)`, guarded separately by `act:inventory-hotbar-swap`, and the no-argument `action.inventory-drop-cursor`, guarded separately by `act:inventory-drop-cursor`. Pickup/place has a copied `u16` slot plus a left/right button; quick move has only the `u16` slot, so the shell—not the guest—chooses the shift-click mode and its transfer ordering. Hotbar swap has a copied `u16` menu slot and `u8` hotbar index; the shell rejects indices outside `0..=8`, chooses the swap click mode, and validates the live menu. Cursor drop has no slot or cursor payload: the shell verifies that its active live menu has a carried stack, then chooses the outside click itself. The shell validates each copied request against the active live menu and then calls `ClientHandle::menu_click`, so prediction, the veto, state id, changed-slot list, and egress remain owned by the client read model. `lodestone_wasm_host::abi::lower_action` turns look into `lodestone_ecs::player::LookIntent`; the conductor applies the final look request in load order during `TickSet::Intent`, before `apply_look_intent`.
 
 For movement, the conductor runs after `lodestone_controller::ecs::compute_movement_intent` and before physics. It overwrites only copied axes and button state; item-use effects stay owned by the controller. Finite axes are clamped to `[-1, 1]`, and non-finite axes become neutral. Physics then resolves the request and the existing controller sends the ordinary movement and player-input actions. This is deliberately an intent rather than a raw packet: a guest cannot forge position, collision, or sequence state.
 
@@ -30,7 +30,7 @@ Any WIT change requires increasing `host::ABI_WORLD`, rebuilding guests, and upd
 
 ## Configuration
 
-The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, `observe:place`, `act:select-slot`, `act:inventory-click`, `act:inventory-quick-move`, `act:inventory-hotbar-swap`, and `observe:inventory`. A guest manifest must request every capability it uses; a request alone never changes the policy.
+The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, `observe:place`, `act:select-slot`, `act:inventory-click`, `act:inventory-quick-move`, `act:inventory-hotbar-swap`, `act:inventory-drop-cursor`, and `observe:inventory`. A guest manifest must request every capability it uses; a request alone never changes the policy.
 
 ```toml
 capabilities = ["act:movement"]
@@ -58,6 +58,10 @@ capabilities = ["act:inventory-quick-move"]
 
 ```toml
 capabilities = ["act:inventory-hotbar-swap"]
+```
+
+```toml
+capabilities = ["act:inventory-drop-cursor"]
 ```
 
 ```toml

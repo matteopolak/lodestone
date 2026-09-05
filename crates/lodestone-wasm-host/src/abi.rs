@@ -71,9 +71,13 @@ pub enum IntentAction {
 /// A bounded, copy-only inventory click the shell must validate against its live
 /// menu before it calls `ClientHandle::menu_click`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InventoryClickIntent {
-    pub slot: u16,
-    pub mode: InventoryClickMode,
+pub enum InventoryClickIntent {
+    /// A slot-addressed operation, kept as copied primitive data until the
+    /// shell validates it against the active live menu.
+    Slot { slot: u16, mode: InventoryClickMode },
+    /// Drop the complete carried stack outside the menu. The guest cannot name
+    /// a slot, inspect the cursor, or manufacture the outside-click packet.
+    DropCursor,
 }
 
 /// A copied inventory operation the shell must resolve against the live menu.
@@ -366,6 +370,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::InventoryClick(_) => Capability::ActInventoryClick,
         Action::InventoryQuickMove(_) => Capability::ActInventoryQuickMove,
         Action::InventoryHotbarSwap(_) => Capability::ActInventoryHotbarSwap,
+        Action::InventoryDropCursor => Capability::ActInventoryDropCursor,
     }
 }
 
@@ -434,7 +439,7 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
         )),
         Action::SelectSlot(slot) => LoweredAction::Intent(IntentAction::SelectSlot(usize::from(slot))),
         Action::InventoryClick(click) => {
-            LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent {
+            LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent::Slot {
                 slot: click.slot,
                 mode: InventoryClickMode::Pickup(match click.button {
                     crate::host::InventoryClickButton::Left => InventoryClickButton::Left,
@@ -443,16 +448,19 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
             }))
         }
         Action::InventoryQuickMove(slot) => {
-            LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent {
+            LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent::Slot {
                 slot,
                 mode: InventoryClickMode::QuickMove,
             }))
         }
         Action::InventoryHotbarSwap(swap) => {
-            LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent {
+            LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent::Slot {
                 slot: swap.slot,
                 mode: InventoryClickMode::HotbarSwap(swap.hotbar),
             }))
+        }
+        Action::InventoryDropCursor => {
+            LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent::DropCursor))
         }
     })
 }
@@ -622,7 +630,7 @@ mod tests {
                 &CapabilitySet::from_iter([Capability::ActInventoryClick]),
             ),
             Ok(LoweredAction::Intent(IntentAction::InventoryClick(
-                InventoryClickIntent {
+                InventoryClickIntent::Slot {
                     slot: 36,
                     mode: InventoryClickMode::Pickup(InventoryClickButton::Left),
                 }
@@ -645,7 +653,7 @@ mod tests {
                 &CapabilitySet::from_iter([Capability::ActInventoryQuickMove]),
             ),
             Ok(LoweredAction::Intent(IntentAction::InventoryClick(
-                InventoryClickIntent {
+                InventoryClickIntent::Slot {
                     slot: 36,
                     mode: InventoryClickMode::QuickMove,
                 }
@@ -674,7 +682,7 @@ mod tests {
                 &CapabilitySet::from_iter([Capability::ActInventoryHotbarSwap]),
             ),
             Ok(LoweredAction::Intent(IntentAction::InventoryClick(
-                InventoryClickIntent {
+                InventoryClickIntent::Slot {
                     slot: 36,
                     mode: InventoryClickMode::HotbarSwap(3),
                 }
@@ -690,6 +698,29 @@ mod tests {
             ),
             Err(Capability::ActInventoryHotbarSwap),
             "pickup/place authority must not also grant hotbar swaps"
+        );
+    }
+
+    /// A cursor drop crosses as a no-argument request. The shell decides whether
+    /// there is a carried stack and constructs the outside click only then.
+    #[test]
+    fn inventory_cursor_drop_lowers_onto_the_shell_owned_menu_predictor() {
+        assert_eq!(
+            lower_action(
+                Action::InventoryDropCursor,
+                &CapabilitySet::from_iter([Capability::ActInventoryDropCursor]),
+            ),
+            Ok(LoweredAction::Intent(IntentAction::InventoryClick(
+                InventoryClickIntent::DropCursor
+            )))
+        );
+        assert_eq!(
+            lower_action(
+                Action::InventoryDropCursor,
+                &CapabilitySet::from_iter([Capability::ActInventoryClick]),
+            ),
+            Err(Capability::ActInventoryDropCursor),
+            "slot-click authority must not also grant an outside cursor drop"
         );
     }
 
@@ -924,6 +955,7 @@ mod tests {
                 slot: 0,
                 hotbar: 0,
             }),
+            Action::InventoryDropCursor,
         ] {
             assert!(
                 lower_action(action.clone(), &CapabilitySet::empty()).is_err(),
