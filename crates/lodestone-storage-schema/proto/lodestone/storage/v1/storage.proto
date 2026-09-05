@@ -21,6 +21,12 @@ message ChunkRecord {
   sint32 column_z = 2;
   uint32 game_data_version = 3;
   repeated ChunkSection sections = 4;
+  // The complete 4x4x4 biome container for each 16-row block section. Built-in
+  // biome values are enum discriminants, never resource-location strings.
+  repeated BiomeSection biome_sections = 5;
+  // The 4x4 surface-biome answer used by surface-facing consumers. It is kept
+  // separately because it is not always the top row of the 3-D container.
+  repeated BuiltinBiome surface_biome_ids = 6 [packed = true];
   repeated ExtensionValue extensions = 10;
 }
 
@@ -31,6 +37,88 @@ message ChunkSection {
   bytes block_state_indices = 4;
   bytes sky_light = 5;
   bytes block_light = 6;
+}
+
+// One 16-row block section's 4x4x4 biome cells in `(qy * 4 + qz) * 4 + qx`
+// order. `quart_rows` is four for a full section and narrows only the final
+// partial section of a dimension.
+message BiomeSection {
+  sint32 section_y = 1;
+  uint32 quart_rows = 2;
+  repeated BuiltinBiome biome_ids = 3 [packed = true];
+}
+
+// Stable built-in biome discriminants for this game-data version. Extension
+// biomes require an explicit future extension-table representation rather than
+// being silently coerced into a built-in value.
+enum BuiltinBiome {
+  BUILTIN_BIOME_UNSPECIFIED = 0;
+  BUILTIN_BIOME_BADLANDS = 1;
+  BUILTIN_BIOME_BAMBOO_JUNGLE = 2;
+  BUILTIN_BIOME_BASALT_DELTAS = 3;
+  BUILTIN_BIOME_BEACH = 4;
+  BUILTIN_BIOME_BIRCH_FOREST = 5;
+  BUILTIN_BIOME_CHERRY_GROVE = 6;
+  BUILTIN_BIOME_COLD_OCEAN = 7;
+  BUILTIN_BIOME_CRIMSON_FOREST = 8;
+  BUILTIN_BIOME_DARK_FOREST = 9;
+  BUILTIN_BIOME_DEEP_COLD_OCEAN = 10;
+  BUILTIN_BIOME_DEEP_DARK = 11;
+  BUILTIN_BIOME_DEEP_FROZEN_OCEAN = 12;
+  BUILTIN_BIOME_DEEP_LUKEWARM_OCEAN = 13;
+  BUILTIN_BIOME_DEEP_OCEAN = 14;
+  BUILTIN_BIOME_DESERT = 15;
+  BUILTIN_BIOME_DRIPSTONE_CAVES = 16;
+  BUILTIN_BIOME_END_BARRENS = 17;
+  BUILTIN_BIOME_END_HIGHLANDS = 18;
+  BUILTIN_BIOME_END_MIDLANDS = 19;
+  BUILTIN_BIOME_ERODED_BADLANDS = 20;
+  BUILTIN_BIOME_FLOWER_FOREST = 21;
+  BUILTIN_BIOME_FOREST = 22;
+  BUILTIN_BIOME_FROZEN_OCEAN = 23;
+  BUILTIN_BIOME_FROZEN_PEAKS = 24;
+  BUILTIN_BIOME_FROZEN_RIVER = 25;
+  BUILTIN_BIOME_GROVE = 26;
+  BUILTIN_BIOME_ICE_SPIKES = 27;
+  BUILTIN_BIOME_JAGGED_PEAKS = 28;
+  BUILTIN_BIOME_JUNGLE = 29;
+  BUILTIN_BIOME_LUKEWARM_OCEAN = 30;
+  BUILTIN_BIOME_LUSH_CAVES = 31;
+  BUILTIN_BIOME_MANGROVE_SWAMP = 32;
+  BUILTIN_BIOME_MEADOW = 33;
+  BUILTIN_BIOME_MUSHROOM_FIELDS = 34;
+  BUILTIN_BIOME_NETHER_WASTES = 35;
+  BUILTIN_BIOME_OCEAN = 36;
+  BUILTIN_BIOME_OLD_GROWTH_BIRCH_FOREST = 37;
+  BUILTIN_BIOME_OLD_GROWTH_PINE_TAIGA = 38;
+  BUILTIN_BIOME_OLD_GROWTH_SPRUCE_TAIGA = 39;
+  BUILTIN_BIOME_PALE_GARDEN = 40;
+  BUILTIN_BIOME_PLAINS = 41;
+  BUILTIN_BIOME_RIVER = 42;
+  BUILTIN_BIOME_SAVANNA = 43;
+  BUILTIN_BIOME_SAVANNA_PLATEAU = 44;
+  BUILTIN_BIOME_SMALL_END_ISLANDS = 45;
+  BUILTIN_BIOME_SNOWY_BEACH = 46;
+  BUILTIN_BIOME_SNOWY_PLAINS = 47;
+  BUILTIN_BIOME_SNOWY_SLOPES = 48;
+  BUILTIN_BIOME_SNOWY_TAIGA = 49;
+  BUILTIN_BIOME_SOUL_SAND_VALLEY = 50;
+  BUILTIN_BIOME_SPARSE_JUNGLE = 51;
+  BUILTIN_BIOME_STONY_PEAKS = 52;
+  BUILTIN_BIOME_STONY_SHORE = 53;
+  BUILTIN_BIOME_SULFUR_CAVES = 54;
+  BUILTIN_BIOME_SUNFLOWER_PLAINS = 55;
+  BUILTIN_BIOME_SWAMP = 56;
+  BUILTIN_BIOME_TAIGA = 57;
+  BUILTIN_BIOME_THE_END = 58;
+  BUILTIN_BIOME_THE_VOID = 59;
+  BUILTIN_BIOME_WARM_OCEAN = 60;
+  BUILTIN_BIOME_WARPED_FOREST = 61;
+  BUILTIN_BIOME_WINDSWEPT_FOREST = 62;
+  BUILTIN_BIOME_WINDSWEPT_GRAVELLY_HILLS = 63;
+  BUILTIN_BIOME_WINDSWEPT_HILLS = 64;
+  BUILTIN_BIOME_WINDSWEPT_SAVANNA = 65;
+  BUILTIN_BIOME_WOODED_BADLANDS = 66;
 }
 
 // General state is typed rather than a string-keyed property map. Future

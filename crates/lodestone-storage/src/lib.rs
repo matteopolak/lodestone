@@ -560,6 +560,8 @@ mod tests {
                     sky_light: vec![],
                     block_light: vec![],
                 }],
+                biome_sections: vec![],
+                surface_biome_ids: vec![],
                 extensions: vec![],
             })),
         }

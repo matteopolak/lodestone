@@ -1,7 +1,8 @@
 use lodestone_storage_schema::generated::{general_record, storage_record};
 use lodestone_storage_schema::{
-    validate_extension_table, validate_record, validate_record_with_extensions, BuiltinDimension,
-    ExtensionTable, FORMAT_VERSION_V1, GameMode, StorageRecord, ValidationError,
+    validate_extension_table, validate_record, validate_record_with_extensions, BiomeSection,
+    BuiltinBiome, BuiltinDimension, ExtensionTable, FORMAT_VERSION_V1, GameMode, StorageRecord,
+    ValidationError,
 };
 use prost::Message;
 
@@ -102,6 +103,34 @@ fn invalid_palette_width_is_rejected_before_storage() {
     assert_eq!(
         validate_record(&record),
         Err(ValidationError::InvalidPaletteBits(16))
+    );
+}
+
+#[test]
+fn complete_builtin_biome_grids_validate_and_an_unknown_value_does_not() {
+    let mut record = StorageRecord::decode(fixture(CHUNK_V1).as_slice()).unwrap();
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        chunk.biome_sections = vec![BiomeSection {
+            section_y: -4,
+            quart_rows: 4,
+            biome_ids: vec![BuiltinBiome::Plains as i32; 64],
+        }];
+        chunk.surface_biome_ids = vec![BuiltinBiome::CherryGrove as i32; 16];
+    }
+    validate_record(&record).unwrap();
+
+    let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+        unreachable!();
+    };
+    chunk.biome_sections[0].biome_ids[63] = BuiltinBiome::Unspecified as i32;
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::UnknownBuiltinBiome(
+            BuiltinBiome::Unspecified as i32
+        ))
     );
 }
 

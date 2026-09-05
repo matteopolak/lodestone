@@ -8,8 +8,9 @@ pub mod generated {
 }
 
 pub use generated::{
-    BuiltinDimension, ChunkRecord, ChunkSection, EntityRecord, ExtensionTable, ExtensionValue,
-    GameMode, GeneralRecord, PlayerRecord, RegisteredExtension, StorageRecord, WorldProperties,
+    BiomeSection, BuiltinBiome, BuiltinDimension, ChunkRecord, ChunkSection, EntityRecord,
+    ExtensionTable, ExtensionValue, GameMode, GeneralRecord, PlayerRecord, RegisteredExtension,
+    StorageRecord, WorldProperties,
 };
 
 /// The only storage-record format understood by the initial schema.
@@ -92,7 +93,51 @@ fn validate_chunk(chunk: &ChunkRecord) -> Result<(), ValidationError> {
             return Err(ValidationError::EmptyPalette);
         }
     }
+    if !chunk.biome_sections.is_empty() || !chunk.surface_biome_ids.is_empty() {
+        if chunk.biome_sections.len() != chunk.sections.len() {
+            return Err(ValidationError::BiomeSectionCount {
+                expected: chunk.sections.len(),
+                actual: chunk.biome_sections.len(),
+            });
+        }
+        if chunk.surface_biome_ids.len() != 16 {
+            return Err(ValidationError::InvalidSurfaceBiomeCount(
+                chunk.surface_biome_ids.len(),
+            ));
+        }
+        for (block_section, biome_section) in chunk.sections.iter().zip(&chunk.biome_sections) {
+            if biome_section.section_y != block_section.section_y {
+                return Err(ValidationError::BiomeSectionCoordinateMismatch {
+                    expected: block_section.section_y,
+                    actual: biome_section.section_y,
+                });
+            }
+            if !(1..=4).contains(&biome_section.quart_rows) {
+                return Err(ValidationError::InvalidBiomeQuartRows(
+                    biome_section.quart_rows,
+                ));
+            }
+            let expected_cells = biome_section.quart_rows as usize * 16;
+            if biome_section.biome_ids.len() != expected_cells {
+                return Err(ValidationError::InvalidBiomeCellCount {
+                    expected: expected_cells,
+                    actual: biome_section.biome_ids.len(),
+                });
+            }
+            validate_builtin_biomes(&biome_section.biome_ids)?;
+        }
+        validate_builtin_biomes(&chunk.surface_biome_ids)?;
+    }
     validate_extension_values(&chunk.extensions)
+}
+
+fn validate_builtin_biomes(ids: &[i32]) -> Result<(), ValidationError> {
+    for &id in ids {
+        if BuiltinBiome::try_from(id).is_err() || id == BuiltinBiome::Unspecified as i32 {
+            return Err(ValidationError::UnknownBuiltinBiome(id));
+        }
+    }
+    Ok(())
 }
 
 fn validate_general(general: &GeneralRecord) -> Result<(), ValidationError> {
@@ -120,6 +165,12 @@ pub enum ValidationError {
     MissingGameDataVersion,
     InvalidPaletteBits(u32),
     EmptyPalette,
+    BiomeSectionCount { expected: usize, actual: usize },
+    BiomeSectionCoordinateMismatch { expected: i32, actual: i32 },
+    InvalidBiomeQuartRows(u32),
+    InvalidBiomeCellCount { expected: usize, actual: usize },
+    InvalidSurfaceBiomeCount(usize),
+    UnknownBuiltinBiome(i32),
     ZeroExtensionId,
     DuplicateExtensionId(u32),
     UnregisteredExtensionId(u32),
@@ -141,6 +192,22 @@ impl std::fmt::Display for ValidationError {
             Self::MissingGameDataVersion => formatter.write_str("chunk has no game data version"),
             Self::InvalidPaletteBits(bits) => write!(formatter, "invalid palette width {bits}"),
             Self::EmptyPalette => formatter.write_str("chunk section has an empty palette"),
+            Self::BiomeSectionCount { expected, actual } => {
+                write!(formatter, "expected {expected} biome sections, found {actual}")
+            }
+            Self::BiomeSectionCoordinateMismatch { expected, actual } => {
+                write!(formatter, "expected biome section Y {expected}, found {actual}")
+            }
+            Self::InvalidBiomeQuartRows(rows) => {
+                write!(formatter, "biome section has invalid quart-row count {rows}")
+            }
+            Self::InvalidBiomeCellCount { expected, actual } => {
+                write!(formatter, "expected {expected} biome cells, found {actual}")
+            }
+            Self::InvalidSurfaceBiomeCount(actual) => {
+                write!(formatter, "expected 16 surface biomes, found {actual}")
+            }
+            Self::UnknownBuiltinBiome(id) => write!(formatter, "unknown built-in biome {id}"),
             Self::ZeroExtensionId => formatter.write_str("extension local ID zero is reserved"),
             Self::DuplicateExtensionId(id) => write!(formatter, "duplicate extension local ID {id}"),
             Self::UnregisteredExtensionId(id) => {
