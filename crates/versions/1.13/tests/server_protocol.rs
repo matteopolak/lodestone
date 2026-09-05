@@ -332,9 +332,9 @@ fn registry_selected_arm_animation_connects_protocol_404_to_the_shared_swing_bro
         .expect("protocol 404 must resolve to its hosted server protocol");
     let adapter = V404Adapter::new();
 
-    for (hand, expected_hand, expected_action) in [
-        (Hand::Main, 0, AnimationAction::SwingMainHand),
-        (Hand::Off, 1, AnimationAction::SwingOffHand),
+    for (hand, expected_action) in [
+        (Hand::Main, AnimationAction::SwingMainHand),
+        (Hand::Off, AnimationAction::SwingOffHand),
     ] {
         let action = ClientAction::SwingArm { hand };
         let Some((packet_id, payload)) = adapter
@@ -346,11 +346,11 @@ fn registry_selected_arm_animation_connects_protocol_404_to_the_shared_swing_bro
         assert_eq!(packet_id, play::serverbound::ARM_ANIMATION);
         assert_eq!(
             protocol.decode(State::Play, packet_id, &payload),
-            ServerBound::Swing { hand: expected_hand },
+            ServerBound::Swing { hand },
             "{action:?} must reach the shared-server swing consumer"
         );
 
-        let animation = if expected_hand == 0 { 0 } else { 3 };
+        let animation = if hand == Hand::Main { 0 } else { 3 };
         let ServerDirective::Send { packet_id, payload } =
             protocol.encode_animate(321, animation)
         else {

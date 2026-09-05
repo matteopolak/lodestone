@@ -10223,8 +10223,11 @@ mod block_entity_query_tests {
 }
 
 /// Maps main/off-hand ordinals to animation action bytes; invalid hands use main.
-fn swing_action(hand: u8) -> u8 {
-    if hand == 1 { 3 } else { 0 }
+fn swing_action(hand: lodestone_model::Hand) -> u8 {
+    match hand {
+        lodestone_model::Hand::Main => 0,
+        lodestone_model::Hand::Off => 3,
+    }
 }
 
 /// Folds one recipe-book acknowledgement and returns the one-entry update that
@@ -19666,17 +19669,8 @@ mod tests {
     /// `SWING_OFF_HAND = 3`) rather than the plausible-but-wrong `0`/`1`.
     #[test]
     fn swing_action_maps_hand_to_vanillas_animate_byte() {
-        assert_eq!(swing_action(0), 0, "main hand must map to SWING_MAIN_HAND");
-        assert_eq!(swing_action(1), 3, "off hand must map to SWING_OFF_HAND, not 1");
-    }
-
-    /// The control for the mapping above: malformed input degrades to the
-    /// main-hand swing rather than propagating garbage into the wire byte —
-    /// the same convention this crate's decode arms already apply.
-    #[test]
-    fn swing_action_degrades_malformed_input_to_main_hand() {
-        assert_eq!(swing_action(2), 0);
-        assert_eq!(swing_action(255), 0);
+        assert_eq!(swing_action(lodestone_model::Hand::Main), 0);
+        assert_eq!(swing_action(lodestone_model::Hand::Off), 3);
     }
 
     /// The positive case: a spectator within range of a resolvable player

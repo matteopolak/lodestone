@@ -3804,7 +3804,8 @@ impl ServerProtocol for V770ServerProtocol {
             State::Play if packet_id == play::serverbound::SWING => {
                 match decode_full::<Swing>(payload) {
                     Some(s) => ServerBound::Swing {
-                        hand: u8::try_from(s.hand).unwrap_or(0),
+                        hand: lodestone_model::Hand::from_wire_ordinal(s.hand)
+                            .unwrap_or(lodestone_model::Hand::Main),
                     },
                     None => ServerBound::Ignored,
                 }

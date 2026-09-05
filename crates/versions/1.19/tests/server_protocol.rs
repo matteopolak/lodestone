@@ -285,9 +285,7 @@ fn registry_selected_protocol_762_carries_arm_swings_to_the_client_event_stream(
         // the hosted decoder independent of the adapter encoder below.
         assert_eq!(
             protocol.decode(State::Play, play::serverbound::ARM_ANIMATION, body),
-            ServerBound::Swing {
-                hand: if hand == Hand::Main { 0 } else { 1 },
-            },
+            ServerBound::Swing { hand },
             "the literal {hand:?} request must reach the shared swing consumer"
         );
 
@@ -302,9 +300,7 @@ fn registry_selected_protocol_762_carries_arm_swings_to_the_client_event_stream(
         assert_eq!(payload, body);
         assert_eq!(
             protocol.decode(State::Play, packet_id, &payload),
-            ServerBound::Swing {
-                hand: if hand == Hand::Main { 0 } else { 1 },
-            },
+            ServerBound::Swing { hand },
             "the adapter request must reach the registry-selected host consumer"
         );
 
