@@ -218,7 +218,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 38] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 39] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -344,6 +344,10 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 38] = [
     NativeMethodSpec { name: "playerHandleGameMode", descriptor: "(J)I" },
     NativeMethodSpec { name: "playerHandleExperienceLevel", descriptor: "(J)I" },
     NativeMethodSpec { name: "playerHandleExperiencePoints", descriptor: "(J)I" },
+    NativeMethodSpec {
+        name: "blockStateIds",
+        descriptor: "([I)[I",
+    },
 ];
 
 const ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS: [IsolatedDescriptorMemberSpec; 4] = [
@@ -370,6 +374,50 @@ const ISOLATED_RESIDENT_BLOCK_CHANGE_LISTENER_METHODS: [IsolatedListenerMethodSp
         name: "onResidentBlockStateChanged",
         descriptor: "(IIII)V",
     },
+];
+
+/// The Rust producer category for one implemented world/block shim member.
+///
+/// This is a census category, not a Java API type: it records the bounded
+/// Rust capability that makes each supported world-domain declaration real.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperWorldCapability {
+    /// `AdapterHost::service_pending` answers one resident state read.
+    ResidentStateRead,
+    /// `AdapterHost::service_pending_block_state_batches` answers one ordered region read.
+    ResidentStateBatchRead,
+    /// `AdapterHost::service_pending_block_writes` applies one resident replacement.
+    ResidentStateWrite,
+    /// Worker-local ordered observation after a host-confirmed replacement.
+    ResidentChangeObservation,
+    /// A generation-checked, worker-local block coordinate value.
+    CallbackBlockHandle,
+    /// A generation-checked worker-local stale-generation query.
+    CallbackBlockHandleRetention,
+}
+
+/// One generated world/block shim declaration and its Rust capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaperWorldMemberSpec {
+    /// Exact declared static-native method.
+    pub method: NativeMethodSpec,
+    /// The finite Rust capability servicing that declaration.
+    pub capability: PaperWorldCapability,
+}
+
+const PAPER_WORLD_SURFACE_CENSUS: [PaperWorldMemberSpec; 12] = [
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[0], capability: PaperWorldCapability::ResidentStateRead },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[2], capability: PaperWorldCapability::ResidentStateWrite },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[8], capability: PaperWorldCapability::ResidentChangeObservation },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[9], capability: PaperWorldCapability::CallbackBlockHandle },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[10], capability: PaperWorldCapability::CallbackBlockHandle },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[11], capability: PaperWorldCapability::CallbackBlockHandle },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[12], capability: PaperWorldCapability::CallbackBlockHandle },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[13], capability: PaperWorldCapability::CallbackBlockHandle },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[14], capability: PaperWorldCapability::ResidentStateRead },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[15], capability: PaperWorldCapability::ResidentStateWrite },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[16], capability: PaperWorldCapability::CallbackBlockHandleRetention },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[38], capability: PaperWorldCapability::ResidentStateBatchRead },
 ];
 
 /// One non-interchangeable phase of native registration.
@@ -429,6 +477,7 @@ const ISOLATED_SHIM_REGISTRATION: &[NativeRegistrationStep] = registration_steps
     ISOLATED_SHIM_METHODS[35],
     ISOLATED_SHIM_METHODS[36],
     ISOLATED_SHIM_METHODS[37],
+    ISOLATED_SHIM_METHODS[38],
 );
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -438,6 +487,14 @@ const ISOLATED_SHIM_REGISTRATION: &[NativeRegistrationStep] = registration_steps
 /// starting a JVM or requiring a JDK.
 pub const fn isolated_shim_methods() -> &'static [NativeMethodSpec] {
     &ISOLATED_SHIM_METHODS
+}
+
+/// Generated census of every implemented world/chunk/block shim member.
+///
+/// A member absent here is deliberately unsupported by this bounded domain;
+/// callers must not infer a capability from an adjacent shim declaration.
+pub const fn paper_world_surface_census() -> &'static [PaperWorldMemberSpec] {
+    &PAPER_WORLD_SURFACE_CENSUS
 }
 
 /// Generated validation and registration sequence for the isolated shim.
@@ -938,6 +995,9 @@ fn method_id(
         ("blockStateId", "(III)I") => {
             env.get_static_method_id(class, jni_str!("blockStateId"), jni_sig!("(III)I"))
         }
+        ("blockStateIds", "([I)[I") => {
+            env.get_static_method_id(class, jni_str!("blockStateIds"), jni_sig!("([I)[I"))
+        }
         ("serverTickCount", "()J") => {
             env.get_static_method_id(class, jni_str!("serverTickCount"), jni_sig!("()J"))
         }
@@ -1094,6 +1154,9 @@ fn register_method(
     match (method.name, method.descriptor) {
         ("blockStateId", "(III)I") => {
             adapter::register_block_query(env, class, method.name, method.descriptor)
+        }
+        ("blockStateIds", "([I)[I") => {
+            adapter::register_block_batch_query(env, class, method.name, method.descriptor)
         }
         ("serverTickCount", "()J") => {
             adapter::register_server_tick_query(env, class, method.name, method.descriptor)
@@ -1531,6 +1594,7 @@ mod tests {
                 NativeMethodSpec { name: "playerHandleGameMode", descriptor: "(J)I" },
                 NativeMethodSpec { name: "playerHandleExperienceLevel", descriptor: "(J)I" },
                 NativeMethodSpec { name: "playerHandleExperiencePoints", descriptor: "(J)I" },
+                NativeMethodSpec { name: "blockStateIds", descriptor: "([I)[I" },
             ],
         );
         let methods = isolated_shim_methods();
@@ -1588,6 +1652,21 @@ mod tests {
             }],
             "the listener is one typed callback, not a general event hierarchy",
         );
+    }
+
+    #[test]
+    fn generated_world_surface_census_maps_each_member_to_one_rust_capability() {
+        let census = paper_world_surface_census();
+        assert_eq!(census.len(), 12, "every supported world/block member is listed once");
+        let unique_methods = census.iter()
+            .map(|entry| (entry.method.name, entry.method.descriptor))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique_methods.len(), census.len(), "world census must not duplicate a declaration");
+        assert!(census.iter().all(|entry| isolated_shim_methods().contains(&entry.method)));
+        assert!(census.iter().any(|entry| entry.method == NativeMethodSpec {
+            name: "blockStateIds",
+            descriptor: "([I)[I",
+        } && entry.capability == PaperWorldCapability::ResidentStateBatchRead));
     }
 
     #[test]
@@ -1684,6 +1763,7 @@ mod tests {
             &source,
             "package lodestone.bridge; public final class IsolatedPaperShim { \
              public static native int blockStateId(int x, int y, int z); \
+             public static native int[] blockStateIds(int[] positions); \
              public static native long serverTickCount(); \
              public static native int setBlockStateId(int x, int y, int z, int stateId); \
              public static native String currentPluginName(); \
@@ -1791,6 +1871,7 @@ mod tests {
             &shim_source,
             "package lodestone.bridge; public final class IsolatedPaperShim { \
              public static native int blockStateId(int x, int y, int z); \
+             public static native int[] blockStateIds(int[] positions); \
              public static native long serverTickCount(); \
              public static native int setBlockStateId(int x, int y, int z, int stateId); \
              public static native String currentPluginName(); \
