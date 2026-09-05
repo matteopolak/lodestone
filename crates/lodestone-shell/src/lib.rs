@@ -115,6 +115,9 @@ pub mod sim;
 /// [`remote_skins`] for the other-players half.
 pub mod skin_fetch;
 pub mod tablist;
+/// Native interactive terminal surfaces selected by `--surface`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod terminal;
 pub mod worldgen;
 /// Native runtime discovery for capability-gated WASM plugins. Kept out of the
 /// browser graph because the Wasmtime host cannot compile for wasm32.
@@ -149,10 +152,13 @@ pub fn run(config: Config) -> anyhow::Result<()> {
         match config.mode {
             Mode::Headless => diagnostics::run_headless(diagnostics::require_owned_account()?, config),
             Mode::Connect => diagnostics::run_connect(diagnostics::require_owned_account()?, config),
+            Mode::Stdio => terminal::run_stdio(diagnostics::require_owned_account()?, config),
+            Mode::Terminal => terminal::run_terminal(diagnostics::require_owned_account()?, config),
             Mode::Window => Err(anyhow::anyhow!(
                 "this build was compiled without the `window` Cargo feature, so it has \
                  no winit and cannot open a window. Rebuild with `--features window` \
-                 (on by default) to open one, or use --headless/--connect instead."
+                 (on by default) to open one, or use --surface stdio/terminal, \
+                 --headless, or --connect instead."
             )),
         }
     }

@@ -1840,6 +1840,13 @@ pub enum Mode {
     /// Connect to the server, stream events for a bounded time, print them, and
     /// exit. Proves the live pipeline end to end without a GPU.
     Connect,
+    /// Connect and expose chat plus command input as newline-delimited stdio.
+    /// No window or GPU is created, and the session runs until stdin closes or
+    /// the local `#quit` command is entered.
+    Stdio,
+    /// Connect and draw the real offscreen game frame as true-colour Unicode
+    /// half blocks inside an interactive terminal UI.
+    Terminal,
     /// A real, persistent session — ticks, connects, keeps the
     /// event loop alive — with **no** presentation attached at start: no
     /// window, no GPU, no `PresentationSet` systems. Unlike [`Mode::Headless`]
@@ -2009,7 +2016,8 @@ impl Config {
     /// binary is discoverable and `./lodestone --help` never opens a window.
     ///
     /// Recognised flags:
-    /// `--headless`, `--connect`, `--window`, `--host <h>`, `--port <p>`,
+    /// `--headless`, `--connect`, `--window`, `--surface <name>`, `--host <h>`,
+    /// `--port <p>`,
     /// `--protocol <n>`, `--render-distance <n>`, `--live` (connect while
     /// windowed), `--seconds <n>`, `--sensitivity <f>`, `--plugin-grants <file>`,
     /// the benchmark options, and `--help`/`-h`.
@@ -2036,6 +2044,23 @@ impl Config {
                 "--help" | "-h" => return CliOutcome::Help(Self::usage()),
                 "--headless" => cfg.mode = Mode::Headless,
                 "--connect" => cfg.mode = Mode::Connect,
+                "--surface" => {
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error(
+                            "--surface requires window, stdio, or terminal".into(),
+                        );
+                    };
+                    cfg.mode = match value.as_str() {
+                        "window" => Mode::Window,
+                        "stdio" => Mode::Stdio,
+                        "terminal" => Mode::Terminal,
+                        _ => {
+                            return CliOutcome::Error(format!(
+                                "--surface requires window, stdio, or terminal, got {value}"
+                            ));
+                        }
+                    };
+                }
                 #[cfg(feature = "runtime-presentation")]
                 "--headless-session" => cfg.mode = Mode::HeadlessSession,
                 "--window" => cfg.mode = Mode::Window,
@@ -2331,6 +2356,9 @@ USAGE:
 
 MODES (default: --window):
     --window                 Open a window and play the interactive game loop
+    --surface <SURFACE>      Presentation surface: window, stdio, or terminal
+                             stdio prints chat and reads chat/commands from stdin
+                             terminal draws true-colour Unicode game frames
     --headless               Render one offscreen frame, print debug stats, exit
     --connect                Stream live server events for a bounded time, exit
     --live                   Also open a live connection while windowed
@@ -2435,6 +2463,21 @@ mod tests {
         assert_eq!(c.mode, Mode::Window);
         assert_eq!(c.protocol, 776);
         assert_eq!(c.port, 25565);
+    }
+
+    #[test]
+    fn surface_selects_each_interactive_presentation() {
+        assert_eq!(parse(&["--surface", "window"]).mode, Mode::Window);
+        assert_eq!(parse(&["--surface", "stdio"]).mode, Mode::Stdio);
+        assert_eq!(parse(&["--surface", "terminal"]).mode, Mode::Terminal);
+        assert!(matches!(
+            Config::from_args(["--surface".to_owned()]),
+            CliOutcome::Error(message) if message.contains("requires window, stdio, or terminal")
+        ));
+        assert!(matches!(
+            Config::from_args(["--surface".to_owned(), "pixels".to_owned()]),
+            CliOutcome::Error(message) if message.contains("got pixels")
+        ));
     }
 
     #[test]
