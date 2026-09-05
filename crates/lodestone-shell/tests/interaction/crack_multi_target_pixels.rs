@@ -171,7 +171,7 @@ fn two_crack_targets_both_reach_pixels_at_distinct_positions() {
             .models()
             .expect("the vanilla load must attach baked block models");
         assert!(
-            !models.quads(state_id.raw()).is_empty(),
+            !models.quads(state_id).is_empty(),
             "{BLOCK} (state {state_id:?}) must have baked model quads, or this gate would be \
              measuring the absence of geometry rather than the absence of a second draw"
         );

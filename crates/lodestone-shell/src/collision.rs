@@ -96,6 +96,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+use lodestone_data::block_states::StateId;
 use lodestone_model::{
     BlockAabb, BlockPhysics, DEFAULT_BLOCK_PHYSICS, VersionAdapter, block_physics,
 };
@@ -1180,7 +1181,7 @@ impl LiveCollision {
         // unrecognised state id — never as a substitute for a real outline
         // that happens to be empty (open water, air, light).
         if let Some(models) = self.atlas.models()
-            && !models.quads(state).is_empty()
+            && StateId::new(state).is_some_and(|state_id| !models.quads(state_id).is_empty())
         {
             return FULL_CUBE;
         }
@@ -1353,7 +1354,8 @@ impl BlockView for LiveCollision {
     /// discards the dynamic state and `fluid_at` is the consumer that needs it.
     /// Still one rule in one place; two callers of it.
     fn fluid_cell_of(&self, state: u32) -> Option<FluidCell> {
-        let cell = self.atlas.models()?.fluid(state)?;
+        let state_id = StateId::new(state)?;
+        let cell = self.atlas.models()?.fluid(state_id)?;
         Some(FluidCell {
             kind: match cell.kind {
                 FluidKind::Water => lodestone_physics::FluidKind::Water,

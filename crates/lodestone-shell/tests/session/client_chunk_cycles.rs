@@ -123,6 +123,7 @@ use std::hint::black_box;
 use lodestone::mesher::{SectionKey, mesh_snapshot_fluids, mesh_snapshot_models, snapshot_section};
 use lodestone_assets::tint::{TintKind, biome_effects};
 use lodestone_client::ConnectionState;
+use lodestone_data::block_states::StateId;
 use lodestone_core::Nbt;
 use lodestone_model::BlockPos;
 use lodestone_render::BlockModels;
@@ -1371,7 +1372,9 @@ fn client_chunk_path_cycle_attribution() {
             .expect("the key came from this column");
         let blocks = section.block_states();
         let n = (0..blocks.entry_count())
-            .filter(|&i| models.fluid(blocks.get(i)).is_some())
+            .filter(|&i| {
+                StateId::new(blocks.get(i)).is_some_and(|state| models.fluid(state).is_some())
+            })
             .count();
         fluid_cells += n;
         if n == 0 { dry.push(snap) } else { wet.push(snap) }

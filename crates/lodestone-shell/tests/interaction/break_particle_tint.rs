@@ -53,7 +53,8 @@ use std::path::PathBuf;
 
 use lodestone::particles::Particles;
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
-use lodestone_model::BlockStateRegistry;
+use lodestone_data::block_states::StateId;
+use lodestone_model::{BlockStateRegistry, BlockStateRef};
 use lodestone_render::{BlockModels, Camera, blocks_json_registry};
 
 /// Walk up from the test's working directory for a pack root holding both files
@@ -99,11 +100,13 @@ fn registry_of(root: &std::path::Path) -> impl BlockStateRegistry {
 /// `block name -> (first state id, that block's every state id)`, built in one
 /// pass. A per-lookup linear scan is 32,366 `resolve` calls, each of which hands
 /// back an owned property map — twenty of those dominated this gate's runtime.
-fn state_index(reg: &impl BlockStateRegistry) -> BTreeMap<String, u32> {
-    let mut out: BTreeMap<String, u32> = BTreeMap::new();
+fn state_index(reg: &impl BlockStateRegistry) -> BTreeMap<String, StateId> {
+    let mut out: BTreeMap<String, StateId> = BTreeMap::new();
     for id in 0..reg.state_count() {
-        if let Some(state) = reg.resolve(id) {
-            out.entry(state.block.to_string()).or_insert(id);
+        if let Some(state_id) = StateId::new(id)
+            && let Some(state) = reg.resolve(id)
+        {
+            out.entry(state.block.to_string()).or_insert(state_id);
         }
     }
     out
@@ -156,10 +159,14 @@ struct Burst {
 /// `p` is threaded in rather than built per call because `Particles::new`
 /// materialises two 32,366-entry tables, which dominates the census below by an
 /// order of magnitude over the burst itself.
-fn burst(p: &mut Particles, models: &BlockModels, state: u32) -> Burst {
+fn burst(p: &mut Particles, models: &BlockModels, state: StateId) -> Burst {
     let atlas = models.atlas();
     p.engine_mut().clear();
-    p.destroy_block([0, 64, 0], state, [1.0; 3]);
+    p.destroy_block(
+        [0, 64, 0],
+        BlockStateRef::canonical(state.raw()),
+        [1.0; 3],
+    );
     let _ = p.extract(&Camera::default(), 0.0, &|_, _, _| {
         Some(lodestone_particle::FULL_BRIGHT)
     });
@@ -294,8 +301,9 @@ fn cascading_block_debris_is_tinted_not_grey() {
             visible,
         } = burst(&mut particles, &models, state);
         eprintln!(
-            "{name:26} state={state:5} tint={tint:?}  subject=#{:02x}{:02x}{:02x} \
+            "{name:26} state={:5} tint={tint:?}  subject=#{:02x}{:02x}{:02x} \
              control(no tint)=#{:02x}{:02x}{:02x}  visible={visible}",
+            state.raw(),
             subject[0], subject[1], subject[2], control[0], control[1], control[2]
         );
 
@@ -344,7 +352,8 @@ fn cascading_block_debris_is_tinted_not_grey() {
         let state = *index.get(name).unwrap_or_else(|| panic!("{name} missing"));
         let b = burst(&mut particles, &models, state);
         eprintln!(
-            "{name:26} state={state:5} subject=#{:02x}{:02x}{:02x} control=#{:02x}{:02x}{:02x}",
+            "{name:26} state={:5} subject=#{:02x}{:02x}{:02x} control=#{:02x}{:02x}{:02x}",
+            state.raw(),
             b.subject[0], b.subject[1], b.subject[2], b.control[0], b.control[1], b.control[2]
         );
         assert!(b.visible > 0, "{name} threw no visible debris");
@@ -399,12 +408,15 @@ fn no_tinted_state_still_throws_grey_debris() {
 
     // One representative state per distinct (block, tint) pair: 32k bursts would
     // be slow and every state of one block shares its sprite.
-    let mut seen: BTreeMap<(String, [u32; 3]), u32> = BTreeMap::new();
-    for id in 0..models.state_count() as u32 {
-        let Some(tint) = models.particle_tint(id) else {
+    let mut seen: BTreeMap<(String, [u32; 3]), StateId> = BTreeMap::new();
+    for raw in 0..models.state_count() as u32 {
+        let Some(state_id) = StateId::new(raw) else {
             continue;
         };
-        let Some(state) = registry.resolve(id) else {
+        let Some(tint) = models.particle_tint(state_id) else {
+            continue;
+        };
+        let Some(state) = registry.resolve(state_id.raw()) else {
             continue;
         };
         #[expect(clippy::cast_possible_truncation, reason = "tints are 0..=1")]
@@ -416,7 +428,7 @@ fn no_tinted_state_still_throws_grey_debris() {
                 (tint[2] * 255.0) as u32,
             ],
         );
-        seen.entry(key).or_insert(id);
+        seen.entry(key).or_insert(state_id);
     }
     eprintln!(
         "=== particle-tint census: {} distinct (block, tint) pairs over {} tinted states",

@@ -44,6 +44,7 @@ use bevy_ecs::query::With;
 use bevy_ecs::resource::Resource;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_ecs::system::{Query, Res, ResMut};
+use lodestone_data::block_states::StateId;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, FrameSet, LocalPlayer, PhysicsState, Update};
 use lodestone_render::{
@@ -1073,8 +1074,11 @@ fn biome_name_at(snapshot: &SectionSnapshot, pos: BlockPos) -> Option<&'static s
 
 impl ModelSectionView for SnapshotModelView<'_> {
     fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
-        let id = self.snapshot.at(0, 0, 0).get_block(x, y, z);
-        self.models.quads(id)
+        let raw = self.snapshot.at(0, 0, 0).get_block(x, y, z);
+        let Some(state) = StateId::new(raw) else {
+            return &[];
+        };
+        self.models.quads(state)
     }
 
     /// Vanilla's `ambientocclusion` model-JSON flag, per state.
@@ -1091,8 +1095,11 @@ impl ModelSectionView for SnapshotModelView<'_> {
     /// clause has no data source in this codebase yet — see
     /// `docs/model-smooth-lighting.md`.
     fn ambient_occlusion_at(&self, x: usize, y: usize, z: usize) -> bool {
-        let id = self.snapshot.at(0, 0, 0).get_block(x, y, z);
-        self.models.ambient_occlusion(id)
+        let raw = self.snapshot.at(0, 0, 0).get_block(x, y, z);
+        let Some(state) = StateId::new(raw) else {
+            return true;
+        };
+        self.models.ambient_occlusion(state)
     }
 
     fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
@@ -1104,8 +1111,11 @@ impl ModelSectionView for SnapshotModelView<'_> {
         if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
             return false;
         }
-        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
-        self.models.occludes(id)
+        let raw = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        let Some(state) = StateId::new(raw) else {
+            return false;
+        };
+        self.models.occludes(state)
     }
 
     /// Owner report: "the ice texture looks inverted... i can see the four
@@ -1123,9 +1133,14 @@ impl ModelSectionView for SnapshotModelView<'_> {
         if !(-1..=1).contains(&ndx) || !(-1..=1).contains(&ndy) || !(-1..=1).contains(&ndz) {
             return false;
         }
-        let here_id = self.snapshot.at(0, 0, 0).get_block(x as usize, y as usize, z as usize);
-        let neighbour_id = self.snapshot.at(ndx, ndy, ndz).get_block(nlx, nly, nlz);
-        self.models.skips_rendering_against(here_id, neighbour_id)
+        let here_raw = self.snapshot.at(0, 0, 0).get_block(x as usize, y as usize, z as usize);
+        let neighbour_raw = self.snapshot.at(ndx, ndy, ndz).get_block(nlx, nly, nlz);
+        let (Some(here), Some(neighbour)) =
+            (StateId::new(here_raw), StateId::new(neighbour_raw))
+        else {
+            return false;
+        };
+        self.models.skips_rendering_against(here, neighbour)
     }
 
     /// Vanilla's FAST leaves (`options.cutoutLeaves == false`): real per-face
@@ -1142,8 +1157,11 @@ impl ModelSectionView for SnapshotModelView<'_> {
         if self.cutout_leaves {
             return false;
         }
-        let id = self.snapshot.at(0, 0, 0).get_block(x, y, z);
-        self.models.is_leaves(id)
+        let raw = self.snapshot.at(0, 0, 0).get_block(x, y, z);
+        let Some(state) = StateId::new(raw) else {
+            return false;
+        };
+        self.models.is_leaves(state)
     }
 
     /// Vanilla's per-**quad** render layer: `SectionCompiler` buckets every
@@ -1180,8 +1198,8 @@ impl ModelSectionView for SnapshotModelView<'_> {
         // through the walls. Demote it to `Cutout` — the alpha-tested opaque
         // pass — which is what this block did before per-quad routing existed.
         // See `BlockModels::is_cauldron`.
-        let id = self.snapshot.at(0, 0, 0).get_block(x, y, z);
-        if self.models.is_cauldron(id) {
+        let raw = self.snapshot.at(0, 0, 0).get_block(x, y, z);
+        if StateId::new(raw).is_some_and(|state| self.models.is_cauldron(state)) {
             return Some(lodestone_render::RenderLayer::Cutout);
         }
         Some(layer)
@@ -1379,7 +1397,10 @@ pub fn snapshot_visibility(
     models: &BlockModels,
 ) -> lodestone_render::SectionVisibility {
     let centre = snapshot.at(0, 0, 0);
-    lodestone_render::compute_visibility_from(|x, y, z| models.occludes(centre.get_block(x, y, z)))
+    lodestone_render::compute_visibility_from(|x, y, z| {
+        StateId::new(centre.get_block(x, y, z))
+            .is_some_and(|state| models.occludes(state))
+    })
 }
 
 /// The mesher's fluid view over a snapshot: resolves each cell's fluid (if any)
@@ -1430,11 +1451,14 @@ impl FluidSectionView for SnapshotFluidView<'_> {
         if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
             return FluidNeighborCell::default();
         }
-        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        let raw = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        let Some(state) = StateId::new(raw) else {
+            return FluidNeighborCell::default();
+        };
         FluidNeighborCell {
-            fluid: self.models.fluid(id),
-            occludes: self.models.occludes(id),
-            overlay: self.models.fluid_overlay(id),
+            fluid: self.models.fluid(state),
+            occludes: self.models.occludes(state),
+            overlay: self.models.fluid_overlay(state),
         }
     }
 
@@ -1445,8 +1469,9 @@ impl FluidSectionView for SnapshotFluidView<'_> {
         if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
             return None;
         }
-        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
-        self.models.fluid(id)
+        let raw = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        let state = StateId::new(raw)?;
+        self.models.fluid(state)
     }
 
     fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
@@ -1456,8 +1481,11 @@ impl FluidSectionView for SnapshotFluidView<'_> {
         if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
             return false;
         }
-        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
-        self.models.occludes(id)
+        let raw = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        let Some(state) = StateId::new(raw) else {
+            return false;
+        };
+        self.models.occludes(state)
     }
 
     /// Whether the neighbour at `(x, y, z)` takes water's **overlay** sprite
@@ -1475,8 +1503,11 @@ impl FluidSectionView for SnapshotFluidView<'_> {
         if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
             return false;
         }
-        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
-        self.models.fluid_overlay(id)
+        let raw = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        let Some(state) = StateId::new(raw) else {
+            return false;
+        };
+        self.models.fluid_overlay(state)
     }
 
     /// The live half of the partial-occluder cull, and it exists for exactly the
@@ -1538,13 +1569,13 @@ impl FluidSectionView for SnapshotFluidView<'_> {
         if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
             return SelfOcclusion::default();
         }
-        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
-        if self.models.layer(id) != lodestone_render::RenderLayer::Solid {
-            return SelfOcclusion::default();
-        }
-        let Some(state) = lodestone_data::block_states::StateId::new(id) else {
+        let raw = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        let Some(state) = StateId::new(raw) else {
             return SelfOcclusion::default();
         };
+        if self.models.layer(state) != lodestone_render::RenderLayer::Solid {
+            return SelfOcclusion::default();
+        }
         let boxes = lodestone_data::outline_shapes::outline_boxes(state);
         lodestone_assets::fluid::self_occlusion(boxes)
     }

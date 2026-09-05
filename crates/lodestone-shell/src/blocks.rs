@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use lodestone_data::block_states::StateId;
 use lodestone_render::{
     BlockAtlas, BlockClassifier, BlockModels, Cell, FluidKind, SpriteId, Surface,
 };
@@ -269,6 +270,7 @@ impl BlockClassifier for ShellClassifier {
 /// before the atlas escapes).
 #[must_use]
 pub fn vanilla_fluid(atlas: &BlockAtlas, state_id: u32) -> Option<FluidKind> {
+    let state_id = StateId::new(state_id)?;
     atlas.models()?.fluid(state_id).map(|cell| cell.kind)
 }
 
