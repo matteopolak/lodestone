@@ -9,6 +9,9 @@ use lodestone_client::{
     ServerAddress, VersionAdapter,
 };
 use lodestone_fuzz::{read_hex_fixture, v26_2_fixture_path};
+use lodestone_model::item::{
+    ItemComponents, ItemTool, MobEffectInstance, ToolBlocks, ToolPatch, ToolRule,
+};
 use lodestone_model::{AdapterError, ClientAction, WorldSink};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_v26_2::{V770Adapter, packet_ids::play};
@@ -38,6 +41,66 @@ fn captured_inventory_script() -> [CapturedStep; 2] {
             expected_count: 1,
         },
     ]
+}
+
+/// Expected patch fields come from the capture's source command and annotated
+/// bytes, independent of both adapter decoding and client inventory folding.
+fn expected_components(fixture: &str) -> ItemComponents {
+    let mut components = ItemComponents::default();
+    match fixture {
+        "tool_component_explicit.hex" => {
+            components.tool = ToolPatch::Set(ItemTool::new(
+                vec![
+                    ToolRule::new(
+                        ToolBlocks::Tag("minecraft:incorrect_for_diamond_tool".parse().unwrap()),
+                        None,
+                        Some(false),
+                    ),
+                    ToolRule::new(ToolBlocks::Blocks(vec![1, 193]), Some(12.5), None),
+                ],
+                1.5,
+                3,
+                true,
+            ));
+        }
+        "tool_component_absent_plain_pickaxe.hex" => {}
+        "potion_contents_complete.hex" => {
+            components.potion = Some(13);
+            components.potion_color = Some(0xff12_3456);
+            components.potion_custom_name = Some("night_vision".into());
+            components.potion_custom_effects = vec![MobEffectInstance {
+                effect_id: 18,
+                amplifier: 1,
+                duration_ticks: 45,
+                ambient: false,
+                show_particles: true,
+                show_icon: true,
+            }];
+        }
+        other => panic!("no independent component expectation for {other}"),
+    }
+    components
+}
+
+fn component_difference(
+    actual: &ItemComponents,
+    expected: &ItemComponents,
+) -> Option<&'static str> {
+    if actual.tool != expected.tool {
+        Some("tool")
+    } else if actual.potion != expected.potion {
+        Some("potion")
+    } else if actual.potion_color != expected.potion_color {
+        Some("potion_color")
+    } else if actual.potion_custom_name != expected.potion_custom_name {
+        Some("potion_custom_name")
+    } else if actual.potion_custom_effects != expected.potion_custom_effects {
+        Some("potion_custom_effects")
+    } else if actual.has_unmodeled != expected.has_unmodeled {
+        Some("has_unmodeled")
+    } else {
+        None
+    }
 }
 
 /// Starts the normal client driver in Play without needing a second protocol
@@ -177,4 +240,54 @@ fn captured_inventory_control_reports_a_wrong_expected_value() {
         ("minecraft:stone".into(), step.expected_count),
         "the negative control must distinguish the captured item from a wrong oracle value"
     );
+}
+
+#[test]
+fn captured_component_replacements_reach_client_state() {
+    let mut client = CapturedClient::new();
+    for fixture in [
+        "tool_component_explicit.hex",
+        "tool_component_absent_plain_pickaxe.hex",
+        "potion_contents_complete.hex",
+        "tool_component_absent_plain_pickaxe.hex",
+    ] {
+        client.replay(fixture).expect("captured replacement replay");
+        let menu = client.handle.player_menu();
+        let item = menu.slot_item(SLOT).expect("captured item in target slot");
+        assert_eq!(
+            component_difference(
+                &lodestone_model::ItemStack::from(item).components,
+                &expected_components(fixture),
+            ),
+            None,
+            "fixture {fixture} must replace component state in public inventory slot {SLOT}"
+        );
+    }
+}
+
+#[test]
+fn captured_component_controls_detect_stale_tool_and_potion_fields() {
+    let mut client = CapturedClient::new();
+    for fixture in ["tool_component_explicit.hex", "potion_contents_complete.hex"] {
+        client.replay(fixture).expect("captured populated patch replay");
+        let stale = lodestone_model::ItemStack::from(
+            client.handle.player_menu().slot_item(SLOT).unwrap(),
+        )
+        .components;
+        client
+            .replay("tool_component_absent_plain_pickaxe.hex")
+            .expect("plain replacement");
+        let menu = client.handle.player_menu();
+        let actual = lodestone_model::ItemStack::from(menu.slot_item(SLOT).unwrap()).components;
+        assert_eq!(component_difference(&actual, &ItemComponents::default()), None);
+        assert_eq!(
+            component_difference(&actual, &stale),
+            Some(if fixture == "tool_component_explicit.hex" {
+                "tool"
+            } else {
+                "potion"
+            }),
+            "the detector must reject a stale component patch after {fixture} is replaced"
+        );
+    }
 }
