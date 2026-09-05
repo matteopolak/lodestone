@@ -3,6 +3,7 @@
 //! Split out of `app.rs`; see that module's own header for the layout.
 
 use super::*;
+use lodestone_data::item::Item;
 
 impl WindowApp {
     pub(super) fn new(config: Config) -> Self {
@@ -634,7 +635,7 @@ impl WindowApp {
     /// so nothing is ever toasted twice.
     ///
     /// A recipe whose result or station item id does not resolve through
-    /// `lodestone_data::items::item_name` (an id outside the generated
+    /// [`Item::from_registry_id`] (an id outside the generated
     /// census) is marked seen but never toasted — the same "draw nothing
     /// rather than a wrong icon" contract `container::merchant::cost_item_stack`
     /// documents for the same table.
@@ -715,7 +716,9 @@ impl WindowApp {
         );
         let sync = self.sim.known_recipes();
         for id in &page_ids {
-            let Some(item_reg_id) = lodestone_data::items::item_id(&id.to_string()) else {
+            let Some(item_reg_id) = Item::from_name(&id.to_string())
+                .map(|item| i32::from(item.registry_id()))
+            else {
                 continue;
             };
             for (display_id, recipe) in sync.unlocked_producing(item_reg_id) {

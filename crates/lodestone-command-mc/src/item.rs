@@ -21,12 +21,13 @@
 //!
 //! Vanilla's own item parser resolves against the item registry and throws
 //! an unknown-item error on a miss. This does the same against
-//! `lodestone_data::items`, so a typo fails as a *parse error the player sees*
+//! `lodestone_data::item::Item`, so a typo fails as a *parse error the player sees*
 //! rather than reaching an executor that has to invent a response. That is the
 //! same layering `ChoicesArgument::strict` exists for and the same reason
 //! `/gamerule` types its value at the tree.
 
 use lodestone_command::{ArgumentType, ParseError, ParseErrorKind, ParsedValue, StringReader};
+use lodestone_data::item::Item;
 use lodestone_model::ItemStack;
 use lodestone_model::command_tree::ArgumentParser;
 use lodestone_model::ids::ResourceKey;
@@ -99,15 +100,15 @@ impl ArgumentType for ItemArg {
             return Err(refuse(start, "expected an item"));
         }
         let qualified = if id.contains(':') { id } else { format!("minecraft:{id}") };
-        if lodestone_data::items::item_id(&qualified).is_none() {
+        let Some(item) = Item::from_name(&qualified) else {
             reader.set_cursor(start);
             return Err(refuse(start, format!("unknown item '{qualified}'")));
-        }
+        };
         // Infallible given the census hit above — a name in `ITEM_NAMES` is
         // namespace-qualified and uses only `Identifier`'s own character set —
         // but parsed rather than assumed, so a future census entry that is not
         // fails here rather than downstream.
-        let Ok(key) = qualified.parse::<ResourceKey>() else {
+        let Ok(key) = item.name().parse::<ResourceKey>() else {
             reader.set_cursor(start);
             return Err(refuse(start, format!("unusable item id '{qualified}'")));
         };
@@ -134,13 +135,11 @@ impl ArgumentType for ItemArg {
         // Both the namespaced and bare forms, because vanilla's own
         // resource-suggestion helper offers `minecraft:stone` *and* `stone` for the
         // default namespace, and a player who types `sto` expects a hit.
-        let mut out = Vec::with_capacity(lodestone_data::items::ITEM_COUNT as usize * 2);
-        for id in 0..i32::try_from(lodestone_data::items::ITEM_COUNT).unwrap_or(i32::MAX) {
-            if let Some(name) = lodestone_data::items::item_name(id) {
-                out.push(name.to_string());
-                if let Some(path) = name.strip_prefix("minecraft:") {
-                    out.push(path.to_string());
-                }
+        let mut out = Vec::with_capacity(Item::COUNT as usize * 2);
+        for item in Item::all() {
+            out.push(item.name().to_string());
+            if let Some(path) = item.name().strip_prefix("minecraft:") {
+                out.push(path.to_string());
             }
         }
         out

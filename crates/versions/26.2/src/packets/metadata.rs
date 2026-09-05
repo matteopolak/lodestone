@@ -1846,8 +1846,8 @@ mod tests {
     /// about **routing**: `read_entity_metadata` handles `SER_ITEM_STACK`
     /// *before* the index match and therefore surfaces it whatever index it
     /// arrives at, which is the only reason an `item_display` has a stack to
-    /// draw at all. The item id comes from `lodestone_data::items::item_id`,
-    /// which is generated from Mojang's own `registries.json`.
+    /// draw at all. The item id is the generated [`lodestone_data::item::Item`]
+    /// discriminant, checked against the committed registry census.
     ///
     /// The discriminating half is the trailing field: index 23's `Int` arm is
     /// gated on the block-display class, so an item-display subject proves the stack
@@ -1855,8 +1855,7 @@ mod tests {
     /// the following index-24 byte proves the reader stayed aligned.
     #[test]
     fn an_item_displays_stack_arrives_at_index_23_and_still_reaches_the_item_field() {
-        let diamond = lodestone_data::items::item_id("minecraft:diamond")
-            .expect("minecraft:diamond is in the generated item registry");
+        let diamond = i32::from(lodestone_data::item::Item::Diamond.registry_id());
 
         let mut bytes = Vec::new();
         bytes.push(IDX_DISPLAY_VARIANT_PAYLOAD);

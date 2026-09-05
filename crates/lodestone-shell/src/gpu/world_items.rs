@@ -29,6 +29,7 @@ use lodestone_render::{
 };
 
 use lodestone_model::event::EquipmentSlot;
+use lodestone_data::item::Item;
 
 use crate::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
 
@@ -723,7 +724,9 @@ impl RenderState {
             // *property* that function's own doc names — no two vaults'
             // clusters scatter in lockstep — rather than chasing the exact
             // unobservable bytes (the `+ damageValue` term is not modelled).
-            let seed_key = lodestone_data::items::item_id(&spawn.item.to_string()).unwrap_or(0);
+            let seed_key = Item::from_name(&spawn.item.to_string())
+                .map(|item| i32::from(item.registry_id()))
+                .unwrap_or(0);
             for copy in 0..amount {
                 let mut offset = item_cluster_jitter(seed_key, copy, jitter_extent);
                 if flat {

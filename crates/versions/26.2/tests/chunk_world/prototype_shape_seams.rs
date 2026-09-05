@@ -193,9 +193,9 @@ fn item_prototype_seam_returns_real_values_not_the_trait_default() {
 #[test]
 fn item_prototype_seam_agrees_with_the_version_table_for_every_item() {
     let adapter = seam();
-    for id in 0..item_prototypes::ITEM_COUNT as i32 {
-        let name = lodestone_data::items::item_name(id).expect("named");
-        let direct = item_prototypes::prototype_by_id(id).expect("table resolves");
+    for item in lodestone_data::item::Item::all() {
+        let name = item.name();
+        let direct = item_prototypes::prototype_for(item);
         let through = adapter.item_prototype(name).expect("seam resolves");
         assert_eq!(
             (
@@ -210,7 +210,8 @@ fn item_prototype_seam_agrees_with_the_version_table_for_every_item() {
                 direct.equip_slot,
                 direct.equippable_by_any_entity
             ),
-            "item_prototype seam disagrees with the version table for {name} (id {id})"
+            "item_prototype seam disagrees with the version table for {name} (id {})",
+            item.registry_id()
         );
     }
 }

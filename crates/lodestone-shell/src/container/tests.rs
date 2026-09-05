@@ -4134,7 +4134,7 @@ fn merchant_menu_via_real_path() -> Menu {
 /// One real offer, folded through [`lodestone_game::trades::TradeOffers::apply`]
 /// (the exact production fold) rather than hand-built already-populated —
 /// registry id `1` is `minecraft:stone` in the 26.2 table
-/// (`lodestone_data::items::item_name`).
+/// (`lodestone_data::item::Item::name`).
 fn trade_offers_via_real_path() -> lodestone_game::trades::TradeOffers {
     let mut store = lodestone_game::trades::TradeOffers::new();
     assert!(store.apply(&lodestone_model::ClientEvent::MerchantOffersReceived {

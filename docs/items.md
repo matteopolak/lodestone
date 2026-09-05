@@ -198,8 +198,9 @@ prediction (everything read 64), and stacking (two damaged swords merged). A
 (`ItemPrototypeOracle.java` → `crates/lodestone-data/tests/support/item_prototype_jvm.txt`,
 regenerated with `LODESTONE_REGEN=1 cargo test -p lodestone-v26-2 --test
 item_prototypes committed_table_matches_dump -- --ignored --nocapture`) is
-indexed by registry id and exposed via `prototype_by_id`/`prototype`/
-`VersionAdapter::item_prototype`. `read_component_patch` seeds the three
+indexed by the validated `lodestone_data::item::Item` enum and exposed via
+`prototype_for`/`prototype`/`VersionAdapter::item_prototype`.
+`read_component_patch` seeds the three
 effective fields from this census before the patch, and a **removal** falls
 back to vanilla's real default of `1`, not 64.
 

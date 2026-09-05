@@ -47,9 +47,7 @@ pub fn menu_name(id: MenuId) -> &'static str {
 ///
 /// This is the reverse of [`menu_name`], needed to encode `open_screen`
 /// server-side. A linear scan over `MENU_COUNT` (25) entries is acceptable
-/// here: it runs once per opened container, not per tick, matching the same
-/// tradeoff `lodestone_data::items::item_id` already makes over its own
-/// (much larger) generated table.
+/// here: it runs once per opened container, not per tick.
 #[must_use]
 pub fn menu_id(name: &str) -> Option<MenuId> {
     MENU_NAMES

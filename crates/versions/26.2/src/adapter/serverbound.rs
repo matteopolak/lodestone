@@ -174,7 +174,8 @@ fn recipe_book_type_to_ordinal(book_type: RecipeBookType) -> i32 {
 /// item-registry id, attributing an unknown item loudly rather than silently
 /// substituting a placeholder.
 fn item_registry_id(stack: &ItemStack) -> Result<i32, AdapterError> {
-    item_id(&stack.item.to_string())
+    Item::from_name(&stack.item.to_string())
+        .map(|item| i32::from(item.registry_id()))
         .ok_or_else(|| AdapterError::Encode(format!("unknown item key {}", stack.item)))
 }
 
@@ -1457,4 +1458,3 @@ impl V770Adapter {
         }
     }
 }
-

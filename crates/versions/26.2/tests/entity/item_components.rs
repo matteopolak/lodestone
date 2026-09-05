@@ -28,7 +28,7 @@ use lodestone_model::{
 };
 use lodestone_v26_2::V770Adapter;
 use lodestone_data::data_component_types::component_type_name;
-use lodestone_data::items::item_id;
+use lodestone_data::item::Item;
 use lodestone_v26_2::packet_ids::play;
 use lodestone_world::World;
 
@@ -38,6 +38,10 @@ fn component_id(name: &str) -> i32 {
     (0..)
         .find(|&id| component_type_name(id) == Some(name))
         .expect("known component type")
+}
+
+fn item_id(name: &str) -> Option<i32> {
+    Item::from_name(name).map(|item| i32::from(item.registry_id()))
 }
 
 /// A component this build deliberately does **not** decode, for every gate that

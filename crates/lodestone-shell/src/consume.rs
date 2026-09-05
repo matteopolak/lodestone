@@ -82,6 +82,7 @@ use lodestone_ecs::ecs::prelude::{Query, Res, ResMut, With};
 use lodestone_ecs::player::{ItemUseTicks, LocalPlayer, PhysicsState, SelectedSlot};
 use lodestone_ecs::session::{ServerGameMode, SessionMenus, Vitals};
 use lodestone_game::consumable::{self, ConsumeAnimation, Consumable};
+use lodestone_data::item::Item;
 
 use crate::interact::{ParticleSim, UsingItem};
 
@@ -150,7 +151,7 @@ impl ConsumeState {
         if ticks_used >= consumable.consume_ticks {
             return None;
         }
-        let item_id = u32::try_from(lodestone_data::items::item_id(item)?).ok()?;
+        let item_id = u32::from(Item::from_name(item)?.registry_id());
         Some(Self {
             item_id,
             consumable,
@@ -333,8 +334,7 @@ mod tests {
             "an orange crumb and a red one must come from different item ids"
         );
         assert_eq!(
-            u32::try_from(lodestone_data::items::item_id("minecraft:carrot").expect("registered"))
-                .expect("non-negative"),
+            u32::from(Item::Carrot.registry_id()),
             carrot.item_id,
             "the id must be the registry id the sprite table is indexed by"
         );

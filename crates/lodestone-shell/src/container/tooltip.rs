@@ -1635,8 +1635,7 @@ mod tests {
         payload.extend_from_slice(&HOTBAR_0_MENU_SLOT.to_be_bytes());
         varint(1, &mut payload); // stack count
         varint(
-            lodestone_data::items::item_id("minecraft:written_book")
-                .expect("written_book is a real item"),
+            i32::from(lodestone_data::item::Item::WrittenBook.registry_id()),
             &mut payload,
         );
         varint(1, &mut payload); // one added component

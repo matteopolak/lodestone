@@ -30,7 +30,7 @@
 //! # Cross-check against a second artifact
 //!
 //! [`dump_ids_and_names_match_the_registries_json_table`] reconciles the dump's
-//! registry ids and names against `crate::items::item_name`, which is generated
+//! registry ids and names against [`item::Item`], which is generated
 //! by `cargo xtask gen-registries` from Mojang's own
 //! `generated/reports/registries.json`. Two independently produced artifacts have
 //! to agree on all 1,537 (id, name) pairs; neither restates the other. That is
@@ -61,7 +61,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use lodestone_model::EquipmentSlot;
-use lodestone_data::{item, item_prototypes, items};
+use lodestone_data::{item, item_prototypes};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -261,8 +261,11 @@ fn committed_table_matches_the_committed_dump() {
     );
     let mut checked = 0usize;
     for row in &rows {
-        let def = item_prototypes::prototype_by_id(row.id as i32)
-            .unwrap_or_else(|| panic!("id {} ({}) missing from table", row.id, row.name));
+        let item = u16::try_from(row.id)
+            .ok()
+            .and_then(item::Item::from_registry_id)
+            .unwrap_or_else(|| panic!("id {} ({}) missing from enum", row.id, row.name));
+        let def = item_prototypes::prototype_for(item);
         assert_eq!(
             u32::from(def.max_stack_size),
             row.max_stack_size,
@@ -319,10 +322,13 @@ fn committed_table_matches_the_committed_dump() {
 #[test]
 fn dump_ids_and_names_match_the_registries_json_table() {
     let rows = parse_dump(DUMP);
-    assert_eq!(rows.len(), items::ITEM_COUNT as usize, "item count mismatch");
+    assert_eq!(rows.len(), item::Item::COUNT as usize, "item count mismatch");
     for row in &rows {
         assert_eq!(
-            items::item_name(row.id as i32),
+            u16::try_from(row.id)
+                .ok()
+                .and_then(item::Item::from_registry_id)
+                .map(item::Item::name),
             Some(row.name.as_str()),
             "registries.json and the JVM dump disagree at item id {}",
             row.id
@@ -330,31 +336,26 @@ fn dump_ids_and_names_match_the_registries_json_table() {
     }
 }
 
-/// `prototype_for`'s whole reason to exist: the typed accessor must agree
-/// with the id-keyed one for every item, not just a spot check.
+/// `prototype_for` must answer every generated item, not just a spot check.
 #[test]
-fn prototype_for_agrees_with_the_id_form_for_every_item() {
+fn prototype_for_covers_every_item() {
     for typed in item::Item::all() {
-        let by_id = item_prototypes::prototype_by_id(i32::from(typed.registry_id()))
-            .expect("every generated Item has a row");
         let by_type = item_prototypes::prototype_for(typed);
+        let by_name = item_prototypes::prototype(typed.name())
+            .expect("every generated item name resolves at the text boundary");
         assert_eq!(
+            (by_name.max_stack_size, by_name.max_damage, by_name.equip_slot),
             (by_type.max_stack_size, by_type.max_damage, by_type.equip_slot),
-            (by_id.max_stack_size, by_id.max_damage, by_id.equip_slot),
-            "prototype_for disagrees with prototype_by_id for {}",
-            typed.name()
+            "name boundary disagrees with typed lookup for {}", typed.name()
         );
     }
 }
 
 #[test]
-fn out_of_range_ids_are_none() {
-    assert!(
-        item_prototypes::prototype_by_id(item_prototypes::ITEM_COUNT as i32).is_none(),
-        "one past the end must miss"
-    );
-    assert!(item_prototypes::prototype_by_id(-1).is_none(), "negative must miss");
-    assert!(item_prototypes::prototype_by_id(i32::MAX).is_none());
+fn raw_item_boundary_rejects_out_of_range_ids() {
+    assert!(item::Item::from_registry_id(item::Item::COUNT).is_none(), "one past the end must miss");
+    assert!(u16::try_from(-1_i32).ok().and_then(item::Item::from_registry_id).is_none());
+    assert!(u16::try_from(i32::MAX).ok().and_then(item::Item::from_registry_id).is_none());
     assert!(item_prototypes::prototype("minecraft:not_an_item").is_none());
 }
 
@@ -490,8 +491,8 @@ fn per_item_stack_caps_are_not_all_64() {
     // (19%) really are not 64, so a table that lost the column — or a consumer
     // that keeps defaulting to 64 — is wrong about one stack in five, not about
     // a handful of exotica.
-    let non_64 = (0..item_prototypes::ITEM_COUNT as i32)
-        .filter_map(item_prototypes::prototype_by_id)
+    let non_64 = item::Item::all()
+        .map(item_prototypes::prototype_for)
         .filter(|def| def.max_stack_size != 64)
         .count();
     assert_eq!(

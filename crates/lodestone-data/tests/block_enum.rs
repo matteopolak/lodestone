@@ -343,8 +343,7 @@ fn block_items_typed_accessor_matches_item_names() {
         let item = Item::from_registry_id(id as u16).expect("table id is in the item registry");
         let typed = block_items::block_placed_by(item);
         assert_eq!(typed.map(Block::name), {
-            let name = lodestone_data::items::item_name(id as i32);
-            name.and_then(Item::from_name)
+            Some(item)
                 .and_then(block_items::block_placed_by)
                 .map(Block::name)
         });

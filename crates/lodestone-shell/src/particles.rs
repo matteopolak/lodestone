@@ -51,6 +51,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lodestone_assets::{ParticleAtlas, ResourceLocation};
+use lodestone_data::item::Item;
 use lodestone_model::event::ParticleOptions;
 use lodestone_particle::{
     DripKind, DripPhase, Layer, ParticleEngine, ParticleQuad, Sheet, SpriteSource, emit,
@@ -1200,8 +1201,7 @@ impl Particles {
     /// — the *seven*-argument sibling, which damps the jitter to a tenth and
     /// would leave these crumbs motionless.
     fn item_burst(&mut self, pos: [f64; 3], item: &str) {
-        let Some(id) = lodestone_data::items::item_id(item)
-            .and_then(|id| u32::try_from(id).ok())
+        let Some(id) = Item::from_name(item).map(|item| u32::from(item.registry_id()))
         else {
             tracing::debug!(
                 target: "particles",
@@ -1459,7 +1459,7 @@ impl Particles {
 }
 
 /// Builds the network-item-id → UV rect table [`Particles::new`] installs, by
-/// walking `lodestone_data::items`' registry order and asking `models` for each
+/// walking [`Item`]s in registry order and asking `models` for each
 /// item's `BreakingItemParticle` sprite.
 ///
 /// Keyed by the **network registry id**, which is what
@@ -1470,12 +1470,9 @@ impl Particles {
 fn item_uv_table(models: &BlockModels) -> Vec<Option<[f32; 4]>> {
     let mut table =
         Vec::with_capacity(lodestone_data::item_prototypes::ITEM_COUNT as usize);
-    for id in 0i32.. {
-        let Some(name) = lodestone_data::items::item_name(id) else {
-            break;
-        };
+    for item in Item::all() {
         table.push(
-            ResourceLocation::parse(name)
+            ResourceLocation::parse(item.name())
                 .ok()
                 .and_then(|loc| models.item_particle_uv(&loc)),
         );
@@ -2277,10 +2274,11 @@ mod tests {
         ];
         let mut seen: Vec<u32> = Vec::new();
         for &(kind, item) in cases {
-            let expected = u32::try_from(
-                lodestone_data::items::item_id(item).expect("a vanilla item is in the registry"),
-            )
-            .expect("a registry id fits u32");
+            let expected = u32::from(
+                Item::from_name(item)
+                    .expect("a vanilla item is in the registry")
+                    .registry_id(),
+            );
             let mut p = resolvable();
             p.spawn_particles(
                 kind,

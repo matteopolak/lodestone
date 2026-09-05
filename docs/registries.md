@@ -103,6 +103,16 @@ replace this with a raw id-to-string helper: it loses the distinction between a 
 state. A custom or data-pack key stays as its parsed identifier in the owning dynamic registry;
 it is not coerced into `Block` merely because its path resembles a built-in name.
 
+`Item` follows the same boundary rule. A packet or synchronized recipe may keep
+its raw `i32` holder while it needs to preserve an unknown/custom entry, but a
+built-in consumer converts it with `u16::try_from(raw).ok().and_then(Item::from_registry_id)`
+before it reads `Item::name`, a prototype, or a sprite-table slot. Writers use
+`Item::from_name` and emit `i32::from(item.registry_id())`; an unresolved custom
+identifier stays unresolved rather than acquiring a made-up built-in id. The
+literal controls in the item-enum and packet fixtures pin `air = 0`, `stone = 1`,
+and independently selected encoded item values, so the conversion is not only a
+round trip over generated tables.
+
 **`Block` and `StateId` are two different id spaces and conflating them is the mistake that
 surfaces late.** `Block` has 1,196 values in **registration** order (wire use: `Holder<Block>`
 in `block_event`, tool rules); `StateId` has 32,366 values in **name-sorted** order (wire use:

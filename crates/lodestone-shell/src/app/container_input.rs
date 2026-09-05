@@ -3,6 +3,7 @@
 //! Split out of `app.rs`; see that module's own header for the layout.
 
 use super::*;
+use lodestone_data::item::Item;
 
 impl WindowApp {
     /// The menu currently drawn as the container screen — the open non-player
@@ -896,8 +897,8 @@ fn furnace_input_property_key(menu: &Menu) -> Option<lodestone_model::Identifier
 fn furnace_input_items(item_ids: &[i32]) -> Vec<lodestone_model::Identifier> {
     item_ids
         .iter()
-        .filter_map(|item_id| lodestone_data::items::item_name(*item_id))
-        .filter_map(|item_name| item_name.parse().ok())
+        .filter_map(|&item_id| u16::try_from(item_id).ok().and_then(Item::from_registry_id))
+        .filter_map(|item| item.name().parse().ok())
         .collect()
 }
 

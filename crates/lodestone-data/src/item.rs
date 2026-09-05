@@ -41,7 +41,7 @@
 //! accessor.
 
 use crate::generated_item_enum as table;
-use crate::generated_items::ITEM_NAMES;
+use crate::generated_items::{ITEM_COUNT, ITEM_NAMES};
 
 pub use table::Item;
 
@@ -51,7 +51,7 @@ const BUILTIN_NAMESPACE: &str = "minecraft";
 
 impl Item {
     /// The number of built-in items — registry ids are `0..COUNT`.
-    pub const COUNT: u16 = table::ITEMS_BY_REGISTRY_ID.len() as u16;
+    pub const COUNT: u16 = ITEM_COUNT as u16;
 
     /// This item's `minecraft:item` registry id, as a `Holder<Item>` carries
     /// it on the wire.
@@ -74,9 +74,8 @@ impl Item {
 
     /// The canonical namespaced name, for example `"minecraft:diamond_hoe"`.
     ///
-    /// Zero-heap: a `&'static str` straight out of rodata, the same table
-    /// [`crate::items::item_name`] reads. There is exactly one copy of each
-    /// item name in the binary.
+    /// Zero-heap: a `&'static str` straight out of rodata. There is exactly
+    /// one copy of each item name in the binary.
     #[must_use]
     pub fn name(self) -> &'static str {
         ITEM_NAMES[self as usize]
