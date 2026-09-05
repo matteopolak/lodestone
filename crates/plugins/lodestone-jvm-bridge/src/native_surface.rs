@@ -218,7 +218,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 39] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 40] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -348,6 +348,10 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 39] = [
         name: "blockStateIds",
         descriptor: "([I)[I",
     },
+    NativeMethodSpec {
+        name: "setBlockStateIds",
+        descriptor: "([I)I",
+    },
 ];
 
 const ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS: [IsolatedDescriptorMemberSpec; 4] = [
@@ -405,7 +409,7 @@ pub struct PaperWorldMemberSpec {
     pub capability: PaperWorldCapability,
 }
 
-const PAPER_WORLD_SURFACE_CENSUS: [PaperWorldMemberSpec; 12] = [
+const PAPER_WORLD_SURFACE_CENSUS: [PaperWorldMemberSpec; 13] = [
     PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[0], capability: PaperWorldCapability::ResidentStateRead },
     PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[2], capability: PaperWorldCapability::ResidentStateWrite },
     PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[8], capability: PaperWorldCapability::ResidentChangeObservation },
@@ -418,6 +422,7 @@ const PAPER_WORLD_SURFACE_CENSUS: [PaperWorldMemberSpec; 12] = [
     PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[15], capability: PaperWorldCapability::ResidentStateWrite },
     PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[16], capability: PaperWorldCapability::CallbackBlockHandleRetention },
     PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[38], capability: PaperWorldCapability::ResidentStateBatchRead },
+    PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[39], capability: PaperWorldCapability::ResidentStateWrite },
 ];
 
 /// One non-interchangeable phase of native registration.
@@ -478,6 +483,7 @@ const ISOLATED_SHIM_REGISTRATION: &[NativeRegistrationStep] = registration_steps
     ISOLATED_SHIM_METHODS[36],
     ISOLATED_SHIM_METHODS[37],
     ISOLATED_SHIM_METHODS[38],
+    ISOLATED_SHIM_METHODS[39],
 );
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -998,6 +1004,9 @@ fn method_id(
         ("blockStateIds", "([I)[I") => {
             env.get_static_method_id(class, jni_str!("blockStateIds"), jni_sig!("([I)[I"))
         }
+        ("setBlockStateIds", "([I)I") => {
+            env.get_static_method_id(class, jni_str!("setBlockStateIds"), jni_sig!("([I)I"))
+        }
         ("serverTickCount", "()J") => {
             env.get_static_method_id(class, jni_str!("serverTickCount"), jni_sig!("()J"))
         }
@@ -1157,6 +1166,9 @@ fn register_method(
         }
         ("blockStateIds", "([I)[I") => {
             adapter::register_block_batch_query(env, class, method.name, method.descriptor)
+        }
+        ("setBlockStateIds", "([I)I") => {
+            adapter::register_block_state_batch_write(env, class, method.name, method.descriptor)
         }
         ("serverTickCount", "()J") => {
             adapter::register_server_tick_query(env, class, method.name, method.descriptor)
@@ -1595,6 +1607,7 @@ mod tests {
                 NativeMethodSpec { name: "playerHandleExperienceLevel", descriptor: "(J)I" },
                 NativeMethodSpec { name: "playerHandleExperiencePoints", descriptor: "(J)I" },
                 NativeMethodSpec { name: "blockStateIds", descriptor: "([I)[I" },
+                NativeMethodSpec { name: "setBlockStateIds", descriptor: "([I)I" },
             ],
         );
         let methods = isolated_shim_methods();
@@ -1657,7 +1670,7 @@ mod tests {
     #[test]
     fn generated_world_surface_census_maps_each_member_to_one_rust_capability() {
         let census = paper_world_surface_census();
-        assert_eq!(census.len(), 12, "every supported world/block member is listed once");
+        assert_eq!(census.len(), 13, "every supported world/block member is listed once");
         let unique_methods = census.iter()
             .map(|entry| (entry.method.name, entry.method.descriptor))
             .collect::<std::collections::BTreeSet<_>>();
@@ -1764,6 +1777,7 @@ mod tests {
             "package lodestone.bridge; public final class IsolatedPaperShim { \
              public static native int blockStateId(int x, int y, int z); \
              public static native int[] blockStateIds(int[] positions); \
+             public static native int setBlockStateIds(int[] writes); \
              public static native long serverTickCount(); \
              public static native int setBlockStateId(int x, int y, int z, int stateId); \
              public static native String currentPluginName(); \
@@ -1872,6 +1886,7 @@ mod tests {
             "package lodestone.bridge; public final class IsolatedPaperShim { \
              public static native int blockStateId(int x, int y, int z); \
              public static native int[] blockStateIds(int[] positions); \
+             public static native int setBlockStateIds(int[] writes); \
              public static native long serverTickCount(); \
              public static native int setBlockStateId(int x, int y, int z, int stateId); \
              public static native String currentPluginName(); \
