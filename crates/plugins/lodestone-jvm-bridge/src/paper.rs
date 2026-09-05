@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
 #[cfg(feature = "jvm")]
+use jni::objects::{Global, JObject};
+#[cfg(feature = "jvm")]
 use jni::Env;
 #[cfg(feature = "jvm")]
 use crate::runtime::{JvmConfig, JvmRuntime};
@@ -132,6 +134,36 @@ pub struct PaperBootstrapPlan {
     plugins: Vec<PaperPluginDescriptor>,
 }
 
+/// Loader state retained after non-initializing lifecycle entry loading.
+///
+/// Each global reference owns one fresh isolated loader. Keeping those loaders
+/// alive preserves the definitions selected from its private classpath and the
+/// native registration installed on its shim definition. It intentionally
+/// retains neither an entry class nor a plugin object: construction and
+/// enablement remain a later, server-lifecycle-owned decision.
+#[cfg(feature = "jvm")]
+pub struct PaperLifecycleLoad {
+    loaders: Vec<Global<JObject<'static>>>,
+}
+
+#[cfg(feature = "jvm")]
+impl fmt::Debug for PaperLifecycleLoad {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PaperLifecycleLoad")
+            .field("loader_count", &self.loaders.len())
+            .finish()
+    }
+}
+
+#[cfg(feature = "jvm")]
+impl PaperLifecycleLoad {
+    /// Number of isolated loaders retained by this successful lifecycle load.
+    pub fn loader_count(&self) -> usize {
+        self.loaders.len()
+    }
+}
+
 impl PaperBootstrapPlan {
     /// The user-supplied Paper server jar selected for this plan.
     pub fn paper_jar(&self) -> &Path {
@@ -221,16 +253,17 @@ impl PaperBootstrapPlan {
         &self,
         runtime: &JvmRuntime,
         env: &mut Env<'local>,
-    ) -> Result<(), PaperBootstrapError> {
+    ) -> Result<PaperLifecycleLoad, PaperBootstrapError> {
         let bootstrap_paths = self.loader_paths(None);
-        self.load_one_entry_in_runtime(runtime, env, &bootstrap_paths, BOOTSTRAP_CLASS)
+        let mut loaders = Vec::with_capacity(self.plugins.len() + 1);
+        loaders.push(self.load_one_entry_in_runtime(runtime, env, &bootstrap_paths, BOOTSTRAP_CLASS)
             .map_err(|error| PaperBootstrapError::lifecycle(
                 format!("could not load Paper bootstrap class {BOOTSTRAP_CLASS}"),
                 error,
-            ))?;
+            ))?);
         for plugin in &self.plugins {
             let plugin_paths = self.loader_paths(Some(plugin.jar()));
-            self.load_one_entry_in_runtime(runtime, env, &plugin_paths, plugin.main_class())
+            loaders.push(self.load_one_entry_in_runtime(runtime, env, &plugin_paths, plugin.main_class())
                 .map_err(|error| PaperBootstrapError::lifecycle(
                     format!(
                         "could not load plugin {:?} entry class {}",
@@ -238,9 +271,9 @@ impl PaperBootstrapPlan {
                         plugin.main_class(),
                     ),
                     error,
-                ))?;
+                ))?);
         }
-        Ok(())
+        Ok(PaperLifecycleLoad { loaders })
     }
 
     #[cfg(feature = "jvm")]
@@ -250,7 +283,7 @@ impl PaperBootstrapPlan {
         env: &mut Env<'local>,
         paths: &[PathBuf],
         binary_name: &str,
-    ) -> Result<(), PaperBootstrapError> {
+    ) -> Result<Global<JObject<'static>>, PaperBootstrapError> {
         let config = paths.iter().fold(JvmConfig::new(), |config, path| {
             config.with_classpath(path)
         });
@@ -262,7 +295,8 @@ impl PaperBootstrapPlan {
                     return Err(crate::runtime::JvmError::new(error.to_string()));
                 }
             }
-            runtime.load_class_from_loader(env, loader, binary_name).map(|_| ())
+            runtime.load_class_from_loader(env, loader, binary_name)?;
+            env.new_global_ref(loader).map_err(crate::runtime::JvmError::from)
         });
         if let Some(error) = native_error.into_inner() {
             return Err(PaperBootstrapError::native_surface(error));

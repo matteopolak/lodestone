@@ -534,7 +534,9 @@ but keeps plugin jars out of the server bootstrap classpath. Its `start_runtime`
 first, then every plugin entry in sorted discovery order. Each plugin request has a fresh isolated
 loader path of shim paths, the server jar, and that plugin jar only; no plugin jar appears in another
 plugin's request. The dedicated host uses `load_lifecycle_entries_in_runtime`, which turns every
-request into one fresh isolated loader and calls `loadClass` without initialization. When the operator
+request into one fresh isolated loader and calls `loadClass` without initialization. Its returned
+`PaperLifecycleLoad` holds one global reference per loader, keeping the selected class definitions
+and per-loader native registration alive for the Java adapter worker's lifetime. When the operator
 also requests the isolated native shim, that same loader first resolves
 `lodestone.bridge.IsolatedPaperShim`, verifies its exact static native
 `blockStateId(int, int, int): int` declaration, then registers the one Rust callback before it loads
@@ -553,10 +555,12 @@ declaring shim class, contradicting the non-initializing load contract; instance
 separate object-lifetime design. The field-operation risk in §1.2 therefore remains open rather than
 being hidden behind a constant or an unvalidated reflection path.
 
-This is deliberately only the first classloader lifecycle step. It does not retain a loader or class
-reference, initialize the server or a plugin, construct a plugin object, invoke an entry point, or
-establish Bukkit/Paper compatibility. Native shims, loader retention, construction, enablement, and
-event dispatch need their own lifecycle policy. The unignored unit tests inject a loader to prove
+This is deliberately only the first retained-loader lifecycle step. It retains loaders, but does not
+retain an entry-class reference, initialize the server or a plugin, construct a plugin object, invoke
+an entry point, or establish Bukkit/Paper compatibility. Construction is not safe to infer from a
+descriptor: it can execute arbitrary plugin code and needs the server-owned plugin lifecycle and API
+state that this bridge does not yet provide. Construction, enablement, and event dispatch need their
+own lifecycle policy. The unignored unit tests inject a loader to prove
 ordering and that bootstrap or plugin errors stop later requests with context. The runtime gate stays
 ignored because it needs a locally installed JDK; it uses stand-in archives only, not an operator
 Paper jar.
@@ -665,10 +669,11 @@ or jar. When set, it must contain the operator-built `lodestone.bridge.IsolatedP
 declaration; the host registers that one block-state query callback in each fresh loader before
 loading the corresponding entry. The host discovers and retains a `PaperBootstrapPlan` before starting
 a JVM, then loads the Paper bootstrap followed by each plugin entry class through separate shim-first
-isolated loaders before the adapter can report ready. Each plugin loader sees shim paths, the server
-jar, and only its own jar. These are non-initializing class loads: the host does **not** initialize
-Paper, retain plugin class loaders, instantiate or enable plugins, dispatch Paper events, or promise
-plugin compatibility.
+isolated loaders before the adapter can report ready. The adapter worker retains every resulting
+loader until it stops. Each plugin loader sees shim paths, the server jar, and only its own jar.
+These are non-initializing class loads: the host does **not** initialize Paper, retain entry-class or
+plugin-object references, instantiate or enable plugins, dispatch Paper events, or promise plugin
+compatibility.
 A malformed Paper configuration fails before startup and saves the world; a lifecycle-load failure is
 terminal for a configured Paper run and likewise saves the world rather than quietly continuing
 without the requested operator input.

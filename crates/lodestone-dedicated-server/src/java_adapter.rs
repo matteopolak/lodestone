@@ -73,7 +73,6 @@ impl JavaAdapter {
         let host = if let Some(plan) = paper_plan.clone() {
             AdapterHost::start_with_setup(config, class, deadline, move |runtime, env| {
                 plan.load_lifecycle_entries_in_runtime(runtime, env)
-                    .map(|_| ())
                     .map_err(|error| format!("could not load configured Paper lifecycle entries: {error}"))
             })
         } else {
