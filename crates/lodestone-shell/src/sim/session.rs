@@ -2057,6 +2057,18 @@ impl Sim {
         })
     }
 
+    /// The server-selected advancement tab, if it named one. The advancement
+    /// screen maps this identifier onto its local tab index when it is open.
+    #[must_use]
+    pub fn advancement_tab_selection(&self) -> Option<lodestone_model::Identifier> {
+        self.read(|w| {
+            w.get::<lodestone_ecs::session::SessionAdvancementTab>(self.local)
+                .expect("the local player always carries SessionAdvancementTab")
+                .0
+                .clone()
+        })
+    }
+
     /// The local player's statistics counters, as `award_stats` last reported
     /// them.
     ///

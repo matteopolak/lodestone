@@ -126,6 +126,13 @@ incrementally as it changes rather than resent in full every time, with one deli
 join always sends the complete tree once, unconditionally, before any incremental update — sending
 an incremental delta first, with nothing to compare it against, is meaningless.
 
+The open advancement tab is separate, short-lived connection state rather than progress. A player's
+open/switch/close report updates the server's selected-tab value and emits the corresponding
+selection directive; the client folds that directive into its session state before the screen maps
+the identifier to its local tab. Do not validate this identifier against the server's bundled tree:
+a client can have a larger data-pack tree, and rejecting an otherwise well-formed tab would force a
+visible, incorrect selection.
+
 ## How to change it
 
 - **A new native inventory slot or equipment kind**: extend the server's own inventory model and its

@@ -85,7 +85,7 @@ use bevy_ecs::prelude::{Query, Res, With};
 use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 use bevy_ecs::world::World;
 use lodestone_model::{
-    ClientEvent, Difficulty, DimensionId, DimensionTypeInfo, GameMode, ResolvedText, Text,
+    ClientEvent, Difficulty, DimensionId, DimensionTypeInfo, GameMode, Identifier, ResolvedText,
 };
 
 use crate::ingest::{IngestBatch, IngestQueuePlugin};
@@ -176,6 +176,13 @@ pub struct SessionMaps(pub lodestone_game::maps::MapStore);
 /// position. See [`lodestone_game::advancement::AdvancementStore`].
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct SessionAdvancements(pub lodestone_game::advancement::AdvancementStore);
+
+/// The tab the server selected for the local player's advancement screen.
+///
+/// This is intentionally independent of [`SessionAdvancements`]: selecting a
+/// tab changes no progress and an empty tree can still have a selected tab.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionAdvancementTab(pub Option<Identifier>);
 
 /// The local player's statistics counters, from `ClientEvent::StatisticsAwarded`.
 ///
@@ -750,6 +757,21 @@ pub fn apply_advancements(batch: Res<IngestBatch>, mut trees: Query<&mut Session
     }
 }
 
+/// `IngestSet::Apply`: `AdvancementsTabSelected` → [`SessionAdvancementTab`].
+pub fn apply_advancement_tab(
+    batch: Res<IngestBatch>,
+    mut selections: Query<&mut SessionAdvancementTab>,
+) {
+    for event in batch.events() {
+        let ClientEvent::AdvancementsTabSelected { tab } = event else {
+            continue;
+        };
+        for mut selection in &mut selections {
+            selection.0 = tab.clone();
+        }
+    }
+}
+
 /// `IngestSet::Apply`: `GameRulesChanged` → [`SessionGameRules`].
 pub fn apply_game_rules(batch: Res<IngestBatch>, mut rules: Query<&mut SessionGameRules>) {
     for event in batch.events() {
@@ -1178,6 +1200,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             SessionRecipeBookSettings::default(),
             SessionMaps::default(),
             SessionAdvancements::default(),
+            SessionAdvancementTab::default(),
         ));
         // A third `insert`: four more stores, again only because the
         // tuple `Bundle` impls stop at arity 15.
@@ -1238,6 +1261,7 @@ impl Plugin for SessionPlugin {
                 apply_recipe_book_settings,
                 apply_maps,
                 apply_advancements,
+                apply_advancement_tab,
                 apply_statistics,
                 apply_registry_order,
                 apply_recipe_book_sync,

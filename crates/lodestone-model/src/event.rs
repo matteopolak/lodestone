@@ -4152,6 +4152,11 @@ pub fn route(event: &ClientEvent) -> Route {
         // (`SessionAdvancements`). The advancements *screen* reads that
         // component; it needs no `forward` arm.
         ClientEvent::AdvancementsUpdated { .. } => SESSION,
+        // The selected advancement tab is separate from advancement progress:
+        // the former is a UI cursor while the latter is the criterion tree.
+        // Both are local-player session state and reach the screen through
+        // their respective `Session*` components.
+        ClientEvent::AdvancementsTabSelected { .. } => SESSION,
         // `lodestone_game::worldborder::WorldBorder` via `apply_world_border`.
         // The largest single cluster in `docs/event-routing.md`'s island list.
         ClientEvent::WorldBorderCenterChanged { .. }
@@ -4241,7 +4246,6 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::SoundStopped { .. }
         | ClientEvent::PlayerCombatEntered
         | ClientEvent::PlayerCombatEnded { .. }
-        | ClientEvent::AdvancementsTabSelected { .. }
         | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
         | ClientEvent::TransferRequested { .. }

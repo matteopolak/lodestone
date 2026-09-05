@@ -4436,15 +4436,22 @@ impl ServerProtocol for V770ServerProtocol {
             // `closed_screen` case).
             State::Play if packet_id == play::serverbound::SEEN_ADVANCEMENTS => {
                 let mut r = Reader::new(payload);
-                let decoded = (|| -> lodestone_core::Result<()> {
+                let decoded = (|| -> lodestone_core::Result<ServerBound> {
                     let action = r.var_i32()?;
-                    if action == 0 {
-                        let _tab = r.string(32767)?;
-                    }
+                    let tab = match action {
+                        0 => Some(r.string(32767)?),
+                        1 => None,
+                        value => {
+                            return Err(lodestone_core::Error::InvalidEnumVariant {
+                                name: "seen advancements action",
+                                value,
+                            });
+                        }
+                    };
                     r.ensure_empty()
+                        .map(|()| ServerBound::SeenAdvancements { tab })
                 })();
-                let _ = decoded;
-                ServerBound::Ignored
+                decoded.unwrap_or(ServerBound::Ignored)
             }
             State::Play if packet_id == play::serverbound::ENTITY_TAG_QUERY => {
                 match decode_full::<EntityTagQuery>(payload) {
@@ -6441,6 +6448,22 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::RECIPE_BOOK_ADD,
             payload: encode_recipe_book_add_body(entries, replace),
+        }
+    }
+
+    /// Echoes the server-owned advancement tab selection to the client. The
+    /// optional identifier uses a leading boolean, unlike the serverbound
+    /// selection action whose discriminant decides whether an identifier
+    /// follows.
+    fn encode_select_advancements_tab(&self, tab: Option<&str>) -> ServerDirective {
+        let mut w = Writer::default();
+        w.bool(tab.is_some());
+        if let Some(tab) = tab {
+            w.string(tab);
+        }
+        ServerDirective::Send {
+            packet_id: play::clientbound::SELECT_ADVANCEMENTS_TAB,
+            payload: w.into_vec(),
         }
     }
 
@@ -9310,6 +9333,82 @@ mod play_ping_request_tests {
             proto.decode(State::Play, play::serverbound::PONG, &body),
             ServerBound::Ignored,
         );
+    }
+}
+
+#[cfg(test)]
+mod seen_advancements_tests {
+    use lodestone_core::{Reader, State};
+    use lodestone_server::{AdvancementManager, ServerBound, ServerDirective, ServerProtocol};
+    use uuid::Uuid;
+
+    use super::V770ServerProtocol;
+    use crate::packet_ids::play;
+
+    /// The body is deliberately raw rather than produced by the client
+    /// adapter: action 0, then the independently counted UTF-8 identifier.
+    /// This catches a decoder that accepts the right action but consumes the
+    /// wrong string framing.
+    #[test]
+    fn seen_advancements_opened_tab_lifts_from_raw_wire_bytes() {
+        let proto = V770ServerProtocol;
+        let body = [
+            0, // OPENED_TAB
+            20, // byte length of minecraft:story/root
+            b'm', b'i', b'n', b'e', b'c', b'r', b'a', b'f', b't', b':', b's', b't', b'o', b'r',
+            b'y', b'/', b'r', b'o', b'o', b't',
+        ];
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::SEEN_ADVANCEMENTS, &body),
+            ServerBound::SeenAdvancements {
+                tab: Some("minecraft:story/root".to_owned()),
+            },
+        );
+    }
+
+    /// The close action carries no identifier; accepting an extra byte would
+    /// hide a stream framing error in the packet immediately after it.
+    #[test]
+    fn seen_advancements_close_has_no_identifier_or_trailing_bytes() {
+        let proto = V770ServerProtocol;
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::SEEN_ADVANCEMENTS, &[1]),
+            ServerBound::SeenAdvancements { tab: None },
+        );
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::SEEN_ADVANCEMENTS, &[1, 0]),
+            ServerBound::Ignored,
+        );
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::SEEN_ADVANCEMENTS, &[2]),
+            ServerBound::Ignored,
+        );
+    }
+
+    /// The production server consumes the lifted selection through
+    /// `AdvancementManager` and emits this directive. Check both ends of that
+    /// seam here so the new state cannot become a write-only counter.
+    #[test]
+    fn seen_advancements_selection_reaches_the_clientbound_tab_directive() {
+        let proto = V770ServerProtocol;
+        let mut manager = AdvancementManager::builtin();
+        let selected = manager.select_tab(
+            Uuid::nil(),
+            Some("minecraft:adventure/root".to_owned()),
+        );
+        let ServerDirective::Send { packet_id, payload } =
+            proto.encode_select_advancements_tab(selected.as_deref())
+        else {
+            panic!("selected advancement tab must be sent to the client");
+        };
+        assert_eq!(packet_id, play::clientbound::SELECT_ADVANCEMENTS_TAB);
+        let mut reader = Reader::new(&payload);
+        assert!(reader.bool().expect("tab-present flag"));
+        assert_eq!(
+            reader.string(32767).expect("tab identifier"),
+            "minecraft:adventure/root"
+        );
+        assert!(reader.ensure_empty().is_ok(), "selection body has no trailing bytes");
     }
 }
 
