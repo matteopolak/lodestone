@@ -114,10 +114,15 @@ what a count gate can do.
   latest result is a gate-input error rather than a reason to reuse an older healthy
   value for that metric. This prevents `Infinity` from silently widening a count gate
   until arbitrary drift passes.
+- **A latest invalid result shadows older history.** A recorder may write `null` when
+  a metric had no samples. For a valid `(scene, metric)` key, that line removes any
+  older numeric value from consideration, so an instrument that stopped producing a
+  count cannot pass from an append-only log. A later numeric record revives the key;
+  an unrelated metric in the same log remains comparable.
 
 ## How the gate cannot pass vacuously
 
-Five separate guards, each with a check in the control suite and a mutation proving the
+Six separate guards, each with a check in the control suite and a mutation proving the
 check would notice its removal:
 
 1. **`--min-compared N`** — fewer than `N` metrics actually compared exits **2**, not 0.
@@ -136,6 +141,10 @@ check would notice its removal:
    can read one results log and make its observations satisfy `--min-compared` twice.
    Each bench has one baseline file; a split or renamed baseline is a gate-input
    failure, not extra coverage.
+6. **A latest null/non-numeric result shadows older history**, so a metric that stopped
+   producing samples becomes `MISSING` rather than silently reusing a prior run. A
+   later numeric line restores the metric; unrelated records in the same file remain
+   usable.
 
 Exit status is `0` inside band, `1` drift or a required metric absent, `2` the gate did
 not really run. Read it directly. `cargo test --workspace | grep … | tail` once reported
@@ -145,7 +154,7 @@ success in this repo while cargo returned 101.
 
 `python3 scripts/test-bench-gate.py` — stdlib only, no pytest, the same shape as
 `scripts/test-profile-cost-table.py` and for the same reason (these are Python scripts
-and no crate owns them). 34 checks over synthetic fixtures in a temporary directory;
+and no crate owns them). 36 checks over synthetic fixtures in a temporary directory;
 nothing is written inside the checkout.
 
 The centre of it is a planted regression in the exact shape of the real one: a fixture
@@ -155,7 +164,7 @@ that moved, and must not implicate the one that did not. Its control is the iden
 fixture unplanted, which must exit 0 — without that pairing, a gate that always failed
 would satisfy every red-expecting check in the file.
 
-Every guard is then mutation-tested. Ten broken copies of `bench-gate.py` (via
+Every guard is then mutation-tested. Eleven broken copies of `bench-gate.py` (via
 `BENCH_GATE_PATH`, which points the suite at a copy so nothing in the shared checkout is
 edited) each turn the suite red:
 
@@ -171,6 +180,7 @@ edited) each turn the suite red:
 | accept duplicate baseline keys | one observed record cannot satisfy coverage twice |
 | accept non-finite values | `Infinity` cannot widen a gate and `NaN` cannot revive a stale result |
 | accept duplicate baseline bench names | two files cannot make one results log satisfy coverage twice |
+| reuse an older value after a null result | a stopped metric becomes `MISSING`, while a later numeric result still works |
 
 Two of these were written *after* a mutation survived, which is the whole point of
 running the mutations rather than reasoning about them: the "unrun bench" check was
