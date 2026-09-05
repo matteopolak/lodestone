@@ -6,7 +6,7 @@
 
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
 use lodestone_server::{
     ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -16,7 +16,7 @@ use crate::PROTOCOL;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::game::{
-    BlockDig, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
+    BlockDig, BlockPlace, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
     ServerboundPosition, ServerboundPositionLook,
 };
 use crate::packets::handshake::SetProtocol;
@@ -72,6 +72,15 @@ fn block_face(face: i8) -> Option<BlockFace> {
         5 => Some(BlockFace::East),
         _ => None,
     }
+}
+
+/// Converts protocol 47's signed cursor byte to a block-local coordinate.
+///
+/// The legacy packet carries sixteenths rather than the floats used by later
+/// eras. Rejecting an out-of-range byte keeps malformed input from becoming a
+/// plausible edge click in the shared placement consumer.
+fn cursor_coordinate(value: i8) -> Option<f32> {
+    (0..=15).contains(&value).then_some(f32::from(value) / 16.0)
 }
 
 fn legacy_composite(canonical: u32) -> Result<u32, ChunkEncodeError> {
@@ -227,6 +236,39 @@ impl ServerProtocol for V47ServerProtocol {
                     4 => ServerBound::ItemDropped { whole_stack: false },
                     5 => ServerBound::ReleaseUseItem,
                     _ => ServerBound::Ignored,
+                }
+            }
+            State::Play if packet_id == play::serverbound::BLOCK_PLACE => {
+                let Some(BlockPlace {
+                    location: Position(pos),
+                    direction,
+                    held_item: _,
+                    cursor_x,
+                    cursor_y,
+                    cursor_z,
+                }) = decode_full(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                let (Some(face), Some(cursor_x), Some(cursor_y), Some(cursor_z)) = (
+                    block_face(direction),
+                    cursor_coordinate(cursor_x),
+                    cursor_coordinate(cursor_y),
+                    cursor_coordinate(cursor_z),
+                ) else {
+                    // The `(-1, -1, -1), -1` in-air sentinel has neither a
+                    // hand choice nor the instantaneous look direction the
+                    // shared projectile consumer needs. Keep it ignored until
+                    // this era can provide that missing input.
+                    return ServerBound::Ignored;
+                };
+                ServerBound::UseItemOn {
+                    pos,
+                    face,
+                    cursor: Vec3f::new(cursor_x, cursor_y, cursor_z),
+                    // Protocol 47 predates off-hand and prediction sequences.
+                    hand: 0,
+                    sequence: 0,
                 }
             }
             // Protocol 47 confirms a placement by echoing position/look; it

@@ -4,7 +4,8 @@ use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, VersionAdapter,
+    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Hand, Vec3f,
+    VersionAdapter,
 };
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_8::{V47Adapter, V47ServerProtocol};
@@ -120,6 +121,83 @@ fn projects_only_the_legacy_vertical_window_and_decodes_break_actions() {
             face: BlockFace::Up,
             sequence: 0,
         }
+    );
+}
+
+#[test]
+fn block_place_lifts_the_protocol_47_body_to_the_shared_placement_consumer() {
+    let protocol = V47ServerProtocol;
+    // x=258, y=64, z=-3 packed into protocol 47's single i64 position;
+    // East face; `0xffff` is the still-present empty inline slot; and cursor
+    // sixteenths. There is no hand or prediction sequence in this era.
+    let body = [
+        0, 0, 0x40, 0x81, 0x03, 0xFF, 0xFF, 0xFD, 5, 0xFF, 0xFF, 4, 8, 12,
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::BLOCK_PLACE, &body),
+        ServerBound::UseItemOn {
+            pos: BlockPos::new(258, 64, -3),
+            face: BlockFace::East,
+            cursor: Vec3f::new(0.25, 0.5, 0.75),
+            hand: 0,
+            sequence: 0,
+        }
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::BLOCK_PLACE,
+            &[0, 0, 0x40, 0x81, 0x03, 0xFF, 0xFF, 0xFD, 6, 0xFF, 0xFF, 4, 8, 12],
+        ),
+        ServerBound::Ignored,
+        "an unknown face must not become a placement against an arbitrary side"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::BLOCK_PLACE,
+            &[0, 0, 0x40, 0x81, 0x03, 0xFF, 0xFF, 0xFD, 5, 0xFF, 0xFF, 16, 8, 12],
+        ),
+        ServerBound::Ignored,
+        "a cursor outside the protocol-47 sixteenth range must not be clamped"
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Configuration,
+            play::serverbound::BLOCK_PLACE,
+            &body,
+        ),
+        ServerBound::Ignored,
+        "the Play packet must not bypass the direct legacy login transition"
+    );
+}
+
+#[test]
+fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
+    let action = ClientAction::UseItemOn {
+        hand: Hand::Main,
+        pos: BlockPos::new(7, 80, -9),
+        face: BlockFace::North,
+        cursor: Vec3f::new(0.5, 0.25, 0.75),
+        inside_block: false,
+        sequence: 123,
+    };
+    let (packet_id, body) = V47Adapter::new()
+        .encode_action(ConnectionState::Play, &action)
+        .expect("main-hand block use is representable in protocol 47")
+        .expect("block use emits one placement frame");
+    assert_eq!(packet_id, play::serverbound::BLOCK_PLACE);
+    assert_eq!(
+        V47ServerProtocol.decode(State::Play, packet_id, &body),
+        ServerBound::UseItemOn {
+            pos: BlockPos::new(7, 80, -9),
+            face: BlockFace::North,
+            // The era's cursor is rounded to sixteenths by the adapter.
+            cursor: Vec3f::new(0.5, 0.25, 0.6875),
+            hand: 0,
+            sequence: 0,
+        },
+        "the real adapter frame must reach the shared server variant consumed by placement"
     );
 }
 
