@@ -133,3 +133,66 @@ fn block_action_sequence_and_batch_ack_reach_the_server_vocabulary() {
         &3.5_f32.to_be_bytes()),
         ServerBound::ChunkBatchAcknowledged { desired_chunks_per_tick: 3.5 });
 }
+
+#[test]
+fn movement_shapes_preserve_position_rotation_and_ground_status() {
+    let protocol = V774ServerProtocol;
+    let position = [24.0_f64, 100.0, 8.0]
+        .into_iter()
+        .flat_map(f64::to_be_bytes)
+        .chain([3])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        protocol.decode(State::Play, packet_ids::play::serverbound::MOVE_PLAYER_POS, &position),
+        ServerBound::PlayerMoved {
+            x: 24.0,
+            y: 100.0,
+            z: 8.0,
+            rotation: None,
+            on_ground: true,
+        }
+    );
+    let position_look = [24.0_f64, 100.0, 8.0]
+        .into_iter()
+        .flat_map(f64::to_be_bytes)
+        .chain(90.0_f32.to_be_bytes())
+        .chain((-15.0_f32).to_be_bytes())
+        .chain([2])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            packet_ids::play::serverbound::MOVE_PLAYER_POS_ROT,
+            &position_look,
+        ),
+        ServerBound::PlayerMoved {
+            x: 24.0,
+            y: 100.0,
+            z: 8.0,
+            rotation: Some(lodestone_model::Rotation::new(90.0, -15.0)),
+            on_ground: false,
+        }
+    );
+    let look = 45.0_f32
+        .to_be_bytes()
+        .into_iter()
+        .chain(30.0_f32.to_be_bytes())
+        .chain([3])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        protocol.decode(State::Play, packet_ids::play::serverbound::MOVE_PLAYER_ROT, &look),
+        ServerBound::PlayerRotated {
+            yaw: 45.0,
+            pitch: 30.0,
+            on_ground: true,
+        }
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            packet_ids::play::serverbound::MOVE_PLAYER_STATUS_ONLY,
+            &[2],
+        ),
+        ServerBound::PlayerStatusOnly { on_ground: false }
+    );
+}

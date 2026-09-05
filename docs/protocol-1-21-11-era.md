@@ -199,7 +199,10 @@ happened to the 1.20.6 era.
 ## Hosting
 
 `server_protocol::V774ServerProtocol` implements offline login, configuration,
-the Overworld join and teleport, chunk batches, and block breaking updates.
+the Overworld join and teleport, chunk batches, player movement, and block
+breaking updates. Its four Play movement packets decode the grounded bit from
+their shared flags byte, preserving the position and optional rotation the
+shared server uses to recenter the view and check interactions.
 Its `src/generated/hosting-configuration.txt` contains all 23 synchronized
 registries, plus feature and tag packets, captured directly from the headless
 1.21.11 server. Every entry has its NBT payload and requires no known-pack
@@ -226,9 +229,9 @@ Without `LODESTONE_REGEN`, the test compares a fresh capture with the committed
 fixture. Each capture has a 30-second deadline and performs no gameplay actions.
 The hermetic companion reads the actual hosted connection and requires every
 fixture payload before its finish signal. `tests/server_integration.rs` verifies
-registry-selected login, Play, chunk receipt and a block break through the real
-integrated-server loop. Its enclosed-room light gate reads the client's render
-light snapshots, checking sky 0 inside and 15 outside, torch emission 14,
+registry-selected login, Play, chunk receipt, movement-driven view recentering,
+and a block break through the real integrated-server loop. Its enclosed-room
+light gate reads the client's render light snapshots, checking sky 0 inside and 15 outside, torch emission 14,
 adjacent air 13, and extinction after removing the source. Fixture properties
 are independently checked against the vendored 1.21.11 block dataset.
 

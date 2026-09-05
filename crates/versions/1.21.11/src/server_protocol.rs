@@ -7,7 +7,7 @@
 use lodestone_core::{
     Ctx, Decode, Encode, Reader, State, Writer, encode_body,
 };
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -15,7 +15,10 @@ use uuid::Uuid;
 use crate::PROTOCOL_1_21_11;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::configuration::RegistryData;
-use crate::packets::game::{PlayerAction, ClientboundPlayerPosition, JoinGame, SpawnInfo};
+use crate::packets::game::{
+    ClientboundPlayerPosition, JoinGame, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
+    MovePlayerStatusOnly, PlayerAction, SpawnInfo,
+};
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginStart, LoginFinished, SetCompression};
 use crate::packets::position::{Position, pack_position};
@@ -335,6 +338,55 @@ impl ServerProtocol for V774ServerProtocol {
                     .map_or(ServerBound::Ignored, |ack| ServerBound::ChunkBatchAcknowledged {
                         desired_chunks_per_tick: ack.chunks_per_tick,
                     })
+            }
+            State::Play if packet_id == play::serverbound::MOVE_PLAYER_POS => {
+                decode_full::<MovePlayerPos>(payload).map_or(
+                    ServerBound::Ignored,
+                    |move_| ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: None,
+                        on_ground: move_.flags & crate::packets::game::movement_flags::ON_GROUND
+                            != 0,
+                    },
+                )
+            }
+            State::Play if packet_id == play::serverbound::MOVE_PLAYER_POS_ROT => {
+                decode_full::<MovePlayerPosRot>(payload).map_or(
+                    ServerBound::Ignored,
+                    |move_| ServerBound::PlayerMoved {
+                        x: move_.x,
+                        y: move_.y,
+                        z: move_.z,
+                        rotation: Some(Rotation {
+                            yaw: move_.yaw,
+                            pitch: move_.pitch,
+                        }),
+                        on_ground: move_.flags & crate::packets::game::movement_flags::ON_GROUND
+                            != 0,
+                    },
+                )
+            }
+            State::Play if packet_id == play::serverbound::MOVE_PLAYER_ROT => {
+                decode_full::<MovePlayerRot>(payload).map_or(
+                    ServerBound::Ignored,
+                    |look| ServerBound::PlayerRotated {
+                        yaw: look.yaw,
+                        pitch: look.pitch,
+                        on_ground: look.flags & crate::packets::game::movement_flags::ON_GROUND
+                            != 0,
+                    },
+                )
+            }
+            State::Play if packet_id == play::serverbound::MOVE_PLAYER_STATUS_ONLY => {
+                decode_full::<MovePlayerStatusOnly>(payload).map_or(
+                    ServerBound::Ignored,
+                    |status| ServerBound::PlayerStatusOnly {
+                        on_ground: status.flags & crate::packets::game::movement_flags::ON_GROUND
+                            != 0,
+                    },
+                )
             }
             _ => ServerBound::Ignored,
         }
