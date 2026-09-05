@@ -29,7 +29,7 @@ license = "GPL-3.0-or-later"
 
 [features]
 default = []
-jvm = ["dep:jni"]
+jvm = ["dep:jni", "dep:zip"]
 
 [lints]
 workspace = true
@@ -49,6 +49,7 @@ workspace = true
 # them: an explanatory comment naming them would fail the very gate it explains.
 lodestone-ecs.workspace = true
 jni = { version = "=0.22.4", default-features = false, features = ["invocation"], optional = true }
+zip = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `assert_ecs_only_dependency_graph` and `within_budget`: the shared reentrancy
