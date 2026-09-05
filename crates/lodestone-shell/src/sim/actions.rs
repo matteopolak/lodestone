@@ -1694,7 +1694,7 @@ impl Sim {
                 // The current state id, unchanged — same reasoning as
                 // `apply_creative_slot`: nothing about this write advances the
                 // container's synchronisation counter.
-                let state_id = menus.0.player().state_id() as i32;
+                let state_id = menus.0.player().state_id();
                 menus.0.apply(&lodestone_model::ClientEvent::ContainerSlot {
                     window_id: 0,
                     state_id,
