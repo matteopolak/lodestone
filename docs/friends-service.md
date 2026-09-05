@@ -10,6 +10,8 @@
 
 `menu::friends` is the presentation consumer. The title and pause-menu Friends buttons open one three-tab surface: Friends lists established relationships, Pending combines incoming and outgoing requests, and Settings exposes the selected account's service-backed Friends availability and request permission. Established-Friend rows show the service's latest credential-free presence as trailing text when a row is available; request rows deliberately remain blank because relationship membership does not establish an activity state. It renders loading, failure, empty, cached-list, disabled, and preference-saving states from `FriendsView`; outbound values are refresh, `Accept`, `Decline`, `Cancel`, `Remove`, and a complete `FriendsPreferences` replacement. The menu disables settings until attributes arrive and while a save is in progress, so repeated clicks cannot replace an earlier preference request. Presence has no decorative visibility switch: the runtime shares activity only while the confirmed service-backed Friends setting is enabled.
 
+`FriendsNotificationFeed` consumes only successive credential-free `FriendsView` values. `FriendsApp` turns its emitted relationship changes into a short-lived HUD toast when the shared top-right toast slot is free. It has no token, service handle, or locally invented notification setting.
+
 ## How it works
 
 `FriendsService::production` owns a five-second, redirect-disabled HTTP client and a fixed `https://api.minecraftservices.com/` origin. A caller passes `&Session` to each operation, so the service neither opens token storage nor refreshes credentials. The session's bearer header is added only to the fixed request origin.
@@ -32,11 +34,15 @@ Friends and presence keep independent entity tags and due times, but share one i
 
 The Friends frame joins an established relationship row to `FriendsView::presence.entries` by profile UUID and draws the returned status through `MenuRow::trailing`. A missing row remains blank rather than asserting that the friend is offline, and pending-request rows never consume presence. Keeping the status in trailing text preserves the list's one-line layout and its shared draw/hit-test geometry.
 
+The notification feed adopts the first list for an account silently. After that baseline, a profile newly entering `incoming` produces a received-request toast, while a profile moving from `outgoing` to `friends` produces an accepted-request toast. It intentionally does not notify for every list difference: those are the only two changes recoverable from the safe view that do not confuse a player-initiated action with someone else's response. Account changes, an absent snapshot, and an explicit service-side disable reset the baseline and clear queued notifications. The app coalesces duplicate profile/action pairs and retains at most five waiting toasts. A Friends toast waits behind an active recipe or advancement toast and starts its five-second display period only once the HUD can draw it.
+
 ## How to change it
 
 Keep wire request and response structs private in `lodestone_auth::friends`; promote only domain values that a runtime or menu genuinely consumes. Add a loopback test that asserts the exact method, path, bearer header, validators, and JSON body before changing a route or field. Do not add invitation, join, signaling, or peer identity fields here: that transport was removed before 26.2 release, as the official pre-release notes record. [Pre-release boundary](https://feedback.minecraft.net/hc/en-us/articles/46153634280333-Minecraft-Java-Edition-26-2-Pre-release-1)
 
 When changing the shell executor, preserve the `Select → ResolveSession → FetchAttributes` ordering and keep `FriendsView` as the only worker-to-frame type. Native work belongs in `app::friends::run_native_worker`; browser work belongs in the local-task seam, not a blocking executor. The application must call `FriendsApp::shutdown` as it exits so its account-scoped state is cleared and the native worker is asked to stop.
+
+Keep relationship-delta interpretation in `FriendsNotificationFeed`, not in HTTP decoding or a menu callback. Seed a newly selected account before notifying, preserve the `outgoing`-to-`friends` requirement for acceptance, and do not add a notification toggle unless the service model supplies one. The shared HUD toast slot has established higher-priority producers; leave a Friends toast queued until that slot is available instead of counting down while it is hidden.
 
 Put polling, cooldown, account replacement, and authentication-retry decisions in `FriendsCoordinator`, not in menu callbacks or the worker. The worker must complete each emitted operation exactly once before polling again. If an app integration adds a new activity source, call `FriendsRuntime::set_desired_presence`; do not send a presence HTTP request directly. `FriendsView` is the only object frame code should retain or clone.
 
@@ -57,6 +63,8 @@ If a new HTTP client is needed, construct it inside this module with redirects d
 - Friends poll cadence: one minute while the overlay is open; five minutes otherwise.
 - Presence cadence/debounce: five minutes and ten seconds respectively.
 - Request floor: ten seconds; unavailable backoff: 15, 30, 60, 120, 240, then 300 seconds.
+- Friends toast display time: five seconds after the shared HUD toast slot becomes available.
+- Friends toast backlog: five waiting profile/action pairs; duplicates coalesce.
 
 ## Dependencies
 
