@@ -49,13 +49,29 @@ division, so an entity at `x = -0.5` belongs to chunk `-1`, not chunk `0`.
 Chunk lifecycle has the same explicit smallest owner before the cache crosses
 its source boundary. `ChunkLifecyclePlan` assigns each on-demand load and each
 selected cache release to `ChunkLifecycleOwner::Chunk { cx, cz }`; `ChunkStore`
-consumes it for the real `column_at` and `unload` calls used by every
-`IntegratedServer`. Ticket transitions remain demand-driven: becoming resident
-does not pre-generate a column, and becoming unresident only releases a column
-that is actually cached. An eviction batch is bounded by current cache entries,
-deduplicated, and ordered `(cx, cz)` before `ChunkSource::unload`, so the
-hash-map iteration behind a ticket delta cannot make negative-column unload
-order vary. This is a serial hand-off, not an unload worker or an I/O change.
+consumes it through `ChunkLifecycleHandoff` for the real `column_at` and
+`unload` calls used by every `IntegratedServer`. Ticket transitions remain
+demand-driven: becoming resident does not pre-generate a column, and becoming
+unresident only releases a column that is actually cached. An eviction batch is
+bounded by current cache entries, deduplicated, and ordered `(cx, cz)` before
+`ChunkSource::unload`, so the hash-map iteration behind a ticket delta cannot
+make negative-column unload order vary.
+
+The hand-off gives every bounded batch and slot a typed acknowledgement token.
+Each slot must move through `SourceReady`, `SourceInFlight`,
+`PersistenceReady`, `PersistenceInFlight`, and `Complete`; a duplicate command,
+out-of-order reply, or reply with an old batch, slot, action, phase, or
+coordinate is rejected. This is the persistence/source ordering seam a future
+region worker must keep: cache residency is removed before a release is
+selected, and a same-coordinate load or release owns a small source gate until
+the persistence hand-off acknowledges. Gates use weak references and disappear
+after work completes, so they are not a second unbounded chunk-residency map.
+Independent coordinates remain free to generate in parallel. The current
+`ChunkStore` path closes the persistence hand-off synchronously when the source
+has accepted its queued request; because `ChunkSource::unload` deliberately
+does not perform I/O, that acknowledgement is not durable disk completion.
+This is still a serial hand-off, not an unload worker, storage-format change, or
+I/O change.
 Entities outside this ambient-effect hand-off, natural-spawn planning, world
 border, game rules, time, weather and other cross-column work remain global.
 For a named populated scene,
@@ -106,9 +122,16 @@ background task. A ticket or LRU eviction may call `ChunkSource::unload` only
 after it has removed that retained cache entry, and must pass the selected
 coordinates through `ChunkLifecyclePlan`; calling the source under the cache
 lock would reintroduce the lock/I/O and re-entry hazards this boundary avoids.
-If a future owner can release a column concurrently, define the source-facing
-acknowledgement and persistence ordering first; the current plan only makes the
-serial owner and canonical order observable.
+If a future owner releases a column concurrently, open a batch through
+`ChunkLifecycleHandoff::open`, retain it between its source and persistence
+commands, and acknowledge persistence exactly once after the durable writer
+completes. `execute_with_persistence` is the current synchronous callback seam
+for the same ordering. Do not replace the bounded batch with a global
+acknowledgement history: an old reply must be stale, not a permanent resident
+record. Preserve `(cx, cz)` selection order, including negative coordinates,
+before dispatching any workers. The current `ChunkSource` contract still lacks
+a durable-save callback, so wiring that callback through `RegionChunkSource` and
+`WorldSaveHandle` remains an architecture gap.
 
 When recording a candidate report, name the populated scene and the explicit
 edge passed to `candidate_region_workload`. Compare total chunks, the number of

@@ -221,7 +221,7 @@ use std::collections::hash_map::Entry as MapEntry;
 use std::sync::Mutex;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
-use crate::chunk_lifecycle::ChunkLifecyclePlan;
+use crate::chunk_lifecycle::{ChunkLifecycleHandoff, ChunkLifecyclePlan};
 use crate::ticket::{TicketDelta, TicketKind, TicketOwner, TicketStoreHandle};
 
 /// The floor under [`capacity_for_view_radius`], and the capacity a radius-less
@@ -600,6 +600,11 @@ pub(crate) struct ChunkStore<S> {
     /// does not change when the slider moves.
     policy: CapacityPolicy,
     cache: Mutex<Cache>,
+    /// The only source-facing lifecycle owner. Cache mutation selects bounded
+    /// load/release work first; this hand-off serializes source transitions for
+    /// one coordinate through their acknowledgement without serializing
+    /// independent generation on other coordinates.
+    lifecycle: ChunkLifecycleHandoff,
     /// The ticket graph this store's residency answers to — the ticket-driven eviction path. See
     /// [`maybe_tick_tickets`](Self::maybe_tick_tickets) for how it is driven and
     /// this module's own doc section on the ticket/status pipeline for the
@@ -677,6 +682,7 @@ impl<S> ChunkStore<S> {
                 evicted: 0,
                 next_ticket_check: 0,
             }),
+            lifecycle: ChunkLifecycleHandoff::default(),
             tickets: TicketStoreHandle::new(),
         }
     }
@@ -778,21 +784,21 @@ impl<S: ChunkSource> ChunkStore<S> {
             }
         }
 
-        let load = ChunkLifecyclePlan::load((cx, cz));
-        let assignment = load
-            .assignments()
-            .first()
-            .expect("an on-demand chunk load has one owner assignment");
-        debug_assert_eq!(assignment.chunk, (cx, cz));
-        debug_assert_eq!(
-            assignment.owner,
-            crate::chunk_lifecycle::ChunkLifecycleOwner::Chunk { cx, cz }
-        );
-        // Lock released: a ~909 ms generation must not serialise
-        // `generate_columns_parallel`'s scoped fan-out.
-        let fresh = self
-            .source
-            .column_at(assignment.chunk.0, assignment.chunk.1, stage);
+        // The cache lock remains released while the source owns this command:
+        // independent columns still generate concurrently, but a later source
+        // release for this exact coordinate cannot overtake the load.
+        let mut fresh = self.lifecycle.execute(ChunkLifecyclePlan::load((cx, cz)), |assignment| {
+            debug_assert_eq!(assignment.chunk, (cx, cz));
+            debug_assert_eq!(
+                assignment.owner,
+                crate::chunk_lifecycle::ChunkLifecycleOwner::Chunk { cx, cz }
+            );
+            self.source
+                .column_at(assignment.chunk.0, assignment.chunk.1, stage)
+        });
+        let fresh = fresh
+            .pop()
+            .expect("an on-demand lifecycle load returns exactly one column");
 
         let mut guard = self.lock();
         let cache = &mut *guard;
@@ -825,7 +831,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         // lets the layer beneath release a column it has already written, so
         // the edit map is not the process's real memory bound for a
         // heavily-built world.
-        for assignment in ChunkLifecyclePlan::unload(evicted).assignments() {
+        self.lifecycle.execute(ChunkLifecyclePlan::unload(evicted), |assignment| {
             debug_assert_eq!(
                 assignment.owner,
                 crate::chunk_lifecycle::ChunkLifecycleOwner::Chunk {
@@ -834,7 +840,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                 }
             );
             self.source.unload(assignment.chunk.0, assignment.chunk.1);
-        }
+        });
         None
     }
 
@@ -981,7 +987,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         };
         // Outside the lock, deliberately — same reasoning as
         // `evict_down_to_capacity`'s call site in `ensure`.
-        for assignment in ChunkLifecyclePlan::unload(evicted).assignments() {
+        self.lifecycle.execute(ChunkLifecyclePlan::unload(evicted), |assignment| {
             debug_assert_eq!(
                 assignment.owner,
                 crate::chunk_lifecycle::ChunkLifecycleOwner::Chunk {
@@ -990,7 +996,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                 }
             );
             self.source.unload(assignment.chunk.0, assignment.chunk.1);
-        }
+        });
     }
 }
 
