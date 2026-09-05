@@ -613,15 +613,17 @@ pub enum SpriteSource {
     /// they cannot name an entry in this build's generated model census, so an
     /// emitter must not manufacture a terrain particle for one.
     BlockState(lodestone_data::block_states::StateId),
-    /// The particle texture of an **item**, by network registry id — an
-    /// eaten or broken item's crumbs take the item model's own sprite.
+    /// The particle texture of a validated built-in **item** — an eaten or
+    /// broken item's crumbs take the item model's own sprite.
     ///
     /// Carrying the *item* rather than a resolved sprite is what makes eating a
     /// carrot throw orange crumbs and eating a beetroot throw red ones. A generic
     /// crumb satisfies any "some particles spawned" check and is visibly wrong for
     /// every coloured food, so the identity travels with the particle and the
-    /// shell resolves it the same way it resolves [`Self::BlockState`].
-    Item(u32),
+    /// shell resolves it the same way it resolves [`Self::BlockState`]. A custom
+    /// item stays in its registry/import owner: this build has no baked model
+    /// census entry for it, so it must not be coerced into a built-in sprite.
+    Item(lodestone_data::item::Item),
 }
 
 /// Which pass a particle draws in.

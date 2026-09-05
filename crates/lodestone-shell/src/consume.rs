@@ -68,7 +68,7 @@
 //!   drinks, so the particle system must consult it rather than the animation. A
 //!   potion that throws crumbs passes every "are there particles" check.
 //! * **The item's own texture is the point.** The crumbs carry
-//!   `SpriteSource::Item(id)` and the shell resolves that against the baked item
+//!   `SpriteSource::Item(item)` and the shell resolves that against the baked item
 //!   models. A generic crumb satisfies any presence check and is visibly wrong for
 //!   anything coloured.
 //! * **The off-hand is not modelled.** `ItemUseTicks` and `UsingItem` are both
@@ -89,9 +89,9 @@ use crate::interact::{ParticleSim, UsingItem};
 /// An in-progress eat or drink by the **local** player.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConsumeState {
-    /// Network registry id of the item being consumed —
-    /// `SpriteSource::Item`'s key, so the crumbs carry the food's own texture.
-    pub item_id: u32,
+    /// Validated built-in item being consumed — `SpriteSource::Item`'s key, so
+    /// the crumbs carry the food's own texture.
+    pub item: Item,
     /// The item's `minecraft:consumable` component.
     pub consumable: Consumable,
     /// Ticks elapsed since the use began, vanilla's `getTicksUsingItem()`.
@@ -151,9 +151,9 @@ impl ConsumeState {
         if ticks_used >= consumable.consume_ticks {
             return None;
         }
-        let item_id = u32::from(Item::from_name(item)?.registry_id());
+        let item = Item::from_name(item)?;
         Some(Self {
-            item_id,
+            item,
             consumable,
             ticks_used,
         })
@@ -246,7 +246,7 @@ pub fn emit_consume_particles(
         pos.z,
         state.0.pitch,
         state.0.yaw,
-        consume.item_id,
+        consume.item,
         consumable::PERIODIC_PARTICLE_COUNT,
     );
 }
@@ -324,19 +324,19 @@ mod tests {
     }
 
     /// The crumbs must carry the *eaten* item, not a generic one. Two foods with
-    /// visibly different sprites, asserted to resolve to two different ids.
+    /// visibly different sprites, asserted to retain two different typed items.
     #[test]
-    fn the_crumbs_carry_the_eaten_items_own_id() {
+    fn the_crumbs_carry_the_eaten_items_own_identity() {
         let carrot = resolve(true, Some(8), Some("minecraft:carrot")).expect("carrot");
         let beetroot = resolve(true, Some(8), Some("minecraft:beetroot")).expect("beetroot");
         assert_ne!(
-            carrot.item_id, beetroot.item_id,
-            "an orange crumb and a red one must come from different item ids"
+            carrot.item, beetroot.item,
+            "an orange crumb and a red one must come from different built-in items"
         );
         assert_eq!(
-            u32::from(Item::Carrot.registry_id()),
-            carrot.item_id,
-            "the id must be the registry id the sprite table is indexed by"
+            Item::Carrot,
+            carrot.item,
+            "the validated item must remain the sprite identity"
         );
     }
 

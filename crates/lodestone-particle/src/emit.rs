@@ -408,7 +408,7 @@ pub fn item_particle(
     xa: f64,
     ya: f64,
     za: f64,
-    item: u32,
+    item: lodestone_data::item::Item,
     rng: &mut JavaRandom,
 ) -> Particle {
     // The 4-argument constructor: zero given velocity, so the whole of `xd/yd/zd`
@@ -460,7 +460,7 @@ pub fn spawn_item_particles(
     eye_z: f64,
     x_rot_deg: f32,
     y_rot_deg: f32,
-    item: u32,
+    item: lodestone_data::item::Item,
     count: u32,
 ) {
     let x_rad = -x_rot_deg.to_radians();
@@ -2360,7 +2360,7 @@ pub fn item_burst_particle(
     x: f64,
     y: f64,
     z: f64,
-    item: u32,
+    item: lodestone_data::item::Item,
     rng: &mut JavaRandom,
 ) -> Particle {
     let mut p = Particle::with_velocity(x, y, z, 0.0, 0.0, 0.0, SpriteSource::Item(item), rng);
@@ -2409,6 +2409,7 @@ mod tests {
     };
     use crate::{Behaviour, DripKind, DripPhase, ParticleEngine, Sheet, SpriteSource};
     use lodestone_data::block_states::StateId;
+    use lodestone_data::item::Item;
     use lodestone_physics::{Aabb, CollisionView};
 
     const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
@@ -2475,6 +2476,31 @@ mod tests {
                 p.z
             );
         }
+    }
+
+    /// Item crumbs retain a generated item identity all the way into the
+    /// particle. The distinct-item control rules out an implementation that
+    /// silently substitutes one generic crumb for every caller.
+    #[test]
+    fn item_crumb_retains_its_validated_item() {
+        let mut rng = ParticleEngine::seeded(4);
+        let carrot = super::item_particle(
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            Item::Carrot,
+            rng.rng(),
+        );
+        let beetroot = super::item_burst_particle(0.0, 0.0, 0.0, Item::Beetroot, rng.rng());
+        assert_eq!(carrot.sprite, SpriteSource::Item(Item::Carrot));
+        assert_eq!(beetroot.sprite, SpriteSource::Item(Item::Beetroot));
+        assert_ne!(
+            carrot.sprite, beetroot.sprite,
+            "distinct foods must not share a generic sprite"
+        );
     }
 
     /// Terrain particles carry the block's identity, which is the whole point —
