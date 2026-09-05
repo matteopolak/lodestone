@@ -154,6 +154,7 @@ use lodestone_entity::pose::{
     ADULT_LIMB_SCALE, BABY_LIMB_SCALE, LIMB_SWING_SMOOTHING, MAX_HEAD_YAW, WalkAnimation,
     clamp_head_to_body, walk_target_speed,
 };
+use lodestone_model::BlockStateRef;
 use lodestone_model::event::{EntityVariant, EquipmentSlot, Reported};
 use lodestone_model::{ResolvedText, Text};
 use lodestone_physics::{
@@ -785,9 +786,9 @@ pub struct EntityDraw {
     pub anim: AnimInput,
     /// The block state this entity is imitating, when it is a
     /// `minecraft:falling_block` and its spawn packet has been decoded — the
-    /// global block-state id, which is the key
-    /// [`CrackResolver::state_quads`](lodestone_render::CrackResolver::state_quads)
-    /// is indexed by.
+    /// source-tagged block-state reference. The moving-block renderer accepts a
+    /// built-in canonical state only after validating it against its census;
+    /// protocol-local values remain opaque until a matching resolver exists.
     ///
     /// `None` for every other entity type, and the switch the moving-block-model
     /// pass keys on (`gpu/moving_blocks.rs`). Absence is deliberate rather than a
@@ -798,7 +799,7 @@ pub struct EntityDraw {
     /// [`extract_entity_draws`], like [`Self::hurt`] and [`Self::item_use`], not
     /// folded through `EntityFacts` — see [`Self::hurt`] for why that hop is
     /// avoided.
-    pub block_state: Option<u32>,
+    pub block_state: Option<BlockStateRef>,
     /// Which of the eight 45° steps the stack in an item frame is turned to —
     /// vanilla's own item-frame rotation accessor, `0..8`.
     ///

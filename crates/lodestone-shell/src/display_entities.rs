@@ -59,7 +59,7 @@ use lodestone_ecs::entity::{
     MinecraftEntityId, Position, Rotation,
 };
 use lodestone_ecs::{Extract, ExtractSet};
-use lodestone_model::ItemStack;
+use lodestone_model::{BlockStateRef, ItemStack};
 
 /// Vanilla's own text-display entity's registry path, as [`DisplayDraw::type_path`]
 /// carries it (bare path, no namespace — matching
@@ -193,13 +193,13 @@ pub struct DisplayDraw {
     /// `text_display`'s style-flags byte, defaulted to `0` when unreported
     /// (no shadow, opaque, explicit background colour, centre-aligned).
     pub text_style_flags: u8,
-    /// `block_display`'s imitated block state (a global block-state id) —
+    /// `block_display`'s imitated source-tagged block-state reference —
     /// `None` when either this is not a `block_display` or it is one that
     /// has never reported the field, which is the switch a block-display
     /// consumer keys on, exactly as
     /// `lodestone_shell::entities::EntityDraw::block_state` already does for
     /// a falling block.
-    pub block_state: Option<u32>,
+    pub block_state: Option<BlockStateRef>,
     /// `item_display`'s displayed item stack — `None` when either this is
     /// not an `item_display` or it is one whose stack has never been
     /// reported (an empty `ItemStack::default()`-shaped absence, same
@@ -552,7 +552,7 @@ mod tests {
             DisplayScale(Vec3f::new(2.0, 2.0, 2.0)),
             DisplayLeftRotation(ModelQuat::new(0.0, 0.7071, 0.0, 0.7071)),
             DisplayRightRotation(ModelQuat::IDENTITY),
-            DisplayBlockState(42),
+            DisplayBlockState(BlockStateRef::canonical(42)),
         ));
         let draws = run_extract(&mut app);
         assert_eq!(draws.len(), 1);
@@ -561,7 +561,7 @@ mod tests {
         assert_eq!(draw.billboard, lodestone_render::display::BillboardMode::Center);
         assert_eq!(draw.transform.translation, Vec3::new(0.5, 0.25, -0.5));
         assert_eq!(draw.transform.scale, Vec3::new(2.0, 2.0, 2.0));
-        assert_eq!(draw.block_state, Some(42));
+        assert_eq!(draw.block_state, Some(BlockStateRef::canonical(42)));
     }
 
     /// A `block_display`'s state and an `item_display`'s stack both reach the

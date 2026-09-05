@@ -8,7 +8,9 @@
 //! both a spawn event and a head-rotation event — losing either one strands the
 //! renderer with a wrong-looking mob.
 
-use lodestone_model::{ClientEvent, ConnectionState, Directive, Rotation, Vec3, VersionAdapter};
+use lodestone_model::{
+    BlockStateRef, ClientEvent, ConnectionState, Directive, Rotation, Vec3, VersionAdapter,
+};
 use lodestone_v26_2::V770Adapter;
 use lodestone_v26_2::packet_ids::play;
 use lodestone_world::World;
@@ -131,7 +133,7 @@ fn a_falling_blocks_add_entity_carries_its_block_state() {
         directives.last(),
         Some(&Directive::Emit(ClientEvent::FallingBlockState {
             entity_id: 11,
-            block_state_id: 1234,
+            block_state: BlockStateRef::canonical(1234),
         })),
         "the Object Data field must reach a consumer, and last so the entity exists"
     );

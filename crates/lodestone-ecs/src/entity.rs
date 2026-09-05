@@ -46,8 +46,8 @@ use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::resource::Resource;
 use lodestone_model::{
-    EntityAttributeSnapshot, EntityEquipment, EntityPose, EntityVariant, ItemStack, Quat,
-    ResourceKey, Text, Vec3, Vec3f,
+    BlockStateRef, EntityAttributeSnapshot, EntityEquipment, EntityPose, EntityVariant, ItemStack,
+    Quat, ResourceKey, Text, Vec3, Vec3f,
 };
 use uuid::Uuid;
 
@@ -197,7 +197,7 @@ pub struct HurtTime(pub u32);
 pub struct DeathTime(pub u32);
 
 /// The block state a `minecraft:falling_block` entity is imitating —
-/// vanilla's own falling-block-entity block-state field, as a global block-state id.
+/// the protocol's block-state reference.
 ///
 /// Folded by [`crate::ingest::apply_falling_block_state`] from
 /// [`lodestone_model::ClientEvent::FallingBlockState`], which the version adapter
@@ -218,7 +218,7 @@ pub struct DeathTime(pub u32);
 /// and vanilla's own falling-block entity synchs no block-state field. A falling block that
 /// changed which block it was would be a different entity.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FallingBlockState(pub u32);
+pub struct FallingBlockState(pub BlockStateRef);
 
 /// Who launched this projectile — vanilla's own projectile-owner accessor's entity id, as the
 /// spawn packet's Object Data field reported it.
@@ -805,8 +805,8 @@ pub struct DisplayTextOpacity(pub i8);
 pub struct DisplayStyleFlags(pub u8);
 
 /// A `block_display`'s imitated block state
-/// (vanilla's own block-display block-state metadata index), as a global block-state id —
-/// the same id space [`FallingBlockState`] and `World::set_block` use.
+/// (vanilla's own block-display block-state metadata index), preserving the
+/// protocol's block-state reference until a renderer can validate it.
 /// **Absent** until first reported, and forever for every entity that is not
 /// a `block_display` (the adapter withholds index 23's `INT` for those — see
 /// `lodestone_model::event::EntityMetadataUpdate::display_block_state`).
@@ -817,7 +817,7 @@ pub struct DisplayStyleFlags(pub u8);
 /// it), while this one rides the ordinary incremental metadata channel and
 /// can change at any time a `/data merge` or plugin edits the entity.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DisplayBlockState(pub u32);
+pub struct DisplayBlockState(pub BlockStateRef);
 
 /// An `item_display`'s display-context ordinal
 /// (vanilla's own item-display item-display-context metadata index) — which perspective (`GUI`,

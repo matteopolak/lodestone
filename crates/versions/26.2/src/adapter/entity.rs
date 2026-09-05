@@ -493,7 +493,7 @@ fn handle_add_entity(
             // negative value is not a state id. Clamping to `0` (air, which bakes
             // no quads and therefore draws nothing) is the one reading that cannot
             // panic or wrap into a plausible-looking wrong block.
-            block_state_id: data.max(0) as u32,
+            block_state: BlockStateRef::canonical(data.max(0) as u32),
         }));
     }
 

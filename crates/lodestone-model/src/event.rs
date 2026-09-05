@@ -808,9 +808,10 @@ pub struct EntityMetadataUpdate {
     /// centre, `0x08` left, `0x10` right). Present only for a `text_display`
     /// that has reported it.
     pub display_text_style_flags: Option<u8>,
-    /// The block display's block-state field, the global block-state id
-    /// this `block_display` is showing — the same id space
-    /// `lodestone_ecs::entity::FallingBlockState` and `World::set_block` use.
+    /// The block display's block-state field this `block_display` is showing.
+    /// [`BlockStateRef::Canonical`] is in the built-in 26.2 numbering;
+    /// [`BlockStateRef::ProtocolLocal`] remains opaque until a matching
+    /// version-aware or dynamic-registry consumer resolves it.
     ///
     /// # Why this needs an entity-type guard where the transformation fields do not
     ///
@@ -822,7 +823,7 @@ pub struct EntityMetadataUpdate {
     /// collar-color field. Ungated, a cat's dye ordinal (`0..=15`) would
     /// decode as a wildly out-of-range block-state id. Present only for a
     /// `block_display` that has reported it.
-    pub display_block_state: Option<u32>,
+    pub display_block_state: Option<BlockStateRef>,
     /// The item display's item-display-context field, the raw
     /// display-context ordinal this `item_display` was told to pose its
     /// item in. The default is `NONE` (`0`), which selects
@@ -2021,9 +2022,9 @@ pub enum ClientEvent {
     FallingBlockState {
         /// Entity id.
         entity_id: i32,
-        /// The global block-state id the entity is imitating, as
-        /// vanilla's own block-state-to-id registry numbers them for this protocol version.
-        block_state_id: u32,
+        /// The block state the entity is imitating. Its source tag is retained
+        /// until a version-aware consumer can resolve it safely.
+        block_state: BlockStateRef,
     },
     /// A projectile's **owner** entity id, from its spawn packet's
     /// **Object Data** field — the same trailing VarInt
