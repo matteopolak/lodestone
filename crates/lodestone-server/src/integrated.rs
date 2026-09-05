@@ -4511,6 +4511,18 @@ mod tests {
                 .set_block(0, 1, 0, "minecraft:redstone_torch[lit=false]");
             source
         }
+
+        fn unlit_furnace_in_origin_column() -> Self {
+            let source = Self::water_at_east_edge();
+            source
+                .columns
+                .lock()
+                .expect("fluid fixture columns poisoned")
+                .get_mut(&(0, 0))
+                .expect("the origin fixture is retained")
+                .set_block(1, 1, 1, "minecraft:furnace[facing=north,lit=false]");
+            source
+        }
     }
 
     impl ChunkSource for FluidFixtureSource {
@@ -4637,6 +4649,72 @@ mod tests {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "the integrated tick loop reached {:?} ticks without consuming the scheduled torch in column (1, 0)",
+                server.tick_stats().map(|stats| stats.tick_count),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A real integrated server consumes the chunk-owned block-entity plan,
+    /// then applies its explicit furnace effect through the shared world
+    /// writer. The scheduled-water input makes the origin column resident;
+    /// without that control the registry's residency gate would correctly
+    /// leave the furnace untouched and this would only prove an unloaded skip.
+    #[tokio::test]
+    async fn integrated_server_applies_a_chunk_owned_block_entity_effect() {
+        let source = FluidFixtureSource::unlit_furnace_in_origin_column();
+        let block_entities = BlockEntityHandle::default();
+        let furnace_pos = lodestone_model::BlockPos::new(1, 1, 1);
+        block_entities.with(|registry| {
+            let mut furnace = crate::furnace::Furnace::new(crate::furnace::FurnaceKind::Furnace);
+            furnace.set_fuel(Some(lodestone_model::ItemStack::new(
+                "minecraft:coal".parse().expect("valid fuel key"),
+                1,
+            )));
+            furnace.set_input(Some(lodestone_model::ItemStack::new(
+                "minecraft:iron_ore".parse().expect("valid input key"),
+                1,
+            )));
+            registry.insert(furnace_pos, crate::block_entities::BlockEntity::Furnace(furnace));
+        });
+        let (server, _client) = IntegratedServer::open_in_memory_with_mobs_using(
+            Silent,
+            source,
+            (0..=0, 0..=0),
+            (8, 8),
+            0,
+            2,
+            block_entities,
+            crate::region_source::ScheduledTickHandle::default(),
+            None,
+            crate::portal::PortalIndex::new(),
+            None,
+            CommandDispatch::none(),
+            crate::ecs::ServerApp::bootstrap(),
+        );
+        let mut pending = crate::scheduled_tick::ScheduledTickQueue::new();
+        assert!(pending.schedule(
+            (15, 1, 0),
+            crate::fluid::TICK_FLUID.to_owned(),
+            1,
+            crate::scheduled_tick::TickPriority::Normal,
+        ));
+        server
+            .block_ticks()
+            .expect("a ticking integrated server exposes its inbound tick feed")
+            .request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if server.resident_block_state_id(1, 1, 1).is_some_and(|state| {
+                state.name() == "minecraft:furnace"
+                    && state.properties().contains(&("lit", "true"))
+            }) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the integrated tick loop reached {:?} ticks without handing the origin furnace effect to its world writer",
                 server.tick_stats().map(|stats| stats.tick_count),
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

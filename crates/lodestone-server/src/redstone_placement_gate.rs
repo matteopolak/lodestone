@@ -1326,10 +1326,10 @@ async fn drive_hoppers(
 /// the unlocked arm two. `tick_all`'s hardcoded `enabled: true` produces the
 /// control column, so this gate fails on a tree with no hopper lock at both cells.
 ///
-/// The distribution is order-independent, which matters because
-/// `tick_all_with_hopper_lock` iterates `HashMap` keys: whichever hopper is
-/// visited first, each acts once per cycle and the totals are identical. Checked
-/// by [`the_hopper_prediction_does_not_depend_on_registry_iteration_order`].
+/// The distribution is order-independent even though
+/// `tick_all_with_hopper_lock` consumes a deterministic chunk-owner plan:
+/// each hopper acts once per cycle and the totals are identical. Checked by
+/// [`the_hopper_prediction_does_not_depend_on_registry_iteration_order`].
 #[tokio::test(start_paused = true)]
 async fn a_powered_hopper_stops_transferring_and_an_unpowered_one_does_not() {
     let mut arms: Vec<(u32, u32)> = Vec::new();
@@ -1430,8 +1430,8 @@ async fn the_unlocked_shorthand_ignores_the_signal_which_is_what_made_this_an_is
     );
 }
 
-/// The prediction above must not depend on `HashMap` iteration order, since
-/// `tick_all_with_hopper_lock` walks `self.entities.keys()`.
+/// The prediction above must not depend on the registry's serial visit order,
+/// even though `tick_all_with_hopper_lock` walks a canonical owner plan.
 ///
 /// Argued by exhaustion over both visit orders rather than by trusting one run:
 /// each hopper acts at most once per cooldown cycle, and neither hopper's action

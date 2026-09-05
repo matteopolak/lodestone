@@ -2668,11 +2668,11 @@ mod tests {
     /// [`BlockEntity::Opaque`](crate::block_entities::BlockEntity::Opaque) reach
     /// the world **zero** times regardless.
     ///
-    /// `tick_all_with_hopper_lock` does not filter: it collects *every* key into
-    /// a fresh `Vec` and dispatches on the variant, so a vanilla world's whole
+    /// `tick_all_with_hopper_lock` does not filter: it assigns *every* key to a
+    /// fresh deterministic owner plan and dispatches on the variant, so a whole
     /// block-entity population is walked at 20 Hz. That is a real property and
-    /// worth pinning — but the cost of an `Opaque` entry is a `Vec` push, two
-    /// hash probes and an empty `tick_non_hopper` arm. **No coordinate of it
+    /// worth pinning — but the cost of an `Opaque` entry is an owner-plan entry,
+    /// two hash probes and an empty `tick_non_hopper` arm. **No coordinate of it
     /// reaches the store**, which is what this gate measures: with 1,608
     /// opaque entities scattered over distinct far-flung
     /// columns, the store still generates only the 49-column tick area.
