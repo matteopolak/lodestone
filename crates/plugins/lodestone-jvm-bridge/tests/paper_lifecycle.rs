@@ -65,6 +65,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native String playerHandleUuid(long handle); \
          public static native long playerHandleForUuid(String uuid); \
          public static native long playerHandleForName(String name); \
+         public static native long playerHandleForNameIgnoringCase(String name); \
          public static native int activePlayerCount(); \
          public static native boolean playerHandleIsActive(long handle); }",
     )
@@ -303,6 +304,7 @@ fn plugin_child_reads_resident_block_state_through_operator_member() {
          public static native String playerHandleUuid(long handle); \
          public static native long playerHandleForUuid(String uuid); \
          public static native long playerHandleForName(String name); \
+         public static native long playerHandleForNameIgnoringCase(String name); \
          public static native int activePlayerCount(); \
          public static native boolean playerHandleIsActive(long handle); }",
     )

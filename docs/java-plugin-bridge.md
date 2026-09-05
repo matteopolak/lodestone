@@ -779,9 +779,13 @@ or replacement fails loudly instead of resolving a later player. The inverse
 `playerHandleForName(String)` searches the same copied worker roster and returns
 that generation-checked handle only when exactly one active copied display name
 matches. A null, unknown, or ambiguous name fails loudly rather than selecting
-a hash-map iteration winner. There is no additional environment variable or
-runtime toggle: the `jvm` feature and an operator-built shim containing the
-exact isolated declarations are the only prerequisites.
+a hash-map iteration winner. `playerHandleForNameIgnoringCase(String)` is the
+separate ASCII-only case-insensitive variant: null or non-ASCII input and any
+case-fold collision fail loudly, so it cannot turn a malformed roster into an
+arbitrary player choice. Both return the same worker-owned generation-checked
+handle; neither reads a server registry. There is no additional environment
+variable or runtime toggle: the `jvm` feature and an operator-built shim
+containing the exact isolated declarations are the only prerequisites.
 
 `activePlayerCount()` returns the count of live player handles in that same
 worker-owned lifecycle map. Its producer is the dedicated host's existing
@@ -833,8 +837,9 @@ block-state reads, validated resident block-state replacement, the current serve
 active retained entry's validated descriptor name and version. It also reconciles the server's
 value-only player roster into generation-checked handles: `playerHandleName(long)`,
 `playerHandleUuid(long)`, `playerHandleForUuid(String)`, `playerHandleForName(String)`,
-`activePlayerCount()`, and `playerHandleIsActive(long)` read that worker snapshot only. The dedicated host never hands a
-server object, connection, ECS entity, or world guard to Java.
+`playerHandleForNameIgnoringCase(String)`, `activePlayerCount()`, and
+`playerHandleIsActive(long)` read that worker snapshot only. The dedicated host
+never hands a server object, connection, ECS entity, or world guard to Java.
 `AdapterHost::start_with_setup` mints the corresponding capability token only
 from its worker's request ports; consuming it keeps that token with the retained loader state, and the
 dedicated `JavaAdapter::poll` call is the matching live producer through
@@ -1049,6 +1054,12 @@ over the copied roster, not a server or world object lookup.
 by the generated shim fixture. Hermetic controls reject null, unknown, and
 ambiguous inputs, then force a disconnect and slot reuse to prove a lookup
 cannot return the departed generation.
+
+`playerHandleForNameIgnoringCase(String)` uses the same exact
+`(Ljava/lang/String;)J` ABI but intentionally limits matching to ASCII copied
+profile names. Its controls reject null and non-ASCII input, reject case-fold
+collisions, and prove a disconnect removes the reverse mapping before a slot
+can be reused. It is a worker-local resolver, not a server-registry read.
 
 The same composed caller exercises recursive Java-to-Rust-to-Java callbacks below and above the
 budget. Depth `2` returns `REENTRANT:OK:3`; depth `4` attempts one more callback and receives

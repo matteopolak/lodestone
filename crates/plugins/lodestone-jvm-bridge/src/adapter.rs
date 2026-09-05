@@ -497,6 +497,44 @@ fn active_player_handle_for_name(name: &str) -> Result<ObjectRef, AdapterError> 
     })
 }
 
+/// Finds one active player by an ASCII case-insensitive copied display name.
+///
+/// The explicit ASCII contract avoids inventing locale-dependent Unicode
+/// folding at the JNI boundary. As with exact-name lookup, collisions fail
+/// rather than letting hash-map iteration choose a player for Java.
+fn active_player_handle_for_name_ignoring_case(
+    name: &str,
+) -> Result<ObjectRef, AdapterError> {
+    if !name.is_ascii() {
+        return Err(AdapterError::new(format!(
+            "playerHandleForNameIgnoringCase: invalid non-ASCII player name {name:?}",
+        )));
+    }
+    ACTIVE_PLAYER_HANDLES.with(|slot| {
+        let active = slot.borrow();
+        let active = active.as_ref().ok_or_else(|| {
+            AdapterError::new("playerHandleForNameIgnoringCase requires the adapter worker thread")
+        })?;
+        let mut matches = active
+            .iter()
+            .filter(|(player, _)| {
+                player.name().is_ascii() && player.name().eq_ignore_ascii_case(name)
+            })
+            .map(|(_, handle)| *handle);
+        let Some(handle) = matches.next() else {
+            return Err(AdapterError::new(format!(
+                "playerHandleForNameIgnoringCase: no active player named {name:?}",
+            )));
+        };
+        if matches.next().is_some() {
+            return Err(AdapterError::new(format!(
+                "playerHandleForNameIgnoringCase: multiple active players named {name:?}",
+            )));
+        }
+        Ok(handle)
+    })
+}
+
 fn parse_uuid_string(value: &str) -> Result<[u8; 16], AdapterError> {
     let bytes = value.as_bytes();
     if bytes.len() != 36 || ![8, 13, 18, 23].into_iter().all(|index| bytes[index] == b'-') {
@@ -560,6 +598,15 @@ fn resolve_active_player_name(value: Option<&str>) -> Result<ObjectRef, AdapterE
         AdapterError::new("playerHandleForName requires a player name")
     })?;
     active_player_handle_for_name(name)
+}
+
+fn resolve_active_player_name_ignoring_case(
+    value: Option<&str>,
+) -> Result<ObjectRef, AdapterError> {
+    let name = value.ok_or_else(|| {
+        AdapterError::new("playerHandleForNameIgnoringCase requires a player name")
+    })?;
+    active_player_handle_for_name_ignoring_case(name)
 }
 
 /// Returns the count of players whose lifecycle has reached this worker.
@@ -1698,6 +1745,28 @@ pub(crate) fn register_player_handle_for_name_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_player_handle_for_name_ignoring_case_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts one Java string and returns
+    // an opaque jlong. It compares only copied ASCII profile names and rejects
+    // collisions rather than publishing a nondeterministically selected handle.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_player_handle_for_name_ignoring_case as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_player_handle_is_active_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -1958,6 +2027,26 @@ extern "system" fn native_player_handle_for_name<'local>(
             )
         };
         resolve_active_player_name(name.as_deref()).map(ObjectRef::to_bits)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_for_name_ignoring_case<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    name: JString<'local>,
+) -> jlong {
+    env.with_env(|env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        let name = if name.is_null() {
+            None
+        } else {
+            Some(name.try_to_string(env).map_err(|error| {
+                AdapterError::new(format!("playerHandleForNameIgnoringCase: {error}"))
+            })?)
+        };
+        resolve_active_player_name_ignoring_case(name.as_deref()).map(ObjectRef::to_bits)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -2496,6 +2585,25 @@ mod tests {
             "the name resolver must return the same worker-owned live handle",
         );
         assert_eq!(
+            resolve_active_player_name_ignoring_case(Some("aLiCe")),
+            Ok(first),
+            "case-insensitive lookup must still return the live generation",
+        );
+        assert_eq!(
+            resolve_active_player_name_ignoring_case(None),
+            Err(AdapterError::new(
+                "playerHandleForNameIgnoringCase requires a player name",
+            )),
+            "a null Java string must fail before a roster lookup",
+        );
+        assert_eq!(
+            resolve_active_player_name_ignoring_case(Some("Alicé")),
+            Err(AdapterError::new(
+                "playerHandleForNameIgnoringCase: invalid non-ASCII player name \"Alicé\"",
+            )),
+            "non-ASCII input must not acquire locale-dependent matching semantics",
+        );
+        assert_eq!(
             resolve_active_player_name(None),
             Err(AdapterError::new("playerHandleForName requires a player name")),
             "a null Java string must fail before a roster lookup",
@@ -2555,6 +2663,13 @@ mod tests {
             )),
             "disconnect removes the name reverse mapping before a stale slot can be reused",
         );
+        assert_eq!(
+            resolve_active_player_name_ignoring_case(Some("alice")),
+            Err(AdapterError::new(
+                "playerHandleForNameIgnoringCase: no active player named \"alice\"",
+            )),
+            "disconnect removes the case-insensitive reverse mapping before slot reuse",
+        );
         let replacement = active_player_handle(&identity, &player).expect("reusable slot");
         assert_ne!(replacement, first);
         assert_eq!(
@@ -2610,6 +2725,30 @@ mod tests {
                 "playerHandleForName: multiple active players named \"Alice\"",
             )),
             "a duplicate display name must fail rather than depend on map iteration order",
+        );
+        assert!(release_active_player_handle(&identity, &first_player).is_some());
+        assert!(release_active_player_handle(&identity, &second_player).is_some());
+        RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn case_insensitive_player_name_resolver_rejects_case_collisions() {
+        let identity = lifecycle_identity("adapter", "adapter", "fixture.Adapter");
+        let first_player = PlayerIdentity::new([10; 16], "Alice");
+        let second_player = PlayerIdentity::new([11; 16], "aLiCe");
+        RESIDENT_OBJECT_HANDLES.with(|slot| {
+            *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(2));
+        });
+        ACTIVE_PLAYER_HANDLES.with(|slot| *slot.borrow_mut() = Some(HashMap::new()));
+        active_player_handle(&identity, &first_player).expect("first profile handle");
+        active_player_handle(&identity, &second_player).expect("second profile handle");
+        assert_eq!(
+            resolve_active_player_name_ignoring_case(Some("ALICE")),
+            Err(AdapterError::new(
+                "playerHandleForNameIgnoringCase: multiple active players named \"ALICE\"",
+            )),
+            "case variants must not select a hash-map iteration winner",
         );
         assert!(release_active_player_handle(&identity, &first_player).is_some());
         assert!(release_active_player_handle(&identity, &second_player).is_some());
