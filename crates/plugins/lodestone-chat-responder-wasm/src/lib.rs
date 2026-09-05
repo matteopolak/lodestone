@@ -29,6 +29,8 @@ wit_bindgen::generate!({
 
 use lodestone::plugin::logging::{log, LogLevel};
 use lodestone::plugin::types::CommandSpec;
+#[cfg(any(feature = "inventory-click", feature = "inventory-click-invalid"))]
+use lodestone::plugin::types::{InventoryClick, InventoryClickButton};
 #[cfg(feature = "commands")]
 use lodestone::plugin::types::CommandAnchor;
 #[cfg(feature = "look")]
@@ -81,7 +83,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.11.0".to_string(),
+            abi: "lodestone:plugin@0.12.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -127,7 +129,19 @@ impl Guest for ChatResponder {
         #[cfg(feature = "inventory")]
         return report_inventory_change(events);
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory")))]
+        #[cfg(feature = "inventory-click")]
+        return vec![Action::InventoryClick(InventoryClick {
+            slot: 36,
+            button: InventoryClickButton::Left,
+        })];
+
+        #[cfg(feature = "inventory-click-invalid")]
+        return vec![Action::InventoryClick(InventoryClick {
+            slot: u16::MAX,
+            button: InventoryClickButton::Right,
+        })];
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid")))]
         return respond(events);
     }
 

@@ -62,6 +62,25 @@ pub enum IntentAction {
     Break(Option<lodestone_ecs::player::BreakIntent>),
     /// Request one shell-owned selected-hotbar-slot change.
     SelectSlot(usize),
+    /// Request one bounded primary/secondary click through the shell-owned menu
+    /// predictor. This is intentionally not a `ClientAction`: only the live
+    /// client has the authoritative menu state needed to predict one.
+    InventoryClick(InventoryClickIntent),
+}
+
+/// A bounded, copy-only inventory click the shell must validate against its live
+/// menu before it calls `ClientHandle::menu_click`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InventoryClickIntent {
+    pub slot: u16,
+    pub button: InventoryClickButton,
+}
+
+/// The only two buttons on the initial inventory-click surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InventoryClickButton {
+    Left,
+    Right,
 }
 
 /// A guest movement request after the boundary has enforced finite, digital axes.
@@ -333,6 +352,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::SetBreak(_) => Capability::ActBreak,
         Action::PlaceBlock(_) => Capability::ActPlace,
         Action::SelectSlot(_) => Capability::ActSelectSlot,
+        Action::InventoryClick(_) => Capability::ActInventoryClick,
     }
 }
 
@@ -400,6 +420,15 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
             },
         )),
         Action::SelectSlot(slot) => LoweredAction::Intent(IntentAction::SelectSlot(usize::from(slot))),
+        Action::InventoryClick(click) => {
+            LoweredAction::Intent(IntentAction::InventoryClick(InventoryClickIntent {
+                slot: click.slot,
+                button: match click.button {
+                    crate::host::InventoryClickButton::Left => InventoryClickButton::Left,
+                    crate::host::InventoryClickButton::Right => InventoryClickButton::Right,
+                },
+            }))
+        }
     })
 }
 
@@ -550,6 +579,34 @@ mod tests {
         assert_eq!(
             lower_action(Action::SelectSlot(6), &granted),
             Ok(LoweredAction::Intent(IntentAction::SelectSlot(6)))
+        );
+    }
+
+    /// Inventory actions cross as only a bounded slot and a two-value button;
+    /// there is no cursor, state id, changed-slot list, or hand-built wire action
+    /// for a guest to forge.
+    #[test]
+    fn inventory_click_lowers_onto_the_shell_owned_menu_predictor() {
+        let click = crate::host::InventoryClick {
+            slot: 36,
+            button: crate::host::InventoryClickButton::Left,
+        };
+        assert_eq!(
+            lower_action(
+                Action::InventoryClick(click),
+                &CapabilitySet::from_iter([Capability::ActInventoryClick]),
+            ),
+            Ok(LoweredAction::Intent(IntentAction::InventoryClick(
+                InventoryClickIntent {
+                    slot: 36,
+                    button: InventoryClickButton::Left,
+                }
+            )))
+        );
+        assert_eq!(
+            lower_action(Action::InventoryClick(click), &CapabilitySet::default_policy()),
+            Err(Capability::ActInventoryClick),
+            "inventory control must prove the default policy, not guest behaviour, stopped it"
         );
     }
 

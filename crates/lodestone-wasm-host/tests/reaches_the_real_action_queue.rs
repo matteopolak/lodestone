@@ -34,7 +34,10 @@ use lodestone_ecs::{GameTick, app::App};
 use lodestone_model::{ClientAction, ClientEvent, PlayerInput, Text};
 use lodestone_physics::{Aabb, CollisionView, PlayerState, Vec3d};
 use lodestone::{config::Config, sim::Sim};
-use lodestone_wasm_host::{Capability, CapabilitySet, PluginHost, WasmHostPlugin, WasmPlugins};
+use lodestone_wasm_host::{
+    Capability, CapabilitySet, InventoryClickButton, InventoryClickIntent, PendingWasmMenuClicks,
+    PluginHost, WasmHostPlugin, WasmPlugins,
+};
 
 fn chat(text: &str) -> GameEvent {
     GameEvent(ClientEvent::Chat {
@@ -101,6 +104,16 @@ fn inventory_capabilities() -> CapabilitySet {
         Capability::ObserveInventory,
         Capability::ActChat,
     ])
+}
+
+fn inventory_click_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActInventoryClick])
+}
+
+fn inventory_click_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActInventoryClick);
+    policy
 }
 
 fn inventory_event() -> GameEvent {
@@ -649,4 +662,87 @@ fn a_wasm_inventory_observer_is_default_denied() {
 
     assert_eq!(chat_actions(&app), Vec::<ClientAction>::new());
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// A separately compiled guest reaches the shell handoff, but the handoff still
+/// carries only the bounded input that the live menu predictor needs. The
+/// shell's `bounded_clicks_reach_the_live_menu_predictor_and_invalid_slots_do_not`
+/// test drives that resource shape into `ClientHandle`; this gate proves the
+/// host composition and capability boundary that precede it.
+#[test]
+fn a_wasm_inventory_click_reaches_the_bounded_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-click"]);
+    let mut host = PluginHost::new(inventory_click_host_policy()).expect("engine");
+    host.load_file("inventory-click", &wasm, &inventory_click_capabilities())
+        .expect("the explicitly granted click fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take(),
+        vec![InventoryClickIntent {
+            slot: 36,
+            button: InventoryClickButton::Left,
+        }],
+        "the guest must reach the shell handoff as bounded copied input, not a packet"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// The guest's maximal ABI slot survives host lowering as copied data. The
+/// shell-consumer control rejects this exact value against the live menu before
+/// it can reach `ClientHandle::menu_click`.
+#[test]
+fn a_wasm_inventory_click_keeps_the_invalid_slot_bounded_until_shell_validation() {
+    let wasm = support::build_example_plugin(&["inventory-click-invalid"]);
+    let mut host = PluginHost::new(inventory_click_host_policy()).expect("engine");
+    host.load_file(
+        "inventory-click-invalid",
+        &wasm,
+        &inventory_click_capabilities(),
+    )
+    .expect("the explicitly granted invalid-click fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take(),
+        vec![InventoryClickIntent {
+            slot: u16::MAX,
+            button: InventoryClickButton::Right,
+        }],
+        "the host must preserve the ABI boundary and leave live menu range validation to the shell"
+    );
+}
+
+/// The identical guest still emits its click, but default policy must stop it
+/// before it can reach the shell handoff. The granted test above is the control:
+/// it proves an empty handoff is a denial rather than an uncalled guest.
+#[test]
+fn a_wasm_inventory_click_is_default_denied_before_the_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-click"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file("inventory-click", &wasm, &CapabilitySet::from_iter([Capability::Log]))
+        .expect("a data-flow action may be withheld after the guest loads");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take()
+            .is_empty(),
+        "an ungranted click must not reach the shell handoff"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
 }

@@ -100,6 +100,12 @@ pub enum Capability {
     /// The guest supplies only a slot number. The shell still owns the range
     /// gate, selected-slot write, and protocol egress.
     ActSelectSlot,
+    /// Request one left/right pickup click through the shell-owned menu predictor.
+    ///
+    /// The guest supplies only a bounded menu slot and button. The shell validates
+    /// the slot against the active menu, then owns prediction, vetoes, state ids,
+    /// and protocol egress.
+    ActInventoryClick,
     /// Receive a generation-bounded outcome after a WASM or native placement
     /// attempt resolves.
     ///
@@ -149,6 +155,7 @@ impl Capability {
         Self::ActBreak,
         Self::ActPlace,
         Self::ActSelectSlot,
+        Self::ActInventoryClick,
         Self::ObservePlace,
         Self::ObserveBreak,
         Self::VetoActions,
@@ -173,6 +180,7 @@ impl Capability {
             Self::ActBreak => "act:break",
             Self::ActPlace => "act:place",
             Self::ActSelectSlot => "act:select-slot",
+            Self::ActInventoryClick => "act:inventory-click",
             Self::ObservePlace => "observe:place",
             Self::ObserveBreak => "observe:break",
             Self::VetoActions => "veto:actions",
@@ -212,6 +220,7 @@ impl Capability {
             | Self::ActBreak
             | Self::ActPlace
             | Self::ActSelectSlot
+            | Self::ActInventoryClick
             | Self::ObservePlace
             | Self::ObserveBreak
             | Self::VetoActions
@@ -391,6 +400,10 @@ mod tests {
         assert!(
             !policy.contains(Capability::ActSelectSlot),
             "act:select-slot must not be granted by default"
+        );
+        assert!(
+            !policy.contains(Capability::ActInventoryClick),
+            "act:inventory-click must not be granted by default"
         );
         assert!(policy.contains(Capability::ObserveChat));
         assert!(policy.contains(Capability::ActChat));

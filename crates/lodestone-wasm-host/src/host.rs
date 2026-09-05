@@ -58,8 +58,8 @@ pub use crate::bindings::lodestone::plugin::types::{
     Action, BlockBreakVerdict, BlockFace, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
     CommandAnchor, CommandContext, CommandEntity, CommandExecution, CommandOutcome,
     CommandPosition, CommandRotation, CommandSpec, EntityDamageVerdict, Event, Hand, Health,
-    InventorySlotChanged, ItemStack, BreakIntent, BreakOutcome, BreakRejection, BreakStatus,
-    InventoryClickVerdict, LogLevel, LookIntent,
+    BreakIntent, BreakOutcome, BreakRejection, BreakStatus, InventoryClick, InventoryClickButton,
+    InventoryClickVerdict, InventorySlotChanged, ItemStack, LogLevel, LookIntent,
     MovementIntent, PlaceIntent, PlaceOutcome, PlaceRejection, PlaceStatus, PlayerInteractVerdict,
     PlayerMoveVerdict, PluginInfo, PluginVerdict,
     SectionBlocksChanged, SectionPos, VerdictContext,
@@ -71,7 +71,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.11.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.12.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin

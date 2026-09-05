@@ -6,7 +6,7 @@ The desktop WASM plugin host exposes copied local-player look, movement, block-b
 
 ## How it works
 
-`lodestone:plugin@0.11.0` provides `action.set-look(option<look-intent>)`, guarded by `act:look`, `action.set-movement(option<movement-intent>)`, guarded by `act:movement`, `action.set-break(option<break-intent>)`, guarded by `act:break`, `action.place-block(place-intent)`, guarded by `act:place`, and `action.select-slot(hotbar-slot)`, guarded by `act:select-slot`. `lodestone_wasm_host::abi::lower_action` turns look into `lodestone_ecs::player::LookIntent`; the conductor applies the final look request in load order during `TickSet::Intent`, before `apply_look_intent`.
+`lodestone:plugin@0.12.0` provides `action.set-look(option<look-intent>)`, guarded by `act:look`, `action.set-movement(option<movement-intent>)`, guarded by `act:movement`, `action.set-break(option<break-intent>)`, guarded by `act:break`, `action.place-block(place-intent)`, guarded by `act:place`, `action.select-slot(hotbar-slot)`, guarded by `act:select-slot`, and `action.inventory-click(inventory-click)`, guarded by `act:inventory-click`. The click record has only a `u16` slot and a left/right button. The shell validates that copied slot against the active live menu and then calls `ClientHandle::menu_click`, so prediction, the veto, state id, changed-slot list, and egress remain owned by the client read model. `lodestone_wasm_host::abi::lower_action` turns look into `lodestone_ecs::player::LookIntent`; the conductor applies the final look request in load order during `TickSet::Intent`, before `apply_look_intent`.
 
 For movement, the conductor runs after `lodestone_controller::ecs::compute_movement_intent` and before physics. It overwrites only copied axes and button state; item-use effects stay owned by the controller. Finite axes are clamped to `[-1, 1]`, and non-finite axes become neutral. Physics then resolves the request and the existing controller sends the ordinary movement and player-input actions. This is deliberately an intent rather than a raw packet: a guest cannot forge position, collision, or sequence state.
 
@@ -24,13 +24,13 @@ The guest output list is ordered. If multiple guest actions set look or set move
 
 ## How to change it
 
-Add a new copied intent arm to `crates/lodestone-wasm-host/wit/lodestone-plugin.wit`, give it an explicit capability in `capability.rs`, and make `abi::lower_action` exhaustive over it. Route it through `conductor::PendingWasmIntents` only when it has an existing ECS consumer with a deliberate schedule edge; do not lower an intent into a raw `ClientAction`. For a one-shot outcome, keep a bounded generation cursor in the host as `LoadedPlugin::observe_place_outcome`; for a continuous lifecycle, keep a per-session status-edge cursor like `LoadedPlugin::observe_break_outcome`. Do not turn either component poll into an every-tick event stream.
+Add a new copied intent arm to `crates/lodestone-wasm-host/wit/lodestone-plugin.wit`, give it an explicit capability in `capability.rs`, and make `abi::lower_action` exhaustive over it. Route it through `conductor::PendingWasmIntents` only when it has an existing ECS consumer with a deliberate schedule edge; do not lower an intent into a raw `ClientAction`. Inventory clicks are the narrow exception: `PendingWasmMenuClicks` is drained after the ECS guard because `ClientHandle::menu_click` alone owns the mutable menu predictor. For a one-shot outcome, keep a bounded generation cursor in the host as `LoadedPlugin::observe_place_outcome`; for a continuous lifecycle, keep a per-session status-edge cursor like `LoadedPlugin::observe_break_outcome`. Do not turn either component poll into an every-tick event stream.
 
 Any WIT change requires increasing `host::ABI_WORLD`, rebuilding guests, and updating the sample plugin's declared ABI. Keep the integration test on a composed `lodestone_app::client_app()` so it proves the production consumer chain rather than a standalone component write.
 
 ## Configuration
 
-The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, `observe:place`, `act:select-slot`, and `observe:inventory`. A guest manifest must request every capability it uses; a request alone never changes the policy.
+The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, `observe:place`, `act:select-slot`, `act:inventory-click`, and `observe:inventory`. A guest manifest must request every capability it uses; a request alone never changes the policy.
 
 ```toml
 capabilities = ["act:movement"]
@@ -46,6 +46,10 @@ capabilities = ["act:break", "observe:break"]
 
 ```toml
 capabilities = ["act:select-slot"]
+```
+
+```toml
+capabilities = ["act:inventory-click"]
 ```
 
 ```toml
