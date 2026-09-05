@@ -32,9 +32,14 @@ unobserved parallel data structure. Scheduled queues and block entities now
 have their own chunk-local ownership seams: `ChunkScheduledTickQueue` keeps
 pending ticks at their target chunk and merges due heads into one serial order,
 while `BlockEntityRegistry::tick_plan` assigns its tick-start snapshot to
-chunk owners and hands visible furnace writes back to the global world writer
-as `BlockEntityTickEffect`. Entities, natural-spawn planning, world border,
-game rules, time, weather and other cross-column work remain global. For a named populated scene,
+chunk owners. It executes one owner batch at a time and returns a
+`BlockEntityTickEffectBatch` for each owner, including an empty batch when no
+visible write occurred. `tick::apply_block_entity_effect_batches` is the sole
+central consumer: it applies each batch and publishes its furnace changes in
+the established owner order. This makes the message boundary real without
+claiming workers can run concurrently. Entities, natural-spawn planning, world
+border, game rules, time, weather and other cross-column work remain global.
+For a named populated scene,
 `FollowArea::candidate_region_workload` groups the same selected chunks into an
 observer-supplied spatial edge using Euclidean division. Its sorted cell counts,
 total, and largest-cell count establish whether that scene is spatially spread
@@ -49,7 +54,9 @@ size in this module alone. First complete the parity and named-scene profiling
 prerequisites in `docs/plans/regionised-server-ticking.md`. A concurrent
 partitioning change must retain deterministic ordering within each owner and
 add an explicit cross-owner hand-off path before any mutation may cross a
-boundary.
+boundary. Reuse the block-entity shape: an owner returns a typed batch and the
+central writer applies batches in a declared order. Do not give a worker a
+second owner's `ChunkSource` just to avoid defining that message.
 
 Keep `FollowArea` as the producer until the live tick loop obtains its work
 through another production-consumed boundary. Any new producer must remove

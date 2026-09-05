@@ -38,9 +38,9 @@
 //! * **Partial visual sync.** A furnace's `lit` flip
 //!   ([`Furnace::is_lit`](crate::furnace::Furnace::is_lit), carried out of
 //!   this module as [`BlockEntity::tick_non_hopper`]'s `Option<bool>` return)
-//!   reaches the client — `crate::tick::run_tick_loop` is the one caller
-//!   holding both this registry and a `ChunkSource::set_block`, so that is
-//!   where the write happens, not here. Ticking a composter to ready
+//!   reaches the client — `crate::tick::run_tick_loop` centrally applies the
+//!   owner batches while holding `ChunkSource::set_block`, so that is where
+//!   the write happens, not here. Ticking a composter to ready
 //!   ([`Composter::is_ready`](crate::composter::Composter::is_ready)) still
 //!   does not write anything back — this module's job is *simulating*, not
 //!   *rendering*.
@@ -933,6 +933,48 @@ impl BlockEntityTickPlan {
     pub fn assignments(&self) -> &[BlockEntityTickAssignment] {
         &self.assignments
     }
+
+    /// The serial execution units for this pass, one contiguous unit per
+    /// chunk owner.
+    ///
+    /// The units preserve [`Self::assignments`]' canonical order. They are
+    /// intentionally a snapshot rather than worker jobs: today the registry
+    /// executes them one after another, but each unit is already the boundary
+    /// that returns messages to the central world writer.
+    #[must_use]
+    pub fn owner_batches(&self) -> Vec<BlockEntityTickOwnerBatch> {
+        let mut batches: Vec<BlockEntityTickOwnerBatch> = Vec::new();
+        for assignment in &self.assignments {
+            if batches.last().is_none_or(|batch| batch.owner != assignment.owner) {
+                batches.push(BlockEntityTickOwnerBatch {
+                    owner: assignment.owner,
+                    assignments: Vec::new(),
+                });
+            }
+            batches
+                .last_mut()
+                .expect("a nonempty tick plan has an owner batch")
+                .assignments
+                .push(*assignment);
+        }
+        batches
+    }
+}
+
+/// One chunk owner's deterministic unit of block-entity execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockEntityTickOwnerBatch {
+    /// The owner that executes every assignment in this batch.
+    pub owner: BlockEntityTickOwner,
+    assignments: Vec<BlockEntityTickAssignment>,
+}
+
+impl BlockEntityTickOwnerBatch {
+    /// The owner-local entities in their serial execution order.
+    #[must_use]
+    pub fn assignments(&self) -> &[BlockEntityTickAssignment] {
+        &self.assignments
+    }
 }
 
 /// A block-state write handed from a chunk-owned entity tick to the world
@@ -945,6 +987,31 @@ pub struct BlockEntityTickEffect {
     pub pos: BlockPos,
     /// The furnace's new `lit` value.
     pub lit: bool,
+}
+
+/// The messages one chunk owner returns after its block-entity work.
+///
+/// The central tick task applies batches in this vector's existing serial
+/// order. A future worker may construct one independently, but it must not
+/// write the world directly or reorder these batches without a separately
+/// validated hand-off rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockEntityTickEffectBatch {
+    /// The owner that produced all effects in this batch.
+    pub owner: BlockEntityTickOwner,
+    effects: Vec<BlockEntityTickEffect>,
+}
+
+impl BlockEntityTickEffectBatch {
+    /// The owner-local effects in the order their entities produced them.
+    #[must_use]
+    pub fn effects(&self) -> &[BlockEntityTickEffect] {
+        &self.effects
+    }
+
+    fn into_effects(self) -> Vec<BlockEntityTickEffect> {
+        self.effects
+    }
 }
 
 /// A [`BlockPos`]-keyed map of live [`BlockEntity`] values — the world's own
@@ -1068,9 +1135,10 @@ impl BlockEntityRegistry {
     /// several tests and call sites that hold no world, so this is an
     /// addition rather than a signature change beyond adding `is_loaded`.
     /// **`crate::tick::run_tick_loop` is the one production caller that must
-    /// use this one** — it is the only place holding both a `ChunkSource` and
-    /// this registry, and a hopper ticked through the shorthand can never be
-    /// locked or bounded.
+    /// use [`tick_all_by_owner_with_hopper_lock`](Self::tick_all_by_owner_with_hopper_lock)**
+    /// — it is the only place holding both a `ChunkSource` and this registry,
+    /// and a hopper ticked through the shorthand can never be locked or
+    /// bounded.
     ///
     /// Returns every furnace-kind `BlockEntityTickEffect` whose `lit` flipped
     /// this tick. The effect is an explicit hand-off from the chunk owner to
@@ -1082,27 +1150,54 @@ impl BlockEntityRegistry {
         is_loaded: &dyn Fn(BlockPos) -> bool,
         enabled: &dyn Fn(BlockPos) -> bool,
     ) -> Vec<BlockEntityTickEffect> {
+        self.tick_all_by_owner_with_hopper_lock(is_loaded, enabled)
+            .into_iter()
+            .flat_map(BlockEntityTickEffectBatch::into_effects)
+            .collect()
+    }
+
+    /// Executes the tick-start snapshot one chunk owner at a time and returns
+    /// one message batch for every owner.
+    ///
+    /// This is the production execution boundary. The implementation remains
+    /// serial so its effects are byte-for-byte ordered as before; the central
+    /// tick task is the sole consumer that turns the returned messages into
+    /// world writes and client publication. Empty batches are retained: an
+    /// owner that had no visible furnace transition still executed and must not
+    /// disappear from the ownership contract.
+    pub fn tick_all_by_owner_with_hopper_lock(
+        &mut self,
+        is_loaded: &dyn Fn(BlockPos) -> bool,
+        enabled: &dyn Fn(BlockPos) -> bool,
+    ) -> Vec<BlockEntityTickEffectBatch> {
         let plan = self.tick_plan();
-        let mut lit_changes = Vec::new();
-        for assignment in plan.assignments() {
-            let pos = assignment.pos;
-            if !is_loaded(pos) {
-                continue;
+        let mut batches = Vec::new();
+        for owner_batch in plan.owner_batches() {
+            let mut effects = Vec::new();
+            for assignment in owner_batch.assignments() {
+                let pos = assignment.pos;
+                if !is_loaded(pos) {
+                    continue;
+                }
+                let is_hopper = matches!(self.entities.get(&pos), Some(BlockEntity::Hopper(_)));
+                if is_hopper {
+                    self.tick_hopper(pos, enabled(pos));
+                } else if let Some(entity) = self.entities.get_mut(&pos)
+                    && let Some(now_lit) = entity.tick_non_hopper()
+                {
+                    effects.push(BlockEntityTickEffect {
+                        owner: owner_batch.owner,
+                        pos,
+                        lit: now_lit,
+                    });
+                }
             }
-            let is_hopper = matches!(self.entities.get(&pos), Some(BlockEntity::Hopper(_)));
-            if is_hopper {
-                self.tick_hopper(pos, enabled(pos));
-            } else if let Some(entity) = self.entities.get_mut(&pos)
-                && let Some(now_lit) = entity.tick_non_hopper()
-            {
-                lit_changes.push(BlockEntityTickEffect {
-                    owner: assignment.owner,
-                    pos,
-                    lit: now_lit,
-                });
-            }
+            batches.push(BlockEntityTickEffectBatch {
+                owner: owner_batch.owner,
+                effects,
+            });
         }
-        lit_changes
+        batches
     }
 
     /// Ticks the hopper at `pos` against its `above`/`below` neighbours,
@@ -1619,6 +1714,39 @@ mod tests {
             ],
             "chunk order, then local position order, is the serial execution contract"
         );
+        assert_eq!(
+            reg.tick_plan().owner_batches(),
+            [
+                BlockEntityTickOwnerBatch {
+                    owner: BlockEntityTickOwner::Chunk { cx: -1, cz: 0 },
+                    assignments: vec![BlockEntityTickAssignment {
+                        owner: BlockEntityTickOwner::Chunk { cx: -1, cz: 0 },
+                        pos: BlockPos::new(-1, 72, 0),
+                    }],
+                },
+                BlockEntityTickOwnerBatch {
+                    owner: BlockEntityTickOwner::Chunk { cx: 0, cz: 0 },
+                    assignments: vec![
+                        BlockEntityTickAssignment {
+                            owner: BlockEntityTickOwner::Chunk { cx: 0, cz: 0 },
+                            pos: BlockPos::new(1, 64, 1),
+                        },
+                        BlockEntityTickAssignment {
+                            owner: BlockEntityTickOwner::Chunk { cx: 0, cz: 0 },
+                            pos: BlockPos::new(1, 80, 1),
+                        },
+                    ],
+                },
+                BlockEntityTickOwnerBatch {
+                    owner: BlockEntityTickOwner::Chunk { cx: 1, cz: 0 },
+                    assignments: vec![BlockEntityTickAssignment {
+                        owner: BlockEntityTickOwner::Chunk { cx: 1, cz: 0 },
+                        pos: BlockPos::new(16, 70, 0),
+                    }],
+                },
+            ],
+            "each owner receives one contiguous serial execution unit"
+        );
     }
 
     /// Two chunk owners handing lit flips to the global world writer must
@@ -1635,20 +1763,26 @@ mod tests {
         }
 
         assert_eq!(
-            reg.tick_all(),
+            reg.tick_all_by_owner_with_hopper_lock(&|_| true, &|_| true),
             [
-                BlockEntityTickEffect {
+                BlockEntityTickEffectBatch {
                     owner: BlockEntityTickOwner::Chunk { cx: -1, cz: 0 },
-                    pos: BlockPos::new(-1, 70, 0),
-                    lit: true,
+                    effects: vec![BlockEntityTickEffect {
+                        owner: BlockEntityTickOwner::Chunk { cx: -1, cz: 0 },
+                        pos: BlockPos::new(-1, 70, 0),
+                        lit: true,
+                    }],
                 },
-                BlockEntityTickEffect {
+                BlockEntityTickEffectBatch {
                     owner: BlockEntityTickOwner::Chunk { cx: 1, cz: 0 },
-                    pos: BlockPos::new(16, 70, 0),
-                    lit: true,
+                    effects: vec![BlockEntityTickEffect {
+                        owner: BlockEntityTickOwner::Chunk { cx: 1, cz: 0 },
+                        pos: BlockPos::new(16, 70, 0),
+                        lit: true,
+                    }],
                 },
             ],
-            "the global world writer must receive effects in the serial owner order"
+            "the central world writer must receive distinct owner batches in serial order"
         );
     }
 
