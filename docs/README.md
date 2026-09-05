@@ -154,6 +154,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   mirrors vanilla's `doClick`, and the handful of screens with real bespoke chrome on
   top of that shared base — cost readouts, station widgets, the creative grid, the
   merchant trade list, the 3-D player preview, and inventory potion-effect icons.
+- [Container synchronization state](./container-synchronization-state.md) —
+  `lodestone_model::ContainerStateId` is the version-free identity for the revision
+  counter that ties a predicted menu click to authoritative container updates. It
+  replaces raw integer state identifiers in the client event/action model and menu
+  reconciliation path.
 - [Crafting](./crafting.md) — The version-free crafting stack in `lodestone-game`:
   the recipe data model and matching rules (`recipe.rs`), a loader for Mojang's own
   datapack JSON (`recipe_json.rs`), the crafting-table menu layout, the plugin-facing
@@ -362,6 +367,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   serverbound (hosting) and clientbound (joining) sides, and the two plugin-facing
   hooks — `EgressFilters` and `ActionVetoes` — that let a plugin inspect, replace,
   suppress, or veto an action before it takes effect or reaches the wire.
+- [Paper world bridge](./paper-world-bridge.md) — `lodestone-jvm-bridge` exposes a
+  deliberately small, loader-local world/block surface to an operator-built
+  `lodestone.bridge.IsolatedPaperShim`. It supplies resident block-state reads and
+  replacements plus ordered bulk reads; it is not a general server, world, chunk, or
+  block-object API.
 - [Particle rendering](./particles.md) — The particle system: how a decoded particle
   type becomes a physically-simulated, textured billboard on screen, and the special
   case of block-break debris, whose colour and texture are derived from the broken
@@ -405,6 +415,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   Two independent halves, one per side of the client/server split, both giving a
   native plugin the Bukkit-class `World.spawnEntity(loc,
   type)`/`Entity.remove()`/free-modification surface:
+- [Plugin entity observation](./plugin-entity-observation.md) — `observe:entities`
+  gives a WASM plugin a typed, copied view of remote-entity lifecycle and selected
+  player state. Native plugins already consume the same decoded
+  `GameEvent(ClientEvent)` stream; the WASM host mirrors the useful entity subset
+  without exposing an ECS entity, a component borrow, or a UUID.
 - [Packet decorators: the version-locked ProtocolLib-class escape hatch](./plugin-packet-decorators.md) —
   A wrapper struct implementing `ServerProtocol` (server) or `VersionAdapter` (client)
   around a concrete protocol family's own type, forwarding most calls unchanged and
@@ -627,9 +642,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Tick region ownership](./tick-region-ownership.md) —
   `lodestone_server::tick_region::TickRegionPlan` makes the ownership of every chunk
   selected for a server tick explicit. The current plan assigns every selected chunk
-  to the smallest region possible, its own `TickOwner::Chunk`, but the server executes
-  those owners serially while parity and populated-world profiling remain
-  prerequisites for concurrent workers.
+  to the smallest region possible, its own `TickOwner::Chunk`, but most phases still
+  execute those owners serially. Dense entity pushing is the first bounded concurrent
+  workload; its immutable planning workers establish the executor and parity substrate
+  without claiming the remaining phases are already regionised.
 - [Tick scheduling: random ticks, scheduled ticks, block entities, and profiling](./tick-scheduling.md) —
   The foundation every per-block-tick feature (crop growth, gravity blocks, fluid
   flow, fire spread, the redstone family) is built on: a vanilla-shaped random-tick
@@ -676,6 +692,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   ordinary clicks, bulk transfers, pickup-all double clicks, hotbar swaps, drops,
   held-item actions, or respawn while native systems retain menu, simulation, and
   network ownership.
+- [WASM world snapshots](./wasm-world-snapshots.md) — The `world:read` WASM
+  capability gives a runtime-loaded plugin a bounded, copied view of block-state ids
+  in the current client chunk store. It is observation only; a missing value means no
+  loaded cell exists at that position, while state `0` remains a loaded air cell.
 - [World events](./world-events.md) — Server-driven world state that is not tied to
   any one player: rain/thunder weather and lightning strikes, the regional-difficulty
   scalar that scales spawns and damage over time, Bad-Omen-triggered raids and

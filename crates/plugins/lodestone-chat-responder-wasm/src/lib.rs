@@ -113,7 +113,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.24.0".to_string(),
+            abi: "lodestone:plugin@0.25.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -158,6 +158,9 @@ impl Guest for ChatResponder {
 
         #[cfg(feature = "inventory")]
         return report_inventory_change(events);
+
+        #[cfg(feature = "entity-observation")]
+        return report_entity_observation(events);
 
         #[cfg(feature = "inventory-click")]
         return vec![Action::InventoryClick(InventoryClick {
@@ -262,7 +265,7 @@ impl Guest for ChatResponder {
         #[cfg(feature = "fs-write")]
         return write_files();
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "send-command", feature = "world-read", feature = "fs-write")))]
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "entity-observation", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "send-command", feature = "world-read", feature = "fs-write")))]
         return respond(events);
     }
 
@@ -458,6 +461,23 @@ fn report_inventory_change(events: Vec<Event>) -> Vec<Action> {
         }
     }
     Vec::new()
+}
+
+/// Turn one copied remote-entity spawn into a normal action so the host test
+/// can prove the complete decode-event → WIT → guest → egress route. The guest
+/// deliberately sees no ECS identity or entity handle.
+#[cfg(feature = "entity-observation")]
+fn report_entity_observation(events: Vec<Event>) -> Vec<Action> {
+    let Some(action) = events.into_iter().find_map(|event| match event {
+        Event::EntitySpawned(spawn) => Some(Action::SendChat(format!(
+            "entity: id={} generation={} kind={} x={}",
+            spawn.entity.entity_id, spawn.entity.generation, spawn.kind, spawn.pos.x
+        ))),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    vec![action]
 }
 
 fn command_specs() -> Vec<CommandSpec> {

@@ -91,6 +91,9 @@ select-slot-invalid = []
 # The inventory-observation conformance fixture. It reports a copied native
 # inventory-slot event after the host explicitly grants `observe:inventory`.
 inventory = []
+# The copied remote-entity lifecycle fixture. It reports a generation-scoped
+# spawn through the normal guest action return path.
+entity-observation = []
 # The bounded inventory-click fixtures. The positive request targets player-menu
 # slot 36; the invalid control uses the largest ABI slot and must be rejected by
 # the shell before it reaches the live predictor.

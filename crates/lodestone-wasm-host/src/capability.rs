@@ -63,6 +63,13 @@ pub enum Capability {
     ObserveInventory,
     /// Receive `ClientEvent::SectionBlocksChanged`.
     ObserveBlocks,
+    /// Receive generation-scoped remote-entity lifecycle, movement, velocity,
+    /// health, and equipment reports plus local-player teleports.
+    ///
+    /// Every payload is copied from the decoded event stream. The guest never
+    /// receives an ECS entity, UUID, component borrow, or a route to mutate the
+    /// client-side entity tracker.
+    ObserveEntities,
     /// Read a bounded, copied block-state snapshot from the current client
     /// chunk store. This is an import capability, so an ungranted guest cannot
     /// instantiate if it references the `world` interface at all.
@@ -215,6 +222,7 @@ impl Capability {
         Self::ObserveHealth,
         Self::ObserveInventory,
         Self::ObserveBlocks,
+        Self::ObserveEntities,
         Self::ReadWorld,
         Self::ActChat,
         Self::ActCommand,
@@ -254,6 +262,7 @@ impl Capability {
             Self::ObserveHealth => "observe:health",
             Self::ObserveInventory => "observe:inventory",
             Self::ObserveBlocks => "observe:blocks",
+            Self::ObserveEntities => "observe:entities",
             Self::ReadWorld => "world:read",
             Self::ActChat => "act:chat",
             Self::ActCommand => "act:command",
@@ -312,6 +321,7 @@ impl Capability {
             | Self::ObserveHealth
             | Self::ObserveInventory
             | Self::ObserveBlocks
+            | Self::ObserveEntities
             | Self::ActChat
             | Self::ActCommand
             | Self::ActInteract
@@ -378,6 +388,7 @@ impl CapabilitySet {
             Capability::ObserveChat,
             Capability::ObserveHealth,
             Capability::ObserveBlocks,
+            Capability::ObserveEntities,
             Capability::ActChat,
             Capability::ActInteract,
             Capability::VetoActions,

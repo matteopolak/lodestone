@@ -60,13 +60,15 @@ use lodestone_ecs::ChunkWorld;
 pub use crate::bindings::lodestone::plugin::types::{
     Action, BlockBreakVerdict, BlockFace, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
     CommandAnchor, CommandContext, CommandEntity, CommandExecution, CommandOutcome,
-    CommandPosition, CommandRotation, CommandSpec, EntityDamageVerdict, Event, Hand, Health,
+    CommandPosition, CommandRotation, CommandSpec, EntityDamageVerdict, EntityEquipment,
+    EntityEquipmentChanged, EntityHealthChanged, EntityIdentity, EntityMotion, EntityMoved,
+    EntityRotation, EntitySpawned, EntityVelocity, EquipmentSlot, Event, Hand, Health,
     BreakIntent, BreakOutcome, BreakRejection, BreakStatus, InventoryClick, InventoryClickButton,
     InventoryHotbarSwap, InventoryThrow, InventoryThrowMode, SelectedItemDropMode,
     InventoryClickVerdict, InventorySlotChanged, ItemStack, LogLevel, LookIntent,
     MovementIntent, PlaceIntent, PlaceOutcome, PlaceRejection, PlaceStatus, PlayerInteractVerdict,
-    PlayerMoveVerdict, PluginInfo, PluginVerdict,
-    SectionBlocksChanged, SectionPos, VerdictContext,
+    PlayerMoveVerdict, PlayerTeleported, PluginInfo, PluginVerdict,
+    SectionBlocksChanged, SectionPos, TeleportRelative, Vec3, VerdictContext,
 };
 
 /// The world version this host speaks. A guest's `init` must return this, and a
@@ -75,7 +77,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.24.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.25.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
@@ -542,6 +544,10 @@ pub struct LoadedPlugin {
     /// intent can remain valid for hundreds of ticks, so unlike placement this
     /// cursor is a status edge rather than a generation counter.
     last_break_outcome: Option<(Entity, crate::host::BreakStatus)>,
+    /// Generation ledger for copied network entity identities. This is host
+    /// state rather than a guest-provided token, so an id reuse cannot make a
+    /// stale guest reference look live in a later entity lifecycle.
+    entity_generations: crate::abi::EntityGenerations,
 }
 
 impl fmt::Debug for LoadedPlugin {
@@ -614,6 +620,14 @@ impl LoadedPlugin {
         }
         self.last_break_outcome = Some(cursor);
         true
+    }
+
+    /// Lift one entity/player event against this guest's lifecycle ledger.
+    pub(crate) fn lift_entity_events(
+        &mut self,
+        event: &lodestone_model::ClientEvent,
+    ) -> Vec<Event> {
+        crate::abi::lift_entity_events(event, &self.granted, &mut self.entity_generations)
     }
 
     #[must_use]
@@ -1209,6 +1223,7 @@ impl PluginHost {
             failure: None,
             last_place_outcome: None,
             last_break_outcome: None,
+            entity_generations: crate::abi::EntityGenerations::default(),
         });
         Ok(self.plugins.len() - 1)
     }

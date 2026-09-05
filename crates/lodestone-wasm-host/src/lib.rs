@@ -113,8 +113,8 @@ pub use abi::{
     IntentAction, InventoryClickButton, InventoryClickIntent, InventoryClickMode, InventoryThrowMode,
     LoweredAction,
     MovementOverride,
-    capability_for, lift_break_outcome, lift_command_context, lift_event, lift_place_outcome,
-    lift_verdict_context, lower_action,
+    capability_for, lift_break_outcome, lift_command_context, lift_entity_events, lift_event,
+    lift_place_outcome, lift_verdict_context, lower_action, EntityGenerations,
 };
 pub use capability::{Capability, CapabilitySet};
 pub use conductor::{
@@ -126,11 +126,13 @@ pub use host::{
     ChatKind, ChatMessage, CommandAnchor, CommandContext,
     CommandEntity, CommandExecution, CommandOutcome, CommandPosition, CommandRotation, CommandSpec,
     DEFAULT_FUEL_PER_TICK, DEFAULT_FUEL_PER_VERDICT, DEFAULT_MEMORY_LIMIT,
-    MAX_BLOCK_SNAPSHOT_POSITIONS, Event, Hand, Health,
+    MAX_BLOCK_SNAPSHOT_POSITIONS, EntityEquipment, EntityEquipmentChanged, EntityHealthChanged,
+    EntityIdentity, EntityMotion, EntityMoved, EntityRotation, EntitySpawned, EntityVelocity,
+    EquipmentSlot, Event, Hand, Health,
     HostError, InventoryHotbarSwap, InventoryThrow, LoadError, LoadedPlugin, LogLevel, LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,
     SelectedItemDropMode,
     PlaceRejection, PlaceStatus, PluginGrantPolicy, PluginHost, PluginIdentity, PluginInfo, SectionBlocksChanged, SectionPos,
-    ReloadError, VerdictDispatch,
+    PlayerTeleported, ReloadError, TeleportRelative, Vec3, VerdictDispatch,
 };
 pub use manifest::{Dependencies, Manifest, ManifestError, Priority, scan_directory};
 
