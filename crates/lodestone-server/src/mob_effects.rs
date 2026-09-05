@@ -325,26 +325,26 @@ pub enum SplashEffect {
 }
 
 /// `ThrownSplashPotion.onHitAsPotion`'s whole per-entity loop, for one entity
-/// already known to be in range: every one of `potion_registry_id`'s **built-in**
+/// already known to be in range: every one of `potion`'s **built-in**
 /// effects (see the module doc for why not `customEffects`), split
 /// instant-vs-timed and scaled by `scale` ([`splash_scale`] of that entity's own
 /// distance) and `duration_scale` (the item's `minecraft:potion_duration_scale`,
 /// `1.0` for the default this build always uses).
 ///
-/// `potion_registry_id` is the raw `minecraft:potion` network id
-/// (`lodestone_model::item::ItemComponents::potion`). An id outside the
-/// registry, or one whose built-in list is empty (`water`/`mundane`/`thick`/
-/// `awkward` — a potion with no effects, `!potion.hasEffects()`), yields an
-/// empty `Vec` — the water-bottle control this module's tests assert
+/// `potion` is a known entry in the built-in `minecraft:potion` census. Raw
+/// item-component values must be validated with
+/// [`lodestone_data::potion::PotionId::from_registry_id`] before reaching this
+/// total lookup. A known potion whose built-in list is empty
+/// (`water`/`mundane`/`thick`/`awkward` — a potion with no effects) yields an
+/// empty `Vec` — the water-bottle control this module's tests asserts
 /// explicitly, so an empty result is never mistaken for "not looked up yet".
 #[must_use]
-pub fn potion_splash_effects(potion_registry_id: i32, scale: f64, duration_scale: f32) -> Vec<SplashEffect> {
-    let Some(potion_registry_id) =
-        lodestone_data::potion::PotionId::from_registry_id(potion_registry_id)
-    else {
-        return Vec::new();
-    };
-    let built_in = lodestone_data::potion::potion_built_in_effects(potion_registry_id);
+pub fn potion_splash_effects(
+    potion: lodestone_data::potion::PotionId,
+    scale: f64,
+    duration_scale: f32,
+) -> Vec<SplashEffect> {
+    let built_in = lodestone_data::potion::potion_built_in_effects(potion);
     built_in
         .iter()
         .filter_map(|&(effect_index, amplifier, base_duration)| {
@@ -1380,6 +1380,12 @@ mod tests {
     /// tested source for the base duration/amplifier — rather than from this
     /// module's own [`splash_timed_duration`].
     #[test]
+    fn potion_splash_effects_requires_a_validated_potion_id() {
+        let _: fn(lodestone_data::potion::PotionId, f64, f32) -> Vec<SplashEffect> =
+            potion_splash_effects;
+    }
+
+    #[test]
     fn potion_splash_effects_scales_a_timed_effect_by_distance() {
         let swiftness = lodestone_data::potion::potion_id("minecraft:swiftness").expect("swiftness exists");
         let potion_id = lodestone_data::potion::PotionId::from_registry_id(swiftness)
@@ -1391,8 +1397,8 @@ mod tests {
         assert_eq!(base_duration, 3600, "swiftness's own base duration");
         assert_eq!(amplifier, 0);
 
-        let close = potion_splash_effects(swiftness, splash_scale(0.0), 1.0);
-        let far = potion_splash_effects(swiftness, splash_scale(10.24), 1.0);
+        let close = potion_splash_effects(potion_id, splash_scale(0.0), 1.0);
+        let far = potion_splash_effects(potion_id, splash_scale(10.24), 1.0);
         assert_eq!(close.len(), 1);
         assert_eq!(far.len(), 1);
         match (&close[0], &far[0]) {
@@ -1417,6 +1423,8 @@ mod tests {
     #[test]
     fn potion_splash_effects_scales_an_instant_effect_by_distance() {
         let harming = lodestone_data::potion::potion_id("minecraft:harming").expect("harming exists");
+        let harming = lodestone_data::potion::PotionId::from_registry_id(harming)
+            .expect("generated potion id is valid");
         let close = potion_splash_effects(harming, splash_scale(0.0), 1.0);
         let far = potion_splash_effects(harming, splash_scale(10.24), 1.0);
         assert_eq!(close, vec![SplashEffect::Instant { effect_id: "minecraft:instant_damage".to_owned(), amount: 6.0 }]);
@@ -1431,14 +1439,9 @@ mod tests {
     #[test]
     fn potion_splash_effects_water_bottle_control() {
         let water = lodestone_data::potion::potion_id("minecraft:water").expect("water exists");
+        let water = lodestone_data::potion::PotionId::from_registry_id(water)
+            .expect("generated potion id is valid");
         assert_eq!(potion_splash_effects(water, 1.0, 1.0), Vec::new());
-        // An out-of-range id (this build's registry) must also yield nothing,
-        // rather than panicking or guessing.
-        assert_eq!(potion_splash_effects(-1, 1.0, 1.0), Vec::new());
-        assert_eq!(
-            potion_splash_effects(lodestone_data::potion::POTION_COUNT as i32, 1.0, 1.0),
-            Vec::new()
-        );
     }
 
     // ---- food consume effects  ----

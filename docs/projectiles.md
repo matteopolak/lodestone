@@ -26,6 +26,12 @@ The player's own launch (drawing and releasing a bow, throwing a snowball/egg/pe
 serverbound `UseItem`/`ReleaseUseItem` pair; a throwable releases immediately and a bow starts a tick-count
 based draw (never a wall-clock duration, since this crate also targets wasm32 where clock APIs trap).
 
+A potion's raw item-component registry number is validated once as `lodestone_data::potion::PotionId` when
+the server launches it. `ProjectileMeta`, the impact staging record, and `mob_effects::potion_splash_effects`
+then retain that type, so the built-in effect-table lookup is total. Absent, extension, and out-of-range
+component values remain `None` at the launch/consume boundary and produce no built-in effect rather than
+being mistaken for a valid potion.
+
 ### Fishing
 
 The fishing rod is ported as a bobber entity with its own cast/bob/nibble/bite state machine
