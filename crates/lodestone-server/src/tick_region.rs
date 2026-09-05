@@ -12,6 +12,58 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
+/// Runs independent owner jobs through a bounded number of native lanes.
+///
+/// Jobs are assigned to lanes in submission order and their results are
+/// returned in that same order, irrespective of completion timing.  The owner
+/// that calls this function must therefore snapshot everything a job needs
+/// before dispatch and centrally validate/apply the returned messages.  A
+/// worker never receives a callback-held world registry lock.
+///
+/// The browser build deliberately keeps the same ordered interface but runs
+/// it serially: scoped native threads are unavailable there.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn run_bounded_owner_jobs<T, R, F>(jobs: Vec<T>, worker_count: usize, work: &F) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+    F: Fn(T) -> R + Sync,
+{
+    let lane_count = worker_count.max(1).min(jobs.len().max(1));
+    let mut lanes: Vec<Vec<(usize, T)>> = (0..lane_count).map(|_| Vec::new()).collect();
+    for (index, job) in jobs.into_iter().enumerate() {
+        lanes[index % lane_count].push((index, job));
+    }
+    let mut completed = std::thread::scope(|scope| {
+        let handles: Vec<_> = lanes
+            .into_iter()
+            .map(|lane| {
+                scope.spawn(move || {
+                    lane.into_iter()
+                        .map(|(index, job)| (index, work(job)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("region owner worker panicked"))
+            .collect::<Vec<_>>()
+    });
+    completed.sort_unstable_by_key(|(index, _)| *index);
+    completed.into_iter().map(|(_, result)| result).collect()
+}
+
+/// See the native implementation: wasm keeps submission order without trying
+/// to manufacture native worker threads.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn run_bounded_owner_jobs<T, R, F>(jobs: Vec<T>, _worker_count: usize, work: &F) -> Vec<R>
+where
+    F: Fn(T) -> R,
+{
+    jobs.into_iter().map(work).collect()
+}
+
 /// The logical owner of a selected chunk during the current tick.
 ///
 /// A [`Self::Chunk`] owner is a deliberately minimal region. The live tick loop

@@ -381,7 +381,7 @@ impl<'w> MobSim<'w> {
         }
         let min_y = f64::from(self.world.min_y);
         let plan = self.orb_owner_plan;
-        let mut batches = super::run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
+        let mut batches = crate::tick_region::run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
             let view = super::ItemCollision {
                 block_state,
                 probe_count: std::cell::Cell::new(0),

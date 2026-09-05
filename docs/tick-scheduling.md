@@ -85,7 +85,7 @@ registry, and mob simulation. It is a thread-local diagnostic rather than a runt
 so release builds add no lock-tracking contention. A new callback-held handle must be placed in
 that order before it can be acquired from scheduled work.
 
-### Block-entity ticking is chunk-owned, serial, and gated by residency
+### Block-entity ticking is chunk-owned, bounded, and gated by residency
 
 Block entities (hoppers foremost, since only that kind actually probes world state each tick) used
 to be ticked from one flat, ever-growing registry scanned unconditionally at full rate regardless of
@@ -106,14 +106,19 @@ block entity's simulated state must be able to keep advancing the moment its chu
 again, exactly as if it had never left, which is a different property from whether it gets ticked on
 any given pass.
 
-`BlockEntityRegistry::tick_plan` then snapshots the registry into one owner per chunk and runs those
-owners serially in `(chunk x, chunk z, local y, local z, local x)` order. This replaces a storage-map
-iteration order with an explicit simulation order without adding workers or changing which entities
-tick. A furnace lit transition is carried out as `BlockEntityTickEffect`, recording its chunk owner,
-and only then handed to the world writer that mutates the visible block state and publishes the update.
-That owner-to-writer hand-off is intentionally explicit: a later region executor must preserve it (or
-replace it with a validated cross-owner message), rather than letting a chunk-local tick mutate shared
-world state through an untracked borrow.
+`BlockEntityRegistry::tick_plan` snapshots the registry into one owner per chunk in `(chunk x, chunk z,
+local y, local z, local x)` order. Resident non-hopper entities then leave the global registry lock as
+immutable per-owner inputs. Native worlds dispatch 128-or-more entries through at most four bounded
+lanes; browser builds and smaller workloads use the same ordered serial interface. The central commit
+validates every owner slot, restores the snapshot order, and only then replaces entity state and emits
+`BlockEntityTickEffect` messages for the world writer. Thus a fast worker cannot publish a furnace
+transition ahead of an earlier owner, and no worker runs while holding the registry mutex.
+
+Hoppers remain serial for now. Their vertical neighbours are mutable registry entries, so treating that
+three-entry operation as a local worker would only hide a cross-owner protocol inside a shared lock. The
+non-hopper commit and the hopper pass are separate because hoppers have no furnace-container adjacency
+today; a future lateral container relation must use an explicit hand-off rather than borrowing another
+owner's state directly.
 
 ### Profiling the tick loop and world generation
 

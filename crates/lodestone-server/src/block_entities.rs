@@ -18,7 +18,7 @@
 //! # What is deliberately not modeled yet
 //!
 //! * **Hopper power is caller-supplied.** `crate::redstone::best_neighbor_signal`
-//!   provides the signal, and [`BlockEntityRegistry::tick_all_with_hopper_lock`]
+//!   provides the signal, and [`BlockEntityHandle::tick_hoppers_with_lock`]
 //!   passes each hopper's `enabled` flag into its tick. `crate::random_tick`
 //!   maintains that property on block state. The plain
 //!   [`tick_all`](BlockEntityRegistry::tick_all) shorthand still ticks every
@@ -881,7 +881,7 @@ fn placed_block_entity_for_item(item: &str) -> Option<(&'static str, PlacedBlock
 /// The current executor still advances every owner on one thread. This type
 /// makes the owner that produces an outbound block-state write visible before
 /// a future region executor changes where that write is applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BlockEntityTickOwner {
     /// The chunk column containing the entity at `(cx, cz)`.
     Chunk { cx: i32, cz: i32 },
@@ -1024,6 +1024,44 @@ impl BlockEntityTickEffectBatch {
     }
 }
 
+/// Tick-start input for one non-hopper entity.  It owns a clone so a worker
+/// cannot retain the registry mutex while it advances the entity.
+#[derive(Debug, Clone)]
+struct BlockEntityTickInput {
+    pos: BlockPos,
+    before: BlockEntity,
+}
+
+/// One non-hopper owner job.  Empty jobs are retained so the central writer
+/// can still validate the complete tick-start owner plan when every entity in
+/// a chunk is currently unloaded.
+#[derive(Debug, Clone)]
+struct BlockEntityTickJob {
+    owner: BlockEntityTickOwner,
+    serial: usize,
+    inputs: Vec<BlockEntityTickInput>,
+}
+
+/// One deferred replacement produced from a tick-start entity clone.
+#[derive(Debug, Clone)]
+struct BlockEntityTickUpdate {
+    pos: BlockPos,
+    before: BlockEntity,
+    after: BlockEntity,
+    lit: Option<bool>,
+}
+
+/// A completed non-hopper owner job.  This private form contains the entity
+/// replacement; the public effect batch below remains the only message the
+/// world writer receives.
+#[derive(Debug, Clone)]
+struct BlockEntityTickCompletion {
+    owner: BlockEntityTickOwner,
+    serial: usize,
+    batch_count: usize,
+    updates: Vec<BlockEntityTickUpdate>,
+}
+
 /// Restores a completed owner batch set to the tick-start publication order.
 ///
 /// The serial executor currently returns batches in this order already, but
@@ -1139,6 +1177,150 @@ impl BlockEntityRegistry {
         BlockEntityTickPlan::from_positions(self.entities.keys().copied())
     }
 
+    /// Snapshots all non-hopper owner jobs without advancing them.
+    ///
+    /// Hoppers remain on the serial path because their vertical container
+    /// neighbours are mutable registry state.  Every other ticking kind owns
+    /// enough state to be advanced from this immutable copy.  The caller
+    /// filters residency and dispatches these jobs after releasing the
+    /// registry lock.
+    fn non_hopper_tick_jobs(&self) -> Vec<BlockEntityTickJob> {
+        let positions = self.entities.iter().filter_map(|(pos, entity)| {
+            (!matches!(entity, BlockEntity::Hopper(_))).then_some(*pos)
+        });
+        BlockEntityTickPlan::from_positions(positions)
+            .owner_batches()
+            .into_iter()
+            .map(|batch| BlockEntityTickJob {
+                owner: batch.owner,
+                serial: batch.serial,
+                inputs: batch
+                    .assignments()
+                    .iter()
+                    .map(|assignment| BlockEntityTickInput {
+                        pos: assignment.pos,
+                        before: self
+                            .entities
+                            .get(&assignment.pos)
+                            .cloned()
+                            .expect("tick-start non-hopper assignment must remain registered"),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn non_hopper_count(&self) -> usize {
+        self.entities
+            .values()
+            .filter(|entity| !matches!(entity, BlockEntity::Hopper(_)))
+            .count()
+    }
+
+    /// Validates and applies cloned non-hopper owner completions.
+    ///
+    /// A connection can edit the registry between the snapshot and this short
+    /// central commit.  In that case the live value is advanced once here
+    /// rather than overwritten by a stale worker clone, preserving one valid
+    /// serialisation of the two operations.  A removed or newly-hopper entry
+    /// belongs to the concurrent operation and is left alone.
+    fn apply_non_hopper_tick_completions(
+        &mut self,
+        mut completions: Vec<BlockEntityTickCompletion>,
+    ) -> Vec<BlockEntityTickEffectBatch> {
+        let expected_count = completions.first().map_or(0, |batch| batch.batch_count);
+        assert_eq!(
+            completions.len(),
+            expected_count,
+            "block-entity owner completion omitted or duplicated a plan batch"
+        );
+        assert!(
+            completions
+                .iter()
+                .all(|batch| batch.batch_count == expected_count),
+            "block-entity owner completions disagree about their tick-start plan"
+        );
+        let mut owners = std::collections::BTreeSet::new();
+        assert!(
+            completions.iter().all(|batch| owners.insert(batch.owner)),
+            "block-entity owner completion has a duplicate owner"
+        );
+        assert!(
+            completions.iter().all(|batch| {
+                batch.updates.iter().all(|update| {
+                    BlockEntityTickOwner::Chunk {
+                        cx: update.pos.x.div_euclid(16),
+                        cz: update.pos.z.div_euclid(16),
+                    } == batch.owner
+                })
+            }),
+            "a block-entity owner completion contains another owner's update"
+        );
+        completions.sort_unstable_by_key(|batch| batch.serial);
+        for (serial, batch) in completions.iter().enumerate() {
+            assert_eq!(
+                batch.serial, serial,
+                "block-entity owner completion has a duplicate, missing, or stale plan slot"
+            );
+        }
+
+        completions
+            .into_iter()
+            .map(|completion| {
+                let mut effects = Vec::new();
+                for update in completion.updates {
+                    let Some(live) = self.entities.get_mut(&update.pos) else {
+                        continue;
+                    };
+                    if matches!(live, BlockEntity::Hopper(_)) {
+                        continue;
+                    }
+                    let lit = if *live == update.before {
+                        *live = update.after;
+                        update.lit
+                    } else {
+                        live.tick_non_hopper()
+                    };
+                    if let Some(lit) = lit {
+                        effects.push(BlockEntityTickEffect {
+                            owner: completion.owner,
+                            pos: update.pos,
+                            lit,
+                        });
+                    }
+                }
+                BlockEntityTickEffectBatch {
+                    owner: completion.owner,
+                    serial: completion.serial,
+                    batch_count: completion.batch_count,
+                    effects,
+                }
+            })
+            .collect()
+    }
+
+    /// Advances only hoppers in the established owner order.
+    ///
+    /// Vertical hopper adjacency is intra-column today, but it still needs
+    /// simultaneous mutable access to three registry entries.  Keep that
+    /// exceptional path serial until it has its own typed ownership transfer
+    /// protocol; non-hoppers use the lock-free worker path instead.
+    fn tick_hoppers_with_lock(
+        &mut self,
+        is_loaded: &dyn Fn(BlockPos) -> bool,
+        enabled: &dyn Fn(BlockPos) -> bool,
+    ) {
+        for owner_batch in self.tick_plan().owner_batches() {
+            for assignment in owner_batch.assignments() {
+                let pos = assignment.pos;
+                if !is_loaded(pos) || !matches!(self.entities.get(&pos), Some(BlockEntity::Hopper(_))) {
+                    continue;
+                }
+                self.tick_hopper(pos, enabled(pos));
+            }
+        }
+    }
+
     /// Advances every registered entity by exactly one tick.
     ///
     /// Positions are snapshotted up front (`BlockEntityTickPlan`, not a live
@@ -1186,11 +1368,10 @@ impl BlockEntityRegistry {
     /// `tick_all` remains as the unlocked, always-loaded shorthand for the
     /// several tests and call sites that hold no world, so this is an
     /// addition rather than a signature change beyond adding `is_loaded`.
-    /// **`crate::tick::run_tick_loop` is the one production caller that must
-    /// use [`tick_all_by_owner_with_hopper_lock`](Self::tick_all_by_owner_with_hopper_lock)**
-    /// — it is the only place holding both a `ChunkSource` and this registry,
-    /// and a hopper ticked through the shorthand can never be locked or
-    /// bounded.
+    /// This remains the direct-registry serial reference used by tests.
+    /// Production calls [`BlockEntityHandle::tick_non_hoppers_by_owner`] and
+    /// [`BlockEntityHandle::tick_hoppers_with_lock`] separately, so workers
+    /// never retain this registry guard while they advance non-hopper state.
     ///
     /// Returns every furnace-kind `BlockEntityTickEffect` whose `lit` flipped
     /// this tick. The effect is an explicit hand-off from the chunk owner to
@@ -1211,12 +1392,9 @@ impl BlockEntityRegistry {
     /// Executes the tick-start snapshot one chunk owner at a time and returns
     /// one message batch for every owner.
     ///
-    /// This is the production execution boundary. The implementation remains
-    /// serial so its effects are byte-for-byte ordered as before; the central
-    /// tick task is the sole consumer that turns the returned messages into
-    /// world writes and client publication. Empty batches are retained: an
-    /// owner that had no visible furnace transition still executed and must not
-    /// disappear from the ownership contract.
+    /// This is the serial reference execution boundary. Empty batches are
+    /// retained: an owner that had no visible furnace transition still
+    /// executed and must not disappear from the ownership contract.
     pub fn tick_all_by_owner_with_hopper_lock(
         &mut self,
         is_loaded: &dyn Fn(BlockPos) -> bool,
@@ -1330,6 +1508,81 @@ impl BlockEntityHandle {
         let _order = crate::lock_order::acquire(crate::lock_order::LockClass::BlockEntities);
         let mut guard = self.0.lock().expect("block entity registry lock poisoned");
         f(&mut guard)
+    }
+
+    /// Advances resident non-hopper entities through bounded chunk-owner jobs.
+    ///
+    /// The handle is locked only to snapshot inputs and to commit validated
+    /// completions.  Owner-local ticking happens between those two callbacks,
+    /// so no worker holds the global block-entity registry lock.  Results are
+    /// centrally restored to tick-start owner order before the caller obtains
+    /// the existing world-writer messages.
+    pub fn tick_non_hoppers_by_owner(
+        &self,
+        is_loaded: &dyn Fn(BlockPos) -> bool,
+    ) -> Vec<BlockEntityTickEffectBatch> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = self.with(|registry| registry.non_hopper_count());
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = if workers >= 128 {
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1)
+                .min(4)
+        } else {
+            1
+        };
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1;
+        self.tick_non_hoppers_by_owner_with_workers(is_loaded, workers)
+    }
+
+    fn tick_non_hoppers_by_owner_with_workers(
+        &self,
+        is_loaded: &dyn Fn(BlockPos) -> bool,
+        workers: usize,
+    ) -> Vec<BlockEntityTickEffectBatch> {
+        let mut jobs = self.with(|registry| registry.non_hopper_tick_jobs());
+        for job in &mut jobs {
+            job.inputs.retain(|input| is_loaded(input.pos));
+        }
+        let batch_count = jobs.len();
+        let completions = crate::tick_region::run_bounded_owner_jobs(jobs, workers, &|job| {
+            let updates = job
+                .inputs
+                .into_iter()
+                .map(|input| {
+                    let mut after = input.before.clone();
+                    let lit = after.tick_non_hopper();
+                    BlockEntityTickUpdate {
+                        pos: input.pos,
+                        before: input.before,
+                        after,
+                        lit,
+                    }
+                })
+                .collect();
+            BlockEntityTickCompletion {
+                owner: job.owner,
+                serial: job.serial,
+                batch_count,
+                updates,
+            }
+        });
+        self.with(|registry| registry.apply_non_hopper_tick_completions(completions))
+    }
+
+    /// Advances the still-serial hopper subset.
+    ///
+    /// Hoppers mutate vertical neighbours in the live registry, so they are
+    /// deliberately kept out of [`Self::tick_non_hoppers_by_owner`] until a
+    /// separate container hand-off protocol can make that interaction safe.
+    pub fn tick_hoppers_with_lock(
+        &self,
+        is_loaded: &dyn Fn(BlockPos) -> bool,
+        enabled: &dyn Fn(BlockPos) -> bool,
+    ) {
+        self.with(|registry| registry.tick_hoppers_with_lock(is_loaded, enabled));
     }
 }
 
@@ -1847,6 +2100,42 @@ mod tests {
             ],
             "the central world writer must receive distinct owner batches in serial order"
         );
+    }
+
+    /// A populated four-owner scene must retain both serial furnace-update
+    /// order and every persisted entity value when the native workers finish
+    /// independently.  The 128 entries also exercises the production
+    /// threshold rather than a two-item toy plan.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dense_non_hopper_region_workers_match_the_serial_owner_plan() {
+        let positions: Vec<_> = [-2, -1, 1, 2]
+            .into_iter()
+            .flat_map(|cx| (64..96).map(move |y| BlockPos::new(cx * 16, y, 0)))
+            .collect();
+        let mut serial = BlockEntityRegistry::new();
+        let parallel = BlockEntityHandle::new();
+        for pos in positions.iter().copied() {
+            let mut furnace = Furnace::new(FurnaceKind::Furnace);
+            furnace.set_fuel(Some(stack("minecraft:coal", 1)));
+            furnace.set_input(Some(stack("minecraft:iron_ore", 1)));
+            serial.insert(pos, BlockEntity::Furnace(furnace.clone()));
+            parallel.with(|registry| registry.insert(pos, BlockEntity::Furnace(furnace)));
+        }
+
+        let expected = serial.tick_all_by_owner_with_hopper_lock(&|_| true, &|_| true);
+        let actual = parallel.tick_non_hoppers_by_owner(&|_| true);
+
+        assert_eq!(actual, expected, "central publication must restore the serial owner order");
+        parallel.with(|registry| {
+            for pos in positions {
+                assert_eq!(
+                    registry.get(pos),
+                    serial.get(pos),
+                    "worker completion must commit the same persisted entity state at {pos:?}"
+                );
+            }
+        });
     }
 
     /// Owner completion is not publication order. This control creates the

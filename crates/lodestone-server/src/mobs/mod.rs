@@ -377,46 +377,6 @@ fn merge_leash_tick_owner_batches(mut batches: Vec<LeashTickOwnerBatch>) -> Vec<
     effects
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn run_bounded_owner_jobs<T, R, F>(jobs: Vec<T>, worker_count: usize, work: &F) -> Vec<R>
-where
-    T: Send,
-    R: Send,
-    F: Fn(T) -> R + Sync,
-{
-    let lane_count = worker_count.max(1).min(jobs.len().max(1));
-    let mut lanes: Vec<Vec<(usize, T)>> = (0..lane_count).map(|_| Vec::new()).collect();
-    for (index, job) in jobs.into_iter().enumerate() {
-        lanes[index % lane_count].push((index, job));
-    }
-    let mut completed = std::thread::scope(|scope| {
-        let handles: Vec<_> = lanes
-            .into_iter()
-            .map(|lane| {
-                scope.spawn(move || {
-                    lane.into_iter()
-                        .map(|(index, job)| (index, work(job)))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| handle.join().expect("region owner worker panicked"))
-            .collect::<Vec<_>>()
-    });
-    completed.sort_unstable_by_key(|(index, _)| *index);
-    completed.into_iter().map(|(_, result)| result).collect()
-}
-
-#[cfg(target_arch = "wasm32")]
-fn run_bounded_owner_jobs<T, R, F>(jobs: Vec<T>, _worker_count: usize, work: &F) -> Vec<R>
-where
-    F: Fn(T) -> R,
-{
-    jobs.into_iter().map(work).collect()
-}
-
 mod block_ids;
 
 // Re-exported so `crate::mobs::block_state_id`/`block_state_id_or_default` keep
@@ -5676,7 +5636,7 @@ impl<'w> MobSim<'w> {
         }
         let min_y = f64::from(self.world.min_y);
         let plan = self.item_owner_plan;
-        let completed = run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
+        let completed = crate::tick_region::run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
             let view = ItemCollision {
                 block_state,
                 probe_count: std::cell::Cell::new(0),
@@ -6466,7 +6426,7 @@ impl<'w> MobSim<'w> {
             }
         }
         let players = &self.players;
-        let mut batches = run_bounded_owner_jobs(jobs, worker_count, &|(owner, serials)| {
+        let mut batches = crate::tick_region::run_bounded_owner_jobs(jobs, worker_count, &|(owner, serials)| {
             let effects = serials
                 .into_iter()
                 .map(|serial| {
@@ -6744,7 +6704,7 @@ impl<'w> MobSim<'w> {
             }
         }
         let plan = self.leash_owner_plan;
-        let mut batches = run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
+        let mut batches = crate::tick_region::run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
             let effects = inputs
                 .into_iter()
                 .map(|input| {
@@ -11519,7 +11479,7 @@ mod follow_range_tests {
         let barrier = Arc::new(Barrier::new(2));
         let active = Arc::new(AtomicUsize::new(0));
         let maximum = Arc::new(AtomicUsize::new(0));
-        let results = run_bounded_owner_jobs(vec![1_u8, 2], 2, &|job| {
+        let results = crate::tick_region::run_bounded_owner_jobs(vec![1_u8, 2], 2, &|job| {
             let now = active.fetch_add(1, Ordering::SeqCst) + 1;
             maximum.fetch_max(now, Ordering::SeqCst);
             barrier.wait();
