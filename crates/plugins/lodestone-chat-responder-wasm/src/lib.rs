@@ -81,7 +81,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.10.0".to_string(),
+            abi: "lodestone:plugin@0.11.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -124,7 +124,10 @@ impl Guest for ChatResponder {
         #[cfg(feature = "select-slot-invalid")]
         return vec![Action::SelectSlot(9)];
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid")))]
+        #[cfg(feature = "inventory")]
+        return report_inventory_change(events);
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory")))]
         return respond(events);
     }
 
@@ -267,6 +270,27 @@ fn break_once_then_report(events: Vec<Event>) -> Vec<Action> {
             pos: BlockPos { x: 4, y: 64, z: 4 },
             face: BlockFace::Up,
         }))];
+    }
+    Vec::new()
+}
+
+/// Report the copied inventory identity received through the guest event batch.
+/// This fixture deliberately observes instead of reaching for any inventory
+/// handle, so its output distinguishes an event granted by the host from a
+/// parallel inventory state that happened to be present in the test app.
+#[cfg(feature = "inventory")]
+fn report_inventory_change(events: Vec<Event>) -> Vec<Action> {
+    for event in events {
+        if let Event::InventorySlotChanged(change) = event {
+            let item = change.item.map_or_else(
+                || "empty".to_owned(),
+                |item| format!("{}x{}", item.item, item.count),
+            );
+            return vec![Action::SendChat(format!(
+                "inventory: slot={} item={item}",
+                change.slot
+            ))];
+        }
     }
     Vec::new()
 }

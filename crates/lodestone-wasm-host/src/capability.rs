@@ -58,6 +58,9 @@ pub enum Capability {
     ObserveChat,
     /// Receive `ClientEvent::HealthChanged`.
     ObserveHealth,
+    /// Receive canonical item identity/count changes for native player-inventory
+    /// slots outside an open container.
+    ObserveInventory,
     /// Receive `ClientEvent::SectionBlocksChanged`.
     ObserveBlocks,
     /// Push `ClientAction::SendChat` / `SendCommand` onto `ActionQueue`.
@@ -137,6 +140,7 @@ impl Capability {
         Self::Log,
         Self::ObserveChat,
         Self::ObserveHealth,
+        Self::ObserveInventory,
         Self::ObserveBlocks,
         Self::ActChat,
         Self::ActInteract,
@@ -160,6 +164,7 @@ impl Capability {
             Self::Log => "log",
             Self::ObserveChat => "observe:chat",
             Self::ObserveHealth => "observe:health",
+            Self::ObserveInventory => "observe:inventory",
             Self::ObserveBlocks => "observe:blocks",
             Self::ActChat => "act:chat",
             Self::ActInteract => "act:interact",
@@ -198,6 +203,7 @@ impl Capability {
             Self::Log | Self::FsRead | Self::ScheduleTasks => true,
             Self::ObserveChat
             | Self::ObserveHealth
+            | Self::ObserveInventory
             | Self::ObserveBlocks
             | Self::ActChat
             | Self::ActInteract

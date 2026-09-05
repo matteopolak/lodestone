@@ -95,6 +95,24 @@ fn select_slot_host_policy() -> CapabilitySet {
     policy
 }
 
+fn inventory_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([
+        Capability::Log,
+        Capability::ObserveInventory,
+        Capability::ActChat,
+    ])
+}
+
+fn inventory_event() -> GameEvent {
+    GameEvent(ClientEvent::InventorySlotChanged {
+        slot: 4,
+        item: Some(lodestone_model::ItemStack::new(
+            "minecraft:gold_ingot".parse().expect("valid item key"),
+            13,
+        )),
+    })
+}
+
 /// An intentionally empty but live collision view. `PlayerCollision::NoWorld`
 /// freezes physics by contract, so the movement integration gate needs this
 /// explicit control to prove that the normal physics system read the guest input.
@@ -582,4 +600,53 @@ fn a_wasm_out_of_range_hotbar_intent_is_a_shell_validated_no_op() {
         "an out-of-range slot must never be echoed to the server"
     );
     assert_eq!(world.resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// A separately built guest observes a real client inventory-slot event through
+/// the same `GameEvent(ClientEvent)` bus native plugins use. The item remains a
+/// copied key/count value: no guest ever receives or can mutate `SessionMenus`.
+#[test]
+fn a_wasm_inventory_observer_receives_the_canonical_slot_change() {
+    let wasm = support::build_example_plugin(&["inventory"]);
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ObserveInventory);
+    let mut host = PluginHost::new(policy).expect("engine");
+    host.load_file("inventory", &wasm, &inventory_capabilities())
+        .expect("the inventory fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().write_message(inventory_event());
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        chat_actions(&app),
+        vec![ClientAction::SendChat {
+            text: "inventory: slot=4 item=minecraft:gold_ingotx13".to_owned(),
+        }],
+        "the separately-built guest must receive the canonical item identity and count"
+    );
+}
+
+/// The default host policy deliberately withholds inventory observation. The
+/// fixture is identical to the positive test and still runs, so no reply proves
+/// the capability gate—not a missing guest, event bus, or client schedule.
+#[test]
+fn a_wasm_inventory_observer_is_default_denied() {
+    let wasm = support::build_example_plugin(&["inventory"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "inventory",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log, Capability::ActChat]),
+    )
+    .expect("a data-flow observation may be withheld after the guest loads");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().write_message(inventory_event());
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(chat_actions(&app), Vec::<ClientAction>::new());
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
 }

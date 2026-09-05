@@ -18,7 +18,7 @@
 //! | `Text`, the styled component tree | a plain `String` | `Text` is recursive, with translation keys, hover/click events and per-node style. Lifting it faithfully means a recursive WIT variant plus a translation table the guest cannot resolve anyway. So [`lift_event`] flattens with `Text::to_plain_string`, and this is **lossy**: a guest cannot see colour, cannot see a translation key, and cannot distinguish a translated message from a literal one that happens to render the same. |
 //! | `ChatAckInfo` on `ClientEvent::Chat` | dropped | signed-chat acknowledgement is the *driver's* bookkeeping — a guest that echoed an `offset` back would fork a sequence counter the driver owns, which is clause 2 of the doctrine. Deliberately unreachable. |
 //! | intent components (`BreakIntent`, `PlaceIntent`, `SelectSlotIntent`, `MovementIntent`, `LookIntent`) and their outcome components | `set-look(option<look-intent>)`, `set-movement(option<movement-intent>)`, `set-break(option<break-intent>)`, `place-block(place-intent)`, `select-slot(hotbar-slot)`, and bounded outcome events | look owns an optional component; movement overrides the normal controller's copied input for one tick, then flows through the existing physics and egress consumers. Break owns a persistent target until explicit release, while the shell owns validation, prediction and sequence. Placement crosses as only a target and face, then the shell owns its one-shot lifecycle. Selection crosses as only the candidate slot; the shell owns range validation and its carried-item echo. See `docs/wasm-plugin-intents.md`. |
-//! | ~110 `ClientEvent` variants | 3 | the curated subset. Not an oversight and not a TODO: a full mirror is the staleness factory `lodestone_ecs::events`'s own module doc refuses. |
+//! | ~110 `ClientEvent` variants | 4 | the curated subset. Not an oversight and not a TODO: a full mirror is the staleness factory `lodestone_ecs::events`'s own module doc refuses. |
 //!
 //! # The staleness question, and the honest answer to it
 //!
@@ -43,7 +43,8 @@ use crate::host::{
     BreakRejection, BreakStatus, ChatKind, ChatMessage,
     CommandAnchor, CommandContext, CommandEntity, CommandExecution, CommandPosition,
     CommandRotation, EntityDamageVerdict, Event, Hand, Health, InventoryClickVerdict,
-    PlaceOutcome, PlaceRejection, PlaceStatus, PlayerInteractVerdict, PlayerMoveVerdict,
+    InventorySlotChanged, ItemStack, PlaceOutcome, PlaceRejection, PlaceStatus,
+    PlayerInteractVerdict, PlayerMoveVerdict,
     SectionBlocksChanged, SectionPos, VerdictContext,
 };
 
@@ -215,6 +216,17 @@ pub fn lift_event(event: &ClientEvent, granted: &CapabilitySet) -> Option<Event>
             food: *food,
             saturation: *saturation,
         })),
+        ClientEvent::InventorySlotChanged { slot, item }
+            if granted.contains(Capability::ObserveInventory) =>
+        {
+            Some(Event::InventorySlotChanged(InventorySlotChanged {
+                slot: *slot,
+                item: item.as_ref().map(|item| ItemStack {
+                    item: item.item.to_string(),
+                    count: item.count,
+                }),
+            }))
+        }
         ClientEvent::SectionBlocksChanged { section, blocks }
             if granted.contains(Capability::ObserveBlocks) =>
         {
@@ -408,6 +420,16 @@ mod tests {
         }
     }
 
+    fn inventory_event() -> ClientEvent {
+        ClientEvent::InventorySlotChanged {
+            slot: 4,
+            item: Some(lodestone_model::ItemStack::new(
+                "minecraft:gold_ingot".parse().expect("valid item key"),
+                13,
+            )),
+        }
+    }
+
     /// The lift carries the text and the kind through unchanged.
     #[test]
     fn a_chat_event_lifts_with_its_text_and_kind() {
@@ -456,6 +478,7 @@ mod tests {
                     saturation: 5.0,
                 },
             ),
+            (Capability::ObserveInventory, inventory_event()),
             (
                 Capability::ObserveBlocks,
                 ClientEvent::SectionBlocksChanged {

@@ -88,6 +88,9 @@ select-slot = []
 # Same route, but deliberately outside the valid 0..=8 range so the composed
 # shell gate proves it rejects malformed guest input without an echo.
 select-slot-invalid = []
+# The inventory-observation conformance fixture. It reports a copied native
+# inventory-slot event after the host explicitly grants `observe:inventory`.
+inventory = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is
