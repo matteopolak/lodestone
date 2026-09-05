@@ -83,7 +83,7 @@ pub fn terrain_particle(
         xa,
         ya,
         za,
-        SpriteSource::BlockState(state.raw()),
+        SpriteSource::BlockState(state),
         rng,
     );
     p.gravity = 1.0;
@@ -314,7 +314,7 @@ pub fn block_marker(engine: &mut ParticleEngine, pos: [f64; 3], state: StateId) 
         pos[0],
         pos[1],
         pos[2],
-        SpriteSource::BlockState(state.raw()),
+        SpriteSource::BlockState(state),
         engine.rng(),
     );
     p.gravity = 0.0;
@@ -2484,7 +2484,7 @@ mod tests {
         let mut engine = ParticleEngine::seeded(3);
         destroy_block_effect(&mut engine, (0, 64, 0), state(42), WHITE, &[FULL_CUBE]);
         let p = &engine.particles()[0];
-        assert_eq!(p.sprite, SpriteSource::BlockState(42));
+        assert_eq!(p.sprite, SpriteSource::BlockState(state(42)));
         assert!(matches!(p.behaviour, Behaviour::Terrain { .. }));
         for c in p.colour {
             assert!((c - 0.6).abs() < 1e-6, "expected 0.6 grey, got {c}");

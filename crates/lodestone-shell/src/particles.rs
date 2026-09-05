@@ -1437,7 +1437,7 @@ impl Particles {
         match sprite {
             SpriteSource::BlockState(id) => self
                 .state_uv
-                .get(id as usize)
+                .get(id.raw() as usize)
                 .copied()
                 .flatten()
                 .map(|rect| (rect, SpriteAtlas::Block)),
@@ -3272,7 +3272,8 @@ mod tests {
     /// what a falling sand column sheds.
     #[test]
     fn the_block_particle_family_splits_four_atlas_sprites_from_one_sheet_mote() {
-        let state = stone_state();
+        let state = lodestone_data::block_states::StateId::new(stone_state())
+            .expect("stone is in the generated block-state census");
         for kind in ["block", "block_crumble", "dust_pillar", "block_marker"] {
             let mut p = resolvable();
             let particle = spawn_block_particle(&mut p, kind, [0.0, 0.0, 0.0]);
