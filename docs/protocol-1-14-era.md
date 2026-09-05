@@ -197,16 +197,16 @@ line for the whole capture, so a future lenient decode cannot quietly undo it.
 
 ### External-client acceptance
 
-The opt-in release-client gate covers this era's hosted protocol 754 as row **754**. Run it with
-`just external-client-acceptance --protocol 754 --output /private/tmp/lodestone-v754` and an
-external driver. The six-stage evidence records the direct login-to-Play transition in
-`configuration.mode: "login_to_play"` and the unbatched initial columns in
-`chunk_batch_acknowledgement.mode: "unbatched", batch_count: 0`; it then requires world join,
+The opt-in release-client gate covers all three hosted rows in this era: protocol 498 (1.14.4),
+578 (1.15.2), and 754 (1.16.5). Each row records direct login-to-Play
+(`configuration.mode: "login_to_play"`) and unbatched initial chunks
+(`chunk_batch_acknowledgement.mode: "unbatched", batch_count: 0`) before requiring world join,
 deliberate movement, one observed `start_destroy_block` result, and a client-initiated clean
-disconnect. Provenance must identify the exact 1.16.5 client build and retain non-empty capture and
-client-log artifacts. This gate was not launched while this documentation was updated, so protocol
-754 remains unverified by a real external client until that manual run produces `report.json`;
-protocols 498 and 578 remain outside the external-client gate.
+disconnect. Run a row with, for example, `just external-client-acceptance --protocol 498 --output
+/private/tmp/lodestone-v498`; repeat for 578 and 754. Provenance must identify the exact release
+build (1.14.4, 1.15.2, or 1.16.5) and retain non-empty capture and client-log artifacts. No client
+was launched while this document was updated; all three rows remain unverified by a real release
+client until their manual runs produce passing `report.json` files.
 
 ## How to change it
 

@@ -202,6 +202,18 @@ the player-list name independently; when the two wire names differ, there is
 no honest fallback between the key spaces and the entity cannot recover that
 row's display name.
 
+### External-client acceptance
+
+The opt-in release-client gate covers hosted protocol **5** (1.7.10). Run it with
+`just external-client-acceptance --protocol 5 --output /private/tmp/lodestone-v5` and an external
+driver. The six-stage evidence records direct login-to-Play (`configuration.mode:
+"login_to_play"`) and the unbatched initial delivery (`chunk_batch_acknowledgement.mode:
+"unbatched", batch_count: 0`), then requires world join, deliberate movement, one observed
+`start_destroy_block` result, and a client-initiated clean disconnect. Provenance must identify the
+exact 1.7.10 client build and retain non-empty capture and client-log artifacts. No client was
+launched while this document was updated; protocol 5 remains unverified by a real release client
+until its manual run produces a passing `report.json`.
+
 ## How to change it
 
 - **The adapter** is `src/adapter.rs`: `CLIENTBOUND` lists every translated

@@ -164,6 +164,19 @@ and 0.5 put **94** and **31** on the wire: `pitch * 63`, truncated. A scale of 6
 1.10.2 and 1.11.2 put `3fc00000` and `3f000000` — exact floats — which is the committed
 differential: the byte era must never reproduce 1.5 exactly, the float era must always.
 
+### External-client acceptance
+
+The opt-in release-client gate covers all four hosted rows in this era: protocol 110 (1.9.4),
+210 (1.10.2), 316 (1.11.2), and 340 (1.12.2). Each row records direct login-to-Play
+(`configuration.mode: "login_to_play"`) and unbatched initial chunks
+(`chunk_batch_acknowledgement.mode: "unbatched", batch_count: 0`) before requiring world join,
+deliberate movement, one observed `start_destroy_block` result, and a client-initiated clean
+disconnect. Run a row with, for example, `just external-client-acceptance --protocol 110 --output
+/private/tmp/lodestone-v110`; repeat for 210, 316, and 340. Provenance must identify the exact
+release build (1.9.4, 1.10.2, 1.11.2, or 1.12.2) and retain non-empty capture and client-log
+artifacts. No client was launched while this document was updated; all four rows remain
+unverified by a real release client until their manual runs produce passing `report.json` files.
+
 ## How to change it
 
 - **Adding a fifth protocol to this era** (there is none left; this is the shape for the next

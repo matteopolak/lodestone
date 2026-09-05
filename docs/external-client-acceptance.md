@@ -2,15 +2,16 @@
 
 ## What it is
 
-`scripts/live-oracles/external-client-acceptance.py` is an opt-in, bounded acceptance gate for
-seven hosted protocols: 754 (1.16.5), 756 (1.17.1), 758 (1.18.2), 762 (1.19.4), 766 (1.20.6),
-774 (1.21.11), and 776 (26.2). It starts one dedicated Lodestone server per selected row and
-accepts a witness only from an installed, unmodified release client.
+`scripts/live-oracles/external-client-acceptance.py` is an opt-in, bounded acceptance gate for all
+16 hosted protocols: 5 (1.7.10), 47 (1.8.9), 110 (1.9.4), 210 (1.10.2), 316 (1.11.2), 340
+(1.12.2), 404 (1.13.2), 498 (1.14.4), 578 (1.15.2), 754 (1.16.5), 756 (1.17.1), 758 (1.18.2),
+762 (1.19.4), 766 (1.20.6), 774 (1.21.11), and 776 (26.2). It starts one dedicated Lodestone
+server per selected row and accepts a witness only from an installed, unmodified release client.
 
 ## How it works
 
-The runner keeps the registry's complete hostable-row matrix for `--list`, but its external gate
-is deliberately limited to seven rows. Rows run serially. Each gets a fresh temporary world,
+The runner keeps the registry's complete hostable-row matrix for `--list` and gates every hosted
+row. Rows run serially. Each gets a fresh temporary world,
 ephemeral localhost port, deadline, server log, and isolated Cargo target directory; a timeout or
 nonzero client-driver exit stops the server and records a failed row.
 
@@ -19,6 +20,15 @@ flow that actually exists in each era:
 
 | protocol | release | configuration stage `mode` | chunk stage `mode` and `batch_count` |
 |---:|---|---|---|
+| 5 | 1.7.10 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
+| 47 | 1.8.9 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
+| 110 | 1.9.4 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
+| 210 | 1.10.2 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
+| 316 | 1.11.2 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
+| 340 | 1.12.2 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
+| 404 | 1.13.2 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
+| 498 | 1.14.4 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
+| 578 | 1.15.2 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
 | 754 | 1.16.5 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
 | 756 | 1.17.1 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
 | 758 | 1.18.2 | `login_to_play` (no Configuration phase) | `unbatched`, `0` (no batch acknowledgement packet) |
@@ -27,11 +37,12 @@ flow that actually exists in each era:
 | 774 | 1.21.11 | `configuration` | `acknowledged`, positive |
 | 776 | 26.2 | `configuration` | `acknowledged`, positive |
 
-Protocols 754, 756, and 758 have no Configuration phase or chunk-batch acknowledgement: their
-configuration stage is an explicit direct-login checkpoint, and their chunk stage records the
-unbatched delivery rather than inventing an acknowledgement. Their join packets carry the
-dimension information needed by each era's host. Protocol 762 likewise goes directly to Play,
-with its dimension registry inline. Protocol 776's Configuration flow includes the synchronized
+Protocols 5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, and 762 have no Configuration
+phase or chunk-batch acknowledgement: their configuration stage is an explicit direct-login
+checkpoint, and their chunk stage records the unbatched delivery rather than inventing an
+acknowledgement. Their join packets carry the dimension information needed by each era's host;
+the 1.13 and 1.14-era rows retain their own chunk framing while sharing the same gate modes.
+Protocols 766, 774, and 776 use Configuration flows that include the synchronized
 registry and tag stream before the finish signal; the gate records that the phase completed but
 does not replace the client's own wire witness with a packet-level claim.
 
@@ -39,7 +50,8 @@ The release client must complete this ordered session before the driver writes i
 
 1. establish the era's login flow, completing Configuration where that phase exists;
 2. receive the initial chunk delivery and acknowledge its batch where the protocol provides batch
-   pacing (754, 756, 758, and 762 record an unbatched delivery with `batch_count: 0`);
+   pacing (5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, and 762 record an
+   unbatched delivery with `batch_count: 0`);
 3. enter the world (join);
 4. send at least one deliberate movement update;
 5. perform exactly one `start_destroy_block` action and observe its result; and
@@ -70,13 +82,15 @@ List the host matrix without launching a server, client, or container:
 just external-client-acceptance --list
 ```
 
-Run the bounded gate for the seven selected hosted protocols using a release-client automation
+Run the bounded gate for selected hosted protocols using a release-client automation
 driver:
 
 ```bash
 LODESTONE_EXTERNAL_CLIENT_DRIVER=/absolute/path/to/driver \
-  just external-client-acceptance --protocol 754 --protocol 756 \
-  --protocol 758 --protocol 762 --protocol 766 \
+  just external-client-acceptance --protocol 5 --protocol 47 \
+  --protocol 110 --protocol 210 --protocol 316 --protocol 340 \
+  --protocol 404 --protocol 498 --protocol 578 --protocol 754 \
+  --protocol 756 --protocol 758 --protocol 762 --protocol 766 \
   --protocol 774 --protocol 776 --output /private/tmp/lodestone-external
 ```
 
@@ -117,23 +131,23 @@ An accepted evidence file has this shape (artifact paths may be relative to the 
 }
 ```
 
-For protocols 754, 756, 758, and 762, the same six entries use `"mode": "login_to_play"` on the
-configuration entry and `"mode": "unbatched", "batch_count": 0` on the chunk entry. The
-observations should say that login entered Play directly and that the initial columns arrived
-without batch framing; the validator checks those row-specific modes rather than accepting a
-fabricated acknowledgement.
+For protocols 5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, and 762, the same six
+entries use `"mode": "login_to_play"` on the configuration entry and `"mode": "unbatched",
+"batch_count": 0` on the chunk entry. The observations should say that login entered Play
+directly and that the initial columns arrived without batch framing; the validator checks those
+row-specific modes rather than accepting a fabricated acknowledgement.
 
 ## How to change it
 
 When a hosted row changes, update `ROWS` and keep its release version, registry feature, and
 protocol number aligned with `lodestone_registry::hosted_protocols`. Add a protocol to
 `GATE_PROTOCOLS` only when its host implements the complete six-stage contract. Keep the row's
-configuration and chunk-batch modes aligned with the host's actual join path: 754, 756, 758, and
-762 are direct login-to-Play and unbatched, while 766, 774, and 776 use Configuration and batch
-acknowledgement. Do not add join-only revisions or imply that a protocol has a packet it does not
-define. Add or update a Python contract test whenever the evidence schema changes, and keep the
-required action externally observable; a successful process launch, login-only screenshot, or
-runner-forced disconnect is not enough.
+configuration and chunk-batch modes aligned with the host's actual join path: protocols 5 through
+762 listed above are direct login-to-Play and unbatched, while 766, 774, and 776 use Configuration
+and batch acknowledgement. Do not add join-only revisions or imply that a protocol has a packet it
+does not define. Add or update a Python contract test whenever the evidence schema changes, and
+keep the required action externally observable; a successful process launch, login-only screenshot,
+or runner-forced disconnect is not enough.
 
 The dedicated-server binary accepts `--protocol <number>` so the runner can select a row from a
 multi-protocol family. Its Cargo features relay registry features rather than adding direct
@@ -142,8 +156,8 @@ CI, or ordinary tests.
 
 ## Configuration
 
-- `--protocol <number>` is repeatable and must be 754, 756, 758, 762, 766, 774, or 776 for an
-  acceptance run. Omit it to run all seven gate rows.
+- `--protocol <number>` is repeatable and must be 5, 47, 110, 210, 316, 340, 404, 498, 578, 754,
+  756, 758, 762, 766, 774, or 776 for an acceptance run. Omit it to run all 16 gate rows.
 - `--mode launch` is the default and requires `--driver` or
   `LODESTONE_EXTERNAL_CLIENT_DRIVER`; `--mode attach` waits for a separately created evidence file.
 - `--output` must name a new directory. It receives each row's server directory, logs, evidence,
@@ -155,9 +169,10 @@ CI, or ordinary tests.
 ## Dependencies
 
 The runner requires Python 3, Cargo, and `lodestone-dedicated-server`. A real acceptance run also
-needs locally installed, unmodified 1.16.5, 1.17.1, 1.18.2, 1.19.4, 1.20.6, 1.21.11, and 26.2
-release clients plus an automation driver or human/UI-assisted evidence recorder. Release-account
-credentials, client container images, and a reliable launcher/UI automation surface are
-intentionally outside the repository. The gate has not been run as part of this change; the
-remaining hosted protocols (5, 47, 110, 210, 316, 340, 404, 498, and 578) remain external-client
-gaps.
+needs locally installed, unmodified 1.7.10, 1.8.9, 1.9.4, 1.10.2, 1.11.2, 1.12.2, 1.13.2,
+1.14.4, 1.15.2, 1.16.5, 1.17.1, 1.18.2, 1.19.4, 1.20.6, 1.21.11, and 26.2 release clients
+plus an automation driver or human/UI-assisted evidence recorder. Release-account credentials,
+client container images, and a reliable launcher/UI automation surface are intentionally outside the
+repository. All 16 hosted protocols are now represented by gate rows, but no client was launched
+while this documentation was updated: every row remains unverified until its manual execution
+produces a passing `report.json` with the six-stage witness and exact client-build provenance.
