@@ -2888,6 +2888,26 @@ impl IntegratedServer {
         storage.write_dirty_chunk(column_x, column_z, column)
     }
 
+    /// Saves one dirty terrain column and its separately owned canonical light
+    /// through the selected native record backend.
+    ///
+    /// The supplied [`lodestone_world::ColumnLight`] retains all block-range
+    /// boundary sections. This remains an explicit typed-record producer: it
+    /// does not redirect the established Anvil save or load path.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_dirty_native_chunk_with_light(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        column: &crate::chunk::ChunkColumn,
+        light: &lodestone_world::ColumnLight,
+    ) -> Result<(), crate::world_storage::Error> {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.write_dirty_chunk_with_light(column_x, column_z, column, light)
+    }
+
     /// Saves one dirty native chunk with the pending block and fluid ticks the
     /// live scheduler currently owns for that column. This does not replace
     /// Anvil's persistent-world save path.
@@ -2924,6 +2944,29 @@ impl IntegratedServer {
             return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
         };
         storage.load_chunk(column_x, column_z, min_y, height)
+    }
+
+    /// Reopens one native terrain column and its complete canonical light
+    /// stream from the selected backend.
+    ///
+    /// A terrain-only record returns an explicit missing-light error instead
+    /// of treating unknown light as darkness. This is a bounded native-record
+    /// consumer and does not replace the established Anvil world loader.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_native_chunk_with_light(
+        &self,
+        column_x: i32,
+        column_z: i32,
+        min_y: i32,
+        height: i32,
+    ) -> Result<
+        Option<(crate::chunk::ChunkColumn, lodestone_world::ColumnLight)>,
+        crate::world_storage::Error,
+    > {
+        let Some(storage) = &self.world_storage else {
+            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
+        };
+        storage.load_chunk_with_light(column_x, column_z, min_y, height)
     }
 
     /// Reopens one native chunk and stages its pending ticks into the supplied
@@ -5830,14 +5873,14 @@ mod tests {
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
     }
 
-    /// The server-level native terrain consumer: a real `ChunkColumn` crosses
-    /// the selected backend, the server stops, a fresh server reopens the
-    /// segment, and the recovered column is used through its normal block
-    /// accessor. The distinct-key read is the absence control, so a test that
-    /// accidentally retained the first in-memory column cannot pass.
+    /// The server-level native terrain-and-light consumer: a real
+    /// `ChunkColumn` and distinct canonical `ColumnLight` cross the selected
+    /// backend, the server stops, and a fresh server reopens both values. The
+    /// distinct-key read is the absence control, so a test that accidentally
+    /// retained the first in-memory values cannot pass.
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn persistent_server_reopens_native_chunk_with_biome_metadata() {
+    async fn persistent_server_reopens_native_chunk_with_biome_metadata_and_light() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock after Unix epoch")
@@ -5905,9 +5948,15 @@ mod tests {
                 },
             ),
         ]);
+        let mut light = lodestone_world::ColumnLight::new(source.section_count());
+        *light.sky_mut(0) = lodestone_world::LightData::Uniform(0);
+        *light.sky_mut(1) = lodestone_world::LightData::Uniform(15);
+        let mut block_values = lodestone_world::NibbleArray::filled(0);
+        block_values.set(lodestone_world::NibbleArray::index(5, 6, 7), 12);
+        *light.block_mut(1) = lodestone_world::LightData::Values(block_values);
         server
-            .write_dirty_native_chunk(3, -5, &source)
-            .expect("write native chunk with resident block entities");
+            .write_dirty_native_chunk_with_light(3, -5, &source, &light)
+            .expect("write native chunk and canonical light with resident block entities");
         server.shutdown().await;
 
         let second_storage = crate::world_storage::WorldStorage::open(
@@ -5930,9 +5979,9 @@ mod tests {
             second_storage,
         )
         .expect("open second persistent server");
-        let loaded = reopened
-            .load_native_chunk(3, -5, 0, 16)
-            .expect("read reopened native terrain")
+        let (loaded, loaded_light) = reopened
+            .load_native_chunk_with_light(3, -5, 0, 16)
+            .expect("read reopened native terrain and light")
             .expect("saved terrain is present");
         assert_eq!(loaded.block_state(2, 3, 4), "minecraft:stone");
         assert_eq!(loaded.block_state(9, 14, 10), "minecraft:oak_log[axis=z]");
@@ -5949,8 +5998,39 @@ mod tests {
             source.block_entities(),
             "the selected server storage path must reopen resident simulated and opaque entities"
         );
+        assert_eq!(
+            loaded_light.sky(0),
+            &lodestone_world::LightData::Uniform(0),
+            "the lower boundary light section must survive the server restart"
+        );
+        assert_eq!(
+            loaded_light.block(0),
+            &lodestone_world::LightData::Missing,
+            "a missing boundary light layer must remain missing after the server restart"
+        );
+        assert_eq!(
+            loaded_light.sky(1),
+            &lodestone_world::LightData::Uniform(15),
+            "a compact uniform light layer must survive the server restart"
+        );
+        assert_eq!(
+            loaded_light
+                .block(1)
+                .get(lodestone_world::NibbleArray::index(5, 6, 7)),
+            Some(12),
+            "a non-uniform light cell must survive the server restart"
+        );
+        assert!(matches!(
+            reopened.load_native_chunk(3, -5, 0, 16),
+            Err(crate::world_storage::Error::Chunk(
+                crate::world_storage::ChunkRecordError::UnsupportedStoredSectionData
+            ))
+        ));
         assert!(
-            reopened.load_native_chunk(4, -5, 0, 16).unwrap().is_none(),
+            reopened
+                .load_native_chunk_with_light(4, -5, 0, 16)
+                .unwrap()
+                .is_none(),
             "a different record key must not be satisfied from the first server's memory"
         );
         reopened.shutdown().await;
