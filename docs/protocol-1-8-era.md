@@ -55,6 +55,14 @@ after the adapter has successfully encoded the key input. Unlike later legacy
 families, protocol 47 stops there: its pre-off-hand wire vocabulary has no
 status-`6` hand swap.
 
+Protocol 47's `block_place` is now also a hosted consumer boundary. Its packed
+position, face byte, mandatory inline slot, and three cursor sixteenths lift to
+`ServerBound::UseItemOn`, with main hand and sequence zero because neither
+concept exists on this wire. Cursor bytes outside `0..=15` and unknown faces are
+rejected rather than clamped into a plausible placement. The separate
+`(-1, -1, -1), -1` in-air sentinel remains ignored: this packet does not carry
+the click-time look direction required by the shared in-air-use consumer.
+
 ## How to change it
 
 Keep protocol-47 section encoding local to this family. Its raw state-word layout differs from the

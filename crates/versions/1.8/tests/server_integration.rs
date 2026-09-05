@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, ChatMode, ClientAction, ClientSettings,
+    BlockActionKind, BlockFace, BlockPos, ChatMode, ClientAction, ClientSettings, Hand,
     DisplayedSkinParts, MainHand, ParticleStatus, Rotation, Vec3,
+    Vec3f,
 };
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_8::adapter;
@@ -51,6 +52,55 @@ impl ChunkSource for LegacyFixtureSource {
             .expect("fixture column lock poisoned")
             .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
     }
+}
+
+#[tokio::test]
+async fn block_place_reaches_the_integrated_protocol_47_consumer_before_later_movement() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
+        .expect("protocol 47 must resolve to a hosted family");
+    let source = Arc::new(LegacyFixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, Arc::clone(&source), 0);
+    let (mut handle, _events) = ClientBuilder::new(address(), profile(), Box::new(adapter()))
+        .player_loaded_policy(PlayerLoadedPolicy::Manual)
+        .connect_with(client_io);
+    handle
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("legacy login must reach Play");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
+        .await
+        .expect("the projected legacy chunk must arrive");
+
+    // The fixture begins empty-handed, so the placement consumer has no block
+    // to write. Send the real legacy frame before a movement update: the next
+    // streamed column proves the in-memory host consumed the placement frame
+    // and kept the same Play session alive for the following server action.
+    handle
+        .send_action(ClientAction::UseItemOn {
+            hand: Hand::Main,
+            pos: TARGET,
+            face: BlockFace::Up,
+            cursor: Vec3f::new(0.5, 0.5, 0.5),
+            inside_block: false,
+            sequence: 0,
+        })
+        .expect("joined legacy client accepts a block use");
+    handle
+        .send_action(ClientAction::Move {
+            pos: Vec3::new(24.0, 100.0, 8.0),
+            rotation: Rotation { yaw: 0.0, pitch: 0.0 },
+            on_ground: true,
+            horizontal_collision: false,
+        })
+        .expect("the session stays usable after legacy block placement");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
+        .await
+        .expect("the post-placement movement must still reach the integrated host");
+
+    handle.shutdown();
+    server.shutdown().await;
 }
 
 fn profile() -> LoginProfile {
