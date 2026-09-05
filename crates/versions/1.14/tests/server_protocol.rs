@@ -198,6 +198,34 @@ fn protocol_578_accepts_its_handshake_and_transitions_directly_to_play() {
     assert_eq!(protocol.begin_play(8).len(), 2);
 }
 
+/// The 1.15.2 join keeps 1.14.4's prefix, then adds a big-endian seed hash
+/// and final respawn-screen byte. Keep the expected body literal so its two
+/// protocol-only fields cannot be blessed by the same codec that writes it.
+#[test]
+fn protocol_578_emits_the_reference_legacy_join_body() {
+    let protocol = V578ServerProtocol;
+    let ServerDirective::Send { packet_id, payload } = &protocol.begin_play(8)[0] else {
+        panic!("begin_play must start with a join packet");
+    };
+
+    assert_eq!(*packet_id, play::clientbound::LOGIN);
+    assert_eq!(
+        payload,
+        &[
+            0, 0, 0, 1, // entity id
+            0, // survival game mode
+            0, 0, 0, 0, // overworld dimension
+            0, 0, 0, 0, 0, 0, 0, 0, // hashed seed
+            20, // max players
+            7, b'd', b'e', b'f', b'a', b'u', b'l', b't', // level type
+            8, // view distance
+            0, // reduced debug info
+            1, // enable respawn screen
+        ],
+        "protocol 578's join inserts the seed and appends enable-respawn-screen",
+    );
+}
+
 #[test]
 fn protocol_578_encodes_a_decodable_straddling_chunk() {
     let protocol = V578ServerProtocol;
@@ -304,6 +332,49 @@ fn protocol_754_accepts_its_handshake_and_emits_binary_login_success() {
     reader.ensure_empty().expect("join packet is fully consumed");
     assert_eq!(join.world_name, "minecraft:overworld");
     assert_eq!(join.view_distance, 8);
+}
+
+/// Protocol 754's join is a different packet shape, not the legacy join with
+/// more fields. This literal reference body keeps the writer and reader from
+/// agreeing on a misplaced field.
+#[test]
+fn protocol_754_emits_the_reference_join_body() {
+    let protocol = V754ServerProtocol;
+    let ServerDirective::Send { packet_id, payload } = &protocol.begin_play(8)[0] else {
+        panic!("begin_play must start with a join packet");
+    };
+
+    assert_eq!(*packet_id, packet_ids::play::clientbound::LOGIN);
+    assert_eq!(
+        payload,
+        &[
+            0, 0, 0, 1, // entity id
+            0, // not hardcore
+            0, // survival game mode
+            255, // no previous game mode
+            1, // one world name
+            19, // world-name string length
+            b'm', b'i', b'n', b'e', b'c', b'r', b'a', b'f', b't', b':', b'o', b'v', b'e',
+            b'r', b'w', b'o', b'r', b'l', b'd',
+            10, 0, 4, b'r', b'o', b'o', b't', // dimension codec root
+            8, 0, 4, b'n', b'a', b'm', b'e', 0, 19, // codec name tag
+            b'm', b'i', b'n', b'e', b'c', b'r', b'a', b'f', b't', b':', b'o', b'v', b'e',
+            b'r', b'w', b'o', b'r', b'l', b'd', 0, // codec name and end tag
+            10, 0, 3, b'd', b'i', b'm', // dimension root
+            1, 0, 7, b'n', b'a', b't', b'u', b'r', b'a', b'l', 1, 0, // natural tag and end
+            19, // world-name string length
+            b'm', b'i', b'n', b'e', b'c', b'r', b'a', b'f', b't', b':', b'o', b'v', b'e',
+            b'r', b'w', b'o', b'r', b'l', b'd',
+            0, 0, 0, 0, 0, 0, 0, 0, // hashed seed
+            20, // max players
+            8, // view distance
+            0, // reduced debug info
+            1, // enable respawn screen
+            0, // not debug
+            0, // not flat
+        ],
+        "protocol 754's join uses binary NBT dimensions and named worlds",
+    );
 }
 
 #[test]

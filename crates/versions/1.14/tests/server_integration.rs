@@ -1,4 +1,4 @@
-//! In-memory integration coverage for the hosted protocol-498 selector.
+//! In-memory integration coverage for each hosted 1.14-era selector.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,7 +8,6 @@ use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_14::adapter_for;
 
-const PROTOCOL: i32 = 498;
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
 
 struct FixtureSource {
@@ -52,8 +51,22 @@ impl ChunkSource for FixtureSource {
 
 #[tokio::test]
 async fn registry_selected_protocol_498_reaches_play_and_confirms_a_block_break() {
-    let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
-        .expect("protocol 498 must resolve to a hosted family");
+    assert_hosted_protocol_reaches_play_and_confirms_a_block_break(498).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_578_reaches_play_and_confirms_a_block_break() {
+    assert_hosted_protocol_reaches_play_and_confirms_a_block_break(578).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_754_reaches_play_and_confirms_a_block_break() {
+    assert_hosted_protocol_reaches_play_and_confirms_a_block_break(754).await;
+}
+
+async fn assert_hosted_protocol_reaches_play_and_confirms_a_block_break(protocol_version: i32) {
+    let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .unwrap_or_else(|| panic!("protocol {protocol_version} must resolve to a hosted family"));
     let source = Arc::new(FixtureSource::new());
     let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
     let profile = LoginProfile {
@@ -64,18 +77,23 @@ async fn registry_selected_protocol_498_reaches_play_and_confirms_a_block_break(
         host: "memory".to_owned(),
         port: 0,
     };
-    let (mut handle, _events) = ClientBuilder::new(address, profile, Box::new(adapter_for(PROTOCOL)))
-        .player_loaded_policy(PlayerLoadedPolicy::Manual)
-        .connect_with(client_io);
+    let (mut handle, _events) =
+        ClientBuilder::new(address, profile, Box::new(adapter_for(protocol_version)))
+            .player_loaded_policy(PlayerLoadedPolicy::Manual)
+            .connect_with(client_io);
 
     handle
         .wait_for_spawn(Duration::from_secs(10))
         .await
-        .expect("protocol-498 login must reach Play");
+        .unwrap_or_else(|error| {
+            panic!("protocol {protocol_version} login must reach Play: {error}")
+        });
     handle
         .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
         .await
-        .expect("protocol-498 chunk must arrive");
+        .unwrap_or_else(|error| {
+            panic!("protocol {protocol_version} chunk must arrive: {error}")
+        });
     let flower = lodestone_data::block_states::state_id("minecraft:dandelion")
         .expect("fixture state exists");
     assert_eq!(handle.block_at(TARGET), Some(flower));
@@ -92,7 +110,11 @@ async fn registry_selected_protocol_498_reaches_play_and_confirms_a_block_break(
     handle
         .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air))
         .await
-        .expect("protocol-498 block update must replace the known block with air");
+        .unwrap_or_else(|error| {
+            panic!(
+                "protocol {protocol_version} block update must replace the known block with air: {error}"
+            )
+        });
 
     handle.shutdown();
     server.shutdown().await;
@@ -102,4 +124,8 @@ async fn registry_selected_protocol_498_reaches_play_and_confirms_a_block_break(
 fn neighbouring_protocols_are_rejected_before_connection_setup() {
     assert!(lodestone_registry::server_protocol_for_protocol(497).is_none());
     assert!(lodestone_registry::server_protocol_for_protocol(499).is_none());
+    assert!(lodestone_registry::server_protocol_for_protocol(577).is_none());
+    assert!(lodestone_registry::server_protocol_for_protocol(579).is_none());
+    assert!(lodestone_registry::server_protocol_for_protocol(753).is_none());
+    assert!(lodestone_registry::server_protocol_for_protocol(755).is_none());
 }
