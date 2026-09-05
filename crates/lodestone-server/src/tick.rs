@@ -56,7 +56,7 @@ use crate::chunk::ChunkSource;
 use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
 use lodestone_entity::ai::mob::EatenBlock;
 use crate::random_tick::RandomTickScheduler;
-use crate::scheduled_tick::{ScheduledTick, TickPriority};
+use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueueAccess, TickPriority};
 use crate::sleep::{SleepEvent, SleepFeed, SleepState, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
 use lodestone_model::BlockPos;
@@ -659,9 +659,9 @@ fn post_note_block_vibration<W: crate::chunk::ChunkSource>(
 ///
 /// A no-op for any other state, so a caller can hand it every block change it
 /// publishes without testing first.
-fn publish_moving_piston(
+fn publish_moving_piston<Q: ScheduledTickQueueAccess<String> + ?Sized>(
     out: &BlockTickFeed,
-    block_ticks: &crate::scheduled_tick::ScheduledTickQueue<String>,
+    block_ticks: &Q,
     x: i32,
     y: i32,
     z: i32,
@@ -671,8 +671,7 @@ fn publish_moving_piston(
         return;
     }
     let Some(entity) = block_ticks
-        .iter()
-        .find(|pending| pending.pos == (x, y, z) && crate::piston::is_finish_kind(&pending.kind))
+        .matching_at((x, y, z), |kind| crate::piston::is_finish_kind(kind))
         .and_then(|pending| crate::piston::parse_finish_kind(&pending.kind))
     else {
         return;
@@ -709,10 +708,10 @@ fn publish_moving_piston(
 /// A no-op for any other state, so a caller can hand it every block change
 /// it publishes without testing first — the same convention
 /// [`publish_moving_piston`] already establishes.
-fn shove_entities_from_piston(
+fn shove_entities_from_piston<Q: ScheduledTickQueueAccess<String> + ?Sized>(
     mobs: &MobHandle,
     block_tick_out: &BlockTickFeed,
-    block_ticks: &crate::scheduled_tick::ScheduledTickQueue<String>,
+    block_ticks: &Q,
     x: i32,
     y: i32,
     z: i32,
@@ -722,8 +721,7 @@ fn shove_entities_from_piston(
         return;
     }
     let Some(entity) = block_ticks
-        .iter()
-        .find(|pending| pending.pos == (x, y, z) && crate::piston::is_finish_kind(&pending.kind))
+        .matching_at((x, y, z), |kind| crate::piston::is_finish_kind(kind))
         .and_then(|pending| crate::piston::parse_finish_kind(&pending.kind))
     else {
         return;
@@ -2461,13 +2459,13 @@ async fn run_tick_loop_with_weather_impl<W>(
         //
         // The region extends past the last use of `fluid_ticks` to the end of the
         // random-tick pass, which `docs/tick-scheduling.md`'s step 3 does not
-        // mention: `random_ticks.tick_chunk` also takes `&mut block_ticks`, so
+        // mention: `random_ticks.tick_chunk` also takes the block-tick owner, so
         // closing the closure at the fluid loop would put that call out of scope.
         // The body below is left at its original indentation for the same reason
         // the wrapper shape was chosen — re-indenting it would touch every line
         // of the section and bury the real change.
         scheduled.with(|queues| {
-        let mut block_ticks = &mut queues.block;
+        let block_ticks = &mut queues.block;
         let fluid_ticks = &mut queues.fluid;
         // Adopt the block ticks scheduled by a player's mutation.
         // `server::propagate_placement` runs the fan-out inline at packet time
@@ -2556,12 +2554,12 @@ async fn run_tick_loop_with_weather_impl<W>(
             let cz = hit.pos.z.div_euclid(16);
             let mut column = world.column(cx, cz);
             for event in crate::random_tick::propagate_and_react_with_entities_across_chunks(
-                &mut column, cx * 16, cz * 16, &*world, hit.pos.x, hit.pos.y, hit.pos.z, &mut block_ticks, game_tick,
+                &mut column, cx * 16, cz * 16, &*world, hit.pos.x, hit.pos.y, hit.pos.z, block_ticks, game_tick,
                 Some(&block_entities),
             ) {
                 let (ex, ey, ez) = event.pos;
                 world.set_block(ex, ey, ez, &event.to);
-                shove_entities_from_piston(&mobs, &block_tick_out, &block_ticks, ex, ey, ez, &event.to);
+                shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, ex, ey, ez, &event.to);
                 post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                 block_tick_out.publish(ex, ey, ez, event.to);
             }
@@ -2714,14 +2712,14 @@ async fn run_tick_loop_with_weather_impl<W>(
                         x,
                         y,
                         z,
-                        &mut block_ticks,
+                        block_ticks,
                         game_tick,
                         Some(&block_entities),
                     ) {
                         let (ex, ey, ez) = event.pos;
                         world.set_block(ex, ey, ez, &event.to);
-                        publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
-                        shove_entities_from_piston(&mobs, &block_tick_out, &block_ticks, ex, ey, ez, &event.to);
+                        publish_moving_piston(&block_tick_out, &*block_ticks, ex, ey, ez, &event.to);
+                        shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, ex, ey, ez, &event.to);
                         post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                         block_tick_out.publish(ex, ey, ez, event.to);
                     }
@@ -3240,7 +3238,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 &due.kind,
                 BlockPos::new(x, y, z),
                 &state,
-                &mut block_ticks,
+                block_ticks,
                 game_tick,
                 Some(&block_entities),
             );
@@ -3256,8 +3254,8 @@ async fn run_tick_loop_with_weather_impl<W>(
                     let (ex, ey, ez) = event.pos;
                     publish_openable_sound(&block_tick_out, BlockPos::new(ex, ey, ez), &event.from, &event.to, game_tick);
                     world.set_block(ex, ey, ez, &event.to);
-                    publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
-                    shove_entities_from_piston(&mobs, &block_tick_out, &block_ticks, ex, ey, ez, &event.to);
+                    publish_moving_piston(&block_tick_out, &*block_ticks, ex, ey, ez, &event.to);
+                    shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, ex, ey, ez, &event.to);
                     post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
                 }
@@ -3325,12 +3323,12 @@ async fn run_tick_loop_with_weather_impl<W>(
                     // is the reader it was missing, and `/gamerule
                     // random_tick_speed 0` now really does stop crop growth.
                     let events =
-                        random_ticks.tick_chunk(&mut column, cx, cz, tick_speed, &mut block_ticks, game_tick, &*world);
+                        random_ticks.tick_chunk(&mut column, cx, cz, tick_speed, block_ticks, game_tick, &*world);
                     for event in events {
                         let (x, y, z) = event.pos;
                         world.set_block(x, y, z, &event.to);
-                        publish_moving_piston(&block_tick_out, &block_ticks, x, y, z, &event.to);
-                        shove_entities_from_piston(&mobs, &block_tick_out, &block_ticks, x, y, z, &event.to);
+                        publish_moving_piston(&block_tick_out, &*block_ticks, x, y, z, &event.to);
+                        shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, x, y, z, &event.to);
                         block_tick_out.publish(x, y, z, event.to);
                     }
                 }
@@ -3461,14 +3459,14 @@ async fn run_tick_loop_with_weather_impl<W>(
                     pos.x,
                     pos.y,
                     pos.z,
-                    &mut block_ticks,
+                    block_ticks,
                     game_tick,
                     Some(&block_entities),
                 ) {
                     let (ex, ey, ez) = event.pos;
                     world.set_block(ex, ey, ez, &event.to);
-                    publish_moving_piston(&block_tick_out, &block_ticks, ex, ey, ez, &event.to);
-                    shove_entities_from_piston(&mobs, &block_tick_out, &block_ticks, ex, ey, ez, &event.to);
+                    publish_moving_piston(&block_tick_out, &*block_ticks, ex, ey, ez, &event.to);
+                    shove_entities_from_piston(&mobs, &block_tick_out, &*block_ticks, ex, ey, ez, &event.to);
                     post_note_block_vibration(&world, &mobs, (ex, ey, ez), &event.from, &event.to);
                     block_tick_out.publish(ex, ey, ez, event.to);
                 }

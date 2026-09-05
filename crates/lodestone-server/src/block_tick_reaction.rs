@@ -59,7 +59,7 @@ use lodestone_model::BlockPos;
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::{ChunkColumn, ChunkSource};
 use crate::random_tick::RandomTickEvent;
-use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
+use crate::scheduled_tick::{ScheduledTickQueueAccess, TickPriority};
 
 /// What one due block tick did.
 #[derive(Debug, Default)]
@@ -88,7 +88,7 @@ pub struct BlockTickReaction {
 /// so the cascade below it reads the post-change world exactly as the drain
 /// used to.
 #[allow(clippy::too_many_arguments)]
-pub fn run_due_block_tick(
+pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<String> + ?Sized>(
     column: &mut ChunkColumn,
     min_x: i32,
     min_z: i32,
@@ -96,7 +96,7 @@ pub fn run_due_block_tick(
     kind: &str,
     pos: BlockPos,
     state: &str,
-    block_ticks: &mut ScheduledTickQueue<String>,
+    block_ticks: &mut Q,
     current_tick: u64,
     block_entities: Option<&BlockEntityHandle>,
 ) -> BlockTickReaction {

@@ -34,14 +34,20 @@ collected before any callback runs — so a tick scheduled while processing this
 itself run in the same batch. A second schedule for a position/kind pair already pending is a silent
 no-op, matching vanilla's dedup behavior for the same case.
 
-The fluid half is now physically partitioned by chunk column. `ChunkScheduledTickQueue` routes a
-fluid tick to the column that owns its position, but its outer owner assigns one shared insertion
-sequence and merges only each local queue's due head. Thus a flow that schedules its next step over a
-chunk border cannot gain or lose priority because of a map traversal or the target column's key. The
-current tick task still executes that merged sequence serially; chunk-local storage makes the future
-hand-off boundary explicit without claiming concurrent fluid simulation. Block ticks remain one
-world-wide queue because their active redstone and piston reactions borrow that queue across
-multi-column mutations; splitting them before that API has an explicit hand-off would be unsound.
+Both halves are physically partitioned by chunk column. `ChunkScheduledTickQueue` routes each tick to
+the column that owns its position, while its outer owner assigns one shared insertion sequence and
+merges only each local queue's due head. Thus a fluid flow or a block reaction that schedules its next
+step over a chunk border cannot gain or lose priority because of map traversal or the target column's
+key. The current tick task still executes that merged sequence serially; local storage is an ownership
+and hand-off boundary, not permission to run columns concurrently.
+
+Block callbacks receive `ScheduledTickQueueAccess`, rather than a particular column's queue. It is the
+explicit hand-off for a redstone reaction that schedules work in another owner and for a reversing
+piston that must remove its own uncommitted finish tick. The interface routes by position, preserves
+the world insertion sequence, and limits `take_matching` to that position's owner, so it cannot cancel
+a neighbouring column's pending work. The real `IntegratedServer` tick loop consumes this block queue;
+the focused controls cover positive and negative chunk coordinates, global equal-time ordering, and
+the piston cancellation negative control.
 
 ### Neighbor-update propagation
 
@@ -136,11 +142,11 @@ cold-region number is the more dramatic-looking figure.
 - **Adding a real scheduled-tick producer**: call the scheduling primitive from wherever a block
   decides "run again in N ticks", the same way vanilla's own tick-scheduling call works; it does not
   care what value type it schedules.
-- **Changing fluid tick ownership**: preserve the outer queue's one global insertion sequence and
-  due-head merge. Do not drain columns in coordinate order or assign an insertion counter per
-  column: either change can reorder equal-time updates crossing a column border. A new block-tick
-  local owner also needs a hand-off design for redstone and piston callbacks before it can replace
-  the current global queue.
+- **Changing tick ownership**: preserve the outer queue's one global insertion sequence and due-head
+  merge. Do not drain columns in coordinate order or assign an insertion counter per column: either
+  change can reorder equal-time updates crossing a column border. Keep block reactions behind
+  `ScheduledTickQueueAccess`; directly retaining a local queue would bypass the cross-owner hand-off
+  and make piston interruption ambiguous.
 - **Adding a real neighbor-update producer**: call the propagator once per mutated position with a
   callback that performs the mutation and returns any further single-target notifications that
   mutation itself triggers — never call the propagator recursively from inside that callback, since

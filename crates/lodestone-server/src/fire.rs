@@ -108,7 +108,7 @@ use lodestone_model::{BlockPos, Difficulty};
 
 use crate::chunk::ChunkSource;
 use crate::mob_spawn::SpawnRng;
-use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
+use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, ScheduledTickQueueAccess, TickPriority};
 
 /// The scheduled-tick `kind` every fire tick carries, in the same `String`-keyed
 /// space `crate::redstone`'s `TICK_TORCH` and `crate::fluid`'s `TICK_FLUID`
@@ -583,11 +583,11 @@ pub fn ticks_after_edit(pos: BlockPos) -> Vec<ScheduledTick<String>> {
 /// fire-primed TNT starts at the ordinary
 /// [`crate::mobs::tnt::DEFAULT_FUSE_TIME`].
 #[allow(clippy::too_many_arguments)]
-pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
+pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<String> + ?Sized>(
     world: &S,
     env: FireEnv,
     pos: BlockPos,
-    block_ticks: &mut ScheduledTickQueue<String>,
+    block_ticks: &mut Q,
     current_tick: u64,
     rng: &mut SpawnRng,
     changes: &mut Vec<(BlockPos, String)>,
