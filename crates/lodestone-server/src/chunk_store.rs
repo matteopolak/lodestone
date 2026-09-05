@@ -964,8 +964,11 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         }).flatten()
     }
 
+    /// Prefer the retained authoritative copy, then preserve the wrapped
+    /// source's explicitly resident columns without calling `column()`.
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
         self.read(cx, cz, ChunkColumn::clone)
+            .or_else(|| self.source.resident_column(cx, cz))
     }
 
     /// Forwarded, not answered: a cache owns no registries of its own, and a

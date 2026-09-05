@@ -53,7 +53,8 @@ struct BoundaryFixtureSource {
 
 impl ChunkSource for BoundaryFixtureSource {
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
-        ((cx, cz) == (1, 0)).then(|| self.column(cx, cz))
+        ((-1..=1).contains(&cx) && (-1..=1).contains(&cz) && (cx, cz) != (0, 0))
+            .then(|| self.column(cx, cz))
     }
 
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
@@ -175,6 +176,7 @@ async fn movement_recenters_the_hosted_view_onto_the_next_chunk() {
 #[tokio::test]
 async fn initial_and_live_border_light_use_the_open_east_column() {
     let target = BlockPos::new(15, 100, 8);
+    let probe = BlockPos::new(15, 100, 7);
     assert!(lodestone_registry::server_protocol_for_protocol(774)
         .expect("protocol 774 must resolve to the hosted family")
         .uses_cross_column_light());
@@ -199,9 +201,9 @@ async fn initial_and_live_border_light_use_the_open_east_column() {
     handle.wait_for_spawn(Duration::from_secs(10)).await.unwrap();
     handle.wait_for_chunk(chunk, Duration::from_secs(10)).await.unwrap();
     assert_eq!(
-        handle.section_light(chunk, 11).unwrap().sky_at(15, 4, 8),
+        handle.section_light(chunk, 11).unwrap().sky_at(probe.x as usize, 4, probe.z as usize),
         14,
-        "the initial chunk must include the open east column"
+        "the initial chunk must retain the open-east path with all eight neighbours resident"
     );
     handle.send_action(ClientAction::Move {
         pos: Vec3::new(12.0, 100.0, 8.0),
@@ -225,8 +227,10 @@ async fn initial_and_live_border_light_use_the_open_east_column() {
         client.block_at(target) == Some(lodestone_data::block_states::air_state_id())
     }).await.expect("the client observes the border block break");
     handle.wait_for(Duration::from_secs(10), move |client| {
-        client.section_light(chunk, 11).is_some_and(|light| light.sky_at(15, 4, 8) == 14)
-    }).await.expect("the relight observes the open eastern neighbour at the border");
+        client.section_light(chunk, 11).is_some_and(|light| {
+            light.sky_at(target.x as usize, 4, target.z as usize) == 14
+        })
+    }).await.expect("the relight opens the broken east-border cell with all eight resident");
     handle.shutdown();
     server.shutdown().await;
 }

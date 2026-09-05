@@ -61,6 +61,11 @@ opt into cross-column light keep their one-column encoder and do not pay for adj
 detached worker encoder is likewise bypassed for an opted-in family until it can carry the same
 neighbourhood explicitly.
 
+A retaining source must preserve an explicitly resident backing column when it has not retained its
+own copy yet. Otherwise the initial centre column can be wrapped and served before its already-loaded
+neighbours enter the cache, turning a fully resident 3×3 into eight opaque seams. The fallback is a
+resident lookup, never a generated-column read.
+
 The update still travels on the acting connection. Broadcasting the result to other players sharing
 the world remains separate multiplayer work.
 
@@ -88,7 +93,10 @@ fail in.
   `ServerProtocol::compute_column_light_with_neighbours` together. Preserve the 3×3 relative
   coordinates; absent columns must use that family's ordinary generated or unloaded-column result.
   Add a direct solver control and a client-observed edit test where the isolated result is provably
-  different.
+  different. The direct fixture must also supply all eight neighbours: for an opaque centre roof and
+  open east column, east-only and full-3×3 results are both sky light 14 at the east border, while
+  the seven-neighbour control without east is 7 through the longer north/south paths. This catches a
+  supplied-neighbour assembly that works only when its list happens to contain one entry.
 - **Extending an off-task chunk encoder to cross-column light**: carry the same 3×3 neighborhood into
   its worker-facing contract before enabling it for a family that opts into cross-column light. Do not
   fall back to the isolated encoder: the initial and live packet paths must agree at a border.
