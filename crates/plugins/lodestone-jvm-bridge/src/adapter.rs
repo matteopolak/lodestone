@@ -910,6 +910,31 @@ fn resolve_resident_player_handle_is_active(bits: i64) -> Result<bool, AdapterEr
     })
 }
 
+/// Reports whether an opaque player handle still belongs to a worker entry.
+///
+/// This is the soft stale-generation control paired with the stricter profile
+/// and activity queries. A callback-only player can be retained but inactive,
+/// while a disconnected or lifecycle-released generation returns `false`.
+/// Forged, out-of-range, and wrong-kind values remain named errors so ordinary
+/// cleanup cannot hide malformed Java input.
+fn resident_player_handle_is_retained(bits: i64) -> Result<bool, AdapterError> {
+    let handle = ObjectRef::from_bits(bits, ObjectKind::Player);
+    RESIDENT_OBJECT_HANDLES.with(|slot| {
+        let handles = slot.borrow();
+        let handles = handles.as_ref().ok_or_else(|| {
+            AdapterError::new("playerHandleIsRetained requires the adapter worker thread")
+        })?;
+        match handles.resolve(handle, ObjectKind::Player) {
+            Ok(ResidentObject::Player { .. }) => Ok(true),
+            Ok(ResidentObject::Block { .. }) => Err(AdapterError::new(
+                "playerHandleIsRetained: expected a Player handle, got a Block handle",
+            )),
+            Err(ResolveError::Stale) => Ok(false),
+            Err(error) => Err(AdapterError::new(format!("playerHandleIsRetained: {error}"))),
+        }
+    })
+}
+
 fn release_resident_handles(identity: &LifecycleIdentity) -> usize {
     RESIDENT_OBJECT_HANDLES.with(|slot| {
         slot.borrow_mut().as_mut().map_or(0, |handles| {
@@ -2124,6 +2149,28 @@ pub(crate) fn register_player_handle_is_active_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_player_handle_is_retained_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts one opaque jlong and
+    // returns whether its generation remains in the worker-local registry.
+    // Forged and wrong-kind values remain Java errors rather than stale input.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_player_handle_is_retained as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_active_player_count_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -2515,6 +2562,19 @@ extern "system" fn native_player_handle_is_active<'local>(
         let _depth = CallbackDepthGuard::enter()
             .map_err(|error| AdapterError::new(error.to_string()))?;
         Ok::<_, AdapterError>(jboolean::from(resolve_resident_player_handle_is_active(bits)?))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_is_retained<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jboolean {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        Ok::<_, AdapterError>(jboolean::from(resident_player_handle_is_retained(bits)?))
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -3146,6 +3206,11 @@ mod tests {
             Ok(true),
             "an active lifecycle handle resolves through the worker snapshot",
         );
+        assert_eq!(
+            resident_player_handle_is_retained(first.to_bits()),
+            Ok(true),
+            "an active lifecycle handle remains available to strict profile queries",
+        );
         assert_eq!(resolve_resident_player_handle_name(first.to_bits()), Ok("Alice".to_owned()));
         assert_eq!(
             resolve_resident_player_handle_uuid(first.to_bits()),
@@ -3167,6 +3232,11 @@ mod tests {
                 "playerHandleIsActive: the referenced object no longer exists",
             )),
             "generation validation must reject the old bits before map lookup",
+        );
+        assert_eq!(
+            resident_player_handle_is_retained(first.to_bits()),
+            Ok(false),
+            "the soft control identifies the disconnected generation without reviving it",
         );
         assert_eq!(
             resolve_resident_player_handle_name(first.to_bits()),
@@ -3207,6 +3277,12 @@ mod tests {
         );
         let replacement = active_player_handle(&identity, &player).expect("reusable slot");
         assert_ne!(replacement, first);
+        assert_eq!(
+            resident_player_handle_is_retained(first.to_bits()),
+            Ok(false),
+            "a reused slot cannot make the old player generation retained again",
+        );
+        assert_eq!(resident_player_handle_is_retained(replacement.to_bits()), Ok(true));
         assert_eq!(
             resolve_active_player_name(Some("Alice")),
             Ok(replacement),
@@ -3849,6 +3925,11 @@ mod tests {
             resolve_resident_player_handle_is_active(first.to_bits()),
             Ok(false),
             "a callback-only handle does not imply a reconciled active lifecycle entry",
+        );
+        assert_eq!(
+            resident_player_handle_is_retained(first.to_bits()),
+            Ok(true),
+            "a callback-only player remains valid until its owning lifecycle entry releases it",
         );
         assert_eq!(
             RESIDENT_OBJECT_HANDLES.with(|slot| {
