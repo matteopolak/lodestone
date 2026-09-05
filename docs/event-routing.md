@@ -58,7 +58,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**9 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**8 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -69,9 +69,12 @@ exactly `Route::NOWHERE`, excluding the `..Route::NOWHERE` struct-update spread 
 that set other flags) and fails if this line drifts from the real count — update the number and
 the source together whenever a variant is added or wired.
 
-The current terminal routes are `ChunkCacheCenterChanged`, `SimulationDistanceChanged`,
-`ItemCooldown`, `SoundStopped`, `PlayerCombatEntered`, `PlayerCombatEnded`,
-`ProjectilePowerChanged`, `MountScreenOpened`, and `ServerDataReceived`. `PlayerLookAt` is no
+The current terminal routes are `SimulationDistanceChanged`, `ItemCooldown`, `SoundStopped`,
+`PlayerCombatEntered`, `PlayerCombatEnded`, `ProjectilePowerChanged`, `MountScreenOpened`, and
+`ServerDataReceived`. `ChunkCacheCenterChanged` now crosses `net::forward` to
+`Sim::poll_net`, which records the authoritative streamed-view center and makes the loading
+screen's per-column grid query that square rather than a possibly stale player position.
+`PlayerLookAt` is no
 longer in this ledger: `net::forward` carries its resolved target and local anchor to
 `Sim::poll_net`, which derives the view direction and writes the existing `PhysicsState` pose.
 That pose is already the visible camera, interaction ray, audio listener, and outgoing movement

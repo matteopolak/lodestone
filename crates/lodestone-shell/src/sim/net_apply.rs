@@ -174,6 +174,12 @@ impl Sim {
                     // retaining the launcher's request makes either surface lie.
                     self.set_view_radius(u32::try_from(radius).unwrap_or(0));
                 }
+                NetUpdate::ChunkCacheCenterChanged { x, z } => {
+                    // The center can lead the player's own position during a
+                    // loading transition. The grid therefore follows this
+                    // server-owned coordinate when it is available.
+                    self.set_chunk_cache_center(x, z);
+                }
                 NetUpdate::SectionBlocks { x, y, z, blocks } => {
                     // A server-authoritative edit inside one loaded section.
                     // Re-mesh at *section* granularity, not the whole column:

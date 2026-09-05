@@ -231,8 +231,8 @@ pub use session::{
     ServerDifficulty, ServerDimension, ServerEntityId, ServerGameMode, SessionBlockDestruction,
     SessionBossBars, SessionChat, SessionDebugFeeds, SessionEnd, SessionEndKind, SessionHudPlugin,
     SessionMenus, SessionPhase,
-    SessionPlugin, SessionRecipeBook, SessionRegistryOrder, SessionScoreboard, SessionServerInfo,
-    SessionSet, SessionStatistics, SessionTrades,
+    ServerChunkCacheCenter, SessionPlugin, SessionRecipeBook, SessionRegistryOrder,
+    SessionScoreboard, SessionServerInfo, SessionSet, SessionStatistics, SessionTrades,
     SessionTabList, SessionWaypoints, TitleOverlay, Vitals, Xp, insert_hud_components,
     insert_session_components, spawn_session,
 };

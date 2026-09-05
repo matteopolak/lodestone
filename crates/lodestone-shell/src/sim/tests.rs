@@ -1453,6 +1453,57 @@ fn chunk_cache_radius_update_replaces_the_loading_views_radius() {
     );
 }
 
+/// The server's stream center is not necessarily the player chunk while a
+/// loading transition is in flight. The grid must follow the packet, while an
+/// older/no-report session retains the player-centred fallback.
+#[test]
+fn chunk_cache_center_update_replaces_the_loading_grid_center() {
+    use crate::net::NetUpdate;
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.player_mut(|player| player.position = Vec3d::new(160.0, 64.0, -80.0));
+    sim.attach_net(net);
+
+    feed.send(NetUpdate::ChunkCacheRadiusChanged { radius: 2 })
+        .expect("loopback accepts the server view radius");
+    sim.poll_net();
+    let fallback = sim.read(|world| {
+        world
+            .get::<lodestone_ecs::ServerChunkCacheCenter>(sim.local_player())
+            .expect("the session has a cache-center slot")
+            .0
+    });
+    assert_eq!(fallback, None, "control: an absent packet keeps player centering");
+    assert_eq!(
+        sim.terrain_chunk_grid()
+            .expect("radius makes the loading grid available")
+            .center,
+        (10, -5),
+        "control: without the packet, the grid stays centered on the player's chunk"
+    );
+
+    feed.send(NetUpdate::ChunkCacheCenterChanged { x: -4, z: 9 })
+        .expect("loopback accepts the server stream center");
+    sim.poll_net();
+    let center = sim.read(|world| {
+        world
+            .get::<lodestone_ecs::ServerChunkCacheCenter>(sim.local_player())
+            .expect("the loading-grid center is retained on the session")
+            .0
+    });
+    assert_eq!(center, Some((-4, 9)), "the latest server center must win");
+    let grid = sim
+        .terrain_chunk_grid()
+        .expect("the routed center feeds the visible loading-grid producer");
+    assert_eq!(grid.center, (-4, 9), "the visible grid must use the packet center");
+    assert_eq!(
+        grid.chunk_at(0, 0),
+        (-6, 7),
+        "the top-left cell must query relative to the server center, not player chunk"
+    );
+}
+
 #[test]
 fn move_is_withheld_until_connected() {
     // A sim that is merely Connecting (attached, not yet logged in) must send
