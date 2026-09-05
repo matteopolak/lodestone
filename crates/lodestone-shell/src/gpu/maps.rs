@@ -2014,8 +2014,9 @@ mod tests {
     #[test]
     fn retained_entry_skips_the_second_build_and_rebuilds_for_new_content() {
         let mut cache = RetainedMapEntries::<MapTextureKey, usize>::default();
-        let first = MapTextureKey::new(17, 3);
-        let changed = MapTextureKey::new(17, 4);
+        let map_id = MapId::new(17).expect("fixed map id is valid");
+        let first = MapTextureKey::new(map_id, 3);
+        let changed = MapTextureKey::new(map_id, 4);
         let mut builds = 0;
 
         let first_value = cache.get_or_insert_with(first, || {
@@ -2042,9 +2043,13 @@ mod tests {
 
     #[test]
     fn retained_last_batch_reuses_an_unchanged_frame_and_rebuilds_on_pose_or_light_change() {
-        let stable = FramedMapInput::new(9, 17, [4.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xF0);
-        let moved = FramedMapInput::new(9, 17, [5.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xF0);
-        let relit = FramedMapInput::new(9, 17, [5.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xE0);
+        let map_id = MapId::new(17).expect("fixed map id is valid");
+        let stable =
+            FramedMapInput::new(9, map_id, [4.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xF0);
+        let moved =
+            FramedMapInput::new(9, map_id, [5.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xF0);
+        let relit =
+            FramedMapInput::new(9, map_id, [5.0, 65.0, -9.0], 0.0, 0.0, 0, false, 0xE0);
         let mut cache = RetainedLast::<FramedMapsKey, usize>::default();
         let mut builds = 0;
 
@@ -2076,8 +2081,11 @@ mod tests {
     /// visible frame's stale vertices until some unrelated movement rebuilds.
     #[test]
     fn invisible_framed_map_has_its_own_lift_and_cache_key() {
-        let visible = FramedMapInput::new(9, 17, [4.0, 65.0, -9.0], 90.0, 0.0, 0, false, 0xF0);
-        let invisible = FramedMapInput::new(9, 17, [4.0, 65.0, -9.0], 90.0, 0.0, 0, true, 0xF0);
+        let map_id = MapId::new(17).expect("fixed map id is valid");
+        let visible =
+            FramedMapInput::new(9, map_id, [4.0, 65.0, -9.0], 90.0, 0.0, 0, false, 0xF0);
+        let invisible =
+            FramedMapInput::new(9, map_id, [4.0, 65.0, -9.0], 90.0, 0.0, 0, true, 0xF0);
         assert_ne!(visible, invisible, "invisibility changes framed-map vertex positions");
 
         let facing = lodestone_render::entity::item_frame_facing_step(90.0, 0.0);

@@ -646,7 +646,12 @@ mod tests {
             0,
         );
         let [x, y, z] = SIGN_BLOCK;
-        column.set_block((x & 15) as usize, y, (z & 15) as usize, oak_sign_state());
+        column.set_block(
+            (x & 15) as usize,
+            y,
+            (z & 15) as usize,
+            oak_sign_state().raw(),
+        );
         let mut world = World::default();
         world.load(
             ChunkPos::from_block(x, z),
@@ -661,8 +666,7 @@ mod tests {
             rel_x: (x & 15) as u8,
             rel_z: (z & 15) as u8,
             y: y as i16,
-            type_id: lodestone_data::block_states::StateId::new(oak_sign_state())
-                .and_then(lodestone_data::block_entity_types::block_entity_type)
+            type_id: lodestone_data::block_entity_types::block_entity_type(oak_sign_state())
                 .map(|kind| kind.raw())
                 .expect("a sign state owns a block-entity type"),
             nbt,

@@ -370,7 +370,14 @@ fn spawns(world: &World, pos: ChunkPos, eye: glam::Vec3) -> Vec<ChestSpawn> {
     chest_candidates(world, [pos], eye)
         .into_iter()
         .filter_map(|(block, state)| {
-            chest_spawn(block, state, lids.openness(block, 1.0), ENTITY_FULLBRIGHT)
+            lodestone_data::block_states::StateId::new(state).and_then(|state_id| {
+                chest_spawn(
+                    block,
+                    state_id,
+                    lids.openness(block, 1.0),
+                    ENTITY_FULLBRIGHT,
+                )
+            })
         })
         .collect()
 }

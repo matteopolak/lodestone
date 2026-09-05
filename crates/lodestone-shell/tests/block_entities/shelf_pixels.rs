@@ -38,6 +38,7 @@
 use lodestone::gpu::{RenderState, SKY_COLOR};
 use lodestone::resources::BlockResources;
 use lodestone_assets::{DisplaySlot, ResourceLocation};
+use lodestone_model::ShelfSlot;
 use lodestone_render::{
     Camera, GpuContext, HeadlessTarget, RenderTarget, ShelfItemSpawn, entity::shelf_item_mesh,
     item_render::ItemStateContext,
@@ -59,6 +60,11 @@ const ITEM: &str = "minecraft:diamond";
 const FACING_YAW_DEG: f32 = 0.0;
 
 const NON_SKY: i32 = 60;
+
+fn shelf_slot(slot: usize) -> ShelfSlot {
+    ShelfSlot::new(u8::try_from(slot).expect("test shelf slot fits in u8"))
+        .expect("test shelf slot is in range")
+}
 
 fn sky_bytes() -> [u8; 3] {
     SKY_COLOR.map(|c| (c * 255.0).round() as u8)
@@ -209,7 +215,7 @@ fn test_spawn(slot: usize) -> ShelfItemSpawn {
     ShelfItemSpawn {
         pos: SHELF,
         facing_yaw_deg: FACING_YAW_DEG,
-        slot,
+        slot: shelf_slot(slot),
         align_to_bottom: false,
         item: ITEM.parse().expect("valid item id"),
         light: lodestone_render::ENTITY_FULLBRIGHT,
@@ -250,7 +256,7 @@ fn expected_rect(
         on_shelf,
         SHELF,
         FACING_YAW_DEG,
-        slot,
+        shelf_slot(slot),
         false,
         lodestone_render::ENTITY_FULLBRIGHT,
     );

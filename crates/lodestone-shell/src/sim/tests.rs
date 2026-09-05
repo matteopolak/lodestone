@@ -584,14 +584,18 @@ fn the_registry_seam_feeds_the_same_numbers_the_unit_tests_assume() {
     // Air is state 0 in every version's block-state registry, so it is the
     // one id the shell can name without naming a version.
     let air = version
-        .block_hardness(id::AIR)
+        .block_hardness(
+            lodestone_data::block_states::StateId::new(id::AIR)
+                .expect("air is in the block-state census"),
+        )
         .expect("air must resolve through the seam");
     assert_eq!(air.hardness, 0.0);
 
     // Find the census entries the unit tests above assume, by value rather
     // than by id (ids renumber every data bump).
     let entries: Vec<_> = (0..40_000)
-        .filter_map(|id| version.block_hardness(id))
+        .filter_map(lodestone_data::block_states::StateId::new)
+        .filter_map(|state_id| version.block_hardness(state_id))
         .collect();
     assert!(
         entries.len() > 30_000,
@@ -613,7 +617,7 @@ fn the_registry_seam_feeds_the_same_numbers_the_unit_tests_assume() {
 
     // An id past the census reports unknown rather than a guess, which is
     // what makes `drive_mining` refuse to dig instead of inventing a rate.
-    assert_eq!(version.block_hardness(u32::MAX), None);
+    assert!(lodestone_data::block_states::StateId::new(u32::MAX).is_none());
 }
 
 /// Live break-timing gate for the shell's own mining inputs, against the

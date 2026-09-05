@@ -4206,11 +4206,13 @@ mod tests {
             if lodestone_data::block_states::block_name(id) != Some("minecraft:chest") {
                 continue;
             }
+            let state_id = StateId::new(id).expect("iterated state id is in the census");
             chest_states += 1;
-            let (yaw, half) = chest_orientation(id).expect("a chest state must have facing");
+            let (yaw, half) =
+                chest_orientation(state_id).expect("a chest state must have facing");
             seen_yaws.insert(yaw as i32);
             seen_halves.insert(half);
-            assert_eq!(chest_material(id), Some(ChestMaterial::Regular));
+            assert_eq!(chest_material(state_id), Some(ChestMaterial::Regular));
         }
         assert!(chest_states > 0, "no chest states in the table at all");
         assert_eq!(
@@ -4242,12 +4244,13 @@ mod tests {
             let found = (0..lodestone_data::block_states::STATE_COUNT)
                 .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()));
             let id = found.unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
+            let state_id = StateId::new(id).expect("iterated state id is in the census");
             assert!(
-                chest_material(id).is_some(),
+                chest_material(state_id).is_some(),
                 "{name} (state {id}) resolved to no material"
             );
             assert!(
-                chest_orientation(id).is_some(),
+                chest_orientation(state_id).is_some(),
                 "{name} (state {id}) resolved no facing"
             );
         }
@@ -4266,7 +4269,12 @@ mod tests {
             else {
                 continue;
             };
-            assert_eq!(chest_material(id), None, "{name} matched a chest material");
+            let state_id = StateId::new(id).expect("iterated state id is in the census");
+            assert_eq!(
+                chest_material(state_id),
+                None,
+                "{name} matched a chest material"
+            );
         }
     }
 
@@ -4297,10 +4305,13 @@ mod skull_tests {
         let mut floor_states = 0usize;
         let mut wall_states = 0usize;
         for id in 0..lodestone_data::block_states::STATE_COUNT {
+            let state_id = StateId::new(id).expect("iterated state id is in the census");
             match lodestone_data::block_states::block_name(id) {
                 Some("minecraft:skeleton_skull") => {
                     floor_states += 1;
-                    match skull_orientation(id).expect("a floor skull must have an orientation") {
+                    match skull_orientation(state_id)
+                        .expect("a floor skull must have an orientation")
+                    {
                         SkullOrientation::Floor { rotation_segment } => {
                             floor_segments.insert(rotation_segment);
                         }
@@ -4309,7 +4320,9 @@ mod skull_tests {
                 }
                 Some("minecraft:skeleton_wall_skull") => {
                     wall_states += 1;
-                    match skull_orientation(id).expect("a wall skull must have an orientation") {
+                    match skull_orientation(state_id)
+                        .expect("a wall skull must have an orientation")
+                    {
                         SkullOrientation::Wall { facing_yaw_deg } => {
                             wall_yaws.insert(facing_yaw_deg as i32);
                         }
@@ -4367,12 +4380,13 @@ mod skull_tests {
             let found = (0..lodestone_data::block_states::STATE_COUNT)
                 .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()));
             let id = found.unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
+            let state_id = StateId::new(id).expect("iterated state id is in the census");
             assert!(
-                skull_type_for_state(id).is_some(),
+                skull_type_for_state(state_id).is_some(),
                 "{name} (state {id}) resolved to no skull type"
             );
             assert!(
-                skull_orientation(id).is_some(),
+                skull_orientation(state_id).is_some(),
                 "{name} (state {id}) resolved no orientation"
             );
         }
@@ -4413,8 +4427,9 @@ mod skull_tests {
             else {
                 continue;
             };
+            let state_id = StateId::new(id).expect("iterated state id is in the census");
             assert_eq!(
-                skull_type_for_state(id),
+                skull_type_for_state(state_id),
                 None,
                 "{name} matched a skull type"
             );
@@ -5000,7 +5015,7 @@ mod shulker_tests {
         }
         assert_eq!(yaws.len(), 4, "all four facings, saw {yaws:?}");
         assert!(with_book > 0 && without_book > 0, "{with_book}/{without_book}");
-        let bell = StateId::new(state_named("minecraft:bell")).expect("bell state is canonical");
+        let bell = state_named("minecraft:bell");
         assert!(
             lectern_spawn([0, 0, 0], bell, 0).is_none(),
             "a bell is not a lectern"
