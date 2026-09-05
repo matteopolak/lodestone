@@ -125,7 +125,6 @@ pub mod entity_types;
 pub mod hardness;
 pub mod item;
 pub mod item_prototypes;
-pub mod items;
 pub mod light_props;
 pub mod menus;
 pub mod mob_effects;

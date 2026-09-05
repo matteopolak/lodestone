@@ -43,6 +43,7 @@
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::{Menu, SpecialLayout};
 use lodestone_game::recipe_sync::RecipeBookSync;
+use lodestone_data::item::Item;
 use lodestone_model::Identifier;
 
 use super::layout::Rect;
@@ -71,8 +72,8 @@ const VISIBLE_COUNT: i32 = COLUMNS * VISIBLE_ROWS;
 #[must_use]
 pub fn server_result_stack(result_items: &[i32]) -> Option<ItemStack> {
     result_items.iter().find_map(|&id| {
-        let name = lodestone_data::items::item_name(id)?;
-        let identifier: Identifier = name.parse().ok()?;
+        let item = u16::try_from(id).ok().and_then(Item::from_registry_id)?;
+        let identifier: Identifier = item.name().parse().ok()?;
         Some(ItemStack::new(identifier, 1))
     })
 }
@@ -91,7 +92,9 @@ pub fn server_results_for_menu(menu: &Menu, sync: &RecipeBookSync) -> Vec<Option
     let Some(input) = menu.slot_item(INPUT_SLOT) else {
         return Vec::new();
     };
-    let Some(input_item_id) = lodestone_data::items::item_id(&input.item().to_string()) else {
+    let Some(input_item_id) = Item::from_name(&input.item().to_string())
+        .map(|item| i32::from(item.registry_id()))
+    else {
         return Vec::new();
     };
     sync.stonecutter_results_for(input_item_id)
@@ -234,8 +237,7 @@ mod tests {
     /// always returns `None`.
     #[test]
     fn server_result_stack_resolves_the_first_nameable_candidate() {
-        let stone_slab = lodestone_data::items::item_id("minecraft:stone_slab")
-            .expect("the generated table must know minecraft:stone_slab");
+        let stone_slab = i32::from(Item::StoneSlab.registry_id());
         let stack =
             server_result_stack(&[stone_slab]).expect("a real id must resolve");
         assert_eq!(stack.item().to_string(), "minecraft:stone_slab");
@@ -255,20 +257,16 @@ mod tests {
     /// `app/recipe_panel.rs`'s `ghost_result_stack`.
     #[test]
     fn server_result_stack_skips_an_unresolvable_leading_candidate() {
-        let stone_slab = lodestone_data::items::item_id("minecraft:stone_slab")
-            .expect("the generated table must know minecraft:stone_slab");
+        let stone_slab = i32::from(Item::StoneSlab.registry_id());
         let stack = server_result_stack(&[i32::MAX, stone_slab]).expect("the second id must resolve");
         assert_eq!(stack.item().to_string(), "minecraft:stone_slab");
     }
 
     #[test]
     fn server_results_for_menu_preserves_server_indices_across_unresolvable_entries() {
-        let stone = lodestone_data::items::item_id("minecraft:stone")
-            .expect("the generated table must know minecraft:stone");
-        let stone_slab = lodestone_data::items::item_id("minecraft:stone_slab")
-            .expect("the generated table must know minecraft:stone_slab");
-        let stone_stairs = lodestone_data::items::item_id("minecraft:stone_stairs")
-            .expect("the generated table must know minecraft:stone_stairs");
+        let stone = i32::from(Item::Stone.registry_id());
+        let stone_slab = i32::from(Item::StoneSlab.registry_id());
+        let stone_stairs = i32::from(Item::StoneStairs.registry_id());
         let mut menu = Menu::stonecutter();
         menu.set_slot_item(
             INPUT_SLOT,

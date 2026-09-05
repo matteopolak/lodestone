@@ -55,10 +55,11 @@
 //!
 //! ## Dependencies
 //!
-//! [`lodestone_data::items`] (protocol-776 item id→name), [`lodestone_game`]
+//! [`lodestone_data::item::Item`] (protocol-776 item registry), [`lodestone_game`]
 //! (`ItemStack`, `TradeOffers`), [`lodestone_model::event::MerchantOffer`].
 
 use lodestone_game::item::{DEFAULT_MAX_STACK_SIZE, ItemStack};
+use lodestone_data::item::Item;
 use lodestone_model::event::MerchantOffer;
 
 use super::layout::Rect;
@@ -236,8 +237,7 @@ pub fn adjusted_cost_a_count(offer: &MerchantOffer) -> i32 {
 }
 
 /// Resolves a raw `(item registry id, count)` cost pair (protocol 776, the
-/// only family with a merchant screen — `lodestone_data::items::item_name`'s
-/// own doc names it "for protocol 776") into a displayable [`ItemStack`].
+/// only family with a merchant screen) into a displayable [`ItemStack`].
 ///
 /// `None` for an id outside the generated table (a malformed or
 /// future-version id), which the caller should treat as "draw nothing" rather
@@ -245,8 +245,8 @@ pub fn adjusted_cost_a_count(offer: &MerchantOffer) -> i32 {
 /// icon, not a missing one.
 #[must_use]
 pub fn cost_item_stack(id: i32, count: i32) -> Option<ItemStack> {
-    let name = lodestone_data::items::item_name(id)?;
-    let identifier: lodestone_model::Identifier = name.parse().ok()?;
+    let item = u16::try_from(id).ok().and_then(Item::from_registry_id)?;
+    let identifier: lodestone_model::Identifier = item.name().parse().ok()?;
     Some(ItemStack::new(identifier, count.max(0)))
 }
 

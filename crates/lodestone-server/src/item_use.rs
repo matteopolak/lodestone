@@ -376,8 +376,8 @@ pub(crate) fn clone_item_stack_for_block(block_state: &str) -> Option<ItemStack>
 pub(crate) fn spawn_egg_for_entity_type(entity_type: &str) -> Option<ItemStack> {
     let (namespace, path) = entity_type.split_once(':')?;
     let egg = format!("{namespace}:{path}_spawn_egg");
-    lodestone_data::items::item_id(&egg)?;
-    Some(ItemStack::new(egg.parse().ok()?, 1))
+    let item = lodestone_data::item::Item::from_name(&egg)?;
+    Some(ItemStack::new(item.name().parse().ok()?, 1))
 }
 
 /// The entity interaction range, flattened as
@@ -531,7 +531,7 @@ mod tests {
             }
         }
         for &(name, _) in FOODS {
-            if lodestone_data::items::item_id(name).is_none() {
+            if lodestone_data::item::Item::from_name(name).is_none() {
                 offenders.push((name, "not an item in the 26.2 registry"));
             }
         }

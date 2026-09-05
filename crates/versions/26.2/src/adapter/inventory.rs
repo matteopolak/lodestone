@@ -89,6 +89,13 @@ impl Depth {
     }
 }
 
+/// Validates a raw protocol-776 item holder id before a built-in census reads
+/// it. Dynamic or future registry entries remain raw in carriers that can
+/// preserve them; this adapter only turns known built-ins into item names.
+fn item_from_wire_id(raw: i32) -> Option<Item> {
+    u16::try_from(raw).ok().and_then(Item::from_registry_id)
+}
+
 impl V770Adapter {
     /// Clientbound play-state packets in the inventory domain, split out of the
     /// former monolithic `handle_play` (see `adapter::mod` for the coordinator).
@@ -349,13 +356,13 @@ pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, A
         return Ok(DecodedStack::Complete(None));
     }
     let item_id = reader.var_i32().map_err(dec_err)?;
-    let name = item_name(item_id)
+    let item = item_from_wire_id(item_id)
         .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
     let count = u32::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
-    let (components, complete) = read_component_patch(reader, name, Depth::ROOT)?;
+    let (components, complete) = read_component_patch(reader, item.name(), Depth::ROOT)?;
     let stack = Some(ItemStack {
-        item: parse_key(name, "item")?,
+        item: parse_key(item.name(), "item")?,
         count,
         components: *components,
     });
@@ -711,9 +718,9 @@ fn read_pot_decorations(reader: &mut Reader<'_>) -> Result<PotDecorations, Adapt
         let id = reader.var_i32().map_err(dec_err)?;
         // A brick face and an absent face are the same state in vanilla, so both
         // land on `None`.
-        *side = match item_name(id) {
-            Some("minecraft:brick") | None => None,
-            Some(name) => Some(parse_key(name, "pot decoration")?),
+        *side = match item_from_wire_id(id) {
+            Some(Item::Brick) | None => None,
+            Some(item) => Some(parse_key(item.name(), "pot decoration")?),
         };
     }
     let [back, left, right, front] = sides;
@@ -2066,12 +2073,12 @@ fn read_item_stack_template_tolerant(
     depth: Depth,
 ) -> Result<bool, AdapterError> {
     let item_id = reader.var_i32().map_err(dec_err)?;
-    let name = item_name(item_id)
+    let item = item_from_wire_id(item_id)
         .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
     let count = reader.var_i32().map_err(dec_err)?;
     u32::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
-    let (_components, complete) = read_component_patch(reader, name, depth)?;
+    let (_components, complete) = read_component_patch(reader, item.name(), depth)?;
     Ok(complete)
 }
 
@@ -2475,8 +2482,8 @@ fn read_slot_display(
             // walks, including its bail-out on an unmodeled component type.
             let item_id = reader.var_i32().map_err(dec_err)?;
             let _count = reader.var_i32().map_err(dec_err)?;
-            let name = item_name(item_id).unwrap_or("minecraft:air");
-            let (_components, complete) = read_component_patch(reader, name, depth)?;
+            let item = item_from_wire_id(item_id).unwrap_or(Item::Air);
+            let (_components, complete) = read_component_patch(reader, item.name(), depth)?;
             if !complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
@@ -2702,7 +2709,7 @@ fn decode_award_stats(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         })?;
         let value_name = match stat_value_registry(type_id) {
             Some(StatValueRegistry::CustomStat) => custom_stat_name(value_id),
-            Some(StatValueRegistry::Item) => item_name(value_id),
+            Some(StatValueRegistry::Item) => item_from_wire_id(value_id).map(Item::name),
             Some(StatValueRegistry::EntityType) => entity_type_name(value_id),
             // This is one registration-order block type, not a palette state.
             // Decode the wire integer once into `Block`; using a state lookup
@@ -3217,19 +3224,20 @@ fn decode_map_item_data(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> 
 /// no `Option`.
 fn read_item_stack_template(reader: &mut Reader<'_>, depth: Depth) -> Result<ItemStack, AdapterError> {
     let item_id = reader.var_i32().map_err(dec_err)?;
-    let name = item_name(item_id)
+    let item = item_from_wire_id(item_id)
         .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
     let count = reader.var_i32().map_err(dec_err)?;
     let count = u32::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
-    let (components, complete) = read_component_patch(reader, name, depth)?;
+    let (components, complete) = read_component_patch(reader, item.name(), depth)?;
     if !complete {
         return Err(AdapterError::Decode(format!(
-            "advancement icon {name} carries an unmodeled item component, so the rest of the packet is unreadable"
+            "advancement icon {} carries an unmodeled item component, so the rest of the packet is unreadable",
+            item.name()
         )));
     }
     Ok(ItemStack {
-        item: parse_key(name, "item")?,
+        item: parse_key(item.name(), "item")?,
         count,
         components: *components,
     })
@@ -3266,14 +3274,14 @@ fn read_bundle_contents(
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
         let item_id = reader.var_i32().map_err(dec_err)?;
-        let name = item_name(item_id)
+        let item = item_from_wire_id(item_id)
             .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
         let item_count = reader.var_i32().map_err(dec_err)?;
         let item_count = u32::try_from(item_count)
             .map_err(|_| AdapterError::Decode(format!("invalid item count {item_count}")))?;
-        let (components, complete) = read_component_patch(reader, name, depth)?;
+        let (components, complete) = read_component_patch(reader, item.name(), depth)?;
         items.push(ItemStack {
-            item: parse_key(name, "item")?,
+            item: parse_key(item.name(), "item")?,
             count: item_count,
             components: *components,
         });
@@ -3313,14 +3321,14 @@ fn read_charged_projectiles(
     let mut items = Vec::with_capacity(count.min(reader.remaining()));
     for _ in 0..count {
         let item_id = reader.var_i32().map_err(dec_err)?;
-        let name = item_name(item_id)
+        let item = item_from_wire_id(item_id)
             .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
         let item_count = reader.var_i32().map_err(dec_err)?;
         let item_count = u32::try_from(item_count)
             .map_err(|_| AdapterError::Decode(format!("invalid item count {item_count}")))?;
-        let (components, complete) = read_component_patch(reader, name, depth)?;
+        let (components, complete) = read_component_patch(reader, item.name(), depth)?;
         items.push(ItemStack {
-            item: parse_key(name, "item")?,
+            item: parse_key(item.name(), "item")?,
             count: item_count,
             components: *components,
         });
@@ -3548,7 +3556,7 @@ mod nesting_budget {
 
     use super::{Depth, MAX_ITEM_NESTING, Reader, read_component_patch};
     use lodestone_data::data_component_types::component_type_name;
-    use lodestone_data::items::item_name;
+    use lodestone_data::item::Item;
 
     fn var_i32(out: &mut Vec<u8>, mut value: i32) {
         loop {
@@ -3570,12 +3578,9 @@ mod nesting_budget {
             .unwrap_or_else(|| panic!("no data component type is named {name}"))
     }
 
-    /// The lowest item id the registry actually resolves, so the nested
-    /// templates name a real item at every level.
+    /// A real item id for the nested templates at every level.
     fn some_item_id() -> i32 {
-        (0..4096)
-            .find(|&id| item_name(id).is_some())
-            .expect("the item registry resolves no id at all")
+        i32::from(Item::Air.registry_id())
     }
 
     /// How a component's payload frames the item stack it contains, past its

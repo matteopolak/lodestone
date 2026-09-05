@@ -17,10 +17,10 @@
 //!   means "`n` direct entries follow". Every ingredient list here takes the
 //!   direct form, so every count is one more than its length.
 //!
-//! Item registry ids come from `lodestone_data::items`, the jar-derived census —
+//! Item registry ids come from `lodestone_data::item::Item`, the jar-derived census —
 //! outside the encoder, which is the point.
 
-use lodestone_data::items::item_id;
+use lodestone_data::item::Item;
 use lodestone_server::crafting::{RecipeBookEntry, RecipeDisplay, SlotDisplay};
 use lodestone_server::{ServerDirective, ServerProtocol};
 use lodestone_v26_2::V770ServerProtocol;
@@ -46,7 +46,9 @@ fn ident(s: &str) -> lodestone_model::Identifier {
 }
 
 fn item(name: &str) -> i32 {
-    item_id(name).unwrap_or_else(|| panic!("{name} must be in the 26.2 item census"))
+    Item::from_name(name)
+        .map(|item| i32::from(item.registry_id()))
+        .unwrap_or_else(|| panic!("{name} must be in the 26.2 item census"))
 }
 
 fn payload(directive: ServerDirective) -> (i32, Vec<u8>) {

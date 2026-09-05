@@ -90,6 +90,7 @@ use lodestone_world::{
     LightProperties, compute_column_light,
 };
 use lodestone_data::block::Block;
+use lodestone_data::item::Item;
 use uuid::Uuid;
 
 // Test-only since the string→id resolver moved into `lodestone-data`
@@ -100,7 +101,6 @@ use uuid::Uuid;
 #[cfg(test)]
 use lodestone_data::block_states::{block_name, properties};
 use lodestone_data::entity_types::entity_type_id;
-use lodestone_data::items::{item_id, item_name};
 use lodestone_data::menus::{MenuId, menu_id};
 use lodestone_data::mob_effects::{mob_effect_id, mob_effect_name};
 use crate::entity_variants;
@@ -883,6 +883,18 @@ fn block_registry_id_by_name(name: &str) -> Option<i32> {
         .map(|block| i32::from(block.registry_id()))
 }
 
+/// Resolves a built-in item key for a protocol-776 writer. A custom or future
+/// key has no id in this build's fixed registry and must not be substituted.
+fn item_registry_id_by_name(name: &str) -> Option<i32> {
+    Item::from_name(name).map(|item| i32::from(item.registry_id()))
+}
+
+/// Validates a raw item holder at a packet boundary before using the built-in
+/// registry's total name accessor.
+fn item_from_wire_id(raw: i32) -> Option<Item> {
+    u16::try_from(raw).ok().and_then(Item::from_registry_id)
+}
+
 /// Resolves a [`StatKey`] to the pair of VarInts vanilla's own stat stream
 /// codec writes: the
 /// `minecraft:stat_type` registry id, then the value's id in whichever registry
@@ -912,7 +924,7 @@ fn stat_wire_ids(key: &StatKey) -> Option<(i32, i32)> {
         | StatType::Used
         | StatType::Broken
         | StatType::PickedUp
-        | StatType::Dropped => item_id(value)?,
+        | StatType::Dropped => item_registry_id_by_name(value)?,
         StatType::Killed | StatType::KilledBy => entity_type_id(value)?,
         StatType::Custom => {
             // Custom stats are conventionally written bare (`play_time`) but the
@@ -979,14 +991,14 @@ const RECIPE_BOOK_CATEGORIES: &[&str] = &[
 fn write_slot_display(w: &mut Writer, display: &ServerSlotDisplay) {
     match display {
         ServerSlotDisplay::Empty => w.var_i32(slot_display::EMPTY),
-        ServerSlotDisplay::Item(item) => match item_id(&item.to_string()) {
+        ServerSlotDisplay::Item(item) => match item_registry_id_by_name(&item.to_string()) {
             Some(id) => {
                 w.var_i32(slot_display::ITEM);
                 w.var_i32(id);
             }
             None => w.var_i32(slot_display::EMPTY),
         },
-        ServerSlotDisplay::Stack { item, count } => match item_id(&item.to_string()) {
+        ServerSlotDisplay::Stack { item, count } => match item_registry_id_by_name(&item.to_string()) {
             Some(id) => {
                 w.var_i32(slot_display::ITEM_STACK);
                 // vanilla's own item-stack-template codec's own stream codec is item, **then** count, then
@@ -1101,7 +1113,7 @@ fn encode_recipe_book_add_body(entries: &[ServerRecipeBookEntry], replace: bool)
             for ingredient in &entry.crafting_requirements {
                 let ids: Vec<i32> = ingredient
                     .iter()
-                    .filter_map(|item| item_id(&item.to_string()))
+                    .filter_map(|item| item_registry_id_by_name(&item.to_string()))
                     .collect();
                 // See this function's doc: `n + 1`, because `0` means "a tag
                 // reference follows instead".
@@ -1255,8 +1267,7 @@ fn read_hashed_stack(r: &mut Reader) -> Option<Option<ItemStack>> {
     if added != 0 || removed != 0 {
         return None;
     }
-    let name = item_name(item_id)?;
-    let item = name.parse().ok()?;
+    let item = item_from_wire_id(item_id)?.name().parse().ok()?;
     let count = u32::try_from(count).ok()?;
     Some(Some(ItemStack::new(item, count)))
 }
@@ -1343,8 +1354,7 @@ fn read_optional_item_stack(r: &mut Reader) -> Option<Option<ItemStack>> {
     if added != 0 || removed != 0 {
         return None;
     }
-    let name = item_name(item_id)?;
-    let item = name.parse().ok()?;
+    let item = item_from_wire_id(item_id)?.name().parse().ok()?;
     let count = u32::try_from(count).ok()?;
     Some(Some(ItemStack::new(item, count)))
 }
@@ -2174,7 +2184,7 @@ fn villager_registry_wire_id(lookup: fn(i32) -> Option<&'static str>, key: &str)
 fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) {
     match item.filter(|stack| stack.count > 0) {
         None => w.var_i32(0),
-        Some(stack) => match item_id(&stack.item.to_string()) {
+        Some(stack) => match item_registry_id_by_name(&stack.item.to_string()) {
             Some(id) => {
                 w.var_i32(i32::try_from(stack.count).unwrap_or(i32::MAX));
                 w.var_i32(id);
@@ -2324,7 +2334,7 @@ fn written_book_page_nbt(text: &Text) -> Nbt {
 /// than writing a bad registry id that would desync everything after it.
 fn write_item_cost(w: &mut Writer, cost: &(ResourceKey, i32)) {
     let (item, count) = cost;
-    match item_id(&item.to_string()) {
+    match item_registry_id_by_name(&item.to_string()) {
         Some(id) => {
             w.var_i32(id);
             w.var_i32(*count);

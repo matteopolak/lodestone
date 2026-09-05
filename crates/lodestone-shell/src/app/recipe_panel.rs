@@ -3,6 +3,7 @@
 //! Split out of `app.rs`; see that module's own header for the layout.
 
 use super::*;
+use lodestone_data::item::Item;
 
 /// Persisted recipe-book panel UI state — see
 /// [`WindowApp::recipe_panel`].
@@ -373,7 +374,10 @@ pub(super) fn recipe_panel_pointer_hit(
 /// than guess" contract as [`crate::container::merchant::cost_item_stack`],
 /// which resolves the same table for the same reason.
 pub(super) fn recipe_item_identifier(id: i32) -> Option<lodestone_model::Identifier> {
-    lodestone_data::items::item_name(id)?.parse().ok()
+    u16::try_from(id)
+        .ok()
+        .and_then(Item::from_registry_id)
+        .and_then(|item| item.name().parse().ok())
 }
 
 /// Resolves a server-sent ghost recipe's result display to one drawable
@@ -406,10 +410,9 @@ mod ghost_result_stack_tests {
     #[test]
     fn a_resolvable_id_becomes_a_stack() {
         // `minecraft:torch`'s registry id in the generated protocol-776 item
-        // table — see `lodestone_data::items::item_name`'s own doc for why
-        // this family is the one this build resolves.
-        let id = lodestone_data::items::item_id("minecraft:torch")
-            .expect("the generated table must know minecraft:torch");
+        // table. The literal pins this test fixture independently of the
+        // enum's name lookup.
+        let id = 350;
         let ghost = GhostRecipe { window_id: 1, result_items: vec![id] };
         let stack = ghost_result_stack(&ghost).expect("a real id must resolve");
         assert_eq!(stack.item().to_string(), "minecraft:torch");
@@ -432,8 +435,7 @@ mod ghost_result_stack_tests {
     /// the case that would fail if the fallback lookup were skipped.
     #[test]
     fn the_first_resolvable_candidate_wins_over_an_earlier_unresolvable_one() {
-        let id = lodestone_data::items::item_id("minecraft:torch")
-            .expect("the generated table must know minecraft:torch");
+        let id = 350;
         let ghost = GhostRecipe { window_id: 1, result_items: vec![i32::MAX, id] };
         let stack = ghost_result_stack(&ghost).expect("the second candidate must resolve");
         assert_eq!(stack.item().to_string(), "minecraft:torch");

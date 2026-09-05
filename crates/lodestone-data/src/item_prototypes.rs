@@ -75,32 +75,19 @@ pub struct ItemPrototypeDef {
     pub equippable_by_any_entity: bool,
 }
 
-/// The prototype components of the item with **network registry id** `id`, or
-/// `None` for an id outside `0..`[`ITEM_COUNT`].
-///
-/// O(1). This is the hot path: the stack decoder already holds the registry id.
-#[must_use]
-pub fn prototype_by_id(id: i32) -> Option<&'static ItemPrototypeDef> {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| generated::ITEM_PROTOTYPES.get(index))
-}
-
 /// The prototype components of `item` (for example `"minecraft:diamond_helmet"`),
 /// or `None` for an item this version does not know.
 ///
-/// Resolves the name through [`crate::items::item_id`], so it costs one linear
-/// scan of the item-name table — fine for the per-query uses this has (a
-/// creative-menu entry, a slot cap), and it avoids minting a second name index
-/// that could drift from the first.
+/// The text is an external/dynamic boundary. Built-in names validate into an
+/// [`crate::item::Item`] before indexing the census; custom or future keys stay
+/// unresolved rather than being mistaken for a built-in item.
 #[must_use]
 pub fn prototype(item: &str) -> Option<&'static ItemPrototypeDef> {
-    prototype_by_id(crate::items::item_id(item)?)
+    crate::item::Item::from_name(item).map(prototype_for)
 }
 
-/// The typed sibling of [`prototype_by_id`], for a caller already holding a
-/// [`crate::item::Item`] — the one real consumer `docs/registry-types.md`'s
-/// Stage 1 asks for.
+/// The total lookup for a caller already holding a validated
+/// [`crate::item::Item`].
 ///
 /// Infallible: an [`crate::item::Item`] and this table's `0..ITEM_COUNT` are
 /// the same `minecraft:item` registry (both generated from
@@ -111,7 +98,9 @@ pub fn prototype(item: &str) -> Option<&'static ItemPrototypeDef> {
 /// call sites once a registry has a typed, infallible id.
 #[must_use]
 pub fn prototype_for(item: crate::item::Item) -> &'static ItemPrototypeDef {
-    prototype_by_id(i32::from(item.registry_id())).unwrap_or_else(|| {
+    generated::ITEM_PROTOTYPES
+        .get(item.registry_id() as usize)
+        .unwrap_or_else(|| {
         panic!(
             "Item::{item:?} (registry id {}) has no row in the generated item-prototype table",
             item.registry_id()

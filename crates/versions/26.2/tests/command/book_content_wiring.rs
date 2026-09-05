@@ -167,8 +167,7 @@ fn writable_book_content_reaches_a_client_container_set_slot() {
     // component patch. `writable_book`'s registry id is looked up rather than
     // hardcoded, since only the *component* bytes below are this test's
     // subject.
-    let item_id = lodestone_data::items::item_id("minecraft:writable_book")
-        .expect("writable_book is a real item");
+    let item_id = i32::from(lodestone_data::item::Item::WritableBook.registry_id());
     let mut expected_prefix = vec![0x00, 0x00, 0x00, 0x24, 0x01];
     expected_prefix.extend(write_varint(item_id));
     assert_eq!(&payload[..expected_prefix.len()], expected_prefix.as_slice());
@@ -285,10 +284,8 @@ fn writable_and_written_book_content_use_distinct_component_ids() {
     // id(N) + added(1) + removed(1) -> the component id follows immediately.
     // Both item ids are looked up (not assumed one byte) so this holds
     // regardless of registry-id width.
-    let writable_item_id = lodestone_data::items::item_id("minecraft:writable_book")
-        .expect("writable_book is a real item");
-    let written_item_id = lodestone_data::items::item_id("minecraft:written_book")
-        .expect("written_book is a real item");
+    let writable_item_id = i32::from(lodestone_data::item::Item::WritableBook.registry_id());
+    let written_item_id = i32::from(lodestone_data::item::Item::WrittenBook.registry_id());
     let writable_id_width = write_varint(writable_item_id).len();
     let written_id_width = write_varint(written_item_id).len();
     let writable_component_id = writable_payload[5 + writable_id_width + 2];

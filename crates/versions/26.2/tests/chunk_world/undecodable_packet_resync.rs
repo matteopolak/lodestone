@@ -52,7 +52,7 @@ use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, ClientEvent, LoginProfile, ServerAddress};
 use lodestone_core::{Ctx, Encode, Nbt, Writer, write_network_nbt};
-use lodestone_data::items::item_id;
+use lodestone_data::item::Item;
 use lodestone_net::{Codec, Connection, memory_pair};
 use lodestone_v26_2::V770Adapter;
 use lodestone_v26_2::packet_ids::{configuration, login, play};
@@ -72,6 +72,10 @@ const THRESHOLD: i32 = 256;
 /// [`the_undecodable_frame_really_spans_several_reads`], which fails loudly if
 /// this drifts in the wrong direction.
 const READ_CHUNK: usize = 8 * 1024;
+
+fn item_id(name: &str) -> Option<i32> {
+    Item::from_name(name).map(|item| i32::from(item.registry_id()))
+}
 
 /// Health values with no plausible default: a decoder that delivered a
 /// zeroed-out or partially-read `set_health` cannot match these.
