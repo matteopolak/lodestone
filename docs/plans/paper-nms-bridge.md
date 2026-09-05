@@ -113,6 +113,27 @@ but in every case it is crate-internal, veto-free, and reachable by nothing outs
 `crates/plugins/lodestone-jvm-bridge/spike/invocation/`; it is deliberately excluded from the
 production workspace. The production bridge still has no JVM linkage or startup path.
 
+## Finite delivery decomposition
+
+The compatibility work is complete only when these seven bounded domains meet their acceptance
+gates. This replaces an open-ended sequence of individual native getters with a finite closure
+model:
+
+| domain | census rows | completion evidence |
+|---|---:|---|
+| world, chunks, and blocks | 1-3 | Stable state identity, authoritative writes and update flags, explicit generation policy, and measured batched region access |
+| entities and players | 4-5 | Generation-safe lifecycle plus production-observable spawn, removal, teleport, damage, messaging, and supported mutation |
+| inventories, items, menus, and serialization | 6-7, 10 | Authoritative menu state and lossless unknown-component handling or loud refusal |
+| scheduler, commands, and permissions | 8, 13-14 | Deterministic tick scheduling, bounded sync hand-back, command dispatch, and permission predicates |
+| events and adjudication | 12 | Supported-event census with differential ordering, cancellation, mutation visibility, and exception isolation |
+| typed packets and interception boundary | 9, 11 | Real addressed typed sends and an explicit, tested raw-interception decision without fake channel objects |
+| real-plugin conformance | all | Reproducible user-supplied runtime harness, machine-readable differential results, and unchanged JVM-disabled cost |
+
+Each domain must enumerate the supported members it owns. Anything outside that enumeration throws
+immediately with its exact member identity. The final conformance domain selects maintained,
+unmodified plugins spanning world editing, permissions or economy, and broad server behavior; a
+green unit suite inside the bridge is not completion evidence by itself.
+
 ## The cut line: where Paper's bytecode stops and ours starts
 
 **This is the centrepiece finding.** Paper's bytecode provides a wrapper layer (a player wrapper
