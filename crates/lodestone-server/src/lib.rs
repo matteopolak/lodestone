@@ -392,6 +392,13 @@ mod redstone_wire;
 /// `region_source` is: it is a `std::fs` schema over `lodestone-anvil`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod player_data;
+/// The explicit selection and dirty-record write seam for persistent worlds.
+///
+/// Native records are intentionally narrower than the existing Anvil world
+/// path until chunk loading and all state producers have migrated; see
+/// `docs/world-storage.md` for the current boundary.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod world_storage;
 /// [`live_save::LiveSaveSlot`] — the one piece of the player-save story that
 /// has to compile on every target. Deliberately **not** `cfg`-gated, unlike
 /// `player_data` above: `LiveSaveSlot` is threaded unconditionally through

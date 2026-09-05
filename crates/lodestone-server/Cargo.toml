@@ -153,6 +153,10 @@ tokio = { workspace = true }
 # the whole `region_source` module is `cfg`-gated off there rather than
 # compiled against a filesystem that would fail at runtime.
 lodestone-anvil = { path = "../lodestone-anvil" }
+# The selected typed-record backend for an integrated server. This stays in
+# the native dependency set with Anvil because both selections use local files;
+# browser singleplayer deliberately has no persistence surface.
+lodestone-storage = { path = "../lodestone-storage" }
 # Issue #273's online-mode half: `has_joined`, the server-side session-server
 # check, and the `AuthError` type `ServerError::AuthServiceUnavailable` wraps.
 # Target-gated for the same reason as `lodestone-anvil` above and as
@@ -227,6 +231,7 @@ lodestone-v26-2 = { path = "../versions/26.2" }
 # than through this crate's own loader, so the oracle reads the file with
 # something other than the code under test.
 lodestone-anvil = { path = "../lodestone-anvil" }
+lodestone-storage-schema = { path = "../lodestone-storage-schema" }
 # `tests/rcon.rs` (issue #331) points the same `RconClient`/`AsyncRconClient`
 # the live oracle tests use against vanilla at our own listener — the
 # verification the issue body calls for. `lodestone-testsupport` does not
