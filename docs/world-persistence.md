@@ -64,9 +64,13 @@ A save writes only the dirty set, not everything resident — a player standing 
 cost megabytes of disk writes every autosave interval — and untouched chunks inside a rewritten
 region file are re-emitted as their original compressed bytes rather than being decoded and
 re-encoded, since the region-file format has no incremental single-chunk update and always rewrites
-a whole file in one pass. Neither generation nor saving is allowed to run on the world's own tick
-thread; both are pushed onto a blocking thread pool, since a synchronous disk write there is
-exactly the same class of stall as a synchronous chunk generation would be.
+a whole file in one pass. An evicted column's unload is a bounded, coordinate-scoped token in the
+`RegionChunkSource` ledger. `WorldSaveHandle::save` acknowledges that token only after the region
+rewrites succeed; the authoritative edit remains retained when a save fails, and a duplicate,
+superseded, or cross-coordinate token cannot release it. Neither generation nor saving is allowed
+to run on the world's own tick thread; both are pushed onto a blocking thread pool, since a
+synchronous disk write there is exactly the same class of stall as a synchronous chunk generation
+would be.
 
 ### The world's own scalars: game rules, difficulty, and the clock
 

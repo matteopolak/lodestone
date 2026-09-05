@@ -67,11 +67,15 @@ selected, and a same-coordinate load or release owns a small source gate until
 the persistence hand-off acknowledges. Gates use weak references and disappear
 after work completes, so they are not a second unbounded chunk-residency map.
 Independent coordinates remain free to generate in parallel. The current
-`ChunkStore` path closes the persistence hand-off synchronously when the source
-has accepted its queued request; because `ChunkSource::unload` deliberately
-does not perform I/O, that acknowledgement is not durable disk completion.
-This is still a serial hand-off, not an unload worker, storage-format change, or
-I/O change.
+`ChunkStore` path closes its source hand-off synchronously when the source has
+accepted its queued request; the wrapped `RegionChunkSource` then creates a
+second, coordinate-scoped durable-save token. `WorldSaveHandle::save` snapshots
+those bounded tokens, acknowledges each one only after all owned region writes
+succeed, and releases the source's authoritative edit only from the durable
+phase. A failed save leaves the token queued for retry; a newer unload of the
+same coordinate supersedes the old token, so a delayed reply is stale rather
+than able to release the wrong ownership. This is still a serial hand-off, not
+an unload worker, storage-format change, or I/O change.
 Entities outside this ambient-effect hand-off, natural-spawn planning, world
 border, game rules, time, weather and other cross-column work remain global.
 For a named populated scene,
@@ -126,12 +130,15 @@ If a future owner releases a column concurrently, open a batch through
 `ChunkLifecycleHandoff::open`, retain it between its source and persistence
 commands, and acknowledge persistence exactly once after the durable writer
 completes. `execute_with_persistence` is the current synchronous callback seam
-for the same ordering. Do not replace the bounded batch with a global
-acknowledgement history: an old reply must be stale, not a permanent resident
-record. Preserve `(cx, cz)` selection order, including negative coordinates,
-before dispatching any workers. The current `ChunkSource` contract still lacks
-a durable-save callback, so wiring that callback through `RegionChunkSource` and
-`WorldSaveHandle` remains an architecture gap.
+for source-side ordering; `RegionChunkSource`'s durable-save ledger is the
+production disk boundary beneath it. Do not replace either bounded ledger with
+a global acknowledgement history: an old reply must be stale, not a permanent
+resident record. Preserve `(cx, cz)` selection order, including negative
+coordinates, before dispatching any workers. The remaining gap is deeper
+regionization: the `ChunkSource` contract still exposes unload as a synchronous
+queue-acceptance hint, so a future asynchronous region owner must carry the
+durable token through its own worker/message boundary instead of treating the
+source-side acknowledgement as disk completion.
 
 When recording a candidate report, name the populated scene and the explicit
 edge passed to `candidate_region_workload`. Compare total chunks, the number of
