@@ -600,7 +600,7 @@ agreement or disagreement.
 
 ### What Track B still does not do
 - **The client-state packet corpus is still small.** The captured lane covers
-  two inventory slot payloads; it does not yet cover captured chunk or broader
+  three inventory slot payloads; it does not yet cover captured chunk or broader
   inventory packet sequences. The two committed item-entity fixtures are
   metadata-only `SET_ENTITY_DATA` payloads with session-scoped ids, not a
   complete spawn/metadata/move/remove sequence, so they cannot independently
@@ -609,6 +609,13 @@ agreement or disagreement.
   provenance. The generated block/entity/inventory/container campaign remains
   hermetic and bounded; it compares client state rather than rendered frames,
   because renderer differences are not themselves client-state bugs.
+  The inventory component lane replays explicit-tool, plain-tool, potion,
+  and plain-tool replacements into the same public menu slot. Independent
+  expectations from capture annotations cover tool rules and defaults, potion
+  holder/color/effects/name, and clearing the old component values. A stale-tool
+  and stale-potion control must each produce a named field mismatch. The check
+  reads the public game stack through its shared-model conversion; it does
+  not stop at the decoder's emitted event.
 - **Generated live cases cover fluids and redstone.** Both have bounded
   generated action domains. Falling blocks and source-water waterlogging each
   additionally have a bounded hermetic `IntegratedServer` action proof, but no
