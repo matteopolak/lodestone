@@ -13,7 +13,8 @@ use lodestone_server::{
     ChunkColumn, ScheduledTickHandle, TickPriority,
     anvil_world_export::{
         ChunkCoordinate, Error, WorldExportInput, WorldExportLossDecision, export_world_directory,
-        preflight_world_export,
+        export_native_world_snapshot, preflight_native_world_export, preflight_world_export,
+        snapshot_native_world_export,
     },
     world_storage::{NativeDirtyChunkRecord, WorldStorage, WorldStorageBackend},
 };
@@ -150,6 +151,83 @@ fn explicit_multi_region_export_publishes_reopenable_terrain_in_coordinate_order
     drop(storage);
     std::fs::remove_dir_all(native_directory).expect("remove native fixture store");
     std::fs::remove_dir_all(destination).expect("remove published fixture world");
+}
+
+#[test]
+fn all_native_snapshot_exports_the_reviewed_records_after_a_later_native_write() {
+    let native_directory = scratch("snapshot-native");
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_directory.clone(),
+    })
+    .expect("open native fixture store");
+    write_chunk(&storage, 32, 0, "minecraft:gold_block", false);
+    write_chunk(&storage, 0, 0, "minecraft:diamond_block", false);
+
+    let snapshot = snapshot_native_world_export(
+        &storage,
+        0,
+        16,
+        400,
+        CompressionScheme::Zlib,
+        1_700_000_000,
+    )
+    .expect("capture complete native terrain records");
+    assert_eq!(
+        snapshot.chunks(),
+        &[ChunkCoordinate { x: 0, z: 0 }, ChunkCoordinate { x: 32, z: 0 }],
+        "the native index order becomes the captured export order"
+    );
+    let report = preflight_native_world_export(&snapshot);
+    assert_eq!(report.unsupported_count(), 0);
+
+    write_chunk(&storage, 0, 0, "minecraft:emerald_block", false);
+    let changed = storage
+        .load_chunk(0, 0, 0, 16)
+        .expect("read changed source")
+        .expect("changed source remains present");
+    assert_eq!(
+        changed.column.block_state(1, 1, 2),
+        "minecraft:emerald_block",
+        "the control proves the store no longer contains the reviewed state"
+    );
+
+    let destination = scratch("snapshot-published");
+    let result = export_native_world_snapshot(
+        &snapshot,
+        &destination,
+        Some(report.decide(WorldExportLossDecision::ProceedAndDiscardUnsupported)),
+    )
+    .expect("the captured reviewed terrain publishes");
+    assert_eq!((result.chunks_exported, result.regions_published), (2, 2));
+    let chunk = read_chunk(&destination.join("region/r.0.0.mca"), 0, 0);
+    assert!(
+        contains_string(&chunk, "minecraft:diamond_block"),
+        "publication must consume the reviewed point-in-time record"
+    );
+    assert!(
+        !contains_string(&chunk, "minecraft:emerald_block"),
+        "re-reading the later native replacement would fail this control"
+    );
+
+    drop(storage);
+    std::fs::remove_dir_all(native_directory).expect("remove native fixture store");
+    std::fs::remove_dir_all(destination).expect("remove published fixture world");
+}
+
+#[test]
+fn all_native_snapshot_refuses_an_empty_store() {
+    let native_directory = scratch("empty-snapshot-native");
+    let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: native_directory.clone(),
+    })
+    .expect("open empty native fixture store");
+
+    assert!(matches!(
+        snapshot_native_world_export(&storage, 0, 16, 0, CompressionScheme::Zlib, 1),
+        Err(Error::EmptySelection)
+    ));
+    drop(storage);
+    std::fs::remove_dir_all(native_directory).expect("remove native fixture store");
 }
 
 #[test]
