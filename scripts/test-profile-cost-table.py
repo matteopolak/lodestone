@@ -239,6 +239,7 @@ def control_real_capture_truncated_samples() -> None:
     s = broken["threads"][0]["samples"]
     s["stack"] = []
     s["threadCPUDelta"] = []
+    s["weight"] = []
     s["length"] = 0
 
     def assert_correct() -> None:
@@ -288,6 +289,34 @@ def test_cpu_time_requirement_rejects_missing_and_malformed_deltas() -> None:
     expect_exit(
         lambda: pct.build_report(pct.Profile(malformed, sidecar_for(REAL)), None, 20, True),
         "incomplete threadCPUDelta",
+    )
+
+
+def test_present_cpu_delta_array_must_align_with_stacks_even_without_strict_mode() -> None:
+    """A malformed present array must not become sample-count evidence.
+
+    The ordinary report may fall back when a platform omits CPU deltas, but a
+    short or empty array is not an omitted field: it cannot be aligned with
+    the sampled stacks and must fail loudly in both report modes.
+    """
+    for replacement, expected in (([], "0 samples"), ([1.0], "1 samples")):
+        raw = load_fixture(REAL)
+        raw["threads"][0]["samples"]["threadCPUDelta"] = replacement
+        expect_exit(
+            lambda raw=raw: pct.build_report(pct.Profile(raw, sidecar_for(REAL)), None, 20),
+            expected,
+        )
+
+
+def test_present_fallback_weight_array_must_align_with_stacks() -> None:
+    """The sample-count fallback's optional weight array has the same row shape."""
+    raw = load_fixture(REAL)
+    samples = raw["threads"][0]["samples"]
+    samples.pop("threadCPUDelta")
+    samples["weight"] = [1.0]
+    expect_exit(
+        lambda: pct.build_report(pct.Profile(raw, sidecar_for(REAL)), None, 20),
+        "sample weights for 1 samples",
     )
 
 
@@ -589,6 +618,8 @@ def main() -> int:
         ("strict CPU-time requirement accepts real capture", test_cpu_time_requirement_accepts_the_real_capture),
         ("CONTROL: strict CPU-time requirement rejects zero-delta capture", control_cpu_time_requirement_rejects_zero_delta_capture),
         ("strict CPU-time requirement rejects missing and malformed deltas", test_cpu_time_requirement_rejects_missing_and_malformed_deltas),
+        ("present CPU deltas must align with sampled stacks", test_present_cpu_delta_array_must_align_with_stacks_even_without_strict_mode),
+        ("fallback weights must align with sampled stacks", test_present_fallback_weight_array_must_align_with_stacks),
         ("collision fixture, per-thread layout (v55)", test_collision_fixture_per_thread_v55),
         ("collision fixture, hoisted layout (v56)", test_collision_fixture_shared_v56),
         ("CONTROL: fixture libraries really do collide at 0x1000", control_collision_fixture_still_collides),
