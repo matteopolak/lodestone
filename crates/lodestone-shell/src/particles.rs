@@ -4098,14 +4098,16 @@ mod tests {
         assert_eq!(frame.drawn, frame.alive - seeds);
     }
 
-    fn campfire_state(lit: bool) -> u32 {
+    fn campfire_state(lit: bool) -> lodestone_data::block_states::StateId {
         (0..lodestone_data::block_states::STATE_COUNT)
-            .find(|id| {
-                if lodestone_data::block_states::block_name(*id) != Some("minecraft:campfire") {
-                    return false;
-                }
-                lodestone_data::block_states::properties(*id)
-                    .unwrap_or(&[])
+            .map(|raw| {
+                lodestone_data::block_states::StateId::new(raw)
+                    .expect("the generated state census range is valid")
+            })
+            .find(|state| {
+                state.block() == lodestone_data::block::Block::Campfire
+                    && state
+                    .properties()
                     .iter()
                     .any(|(name, value)| {
                         *name == "lit" && *value == if lit { "true" } else { "false" }
@@ -4153,6 +4155,30 @@ mod tests {
         assert!(
             particles.engine.particles().is_empty(),
             "26.2 owns the main plume in its own campfire-block-entity particle tick"
+        );
+    }
+
+    /// The ambient probe crosses the raw-state boundary once. Its valid control
+    /// proves this test is not satisfied by an ambient loop that never emits.
+    #[test]
+    fn ambient_probe_drops_an_out_of_census_state_before_typed_block_dispatch() {
+        let mut particles = Particles::new(None);
+        particles.engine = ParticleEngine::seeded(4096);
+        particles.ambient_tick([0.0, 64.0, 0.0], &mut |_| {
+            lodestone_data::block_states::STATE_COUNT
+        });
+        assert!(
+            particles.engine.particles().is_empty(),
+            "an out-of-census probe result must not reach a block-specific emitter"
+        );
+
+        particles.ambient_tick([0.0, 64.0, 0.0], &mut |_| {
+            lodestone_data::block::Block::EndRod.default_state().raw()
+        });
+        assert_eq!(
+            particles.engine.particles().len(),
+            AMBIENT_SAMPLES,
+            "a valid typed-block control must reach the end-rod emitter once per probe"
         );
     }
 
@@ -4404,8 +4430,10 @@ impl Particles {
                 centre[1] + offset[1],
                 centre[2] + offset[2],
             ];
-            let state = probe(block);
-            if state == 0 {
+            let Some(state) = lodestone_data::block_states::StateId::new(probe(block)) else {
+                continue;
+            };
+            if state.block() == lodestone_data::block::Block::Air {
                 continue;
             }
             self.animate_block(block, state);
@@ -4414,23 +4442,28 @@ impl Particles {
 
     /// One block's `animateTick`, for the handful of blocks a survival player
     /// actually notices. Silent for everything else.
-    fn animate_block(&mut self, block: [i32; 3], state: u32) {
-        let Some(name) = lodestone_data::block_states::block_name(state) else {
-            return;
-        };
-        let props = lodestone_data::block_states::properties(state).unwrap_or(&[]);
+    fn animate_block(
+        &mut self,
+        block: [i32; 3],
+        state: lodestone_data::block_states::StateId,
+    ) {
+        let block_kind = state.block();
+        let props = state.properties();
         let prop = |key: &str| props.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
         let [bx, by, bz] = [
             f64::from(block[0]),
             f64::from(block[1]),
             f64::from(block[2]),
         ];
-        match name.strip_prefix("minecraft:").unwrap_or(name) {
+        match block_kind {
             // Vanilla's own torch-block animate-tick: one flame and one smoke at the flame's
             // own position, which for a wall torch is offset *away* from the wall
             // it hangs on. Using the block centre for both puts the flame inside
             // the wall.
-            "torch" | "soul_torch" | "wall_torch" | "soul_wall_torch" => {
+            lodestone_data::block::Block::Torch
+            | lodestone_data::block::Block::SoulTorch
+            | lodestone_data::block::Block::WallTorch
+            | lodestone_data::block::Block::SoulWallTorch => {
                 let (dx, dz, dy) = match prop("facing") {
                     Some("north") => (0.0, 0.27, 0.22),
                     Some("south") => (0.0, -0.27, 0.22),
@@ -4441,7 +4474,11 @@ impl Particles {
                 };
                 let (x, y, z) = (bx + 0.5 + dx, by + 0.7 + dy, bz + 0.5 + dz);
                 emit::smoke(&mut self.engine, x, y, z, 0.0, 0.0, 0.0, 1.0);
-                if name.contains("soul") {
+                if matches!(
+                    block_kind,
+                    lodestone_data::block::Block::SoulTorch
+                        | lodestone_data::block::Block::SoulWallTorch
+                ) {
                     emit::soul_fire_flame(&mut self.engine, x, y, z, 0.0, 0.0, 0.0);
                 } else {
                     emit::flame(&mut self.engine, x, y, z, 0.0, 0.0, 0.0);
@@ -4450,7 +4487,8 @@ impl Particles {
             // Vanilla's own nether-portal-block animate-tick: four motes per tick at random
             // points inside the block, drifting on a signed offset — which for
             // vanilla's own portal particle is the *amplitude* it converges from, not a speed.
-            "nether_portal" | "end_gateway" => {
+            lodestone_data::block::Block::NetherPortal
+            | lodestone_data::block::Block::EndGateway => {
                 for _ in 0..4 {
                     let rng = self.engine.rng();
                     let (rx, ry, rz) = (
@@ -4476,7 +4514,7 @@ impl Particles {
             }
             // Vanilla's own end-rod-block animate-tick: one sparkle just off the rod's tip,
             // along whatever axis it points.
-            "end_rod" => {
+            lodestone_data::block::Block::EndRod => {
                 let (dx, dy, dz) = match prop("facing") {
                     Some("up") => (0.0, 0.4, 0.0),
                     Some("down") => (0.0, -0.4, 0.0),
