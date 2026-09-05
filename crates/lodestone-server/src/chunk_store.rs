@@ -960,8 +960,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             if !(0..i64::from(column.height)).contains(&local_y) {
                 return None;
             }
-            lodestone_data::block_states::StateId::new(
-                column.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
+            Some(column.resolved_block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
         }).flatten()
     }
 

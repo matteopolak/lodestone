@@ -100,6 +100,17 @@ impl StateId {
         self.0
     }
 
+    /// The canonical namespaced block name this state belongs to.
+    ///
+    /// Total, O(1), and zero-heap. A `StateId` is always one of this build's
+    /// built-in states; names introduced by a plugin or data pack remain text
+    /// at the registry/import boundary and therefore cannot be represented by
+    /// this type.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        self.block().name()
+    }
+
     /// The block this state belongs to. Total, O(1), two array indexes.
     ///
     /// Goes through the generated registry-order join rather than treating a
@@ -125,6 +136,17 @@ impl StateId {
     #[must_use]
     pub fn is_default(self) -> bool {
         crate::snow_support::is_default_state(self)
+    }
+
+    /// Resolves one canonical block-state string into this build's state table.
+    ///
+    /// The parser deliberately accepts `&str`: a caller may hold a namespaced
+    /// plugin or data-pack value that this built-in table does not contain. Such
+    /// a value returns `None` here so its owning registry can preserve or
+    /// handle it; it is never coerced into a built-in state.
+    #[must_use]
+    pub fn from_state_str(state: &str) -> Option<Self> {
+        state_id(state).and_then(Self::new)
     }
 }
 
@@ -312,9 +334,18 @@ fn block_index(name: &str) -> Option<u16> {
 /// not a runtime condition).
 #[must_use]
 pub fn air_state_id() -> u32 {
-    static AIR: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    air_state().raw()
+}
+
+/// The canonical `minecraft:air` state as a validated [`StateId`].
+///
+/// Protocol encoders that need its numeric representation should call
+/// [`StateId::raw`] at their wire boundary.
+#[must_use]
+pub fn air_state() -> StateId {
+    static AIR: std::sync::OnceLock<StateId> = std::sync::OnceLock::new();
     *AIR.get_or_init(|| {
-        state_id("minecraft:air").expect(
+        StateId::from_state_str("minecraft:air").expect(
             "generated block-state table has no `minecraft:air` entry — regenerate or fix the table",
         )
     })

@@ -288,6 +288,20 @@ fn known_ids_resolve_to_the_right_blocks() {
 }
 
 #[test]
+fn typed_state_identity_is_total_and_extension_names_stay_at_the_parse_boundary() {
+    let air = block_states::air_state();
+    assert_eq!(air.name(), "minecraft:air");
+    assert_eq!(air.properties(), &[]);
+    assert_eq!(air.raw(), block_states::air_state_id());
+    assert_eq!(block_states::StateId::from_state_str("minecraft:air"), Some(air));
+    assert_eq!(
+        block_states::StateId::from_state_str("lodestone:polished_test_stone"),
+        None,
+        "a namespaced extension must remain available to its owning registry rather than becoming a built-in state"
+    );
+}
+
+#[test]
 fn registry_trait_matches_the_static_accessors() {
     let table = BlockStateTable::new();
     assert_eq!(table.state_count(), block_states::STATE_COUNT);

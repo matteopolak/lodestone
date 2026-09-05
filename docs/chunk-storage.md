@@ -34,10 +34,10 @@ almost all of that structure pre-computed.
 ### Wire encoding: real per-cell state, resolved as integers, not strings
 
 The server's terrain data is real block variety end to end (grass, dirt, ores, water, whatever the
-generator produces); the wire encoder resolves each cell's real global state id directly from the
-column's own pre-resolved integer palette rather than re-resolving a block-state string per cell.
-That integer resolution happens once per distinct palette entry (a few dozen times per column), not
-once per cell (tens of thousands of times) — resolving a state string per block is both far more
+generator produces); the column resolves each distinct state string once into a validated
+`lodestone_data::block_states::StateId`, then the wire encoder writes that typed value's raw integer
+at its protocol boundary rather than re-resolving a block-state string per cell. That resolution
+happens once per distinct palette entry (a few dozen times per column), not once per cell (tens of thousands of times) — resolving a state string per block is both far more
 expensive and, in an earlier version of this encoder, was silently skipped altogether in favor of
 collapsing every solid block to one hardcoded stand-in and everything else (including every fluid)
 to air. Fixing that collapse alone was not sufficient: a fluid's *bare* block name (with no
@@ -76,7 +76,8 @@ was careful to avoid.
 ## How to change it
 
 - **Never resolve a block-state string per cell, in the encoder or anywhere else on a hot path.**
-  Route through the column's own pre-resolved integer palette instead; a local hash-map memo over
+  Route through the column's own pre-resolved `StateId` palette instead; convert to the raw integer
+  only where a packet needs it. A local hash-map memo over
   strings does not recover the cost, since hashing the strings themselves is a measurable fraction
   of the total.
 - **A same-name fallback resolution is not safe to extend casually to a new property-requiring
