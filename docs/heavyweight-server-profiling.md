@@ -95,6 +95,14 @@ complete runtime JSONL record are non-empty and agree on scene identity and
 population. Use `just samply-heavy-server-smoke` for the 12-second local smoke
 capture; it is the appropriate verification run, not a long campaign.
 
+For a completed capture, `just validate-heavy-server-profile <capture>` repeats
+those coherence checks without launching Samply, the server, or a scene. It
+derives the runner-owned `*.scene.json` and `*.runtime.jsonl` sidecars from the
+capture's `*.json.gz` name, requires the entity spec and its SHA-256 identity,
+then requires the one complete runtime row to describe that same bounded
+population. It deliberately does not parse the large Samply payload; use
+`profile-cost-table.py` when symbol analysis is the question.
+
 On macOS, Samply must be self-signed for process attachment. The runner inspects
 Samply's code signature before it emits the scene or creates any output
 directory. If it reports a missing `com.apple.security.cs.debugger` entitlement,
