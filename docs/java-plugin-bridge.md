@@ -827,7 +827,11 @@ inherits those shared definitions. The worker also snapshots each
 descriptor's construction prerequisite. Without `LODESTONE_PAPER_SHIM_PATH`, no facade is available.
 With it, the dedicated host supplies one Java-facing, loader-local native state surface: resident
 block-state reads, validated resident block-state replacement, the current server tick, and the
-active retained entry's validated descriptor name and version.
+active retained entry's validated descriptor name and version. It also reconciles the server's
+value-only player roster into generation-checked handles: `playerHandleName(long)`,
+`playerHandleUuid(long)`, `playerHandleForUuid(String)`, `activePlayerCount()`, and
+`playerHandleIsActive(long)` read that worker snapshot only. The dedicated host never hands a
+server object, connection, ECS entity, or world guard to Java.
 `AdapterHost::start_with_setup` mints the corresponding capability token only
 from its worker's request ports; consuming it keeps that token with the retained loader state, and the
 dedicated `JavaAdapter::poll` call is the matching live producer through
@@ -999,6 +1003,13 @@ for a player the worker never observed does not mint a temporary object. Registr
 before dispatch, so neither callback runs under a server-world guard. A reconnect therefore gets a
 different `long`, while a plugin never receives an ECS pointer or a connection object.
 
+The same worker-local lifecycle map supports `playerHandleForUuid(String)`. It accepts a 36-character
+UUID string (hexadecimal case is ignored), searches only the roster snapshot already reconciled by
+the dedicated host, and returns the matching generation-checked handle. Unknown, malformed, or
+ambiguous UUIDs fail with a named Java error; the resolver never creates a handle just to satisfy a
+lookup. A disconnect removes the reverse mapping before the slot can be reused, so a lookup after
+departure cannot recover an old `long` or accidentally select a replacement player.
+
 Hermetic registry tests force slot reuse after release, exercise kind mismatch and capacity
 exhaustion, and verify that `clear` advances every live generation before reuse. The adapter's
 worker-local callback tests obtain both block and player handles, check that the player is available
@@ -1019,6 +1030,11 @@ worker snapshot: an active lifecycle handle reports `true`, a live
 callback-only handle reports `false`, and a released handle fails its
 generation check before the snapshot is read. The isolated shim fixture pins
 its `(J)Z` declaration and registration after every declaration validation.
+
+`playerHandleForUuid(String)` has a matching `(Ljava/lang/String;)J` declaration and registration
+fixture. Its controls cover malformed input before map lookup, an unknown UUID after disconnect,
+and slot reuse: the old handle is not returned for the departed profile. This is a value resolver
+over the copied roster, not a server or world object lookup.
 
 The same composed caller exercises recursive Java-to-Rust-to-Java callbacks below and above the
 budget. Depth `2` returns `REENTRANT:OK:3`; depth `4` attempts one more callback and receives
