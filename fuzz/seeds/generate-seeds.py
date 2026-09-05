@@ -232,6 +232,62 @@ def seed_packet_decoders() -> list[str]:
     return notes
 
 
+def write_varint(value: int) -> bytes:
+    """Encode a non-negative protocol VarInt without using Lodestone code."""
+    if value < 0:
+        raise Fatal(f"negative packet-frame length: {value}")
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        out.append(byte | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def seed_packet_frame_codec() -> list[str]:
+    """Frame captured wire payloads with independent stdlib codec primitives.
+
+    The captured fixtures deliberately contain packet *payloads* only: their
+    packet-id and stream framing were stripped by the capture fixture format.
+    This target needs the previous receive-layer bytes, so packet ids come from
+    the generator report and framing/compression comes from this Python
+    implementation (`zlib`, not `lodestone_net::Codec`).  Keeping the producer
+    independent is important: an encode/decode round trip with the Rust codec
+    would make an identical framing mistake on both sides look like a seed.
+    """
+    ids = load_packet_report()
+    fixtures = sorted(require(V26_2_FIXTURES).glob("*.hex"))
+    if not fixtures:
+        raise Fatal(f"no *.hex captures under {V26_2_FIXTURES}")
+
+    seeded = 0
+    for fixture in fixtures[:4]:
+        packet = next(((s, p) for pat, s, p in FIXTURE_PACKETS if pat.match(fixture.stem)), None)
+        if packet is None:
+            raise Fatal(f"{fixture.name} matches no FIXTURE_PACKETS pattern")
+        state, name = packet
+        packet_id = ids.get((state, name))
+        if packet_id is None:
+            raise Fatal(f"{name} is not a clientbound {state} packet in the vanilla report")
+        body = write_varint(packet_id) + read_hex_fixture(fixture)[:MAX_SEED_BYTES]
+
+        # Target layout is mode byte, feed-fragment byte, then a complete
+        # stream. Mode 0 has compression disabled. A one-byte feed chunk makes
+        # the codec observe every partial length prefix and frame body.
+        plain = write_varint(len(body)) + body
+        write_seed("packet_frame_codec", f"{fixture.stem}_plain.bin", b"\x00\x00" + plain)
+
+        # Mode 1 enables threshold=1, so this non-empty packet must take the
+        # zlib path. `zlib.compress` is a separate implementation from the
+        # Rust flate wrapper the target exercises.
+        compressed_body = write_varint(len(body)) + zlib.compress(body)
+        compressed = write_varint(len(compressed_body)) + compressed_body
+        write_seed("packet_frame_codec", f"{fixture.stem}_zlib.bin", b"\x01\x1f" + compressed)
+        seeded += 2
+    return [f"{seeded} independently framed captured packets -> packet_frame_codec"]
+
+
 def decompress_nbt(raw: bytes) -> bytes:
     if raw[:2] == b"\x1f\x8b":
         return gzip.decompress(raw)
@@ -530,18 +586,28 @@ def seed_resource_pack_zip() -> list[str]:
     `zipfile` output, not our own writer's.
     """
     lang = require(VANILLA_ASSETS / "lang")
+    # `ZipFile.writestr(name, data)` otherwise takes the current wall-clock
+    # time for every central-directory header. The archive is a generated
+    # corpus seed, so preserve its byte identity across regeneration when the
+    # source language files have not changed.
+    def write_entry(zf: zipfile.ZipFile, name: str, data: bytes) -> None:
+        entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        entry.compress_type = zipfile.ZIP_DEFLATED
+        zf.writestr(entry, data)
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name in ("en_us.json", "deprecated.json"):
             path = require(lang / name)
-            zf.writestr(f"assets/minecraft/lang/{name}", path.read_bytes()[:MAX_SEED_BYTES])
-        zf.writestr("assets/.mcassetsroot", b"")
+            write_entry(zf, f"assets/minecraft/lang/{name}", path.read_bytes()[:MAX_SEED_BYTES])
+        write_entry(zf, "assets/.mcassetsroot", b"")
     write_seed("resource_pack_zip_source", "vanilla_lang_pack.zip", buf.getvalue())
     return ["a zip of vanilla's own lang files -> resource_pack_zip_source"]
 
 
 FAMILIES = [
     seed_packet_decoders,
+    seed_packet_frame_codec,
     seed_nbt,
     seed_region,
     seed_loot_tables,

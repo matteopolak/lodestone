@@ -51,6 +51,10 @@ serde_json = "1"
 # `lodestone-model` (`Text::from_json`, `Text::from_nbt`) -- the latter
 # already depended on via `lodestone-model` above.
 lodestone-anvil = { path = "../crates/lodestone-anvil" }
+# The wire-framing target drives the sans-I/O receive state machine directly.
+# Packet-decoder targets start after this boundary, so they cannot exercise
+# split length prefixes, compression headers, or zlib payload length checks.
+lodestone-net = { path = "../crates/lodestone-net" }
 
 [[bin]]
 name = "v26_2_clientbound_decode"
@@ -139,6 +143,13 @@ bench = false
 [[bin]]
 name = "resource_pack_zip_source"
 path = "fuzz_targets/resource_pack_zip_source.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_frame_codec"
+path = "fuzz_targets/packet_frame_codec.rs"
 test = false
 doc = false
 bench = false
