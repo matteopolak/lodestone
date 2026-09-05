@@ -596,7 +596,9 @@ pub use integrated::{LanConfig, LanDiscovery, PublishConfig};
 #[cfg(not(target_arch = "wasm32"))]
 pub use properties::{ServerProperties, parse_seed};
 pub use crafting::{BUNDLED_CRAFTING_RECIPES, CraftingState, recipe_book};
-pub use inventory::{HOTBAR_SIZE, OFFHAND_NATIVE, PLAYER_NATIVE_SIZE, PlayerInventory};
+pub use inventory::{
+    HOTBAR_SIZE, OFFHAND_NATIVE, PLAYER_NATIVE_SIZE, InventoryMutationError, PlayerInventory,
+};
 pub use loot::{LootContext, LootTable, LootTableBuilder, LootTableResolver, LootTableSet, roll_loot};
 pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
