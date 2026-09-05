@@ -809,6 +809,9 @@ The player-handle entity-ID method uses that same live snapshot and returns the 
 network entity ID. The ID deliberately is not stored in the long-lived handle: reconnect and
 roster reconciliation remain authoritative, and an unavailable player is an error rather than a
 plausible sentinel.
+The player-handle game-mode method reads the same host snapshot. Rust carries one of four closed
+variants and maps them to Java integers only at the native boundary: survival 0, creative 1,
+adventure 2, and spectator 3. No string spelling or unknown numeric value can enter the snapshot.
 The generic registry separately reports wrong-kind use. A live player handle may
 also resolve through `playerHandleName(long)` and `playerHandleUuid(long)`. The
 latter returns a canonical lowercase UUID string from the fixed sixteen profile
