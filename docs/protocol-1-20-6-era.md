@@ -250,8 +250,12 @@ The same feature registers `V766ServerProtocol` for hosting protocol 766.
 
 `server_protocol::V766ServerProtocol` implements offline login, configuration,
 the Overworld join and teleport, chunk batches, player movement, block
-breaking updates, inventory drops, held-item release, hand swaps, and block-use
-placement. Its 766 `block_place` decoder lifts
+breaking updates, inventory drops, held-item release, hand swaps, chat, and
+block-use placement. `chat_message` carries its bounded text, timestamp, salt,
+optional signature, and fixed acknowledgement tail into `ServerBound::Chat`;
+the shared server verifies or accepts it according to its connection policy and
+publishes the result back through this era's anonymous-NBT `system_chat`
+encoder. Its 766 `block_place` decoder lifts
 the hand, signed packed position, face, block-local cursor, and prediction
 sequence into `ServerBound::UseItemOn`, the existing integrated-server placement
 consumer; it rejects invalid hand or face values and never accepts those bytes
@@ -313,7 +317,9 @@ Its hermetic companion reads an actual registry-selected hosted connection and
 requires every recorded payload to arrive before the finish signal.
 `tests/server_integration.rs` checks the actual registry-selected server/client
 path through Play, chunk receipt, movement-driven view recentering, and block
-break.
+break. It also sends chat through the real adapter, registry-selected host, and
+shared broadcast queue, then requires the pre-existing client decoder to expose
+the exact rendered system-chat event.
 Its enclosed-room lighting gate checks sky 0 inside and 15 outside, torch 14,
 adjacent air 13, and extinction after removing the torch. A separate boundary
 gate starts from isolated sky 0 beneath an opaque roof, removes a border

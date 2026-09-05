@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
+use lodestone_client::{ChatKind, ClientBuilder, ClientEvent, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Rotation, Vec3, Vec3f,
     VersionAdapter,
@@ -179,6 +179,69 @@ fn adapter_non_breaking_player_actions_reach_the_registry_selected_host() {
             "the action must remain unavailable before Play"
         );
     }
+}
+
+#[test]
+fn adapter_chat_reaches_the_registry_selected_host_consumer() {
+    let adapter = adapter_for(766);
+    let host = lodestone_registry::server_protocol_for_protocol(766)
+        .expect("protocol 766 must resolve to the hosted family");
+    let action = ClientAction::SendChat {
+        text: "adapter chat".to_owned(),
+    };
+    let Some((packet_id, payload)) = adapter
+        .encode_action(ConnectionState::Play, &action)
+        .expect("the protocol-766 adapter must encode chat")
+    else {
+        panic!("chat must have a serverbound packet");
+    };
+    assert_eq!(
+        host.decode(lodestone_core::State::Play, packet_id, &payload),
+        lodestone_server::ServerBound::Chat {
+            message: "adapter chat".to_owned(),
+            timestamp_millis: 0,
+            salt: 0,
+            signature: None,
+        },
+        "the real adapter and registry-selected host must agree on chat"
+    );
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_766_echoes_chat_through_the_client_event_stream() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(766)
+        .expect("protocol 766 must resolve to the hosted family");
+    let source = Arc::new(FixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let username = "ChatFixture";
+    let (mut handle, mut events) = ClientBuilder::new(
+        ServerAddress { host: "memory".to_owned(), port: 0 },
+        LoginProfile { username: username.to_owned(), uuid: uuid::Uuid::new_v4() },
+        Box::new(adapter_for(766)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(client_io);
+    handle.wait_for_spawn(Duration::from_secs(10)).await
+        .expect("protocol-766 chat fixture reaches Play");
+    handle.send_action(ClientAction::SendChat {
+        text: "end to end".to_owned(),
+    }).expect("joined client accepts chat");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let expected = format!("<{username}> end to end");
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, events.recv()).await
+            .expect("chat echo arrives before the deadline")
+            .expect("client event stream stays open");
+        if let ClientEvent::Chat { text, kind, .. } = event {
+            assert_eq!(kind, ChatKind::System, "the shared broadcaster uses system chat");
+            assert_eq!(text.to_plain_string(), expected);
+            break;
+        }
+    }
+    handle.shutdown();
+    server.shutdown().await;
 }
 
 #[tokio::test]

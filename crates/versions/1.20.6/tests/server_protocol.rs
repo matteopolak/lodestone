@@ -1,4 +1,4 @@
-use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
+use lodestone_core::{Ctx, Decode, Reader, State, Writer, encode_body};
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Vec3f};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_20_6::{V766ServerProtocol, packet_ids};
@@ -128,6 +128,47 @@ fn block_action_and_initial_chunk_batch_use_the_hosted_wire_shapes() {
     });
     assert_eq!(protocol.decode(State::Play, 0x08, &[0x40, 0x60, 0x00, 0x00]),
         ServerBound::ChunkBatchAcknowledged { desired_chunks_per_tick: 3.5 });
+}
+
+#[test]
+fn literal_chat_message_reaches_the_shared_chat_consumer() {
+    let protocol = V766ServerProtocol;
+    // Independently assembled protocol-766 chat_message fields: bounded text,
+    // timestamp, salt, absent signature, then a three-byte acknowledgement set.
+    // This deliberately does not use ChatMessage::encode, so the server decoder
+    // cannot agree with its own writer on a misplaced or omitted field.
+    let mut body = Writer::default();
+    body.string("wire chat");
+    body.i64(1_700_000_000_123);
+    body.i64(-42);
+    body.bool(false);
+    body.var_i32(0);
+    body.u8(0);
+    body.u8(0);
+    body.u8(0);
+    let body = body.into_vec();
+    assert_eq!(
+        protocol.decode(State::Play, 0x06, &body),
+        ServerBound::Chat {
+            message: "wire chat".to_owned(),
+            timestamp_millis: 1_700_000_000_123,
+            salt: -42,
+            signature: None,
+        },
+        "the protocol-766 chat packet must reach the shared broadcast consumer"
+    );
+    let mut trailing = body.clone();
+    trailing.push(0);
+    assert_eq!(
+        protocol.decode(State::Play, 0x06, &trailing),
+        ServerBound::Ignored,
+        "a trailing byte must not be mistaken for a valid acknowledgement shape"
+    );
+    assert_eq!(
+        protocol.decode(State::Configuration, 0x06, &body),
+        ServerBound::Ignored,
+        "chat must remain unavailable before the configuration-to-Play handoff"
+    );
 }
 
 #[test]
