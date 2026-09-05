@@ -267,6 +267,15 @@ impl CapabilitySet {
         self.0.insert(capability)
     }
 
+    /// Add every capability in `other` to this set.
+    ///
+    /// Discovery policy uses this to add a narrowly configured exception to a
+    /// host's baseline policy. It can only add permissions: the host baseline
+    /// remains the fail-closed floor for every plugin without an exception.
+    pub fn extend_from(&mut self, other: &Self) {
+        self.0.extend(other.iter());
+    }
+
     /// The capabilities in `self` that `policy` does not grant, in wire-name
     /// order. Empty means the request is satisfiable.
     ///

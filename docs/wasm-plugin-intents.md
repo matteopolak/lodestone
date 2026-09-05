@@ -26,7 +26,7 @@ Any WIT change requires increasing `host::ABI_WORLD`, rebuilding guests, and upd
 
 ## Configuration
 
-The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, and `observe:place`. An embedding host must grant the corresponding capability, and the guest manifest must request it.
+The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, and `observe:place`. A guest manifest must request every capability it uses; a request alone never changes the policy.
 
 ```toml
 capabilities = ["act:movement"]
@@ -39,6 +39,36 @@ capabilities = ["act:place", "observe:place"]
 ```toml
 capabilities = ["act:break", "observe:break"]
 ```
+
+For desktop directory discovery, use `PluginGrantPolicy` to add a narrow exception
+to the shell's unchanged fail-closed baseline. `PluginIdentity` contains the path
+to `plugin.toml` relative to the discovered `plugins/` directory **and** the
+manifest's `name`. Both fields must match. Do not key a grant by the module's
+reported `init` name or by a `.wasm` filename: neither identifies the configured
+installation instance.
+
+```rust
+use lodestone_wasm_host::{Capability, CapabilitySet, PluginGrantPolicy, PluginIdentity};
+
+let mut grants = PluginGrantPolicy::default();
+grants.grant(
+    PluginIdentity::new("builder/plugin.toml", "builder"),
+    CapabilitySet::from_iter([Capability::ActPlace, Capability::ObservePlace]),
+);
+lodestone::wasm_plugins::install_from_directory_with_grants(
+    &mut app,
+    std::path::Path::new("plugins"),
+    &grants,
+)?;
+```
+
+`PluginHost::load_directory_with_grants` adds that pair only while loading the
+matching manifest; all unlisted plugins retain the host baseline. It recomputes
+the path-relative match each time discovery runs, so a host rebuilt for reload
+uses the same policy. Changing grants does not alter a running guest's authority:
+reload the host deliberately. `install_from_directory` remains the convenient
+empty-grants helper for shell and headless-library consumers that want no
+exceptions.
 
 ## Dependencies
 
