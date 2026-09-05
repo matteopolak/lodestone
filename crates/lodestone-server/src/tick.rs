@@ -2495,20 +2495,27 @@ async fn run_tick_loop_with_weather_impl<W>(
         // has to happen somewhere, and here is where both queues are in scope.
         // `crate::fluid::TICK_FLUID` is the only kind that goes left.
         for pending in block_tick_out.drain_scheduled_ticks() {
-            let queue = if pending.kind == crate::fluid::TICK_FLUID {
-                &mut *fluid_ticks
+            if pending.kind == crate::fluid::TICK_FLUID {
+                if fluid_ticks.has_scheduled(pending.pos, &pending.kind) {
+                    continue;
+                }
+                fluid_ticks.schedule(
+                    pending.pos,
+                    pending.kind,
+                    game_tick + pending.trigger_tick,
+                    pending.priority,
+                );
             } else {
-                &mut *block_ticks
-            };
-            if queue.has_scheduled(pending.pos, &pending.kind) {
-                continue;
+                if block_ticks.has_scheduled(pending.pos, &pending.kind) {
+                    continue;
+                }
+                block_ticks.schedule(
+                    pending.pos,
+                    pending.kind,
+                    game_tick + pending.trigger_tick,
+                    pending.priority,
+                );
             }
-            queue.schedule(
-                pending.pos,
-                pending.kind,
-                game_tick + pending.trigger_tick,
-                pending.priority,
-            );
         }
 
         // Resolve each target-block hit from `MobSim::resolve_projectile_impacts`.

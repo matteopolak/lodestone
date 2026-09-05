@@ -55,7 +55,7 @@
 //! silently dropped, regardless of the new call's `trigger_tick` or
 //! `priority`. [`ScheduledTickQueue::schedule`] mirrors this exactly.
 
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -227,6 +227,33 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
         true
     }
 
+    /// Inserts a tick with an order assigned by a containing queue.
+    ///
+    /// A chunk-local container must not restart the final drain-order
+    /// tiebreaker for each chunk. Its world-level owner supplies one sequence
+    /// shared by every contained queue through this internal entry point.
+    fn schedule_with_sub_tick_order(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: T,
+        trigger_tick: u64,
+        priority: TickPriority,
+        sub_tick_order: u64,
+    ) -> bool {
+        let key = (pos, kind.clone());
+        if !self.scheduled.insert(key) {
+            return false;
+        }
+        self.heap.push(HeapEntry(ScheduledTick {
+            pos,
+            kind,
+            trigger_tick,
+            priority,
+            sub_tick_order,
+        }));
+        true
+    }
+
     /// `true` iff a tick for `(pos, kind)` is currently pending — mirrors
     /// the real per-chunk container's own has-scheduled-tick query.
     #[must_use]
@@ -289,6 +316,22 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
         out
     }
 
+    fn peek_due(&self, current_tick: u64) -> Option<&ScheduledTick<T>> {
+        self.heap
+            .peek()
+            .map(|entry| &entry.0)
+            .filter(|tick| tick.trigger_tick <= current_tick)
+    }
+
+    fn pop_due(&mut self, current_tick: u64) -> Option<ScheduledTick<T>> {
+        let due = self.peek_due(current_tick).is_some();
+        due.then(|| {
+            let entry = self.heap.pop().expect("just observed a due scheduled tick").0;
+            self.scheduled.remove(&(entry.pos, entry.kind.clone()));
+            entry
+        })
+    }
+
     /// Removes and returns the first pending tick at `pos` whose `kind`
     /// satisfies `matches`, regardless of `trigger_tick` — i.e. **interrupts**
     /// a pending tick rather than waiting for it to come due.
@@ -332,6 +375,179 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
         }
         self.heap = BinaryHeap::from(rebuilt);
         found
+    }
+}
+
+/// A scheduled-tick sink used by a tick body that may schedule its own next
+/// pass. `ScheduledTickQueue` is the single-container reduction used by block
+/// ticks; [`ChunkScheduledTickQueue`] is the chunk-local fluid implementation.
+pub trait ScheduledTickSink<T> {
+    /// Schedules one pending tick, returning `false` for the normal
+    /// per-position deduplication case.
+    fn schedule_tick(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: T,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool;
+}
+
+impl<T: Eq + Hash + Clone> ScheduledTickSink<T> for ScheduledTickQueue<T> {
+    fn schedule_tick(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: T,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool {
+        self.schedule(pos, kind, trigger_tick, priority)
+    }
+}
+
+/// A world-owned collection of chunk-local scheduled-tick queues.
+///
+/// Every position is routed to the queue for its containing chunk. The outer
+/// owner assigns the sub-tick sequence, then selects the earliest due head
+/// across all chunk queues. That preserves the established global order
+/// `(trigger tick, priority, insertion order)` even when a fluid update in one
+/// column schedules its next update across a chunk border. The current tick
+/// task still executes that selected order serially; this is a storage and
+/// hand-off boundary, not permission to run columns concurrently.
+#[derive(Debug)]
+pub struct ChunkScheduledTickQueue<T> {
+    queues: BTreeMap<(i32, i32), ScheduledTickQueue<T>>,
+    next_sub_tick_order: u64,
+}
+
+impl<T> Default for ChunkScheduledTickQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> ChunkScheduledTickQueue<T> {
+    /// An empty world-owned collection of chunk queues.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            queues: BTreeMap::new(),
+            next_sub_tick_order: 0,
+        }
+    }
+
+    /// Number of pending ticks across all local queues.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.queues.values().map(ScheduledTickQueue::len).sum()
+    }
+
+    /// `true` iff no chunk owns a pending tick.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.queues.is_empty()
+    }
+
+    fn chunk_for(pos: (i32, i32, i32)) -> (i32, i32) {
+        (pos.0.div_euclid(16), pos.2.div_euclid(16))
+    }
+}
+
+impl<T: Eq + Hash + Clone> ChunkScheduledTickQueue<T> {
+    /// Routes a tick to the queue for `pos`'s chunk while assigning an order
+    /// from the single world-wide sequence.
+    pub fn schedule(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: T,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool {
+        let chunk = Self::chunk_for(pos);
+        let queue = self.queues.entry(chunk).or_default();
+        let order = self.next_sub_tick_order;
+        let scheduled = queue.schedule_with_sub_tick_order(pos, kind, trigger_tick, priority, order);
+        if scheduled {
+            self.next_sub_tick_order += 1;
+        }
+        scheduled
+    }
+
+    /// `true` iff `pos`'s local queue holds a pending tick of `kind`.
+    #[must_use]
+    pub fn has_scheduled(&self, pos: (i32, i32, i32), kind: &T) -> bool {
+        self.queues
+            .get(&Self::chunk_for(pos))
+            .is_some_and(|queue| queue.has_scheduled(pos, kind))
+    }
+
+    /// Every pending tick across every local queue. The iterator order is not
+    /// drain order; callers that need execution order must use
+    /// [`drain_due`](Self::drain_due).
+    pub fn iter(&self) -> impl Iterator<Item = &ScheduledTick<T>> {
+        self.queues.values().flat_map(ScheduledTickQueue::iter)
+    }
+
+    /// Drains due ticks in the world-wide ordering contract, while keeping the
+    /// pending records physically owned by their chunk until this point.
+    pub fn drain_due(&mut self, current_tick: u64, max_to_process: usize) -> Vec<ScheduledTick<T>> {
+        let mut out = Vec::new();
+        while out.len() < max_to_process {
+            let next_chunk = self
+                .queues
+                .iter()
+                .filter_map(|(&chunk, queue)| queue.peek_due(current_tick).map(|tick| (chunk, tick)))
+                .min_by_key(|(_, tick)| (tick.trigger_tick, tick.priority, tick.sub_tick_order))
+                .map(|(chunk, _)| chunk);
+            let Some(chunk) = next_chunk else {
+                break;
+            };
+            let (tick, empty) = {
+                let queue = self
+                    .queues
+                    .get_mut(&chunk)
+                    .expect("selected chunk must still have a scheduled queue");
+                let tick = queue
+                    .pop_due(current_tick)
+                    .expect("selected chunk must still have the due head");
+                (tick, queue.is_empty())
+            };
+            if empty {
+                self.queues.remove(&chunk);
+            }
+            out.push(tick);
+        }
+        out
+    }
+
+    /// Removes the first matching tick in `pos`'s local queue.
+    pub fn take_matching(
+        &mut self,
+        pos: (i32, i32, i32),
+        matches: impl FnMut(&T) -> bool,
+    ) -> Option<ScheduledTick<T>> {
+        let chunk = Self::chunk_for(pos);
+        let (tick, empty) = {
+            let queue = self.queues.get_mut(&chunk)?;
+            let tick = queue.take_matching(pos, matches);
+            (tick, queue.is_empty())
+        };
+        if empty {
+            self.queues.remove(&chunk);
+        }
+        tick
+    }
+}
+
+impl<T: Eq + Hash + Clone> ScheduledTickSink<T> for ChunkScheduledTickQueue<T> {
+    fn schedule_tick(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: T,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool {
+        self.schedule(pos, kind, trigger_tick, priority)
     }
 }
 
@@ -409,7 +625,7 @@ pub struct ScheduledTickQueues {
     /// The real per-world block-tick queue.
     pub block: ScheduledTickQueue<String>,
     /// The real per-world fluid-tick queue.
-    pub fluid: ScheduledTickQueue<String>,
+    pub fluid: ChunkScheduledTickQueue<String>,
 }
 
 impl ScheduledTickHandle {
@@ -453,12 +669,15 @@ impl ScheduledTickHandle {
             }
         };
         for tick in staged {
-            let queue = if tick.fluid {
-                &mut guard.fluid
+            if tick.fluid {
+                guard
+                    .fluid
+                    .schedule(tick.pos, tick.kind, tick.trigger_tick, tick.priority);
             } else {
-                &mut guard.block
-            };
-            queue.schedule(tick.pos, tick.kind, tick.trigger_tick, tick.priority);
+                guard
+                    .block
+                    .schedule(tick.pos, tick.kind, tick.trigger_tick, tick.priority);
+            }
         }
         f(&mut guard)
     }
@@ -742,5 +961,34 @@ mod tests {
         let k2: Vec<&str> = d2.iter().map(|t| t.kind).collect();
         assert_eq!(k1, k2);
         assert_eq!(k1, vec!["c", "b", "a"]);
+    }
+
+    /// The local queues must not let their map order replace the world-wide
+    /// insertion tiebreaker. The first entry belongs to chunk `(1, 0)`, while
+    /// the second belongs to `(0, 0)`; a drain ordered by chunk key would
+    /// reverse them.
+    #[test]
+    fn chunk_local_queues_keep_global_insertion_order_across_a_column_border() {
+        let mut q: ChunkScheduledTickQueue<&'static str> = ChunkScheduledTickQueue::new();
+        assert!(q.schedule((16, 0, 0), "east-first", 10, TickPriority::Normal));
+        assert!(q.schedule((15, 0, 0), "west-second", 10, TickPriority::Normal));
+
+        let drained = q.drain_due(10, usize::MAX);
+        let kinds: Vec<_> = drained.iter().map(|tick| tick.kind).collect();
+        assert_eq!(kinds, ["east-first", "west-second"]);
+    }
+
+    /// Priority remains ahead of insertion order even when the contenders are
+    /// physically held by different chunks. This is the second part of the
+    /// cross-column ordering contract, distinct from the insertion control.
+    #[test]
+    fn chunk_local_queues_compare_priority_before_cross_column_insertion_order() {
+        let mut q: ChunkScheduledTickQueue<&'static str> = ChunkScheduledTickQueue::new();
+        assert!(q.schedule((16, 0, 0), "normal-first", 10, TickPriority::Normal));
+        assert!(q.schedule((15, 0, 0), "high-second", 10, TickPriority::High));
+
+        let drained = q.drain_due(10, usize::MAX);
+        let kinds: Vec<_> = drained.iter().map(|tick| tick.kind).collect();
+        assert_eq!(kinds, ["high-second", "normal-first"]);
     }
 }

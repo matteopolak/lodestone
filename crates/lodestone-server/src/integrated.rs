@@ -4439,12 +4439,121 @@ mod tests {
         }
     }
 
+    /// A retained two-column water fixture for the scheduled-fluid consumer
+    /// gate. The source is cloneable because the server owns one clone while
+    /// this test keeps the setup handle; the actual assertion reads through
+    /// `IntegratedServer::resident_block_state_id`, never this source.
+    #[derive(Debug, Clone)]
+    struct FluidFixtureSource {
+        columns: Arc<Mutex<HashMap<(i32, i32), ChunkColumn>>>,
+    }
+
+    impl FluidFixtureSource {
+        fn flat_column() -> ChunkColumn {
+            let mut column = ChunkColumn::new(0, 16);
+            for x in 0..16 {
+                for z in 0..16 {
+                    column.set_block(x, 0, z, "minecraft:stone");
+                }
+            }
+            column
+        }
+
+        fn water_at_east_edge() -> Self {
+            let mut columns = HashMap::new();
+            let mut origin = Self::flat_column();
+            origin.set_block(15, 1, 0, "minecraft:water[level=0]");
+            columns.insert((0, 0), origin);
+            columns.insert((1, 0), Self::flat_column());
+            Self {
+                columns: Arc::new(Mutex::new(columns)),
+            }
+        }
+    }
+
+    impl ChunkSource for FluidFixtureSource {
+        fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+            self.columns
+                .lock()
+                .expect("fluid fixture columns poisoned")
+                .get(&(cx, cz))
+                .cloned()
+                .unwrap_or_else(Self::flat_column)
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.column(x.div_euclid(16), z.div_euclid(16))
+                .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+                .to_string()
+        }
+
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            self.column(x.div_euclid(16), z.div_euclid(16))
+                .biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
+                .to_string()
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+            let chunk = (x.div_euclid(16), z.div_euclid(16));
+            self.columns
+                .lock()
+                .expect("fluid fixture columns poisoned")
+                .entry(chunk)
+                .or_insert_with(Self::flat_column)
+                .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+        }
+    }
+
     fn total(calls: &Arc<Mutex<HashMap<(i32, i32), usize>>>) -> usize {
         calls
             .lock()
             .expect("counting source lock poisoned")
             .values()
             .sum()
+    }
+
+    /// The actual `IntegratedServer` tick loop consumes an inbound fluid tick
+    /// through the chunk-local queue, then writes the spread into the adjacent
+    /// column. A direct queue test cannot detect a queue that is never used by
+    /// the server, so this checks the retained server world after scheduling.
+    #[tokio::test]
+    async fn integrated_server_fluid_tick_crosses_into_its_next_chunk_owner() {
+        let source = FluidFixtureSource::water_at_east_edge();
+        let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
+            Silent,
+            source,
+            (0..=0, 0..=0),
+            (8, 8),
+            0,
+            2,
+        );
+        let mut pending = crate::scheduled_tick::ScheduledTickQueue::new();
+        assert!(pending.schedule(
+            (15, 1, 0),
+            crate::fluid::TICK_FLUID.to_owned(),
+            1,
+            crate::scheduled_tick::TickPriority::Normal,
+        ));
+        server
+            .block_ticks()
+            .expect("a ticking integrated server exposes its inbound tick feed")
+            .request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if server
+                .resident_block_state_id(16, 1, 0)
+                .is_some_and(|state| state.name() == "minecraft:water")
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the integrated tick loop reached {:?} ticks without moving the scheduled water into chunk (1, 0)",
+                server.tick_stats().map(|stats| stats.tick_count),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     /// **The production wiring check.** `server::tests`
@@ -5049,6 +5158,7 @@ mod tests {
                 biome_sections: Vec::new(),
                 surface_biome_ids: Vec::new(),
                 motion_blocking_heights: Vec::new(),
+                block_entity_nbt: Vec::new(),
                 extensions: Vec::new(),
             })),
         };
