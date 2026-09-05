@@ -52,6 +52,7 @@ impl WindowApp {
             ui: UiState::new(),
             nav: MenuNav::new(),
             statuses: StatusCache::new(),
+            friends: FriendsApp::new(),
             menu: None,
             favicons: crate::menu::render::FaviconCache::new(),
             cursor: (0.0, 0.0),

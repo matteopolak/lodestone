@@ -6,6 +6,8 @@
 
 `lodestone::friends_runtime` is the shell-owned companion boundary. It retains at most one selected account session, schedules all Friends work, and exposes a `FriendsView` with no bearer credential for the eventual title and pause-menu UI.
 
+`app::friends::FriendsApp` is the execution boundary around that coordinator. Native builds run it on a named worker with its own current-thread async runtime; browser builds use a local-task-compatible handle. Both receive only account metadata and activity intent, then return only `FriendsView` snapshots. Selected-account resolution, cache refresh, service calls, and the resolved session stay private to the executor. The frame calls `FriendsApp::sync` with the account switcher's selected profile and the game activity; it sends only changes, filters late views from a prior account, and gives menus a credential-free `view` accessor.
+
 ## How it works
 
 `FriendsService::production` owns a five-second, redirect-disabled HTTP client and a fixed `https://api.minecraftservices.com/` origin. A caller passes `&Session` to each operation, so the service neither opens token storage nor refreshes credentials. The session's bearer header is added only to the fixed request origin.
@@ -18,6 +20,8 @@ The implementation uses the documented route family: `GET`/`PUT /friends`, `GET`
 
 The non-default `friends-test-service` feature exposes `for_test_base` for downstream hermetic tests. It accepts only `http` or `https` loopback origins. Production has no origin override, including through environment variables or preferences.
 
+The worker always resolves a selected account before the first attributes request, and the coordinator permits only one in-flight operation. A resolution that no longer matches the selected profile is discarded. Service completions are applied while the worker still owns the session, then a view is emitted; no completion channel carries a `Session` or bearer token. The native executor uses the standard production service. The browser executor has the same ordering seam but reports the service unavailable until a redirect-safe browser transport is available.
+
 `FriendsRuntime` drives a pure `FriendsCoordinator` through an injected `FriendsClock`. The coordinator emits a credential-free `FriendsOperation`; only the worker that owns the runtime borrows `FriendsRuntime::session` to run a non-resolution request. The operation result is then fed back into the coordinator. This is the boundary that permits the native single-worker thread and browser local-task runner to share ordering and retry behavior without letting a session into menu state.
 
 The selected account is part of every resolution completion. A completion for an account that was switched away while it ran is ignored, and switching clears snapshots, validators, pending mutations, retry state, and the retained session before the next account can be displayed. Before work, the runtime re-resolves a session inside the existing five-minute expiry margin. One `401` clears it and permits one resolution plus one retry; a mutation that fails after a transport ambiguity is discarded rather than replayed.
@@ -27,6 +31,8 @@ Friends and presence keep independent entity tags and due times, but share one i
 ## How to change it
 
 Keep wire request and response structs private in `lodestone_auth::friends`; promote only domain values that a runtime or menu genuinely consumes. Add a loopback test that asserts the exact method, path, bearer header, validators, and JSON body before changing a route or field. Do not add invitation, join, signaling, or peer identity fields here: that transport was removed before 26.2 release, as the official pre-release notes record. [Pre-release boundary](https://feedback.minecraft.net/hc/en-us/articles/46153634280333-Minecraft-Java-Edition-26-2-Pre-release-1)
+
+When changing the shell executor, preserve the `Select → ResolveSession → FetchAttributes` ordering and keep `FriendsView` as the only worker-to-frame type. Native work belongs in `app::friends::run_native_worker`; browser work belongs in the local-task seam, not a blocking executor. The application must call `FriendsApp::shutdown` as it exits so its account-scoped state is cleared and the native worker is asked to stop.
 
 Put polling, cooldown, account replacement, and authentication-retry decisions in `FriendsCoordinator`, not in menu callbacks or the worker. The worker must complete each emitted operation exactly once before polling again. If an app integration adds a new activity source, call `FriendsRuntime::set_desired_presence`; do not send a presence HTTP request directly. `FriendsView` is the only object frame code should retain or clone.
 

@@ -224,7 +224,10 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.friends.shutdown();
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 if let (Some(gpu), Some(target), Some(render)) = (
                     self.gpu.as_ref(),
