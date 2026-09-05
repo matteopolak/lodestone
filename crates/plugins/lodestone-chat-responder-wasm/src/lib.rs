@@ -36,6 +36,8 @@ use lodestone::plugin::types::{InventoryClick, InventoryClickButton};
     feature = "inventory-hotbar-swap-invalid"
 ))]
 use lodestone::plugin::types::InventoryHotbarSwap;
+#[cfg(any(feature = "inventory-throw", feature = "inventory-throw-invalid"))]
+use lodestone::plugin::types::{InventoryThrow, InventoryThrowMode};
 #[cfg(feature = "commands")]
 use lodestone::plugin::types::CommandAnchor;
 #[cfg(feature = "look")]
@@ -88,7 +90,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.15.0".to_string(),
+            abi: "lodestone:plugin@0.16.0".to_string(),
             commands: command_specs(),
         }
     }
@@ -164,10 +166,22 @@ impl Guest for ChatResponder {
             hotbar: 9,
         })];
 
+        #[cfg(feature = "inventory-throw")]
+        return vec![Action::InventoryThrow(InventoryThrow {
+            slot: 36,
+            mode: InventoryThrowMode::Stack,
+        })];
+
+        #[cfg(feature = "inventory-throw-invalid")]
+        return vec![Action::InventoryThrow(InventoryThrow {
+            slot: u16::MAX,
+            mode: InventoryThrowMode::One,
+        })];
+
         #[cfg(feature = "inventory-drop-cursor")]
         return vec![Action::InventoryDropCursor];
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-drop-cursor")))]
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor")))]
         return respond(events);
     }
 

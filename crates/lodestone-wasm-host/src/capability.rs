@@ -120,6 +120,12 @@ pub enum Capability {
     /// selected hotbar position, while the shell still owns slot validation,
     /// prediction, vetoes, and protocol egress.
     ActInventoryHotbarSwap,
+    /// Drop one item or a complete stack from a live menu slot through the
+    /// shell-owned predictor.
+    ///
+    /// This is intentionally separate from every other inventory mutation: it
+    /// removes item contents from a slot and can create a world-side drop.
+    ActInventoryThrow,
     /// Drop the complete carried stack outside the live menu through the
     /// shell-owned predictor.
     ///
@@ -178,6 +184,7 @@ impl Capability {
         Self::ActInventoryClick,
         Self::ActInventoryQuickMove,
         Self::ActInventoryHotbarSwap,
+        Self::ActInventoryThrow,
         Self::ActInventoryDropCursor,
         Self::ObservePlace,
         Self::ObserveBreak,
@@ -206,6 +213,7 @@ impl Capability {
             Self::ActInventoryClick => "act:inventory-click",
             Self::ActInventoryQuickMove => "act:inventory-quick-move",
             Self::ActInventoryHotbarSwap => "act:inventory-hotbar-swap",
+            Self::ActInventoryThrow => "act:inventory-throw",
             Self::ActInventoryDropCursor => "act:inventory-drop-cursor",
             Self::ObservePlace => "observe:place",
             Self::ObserveBreak => "observe:break",
@@ -249,6 +257,7 @@ impl Capability {
             | Self::ActInventoryClick
             | Self::ActInventoryQuickMove
             | Self::ActInventoryHotbarSwap
+            | Self::ActInventoryThrow
             | Self::ActInventoryDropCursor
             | Self::ObservePlace
             | Self::ObserveBreak
@@ -441,6 +450,10 @@ mod tests {
         assert!(
             !policy.contains(Capability::ActInventoryDropCursor),
             "act:inventory-drop-cursor must not be granted by default"
+        );
+        assert!(
+            !policy.contains(Capability::ActInventoryThrow),
+            "act:inventory-throw must not be granted by default"
         );
         assert!(policy.contains(Capability::ObserveChat));
         assert!(policy.contains(Capability::ActChat));

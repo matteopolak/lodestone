@@ -36,7 +36,7 @@ use lodestone_physics::{Aabb, CollisionView, PlayerState, Vec3d};
 use lodestone::{config::Config, sim::Sim};
 use lodestone_wasm_host::{
     Capability, CapabilitySet, InventoryClickButton, InventoryClickIntent, InventoryClickMode,
-    PendingWasmMenuClicks, PluginHost, WasmHostPlugin, WasmPlugins,
+    InventoryThrowMode, PendingWasmMenuClicks, PluginHost, WasmHostPlugin, WasmPlugins,
 };
 
 fn chat(text: &str) -> GameEvent {
@@ -143,6 +143,16 @@ fn inventory_drop_cursor_capabilities() -> CapabilitySet {
 fn inventory_drop_cursor_host_policy() -> CapabilitySet {
     let mut policy = CapabilitySet::default_policy();
     policy.insert(Capability::ActInventoryDropCursor);
+    policy
+}
+
+fn inventory_throw_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActInventoryThrow])
+}
+
+fn inventory_throw_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActInventoryThrow);
     policy
 }
 
@@ -1000,6 +1010,88 @@ fn a_wasm_inventory_cursor_drop_is_default_denied_before_the_shell_handoff() {
             .take()
             .is_empty(),
         "an ungranted cursor drop must not reach the shell handoff"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+/// A separately-built guest reaches the bounded shell handoff with an explicit
+/// complete-stack throw. The request contains no menu contents, cursor, or
+/// packet fields; the shell chooses the live predictor operation.
+#[test]
+fn a_wasm_inventory_throw_reaches_the_bounded_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-throw"]);
+    let mut host = PluginHost::new(inventory_throw_host_policy()).expect("engine");
+    host.load_file("inventory-throw", &wasm, &inventory_throw_capabilities())
+        .expect("the explicitly granted throw fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take(),
+        vec![InventoryClickIntent::Throw {
+            slot: 36,
+            mode: InventoryThrowMode::Stack,
+        }],
+        "the guest must hand off only bounded throw data, never menu state or a packet"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// The maximum copied slot remains intact until the shell validates it against
+/// the live menu. This is the invalid-input control for the real guest route.
+#[test]
+fn a_wasm_inventory_throw_keeps_the_invalid_slot_bounded_until_shell_validation() {
+    let wasm = support::build_example_plugin(&["inventory-throw-invalid"]);
+    let mut host = PluginHost::new(inventory_throw_host_policy()).expect("engine");
+    host.load_file(
+        "inventory-throw-invalid",
+        &wasm,
+        &inventory_throw_capabilities(),
+    )
+    .expect("the explicitly granted invalid throw fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take(),
+        vec![InventoryClickIntent::Throw {
+            slot: u16::MAX,
+            mode: InventoryThrowMode::One,
+        }]
+    );
+}
+
+/// The same guest output under the fail-closed default policy is counted and
+/// never reaches the shell queue; the granted test above is its control.
+#[test]
+fn a_wasm_inventory_throw_is_default_denied_before_the_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-throw"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "inventory-throw",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log]),
+    )
+    .expect("a data-flow action may be withheld after the guest loads");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take()
+            .is_empty(),
+        "an ungranted throw must not reach the shell handoff"
     );
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
 }

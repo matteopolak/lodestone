@@ -110,7 +110,8 @@ pub mod host;
 pub mod manifest;
 
 pub use abi::{
-    IntentAction, InventoryClickButton, InventoryClickIntent, InventoryClickMode, LoweredAction,
+    IntentAction, InventoryClickButton, InventoryClickIntent, InventoryClickMode, InventoryThrowMode,
+    LoweredAction,
     MovementOverride,
     capability_for, lift_break_outcome, lift_command_context, lift_event, lift_place_outcome,
     lift_verdict_context, lower_action,
@@ -125,7 +126,7 @@ pub use host::{
     ChatKind, ChatMessage, CommandAnchor, CommandContext,
     CommandEntity, CommandExecution, CommandOutcome, CommandPosition, CommandRotation, CommandSpec,
     DEFAULT_FUEL_PER_TICK, DEFAULT_FUEL_PER_VERDICT, DEFAULT_MEMORY_LIMIT, Event, Hand, Health,
-    HostError, InventoryHotbarSwap, LoadError, LoadedPlugin, LogLevel, LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,
+    HostError, InventoryHotbarSwap, InventoryThrow, LoadError, LoadedPlugin, LogLevel, LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,
     PlaceRejection, PlaceStatus, PluginGrantPolicy, PluginHost, PluginIdentity, PluginInfo, SectionBlocksChanged, SectionPos,
     ReloadError, VerdictDispatch,
 };
