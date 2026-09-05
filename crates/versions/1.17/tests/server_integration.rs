@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, Rotation, Vec3};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 use lodestone_v1_17::adapter_for;
 
@@ -91,6 +91,14 @@ async fn registry_selected_protocol_756_reaches_play_and_confirms_a_block_break(
         .await
         .expect("block update reaches the protocol-756 client");
 
+    handle
+        .move_to(Vec3::new(24.0, 100.0, 8.0), Rotation::default(), true, false)
+        .expect("the 1.17 client emits a position packet");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
+        .await
+        .expect("the protocol-756 host recenters the view after movement");
+
     handle.shutdown();
     server.shutdown().await;
 }
@@ -138,6 +146,14 @@ async fn registry_selected_protocol_758_reaches_play_and_confirms_a_block_break(
         .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air))
         .await
         .expect("block update reaches the protocol-758 client");
+
+    handle
+        .move_to(Vec3::new(24.0, 100.0, 8.0), Rotation::default(), true, false)
+        .expect("the 1.18 client emits a position packet");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
+        .await
+        .expect("the protocol-758 host recenters the view after movement");
 
     handle.shutdown();
     server.shutdown().await;

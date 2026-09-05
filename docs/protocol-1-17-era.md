@@ -72,6 +72,18 @@ controls join each registry-selected server, read a known chunk block and
 observe its block update after a break. Real 1.17.1 and 1.18.2 client sessions
 remain required validation.
 
+The same hosts decode all four ordinary Play movement bodies. Position and
+position-with-look become `ServerBound::PlayerMoved`; look-only becomes
+`PlayerRotated`; and the grounded-only form becomes `PlayerStatusOnly`. This
+is not just player state bookkeeping: the integrated server's
+`dispatch_play_packet`
+uses a moved position to recenter `ViewTracker`, stream the newly visible
+chunk strip, move the chunk ticket, and republish the tick anchor. The
+in-memory tests cross from chunk `(0, 0)` into `(1, 0)` through the real
+registry-selected adapter and server and wait for that newly streamed chunk;
+the protocol tests also decode literal negative/fractional wire bodies so the
+server-side lift cannot be justified by a symmetric encoder round trip.
+
 ### One block-state table and one entity table, which is not what the era below needs
 
 The 1.14 era needs three of each, because every release inserts blocks and
