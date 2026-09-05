@@ -867,7 +867,7 @@ mod tests {
             ExpectedResponse {
                 status: "200 OK",
                 headers: "ETag: \"presence-v1\"\r\n",
-                body: r#"{"presence":[{"profileId":"61699b2e-d327-4a01-9f1e-0ea8c3f06bc6","status":"NOT_YET_KNOWN","lastUpdated":"2026-09-05T00:00:00Z"}]}"#,
+                body: r#"{"presence":[{"profileId":"61699b2e-d327-4a01-9f1e-0ea8c3f06bc6","status":"PLAYING_SERVER","lastUpdated":"2026-09-05T00:00:00Z"}]}"#,
             },
         ])
         .await;
@@ -933,7 +933,7 @@ mod tests {
         let CachedResponse::Fresh { value, .. } = presence else {
             panic!("a 200 presence response must be fresh");
         };
-        assert_eq!(value.entries[0].status, PresenceStatus::Unknown);
+        assert_eq!(value.entries[0].status, PresenceStatus::Server);
 
         let captured: Vec<_> = (0..5)
             .map(|_| requests.recv().expect("captured request"))

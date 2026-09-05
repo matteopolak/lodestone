@@ -5,7 +5,9 @@
 //! and relationship changes leave as [`FriendsIntent`] values for the app to
 //! hand back to its Friends worker.
 
-use lodestone_auth::friends::{FriendMutation, FriendProfile, FriendsPreferences, FriendsSnapshot};
+use lodestone_auth::friends::{
+    FriendMutation, FriendProfile, FriendsPreferences, FriendsSnapshot, PresenceStatus,
+};
 
 use crate::friends_runtime::{FriendsError, FriendsView, FriendsViewState};
 
@@ -360,6 +362,33 @@ impl Entry<'_> {
             Self::Outgoing(profile) => format!("{} (sent)", profile.name),
         }
     }
+
+    /// Presence is returned only for established Friends. Pending requests are
+    /// deliberately relationship-only rows, so an absent presence entry stays
+    /// blank instead of being presented as an offline assertion.
+    fn presence_status(self, view: &FriendsView) -> Option<PresenceStatus> {
+        let Self::Friend(profile) = self else {
+            return None;
+        };
+        view.presence
+            .as_ref()?
+            .entries
+            .iter()
+            .find(|entry| entry.profile_id == profile.profile_id)
+            .map(|entry| entry.status)
+    }
+}
+
+fn presence_label(status: PresenceStatus) -> &'static str {
+    match status {
+        PresenceStatus::Offline => "Offline",
+        PresenceStatus::Online => "Online",
+        PresenceStatus::LocalWorld => "Playing Singleplayer",
+        PresenceStatus::LanWorld => "Playing LAN",
+        PresenceStatus::Realm => "Playing Realms",
+        PresenceStatus::Server => "Playing on Server",
+        PresenceStatus::Unknown => "Unknown",
+    }
 }
 
 #[must_use]
@@ -410,6 +439,11 @@ pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
         let y = HEADER_H + widget::LIST_CONTENT_PADDING + index as f32 * ROW_H - nav.scroll.floor();
         rows.push(MenuRow {
             label: entry.label(),
+            trailing: entry
+                .presence_status(nav.view())
+                .map(presence_label)
+                .unwrap_or_default()
+                .to_owned(),
             enabled: true,
             slot: Some(Slot {
                 origin: Origin::ScreenTop,
@@ -669,6 +703,43 @@ mod tests {
         let frame = frame(&nav);
         assert!(frame.rows.iter().any(|row| row.label == "Friends: On" && !row.enabled));
         assert_eq!(frame.notice.as_ref().map(|notice| notice.text.as_str()), Some("Saving Friends settings..."));
+    }
+
+    #[test]
+    fn service_presence_reaches_the_established_friend_row_only() {
+        // The UI must consume a credential-free service result rather than
+        // infer a status from the relationship list.
+        let alice = profile(1, "Alice");
+        let bob = profile(2, "Bob");
+        let mut view = ready(FriendsSnapshot {
+            friends: vec![alice.clone()],
+            incoming: vec![bob],
+            ..FriendsSnapshot::default()
+        });
+        view.presence = Some(lodestone_auth::friends::PresenceSnapshot {
+            entries: vec![lodestone_auth::friends::PresenceEntry {
+                profile_id: alice.profile_id,
+                status: PresenceStatus::Server,
+                last_updated: "2026-09-05T00:00:00Z".to_owned(),
+            }],
+        });
+
+        let mut nav = FriendsNav::default();
+        nav.refresh(view);
+        let friends = frame(&nav);
+        assert_eq!(
+            friends.rows.iter().find(|row| row.label == "Alice").map(|row| row.trailing.as_str()),
+            Some("Playing on Server"),
+            "the Friends frame did not consume the service presence view"
+        );
+
+        nav.activate(Control::Tab(FriendsTab::Pending));
+        let pending = frame(&nav);
+        assert_eq!(
+            pending.rows.iter().find(|row| row.label.contains("Bob")).map(|row| row.trailing.as_str()),
+            Some(""),
+            "a request row must not claim a presence value the service did not return"
+        );
     }
 
     #[test]
