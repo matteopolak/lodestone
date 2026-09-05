@@ -954,6 +954,17 @@ impl<S: ChunkSource> ChunkStore<S> {
 }
 
 impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
+    fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
+        self.read(x.div_euclid(16), z.div_euclid(16), |column| {
+            let local_y = i64::from(y) - i64::from(column.min_y);
+            if !(0..i64::from(column.height)).contains(&local_y) {
+                return None;
+            }
+            lodestone_data::block_states::StateId::new(
+                column.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
+        }).flatten()
+    }
+
     /// Forwarded, not answered: a cache owns no registries of its own, and a
     /// constructor that wraps before asking would otherwise see `None` and build
     /// a private pair the save path cannot read.
@@ -1619,6 +1630,29 @@ mod tests {
             "the residency checks themselves must not have generated anything beyond the one \
              explicit `column()` call"
         );
+    }
+
+    #[test]
+    fn resident_block_read_never_generates_and_forwards_through_wrappers() {
+        let counting = CountingSource::new();
+        let calls = Arc::clone(&counting.calls);
+        let store = Arc::new(ChunkStore::new(counting));
+        assert_eq!(store.resident_block_state_id(-19, 7, 23), None);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let _ = store.column(-2, 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "generation control");
+        store.set_block(-19, 7, 23, "minecraft:stone");
+        let wrapped = crate::dimension::DimensionalSource::alone(
+            Arc::clone(&store), crate::dimension::Dimension::Overworld,
+            crate::portal::PortalIndex::default(),
+        );
+        let borrowed = &wrapped;
+        assert_eq!(ChunkSource::resident_block_state_id(&borrowed, -19, 7, 23).map(|id| id.raw()), Some(1));
+        assert_eq!(wrapped.resident_block_state_id(-18, 7, 23).map(|id| id.raw()), Some(0));
+        assert_eq!(wrapped.resident_block_state_id(-19, i32::MIN, 23), None);
+        assert_eq!(wrapped.resident_block_state_id(-19, i32::MAX, 23), None);
+        assert_eq!(wrapped.resident_block_state_id(919, 7, 23), None);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "reads must not load or regenerate");
     }
 
     /// Edits survive the store, in both directions that can lose them.

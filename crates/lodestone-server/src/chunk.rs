@@ -1100,8 +1100,9 @@ impl ChunkColumn {
             .palette_state_ids
             .iter()
             .map(|&id| {
-                lodestone_data::block_entity_types::block_entity_type(id)
-                    .and_then(lodestone_data::block_entity_types::block_entity_type_name)
+                lodestone_data::block_states::StateId::new(id)
+                    .and_then(lodestone_data::block_entity_types::block_entity_type)
+                    .map(lodestone_data::block_entity_types::block_entity_type_name)
             })
             .collect();
         if types.iter().all(Option::is_none) {
@@ -1269,6 +1270,13 @@ pub trait ChunkSource: Send + Sync {
     /// column-sized; the point is that the choice is explicit at every
     /// implementor rather than silently inherited.
     fn block_state(&self, x: i32, y: i32, z: i32) -> String;
+
+    /// Reads a retained block without loading or generating a column. `None`
+    /// means unavailable, unsupported, or outside the retained column's height.
+    /// Cache wrappers override this atomically; forwarding wrappers must forward.
+    fn resident_block_state_id(&self, _x: i32, _y: i32, _z: i32) -> Option<lodestone_data::block_states::StateId> {
+        None
+    }
 
     /// Reads the biome id at world coordinates `(x, y, z)` — `/execute if
     /// biome`'s own read, through the same data
@@ -1521,6 +1529,10 @@ pub trait ChunkSource: Send + Sync {
 /// LAN player's portal travel would silently stop working while a directly-held
 /// concrete source kept it.
 impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
+    fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
+        (**self).resident_block_state_id(x, y, z)
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         (**self).column(cx, cz)
     }
@@ -1595,6 +1607,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
 /// see the `Arc` impl's own note for what an unforwarded defaulted method
 /// silently costs.
 impl<S: ChunkSource + ?Sized> ChunkSource for &S {
+    fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
+        (**self).resident_block_state_id(x, y, z)
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         (**self).column(cx, cz)
     }

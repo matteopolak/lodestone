@@ -2674,6 +2674,15 @@ impl IntegratedServer {
         &self.world_state
     }
 
+    /// Reads the primary world's retained terrain through the same source used
+    /// by connections and ticking, without loading or generating missing columns.
+    /// `None` distinguishes unavailable terrain from a valid air state.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
+        self.world_source.as_ref()?.resident_block_state_id(x, y, z)
+    }
+
     /// This world's shared player registry, for a host that wants RCON or an
     /// admin console to see and target real connections rather than nobody.
     ///

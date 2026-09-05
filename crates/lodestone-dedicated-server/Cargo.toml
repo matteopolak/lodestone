@@ -9,6 +9,10 @@ description = "A standalone, headless dedicated server binary over lodestone-ser
 [lints]
 workspace = true
 
+[features]
+default = []
+jvm = ["dep:lodestone-jvm-bridge"]
+
 # The whole point of splitting this crate off `lodestone-server` (a library
 # only, no `[[bin]]`) rather than adding a `[[bin]]` target there: that crate
 # also compiles for `wasm32-unknown-unknown` as part of the browser bundle
@@ -24,6 +28,7 @@ name = "lodestone-server"
 path = "src/main.rs"
 
 [dependencies]
+lodestone-jvm-bridge = { path = "../plugins/lodestone-jvm-bridge", optional = true, features = ["jvm"] }
 lodestone-server = { path = "../lodestone-server" }
 # The `ServerProtocol` to host, reached through the registry rather than by
 # naming a version crate directly.

@@ -476,6 +476,10 @@ impl<S: std::fmt::Debug> std::fmt::Debug for DimensionalSource<S> {
 }
 
 impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
+    fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
+        self.primary.resident_block_state_id(x, y, z)
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         self.primary.column(cx, cz)
     }
