@@ -100,7 +100,7 @@ use std::sync::{Arc, Mutex};
 use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
 use crate::mobs::ChunkWorld;
-use crate::tick_region::{CandidateRegionWorkload, TickOwner, TickRegionPlan};
+use crate::tick_region::{CandidateRegionWorkload, TickOwnedChunk, TickRegionPlan};
 
 /// One player's position as the world tick loop needs it: which dimension they
 /// are in and which chunk column they are standing in.
@@ -217,7 +217,7 @@ impl FollowArea {
             .collect();
         Self {
             follow,
-            plan: TickRegionPlan::global(fallback.clone()),
+            plan: TickRegionPlan::chunk_owned(fallback.clone()),
             fallback,
             scratch: Vec::new(),
         }
@@ -255,19 +255,24 @@ impl FollowArea {
         if self.scratch == self.plan.chunks() {
             return false;
         }
-        self.plan = TickRegionPlan::global(std::mem::take(&mut self.scratch));
+        self.plan = TickRegionPlan::chunk_owned(std::mem::take(&mut self.scratch));
         true
     }
 
     /// The columns to simulate this tick.
     #[must_use]
     pub fn chunks(&self) -> &[(i32, i32)] {
-        debug_assert_eq!(
-            self.plan.owner(),
-            TickOwner::Global,
-            "the current tick loop has exactly one chunk-work owner"
-        );
         self.plan.chunks()
+    }
+
+    /// The same selected chunks, assigned to the smallest region-local owner.
+    ///
+    /// The server still runs this sequence serially. Its order deliberately
+    /// matches [`Self::chunks`] so changing the ownership boundary cannot shift
+    /// random-number draws before a future hand-off design says it may.
+    #[must_use]
+    pub fn owned_chunks(&self) -> &[TickOwnedChunk] {
+        self.plan.owned_chunks()
     }
 
     /// The column count, as vanilla's own spawnable-chunk-count for the spawn-cap
@@ -503,7 +508,7 @@ mod tests {
     /// without pretending that its candidate cells are already tick owners.
     /// The two radius-one squares lie on deliberately different sides of the
     /// 8-chunk boundaries, making an off-by-one or truncating negative divide
-    /// change the exact five-cell result below.
+    /// change the exact eight-cell result below.
     #[test]
     fn a_populated_area_reports_candidate_region_workload_without_partitioning_the_tick() {
         let anchors = TickAnchors::default();
@@ -525,13 +530,25 @@ mod tests {
         let workload = area.candidate_region_workload(NonZeroU32::new(8).unwrap());
 
         assert_eq!(workload.total_chunks(), 18);
-        assert_eq!(workload.largest_region_chunks(), 9);
+        assert_eq!(workload.largest_region_chunks(), 4);
         assert_eq!(
             workload.regions(),
             [
                 crate::tick_region::CandidateRegionLoad {
                     region: (-1, -1),
-                    chunks: 9,
+                    chunks: 4,
+                },
+                crate::tick_region::CandidateRegionLoad {
+                    region: (-1, 0),
+                    chunks: 2,
+                },
+                crate::tick_region::CandidateRegionLoad {
+                    region: (0, -1),
+                    chunks: 2,
+                },
+                crate::tick_region::CandidateRegionLoad {
+                    region: (0, 0),
+                    chunks: 1,
                 },
                 crate::tick_region::CandidateRegionLoad {
                     region: (1, -1),
@@ -552,6 +569,40 @@ mod tests {
             ]
         );
         assert_eq!(area.spawnable_chunks(), 18);
+    }
+
+    #[test]
+    fn chunk_owners_keep_negative_and_boundary_columns_in_visit_order() {
+        let anchors = TickAnchors::default();
+        anchors.publish(vec![
+            TickAnchor {
+                dimension: Dimension::Overworld,
+                cx: -1,
+                cz: 0,
+            },
+            TickAnchor {
+                dimension: Dimension::Overworld,
+                cx: 0,
+                cz: 0,
+            },
+        ]);
+        let mut area = FollowArea::new(follow(anchors, Dimension::Overworld, 0), -3..=3, -3..=3);
+        assert!(area.recompute());
+
+        assert_eq!(area.chunks(), [(-1, 0), (0, 0)]);
+        assert_eq!(
+            area.owned_chunks(),
+            [
+                TickOwnedChunk {
+                    owner: crate::tick_region::TickOwner::Chunk { cx: -1, cz: 0 },
+                    chunk: (-1, 0),
+                },
+                TickOwnedChunk {
+                    owner: crate::tick_region::TickOwner::Chunk { cx: 0, cz: 0 },
+                    chunk: (0, 0),
+                },
+            ]
+        );
     }
 
     /// The visit order is stable across recomputes, because the random-tick

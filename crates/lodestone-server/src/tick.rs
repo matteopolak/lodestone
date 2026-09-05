@@ -3309,7 +3309,8 @@ async fn run_tick_loop_with_weather_impl<W>(
             // The follow area rather than the two fixed ranges: crops, grass, fire,
             // leaf decay and every other randomly-ticking block now grow where the
             // player is standing instead of only around chunk (0, 0).
-            for &(cx, cz) in area.chunks() {
+            for owned in area.owned_chunks() {
+                let (cx, cz) = owned.chunk;
                 {
                     let mut column = world.column(cx, cz);
                     // Read the current game rule, not `DEFAULT_RANDOM_TICK_SPEED`.
@@ -3359,7 +3360,8 @@ async fn run_tick_loop_with_weather_impl<W>(
             let total_game_time = world_state.time().game_time;
             let living_entities = mobs.with(|sim| sim.living_entity_positions());
             let mut strikes = Vec::new();
-            for &(cx, cz) in area.chunks() {
+            for owned in area.owned_chunks() {
+                let (cx, cz) = owned.chunk;
                 if let Some(strike) = crate::lightning::tick_thunder_for_chunk(
                     &*world,
                     env,
