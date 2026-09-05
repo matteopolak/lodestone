@@ -87,6 +87,44 @@ const MAX_IDENTIFIER_CHARS: usize = 32767;
 /// so a hostile length prefix cannot make us pre-allocate.
 const MAX_ENTRIES: usize = 65536;
 
+/// A non-negative holder id in this connection's
+/// `minecraft:dimension_type` registry.
+///
+/// This is deliberately a range-checked semantic id, not an enum over this
+/// build's dimension types. Configuration registry sync assigns the holder
+/// order for each connection, and a data pack may add or reorder entries. A
+/// value can therefore be valid on the wire yet absent from the currently
+/// received table; [`ClientRegistries::dimension_type`] reports that as an
+/// unresolved lookup rather than rejecting or rewriting the id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DimensionTypeHolderId(u32);
+
+impl DimensionTypeHolderId {
+    /// Validates the signed VarInt form that `login` and `respawn` carry.
+    ///
+    /// The packet structs retain the raw `i32` so their derive-generated codec
+    /// remains a faithful wire representation. Version-adapter ingress calls
+    /// this once before a value can index registry state.
+    #[must_use]
+    pub const fn from_wire(raw: i32) -> Option<Self> {
+        if raw < 0 {
+            None
+        } else {
+            Some(Self(raw as u32))
+        }
+    }
+
+    /// Returns this holder's raw index for diagnostics or a wire-facing event.
+    #[must_use]
+    pub const fn wire_value(self) -> i32 {
+        self.0 as i32
+    }
+
+    const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// One packed registry entry: its resource id, and its contents when the server
 /// did not elide them.
 #[derive(Debug, Clone, PartialEq)]
@@ -447,12 +485,11 @@ impl ClientRegistries {
         }
     }
 
-    /// The dimension type at holder id `id` — the integer `login` and `respawn`
-    /// carry — with its registry name.
+    /// The dimension type at a validated holder id — the integer `login` and
+    /// `respawn` carry — with its registry name.
     #[must_use]
-    pub fn dimension_type(&self, id: i32) -> Option<(&str, &DimensionType)> {
-        let index = usize::try_from(id).ok()?;
-        let (name, parsed) = self.dimension_types.get(index)?;
+    pub fn dimension_type(&self, id: DimensionTypeHolderId) -> Option<(&str, &DimensionType)> {
+        let (name, parsed) = self.dimension_types.get(id.index())?;
         Some((name.as_str(), parsed.as_ref()?))
     }
 
@@ -754,8 +791,23 @@ mod tests {
         assert_eq!(registries.dimension_type_count(), 2);
         // Both are unresolvable, but the *count* is right, so a later entry's id
         // is not stolen by an earlier elision.
-        assert!(registries.dimension_type(0).is_none());
-        assert!(registries.dimension_type(1).is_none());
+        let first = DimensionTypeHolderId::from_wire(0).expect("zero is a valid holder id");
+        let second = DimensionTypeHolderId::from_wire(1).expect("one is a valid holder id");
+        assert!(registries.dimension_type(first).is_none());
+        assert!(registries.dimension_type(second).is_none());
+    }
+
+    #[test]
+    fn dimension_type_holder_id_rejects_negative_wire_values_but_preserves_dynamic_ids() {
+        assert_eq!(DimensionTypeHolderId::from_wire(-1), None);
+
+        let custom = DimensionTypeHolderId::from_wire(i32::MAX)
+            .expect("a data-pack holder id is not limited by this build's census");
+        assert_eq!(custom.wire_value(), i32::MAX);
+
+        // Validation is separate from resolution: a well-formed custom id may
+        // be absent because this registry packet has no such entry.
+        assert!(ClientRegistries::default().dimension_type(custom).is_none());
     }
 
     #[test]

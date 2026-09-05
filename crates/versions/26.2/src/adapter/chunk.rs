@@ -34,7 +34,8 @@ impl V770Adapter {
             // `dimension_type` is the registry holder id; `dimension` is the
             // level name. The id wins where the registry resolved it, and
             // `enter_dimension` falls back to the name match where it did not.
-            let dimension_type = self.enter_dimension(body.dimension_type, &body.dimension);
+            let dimension_type =
+                self.enter_dimension_from_wire(body.dimension_type, &body.dimension);
             let dimension = body.dimension.parse().map_err(|_| {
                 AdapterError::Decode(format!("invalid dimension {}", body.dimension))
             })?;

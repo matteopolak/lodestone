@@ -169,7 +169,8 @@ impl V770Adapter {
             // Respawn is also how the server reports portal travel, so the
             // dimension type moves here too — and it is the *only* place a
             // Nether trip's `min_y`/`height` change can be picked up.
-            let dimension_type = self.enter_dimension(respawn.dimension_type, &respawn.dimension);
+            let dimension_type =
+                self.enter_dimension_from_wire(respawn.dimension_type, &respawn.dimension);
             let dimension = respawn.dimension.parse().map_err(|_| {
                 AdapterError::Decode(format!("invalid dimension {}", respawn.dimension))
             })?;

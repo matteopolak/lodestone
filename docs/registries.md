@@ -38,6 +38,15 @@ than growing a generic NBT cache. An elided or unparseable entry keeps its slot 
 id; a resent registry (a Configuration re-run) replaces the whole set rather than appending,
 for the same reason.
 
+`login` and `respawn` keep their dimension-type holder field as the raw signed VarInt in
+their packet structs, because that is the wire shape and the canonical event retains it for
+diagnostics. `DimensionTypeHolderId::from_wire` validates it exactly once at the v26 adapter
+ingress before `ClientRegistries::dimension_type` can index the per-connection table. The type
+rejects negative values only: a non-negative id is not validated against a built-in census,
+because a data pack may add or reorder dimension types. A well-formed but unknown id stays an
+explicit unresolved lookup and follows the existing level-name fallback; it is never coerced to
+an overworld holder.
+
 The server side is the mirror: `ServerProtocol::encode_registry_data` emits the same 29-packet
 burst (`select_known_packs` with an empty requested-pack list, all 29 registries, then
 `update_tags`) so a real vanilla client can join our integrated server.
