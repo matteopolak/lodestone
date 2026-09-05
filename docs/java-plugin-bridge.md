@@ -799,6 +799,12 @@ write request, so a stale or wrong-kind value cannot mutate a recycled position.
 authority to reject an unavailable column, invalid state ID, or out-of-height coordinate; the call
 does not load terrain and carries none of the physics, block-entity, packet, cancellation, or
 general event semantics of a complete server API.
+The three player-handle coordinate methods resolve the same copied,
+generation-checked player identity before requesting its current position through a dedicated
+bounded host port. The dedicated host matches the UUID against its live player snapshot after
+world servicing has returned; disconnect, stale-generation, and non-finite-coordinate cases fail
+by name rather than becoming an origin position. Each component is a fresh live read, so callers
+that require an atomic three-component snapshot need a later object-shaped API.
 The generic registry separately reports wrong-kind use. A live player handle may
 also resolve through `playerHandleName(long)` and `playerHandleUuid(long)`. The
 latter returns a canonical lowercase UUID string from the fixed sixteen profile
@@ -937,7 +943,8 @@ worker, copies the block coordinates, and sends the existing bounded state query
 does not expose a world object, retain an ECS lock across the JVM boundary, or define a second plugin
 API.
 
-The admin loop services at most 64 block queries, 64 block writes, and 64 server-tick queries per 1 ms poll. Block
+The admin loop services at most 64 block queries, 64 block writes, 64 player-position queries, and
+64 server-tick queries per 1 ms poll. Block
 queries use `IntegratedServer::resident_block_state_id`, which reaches the live primary `ChunkStore`,
 checks presence, and reads the cell under one cache lock. It never invokes generation, reads disk,
 clones a whole column, or returns air for unavailable terrain. `Arc`, borrowed-source and dimension

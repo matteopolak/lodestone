@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use jni::errors::ThrowRuntimeExAndDefault;
 use jni::objects::{Global, JClass, JObject, JString};
 use jni::strings::JNIString;
-use jni::sys::{jboolean, jint, jlong, jobject, jstring};
+use jni::sys::{jboolean, jdouble, jint, jlong, jobject, jstring};
 use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
 
 use crate::runtime::{JvmConfig, JvmRuntime};
@@ -95,9 +95,27 @@ impl PlayerIdentity {
 /// A failed write must not be reported as a successful no-op.
 pub type BlockStateWriteAnswer = Result<(), String>;
 
+/// A live-position query keyed by copied account identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayerPositionQuery {
+    pub uuid: [u8; 16],
+}
+
+/// A copied player position returned by the host.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlayerPosition {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+/// A disconnected player must remain distinct from a valid origin position.
+pub type PlayerPositionAnswer = Result<PlayerPosition, String>;
+
 type BlockPort = WorldPort<BlockStateQuery, BlockStateAnswer>;
 type BlockWritePort = WorldPort<BlockStateWrite, BlockStateWriteAnswer>;
 type TickPort = WorldPort<(), ServerTickAnswer>;
+type PlayerPositionPort = WorldPort<PlayerPositionQuery, PlayerPositionAnswer>;
 type Events = SyncSender<Result<AdapterEvent, AdapterError>>;
 
 /// A host must distinguish an inactive game tick from a valid count.
@@ -116,14 +134,21 @@ pub struct NativeServerSurface {
     _block_port: BlockPort,
     _block_write_port: BlockWritePort,
     _tick_port: TickPort,
+    _player_position_port: PlayerPositionPort,
 }
 
 impl NativeServerSurface {
-    fn from_ports(block_port: BlockPort, block_write_port: BlockWritePort, tick_port: TickPort) -> Self {
+    fn from_ports(
+        block_port: BlockPort,
+        block_write_port: BlockWritePort,
+        tick_port: TickPort,
+        player_position_port: PlayerPositionPort,
+    ) -> Self {
         Self {
             _block_port: block_port,
             _block_write_port: block_write_port,
             _tick_port: tick_port,
+            _player_position_port: player_position_port,
         }
     }
 }
@@ -132,6 +157,7 @@ thread_local! {
     static CALLBACK_PORT: RefCell<Option<BlockPort>> = const { RefCell::new(None) };
     static BLOCK_WRITE_PORT: RefCell<Option<BlockWritePort>> = const { RefCell::new(None) };
     static SERVER_TICK_PORT: RefCell<Option<TickPort>> = const { RefCell::new(None) };
+    static PLAYER_POSITION_PORT: RefCell<Option<PlayerPositionPort>> = const { RefCell::new(None) };
     static RESIDENT_OBJECT_HANDLES: RefCell<Option<ObjectRegistry<ResidentObject>>> = const {
         RefCell::new(None)
     };
@@ -943,6 +969,28 @@ fn resolve_resident_player_handle_uuid(bits: i64) -> Result<String, AdapterError
     ))
 }
 
+fn resolve_resident_player_position(bits: i64, axis: usize, operation: &str) -> Result<jdouble, AdapterError> {
+    let player = resolve_resident_player_handle(bits, operation)?;
+    let port = PLAYER_POSITION_PORT.with(|slot| slot.borrow().clone()).ok_or_else(|| {
+        AdapterError::new(format!("{operation} requires the adapter worker thread"))
+    })?;
+    let position = port
+        .request(PlayerPositionQuery { uuid: player.uuid() })
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?;
+    let value = match axis {
+        0 => position.x,
+        1 => position.y,
+        2 => position.z,
+        _ => return Err(AdapterError::new(format!("{operation}: invalid coordinate axis"))),
+    };
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(AdapterError::new(format!("{operation}: host returned a non-finite coordinate")))
+    }
+}
+
 /// Reports whether a live player handle's copied profile is in the worker's
 /// reconciled lifecycle map.
 ///
@@ -1120,6 +1168,7 @@ pub struct AdapterHost {
     servicer: PortServicer<BlockStateQuery, BlockStateAnswer>,
     block_write_servicer: PortServicer<BlockStateWrite, BlockStateWriteAnswer>,
     server_tick_servicer: PortServicer<(), ServerTickAnswer>,
+    player_position_servicer: PortServicer<PlayerPositionQuery, PlayerPositionAnswer>,
     deadline: Duration,
     state: State,
 }
@@ -1162,7 +1211,7 @@ impl AdapterHost {
             return Err(AdapterError::new("adapter deadline must be positive"));
         }
         let class = class.to_owned();
-        Self::spawn(deadline, move |commands, events, port, block_write_port, server_tick_port| {
+        Self::spawn(deadline, move |commands, events, port, block_write_port, server_tick_port, player_position_port| {
             let result = run_java(
                 config,
                 &class,
@@ -1171,6 +1220,7 @@ impl AdapterHost {
                 port,
                 block_write_port,
                 server_tick_port,
+                player_position_port,
                 setup,
             );
             if let Err(error) = result {
@@ -1181,7 +1231,7 @@ impl AdapterHost {
 
     fn spawn(
         deadline: Duration,
-        run: impl FnOnce(Receiver<AdapterCommand>, Events, BlockPort, BlockWritePort, TickPort)
+        run: impl FnOnce(Receiver<AdapterCommand>, Events, BlockPort, BlockWritePort, TickPort, PlayerPositionPort)
             + Send
             + 'static,
     ) -> Result<Self, AdapterError> {
@@ -1190,9 +1240,10 @@ impl AdapterHost {
         let (port, servicer) = channel(deadline);
         let (block_write_port, block_write_servicer) = channel(deadline);
         let (server_tick_port, server_tick_servicer) = channel(deadline);
+        let (player_position_port, player_position_servicer) = channel(deadline);
         std::thread::Builder::new()
             .name("lodestone-java-adapter".to_owned())
-            .spawn(move || run(receiver, sender, port, block_write_port, server_tick_port))
+            .spawn(move || run(receiver, sender, port, block_write_port, server_tick_port, player_position_port))
             .map_err(|error| AdapterError::new(format!("adapter worker startup: {error}")))?;
         Ok(Self {
             commands,
@@ -1200,6 +1251,7 @@ impl AdapterHost {
             servicer,
             block_write_servicer,
             server_tick_servicer,
+            player_position_servicer,
             deadline,
             state: State::Loading(Instant::now()),
         })
@@ -1350,6 +1402,18 @@ impl AdapterHost {
         self.server_tick_servicer.service_all_pending(max, |_| answer())
     }
 
+    /// Answers copied player positions on the caller's host thread.
+    pub fn service_pending_player_positions(
+        &self,
+        max: usize,
+        answer: impl FnMut(PlayerPositionQuery) -> PlayerPositionAnswer,
+    ) -> usize {
+        if matches!(self.state, State::Failed(_)) {
+            return 0;
+        }
+        self.player_position_servicer.service_all_pending(max, answer)
+    }
+
     /// Polls completion without waiting. Startup/callback deadlines are terminal;
     /// poll regularly even when no world query is pending. Java exceptions name
     /// the failing class/method and preserve the Java exception's description.
@@ -1459,6 +1523,7 @@ fn run_java<S>(
     port: BlockPort,
     block_write_port: BlockWritePort,
     server_tick_port: TickPort,
+    player_position_port: PlayerPositionPort,
     setup: impl for<'local> FnOnce(&JvmRuntime, &mut Env<'local>, NativeServerSurface)
         -> Result<S, String>,
 ) -> Result<(), AdapterError> {
@@ -1472,6 +1537,7 @@ fn run_java<S>(
             CALLBACK_PORT.with(|slot| *slot.borrow_mut() = Some(port.clone()));
             BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = Some(block_write_port.clone()));
             SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = Some(server_tick_port.clone()));
+            PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = Some(player_position_port.clone()));
             RESIDENT_OBJECT_HANDLES.with(|slot| {
                 *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(
                     MAX_RESIDENT_OBJECT_HANDLES,
@@ -1486,6 +1552,7 @@ fn run_java<S>(
                 port.clone(),
                 block_write_port.clone(),
                 server_tick_port.clone(),
+                player_position_port.clone(),
             );
             let setup_state = setup(&runtime, env, surface).map_err(|error| {
                 AdapterError::new(format!("adapter {class_name} setup: {error}"))
@@ -1639,6 +1706,7 @@ fn run_java<S>(
         CALLBACK_PORT.with(|slot| *slot.borrow_mut() = None);
         BLOCK_WRITE_PORT.with(|slot| *slot.borrow_mut() = None);
         SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = None);
+        PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = None);
         RESIDENT_BLOCK_CHANGE_SUBSCRIPTIONS.with(|slot| *slot.borrow_mut() = None);
         Ok(result)
     }).map_err(|error| AdapterError::new(error.to_string()))?
@@ -2270,6 +2338,29 @@ pub(crate) fn register_player_handle_is_retained_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_player_handle_position_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    let callback = match method_name {
+        "playerHandleX" => native_player_handle_x as *mut c_void,
+        "playerHandleY" => native_player_handle_y as *mut c_void,
+        "playerHandleZ" => native_player_handle_z as *mut c_void,
+        _ => unreachable!("validated player coordinate member"),
+    };
+    // SAFETY: each validated native accepts one opaque handle and returns one
+    // finite double copied through the bounded player-position host port.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(&name, &signature, callback);
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_active_player_count_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -2516,6 +2607,45 @@ extern "system" fn native_current_player_handle<'local>(
         Ok::<_, AdapterError>(current_resident_player_handle()?.to_bits())
     })
     .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_x<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jdouble {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resolve_resident_player_position(bits, 0, "playerHandleX")
+    })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_y<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jdouble {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resolve_resident_player_position(bits, 1, "playerHandleY")
+    })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_z<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jdouble {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resolve_resident_player_position(bits, 2, "playerHandleZ")
+    })
+        .resolve::<ThrowRuntimeExAndDefault>()
 }
 
 extern "system" fn native_player_handle_name<'local>(
@@ -3115,7 +3245,7 @@ mod tests {
     #[test]
     fn callback_queries_run_on_host_and_ticks_do_not_overlap() {
         let host_thread = std::thread::current().id();
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, port, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, port, _, _, _| {
             assert_ne!(std::thread::current().id(), host_thread);
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             for command in commands {
@@ -3154,7 +3284,7 @@ mod tests {
             z: 33,
             state_id: 1234,
         };
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, _, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, _, _, _, _| {
             assert_ne!(std::thread::current().id(), host_thread);
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             let command = commands.recv().expect("one host callback");
@@ -3202,7 +3332,7 @@ mod tests {
         let player_for_worker = player.clone();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |commands, events, _, _, _| {
+            move |commands, events, _, _, _, _| {
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(
                     commands.recv().expect("one player callback"),
@@ -3241,7 +3371,7 @@ mod tests {
         let disconnected = player.clone();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |commands, events, _, _, _| {
+            move |commands, events, _, _, _, _| {
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(
                     commands.recv().expect("join transition"),
@@ -3733,7 +3863,7 @@ mod tests {
 
     #[test]
     fn deadline_rejects_a_late_completion_and_remains_terminal() {
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _, _| {
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             let _ = commands.recv();
         }).unwrap();
@@ -3757,7 +3887,7 @@ mod tests {
 
     #[test]
     fn worker_errors_preserve_the_named_failure() {
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _, _, _| {
             events.send(Err(AdapterError::new("example.Adapter.onTick: missing member"))).unwrap();
             let _ = commands.recv();
         }).unwrap();
@@ -3779,7 +3909,7 @@ mod tests {
         let host_thread = std::thread::current().id();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |_commands, events, _port, _write_port, tick_port| {
+            move |_commands, events, _port, _write_port, tick_port, _| {
                 assert_ne!(std::thread::current().id(), host_thread);
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(tick_port.request(()).unwrap(), Ok(0));
@@ -3799,7 +3929,7 @@ mod tests {
         let host_thread = std::thread::current().id();
         let mut host = AdapterHost::spawn(
             Duration::from_secs(2),
-            move |_commands, events, _port, write_port, _tick_port| {
+            move |_commands, events, _port, write_port, _tick_port, _| {
                 assert_ne!(std::thread::current().id(), host_thread);
                 events.send(Ok(AdapterEvent::Ready)).unwrap();
                 assert_eq!(
@@ -4139,6 +4269,62 @@ mod tests {
                 "setBlockHandleStateId: the referenced object no longer exists",
             )),
             "a stale handle must fail before a write request is made",
+        );
+        worker.join().expect("worker joins");
+    }
+
+    #[test]
+    fn player_position_reads_use_copied_identity_and_the_bounded_host_port() {
+        let identity = lifecycle_identity("alpha", "one", "alpha.Main");
+        let player = PlayerIdentity::new([7; 16], "Alice");
+        let (port, servicer) = channel(Duration::from_secs(1));
+        let (sender, receiver) = sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            RESIDENT_OBJECT_HANDLES.with(|slot| {
+                *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(1));
+            });
+            PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = Some(port));
+            let handle = resident_player_handle(&identity, &player).expect("player handle");
+            let result = resolve_resident_player_position(handle.to_bits(), 2, "playerHandleZ");
+            let non_finite =
+                resolve_resident_player_position(handle.to_bits(), 0, "playerHandleX");
+            assert_eq!(release_resident_handles(&identity), 1);
+            let stale = resolve_resident_player_position(handle.to_bits(), 2, "playerHandleZ");
+            PLAYER_POSITION_PORT.with(|slot| *slot.borrow_mut() = None);
+            RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+            sender
+                .send((result, non_finite, stale))
+                .expect("position results");
+        });
+        let limit = Instant::now() + Duration::from_secs(1);
+        let mut requests = 0;
+        while requests < 2 {
+            requests += servicer.service_all_pending(1, |query| {
+                assert_eq!(query, PlayerPositionQuery { uuid: [7; 16] });
+                if requests == 0 {
+                    Ok(PlayerPosition { x: 12.5, y: 64.0, z: -9.25 })
+                } else {
+                    Ok(PlayerPosition { x: f64::NAN, y: 64.0, z: -9.25 })
+                }
+            });
+            if requests < 2 {
+                assert!(Instant::now() < limit, "worker did not request a player position");
+                std::thread::yield_now();
+            }
+        }
+        let (result, non_finite, stale) = receiver.recv().expect("position results");
+        assert_eq!(result, Ok(-9.25));
+        assert_eq!(
+            non_finite,
+            Err(AdapterError::new(
+                "playerHandleX: host returned a non-finite coordinate",
+            )),
+        );
+        assert_eq!(
+            stale,
+            Err(AdapterError::new(
+                "playerHandleZ: the referenced object no longer exists",
+            )),
         );
         worker.join().expect("worker joins");
     }
