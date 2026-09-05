@@ -58,7 +58,10 @@ use crate::mobs::{
 };
 use lodestone_entity::ai::mob::EatenBlock;
 use crate::random_tick::RandomTickScheduler;
-use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueueAccess, TickPriority};
+use crate::scheduled_tick::{
+    merge_due_owner_batches, ScheduledTick, ScheduledTickOwnerBatch, ScheduledTickQueueAccess,
+    TickPriority,
+};
 use crate::sleep::{SleepEvent, SleepFeed, SleepState, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
 use lodestone_model::BlockPos;
@@ -1475,6 +1478,17 @@ pub(crate) async fn run_primary_tick_loop_with_weather<W>(
     .await;
 }
 
+/// Accepts every scheduled-tick owner completion before the live callback
+/// drain. Queue owners keep due records local until this boundary; this
+/// central consumer validates the complete tick-start batch set and restores
+/// the existing global drain order before any block or fluid callback runs.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_scheduled_tick_owner_batches<T>(
+    batches: Vec<ScheduledTickOwnerBatch<T>>,
+) -> Vec<ScheduledTick<T>> {
+    merge_due_owner_batches(batches)
+}
+
 /// Applies block-entity owner messages after their serial execution phase.
 ///
 /// Block-entity owners may mutate their own simulation state, but they do not
@@ -2727,7 +2741,9 @@ async fn run_tick_loop_with_weather_impl<W>(
         // and feeding a further torch) resolves depth-first within this one
         // drain, exactly like vanilla's `LevelTicks::runCollectedTicks`
         // invoking its callback once per due entry, in `DRAIN_ORDER`.
-        let due_block_ticks = block_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK);
+        let due_block_ticks = apply_scheduled_tick_owner_batches(
+            block_ticks.drain_due_owner_batches(game_tick, MAX_SCHEDULED_TICKS_PER_TICK),
+        );
         clock.record_owner_work(OwnerTickStats {
             scheduled_block_ticks: due_block_ticks.len() as u64,
             ..OwnerTickStats::default()
@@ -3426,7 +3442,9 @@ async fn run_tick_loop_with_weather_impl<W>(
         // out of this same pass — so a flow advances one cell per delay period
         // rather than resolving the whole pool inside one tick.
         let mut fluid_changes: Vec<(BlockPos, String)> = Vec::new();
-        let due_fluid_ticks = fluid_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK);
+        let due_fluid_ticks = apply_scheduled_tick_owner_batches(
+            fluid_ticks.drain_due_owner_batches(game_tick, MAX_SCHEDULED_TICKS_PER_TICK),
+        );
         clock.record_owner_work(OwnerTickStats {
             scheduled_fluid_ticks: due_fluid_ticks.len() as u64,
             ..OwnerTickStats::default()
@@ -3711,8 +3729,8 @@ mod tests {
     use crate::weather::{LEVEL_STEP, WeatherEvent};
     use crate::mobs::ChunkWorld;
     // `run_tick_loop` borrows its queues from `ScheduledTickHandle` internally,
-    // so tests import only `ScheduledTickQueue` here.
-    use crate::scheduled_tick::ScheduledTickQueue;
+    // so tests import only the queue value types here.
+    use crate::scheduled_tick::{ChunkScheduledTickQueue, ScheduledTickQueue};
     // For `ResourceKey::from_str` in the grazing gates below.
     use std::str::FromStr;
 
@@ -3722,6 +3740,47 @@ mod tests {
             LiveMobSource::default(),
             BlockEntityHandle::default(),
         )
+    }
+
+    /// The live tick loop reaches this central consumer for both block and
+    /// fluid drains. Reversed owner completion must not move a callback ahead
+    /// of an earlier global `(trigger, priority, insertion)` slot.
+    #[test]
+    fn scheduled_tick_central_consumer_restores_reversed_owner_completion() {
+        fn build_queue() -> ChunkScheduledTickQueue<&'static str> {
+            let mut queue = ChunkScheduledTickQueue::new();
+            assert!(queue.schedule((-1, 0, 0), "west-first", 4, TickPriority::Normal));
+            assert!(queue.schedule((16, 0, 0), "east-second", 4, TickPriority::Normal));
+            assert!(queue.schedule((-2, 0, 0), "west-third", 4, TickPriority::Normal));
+            queue
+        }
+
+        let mut queue = build_queue();
+        let batches = queue.drain_due_owner_batches(4, usize::MAX);
+        let serial: Vec<_> = build_queue()
+            .drain_due(4, usize::MAX)
+            .iter()
+            .map(|tick| tick.kind)
+            .collect();
+        let mut completed = batches;
+        completed.reverse();
+        let completion_order: Vec<_> = completed
+            .iter()
+            .flat_map(|batch| batch.assignments())
+            .map(|assignment| assignment.tick().kind)
+            .collect();
+        assert_ne!(
+            completion_order, serial,
+            "control requires reversed owner completion to change raw callback order"
+        );
+        assert_eq!(
+            apply_scheduled_tick_owner_batches(completed)
+                .iter()
+                .map(|tick| tick.kind)
+                .collect::<Vec<_>>(),
+            serial,
+            "the production central consumer must restore the original callback order"
+        );
     }
 
     /// A minimal [`ChunkSource`] for tests that only need `run_tick_loop` to
