@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.14.0;
+package lodestone:plugin@0.15.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -361,6 +361,14 @@ interface types {
         /// validates both against its live menu and owns prediction, vetoes,
         /// state ids, changed slots, and packet egress.
         inventory-hotbar-swap(inventory-hotbar-swap),
+        /// Drop the complete carried stack outside the active menu through its
+        /// live predictor — capability `act:inventory-drop-cursor`.
+        ///
+        /// The guest supplies no slot, cursor item, state id, or packet. The
+        /// shell first verifies that the live menu has a carried stack, then
+        /// chooses the outside-click representation and owns prediction,
+        /// veto, changed slots, and egress.
+        inventory-drop-cursor,
     }
 
     /// A root command a guest wants the host to register. The host supplies one
@@ -430,7 +438,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.14.0"`.
+        /// `"lodestone:plugin@0.15.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.

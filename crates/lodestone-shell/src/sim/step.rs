@@ -1042,31 +1042,43 @@ fn submit_wasm_menu_clicks(
     handle: &lodestone_client::ClientHandle,
     clicks: Vec<lodestone_wasm_host::InventoryClickIntent>,
 ) {
-    let menu = handle
-        .open_menu()
-        .map(|open| open.menu)
-        .unwrap_or_else(|| handle.player_menu());
-
     for request in clicks {
-        let slot = usize::from(request.slot);
-        if slot >= menu.slot_count() {
-            tracing::warn!(slot, "refused a WASM inventory click outside the active menu");
-            continue;
-        }
-        let click = match request.mode {
-            lodestone_wasm_host::InventoryClickMode::Pickup(
-                lodestone_wasm_host::InventoryClickButton::Left,
-            ) => Click::left(slot),
-            lodestone_wasm_host::InventoryClickMode::Pickup(
-                lodestone_wasm_host::InventoryClickButton::Right,
-            ) => Click::right(slot),
-            lodestone_wasm_host::InventoryClickMode::QuickMove => Click::shift(slot),
-            lodestone_wasm_host::InventoryClickMode::HotbarSwap(hotbar) if hotbar < 9 => {
-                Click::hotbar_swap(slot, hotbar)
+        let live_menu = || {
+            handle
+                .open_menu()
+                .map(|open| open.menu)
+                .unwrap_or_else(|| handle.player_menu())
+        };
+        let click = match request {
+            lodestone_wasm_host::InventoryClickIntent::Slot { slot, mode } => {
+                let slot = usize::from(slot);
+                if slot >= live_menu().slot_count() {
+                    tracing::warn!(slot, "refused a WASM inventory click outside the active menu");
+                    continue;
+                }
+                match mode {
+                    lodestone_wasm_host::InventoryClickMode::Pickup(
+                        lodestone_wasm_host::InventoryClickButton::Left,
+                    ) => Click::left(slot),
+                    lodestone_wasm_host::InventoryClickMode::Pickup(
+                        lodestone_wasm_host::InventoryClickButton::Right,
+                    ) => Click::right(slot),
+                    lodestone_wasm_host::InventoryClickMode::QuickMove => Click::shift(slot),
+                    lodestone_wasm_host::InventoryClickMode::HotbarSwap(hotbar) if hotbar < 9 => {
+                        Click::hotbar_swap(slot, hotbar)
+                    }
+                    lodestone_wasm_host::InventoryClickMode::HotbarSwap(hotbar) => {
+                        tracing::warn!(hotbar, "refused a WASM inventory swap outside the hotbar");
+                        continue;
+                    }
+                }
             }
-            lodestone_wasm_host::InventoryClickMode::HotbarSwap(hotbar) => {
-                tracing::warn!(hotbar, "refused a WASM inventory swap outside the hotbar");
-                continue;
+            lodestone_wasm_host::InventoryClickIntent::DropCursor => {
+                if live_menu().carried().is_none() {
+                    tracing::warn!("refused a WASM cursor drop without a carried stack");
+                    continue;
+                }
+                Click::drop_cursor()
             }
         };
         let _ = handle.menu_click(click, PlayerCtx::survival());
@@ -1081,7 +1093,7 @@ mod wasm_menu_click_tests {
         ClientAction, ClientBuilder, ConnectionState, Directive, LoginProfile, ServerAddress,
         VersionAdapter,
     };
-    use lodestone_model::{AdapterError, ContainerClickType};
+    use lodestone_model::{AdapterError, ClientEvent, ContainerClickType, ItemStack};
     use lodestone_net::{Connection, memory_pair};
     use lodestone_wasm_host::{InventoryClickIntent, InventoryClickMode};
     use lodestone_world::WorldSink;
@@ -1091,6 +1103,7 @@ mod wasm_menu_click_tests {
 
     const CONTAINER_CLICK_PACKET: i32 = 0x31;
     const BARRIER_PACKET: i32 = 0x32;
+    const SEED_CURSOR_PACKET: i32 = 0x33;
 
     /// A protocol-free encoder that makes the client action queue observable.
     #[derive(Debug)]
@@ -1123,10 +1136,21 @@ mod wasm_menu_click_tests {
             &self,
             _world: &mut dyn WorldSink,
             _state: ConnectionState,
-            _packet_id: i32,
+            packet_id: i32,
             _payload: &[u8],
         ) -> Result<Vec<Directive>, AdapterError> {
-            Ok(Vec::new())
+            if packet_id != SEED_CURSOR_PACKET {
+                return Ok(Vec::new());
+            }
+            Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
+                window_id: 0,
+                state_id: 7,
+                items: vec![None; 46],
+                carried_item: Some(ItemStack::new(
+                    "minecraft:stone".parse().expect("constant item key"),
+                    4,
+                )),
+            })])
         }
 
         fn encode_action(
@@ -1186,11 +1210,11 @@ mod wasm_menu_click_tests {
         submit_wasm_menu_clicks(
             &handle,
             vec![
-                InventoryClickIntent {
+                InventoryClickIntent::Slot {
                     slot: 36,
                     mode: InventoryClickMode::QuickMove,
                 },
-                InventoryClickIntent {
+                InventoryClickIntent::Slot {
                     slot: u16::MAX,
                     mode: InventoryClickMode::QuickMove,
                 },
@@ -1250,11 +1274,11 @@ mod wasm_menu_click_tests {
         submit_wasm_menu_clicks(
             &handle,
             vec![
-                InventoryClickIntent {
+                InventoryClickIntent::Slot {
                     slot: 36,
                     mode: InventoryClickMode::HotbarSwap(3),
                 },
-                InventoryClickIntent {
+                InventoryClickIntent::Slot {
                     slot: 36,
                     mode: InventoryClickMode::HotbarSwap(9),
                 },
@@ -1288,6 +1312,78 @@ mod wasm_menu_click_tests {
             second,
             (BARRIER_PACKET, 78_i64.to_be_bytes().to_vec()),
             "the invalid hotbar key must not precede the barrier"
+        );
+        drop(events);
+    }
+
+    /// A no-argument guest request uses the same live predictor for an outside
+    /// cursor drop. The wire-seeded cursor makes the first request valid; the
+    /// second sees the predictor's cleared cursor and must not pass the barrier.
+    #[tokio::test]
+    async fn bounded_cursor_drops_use_the_live_predictor_and_reject_an_empty_cursor() {
+        let (client_io, server_io) = memory_pair();
+        let (handle, mut events) = ClientBuilder::new(
+            ServerAddress {
+                host: "memory".into(),
+                port: 0,
+            },
+            LoginProfile {
+                username: "PluginTest".into(),
+                uuid: Uuid::nil(),
+            },
+            Box::new(ClickAdapter {
+                expected: ContainerClickType::Pickup,
+            }),
+        )
+        .connect_with(client_io);
+        let mut peer = Connection::new(server_io);
+        peer.write_packet(SEED_CURSOR_PACKET, &[])
+            .await
+            .expect("the wire seed must reach the client read model");
+        events
+            .recv()
+            .await
+            .expect("the cursor seed must be folded before the drop");
+
+        submit_wasm_menu_clicks(
+            &handle,
+            vec![
+                InventoryClickIntent::DropCursor,
+                InventoryClickIntent::DropCursor,
+            ],
+        );
+        handle
+            .send_action(ClientAction::KeepAliveResponse { id: 79 })
+            .expect("the barrier action must enter the same live queue");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the carried cursor must produce one live-predicted click")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the valid click");
+        assert_eq!(first.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            first.1,
+            [0_i32, 7, -999, 0]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the shell, not the guest, must choose the outside slot and live state id"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the barrier must follow the one valid cursor drop")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the barrier");
+        assert_eq!(
+            second,
+            (BARRIER_PACKET, 79_i64.to_be_bytes().to_vec()),
+            "the empty-cursor request must not enqueue a second container click"
+        );
+        assert!(
+            handle.player_menu().carried().is_none(),
+            "the live predictor must clear the cursor before it rejects the second request"
         );
         drop(events);
     }

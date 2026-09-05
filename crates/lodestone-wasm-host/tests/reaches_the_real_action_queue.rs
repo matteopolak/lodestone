@@ -136,6 +136,16 @@ fn inventory_hotbar_swap_host_policy() -> CapabilitySet {
     policy
 }
 
+fn inventory_drop_cursor_capabilities() -> CapabilitySet {
+    CapabilitySet::from_iter([Capability::Log, Capability::ActInventoryDropCursor])
+}
+
+fn inventory_drop_cursor_host_policy() -> CapabilitySet {
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ActInventoryDropCursor);
+    policy
+}
+
 fn inventory_event() -> GameEvent {
     GameEvent(ClientEvent::InventorySlotChanged {
         slot: 4,
@@ -704,7 +714,7 @@ fn a_wasm_inventory_click_reaches_the_bounded_shell_handoff() {
         app.world_mut()
             .resource_mut::<PendingWasmMenuClicks>()
             .take(),
-        vec![InventoryClickIntent {
+        vec![InventoryClickIntent::Slot {
             slot: 36,
             mode: InventoryClickMode::Pickup(InventoryClickButton::Left),
         }],
@@ -735,7 +745,7 @@ fn a_wasm_inventory_click_keeps_the_invalid_slot_bounded_until_shell_validation(
         app.world_mut()
             .resource_mut::<PendingWasmMenuClicks>()
             .take(),
-        vec![InventoryClickIntent {
+        vec![InventoryClickIntent::Slot {
             slot: u16::MAX,
             mode: InventoryClickMode::Pickup(InventoryClickButton::Right),
         }],
@@ -789,7 +799,7 @@ fn a_wasm_inventory_quick_move_reaches_the_bounded_shell_handoff() {
         app.world_mut()
             .resource_mut::<PendingWasmMenuClicks>()
             .take(),
-        vec![InventoryClickIntent {
+        vec![InventoryClickIntent::Slot {
             slot: 36,
             mode: InventoryClickMode::QuickMove,
         }],
@@ -820,7 +830,7 @@ fn a_wasm_inventory_quick_move_keeps_the_invalid_slot_bounded_until_shell_valida
         app.world_mut()
             .resource_mut::<PendingWasmMenuClicks>()
             .take(),
-        vec![InventoryClickIntent {
+        vec![InventoryClickIntent::Slot {
             slot: u16::MAX,
             mode: InventoryClickMode::QuickMove,
         }]
@@ -876,7 +886,7 @@ fn a_wasm_inventory_hotbar_swap_reaches_the_bounded_shell_handoff() {
         app.world_mut()
             .resource_mut::<PendingWasmMenuClicks>()
             .take(),
-        vec![InventoryClickIntent {
+        vec![InventoryClickIntent::Slot {
             slot: 36,
             mode: InventoryClickMode::HotbarSwap(3),
         }],
@@ -906,7 +916,7 @@ fn a_wasm_inventory_hotbar_swap_keeps_an_invalid_key_bounded_until_shell_validat
         app.world_mut()
             .resource_mut::<PendingWasmMenuClicks>()
             .take(),
-        vec![InventoryClickIntent {
+        vec![InventoryClickIntent::Slot {
             slot: 36,
             mode: InventoryClickMode::HotbarSwap(9),
         }]
@@ -936,6 +946,60 @@ fn a_wasm_inventory_hotbar_swap_is_default_denied_before_the_shell_handoff() {
             .take()
             .is_empty(),
         "an ungranted hotbar swap must not reach the shell handoff"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
+}
+
+/// The no-argument drop request crosses the same bounded handoff without
+/// leaking cursor contents, an outside-slot sentinel, or a packet to the guest.
+#[test]
+fn a_wasm_inventory_cursor_drop_reaches_the_bounded_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-drop-cursor"]);
+    let mut host = PluginHost::new(inventory_drop_cursor_host_policy()).expect("engine");
+    host.load_file(
+        "inventory-drop-cursor",
+        &wasm,
+        &inventory_drop_cursor_capabilities(),
+    )
+    .expect("the explicitly granted cursor-drop fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take(),
+        vec![InventoryClickIntent::DropCursor],
+        "the guest must hand off only a cursor-drop request, never cursor state or a packet"
+    );
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
+/// The granted integration control above proves that this empty handoff is the
+/// fail-closed capability boundary rather than an inert separately built guest.
+#[test]
+fn a_wasm_inventory_cursor_drop_is_default_denied_before_the_shell_handoff() {
+    let wasm = support::build_example_plugin(&["inventory-drop-cursor"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "inventory-drop-cursor",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log]),
+    )
+    .expect("a data-flow action may be withheld after the guest loads");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().run_schedule(GameTick);
+
+    assert!(
+        app.world_mut()
+            .resource_mut::<PendingWasmMenuClicks>()
+            .take()
+            .is_empty(),
+        "an ungranted cursor drop must not reach the shell handoff"
     );
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 1);
 }

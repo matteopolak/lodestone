@@ -106,6 +106,8 @@ inventory-hotbar-swap = []
 # The valid menu slot paired with an out-of-range hotbar key must be rejected by
 # the shell before the live predictor can enqueue a container action.
 inventory-hotbar-swap-invalid = []
+# A copied no-argument cursor drop through the shell's live menu predictor.
+inventory-drop-cursor = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is
