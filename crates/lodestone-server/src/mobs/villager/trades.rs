@@ -43,23 +43,23 @@
 
 use super::Profession;
 
-pub use lodestone_data::villager_trades::TradeRecord;
+pub use lodestone_data::villager_trades::{TradeRecord, VillagerLevel};
 
 /// This level's own trade set: the pool [`offers_for`] draws from and how
 /// many of it a real `TradeSet` picks. Forwards to
 /// [`lodestone_data::villager_trades::pool_for`] keyed by
 /// [`Profession::path`].
 #[must_use]
-pub fn pool_for(profession: Profession, level: i32) -> Option<(&'static [TradeRecord], usize)> {
+pub fn pool_for(profession: Profession, level: VillagerLevel) -> Option<(&'static [TradeRecord], usize)> {
     lodestone_data::villager_trades::pool_for(profession.path(), level)
 }
 
 /// The trades this level's own `TradeSet` contributes — **not** cumulative
 /// across levels; see [`offers_up_to`] for the villager-facing accumulation.
 /// Empty for any profession/level [`lodestone_data::villager_trades`] has not
-/// ported, or for `level` outside `1..=5`.
+/// ported. `VillagerLevel` makes an out-of-range tier unrepresentable here.
 #[must_use]
-pub fn offers_for(profession: Profession, level: i32) -> Vec<TradeRecord> {
+pub fn offers_for(profession: Profession, level: VillagerLevel) -> Vec<TradeRecord> {
     match pool_for(profession, level) {
         Some((pool, amount)) => pool.iter().take(amount).copied().collect(),
         None => Vec::new(),
@@ -75,15 +75,20 @@ pub fn offers_for(profession: Profession, level: i32) -> Vec<TradeRecord> {
 /// rather than modelling the incremental history (restocking/relisting is
 /// a third piece not built here).
 #[must_use]
-pub fn offers_up_to(profession: Profession, level: i32) -> Vec<TradeRecord> {
-    (1..=level.clamp(1, 5))
-        .flat_map(|l| offers_for(profession, l))
+pub fn offers_up_to(profession: Profession, level: VillagerLevel) -> Vec<TradeRecord> {
+    level
+        .unlocked_tiers()
+        .flat_map(|tier| offers_for(profession, tier))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn level(number: i32) -> VillagerLevel {
+        VillagerLevel::new(number).expect("test level is in the five-tier trade domain")
+    }
 
     /// **The production-reader count that matters.** Before this module
     /// delegated, `crate::mobs::villager::trades` (what
@@ -97,7 +102,7 @@ mod tests {
     /// `Nitwit`, which are `None` by design on both sides).
     #[test]
     fn a_librarian_now_offers_real_trades_through_this_seam() {
-        let offers = offers_for(Profession::Librarian, 1);
+        let offers = offers_for(Profession::Librarian, level(1));
         assert!(
             !offers.is_empty(),
             "librarian level 1 must have real trades now that this module \
@@ -111,7 +116,7 @@ mod tests {
     /// the delegation carries the *right* data, not just non-empty data.
     #[test]
     fn farmer_level_1_still_generates_the_real_wheat_for_emerald_trade() {
-        let offers = offers_for(Profession::Farmer, 1);
+        let offers = offers_for(Profession::Farmer, level(1));
         assert_eq!(offers.len(), 2, "trade_set/farmer/level_1.json's amount is 2");
         assert_eq!(offers[0].wants_item, "minecraft:wheat");
         assert_eq!(offers[0].wants_count, 20);
@@ -127,8 +132,8 @@ mod tests {
     /// behaviour must survive the delegation, not just the non-empty case.
     #[test]
     fn an_unported_profession_still_returns_no_offers_rather_than_invented_ones() {
-        assert!(offers_for(Profession::Nitwit, 1).is_empty());
-        assert!(offers_for(Profession::None, 1).is_empty());
+        assert!(offers_for(Profession::Nitwit, level(1)).is_empty());
+        assert!(offers_for(Profession::None, level(1)).is_empty());
     }
 
     /// Levels accumulate: a level-3 farmer offers level-1's trades too —
@@ -136,7 +141,7 @@ mod tests {
     /// `offers_up_to`'s own loop is still local code.
     #[test]
     fn trades_accumulate_across_levels() {
-        let up_to_3 = offers_up_to(Profession::Farmer, 3);
+        let up_to_3 = offers_up_to(Profession::Farmer, level(3));
         assert_eq!(up_to_3.len(), 6, "2 trades per level across 3 levels");
         assert!(up_to_3.iter().any(|t| t.gives_item == "minecraft:emerald" && t.wants_item == "minecraft:wheat"));
         assert!(up_to_3.iter().any(|t| t.gives_item == "minecraft:cookie"));
@@ -164,7 +169,7 @@ mod tests {
             Profession::Weaponsmith,
         ];
         for profession in professions {
-            let any_level_has_offers = (1..=5).any(|level| !offers_for(profession, level).is_empty());
+            let any_level_has_offers = (1..=5).any(|number| !offers_for(profession, level(number)).is_empty());
             assert!(
                 any_level_has_offers,
                 "{profession:?} must have real trades at some level through \

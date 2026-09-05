@@ -59,7 +59,7 @@
 //! this section) is the *other* half of "price fluctuation": ordinary
 //! repeated buying, with no gossip system involved at all.
 
-use lodestone_data::villager_trades::{TradeRecord, pool_for};
+use lodestone_data::villager_trades::{TradeRecord, VillagerLevel, pool_for};
 
 use crate::mobs::villager::Profession;
 
@@ -302,10 +302,11 @@ impl VillagerTrades {
     /// applied here against the complete `lodestone_data::villager_trades`
     /// table instead of that module's farmer-only one.
     #[must_use]
-    pub fn for_profession(profession: Profession, level: i32) -> Self {
-        let offers = (1..=level.clamp(1, 5))
-            .flat_map(|l| {
-                pool_for(profession.path(), l)
+    pub fn for_profession(profession: Profession, level: VillagerLevel) -> Self {
+        let offers = level
+            .unlocked_tiers()
+            .flat_map(|tier| {
+                pool_for(profession.path(), tier)
                     .into_iter()
                     .flat_map(|(pool, amount)| pool.iter().take(amount).copied())
             })
@@ -354,11 +355,13 @@ mod tests {
     use super::*;
 
     fn wheat_for_emerald() -> TradeRecord {
-        pool_for("farmer", 1).expect("farmer level 1 is ported").0[0]
+        pool_for("farmer", VillagerLevel::NOVICE)
+            .expect("farmer level 1 is ported")
+            .0[0]
     }
 
     fn cod_for_cooked_cod() -> TradeRecord {
-        pool_for("fisherman", 1)
+        pool_for("fisherman", VillagerLevel::NOVICE)
             .expect("fisherman level 1 is ported")
             .0
             .iter()
@@ -469,7 +472,7 @@ mod tests {
     /// accident from copy-pasting the other one's arithmetic.
     #[test]
     fn heavy_use_raises_the_price_by_the_predicted_amount() {
-        let leggings = pool_for("armorer", 1)
+        let leggings = pool_for("armorer", VillagerLevel::NOVICE)
             .unwrap()
             .0
             .iter()
@@ -520,7 +523,10 @@ mod tests {
     /// farmer-only one `crate::mobs::villager::trades` still carries.
     #[test]
     fn for_profession_accumulates_every_level_up_to_the_requested_one() {
-        let trades = VillagerTrades::for_profession(Profession::Farmer, 3);
+        let trades = VillagerTrades::for_profession(
+            Profession::Farmer,
+            VillagerLevel::new(3).expect("level three is valid"),
+        );
         // 2 offers/level (farmer's trade_set amount) across 3 levels.
         assert_eq!(trades.offers.len(), 6);
         assert!(
@@ -545,7 +551,7 @@ mod tests {
     /// empty, not a panicking, list.
     #[test]
     fn an_unported_profession_yields_no_offers_rather_than_panicking() {
-        let trades = VillagerTrades::for_profession(Profession::Nitwit, 5);
+        let trades = VillagerTrades::for_profession(Profession::Nitwit, VillagerLevel::MASTER);
         assert!(trades.offers.is_empty());
     }
 
@@ -601,7 +607,7 @@ mod tests {
     /// in that order (demand computed from the pre-reset uses).
     #[test]
     fn maybe_restock_resets_uses_and_updates_demand_from_the_pre_reset_count() {
-        let mut trades = VillagerTrades::for_profession(Profession::Farmer, 1);
+        let mut trades = VillagerTrades::for_profession(Profession::Farmer, VillagerLevel::NOVICE);
         let cost = trades.offers[0].modified_cost_a_count();
         trades.offers[0].take(cost, 0).unwrap();
         assert_eq!(trades.offers[0].uses, 1);
