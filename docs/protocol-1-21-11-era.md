@@ -207,6 +207,14 @@ the grounded bit from
 their shared flags byte, preserving the position and optional rotation the
 shared server uses to recenter the view and check interactions.
 
+The empty Play `player_loaded` marker reaches `ServerBound::PlayerLoaded` as
+well. The default `lodestone-client` policy emits it after the placement
+teleport; the shared connection then enables fall simulation for later movement
+samples. A trailing byte is rejected rather than silently changing that
+connection-local readiness state. The protocol also emits the shared health
+update after that consumer applies damage, so the HUD-facing result is not an
+unobserved server-only state change.
+
 The initial view is a typed `ChunkBatchStart`, its columns, then a typed
 `ChunkBatchFinished`; the serverbound `ChunkBatchReceived` decoder becomes
 `ServerBound::ChunkBatchAcknowledged`. The shared server consumes that event

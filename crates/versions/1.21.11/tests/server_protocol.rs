@@ -283,6 +283,28 @@ fn movement_shapes_preserve_position_rotation_and_ground_status() {
 }
 
 #[test]
+fn player_loaded_is_an_empty_play_marker() {
+    let protocol = V774ServerProtocol;
+    // Protocol 774 assigns player_loaded the Play id 0x2b and its body is
+    // genuinely empty. These bytes are assembled from that wire shape rather
+    // than through the packet encoder.
+    assert_eq!(
+        protocol.decode(State::Play, 0x2b, &[]),
+        ServerBound::PlayerLoaded,
+    );
+    assert_eq!(
+        protocol.decode(State::Play, 0x2b, &[0]),
+        ServerBound::Ignored,
+        "a trailing byte must not mark the shared connection ready"
+    );
+    assert_eq!(
+        protocol.decode(State::Configuration, 0x2b, &[]),
+        ServerBound::Ignored,
+        "readiness belongs to Play after the configuration handoff"
+    );
+}
+
+#[test]
 fn a_loaded_neighbour_contributes_sky_light_across_the_east_border() {
     let protocol = V774ServerProtocol;
     let mut center = ChunkColumn::new(-64, 384);
