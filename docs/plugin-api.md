@@ -359,6 +359,10 @@ stops dispatch. A trap, fuel exhaustion, or future native context this ABI canno
 current action, unloads the failing guest where applicable, and lets later actions be considered by
 the remaining guests. The `veto:actions` data-flow capability gates delivery to the export.
 
+`act:chat` permits only chat text; server commands require the separately default-denied
+`act:command` capability. Both still enter the ordinary client action queue, but a conversational
+plugin cannot silently escalate into command execution.
+
 The ABI includes copied look and movement intent plus one-shot placement and deliberately narrow
 inventory actions. Pickup-all double click has its own `act:inventory-double-click` grant and carries
 only a `u16` slot; the live carried stack determines what matching items can be collected. For an

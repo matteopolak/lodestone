@@ -80,6 +80,8 @@ static STAB_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 static RESPAWN_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "disconnect")]
 static DISCONNECT_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "send-command")]
+static COMMAND_SENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "scheduler")]
 static REPEATS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(feature = "scheduler")]
@@ -243,10 +245,17 @@ impl Guest for ChatResponder {
             Vec::new()
         };
 
+        #[cfg(feature = "send-command")]
+        return if !COMMAND_SENT.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            vec![Action::SendCommand("time query daytime".to_owned())]
+        } else {
+            Vec::new()
+        };
+
         #[cfg(feature = "fs-write")]
         return write_files();
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "fs-write")))]
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "send-command", feature = "fs-write")))]
         return respond(events);
     }
 

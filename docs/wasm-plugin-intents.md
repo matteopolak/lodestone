@@ -10,6 +10,8 @@ The desktop WASM plugin host exposes copied local-player look, movement, block-b
 
 For movement, the conductor runs after `lodestone_controller::ecs::compute_movement_intent` and before physics. It overwrites only copied axes and button state; item-use effects stay owned by the controller. Finite axes are clamped to `[-1, 1]`, and non-finite axes become neutral. Physics then resolves the request and the existing controller sends the ordinary movement and player-input actions. This is deliberately an intent rather than a raw packet: a guest cannot forge position, collision, or sequence state.
 
+`send-chat` and `send-command` deliberately do not share authority. `act:chat` permits conversational text only; `act:command` is separately default-denied because a command can mutate server state. Both use the existing ordered client action queue.
+
 The guest output list is ordered. If multiple guest actions set look or set movement in one tick, the last request of each kind wins. `none` removes look ownership or leaves the normal controller input intact for movement. The focused integration gate builds separate guest artifacts, verifies a changed `PhysicsState`, and verifies that the ordinary movement sender reports the resulting look or input in that tick.
 
 `set-break(some(break-intent))` installs or retargets a persistent `BreakIntent`; returning no break action leaves that claim alone, and `set-break(none)` releases it. The shell's existing `drive_mining` consumer owns reach and obstruction checks, live-state lookup, tool speed, vetoes, crack progress, local air prediction, the packet sequence, and the idempotent abort. Human attack input wins. `observe:break` supplies only changed `idle`, `progressing`, or finite rejection states per local-player session, so a long dig cannot turn into an unbounded every-tick event feed.
@@ -50,10 +52,14 @@ Any WIT change requires increasing `host::ABI_WORLD`, rebuilding guests, and upd
 
 ## Configuration
 
-The default host policy withholds `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, `observe:place`, `act:select-slot`, `act:inventory-click`, `act:inventory-quick-move`, `act:inventory-double-click`, `act:inventory-hotbar-swap`, `act:inventory-drop-cursor`, `act:drop-selected-item`, `act:swap-offhand`, `act:release-use-item`, `act:stab`, `act:respawn`, `act:disconnect`, `observe:inventory`, `fs:read`, and `fs:write`. A guest manifest must request every capability it uses; a request alone never changes the policy.
+The default host policy withholds `act:command`, `act:look`, `act:movement`, `act:break`, `observe:break`, `act:place`, `observe:place`, `act:select-slot`, `act:inventory-click`, `act:inventory-quick-move`, `act:inventory-double-click`, `act:inventory-hotbar-swap`, `act:inventory-drop-cursor`, `act:drop-selected-item`, `act:swap-offhand`, `act:release-use-item`, `act:stab`, `act:respawn`, `act:disconnect`, `observe:inventory`, `fs:read`, and `fs:write`. A guest manifest must request every capability it uses; a request alone never changes the policy.
 
 ```toml
 capabilities = ["act:movement"]
+```
+
+```toml
+capabilities = ["act:command"]
 ```
 
 ```toml

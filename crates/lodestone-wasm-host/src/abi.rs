@@ -374,7 +374,8 @@ pub fn lift_break_outcome(outcome: &lodestone_ecs::player::BreakOutcome) -> Brea
 #[must_use]
 pub fn capability_for(action: &Action) -> Capability {
     match action {
-        Action::SendChat(_) | Action::SendCommand(_) => Capability::ActChat,
+        Action::SendChat(_) => Capability::ActChat,
+        Action::SendCommand(_) => Capability::ActCommand,
         Action::SwingArm(_) => Capability::ActInteract,
         Action::SwapItemWithOffhand => Capability::ActSwapOffhand,
         Action::ReleaseUseItem => Capability::ActReleaseUseItem,
@@ -643,6 +644,14 @@ mod tests {
             Ok(LoweredAction::Client(ClientAction::SendCommand {
                 command: "time set day".to_owned()
             }))
+        );
+        assert_eq!(
+            lower_action(
+                Action::SendCommand("time set day".to_owned()),
+                &CapabilitySet::from_iter([Capability::ActChat]),
+            ),
+            Err(Capability::ActCommand),
+            "ordinary chat authority must not permit server commands"
         );
         assert_eq!(
             lower_action(Action::SwingArm(Hand::Off), &granted),
