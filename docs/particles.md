@@ -55,6 +55,11 @@ validated type and lower it to the raw atlas index only when constructing `Sprit
 An out-of-census or custom state fails closed before spawning debris, while names introduced by a plugin
 or data pack remain in their registry/import owners rather than being coerced into a built-in state.
 
+The ambient world probe has the same boundary before it chooses a block-specific animation: it converts
+the returned numeric state to `StateId`, then dispatches on the typed `Block` and reads properties only
+through that validated state. An unknown or custom probe result produces no particle; a built-in block
+added in a future registry update cannot accidentally match a misspelled name.
+
 The tint is **not** the same lookup as a block's face tint — vanilla's `TerrainParticle` constructor
 calls a separate virtual method (`colorAsTerrainParticle`), and a couple of blocks deliberately disagree
 with their own face tint (`grass_block`'s particle samples untinted dirt, since its `#particle` texture
