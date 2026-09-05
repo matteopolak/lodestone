@@ -550,10 +550,10 @@ also requests the isolated native shim, the shared bootstrap loader first resolv
 `blockStateId(int, int, int): int`, `serverTickCount(): long`, and
 `setBlockStateId(int, int, int, int): int`, `currentPluginName(): String`, and
 `currentPluginVersion(): String`, and
-`currentPluginDescriptor(): IsolatedPluginDescriptor` declarations, then registers all six Rust callbacks
-before it loads the bootstrap or plugin entry. Each plugin child inherits that one
-registration and definition, preventing the same Java API type from being separately defined for
-each plugin loader.
+`currentPluginDescriptor(): IsolatedPluginDescriptor` declarations, then registers the full
+generated callback list before it loads the bootstrap or plugin entry. Each plugin child inherits
+that one registration and definition, preventing the same Java API type from being separately
+defined for each plugin loader.
 
 The native declaration list is generated from one Rust `NativeMethodSpec`, and its class, name,
 descriptor, and order have hermetic tests that need neither a JDK nor operator jars. Registration
@@ -561,6 +561,16 @@ validation produces a typed `NativeSurfaceError`; the lifecycle host preserves i
 the terminal startup error. The ignored JDK gate compiles only a repository-owned stand-in declaration
 and proves JNI accepts that generated registration. This is a native callback seam, not a supplied
 Bukkit/Paper API or a claim that any plugin can run.
+
+One additional interception control accepts a single operator-selected static `()I` member. Its
+binary class name, member name, and returned value are validated input rather than a committed
+upstream inventory. The bridge loads and registers that member in the retained bootstrap loader
+before it creates any plugin child loader; an already-compiled child entry therefore consumes the
+same native definition through its normal parent relationship. A missing class, a wrong member
+shape, or failed native registration names the requested member and stops startup. The JDK-gated
+lifecycle fixture checks that a real retained plugin entry receives the expected `341` value from
+this path. This is a narrow class-loader/native-registration control, not a parallel Bukkit facade
+or a claim of broad internal-surface coverage.
 
 Field access is deliberately not part of this surface. Reading a static field would initialize its
 declaring shim class, contradicting the non-initializing load contract; instance fields would need a
@@ -747,6 +757,9 @@ one-slot worker command queue, and any world read or write from a listener must 
 `WorldPort` request/response seam rather than reaching an ECS guard. The
 `IsolatedPaperShim.blockHandlePosition(long)` resolver returns a copied coordinate string while the
 handle is live; stale, forged, out-of-range, and worker-off-thread calls fail as named Java errors.
+`blockHandleStateId(long)` first generation-checks that same handle, then asks the host's bounded
+resident-block query port for the state at its copied coordinate. This preserves the distinction
+between air and an unavailable column, and a stale handle fails before a host query is sent.
 The generic registry separately reports wrong-kind use. There is no additional
 environment variable or runtime toggle: the `jvm` feature and an operator-built shim containing
 the exact isolated declarations are the only prerequisites.

@@ -182,7 +182,7 @@ fn bridge_edge_is_default_off(text: &str) -> bool {
         .map(|line| line.split('#').next().unwrap_or("").chars()
             .filter(|character| !character.is_whitespace()).collect())
         .collect();
-    lines.iter().any(|line| line == "default=[]")
+    lines.iter().any(|line| line.starts_with("default=[") && !line.contains("\"jvm\""))
         && lines.iter().any(|line| line == "jvm=[\"dep:lodestone-jvm-bridge\"]")
         && lines.iter().any(|line| line.starts_with("lodestone-jvm-bridge=")
             && line.contains("optional=true") && line.contains("features=[\"jvm\"]"))
@@ -198,6 +198,7 @@ jvm = ["dep:lodestone-jvm-bridge"]
 lodestone-jvm-bridge = { path = "bridge", optional = true, features = ["jvm"] }
 "#;
     assert!(bridge_edge_is_default_off(manifest));
+    assert!(bridge_edge_is_default_off(&manifest.replace("default = []", "default = [\"v26-2\"]")));
     assert!(!bridge_edge_is_default_off(&manifest.replace("optional = true", "optional = false")));
     assert!(!bridge_edge_is_default_off(&manifest.replace("default = []", "default = [\"jvm\"]")));
     assert!(!bridge_edge_is_default_off(&manifest.replace("dep:lodestone-jvm-bridge", "unrelated")));

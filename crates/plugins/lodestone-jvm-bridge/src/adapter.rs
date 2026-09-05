@@ -486,6 +486,26 @@ fn resolve_resident_block_handle(
     })
 }
 
+/// Resolves a block handle before requesting its current state from the host.
+///
+/// The coordinate lookup happens entirely in the worker-owned registry, then
+/// the value query uses the same bounded port as a coordinate query. A stale
+/// or wrong-kind handle therefore fails before it can reach the host, and the
+/// host still owns the distinction between a resident air block and an absent
+/// column.
+fn resident_block_handle_state_id(bits: i64) -> Result<jint, AdapterError> {
+    let (x, y, z) = resolve_resident_block_handle(bits).map_err(|error| {
+        AdapterError::new(error.to_string().replace("blockHandlePosition", "blockHandleStateId"))
+    })?;
+    let port = CALLBACK_PORT.with(|slot| slot.borrow().clone())
+        .ok_or_else(|| AdapterError::new("blockHandleStateId requires the adapter worker thread"))?;
+    let state = port.request(BlockStateQuery { x, y, z })
+        .map_err(|error| AdapterError::new(format!("blockHandleStateId: {error}")))?
+        .map_err(|error| AdapterError::new(format!("blockHandleStateId({x},{y},{z}): {error}")))?;
+    jint::try_from(state)
+        .map_err(|_| AdapterError::new("blockHandleStateId exceeds Java int range"))
+}
+
 fn resolve_resident_player_handle(bits: i64) -> Result<String, AdapterError> {
     let handle = ObjectRef::from_bits(bits, ObjectKind::Player);
     RESIDENT_OBJECT_HANDLES.with(|slot| {
@@ -606,7 +626,7 @@ pub enum AdapterEvent {
     /// of making the adapter terminal.
     BlockStateChangedCompleted {
         change: BlockStateWrite,
-        /// The value-only player identity supplied for this change, if any.
+        /// The value-only player identity supplied for the reported block replacement, if any.
         /// The listener sees it only through the worker-owned player handle.
         player: Option<PlayerIdentity>,
         listener_failures: Vec<ResidentBlockChangeListenerFailure>,
@@ -939,7 +959,7 @@ impl AdapterHost {
 pub struct AdapterError(String);
 
 impl AdapterError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }
@@ -1366,6 +1386,28 @@ pub(crate) fn register_block_handle_position_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_block_handle_state_id_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts an opaque jlong and returns
+    // a jint. Resolution occurs before the bounded world-port request, so no
+    // ECS pointer, handle, or guard crosses JNI.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_block_handle_state_id as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_current_player_handle_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -1525,6 +1567,19 @@ extern "system" fn native_block_handle_position<'local>(
         env.new_string(format!("{},{},{}", position.0, position.1, position.2))
             .map(|value| value.into_raw())
             .map_err(|error| AdapterError::new(format!("blockHandlePosition: {error}")))
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_block_handle_state_id<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resident_block_handle_state_id(bits)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -2338,6 +2393,50 @@ mod tests {
         RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
         CURRENT_RESIDENT_BLOCK_HANDLE.with(|slot| *slot.borrow_mut() = None);
         CURRENT_RESIDENT_PLAYER_HANDLE.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn block_handle_state_read_uses_the_bounded_port_after_generation_check() {
+        let identity = lifecycle_identity("alpha", "one", "alpha.Main");
+        let change = BlockStateWrite {
+            x: 11,
+            y: 1,
+            z: 4,
+            state_id: 1234,
+        };
+        let (port, servicer) = channel(Duration::from_secs(1));
+        let (result_sender, result_receiver) = sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            RESIDENT_OBJECT_HANDLES.with(|slot| {
+                *slot.borrow_mut() = Some(ObjectRegistry::with_capacity(1));
+            });
+            CALLBACK_PORT.with(|slot| *slot.borrow_mut() = Some(port));
+            let handle = resident_block_handle(&identity, change).expect("block handle");
+            let result = resident_block_handle_state_id(handle.to_bits());
+            assert_eq!(release_resident_handles(&identity), 1);
+            let stale = resident_block_handle_state_id(handle.to_bits());
+            CALLBACK_PORT.with(|slot| *slot.borrow_mut() = None);
+            RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
+            result_sender.send((result, stale)).expect("state results");
+        });
+        let limit = Instant::now() + Duration::from_secs(1);
+        while servicer.service_all_pending(1, |query| {
+            assert_eq!(query, BlockStateQuery { x: 11, y: 1, z: 4 });
+            Ok(422)
+        }) == 0 {
+            assert!(Instant::now() < limit, "worker did not request a block state");
+            std::thread::yield_now();
+        }
+        let (result, stale) = result_receiver.recv().expect("state results");
+        assert_eq!(result, Ok(422));
+        assert_eq!(
+            stale,
+            Err(AdapterError::new(
+                "blockHandleStateId: the referenced object no longer exists",
+            )),
+            "a stale handle must fail before a host request is made",
+        );
+        worker.join().expect("worker joins");
     }
 
     #[test]

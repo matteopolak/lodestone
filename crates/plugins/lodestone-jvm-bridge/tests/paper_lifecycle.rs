@@ -7,6 +7,7 @@ use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
 use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost};
+use lodestone_jvm_bridge::native_surface::OperatorValueMember;
 use lodestone_jvm_bridge::paper::{
     PaperBootstrapConfig, PaperPluginLifecyclePhase, PaperPluginLifecycleStep,
     PaperServerFacadeInput,
@@ -58,10 +59,20 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
          public static native void subscribeResidentBlockStateChanges(ResidentBlockChangeListener listener); \
          public static native long currentBlockHandle(); \
          public static native String blockHandlePosition(long handle); \
+         public static native int blockHandleStateId(long handle); \
          public static native long currentPlayerHandle(); \
          public static native String playerHandleName(long handle); }",
     )
     .expect("shim source");
+    let intercepted_package = shim_sources.join("fixture/intercepted");
+    fs::create_dir_all(&intercepted_package).expect("intercepted source directory");
+    let intercepted_source = intercepted_package.join("Value.java");
+    fs::write(
+        &intercepted_source,
+        "package fixture.intercepted; public final class Value { \
+         public static native int read(); }",
+    )
+    .expect("intercepted source");
     let descriptor_source = shim_package.join("IsolatedPluginDescriptor.java");
     fs::write(
         &descriptor_source,
@@ -97,6 +108,7 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     compile(&jdk, &shim_classes, &descriptor_source);
     compile(&jdk, &shim_classes, &listener_source);
     compile_with_classpath(&jdk, &shim_classes, &shim_source, &shim_classes);
+    compile(&jdk, &shim_classes, &intercepted_source);
     compile(&jdk, &adapter_classes, &adapter_source);
     let manifest = fixture.path().join("MANIFEST.MF");
     fs::write(&manifest, "Manifest-Version: 1.0\nImplementation-Title: Paper\n")
@@ -138,6 +150,10 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     let plan = PaperBootstrapConfig::new(&paper_jar, &plugins)
         .with_shim_path(&shim_classes)
         .with_isolated_native_shim()
+        .with_operator_value_member(
+            OperatorValueMember::new("fixture.intercepted.Value", "read", 341)
+                .expect("operator member"),
+        )
         .discover()
         .expect("discover stand-in lifecycle inputs");
     let (status_sender, status_receiver) = sync_channel(1);
@@ -214,7 +230,19 @@ fn lifecycle_entries_run_callbacks_on_the_adapter_worker() {
     assert_eq!(status.plugins()[3].phase(), PaperPluginLifecyclePhase::Disabled);
     assert_eq!(
         fs::read_to_string(&callback_log).expect("callback log"),
-        "Alpha-construct:Alpha:one:fixture.alpha.Main\nBravo-construct:Bravo:one:fixture.bravo.Main\nCharlie-construct:Charlie:one:fixture.charlie.Main\nDelta-construct:Delta:one:fixture.delta.Main\nAlpha-enable:Alpha:one:fixture.alpha.Main\nBravo-enable:Bravo:one:fixture.bravo.Main\nCharlie-enable:Charlie:one:fixture.charlie.Main\nDelta-enable:Delta:one:fixture.delta.Main\nDelta-disable:Delta:one:fixture.delta.Main\nCharlie-disable:Charlie:one:fixture.charlie.Main\nAlpha-disable:Alpha:one:fixture.alpha.Main\n",
+        concat!(
+            "Alpha-construct:Alpha:one:fixture.alpha.Main:value=341\n",
+            "Bravo-construct:Bravo:one:fixture.bravo.Main:value=341\n",
+            "Charlie-construct:Charlie:one:fixture.charlie.Main:value=341\n",
+            "Delta-construct:Delta:one:fixture.delta.Main:value=341\n",
+            "Alpha-enable:Alpha:one:fixture.alpha.Main\n",
+            "Bravo-enable:Bravo:one:fixture.bravo.Main\n",
+            "Charlie-enable:Charlie:one:fixture.charlie.Main\n",
+            "Delta-enable:Delta:one:fixture.delta.Main\n",
+            "Delta-disable:Delta:one:fixture.delta.Main\n",
+            "Charlie-disable:Charlie:one:fixture.charlie.Main\n",
+            "Alpha-disable:Alpha:one:fixture.alpha.Main\n",
+        ),
     );
 }
 
@@ -233,7 +261,8 @@ fn callback_plugin_source(
          java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND); \
          }} catch (java.io.IOException error) {{ throw new RuntimeException(error); }} }} \
          private static String identity() {{ lodestone.bridge.IsolatedPluginDescriptor descriptor = lodestone.bridge.IsolatedPaperShim.currentPluginDescriptor(); return descriptor.name() + \":\" + descriptor.version() + \":\" + descriptor.mainClass(); }} \
-         public Main() {{ log(\"{name}-construct:\" + identity()); }} \
+         private static int interceptedValue() {{ return fixture.intercepted.Value.read(); }} \
+         public Main() {{ log(\"{name}-construct:\" + identity() + \":value=\" + interceptedValue()); }} \
          public void onEnable() {{ log(\"{name}-enable:\" + identity()); {enable_failure} }} \
          public void onDisable() {{ log(\"{name}-disable:\" + identity()); {disable_failure} }} }}"
     )
