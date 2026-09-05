@@ -1,6 +1,6 @@
 use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
 use lodestone_data::block_states;
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_19::V762ServerProtocol;
 use lodestone_v1_19::packet_ids::{handshaking, play};
@@ -218,5 +218,51 @@ fn protocol_762_lifts_all_four_movement_shapes_from_literal_bodies() {
         protocol.decode(State::Play, -1, &trailing),
         ServerBound::Ignored,
         "an unknown packet id must not turn plausible movement bytes into a move"
+    );
+}
+
+#[test]
+fn protocol_762_lifts_literal_block_use_with_its_prediction_sequence() {
+    let protocol = V762ServerProtocol;
+
+    // Independent 762 packet body: main/off hand VarInt, packed 5/-10/-7
+    // position, south face, three IEEE-754 cursor coordinates, inside-block,
+    // then the 1.19 block-prediction sequence. These bytes do not use this
+    // crate's position packer or packet encoder.
+    let body = [
+        0x01, // off hand
+        0x00, 0x00, 0x01, 0x7f, 0xff, 0xff, 0x9f, 0xf6, // 5, -10, -7
+        0x03, // south
+        0x3e, 0x80, 0x00, 0x00, // 0.25
+        0x3f, 0x80, 0x00, 0x00, // 1.0
+        0x3f, 0x40, 0x00, 0x00, // 0.75
+        0x01, // inside block
+        0x11, // prediction sequence 17
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::BLOCK_PLACE, &body),
+        ServerBound::UseItemOn {
+            pos: BlockPos::new(5, -10, -7),
+            face: BlockFace::South,
+            cursor: Vec3f {
+                x: 0.25,
+                y: 1.0,
+                z: 0.75,
+            },
+            sequence: 17,
+            hand: 1,
+        }
+    );
+
+    let mut invalid_face = body;
+    invalid_face[9] = 0x06;
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::BLOCK_PLACE,
+            &invalid_face
+        ),
+        ServerBound::Ignored,
+        "a malformed face must not reach placement through a plausible packet body"
     );
 }

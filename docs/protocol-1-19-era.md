@@ -150,6 +150,12 @@ recentre consumer rather than merely decoding into an unused value. The host
 lifts `position`, `position_look`, `look`, and status-only `flying`; position
 samples update streaming, fall tracking, and the server's player snapshot,
 while look-only and status-only samples preserve their narrower consumers.
+The same test module carries an adapter-to-registry-host block-use assertion:
+the 762 `block_place` body reaches `ServerBound::UseItemOn`, including its
+hand, cursor, and prediction sequence, which is consumed by the integrated
+server's placement and interaction path. The literal-byte decoder test keeps
+that conversion independent of the adapter encoder and rejects an out-of-range
+face before it can enter the consumer.
 `tests/server_protocol.rs` checks the packet ids present in the real 1.19.4
 capture and decodes literal movement bodies with the production codecs,
 including trailing-byte and unknown-id negative controls. This is not
