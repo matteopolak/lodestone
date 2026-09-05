@@ -566,31 +566,38 @@ declaring shim class, contradicting the non-initializing load contract; instance
 separate object-lifetime design. The field-operation risk in §1.2 therefore remains open rather than
 being hidden behind a constant or an unvalidated reflection path.
 
-This is deliberately only the retained `Load` lifecycle step. It retains a loader and non-initialized
-entry-class reference per successful descriptor, but does not initialize the server or a plugin,
-construct a plugin object, invoke an entry point, or establish Bukkit/Paper compatibility.
-Construction is not safe to infer from a descriptor: it can execute arbitrary plugin code and needs
-the server-owned API state that this bridge does not yet provide. The retained load is therefore
-immediately wrapped in `PaperPluginConstructionPlan`. Its descriptor-backed readiness snapshot keeps
-each plugin's validated name, version, kind, and main class beside the same worker-lifetime loader
-that resolved its entry. On the isolated worker, it reads each loaded class's public constructor
-metadata and records whether a zero-argument constructor exists. This reflection does not initialize
-the class, instantiate it, or invoke any plugin callback. A missing or uninspectable constructor is
-reported as a construction blocker before facade state; `EntryLoadFailed` remains the result for an
-entry with no retained class. A structurally suitable entry still reports
-`PaperServerFacadeState::Unavailable` when no native surface was installed or
-`PaperServerFacadeState::NativeServerSurface` when only the narrow native state seam is installed.
-There is deliberately no ready-to-construct state and no Java constructor call: a later slice must
-install a real, server-owned facade through that retained loader before it may add one. Enablement,
-disabling, and event dispatch remain later lifecycle work. The unignored unit tests inject loader
-outcomes and constructor shapes to prove ordering, phase rules, bootstrap-terminal failure, isolated
-plugin failures, and blocking. The runtime gate stays ignored because it needs a locally installed
-JDK; it uses stand-in archives only, not an operator Paper jar, and proves reflection does not run a
-static initializer.
+The retained `Load` lifecycle step keeps a loader and non-initialized entry-class reference per
+successful descriptor. It is immediately wrapped in `PaperPluginConstructionPlan`, whose readiness
+snapshot keeps each plugin's validated name, version, kind, and main class beside the same
+worker-lifetime loader that resolved it. On the isolated worker, preflight reads each loaded class's
+public constructor metadata without initializing the class, instantiating it, or invoking a callback.
+A missing or uninspectable constructor is reported before any facade decision; `EntryLoadFailed`
+remains the result for an entry with no retained class.
+
+`PaperServerFacadeInput::entry_construction_only` is the intentionally tiny exception: it consumes
+the adapter worker's capability token and permits one zero-argument Java-language constructor attempt
+for each preflighted entry on that same worker, then retains the resulting Java object with its
+defining loader. It supplies **no** server object, plugin metadata object, callback surface, event
+system, or compatibility contract. It exists to prove the retained-object and failure-isolation
+mechanics, not to make an ordinary plugin usable.
+`construct_entries` attempts eligible entries in discovery order; a constructor exception changes only
+that entry to `Failed` with a `Construct` diagnostic and later eligible entries still run. The status
+sequence is consequently `Discovered → Loaded → Constructed`; `Enable` and `Disable` remain
+unimplemented future operations, and no callback is exposed. The ordinary `Unavailable` input and
+the narrow `NativeServerSurface` input both remain construction blockers. A future server-facing
+construction path must add a real facade through the retained loader rather than treating this
+entry-only experiment as a partial API.
+
+The unignored unit tests inject loader outcomes and constructor shapes to prove ordering, phase
+rules, bootstrap-terminal failure, isolated plugin failures, and blocking. The runtime gate stays
+ignored because it needs a locally installed JDK; it builds stand-in archives only, runs both a
+successful and a deliberately failing constructor on the one adapter worker, and checks the retained
+per-descriptor `Construct` outcomes. It does not use an operator Paper jar or establish plugin
+compatibility.
 
 ```bash
 cargo test -p lodestone-jvm-bridge --features jvm --test paper_lifecycle \
-    lifecycle_entries_load_without_initialization -- --ignored --exact
+    lifecycle_entries_construct_on_the_adapter_worker -- --ignored --exact
 ```
 
 The ignored local-jar gate uses a locally materialized server jar and does not download or extract

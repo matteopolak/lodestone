@@ -8,25 +8,25 @@ use std::time::{Duration, Instant};
 
 use lodestone_jvm_bridge::adapter::{AdapterEvent, AdapterHost};
 use lodestone_jvm_bridge::paper::{
-    PaperBootstrapConfig, PaperPluginConstructorShape, PaperServerFacadeInput,
-    PaperServerFacadeState,
+    PaperBootstrapConfig, PaperPluginLifecyclePhase, PaperPluginLifecycleStep,
+    PaperServerFacadeInput,
 };
 use lodestone_jvm_bridge::runtime::JvmConfig;
 
 /// This deliberately uses stand-in archives. It proves only the production
-/// loader's non-initializing lifecycle boundary, not Paper startup or plugin
+/// loader's retained-entry construction boundary, not Paper startup or plugin
 /// compatibility. Run it in a fresh process because JNI permits one JVM.
 #[test]
 #[ignore = "requires JAVA_HOME pointing to a JDK with javac and libjvm"]
-fn lifecycle_entries_load_without_initialization() {
+fn lifecycle_entries_construct_on_the_adapter_worker() {
     let jdk = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"));
     let fixture = FixtureDirectory::new();
     let paper_sources = fixture.path().join("paper-sources");
     let paper_classes = fixture.path().join("paper-classes");
     let plugin_sources = fixture.path().join("plugin-sources");
     let plugin_classes = fixture.path().join("plugin-classes");
-    let shim_sources = fixture.path().join("shim-sources");
-    let shim_classes = fixture.path().join("shim-classes");
+    let failing_sources = fixture.path().join("failing-sources");
+    let failing_classes = fixture.path().join("failing-classes");
     let adapter_sources = fixture.path().join("adapter-sources");
     let adapter_classes = fixture.path().join("adapter-classes");
     for path in [
@@ -34,8 +34,8 @@ fn lifecycle_entries_load_without_initialization() {
         &paper_classes,
         &plugin_sources,
         &plugin_classes,
-        &shim_sources,
-        &shim_classes,
+        &failing_sources,
+        &failing_classes,
         &adapter_sources,
         &adapter_classes,
     ] {
@@ -50,21 +50,21 @@ fn lifecycle_entries_load_without_initialization() {
     let plugin_source = plugin_sources.join("Main.java");
     fs::write(
         &plugin_source,
-        "package fixture.plugin; public final class Main { static { if (System.nanoTime() != Long.MIN_VALUE) throw new AssertionError(\"plugin initialized\"); } }",
+        "package fixture.plugin; public final class Main { \
+         private static int constructions; \
+         public Main() { constructions++; } \
+         public static int constructions() { return constructions; } }",
     )
     .expect("plugin source");
-    let shim_package = shim_sources.join("lodestone/bridge");
-    fs::create_dir_all(&shim_package).expect("shim package directory");
-    let shim_source = shim_package.join("IsolatedPaperShim.java");
+    let failing_package = failing_sources.join("fixture/failing");
+    fs::create_dir_all(&failing_package).expect("failing plugin package directory");
+    let failing_source = failing_package.join("Main.java");
     fs::write(
-        &shim_source,
-        "package lodestone.bridge; public final class IsolatedPaperShim { \
-         static { if (System.nanoTime() != Long.MIN_VALUE) throw new AssertionError(\"shim initialized\"); } \
-         public static native int blockStateId(int x, int y, int z); \
-         public static native long serverTickCount(); \
-         public static native int setBlockStateId(int x, int y, int z, int stateId); }",
+        &failing_source,
+        "package fixture.failing; public final class Main { \
+         public Main() { throw new IllegalStateException(\"deliberate fixture failure\"); } }",
     )
-    .expect("shim source");
+    .expect("failing plugin source");
     let adapter_package = adapter_sources.join("fixture/adapter");
     fs::create_dir_all(&adapter_package).expect("adapter package directory");
     let adapter_source = adapter_package.join("LifecycleAdapter.java");
@@ -78,13 +78,18 @@ fn lifecycle_entries_load_without_initialization() {
     .expect("adapter source");
     compile(&jdk, &paper_classes, &bootstrap_source);
     compile(&jdk, &plugin_classes, &plugin_source);
-    compile(&jdk, &shim_classes, &shim_source);
+    compile(&jdk, &failing_classes, &failing_source);
     compile(&jdk, &adapter_classes, &adapter_source);
     fs::write(
         plugin_classes.join("plugin.yml"),
         "name: Fixture\nversion: one\nmain: fixture.plugin.Main\n",
     )
     .expect("plugin descriptor");
+    fs::write(
+        failing_classes.join("plugin.yml"),
+        "name: Failing\nversion: one\nmain: fixture.failing.Main\n",
+    )
+    .expect("failing plugin descriptor");
     let manifest = fixture.path().join("MANIFEST.MF");
     fs::write(&manifest, "Manifest-Version: 1.0\nImplementation-Title: Paper\n")
         .expect("Paper manifest");
@@ -97,33 +102,36 @@ fn lifecycle_entries_load_without_initialization() {
     );
     let plugins = fixture.path().join("plugins");
     fs::create_dir(&plugins).expect("plugins directory");
-    archive(&jdk, &plugins, "fixture.jar", &plugin_classes, None);
+    archive(&jdk, &plugins, "a-failing.jar", &failing_classes, None);
+    archive(&jdk, &plugins, "b-fixture.jar", &plugin_classes, None);
 
     let plan = PaperBootstrapConfig::new(&paper_jar, &plugins)
-        .with_shim_path(&shim_classes)
-        .with_isolated_native_shim()
         .discover()
         .expect("discover stand-in lifecycle inputs");
-    let (construction_sender, construction_receiver) = sync_channel(1);
+    let (status_sender, status_receiver) = sync_channel(1);
     let mut host = AdapterHost::start_with_setup(
         JvmConfig::new().with_classpath(&adapter_classes),
         "fixture.adapter.LifecycleAdapter",
         Duration::from_secs(5),
         move |runtime, env, native_surface| {
             let lifecycle = plan.load_lifecycle_entries_in_runtime(runtime, env)
-                .expect("load classes without running static initializers");
-            assert_eq!(lifecycle.loader_count(), 2, "retain bootstrap and plugin loaders");
+                .expect("load retained entry classes");
+            assert_eq!(lifecycle.loader_count(), 3, "retain bootstrap and plugin loaders");
             assert!(lifecycle.retains_bootstrap_loader());
-            assert_eq!(lifecycle.loaded_plugins()[0].descriptor().name(), "Fixture");
-            assert!(lifecycle.loaded_plugins()[0].retains_entry_association());
+            assert_eq!(lifecycle.loaded_plugins()[1].descriptor().name(), "Fixture");
+            assert!(lifecycle.loaded_plugins()[1].retains_entry_association());
             let construction = lifecycle
-                .into_construction_plan(env, PaperServerFacadeInput::native_server_surface(
-                    native_surface,
-                ))
-                .expect("retain worker-owned native facade state");
-            construction_sender
-                .send(construction.readiness().clone())
-                .map_err(|error| format!("send construction readiness: {error}"))?;
+                .into_construction_plan(
+                    env,
+                    PaperServerFacadeInput::entry_construction_only(native_surface),
+                )
+                .expect("retain entry-only construction state")
+                .construct_entries(env);
+            assert_eq!(construction.plugins().len(), 1);
+            assert!(construction.plugins()[0].retains_instance());
+            status_sender
+                .send(construction.status().clone())
+                .map_err(|error| format!("send construction status: {error}"))?;
             Ok(construction)
         },
     )
@@ -140,19 +148,22 @@ fn lifecycle_entries_load_without_initialization() {
         }
         std::thread::yield_now();
     }
-    let readiness = construction_receiver
+    let status = status_receiver
         .try_recv()
-        .expect("worker must publish construction state before readiness");
-    assert_eq!(readiness.facade(), PaperServerFacadeState::NativeServerSurface);
-    assert_eq!(readiness.plugins()[0].descriptor().name(), "Fixture");
+        .expect("worker must publish construction status before readiness");
+    assert_eq!(status.plugins()[0].descriptor().name(), "Failing");
     assert_eq!(
-        readiness.plugins()[0].constructor(),
-        PaperPluginConstructorShape::PublicNoArguments,
+        status.plugins()[0].phase(),
+        PaperPluginLifecyclePhase::Failed,
     );
-    assert_eq!(
-        readiness.plugins()[0].blocker().to_string(),
-        "the installed server capability cannot supply plugin construction semantics",
-    );
+    let failure = status.plugins()[0].failure().expect("constructor failure is retained");
+    assert_eq!(failure.step(), PaperPluginLifecycleStep::Construct);
+    assert!(failure.message().contains("deliberate fixture failure"), "{failure:?}");
+    assert_eq!(status.plugins()[1].descriptor().name(), "Fixture");
+    assert_eq!(status.plugins()[1].phase(), PaperPluginLifecyclePhase::Constructed);
+    assert_eq!(status.plugins()[1].failure(), None);
+    assert!(PaperPluginLifecyclePhase::Constructed
+        .accepts(PaperPluginLifecycleStep::Enable));
 }
 
 struct FixtureDirectory(PathBuf);
