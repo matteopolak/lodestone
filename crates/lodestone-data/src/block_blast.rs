@@ -83,8 +83,8 @@
 //!
 //! # Dependencies
 //!
-//! [`crate::generated_block_blast`], and [`crate::block_states`] for the
-//! string→id resolution on the slow path. Consumers: `lodestone-server`'s `fire`
+//! [`crate::generated_block_blast`], and [`StateId::from_state_str`] for the
+//! string-to-id resolution on the slow path. Consumers: `lodestone-server`'s `fire`
 //! (spread and burnout) and `explosion_blocks` (blast destruction).
 
 use crate::block::Block;
@@ -215,13 +215,13 @@ pub fn explosion_resistance_for_state_id(id: StateId) -> Option<f32> {
 /// The string-keyed form of [`explosion_resistance_for_state_id`] — **the slow
 /// path**, kept for callers holding a state string rather than an id.
 ///
-/// Resolves through [`crate::block_states::state_id`] when it can, so the answer
-/// is byte-identical to the flat table's, and falls back to name + `waterlogged`
-/// parsing for a state string the registry cannot resolve at all.
+/// Resolves through [`StateId::from_state_str`] when it can, so the answer is
+/// byte-identical to the flat table's, and falls back to name + `waterlogged`
+/// parsing for a state string the built-in registry cannot resolve at all.
 #[must_use]
 pub fn explosion_resistance_for_state(state: &str) -> Option<f32> {
-    if let Some(id) = crate::block_states::state_id(state) {
-        return StateId::new(id).and_then(explosion_resistance_for_state_id);
+    if let Some(id) = StateId::from_state_str(state) {
+        return explosion_resistance_for_state_id(id);
     }
     let name = base_name(state);
     let is_air = matches!(
@@ -326,9 +326,9 @@ mod tests {
         let mut fluid_capped = 0usize;
         for id in 0..STATE_COUNT {
             let state_id = StateId::new(id).expect("generated state id is valid");
-            let name = crate::block_states::block_name(id).expect("every id has a block");
-            let waterlogged = crate::block_states::properties(id)
-                .expect("every id has properties")
+            let name = state_id.name();
+            let waterlogged = state_id
+                .properties()
                 .iter()
                 .any(|(k, v)| *k == "waterlogged" && *v == "true");
             let flat = explosion_resistance_for_state_id(state_id);
@@ -391,6 +391,20 @@ mod tests {
         assert_eq!(blast("minecraft:not_a_block"), None);
         assert_eq!(blast_or_inert("minecraft:not_a_block"), BlockBlast::INERT);
         assert_eq!(blast("minecraft:air").unwrap(), BlockBlast::INERT);
+    }
+
+    /// An unknown dynamic state stays on the string fallback rather than being
+    /// coerced into a built-in state merely to reach the flat table.
+    #[test]
+    fn unknown_dynamic_states_keep_their_waterlogged_fallback() {
+        assert_eq!(
+            explosion_resistance_for_state("example:reservoir[waterlogged=true]"),
+            Some(FLUID_EXPLOSION_RESISTANCE)
+        );
+        assert_eq!(
+            explosion_resistance_for_state("example:reservoir[waterlogged=false]"),
+            Some(0.0)
+        );
     }
 
     #[test]

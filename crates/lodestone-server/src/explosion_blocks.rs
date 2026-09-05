@@ -250,9 +250,8 @@ fn cell_resistance<S: ChunkSource>(
         return None;
     }
     let state = world.block_state(pos.x, pos.y, pos.z);
-    Some(match block_states::state_id(&state) {
-        Some(id) => block_states::StateId::new(id)
-            .and_then(block_blast::explosion_resistance_for_state_id),
+    Some(match block_states::StateId::from_state_str(&state) {
+        Some(id) => block_blast::explosion_resistance_for_state_id(id),
         None => block_blast::explosion_resistance_for_state(&state),
     })
 }
