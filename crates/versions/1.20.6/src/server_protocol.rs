@@ -345,6 +345,16 @@ impl ServerProtocol for V766ServerProtocol {
                 else {
                     return ServerBound::Ignored;
                 };
+                // Statuses 3 through 6 share this packet shape but do not
+                // target a block. The decoded location, face and prediction
+                // sequence are protocol padding; only the action reaches the server.
+                match status {
+                    3 => return ServerBound::ItemDropped { whole_stack: true },
+                    4 => return ServerBound::ItemDropped { whole_stack: false },
+                    5 => return ServerBound::ReleaseUseItem,
+                    6 => return ServerBound::SwapItemInHand,
+                    _ => {}
+                }
                 let (Some(action), Some(face)) = (block_action(status), block_face(face)) else {
                     return ServerBound::Ignored;
                 };

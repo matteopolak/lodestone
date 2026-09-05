@@ -250,13 +250,19 @@ The same feature registers `V766ServerProtocol` for hosting protocol 766.
 
 `server_protocol::V766ServerProtocol` implements offline login, configuration,
 the Overworld join and teleport, chunk batches, player movement, block
-breaking updates, and block-use placement. Its 766 `block_place` decoder lifts
+breaking updates, inventory drops, held-item release, hand swaps, and block-use
+placement. Its 766 `block_place` decoder lifts
 the hand, signed packed position, face, block-local cursor, and prediction
 sequence into `ServerBound::UseItemOn`, the existing integrated-server placement
 consumer; it rejects invalid hand or face values and never accepts those bytes
 before Play. All four Play movement shapes preserve the position,
 optional rotation, and grounded status the shared server uses to recenter the
-view and check interactions.
+view and check interactions. The shared `block_dig` envelope also lifts its
+non-breaking statuses into the existing server consumers: `3` and `4` drop the
+whole selected stack or one item, `5` releases an in-progress held-item use,
+and `6` swaps the selected main-hand slot with the off hand. Their target,
+face, and prediction fields are padding rather than an interaction target; an
+unknown status or any such packet before Play is ignored.
 The configuration fixture in `src/generated/hosting-configuration.txt` contains
 all eight synchronized registries, plus features and tags, recorded directly
 from the headless 1.20.6 server. Every registry entry has its NBT payload, so no
