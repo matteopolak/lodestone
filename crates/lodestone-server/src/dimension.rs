@@ -488,6 +488,15 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.column(cx, cz)
     }
 
+    fn column_at(
+        &self,
+        cx: i32,
+        cz: i32,
+        stage: crate::chunk::ChunkGenerationStage,
+    ) -> ChunkColumn {
+        self.primary.column_at(cx, cz, stage)
+    }
+
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
         self.primary.block_state(x, y, z)
     }

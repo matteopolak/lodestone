@@ -98,7 +98,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource};
 use crate::protocol::{ChunkEncodeError, ChunkEncoder, ServerDirective};
 use crate::server::SourceRef;
 
@@ -149,6 +149,15 @@ impl ColumnPayload {
 /// and nothing else; under-including shows the player a hole in the direction
 /// they are actually facing, which is the whole complaint this exists to answer.
 const FRUSTUM_HALF_ANGLE_DEGREES: f32 = 60.0;
+
+/// Radius around a player that receives complete terrain generation when the
+/// streaming path enables progressive generation.
+///
+/// Eight strictly contains the ticked/mob/interaction area (radius three) and
+/// leaves a four-chunk margin for movement and packet latency. It is not a
+/// cache or allocation limit: callers still bound their streamed view and its
+/// retained columns independently.
+pub const DEFAULT_FULL_GENERATION_RADIUS: i32 = 8;
 
 /// How finely a yaw is quantised before it counts as "the player turned".
 ///
@@ -584,6 +593,9 @@ pub struct ColumnPipeline<S> {
     /// half of a join must be re-orderable when the player moves or turns while
     /// it is still draining.
     queue: ColumnQueue,
+    /// The centre and inclusive near radius that receive complete generation.
+    /// `None` keeps the historic all-full behaviour for every existing caller.
+    generation_band: Option<((i32, i32), i32)>,
     /// How many columns this pipeline was built with, so
     /// [`remaining`](Self::remaining) can be answered without the queue and the
     /// in-flight set having to agree about who owns a column mid-flight.
@@ -609,6 +621,7 @@ impl<S> std::fmt::Debug for ColumnPipeline<S> {
             .field("window", &self.window)
             .field("pending", &self.queue.len())
             .field("emitted", &self.emitted)
+            .field("generation_band", &self.generation_band)
             .field("inflight", &self.inflight.len())
             .finish_non_exhaustive()
     }
@@ -659,6 +672,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             source,
             encoder: None,
             queue,
+            generation_band: None,
             total,
             emitted: 0,
             window: window.max(1),
@@ -680,6 +694,29 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     pub fn encoding_with(mut self, encoder: Option<Arc<dyn ChunkEncoder>>) -> Self {
         self.encoder = encoder;
         self
+    }
+
+    /// Requests full generation through the inclusive Chebyshev `radius` around
+    /// `centre`, and shaped generation for the rest of this pipeline's view.
+    ///
+    /// This is a streaming concern, not a terrain-source policy: gameplay
+    /// reads continue to call [`ChunkSource::column`] and therefore always ask
+    /// for a full column. A negative radius is useful to tests as an all-shaped
+    /// control and is deliberately not clamped into a misleading one-column
+    /// full band.
+    #[must_use]
+    pub(crate) fn with_generation_band(mut self, centre: (i32, i32), radius: i32) -> Self {
+        self.generation_band = Some((centre, radius));
+        self
+    }
+
+    fn generation_stage_for(&self, coord: (i32, i32)) -> ChunkGenerationStage {
+        match self.generation_band {
+            Some((centre, radius)) if ring_distance(centre, coord) > radius => {
+                ChunkGenerationStage::Shaped
+            }
+            _ => ChunkGenerationStage::Full,
+        }
     }
 
     /// Re-keys the columns not yet handed to the pool for a player who has moved
@@ -796,6 +833,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
                 break;
             };
             let source = Arc::clone(&self.source);
+            let stage = self.generation_stage_for((cx, cz));
             // **Protocol encode happens here, on the worker, not on the caller's
             // task** — that is the whole point of `encoder`. The column is dropped
             // inside the closure, so the connection task never even sees the
@@ -805,7 +843,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             self.inflight.push_back((
                 (cx, cz),
                 tokio::task::spawn_blocking(move || {
-                    let column = source.column(cx, cz);
+                    let column = source.column_at(cx, cz, stage);
                     match encoder {
                         Some(encoder) => encoder
                             .try_encode_chunk(cx, cz, &column)
@@ -836,7 +874,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         let Some((cx, cz)) = self.queue.pop() else {
             return Ok(None);
         };
-        let column = self.source.column(cx, cz);
+        let column = self.source.column_at(cx, cz, self.generation_stage_for((cx, cz)));
         self.emitted += 1;
         self.primed = true;
         let _ = &self.inflight;
@@ -1052,6 +1090,7 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     /// A source whose column cost is a function of its position in a known list,
@@ -1061,6 +1100,38 @@ mod tests {
         coords: Vec<(i32, i32)>,
         delays: Vec<Duration>,
         completed: Arc<AtomicUsize>,
+    }
+
+    /// A deliberately non-progressive terrain body with a progressive request
+    /// log. The stage comes from the scheduler, so this detects an accidental
+    /// return to `ChunkSource::column` even though the placeholder terrain is
+    /// identical at both stages.
+    struct StageRecordingSource {
+        requests: Mutex<Vec<((i32, i32), ChunkGenerationStage)>>,
+    }
+
+    impl ChunkSource for StageRecordingSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 16)
+        }
+
+        fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
+            self.requests
+                .lock()
+                .expect("stage request log lock poisoned")
+                .push(((cx, cz), stage));
+            ChunkColumn::new(0, 16)
+        }
+
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::AIR.to_string()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_string()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
     }
 
     impl ChunkSource for SkewedSource {
@@ -1599,6 +1670,61 @@ mod tests {
             .await
             .expect("a source without an encoder cannot fail")
             .is_none());
+    }
+
+    /// A stream wider than its complete-generation band must request the
+    /// reduced prefix only for the far columns. The request log is the detector:
+    /// the returned fixture columns are intentionally indistinguishable, so a
+    /// test that looked at pixels or payloads here would let a full-generation
+    /// regression pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn far_columns_request_shaped_generation_and_near_columns_remain_full() {
+        let coords = vec![(0, 0), (1, 1), (2, 0), (-3, 3)];
+        let source = Arc::new(StageRecordingSource {
+            requests: Mutex::new(Vec::new()),
+        });
+        let mut pipeline = ColumnPipeline::with_window(Arc::clone(&source), coords.clone(), 1)
+            .with_generation_band((0, 0), 1);
+        while pipeline
+            .next()
+            .await
+            .expect("stage-recording source cannot fail")
+            .is_some()
+        {}
+        assert_eq!(
+            *source.requests.lock().expect("stage request log lock poisoned"),
+            vec![
+                ((0, 0), ChunkGenerationStage::Full),
+                ((1, 1), ChunkGenerationStage::Full),
+                ((2, 0), ChunkGenerationStage::Shaped),
+                ((-3, 3), ChunkGenerationStage::Shaped),
+            ],
+            "a far request recorded as Full means the expensive suffix is still wired into the stream"
+        );
+
+        // Detector control: a negative radius is an all-shaped view. If a
+        // future refactor ignores `generation_band`, this control reports the
+        // first full request rather than merely observing a green all-full run.
+        let control = Arc::new(StageRecordingSource {
+            requests: Mutex::new(Vec::new()),
+        });
+        let mut pipeline = ColumnPipeline::with_window(Arc::clone(&control), coords, 1)
+            .with_generation_band((0, 0), -1);
+        while pipeline
+            .next()
+            .await
+            .expect("stage-recording source cannot fail")
+            .is_some()
+        {}
+        assert!(
+            control
+                .requests
+                .lock()
+                .expect("stage request log lock poisoned")
+                .iter()
+                .all(|(_, stage)| *stage == ChunkGenerationStage::Shaped),
+            "control: radius -1 must request no full columns; a Full request proves the stage detector is inert"
+        );
     }
 
     /// [`ticket_level_for_ring`] must describe the same quantity a real
