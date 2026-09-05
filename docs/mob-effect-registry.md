@@ -30,9 +30,11 @@ than table indices.
 
 `MobEffectInstance` intentionally retains its raw `i32` id. It can arrive in
 an item component where the owning session or an extension has supplied a
-value outside this built-in census. Tooltip and colour consumers validate that
-raw value when they need built-in data; an unknown value is preserved by the
-model and simply has no built-in name, tooltip, or colour.
+value outside this built-in census. The tooltip converts that raw value with
+`MobEffectId::from_registry_id` before it calls
+`lodestone_data::potion::mob_effect_tooltip_for` or
+`mob_effect_attribute_modifiers_for`; an unknown value is preserved by the
+model and simply has no built-in name, tooltip, colour, or attribute modifier.
 
 ## How to change it
 
@@ -41,7 +43,9 @@ version changes, then update the literal boundary controls in
 `lodestone_data::mob_effects`. Packet paths should convert their raw VarInt
 with `MobEffectId::from_registry_id` once at decode or encode entry, applying
 the era's one-based adjustment with checked arithmetic when required, then
-pass the typed value through table lookups. Do not change
+pass the typed value through table lookups. Built-in helper APIs take
+`MobEffectId`, not raw `i32`, so add a conversion at a newly introduced
+external consumer rather than a second unchecked lookup helper. Do not change
 `MobEffectInstance` to reject an extension value unless the owning session's
 registry synchronization is also modeled.
 
