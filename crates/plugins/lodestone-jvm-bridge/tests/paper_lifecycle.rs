@@ -59,7 +59,8 @@ fn lifecycle_entries_load_without_initialization() {
         &shim_source,
         "package lodestone.bridge; public final class IsolatedPaperShim { \
          static { if (System.nanoTime() != Long.MIN_VALUE) throw new AssertionError(\"shim initialized\"); } \
-         public static native int blockStateId(int x, int y, int z); }",
+         public static native int blockStateId(int x, int y, int z); \
+         public static native long serverTickCount(); }",
     )
     .expect("shim source");
     let adapter_package = adapter_sources.join("fixture/adapter");
@@ -113,7 +114,7 @@ fn lifecycle_entries_load_without_initialization() {
             assert_eq!(lifecycle.loaded_plugins()[0].descriptor().name(), "Fixture");
             assert!(lifecycle.loaded_plugins()[0].retains_entry_association());
             let construction = lifecycle
-                .into_construction_plan(PaperServerFacadeInput::native_block_state_read(
+                .into_construction_plan(PaperServerFacadeInput::native_server_read(
                     native_surface,
                 ))
                 .expect("retain worker-owned native facade state");
@@ -136,7 +137,7 @@ fn lifecycle_entries_load_without_initialization() {
     let readiness = construction_receiver
         .try_recv()
         .expect("worker must publish construction state before readiness");
-    assert_eq!(readiness.facade(), PaperServerFacadeState::NativeBlockStateRead);
+    assert_eq!(readiness.facade(), PaperServerFacadeState::NativeServerRead);
     assert_eq!(readiness.plugins()[0].descriptor().name(), "Fixture");
     assert_eq!(
         readiness.plugins()[0].blocker().to_string(),

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use jni::errors::ThrowRuntimeExAndDefault;
 use jni::objects::{JClass, JString};
 use jni::strings::JNIString;
-use jni::sys::jint;
+use jni::sys::{jint, jlong};
 use jni::{Env, EnvUnowned, JValue, NativeMethod, jni_sig, jni_str};
 
 use crate::runtime::{JvmConfig, JvmRuntime};
@@ -33,27 +33,38 @@ pub struct BlockStateQuery {
 pub type BlockStateAnswer = Result<u32, String>;
 
 type BlockPort = WorldPort<BlockStateQuery, BlockStateAnswer>;
+type TickPort = WorldPort<(), ServerTickAnswer>;
 type Events = SyncSender<Result<AdapterEvent, AdapterError>>;
 
-/// Proof that setup is running beside a live native block-query producer.
+/// A host must distinguish an inactive game tick from a valid count.
+pub type ServerTickAnswer = Result<u64, String>;
+
+/// Proof that setup is running beside live native server-read producers.
 ///
-/// Only [`AdapterHost`] creates this token, from the worker's request port.
+/// Only [`AdapterHost`] creates this token, from the worker's request ports.
 /// A lifecycle setup may consume it to install a loader-local Java surface,
 /// but cannot use it to read world state directly. The matching
-/// [`AdapterHost::service_pending`] endpoint remains the only producer.
+/// [`AdapterHost::service_pending`] and
+/// [`AdapterHost::service_pending_server_tick`] endpoints remain the only
+/// producers.
 #[derive(Debug)]
-pub struct NativeBlockStateSurface {
-    _port: BlockPort,
+pub struct NativeServerReadSurface {
+    _block_port: BlockPort,
+    _tick_port: TickPort,
 }
 
-impl NativeBlockStateSurface {
-    fn from_port(port: BlockPort) -> Self {
-        Self { _port: port }
+impl NativeServerReadSurface {
+    fn from_ports(block_port: BlockPort, tick_port: TickPort) -> Self {
+        Self {
+            _block_port: block_port,
+            _tick_port: tick_port,
+        }
     }
 }
 
 thread_local! {
     static CALLBACK_PORT: RefCell<Option<BlockPort>> = const { RefCell::new(None) };
+    static SERVER_TICK_PORT: RefCell<Option<TickPort>> = const { RefCell::new(None) };
 }
 
 /// A completed worker transition. Ticks carry the caller's original sequence.
@@ -82,6 +93,7 @@ pub struct AdapterHost {
     commands: SyncSender<u64>,
     events: Receiver<Result<AdapterEvent, AdapterError>>,
     servicer: PortServicer<BlockStateQuery, BlockStateAnswer>,
+    server_tick_servicer: PortServicer<(), ServerTickAnswer>,
     deadline: Duration,
     state: State,
 }
@@ -101,9 +113,9 @@ impl AdapterHost {
     ///
     /// The setup runs after the JVM starts but before the adapter class loads.
     /// It receives no world state and must not invoke arbitrary operator code.
-    /// Its [`NativeBlockStateSurface`] token proves that the same worker owns a
-    /// native request port with a host-side producer; it is the only way a
-    /// lifecycle host may claim that narrow capability. A successful result
+    /// Its [`NativeServerReadSurface`] token proves that the same worker owns
+    /// native request ports with host-side producers; it is the only way a
+    /// lifecycle host may claim those narrow capabilities. A successful result
     /// remains on that worker until the adapter stops, so setup can retain
     /// loader-owned JVM state without publishing it to the tick thread.
     pub fn start_with_setup<F, S>(
@@ -113,7 +125,7 @@ impl AdapterHost {
         setup: F,
     ) -> Result<Self, AdapterError>
     where
-        F: for<'local> FnOnce(&JvmRuntime, &mut Env<'local>, NativeBlockStateSurface)
+        F: for<'local> FnOnce(&JvmRuntime, &mut Env<'local>, NativeServerReadSurface)
                 -> Result<S, String>
             + Send
             + 'static,
@@ -124,8 +136,16 @@ impl AdapterHost {
             return Err(AdapterError::new("adapter deadline must be positive"));
         }
         let class = class.to_owned();
-        Self::spawn(deadline, move |commands, events, port| {
-            let result = run_java(config, &class, commands, &events, port, setup);
+        Self::spawn(deadline, move |commands, events, port, server_tick_port| {
+            let result = run_java(
+                config,
+                &class,
+                commands,
+                &events,
+                port,
+                server_tick_port,
+                setup,
+            );
             if let Err(error) = result {
                 let _ = events.send(Err(error));
             }
@@ -134,19 +154,21 @@ impl AdapterHost {
 
     fn spawn(
         deadline: Duration,
-        run: impl FnOnce(Receiver<u64>, Events, BlockPort) + Send + 'static,
+        run: impl FnOnce(Receiver<u64>, Events, BlockPort, TickPort) + Send + 'static,
     ) -> Result<Self, AdapterError> {
         let (commands, receiver) = sync_channel(1);
         let (sender, events) = sync_channel(1);
         let (port, servicer) = channel(deadline);
+        let (server_tick_port, server_tick_servicer) = channel(deadline);
         std::thread::Builder::new()
             .name("lodestone-java-adapter".to_owned())
-            .spawn(move || run(receiver, sender, port))
+            .spawn(move || run(receiver, sender, port, server_tick_port))
             .map_err(|error| AdapterError::new(format!("adapter worker startup: {error}")))?;
         Ok(Self {
             commands,
             events,
             servicer,
+            server_tick_servicer,
             deadline,
             state: State::Loading(Instant::now()),
         })
@@ -184,6 +206,22 @@ impl AdapterHost {
             return 0;
         }
         self.servicer.service_all_pending(max, answer)
+    }
+
+    /// Answers at most `max` queued server-tick reads on the caller's thread.
+    ///
+    /// The closure must read the host's live tick witness. An inactive server
+    /// is an error, not a made-up zero, because zero is a valid tick count for
+    /// a future host whose lifecycle has not completed boot yet.
+    pub fn service_pending_server_tick(
+        &self,
+        max: usize,
+        mut answer: impl FnMut() -> ServerTickAnswer,
+    ) -> usize {
+        if matches!(self.state, State::Failed(_)) {
+            return 0;
+        }
+        self.server_tick_servicer.service_all_pending(max, |_| answer())
     }
 
     /// Polls completion without waiting. Startup/callback deadlines are terminal;
@@ -260,7 +298,8 @@ fn run_java<S>(
     commands: Receiver<u64>,
     events: &Events,
     port: BlockPort,
-    setup: impl for<'local> FnOnce(&JvmRuntime, &mut Env<'local>, NativeBlockStateSurface)
+    server_tick_port: TickPort,
+    setup: impl for<'local> FnOnce(&JvmRuntime, &mut Env<'local>, NativeServerReadSurface)
         -> Result<S, String>,
 ) -> Result<(), AdapterError> {
     // Operator paths are supplied only to isolated loaders below. Putting
@@ -270,7 +309,12 @@ fn run_java<S>(
         .map_err(|error| AdapterError::new(format!("adapter {class_name}: {error}")))?;
     runtime.with_attached_thread(|env| {
         let result = (|| {
-            let surface = NativeBlockStateSurface::from_port(port.clone());
+            CALLBACK_PORT.with(|slot| *slot.borrow_mut() = Some(port.clone()));
+            SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = Some(server_tick_port.clone()));
+            let surface = NativeServerReadSurface::from_ports(
+                port.clone(),
+                server_tick_port.clone(),
+            );
             let setup_state = setup(&runtime, env, surface).map_err(|error| {
                 AdapterError::new(format!("adapter {class_name} setup: {error}"))
             })?;
@@ -280,7 +324,6 @@ fn run_java<S>(
                 .map_err(|error| java_error(env, &format!("{class_name}.blockStateId(III)I"), error))?;
             env.get_static_method_id(&class, jni_str!("onTick"), jni_sig!("(J)V"))
                 .map_err(|error| java_error(env, &format!("{class_name}.onTick(J)V"), error))?;
-            CALLBACK_PORT.with(|slot| *slot.borrow_mut() = Some(port));
             if events.send(Ok(AdapterEvent::Ready)).is_err() {
                 return Ok(());
             }
@@ -299,6 +342,7 @@ fn run_java<S>(
             Ok(())
         })();
         CALLBACK_PORT.with(|slot| *slot.borrow_mut() = None);
+        SERVER_TICK_PORT.with(|slot| *slot.borrow_mut() = None);
         Ok(result)
     }).map_err(|error| AdapterError::new(error.to_string()))?
 }
@@ -341,6 +385,25 @@ pub(crate) fn register_block_query(
     }
 }
 
+#[allow(unsafe_code)]
+pub(crate) fn register_server_tick_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the static native accepts no arguments and returns a jlong.
+    // Callers validate the supplied declaration before registration. The
+    // callback contains panics and errors at the JNI boundary.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(&name, &signature,
+            native_server_tick_count as *mut c_void);
+        env.register_native_methods(class, &[method])
+    }
+}
+
 extern "system" fn native_block_state_id<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
@@ -357,6 +420,23 @@ extern "system" fn native_block_state_id<'local>(
             .map_err(|error| AdapterError::new(format!("blockStateId: {error}")))?
             .map_err(|error| AdapterError::new(format!("blockStateId({x},{y},{z}): {error}")))?;
         jint::try_from(state).map_err(|_| AdapterError::new("blockStateId exceeds Java int range"))
+    }).resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_server_tick_count<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> jlong {
+    env.with_env(|_env| -> Result<jlong, AdapterError> {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        let port = SERVER_TICK_PORT.with(|slot| slot.borrow().clone())
+            .ok_or_else(|| AdapterError::new("serverTickCount requires the adapter worker thread"))?;
+        let tick = port.request(())
+            .map_err(|error| AdapterError::new(format!("serverTickCount: {error}")))?
+            .map_err(|error| AdapterError::new(format!("serverTickCount: {error}")))?;
+        jlong::try_from(tick)
+            .map_err(|_| AdapterError::new("serverTickCount exceeds Java long range"))
     }).resolve::<ThrowRuntimeExAndDefault>()
 }
 
@@ -378,7 +458,7 @@ mod tests {
     #[test]
     fn callback_queries_run_on_host_and_ticks_do_not_overlap() {
         let host_thread = std::thread::current().id();
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, port| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), move |commands, events, port, _| {
             assert_ne!(std::thread::current().id(), host_thread);
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             for tick in commands {
@@ -407,7 +487,7 @@ mod tests {
 
     #[test]
     fn deadline_rejects_a_late_completion_and_remains_terminal() {
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _| {
             events.send(Ok(AdapterEvent::Ready)).unwrap();
             let _ = commands.recv();
         }).unwrap();
@@ -431,7 +511,7 @@ mod tests {
 
     #[test]
     fn worker_errors_preserve_the_named_failure() {
-        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port| {
+        let mut host = AdapterHost::spawn(Duration::from_secs(2), |commands, events, _port, _| {
             events.send(Err(AdapterError::new("example.Adapter.onTick: missing member"))).unwrap();
             let _ = commands.recv();
         }).unwrap();
@@ -444,6 +524,26 @@ mod tests {
                 }
                 Ok(_) => assert!(Instant::now() < limit),
             }
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn server_tick_reads_run_on_the_host_and_preserve_zero() {
+        let host_thread = std::thread::current().id();
+        let mut host = AdapterHost::spawn(
+            Duration::from_secs(2),
+            move |_commands, events, _port, tick_port| {
+                assert_ne!(std::thread::current().id(), host_thread);
+                events.send(Ok(AdapterEvent::Ready)).unwrap();
+                assert_eq!(tick_port.request(()).unwrap(), Ok(0));
+            },
+        )
+        .unwrap();
+        assert_eq!(await_event(&mut host), AdapterEvent::Ready);
+        let limit = Instant::now() + Duration::from_secs(2);
+        while host.service_pending_server_tick(1, || Ok(0)) == 0 {
+            assert!(Instant::now() < limit, "server tick query did not reach the host");
             std::thread::yield_now();
         }
     }

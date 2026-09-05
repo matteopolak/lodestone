@@ -2,7 +2,7 @@
 //!
 //! This is not a Bukkit or Paper API. An operator-built shim may opt into this
 //! one class while its loader is being prepared. The generated registration
-//! list is intentionally one method wide: extending it requires a concrete
+//! list is intentionally narrow: extending it requires a concrete
 //! host capability and a separately predicted test, not an inventory of
 //! speculative compatibility methods.
 
@@ -17,7 +17,7 @@ use crate::runtime::{JvmError, JvmRuntime};
 /// Binary name an operator-built isolated shim must use for this native seam.
 pub const ISOLATED_SHIM_CLASS: &str = "lodestone.bridge.IsolatedPaperShim";
 
-/// The only native member in the generated first surface.
+/// A native member in the generated isolated server-read surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeMethodSpec {
     /// Java method name.
@@ -26,10 +26,16 @@ pub struct NativeMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 1] = [NativeMethodSpec {
-    name: "blockStateId",
-    descriptor: "(III)I",
-}];
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 2] = [
+    NativeMethodSpec {
+        name: "blockStateId",
+        descriptor: "(III)I",
+    },
+    NativeMethodSpec {
+        name: "serverTickCount",
+        descriptor: "()J",
+    },
+];
 
 /// One non-interchangeable phase of native registration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,9 +46,11 @@ pub enum NativeRegistrationStep {
     Register(NativeMethodSpec),
 }
 
-const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 2] = [
+const ISOLATED_SHIM_REGISTRATION: [NativeRegistrationStep; 4] = [
     NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[0]),
+    NativeRegistrationStep::Validate(ISOLATED_SHIM_METHODS[1]),
     NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[0]),
+    NativeRegistrationStep::Register(ISOLATED_SHIM_METHODS[1]),
 ];
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -115,7 +123,7 @@ pub(crate) fn validate_and_register(
                 // `jni` represents identifiers as compile-time modified-UTF8
                 // literals. The generated spec above remains the checked
                 // source of truth; this branch is its one JNI encoding.
-                env.get_static_method_id(class, jni_str!("blockStateId"), jni_sig!("(III)I"))
+                method_id(env, class, *method)
                     .map_err(|error| NativeSurfaceError::MissingMethod {
                         class: ISOLATED_SHIM_CLASS,
                         method: *method,
@@ -123,7 +131,7 @@ pub(crate) fn validate_and_register(
                     })?;
             }
             NativeRegistrationStep::Register(method) => {
-                adapter::register_block_query(env, class, method.name, method.descriptor)
+                register_method(env, class, *method)
                     .map_err(|error| NativeSurfaceError::Registration {
                         class: ISOLATED_SHIM_CLASS,
                         detail: error.to_string(),
@@ -132,6 +140,38 @@ pub(crate) fn validate_and_register(
         }
     }
     Ok(())
+}
+
+fn method_id(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method: NativeMethodSpec,
+) -> jni::errors::Result<jni::objects::JStaticMethodID> {
+    match (method.name, method.descriptor) {
+        ("blockStateId", "(III)I") => {
+            env.get_static_method_id(class, jni_str!("blockStateId"), jni_sig!("(III)I"))
+        }
+        ("serverTickCount", "()J") => {
+            env.get_static_method_id(class, jni_str!("serverTickCount"), jni_sig!("()J"))
+        }
+        _ => unreachable!("the isolated native surface has only generated method specs"),
+    }
+}
+
+fn register_method(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method: NativeMethodSpec,
+) -> jni::errors::Result<()> {
+    match (method.name, method.descriptor) {
+        ("blockStateId", "(III)I") => {
+            adapter::register_block_query(env, class, method.name, method.descriptor)
+        }
+        ("serverTickCount", "()J") => {
+            adapter::register_server_tick_query(env, class, method.name, method.descriptor)
+        }
+        _ => unreachable!("the isolated native surface has only generated method specs"),
+    }
 }
 
 /// Loads, validates, and registers the shim in one fresh isolated loader.
@@ -163,22 +203,30 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+    use std::time::{Duration, Instant};
 
+    use crate::adapter::{AdapterEvent, AdapterHost};
     use crate::runtime::JvmConfig;
 
     #[test]
-    fn generated_surface_pins_the_only_supported_member_and_descriptor() {
+    fn generated_surface_pins_each_supported_member_and_descriptor() {
         assert_eq!(ISOLATED_SHIM_CLASS, "lodestone.bridge.IsolatedPaperShim");
         assert_eq!(
             isolated_shim_methods(),
-            &[NativeMethodSpec { name: "blockStateId", descriptor: "(III)I" }],
+            &[
+                NativeMethodSpec { name: "blockStateId", descriptor: "(III)I" },
+                NativeMethodSpec { name: "serverTickCount", descriptor: "()J" },
+            ],
         );
-        let method = isolated_shim_methods()[0];
+        let block_state = isolated_shim_methods()[0];
+        let server_tick = isolated_shim_methods()[1];
         assert_eq!(
             isolated_shim_registration_steps(),
             &[
-                NativeRegistrationStep::Validate(method),
-                NativeRegistrationStep::Register(method),
+                NativeRegistrationStep::Validate(block_state),
+                NativeRegistrationStep::Validate(server_tick),
+                NativeRegistrationStep::Register(block_state),
+                NativeRegistrationStep::Register(server_tick),
             ],
             "a registration must never precede declaration validation",
         );
@@ -207,7 +255,8 @@ mod tests {
         fs::write(
             &source,
             "package lodestone.bridge; public final class IsolatedPaperShim { \
-             public static native int blockStateId(int x, int y, int z); }",
+             public static native int blockStateId(int x, int y, int z); \
+             public static native long serverTickCount(); }",
         )
         .expect("shim source");
         let output = Command::new(std::path::PathBuf::from(jdk).join("bin/javac"))
@@ -236,6 +285,97 @@ mod tests {
                 Ok(())
             })
             .expect("attach JVM thread");
+        fs::remove_dir_all(fixture).expect("remove fixture directory");
+    }
+
+    #[test]
+    #[ignore = "requires JAVA_HOME pointing to a JDK with javac and libjvm"]
+    fn live_server_tick_surface_reaches_the_adapter_host_producer() {
+        let jdk = std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required");
+        let fixture = std::env::temp_dir().join(format!(
+            "lodestone-native-server-tick-{}",
+            std::process::id(),
+        ));
+        let shim_root = fixture.join("shim");
+        let adapter_root = fixture.join("adapter");
+        let shim_source_root = shim_root.join("lodestone/bridge");
+        let adapter_source_root = adapter_root.join("fixture/adapter");
+        fs::create_dir_all(&shim_source_root).expect("shim source directory");
+        fs::create_dir_all(&adapter_source_root).expect("adapter source directory");
+        let shim_source = shim_source_root.join("IsolatedPaperShim.java");
+        fs::write(
+            &shim_source,
+            "package lodestone.bridge; public final class IsolatedPaperShim { \
+             public static native int blockStateId(int x, int y, int z); \
+             public static native long serverTickCount(); }",
+        )
+        .expect("shim source");
+        let adapter_source = adapter_source_root.join("SurfaceAdapter.java");
+        fs::write(
+            &adapter_source,
+            "package fixture.adapter; public final class SurfaceAdapter { \
+             private static native int blockStateId(int x, int y, int z); \
+             public static void onTick(long tick) {} }",
+        )
+        .expect("adapter source");
+        for (output, source) in [(&shim_root, &shim_source), (&adapter_root, &adapter_source)] {
+            let compile = Command::new(std::path::PathBuf::from(&jdk).join("bin/javac"))
+                .arg("-d")
+                .arg(output)
+                .arg(source)
+                .output()
+                .expect("javac");
+            assert!(
+                compile.status.success(),
+                "javac: {}",
+                String::from_utf8_lossy(&compile.stderr)
+            );
+        }
+
+        let mut host = AdapterHost::start_with_setup(
+            JvmConfig::new().with_classpath(&adapter_root),
+            "fixture.adapter.SurfaceAdapter",
+            Duration::from_secs(5),
+            move |runtime, env, _surface| {
+                let shim_config = JvmConfig::new().with_classpath(&shim_root);
+                runtime
+                    .with_isolated_loader(env, &shim_config, |env, loader| {
+                        install_in_loader(runtime, env, loader)
+                            .map_err(|error| JvmError::new(error.to_string()))?;
+                        let shim = runtime
+                            .load_class_from_loader(env, loader, ISOLATED_SHIM_CLASS)?;
+                        let tick = env
+                            .call_static_method(
+                                &shim,
+                                jni_str!("serverTickCount"),
+                                jni_sig!("()J"),
+                                &[],
+                            )
+                            .and_then(|value| value.j())
+                            ?;
+                        if tick != 41 {
+                            return Err(JvmError::new(format!(
+                                "expected server tick 41, got {tick}"
+                            )));
+                        }
+                        Ok(())
+                    })
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .expect("start native surface adapter");
+        let limit = Instant::now() + Duration::from_secs(5);
+        loop {
+            host.service_pending_server_tick(1, || Ok(41));
+            match host.poll().expect("native surface adapter event") {
+                Some(AdapterEvent::Ready) => break,
+                Some(AdapterEvent::TickCompleted(tick)) => {
+                    panic!("unexpected adapter tick {tick}");
+                }
+                None => assert!(Instant::now() < limit, "server tick surface did not become ready"),
+            }
+            std::thread::yield_now();
+        }
         fs::remove_dir_all(fixture).expect("remove fixture directory");
     }
 }

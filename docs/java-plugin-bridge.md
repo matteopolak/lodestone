@@ -546,9 +546,9 @@ isolated, reported against that descriptor, and does not stop the host from chec
 entries. When the operator
 also requests the isolated native shim, that same loader first resolves
 `lodestone.bridge.IsolatedPaperShim`, verifies its exact static native
-`blockStateId(int, int, int): int` declaration, then registers the one Rust callback before it loads
-the bootstrap or plugin entry. A different loader never inherits that registration, so installing it
-per fresh lifecycle loader is required rather than optional bookkeeping.
+`blockStateId(int, int, int): int` and `serverTickCount(): long` declarations, then registers both
+Rust callbacks before it loads the bootstrap or plugin entry. A different loader never inherits that
+registration, so installing it per fresh lifecycle loader is required rather than optional bookkeeping.
 
 The native declaration list is generated from one Rust `NativeMethodSpec`, and its class, name,
 descriptor, and order have hermetic tests that need neither a JDK nor operator jars. Registration
@@ -569,9 +569,10 @@ Construction is not safe to infer from a descriptor: it can execute arbitrary pl
 the server-owned API state that this bridge does not yet provide. The retained load is therefore
 immediately wrapped in `PaperPluginConstructionPlan`. Its descriptor-backed readiness snapshot keeps
 each plugin's validated name, version, kind, and main class beside the same worker-lifetime loader
-that resolved its entry. It reports `PaperServerFacadeState::Unavailable` for every successfully
-loaded entry and `EntryLoadFailed` for an entry with no retained class. There is deliberately no
-ready-to-construct state and no Java constructor call: a later slice must install a real,
+that resolved its entry. It reports `PaperServerFacadeState::Unavailable` when no native surface was
+installed, `PaperServerFacadeState::NativeServerRead` when the narrow native reads are installed, and
+`EntryLoadFailed` for an entry with no retained class. There is deliberately no ready-to-construct
+state and no Java constructor call: a later slice must install a real,
 server-owned facade through that retained loader before it may add one. Enablement, disabling, and
 event dispatch remain later lifecycle work. The unignored unit tests inject a loader to prove
 ordering, phase rules, bootstrap-terminal failure, isolated plugin failures, and that construction
@@ -680,20 +681,21 @@ Configuration supplied to a build without `jvm` is a reported error followed by 
 To add Paper bootstrap intake to that same worker, set `LODESTONE_PAPER_JAR` and
 `LODESTONE_PAPER_PLUGIN_DIRECTORY`; `LODESTONE_PAPER_SHIM_PATH` optionally names one shim directory
 or jar. When set, it must contain the operator-built `lodestone.bridge.IsolatedPaperShim` native
-declaration; the host registers that one block-state query callback in each fresh loader before
-loading the corresponding entry. The host discovers and retains a `PaperBootstrapPlan` before starting
+declarations; the host registers its block-state query and server-tick callbacks in each fresh loader
+before loading the corresponding entry. The host discovers and retains a `PaperBootstrapPlan` before starting
 a JVM, then loads the Paper bootstrap followed by each plugin entry class through separate shim-first
 isolated loaders before the adapter can report ready. The dedicated adapter owns the resulting
 worker-lifetime lifecycle state and snapshots each descriptor's Load status before readiness. Each
 plugin loader sees shim paths, the server jar, and only its own jar. The worker also snapshots each
 descriptor's construction prerequisite. Without `LODESTONE_PAPER_SHIM_PATH`, no facade is available.
-With it, the dedicated host supplies exactly one Java-facing, loader-local capability: the registered
-native block-state read. `AdapterHost::start_with_setup` mints the corresponding capability token only
-from its worker's request port; consuming it keeps that token with the retained loader state, and the
+With it, the dedicated host supplies one Java-facing, loader-local native read surface: block state and
+the current server tick. `AdapterHost::start_with_setup` mints the corresponding capability token only
+from its worker's request ports; consuming it keeps that token with the retained loader state, and the
 dedicated `JavaAdapter::poll` call is the matching live producer through
-`IntegratedServer::resident_block_state_id`. A lifecycle caller cannot claim that seam with an enum
-value while no request producer exists. It is not a Bukkit `Server`, a plugin loader, or a construction
-permit: loaded entries remain blocked from construction with a named insufficient-facade result. These
+`IntegratedServer::resident_block_state_id` and `IntegratedServer::server_tick_count`. A lifecycle caller
+cannot claim that seam with an enum value while no request producer exists. It is not a Bukkit `Server`,
+a plugin loader, or a construction permit: loaded entries remain blocked from construction with a named
+insufficient-facade result. These
 are non-initializing class loads: the host does **not**
 initialize Paper, construct or enable plugins, dispatch Paper events, or promise plugin
 compatibility. Successfully loaded entries are retained but blocked from construction rather than
@@ -703,14 +705,15 @@ A malformed Paper configuration or bootstrap Load failure saves the world before
 can continue. A plugin-entry Load failure is instead retained as disabled descriptor status, rather
 than silently removing the operator input or preventing the later isolated entries from being checked.
 
-The admin loop services at most 64 block queries per 1 ms poll, using
-`IntegratedServer::resident_block_state_id`. That accessor reaches the live primary `ChunkStore`,
-which checks presence and reads the cell under one cache lock. It never invokes generation, reads
-disk, clones a whole column, or returns air for unavailable terrain. `Arc`, borrowed-source and
-dimension wrappers forward this capability. A source with no retained read capability returns
-`None`; the host converts this into a named Java error. Extreme and out-of-height Y coordinates are
-also unavailable. The Rust API returns validated `StateId`; conversion to a raw integer happens
-only at the Java wire boundary.
+The admin loop services at most 64 block queries and 64 server-tick queries per 1 ms poll. Block
+queries use `IntegratedServer::resident_block_state_id`, which reaches the live primary `ChunkStore`,
+checks presence, and reads the cell under one cache lock. It never invokes generation, reads disk,
+clones a whole column, or returns air for unavailable terrain. `Arc`, borrowed-source and dimension
+wrappers forward this capability. A source with no retained read capability returns `None`; the host
+converts this into a named Java error. Extreme and out-of-height Y coordinates are also unavailable.
+The Rust API returns validated `StateId`; conversion to a raw integer happens only at the Java wire
+boundary. Tick queries use `IntegratedServer::server_tick_count`; an inactive server is likewise a
+named error rather than a fabricated zero, because zero may be a valid future tick count.
 
 The adapter observes the latest completed server tick whenever it becomes idle. Intervening server
 ticks are **coalesced**, not replayed with historical state; the same tick is never dispatched twice.

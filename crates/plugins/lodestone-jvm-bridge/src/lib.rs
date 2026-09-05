@@ -26,9 +26,9 @@
 //!   attachment, with no ECS guard or world handle in the callback API.
 //! - [`adapter`] (with `jvm`) — a dedicated worker that loads an explicit
 //!   adapter class, registers its native block query, and dispatches ticks.
-//! - [`native_surface`] (with `jvm`) — the one generated and validated native
-//!   declaration an operator-built isolated shim may request before lifecycle
-//!   entry loading.
+//! - [`native_surface`] (with `jvm`) — the generated and validated narrow
+//!   server-read declarations an operator-built isolated shim may request
+//!   before lifecycle entry loading.
 //! - [`paper`] (with `paper-preflight`) — validates an operator-supplied Paper
 //!   jar and discovers sorted plugin entry surfaces without extracting either
 //!   archive or starting a JVM.
