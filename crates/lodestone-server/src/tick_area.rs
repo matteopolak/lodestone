@@ -94,12 +94,13 @@
 //! the terrain rebuild, and [`crate::mobs::ChunkWorld`] as the view type the
 //! natural spawner consumes.
 
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 
 use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
 use crate::mobs::ChunkWorld;
-use crate::tick_region::{TickOwner, TickRegionPlan};
+use crate::tick_region::{CandidateRegionWorkload, TickOwner, TickRegionPlan};
 
 /// One player's position as the world tick loop needs it: which dimension they
 /// are in and which chunk column they are standing in.
@@ -279,7 +280,28 @@ impl FollowArea {
     /// why growing the radius raises the mob cap as a side effect.
     #[must_use]
     pub fn spawnable_chunks(&self) -> i32 {
-        i32::try_from(self.plan.chunks().len()).unwrap_or(i32::MAX)
+        let chunks: usize = self
+            .plan
+            .owner_workloads()
+            .iter()
+            .map(|workload| workload.chunks)
+            .sum();
+        debug_assert_eq!(chunks, self.plan.chunks().len());
+        i32::try_from(chunks).unwrap_or(i32::MAX)
+    }
+
+    /// Groups this live tick area's selected chunks into observer-chosen
+    /// candidate regions without changing the current global owner.
+    ///
+    /// This is the measurement seam for a named populated scene. Callers must
+    /// report the chosen edge with their result; it is not server configuration
+    /// and does not start region workers.
+    #[must_use]
+    pub fn candidate_region_workload(
+        &self,
+        edge_chunks: NonZeroU32,
+    ) -> CandidateRegionWorkload {
+        self.plan.candidate_region_workload(edge_chunks)
     }
 
     /// Snapshots this area's terrain out of `source` into the view the natural
@@ -475,6 +497,61 @@ mod tests {
             70,
             "the spawn cap scales with the area actually simulated"
         );
+    }
+
+    /// A populated, two-player scene provides a deterministic spatial report
+    /// without pretending that its candidate cells are already tick owners.
+    /// The two radius-one squares lie on deliberately different sides of the
+    /// 8-chunk boundaries, making an off-by-one or truncating negative divide
+    /// change the exact five-cell result below.
+    #[test]
+    fn a_populated_area_reports_candidate_region_workload_without_partitioning_the_tick() {
+        let anchors = TickAnchors::default();
+        anchors.publish(vec![
+            TickAnchor {
+                dimension: Dimension::Overworld,
+                cx: -1,
+                cz: -1,
+            },
+            TickAnchor {
+                dimension: Dimension::Overworld,
+                cx: 16,
+                cz: 0,
+            },
+        ]);
+        let mut area = FollowArea::new(follow(anchors, Dimension::Overworld, 1), -3..=3, -3..=3);
+        assert!(area.recompute());
+
+        let workload = area.candidate_region_workload(NonZeroU32::new(8).unwrap());
+
+        assert_eq!(workload.total_chunks(), 18);
+        assert_eq!(workload.largest_region_chunks(), 9);
+        assert_eq!(
+            workload.regions(),
+            [
+                crate::tick_region::CandidateRegionLoad {
+                    region: (-1, -1),
+                    chunks: 9,
+                },
+                crate::tick_region::CandidateRegionLoad {
+                    region: (1, -1),
+                    chunks: 1,
+                },
+                crate::tick_region::CandidateRegionLoad {
+                    region: (1, 0),
+                    chunks: 2,
+                },
+                crate::tick_region::CandidateRegionLoad {
+                    region: (2, -1),
+                    chunks: 2,
+                },
+                crate::tick_region::CandidateRegionLoad {
+                    region: (2, 0),
+                    chunks: 4,
+                },
+            ]
+        );
+        assert_eq!(area.spawnable_chunks(), 18);
     }
 
     /// The visit order is stable across recomputes, because the random-tick

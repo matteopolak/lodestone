@@ -21,6 +21,16 @@ consume chunks in that order; a duplicate would advance one chunk twice in a
 tick. This check makes the single-owner invariant testable now and provides the
 input contract a future partitioner must preserve.
 
+`TickRegionPlan::owner_workloads` reports the current real ownership (one
+global owner and its selected-chunk count). `FollowArea::spawnable_chunks`
+consumes that report on the live tick path, so the count cannot become an
+unobserved parallel data structure. For a named populated scene,
+`FollowArea::candidate_region_workload` groups the same selected chunks into an
+observer-supplied spatial edge using Euclidean division. Its sorted cell counts,
+total, and largest-cell count establish whether that scene is spatially spread
+out or concentrated before any worker or lock is introduced. Candidate cells
+are measurements only; they do not alter the global owner or simulation order.
+
 ## How to change it
 
 Do not add region workers or choose a region size in this module alone. First
@@ -35,9 +45,17 @@ through another production-consumed boundary. Any new producer must remove
 duplicates before constructing a plan and preserve a deliberate visit order;
 bypassing that check makes duplicate random ticks possible.
 
+When recording a candidate report, name the populated scene and the explicit
+edge passed to `candidate_region_workload`. Compare total chunks, the number of
+non-empty cells, and the largest-cell count across clustered and spread-out
+scenes. This is spatial workload evidence, not an MSPT measurement: use it to
+decide whether a later profile deserves a regionisation experiment, never as a
+claim that a particular edge is the right worker size.
+
 ## Configuration
 
-None. There is intentionally no region-size setting: a useful size depends on
+None. There is intentionally no region-size setting: a candidate edge is an
+explicit argument to a measurement, while a useful worker size depends on
 profiling a populated, named workload and has not been selected.
 
 ## Dependencies
