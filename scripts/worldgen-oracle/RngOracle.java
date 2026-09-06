@@ -92,6 +92,27 @@ public final class RngOracle {
             }
         }
 
+        // WorldgenRandom inherits its Gaussian sampler from the bit-random
+        // superclass while taking bits from the selected wrapped family.  These
+        // probes pin both the values and the stream position after a cached
+        // pair; the reseed case captures the wrapper override's intentionally
+        // persistent cache.
+        for (long seed : new long[]{42L, -8823894646L}){
+            for (boolean xoro : new boolean[]{true,false}){
+                String t = "wgr["+(xoro?"xoro":"legacy")+","+seed+"].nextGaussian";
+                WorldgenRandom paired = new WorldgenRandom(xoro ? new XoroshiroRandomSource(seed) : new LegacyRandomSource(seed));
+                pd(t+".0", paired.nextGaussian());
+                pd(t+".1", paired.nextGaussian());
+                p(t+".afterPair.nextLong", paired.nextLong());
+
+                WorldgenRandom reseeded = new WorldgenRandom(xoro ? new XoroshiroRandomSource(seed) : new LegacyRandomSource(seed));
+                pd(t+".reseed.first", reseeded.nextGaussian());
+                reseeded.setSeed(-918273645L);
+                pd(t+".reseed.cached", reseeded.nextGaussian());
+                p(t+".reseed.afterCached.nextLong", reseeded.nextLong());
+            }
+        }
+
         System.out.print(sb);
     }
 }

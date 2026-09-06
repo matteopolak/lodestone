@@ -146,14 +146,6 @@ pub struct LegacyPositionalFactory {
     seed: i64,
 }
 
-impl LegacyPositionalFactory {
-    /// Builds a factory from a raw seed (the `new LegacyPositionalRandomFactory(seed)` ctor).
-    #[must_use]
-    pub(crate) fn from_seed_value(seed: i64) -> Self {
-        Self { seed }
-    }
-}
-
 impl PositionalRandomFactory for LegacyPositionalFactory {
     type Source = LegacyRandomSource;
 
