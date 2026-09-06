@@ -198,6 +198,37 @@ retype above, and `settings` did not widen at all. Every one of those widenings
 decodes or encodes out of a committed capture from a protocol it now claims,
 which is the plan's one guard against inheritance-by-range.
 
+### Bounded clientbound world and entity events
+
+The adapter consumes the high-value event packets that were previously
+declared ignored. Explosion offsets use the wire VarInt count and are bounded
+by both a 65,536-entry ceiling and the remaining payload before allocation;
+the resulting `ClientEvent::Explosion` preserves all offsets and the three
+floating-point knockback components. Game-state codes 1, 2, 3, 7 and 8 map to
+weather or game-mode events, with fractional or out-of-range mode parameters
+rejected.
+
+`block_break_animation` and `world_event` feed the existing event model. A
+level event with code 2001 retains its state number as a
+protocol-local `BlockStateRef`; it must not be looked up in the canonical 26.2
+state table because the numbering spaces differ.
+
+`multi_block_change` applies state changes through `WorldSink::set_blocks`,
+synchronizes block entities, and emits one section-dirty event. Its packed
+header decodes x/z as signed 22-bit fields and handles the important era
+difference: section Y is unsigned at 756 but signed at 758. Equipment uses the
+top-bit-terminated list, but remains ignored because this family has no
+authoritative 1.17/1.18 item registry map; the current `lodestone-data` item
+table is for a different protocol. `block_action` is likewise left ignored
+until a protocol-local block registry map exists. Textual attribute names and
+UUID modifiers are retained with bounded attribute and modifier counts; the
+wire `minecraft:generic.*` keys are normalized to the model's canonical
+`minecraft:*` keys, and unknown keys are consumed but omitted. Explosions also
+apply every signed offset to loaded world storage as canonical air and remove
+any block entity at that position before emitting the event. Unsupported
+game-state reasons are consumed without emitting; malformed counts and
+trailing bytes fail closed.
+
 ### Chunk framing, the era's real risk
 
 `packets/chunk.rs` is where all the danger is, and both protocols differ from

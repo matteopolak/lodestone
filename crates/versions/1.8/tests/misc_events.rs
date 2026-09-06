@@ -17,8 +17,8 @@
 use lodestone_core::{Ctx, Encode, Reader, Writer};
 use lodestone_model::{
     BlockStateRef, ClientAction, ClientEvent, CollisionRule, ConnectionState, Difficulty,
-    DisplaySlot, EquipmentSlot, LevelEventData, ObjectiveMode, ObjectiveRenderType, SoundCategory,
-    TeamAction, TeamColor, VersionAdapter, Visibility,
+    DisplaySlot, EquipmentSlot, GameMode, LevelEventData, ObjectiveMode, ObjectiveRenderType,
+    SoundCategory, TeamAction, TeamColor, VersionAdapter, Visibility,
 };
 use lodestone_v1_8::V47Adapter;
 use lodestone_v1_8::packet_ids::play;
@@ -33,7 +33,7 @@ use lodestone_v1_8::packets::slot::Slot;
 use lodestone_v1_8::packets::world::{
     BlockAction, BlockBreakAnimation, NamedSoundEffect, OpenSignEntity, WorldEvent,
 };
-use lodestone_world::World;
+use lodestone_world::{ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World};
 
 const CTX: Ctx = Ctx { version: 47 };
 const EPS: f32 = 1e-6;
@@ -979,5 +979,247 @@ fn tab_complete_reply_with_no_pending_request_falls_back_to_zeroed_range() {
             assert_eq!(length, 0);
         }
         other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// update_time / game_state_change / explosion / update_attributes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn update_time_decodes_two_raw_i64s_in_wire_order() {
+    // These are a captured-layout fixture, deliberately not this crate's
+    // encoder: age 0x0102_0304_0506_0708 followed by time -0x0102_0304_0506_0708.
+    let payload = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xfe, 0xfd, 0xfc, 0xfb, 0xfa, 0xf9,
+        0xf8, 0xf8,
+    ];
+    match only_event(dispatch(play::clientbound::UPDATE_TIME, &payload)) {
+        ClientEvent::TimeChanged {
+            world_age,
+            time_of_day,
+        } => {
+            assert_eq!(world_age, 0x0102_0304_0506_0708);
+            assert_eq!(time_of_day, -0x0102_0304_0506_0708);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn game_state_reason_one_ends_rain_and_reason_two_begins_it() {
+    let fixtures: [(u8, f32); 5] = [
+        (1, 0.0),
+        (2, 0.0),
+        (3, 2.0),
+        (7, 0.625),
+        (8, 0.375),
+    ];
+
+    for (reason, value) in fixtures {
+        let mut payload = vec![reason];
+        payload.extend_from_slice(&value.to_be_bytes());
+        match (reason, only_event(dispatch(play::clientbound::GAME_STATE_CHANGE, &payload))) {
+            (1, ClientEvent::WeatherChanged { raining, rain_level, thunder_level }) => {
+                assert_eq!(raining, Some(false));
+                assert_eq!(rain_level, None);
+                assert_eq!(thunder_level, None);
+            }
+            (2, ClientEvent::WeatherChanged { raining, rain_level, thunder_level }) => {
+                assert_eq!(raining, Some(true));
+                assert_eq!(rain_level, None);
+                assert_eq!(thunder_level, None);
+            }
+            (3, ClientEvent::GameModeChanged { game_mode }) => {
+                assert_eq!(game_mode, GameMode::Adventure);
+            }
+            (7, ClientEvent::WeatherChanged { raining, rain_level, thunder_level }) => {
+                assert_eq!(raining, None);
+                assert_eq!(rain_level, Some(0.625));
+                assert_eq!(thunder_level, None);
+            }
+            (8, ClientEvent::WeatherChanged { raining, rain_level, thunder_level }) => {
+                assert_eq!(raining, None);
+                assert_eq!(rain_level, None);
+                assert_eq!(thunder_level, Some(0.375));
+            }
+            (_, other) => panic!("unexpected event for reason {reason}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn game_state_ignores_unknown_reasons_and_rejects_nonintegral_game_modes() {
+    assert!(dispatch(
+        play::clientbound::GAME_STATE_CHANGE,
+        &[99, 0x3f, 0x80, 0x00, 0x00],
+    )
+    .is_empty());
+
+    let error = V47Adapter::new()
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::GAME_STATE_CHANGE,
+            &[3, 0x40, 0x60, 0x00, 0x00], // 3.5 is not a game-mode id.
+        )
+        .expect_err("a fractional game-mode value must be rejected");
+    assert!(error.to_string().contains("game mode 3.5"));
+}
+
+#[test]
+fn explosion_keeps_offsets_and_the_unconditional_zero_or_nonzero_impulse() {
+    // Four distinct f32 header fields, two signed offset triples, then three
+    // distinct motion components. This is hand-assembled to keep the codec
+    // under test from supplying its own expected layout.
+    let payload = [
+        0x3f, 0xa0, 0x00, 0x00, // x = 1.25
+        0xc0, 0x20, 0x00, 0x00, // y = -2.5
+        0x40, 0x70, 0x00, 0x00, // z = 3.75
+        0x40, 0x10, 0x00, 0x00, // radius = 2.25
+        0x00, 0x00, 0x00, 0x02, // two affected blocks
+        0xff, 0x02, 0xfd, // (-1, 2, -3)
+        0x04, 0xfb, 0x06, // (4, -5, 6)
+        0x3f, 0x00, 0x00, 0x00, // motion x = 0.5
+        0xbe, 0x80, 0x00, 0x00, // motion y = -0.25
+        0x3f, 0xc0, 0x00, 0x00, // motion z = 1.5
+    ];
+    match only_event(dispatch(play::clientbound::EXPLOSION, &payload)) {
+        ClientEvent::Explosion {
+            pos,
+            radius,
+            affected_blocks,
+            knockback,
+        } => {
+            assert_eq!((pos.x, pos.y, pos.z), (1.25, -2.5, 3.75));
+            assert_eq!(radius, 2.25);
+            assert_eq!(affected_blocks, vec![[-1, 2, -3], [4, -5, 6]]);
+            let knockback = knockback.expect("legacy explosion always carries motion fields");
+            assert_eq!((knockback.x, knockback.y, knockback.z), (0.5, -0.25, 1.5));
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn explosion_removes_floored_offset_blocks_from_a_loaded_world_only() {
+    let air = lodestone_data::block_states::air_state().raw();
+    let mut world = World::new();
+    world.load(
+        ChunkPos::new(0, 0),
+        LoadedChunk::new(
+            ChunkColumn::new(
+                0,
+                16,
+                PaletteKind::block_states(),
+                PaletteKind::biomes(),
+                air,
+                0,
+            ),
+            ColumnLight::new(16),
+            Heightmaps::new(),
+            Vec::new(),
+        ),
+    );
+
+    const MARKER: u32 = 1_234;
+    // floor(1.25, 70.25, 3.75) is (1, 70, 3), so the two offsets below
+    // target (0, 72, 0) and (5, 65, 9). The neighboring marker must survive.
+    world.set_block(0, 72, 0, MARKER);
+    world.set_block(5, 65, 9, MARKER);
+    world.set_block(1, 70, 3, MARKER);
+
+    let payload = [
+        0x3f, 0xa0, 0x00, 0x00, // x = 1.25
+        0x42, 0x8c, 0x80, 0x00, // y = 70.25
+        0x40, 0x70, 0x00, 0x00, // z = 3.75
+        0x40, 0x10, 0x00, 0x00, // radius = 2.25
+        0x00, 0x00, 0x00, 0x02,
+        0xff, 0x02, 0xfd, // (-1, 2, -3)
+        0x04, 0xfb, 0x06, // (4, -5, 6)
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    ];
+    let directives = V47Adapter::new()
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            play::clientbound::EXPLOSION,
+            &payload,
+        )
+        .expect("explode packet");
+    assert!(matches!(directives.as_slice(), [lodestone_model::Directive::Emit(ClientEvent::Explosion { .. })]));
+    assert_eq!(world.block_state_at(0, 72, 0), Some(air));
+    assert_eq!(world.block_state_at(5, 65, 9), Some(air));
+    assert_eq!(world.block_state_at(1, 70, 3), Some(MARKER));
+}
+
+#[test]
+fn textual_attributes_keep_known_snapshots_and_skip_unknown_keys() {
+    // Entity id 300 is a two-byte VarInt. The property count is intentionally
+    // a four-byte i32, while the modifier count is a VarInt; this fixture
+    // discriminates all three textual-attribute width conventions at once.
+    let mut payload = vec![0xac, 0x02, 0x00, 0x00, 0x00, 0x02];
+    payload.extend_from_slice(&[17]);
+    payload.extend_from_slice(b"generic.maxHealth");
+    payload.extend_from_slice(&[0x40, 0x34, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00]); // 20.5
+    payload.push(1); // one modifier (VarInt)
+    payload.extend_from_slice(&[
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+        0xee, 0xff,
+    ]);
+    payload.extend_from_slice(&[0xbf, 0xd0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // -0.25
+    payload.push(2);
+    payload.push(13);
+    payload.extend_from_slice(b"custom.future");
+    payload.extend_from_slice(&[0x40, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // 9.0
+    payload.push(0); // no modifiers
+
+    match only_event(dispatch(play::clientbound::UPDATE_ATTRIBUTES, &payload)) {
+        ClientEvent::EntityAttributesUpdated {
+            entity_id,
+            attributes,
+        } => {
+            assert_eq!(entity_id, 300);
+            assert_eq!(attributes.len(), 1, "the unknown key is intentionally skipped");
+            let attribute = &attributes[0];
+            assert_eq!(attribute.attribute.to_string(), "minecraft:max_health");
+            assert_eq!(attribute.base, 20.5);
+            assert_eq!(attribute.modifiers.len(), 1);
+            let modifier = &attribute.modifiers[0];
+            assert_eq!(
+                modifier.id.to_string(),
+                "lodestone:legacy_modifier_00112233445566778899aabbccddeeff"
+            );
+            assert_eq!(modifier.amount, -0.25);
+            assert_eq!(modifier.operation, 2);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
+fn textual_attributes_reject_negative_and_out_of_range_modifier_operations() {
+    for operation in [0xff, 0x03] {
+        // VarInt entity id, i32 property count, known textual key, f64 base,
+        // one UUID modifier, then the deliberately invalid signed operation.
+        let mut payload = vec![1, 0, 0, 0, 1, 17];
+        payload.extend_from_slice(b"generic.maxHealth");
+        payload.extend_from_slice(&[0x40, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // 20.0
+        payload.push(1);
+        payload.extend_from_slice(&[0; 16]);
+        payload.extend_from_slice(&[0x3f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // 1.0
+        payload.push(operation);
+
+        let error = V47Adapter::new()
+            .handle_packet(
+                &mut World::new(),
+                ConnectionState::Play,
+                play::clientbound::UPDATE_ATTRIBUTES,
+                &payload,
+            )
+            .expect_err("invalid modifier operation must reject the packet");
+        assert!(error.to_string().contains("modifier operation"));
     }
 }

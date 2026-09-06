@@ -47,8 +47,8 @@ use crate::packets::window::{
     ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowItems,
 };
 use crate::packets::world::{
-    BlockAction, BlockBreakAnimation, BlockChange, BlockDig, BlockPlace, MultiBlockChange,
-    NamedSoundEffect, OpenSignEntity, WorldEvent,
+    BlockAction, BlockBreakAnimation, BlockChange, BlockDig, BlockPlace, Explosion,
+    MultiBlockChange, NamedSoundEffect, OpenSignEntity, WorldEvent,
 };
 
 /// Protocol version implemented by this adapter.
@@ -1051,6 +1051,47 @@ impl V5Adapter {
         })])
     }
 
+    fn handle_play_explosion(
+        &self,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: Explosion = decode_body_exact(payload)?;
+        // The legacy packet's offsets are authoritative removals, not merely
+        // visual hints. Apply the same state-write tail as block updates so
+        // loaded columns change immediately and any block entity at a removed
+        // position is cleared.
+        let origin_x = f64::from(body.x).floor() as i32;
+        let origin_y = f64::from(body.y).floor() as i32;
+        let origin_z = f64::from(body.z).floor() as i32;
+        let air = block_states::air_state_id();
+        for offset in &body.affected_block_offsets {
+            let x = origin_x
+                .checked_add(i32::from(offset[0]))
+                .ok_or_else(|| AdapterError::Decode("explosion x offset overflows".into()))?;
+            let y = origin_y
+                .checked_add(i32::from(offset[1]))
+                .ok_or_else(|| AdapterError::Decode("explosion y offset overflows".into()))?;
+            let z = origin_z
+                .checked_add(i32::from(offset[2]))
+                .ok_or_else(|| AdapterError::Decode("explosion z offset overflows".into()))?;
+            world.set_block(x, y, z, air);
+            world.sync_block_entity(x, y, z, None);
+        }
+        Ok(vec![Directive::Emit(ClientEvent::Explosion {
+            pos: Vec3::new(f64::from(body.x), f64::from(body.y), f64::from(body.z)),
+            radius: body.radius,
+            affected_blocks: body.affected_block_offsets,
+            // Protocol 5 has no presence flag: zero motion is the wire's
+            // explicit "outside the blast" value, not an absent impulse.
+            knockback: Some(Vec3::new(
+                f64::from(body.player_motion_x),
+                f64::from(body.player_motion_y),
+                f64::from(body.player_motion_z),
+            )),
+        })])
+    }
+
     fn handle_play_named_sound_effect(
         &self,
         _world: &mut dyn WorldSink,
@@ -1964,6 +2005,13 @@ pub static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandlerFn
         ),
     ),
     (
+        "minecraft:explosion",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_explosion as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:named_sound_effect",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2206,12 +2254,6 @@ pub static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "map item data in this era is a byte-packed command stream -- a colour column, a scale \
          change or an icon list, selected by the payload's first byte -- rather than the flat \
          colour array a canonical map event would carry",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:explosion",
-        "the canonical explosion event carries a particle and sound selection this era's packet \
-         does not have, and its block-offset list is redundant: the server sends an ordinary \
-         block change for each removed block alongside it",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:world_particles",

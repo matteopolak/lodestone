@@ -6430,7 +6430,7 @@ enum BrewingInsertOutcome {
 #[must_use]
 fn bottle_from_item(item: &str) -> Option<Bottle> {
     match item {
-        "minecraft:water_bottle" => Some(Bottle::new(BottleKind::Potion, "minecraft:water")),
+        "minecraft:water_bottle" => Bottle::from_potion_name(BottleKind::Potion, "minecraft:water"),
         _ => None,
     }
 }
@@ -18691,7 +18691,7 @@ mod tests {
         });
         assert_eq!(
             bottle,
-            Some(Bottle::new(BottleKind::Potion, "minecraft:water")),
+            Bottle::from_potion_name(BottleKind::Potion, "minecraft:water"),
             "the water bottle must land in bottle slot 0"
         );
     }
@@ -18789,7 +18789,10 @@ mod tests {
         block_entities.with(|reg| {
             if let Some(BlockEntity::BrewingStand(stand)) = reg.get_mut(pos) {
                 for slot in 0..3 {
-                    stand.set_bottle(slot, Some(Bottle::new(BottleKind::Potion, "minecraft:awkward")));
+                    stand.set_bottle(
+                        slot,
+                        Bottle::from_potion_name(BottleKind::Potion, "minecraft:awkward"),
+                    );
                 }
             }
         });

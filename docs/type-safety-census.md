@@ -146,7 +146,6 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-server/src/piston.rs:     pub moved_state: String,` | `potion-and-state-value` |
 | `crates/lodestone-server/src/redstone_note_block.rs:     pub new_state: String,` | `potion-and-state-value` |
 | `crates/lodestone-assets/src/meta.rs:     pub id: String,` | `dimension-resource-url` |
-| `crates/lodestone-server/src/brewing.rs:     pub potion: String,` | `potion-and-state-value` |
 | `crates/lodestone-server/src/redstone_dispenser.rs:     pub new_state: String,` | `potion-and-state-value` |
 | `crates/lodestone-server/src/plugin_dimension.rs:     pub key: String,` | `dimension-resource-url` |
 | `crates/lodestone-assets/src/item_model.rs:     pub kind: String,` | `typed-discriminator` |

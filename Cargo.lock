@@ -3053,6 +3053,7 @@ dependencies = [
  "lodestone-ecs",
  "lodestone-model",
  "lodestone-physics",
+ "tracing",
 ]
 
 [[package]]

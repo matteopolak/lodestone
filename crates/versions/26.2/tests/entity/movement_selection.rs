@@ -31,7 +31,9 @@ use lodestone_model::{
 };
 use lodestone_v26_2::V770Adapter;
 use lodestone_v26_2::packet_ids::play;
-use lodestone_v26_2::packets::game::{MovePlayerPos, MovePlayerRot, MovePlayerStatusOnly};
+use lodestone_v26_2::packets::game::{
+    MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly,
+};
 
 const CTX: Ctx = Ctx { version: 776 };
 
@@ -62,6 +64,17 @@ fn pos_golden(x: f64, y: f64, z: f64, flags: u8) -> Vec<u8> {
     bytes.extend_from_slice(&x.to_be_bytes());
     bytes.extend_from_slice(&y.to_be_bytes());
     bytes.extend_from_slice(&z.to_be_bytes());
+    bytes.push(flags);
+    bytes
+}
+
+fn pos_rot_golden(pos: Vec3, rotation: Rotation, flags: u8) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&pos.x.to_be_bytes());
+    bytes.extend_from_slice(&pos.y.to_be_bytes());
+    bytes.extend_from_slice(&pos.z.to_be_bytes());
+    bytes.extend_from_slice(&rotation.yaw.to_be_bytes());
+    bytes.extend_from_slice(&rotation.pitch.to_be_bytes());
     bytes.push(flags);
     bytes
 }
@@ -102,6 +115,25 @@ fn establish_baseline(adapter: &V770Adapter) {
         )
         .expect("encode initial move")
         .expect("initial move always sends pos_rot");
+}
+
+#[test]
+fn correction_echo_forces_position_and_rotation_even_when_both_are_unchanged() {
+    let adapter = V770Adapter::new();
+    establish_baseline(&adapter);
+    let action = move_action(BASE_POS, BASE_ROT, false, false);
+
+    let (packet_id, payload) = adapter
+        .encode_correction_echo(ConnectionState::Play, &action)
+        .expect("encode correction echo")
+        .expect("a correction echo is unconditional");
+
+    assert_eq!(packet_id, play::serverbound::MOVE_PLAYER_POS_ROT);
+    assert_eq!(payload, pos_rot_golden(BASE_POS, BASE_ROT, 0));
+    let body: MovePlayerPosRot = decode(&payload);
+    assert_eq!((body.x, body.y, body.z), (BASE_POS.x, BASE_POS.y, BASE_POS.z));
+    assert_eq!((body.yaw, body.pitch), (BASE_ROT.yaw, BASE_ROT.pitch));
+    assert_eq!(body.flags, 0);
 }
 
 #[test]
@@ -417,6 +449,9 @@ fn player_position_keeps_delta_movement_and_all_relative_bits() {
             &bytes,
         )
         .expect("decode player position correction");
+    assert!(matches!(directives.first(), Some(Directive::AwaitTeleportCorrection)));
+    assert!(matches!(directives.get(1), Some(Directive::Emit(ClientEvent::TeleportPlayer { .. }))));
+    assert!(matches!(directives.get(2), Some(Directive::Send { packet_id, .. }) if *packet_id == play::serverbound::ACCEPT_TELEPORTATION));
     let event = directives
         .iter()
         .find_map(|directive| match directive {
@@ -462,26 +497,19 @@ const TELEPORT_TARGET: Vec3 = Vec3 {
     z: -376.5,
 };
 
-/// **The invariant**: once this adapter has confirmed a teleport, the next
-/// movement packet it writes claims that teleport's target, whatever pose the
-/// simulation upstream had already built its claim from.
-///
-/// A vanilla client cannot violate this — it applies the pose, confirms, and
-/// sends, on one thread. Ours can: the confirmation is written the instant the
-/// packet decodes, while a movement action built from the old pose may already
-/// be sitting in the driver's queue, three hops downstream of the simulation
-/// and out of reach of everything above. The real server answers such a claim
-/// with a corrective teleport (its speed rule, which unlike its
-/// positional-disagreement rule does not zero the vertical component), so
-/// getting this wrong rubber-bands the player on ordinary teleports.
+/// A correction decode does not make this stateless encoder rewrite an
+/// independently supplied movement claim. The connection driver owns the
+/// correction transaction and supplies the forced echo after local adoption.
 #[test]
-fn the_first_move_after_a_teleport_claims_the_teleport_target_not_the_stale_pose() {
+fn correction_decode_does_not_rewrite_an_independent_move() {
     let adapter = V770Adapter::new();
     establish_baseline(&adapter);
 
     accept_teleport(&adapter, 7, TELEPORT_TARGET, 0);
 
-    // The claim the simulation had already built: still the pre-teleport pose.
+    // The claim comes from an independent caller. It must not be silently
+    // rewritten in this layer; the driver prevents pre-correction claims from
+    // reaching this encoder in the first place.
     let encoded = adapter
         .encode_action(
             ConnectionState::Play,
@@ -497,14 +525,12 @@ fn the_first_move_after_a_teleport_claims_the_teleport_target_not_the_stale_pose
     let decoded: MovePlayerPos = decode(&body);
     assert_eq!(
         (decoded.x, decoded.y, decoded.z),
-        (TELEPORT_TARGET.x, TELEPORT_TARGET.y, TELEPORT_TARGET.z),
-        "the first move after a teleport must claim the target, not the pose the simulation \
-         still held"
+        (BASE_POS.x, BASE_POS.y, BASE_POS.z),
+        "the adapter preserves the action it was given"
     );
     assert_eq!(
-        decoded.flags, 0x00,
-        "vanilla's own post-teleport send passes neither on-ground nor horizontal-collision, \
-         whatever the caller computed"
+        decoded.flags, 0x03,
+        "the adapter preserves movement flags as well as the position"
     );
 }
 

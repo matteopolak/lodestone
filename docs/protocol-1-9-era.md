@@ -151,6 +151,37 @@ The metadata gate is a real check rather than a comment: encoding an NBT metadat
 340 errors, and decoding type 13 below 340 errors instead of consuming the rest of the packet as
 a plausible NBT read.
 
+### Legacy world-state and entity-attribute packets
+
+All four protocol tables now lift the legacy explosion packet into `ClientEvent::Explosion`.
+Its fixed signed `i32` block-count is bounded at 8,192 before allocation, its three signed-byte
+block offsets are retained unchanged, and its three local-player motion floats become `Some(Vec3)`
+even when all are zero because this wire shape always carries them. The packet has no particle or
+sound selection; neither is invented by the adapter. Before emitting the event, every removed
+offset is applied as canonical air at `floor(centre) + offset` and synchronises its block-entity
+record with `None`, using the same state-write cleanup path as ordinary block changes.
+
+`game_state_change` has a one-byte reason and a shared `f32` parameter. Reason 1 ends rain,
+reason 2 begins it, 3 changes the local game mode only when the float is integral and valid, and
+7 and 8 update rain and thunder intensity respectively. Other reason codes are fully decoded and
+dropped until the model has an honest carrier.
+
+`entity_update_attributes` uses a VarInt entity id, a fixed signed `i32` property count, textual
+dotted camel-case keys, `f64` bases, and VarInt-counted UUID modifiers. The decoder bounds
+properties at 128 and modifiers per property at 1,024 before allocating, accepts only the three
+operation ordinals, maps the ten built-in textual keys to canonical resource keys, and gives each
+UUID modifier a stable `lodestone:legacy_modifier_<hex>` identity. Unknown extension keys are
+skipped individually rather than dropping otherwise valid snapshots.
+
+The metadata *list* codec is intentionally not folded into `ClientEvent::EntityMetadataUpdated`
+yet. Its current evidence establishes the self-terminating wire list and serializer ids, but the
+committed 1.9.4/1.10.2/1.11.2 join captures do not annotate which runtime entity class supplied
+each index, and the available 1.12.2 live decode only proves parse completion, not base-field
+meaning. A universal-index mapping would therefore be a guess. Before wiring it, add exact-era
+evidence that changes one known base field at a time and records its index, serializer and value
+for each represented protocol; then test both a spawn-time list and an incremental update through
+the adapter.
+
 ### Exact inversion of legacy block-state ids
 
 `lodestone-canonical::inverse` is the shared reverse lookup for a canonical 26.2 state that must

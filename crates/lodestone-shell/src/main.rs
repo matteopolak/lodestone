@@ -29,7 +29,7 @@
 // dispatches to it when `window` is on and to `lodestone::diagnostics`
 // directly when it is off — see `lodestone`'s own crate doc.
 #[cfg(not(target_arch = "wasm32"))]
-use lodestone::{CliOutcome, Config, run};
+use lodestone::{CliOutcome, Config, Mode, run};
 
 /// The browser build's do-nothing `main`. See this module's docs — `web/` is the
 /// real entry point, and this only satisfies the `[[bin]]` target.
@@ -42,7 +42,7 @@ fn main() -> anyhow::Result<()> {
     // world exist — so the binary is discoverable and `--help` never boots a game.
     match Config::from_args(std::env::args().skip(1)) {
         CliOutcome::Run(mut config) => {
-            let _chrome_guard = init_logging();
+            let _chrome_guard = init_logging(config.mode);
             // Fold `options.json` into the argv-parsed config, for the settings
             // that live in both. An explicit flag still wins for
             // this run; everything else takes the persisted value, so the
@@ -65,11 +65,29 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Where the process-wide tracing formatter writes its text output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogDestination {
+    Stdout,
+    Stderr,
+}
+
+/// Keep tracing off the stream every non-window presentation surface owns.
+fn logging_destination(mode: Mode) -> LogDestination {
+    match mode {
+        Mode::Window => LogDestination::Stdout,
+        Mode::Headless | Mode::Connect | Mode::Stdio | Mode::Terminal => LogDestination::Stderr,
+        #[cfg(feature = "runtime-presentation")]
+        Mode::HeadlessSession => LogDestination::Stderr,
+    }
+}
+
 /// Initialise `tracing` from `RUST_LOG`, defaulting to `info`.
 /// When `LODESTONE_TRACE` is set, also writes a chrome://tracing flamegraph
-/// to the named file.
+/// to the named file. Only the window surface leaves stdout available to the
+/// formatter; every other surface sends diagnostics to stderr instead.
 #[cfg(not(target_arch = "wasm32"))]
-fn init_logging() -> Option<tracing_chrome::FlushGuard> {
+fn init_logging(mode: Mode) -> Option<tracing_chrome::FlushGuard> {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::prelude::*;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -78,17 +96,61 @@ fn init_logging() -> Option<tracing_chrome::FlushGuard> {
 
     if let Some(path) = trace_path {
         let (chrome_layer, guard) = tracing_chrome::ChromeLayerBuilder::new().file(&path).build();
-        let _ = tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer().with_filter(filter))
-            .with(chrome_layer)
-            .try_init();
+        match logging_destination(mode) {
+            LogDestination::Stdout => {
+                let _ = tracing_subscriber::registry()
+                    .with(chrome_layer)
+                    .with(tracing_subscriber::fmt::layer().with_filter(filter))
+                    .try_init();
+            }
+            LogDestination::Stderr => {
+                let _ = tracing_subscriber::registry()
+                    .with(chrome_layer)
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_writer(std::io::stderr)
+                            .with_filter(filter),
+                    )
+                    .try_init();
+            }
+        }
         tracing::info!("chrome trace writing to {path}");
         Some(guard)
     } else {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_target(false)
-            .try_init();
+        match logging_destination(mode) {
+            LogDestination::Stdout => {
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_target(false)
+                    .try_init();
+            }
+            LogDestination::Stderr => {
+                let _ = tracing_subscriber::fmt()
+                    .with_writer(std::io::stderr)
+                    .with_env_filter(filter)
+                    .with_target(false)
+                    .try_init();
+            }
+        }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_window_surface_leaves_stdout_for_tracing() {
+        assert_eq!(logging_destination(Mode::Stdio), LogDestination::Stderr);
+        assert_eq!(logging_destination(Mode::Terminal), LogDestination::Stderr);
+        assert_eq!(logging_destination(Mode::Headless), LogDestination::Stderr);
+        assert_eq!(logging_destination(Mode::Connect), LogDestination::Stderr);
+        #[cfg(feature = "runtime-presentation")]
+        assert_eq!(
+            logging_destination(Mode::HeadlessSession),
+            LogDestination::Stderr
+        );
+        assert_eq!(logging_destination(Mode::Window), LogDestination::Stdout);
     }
 }

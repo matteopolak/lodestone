@@ -188,6 +188,118 @@ pub struct WorldEvent {
     pub global: bool,
 }
 
+/// Clientbound `explosion`.
+///
+/// The legacy explosion frame uses single-precision coordinates and radius,
+/// then an `i32` count followed by that many signed-byte block offsets. The
+/// three player-motion components are always present, including zeroes when
+/// the client is outside the blast. The count is checked against the bytes
+/// remaining before allocation so a malformed frame cannot request an
+/// unbounded vector or consume the motion fields as offsets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Explosion {
+    /// Explosion centre x coordinate.
+    pub x: f32,
+    /// Explosion centre y coordinate.
+    pub y: f32,
+    /// Explosion centre z coordinate.
+    pub z: f32,
+    /// Blast radius in blocks.
+    pub radius: f32,
+    /// Signed block offsets from the floored centre.
+    pub affected_block_offsets: Vec<[i8; 3]>,
+    /// This client's x knockback impulse, always present on the wire.
+    pub player_motion_x: f32,
+    /// This client's y knockback impulse, always present on the wire.
+    pub player_motion_y: f32,
+    /// This client's z knockback impulse, always present on the wire.
+    pub player_motion_z: f32,
+}
+
+impl lodestone_core::Decode for Explosion {
+    fn decode(
+        reader: &mut lodestone_core::Reader<'_>,
+        _ctx: lodestone_core::Ctx,
+    ) -> lodestone_core::Result<Self> {
+        let x = reader.f32()?;
+        let y = reader.f32()?;
+        let z = reader.f32()?;
+        let radius = reader.f32()?;
+        let count = reader.i32()?;
+        if count < 0 {
+            return Err(lodestone_core::Error::NegativeLength(count));
+        }
+        let count = count as usize;
+        // The motion tail is fixed at three f32 values. Leave it out of the
+        // offset budget so a count that reaches into the tail is rejected.
+        const MOTION_BYTES: usize = 3 * 4;
+        let available = reader.remaining();
+        let offset_bytes = available
+            .checked_sub(MOTION_BYTES)
+            .ok_or(lodestone_core::Error::UnexpectedEof)?;
+        let max_count = offset_bytes / 3;
+        if count > max_count {
+            return Err(lodestone_core::Error::LimitExceeded {
+                limit: max_count,
+                actual: count,
+            });
+        }
+        let mut affected_block_offsets = Vec::with_capacity(count);
+        for _ in 0..count {
+            affected_block_offsets.push([reader.i8()?, reader.i8()?, reader.i8()?]);
+        }
+        let player_motion_x = reader.f32()?;
+        let player_motion_y = reader.f32()?;
+        let player_motion_z = reader.f32()?;
+        Ok(Self {
+            x,
+            y,
+            z,
+            radius,
+            affected_block_offsets,
+            player_motion_x,
+            player_motion_y,
+            player_motion_z,
+        })
+    }
+}
+
+impl lodestone_core::Encode for Explosion {
+    fn encode(
+        &self,
+        writer: &mut lodestone_core::Writer,
+        _ctx: lodestone_core::Ctx,
+    ) -> lodestone_core::Result<()> {
+        writer.f32(self.x);
+        writer.f32(self.y);
+        writer.f32(self.z);
+        writer.f32(self.radius);
+        let count = i32::try_from(self.affected_block_offsets.len()).map_err(|_| {
+            lodestone_core::Error::Custom(format!(
+                "{} explosion offsets do not fit the i32 count",
+                self.affected_block_offsets.len()
+            ))
+        })?;
+        writer.i32(count);
+        for [x, y, z] in &self.affected_block_offsets {
+            writer.i8(*x);
+            writer.i8(*y);
+            writer.i8(*z);
+        }
+        writer.f32(self.player_motion_x);
+        writer.f32(self.player_motion_y);
+        writer.f32(self.player_motion_z);
+        Ok(())
+    }
+}
+
+impl lodestone_core::Packet for Explosion {
+    const NAME: &'static str = "minecraft:explosion";
+    const STATE: lodestone_core::State = lodestone_core::State::Play;
+    const BOUND: lodestone_core::Bound = lodestone_core::Bound::Client;
+    const PROTOCOLS: lodestone_core::ProtocolRange = lodestone_core::ProtocolRange::new(5, 5);
+}
+
 /// Clientbound `named_sound_effect`.
 ///
 /// The coordinates are fixed-point in *eighths* of a block here, not the

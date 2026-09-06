@@ -9,9 +9,10 @@ use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
-    ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityInteraction,
+    ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts,
+    EntityAttributeModifier, EntityAttributeSnapshot, EntityInteraction, EntityMetadataUpdate,
     EntityMovement, GameMode, Hand, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
-    PlayerCommand, PlayerListEntry, ProfileProperty, RecipeBookType, ResourceKey,
+    PlayerCommand, PlayerListEntry, ProfileProperty, RecipeBookType, Reported, ResourceKey,
     ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, TeamAction, TeamColor,
     TeamParameters, TeleportFlags, Text, Vec3, VersionAdapter, Visibility, WorldSink,
 };
@@ -22,13 +23,15 @@ use crate::entity_types;
 use crate::packets::chunk::{ChunkShape, MapChunk, UnloadChunk};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::{
-    EntityDestroy, EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
-    NamedEntitySpawn, RelEntityMove, SpawnEntityExperienceOrb, SpawnEntityLiving, SpawnObject,
+    EntityDestroy, EntityLook, EntityMetadataPacket, EntityMoveLook, EntityTeleport,
+    EntityVelocityPacket, NamedEntitySpawn, RelEntityMove, SpawnEntityExperienceOrb,
+    SpawnEntityLiving, SpawnObject,
 };
 use crate::packets::game::{
-    AttachEntity, BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook,
-    Collect, CraftingBookData, DifficultyPacket, EntityAction, EntityEffect, JoinGame,
-    KickDisconnect, OpenSignEntity, PlayerlistHeader, RemoveEntityEffect, Respawn,
+    AttachEntity, BlockBreakAnimation, BlockDig, BlockPlace, ClientCommand, ClientboundChat,
+    ClientboundPositionLook, Collect, CraftingBookData, DifficultyPacket, EntityAction,
+    EntityEffect, Explosion, GameStateChange, JoinGame, KickDisconnect, OpenSignEntity,
+    PlayerlistHeader, RemoveEntityEffect, Respawn,
     ServerboundArmAnimation, ServerboundChat, ServerboundFlying, ServerboundLook,
     ServerboundPosition, ServerboundPositionLook, SetPassengers, Spectate, SpawnPosition,
     TeleportConfirm, UpdateHealth, UpdateTime, UseEntity, UseEntityAt, UseEntityInteract,
@@ -38,6 +41,7 @@ use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{
     EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression,
 };
+use crate::packets::metadata::{EntityMetadata, MetadataValue};
 use crate::packets::player_info::{PlayerInfo, PlayerInfoAction};
 use crate::packets::position::Position;
 use crate::packets::settings::{BrandPayload, PlayerAbilities, ResourcePackReceive, Settings};
@@ -603,6 +607,31 @@ fn game_mode(value: u8) -> Result<GameMode, AdapterError> {
     }
 }
 
+/// Decodes the game-mode value carried by reason 3. Unlike the byte-valued
+/// join field, this packet carries an unconstrained float on the wire; only a
+/// finite integral mode in the protocol's four-value domain is valid.
+fn game_mode_change(value: f32) -> Result<GameMode, AdapterError> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=3.0).contains(&value) {
+        return Err(AdapterError::Decode(format!(
+            "invalid game mode value {value:?}; expected finite integer 0..=3"
+        )));
+    }
+    game_mode(value as u8)
+}
+
+/// Floors one finite explosion-centre component to a block coordinate.
+/// Validate all three components before applying any removal so an invalid
+/// float cannot leave a partially mutated loaded world behind.
+fn explosion_origin(component: f32, axis: &str) -> Result<i32, AdapterError> {
+    let floored = f64::from(component).floor();
+    if !floored.is_finite() || floored < f64::from(i32::MIN) || floored > f64::from(i32::MAX) {
+        return Err(AdapterError::Decode(format!(
+            "explosion {axis} centre {component} is outside block-coordinate range"
+        )));
+    }
+    Ok(floored as i32)
+}
+
 /// Parses a 1.16 namespaced world name (e.g. `minecraft:overworld`) into a
 /// canonical [`DimensionId`](lodestone_model::DimensionId).
 ///
@@ -731,6 +760,106 @@ const ABILITY_INSTABUILD: i8 = 0x08;
 /// no derive attribute can express.
 fn dec_err(err: impl std::fmt::Display) -> AdapterError {
     AdapterError::Decode(err.to_string())
+}
+
+/// Raises the three entity-base fields whose 1.13 indices and serializers are
+/// universal across the entity classes: flags (0), optional custom name (2),
+/// and custom-name visibility (3). Other indices are deliberately left alone:
+/// at 404 their meaning depends on the concrete entity class, and a raw value
+/// cannot safely be presented as a health/variant/equipment update without an
+/// entity registry guard.
+fn metadata_update(metadata: &EntityMetadata) -> EntityMetadataUpdate {
+    let mut update = EntityMetadataUpdate::default();
+    for entry in &metadata.0 {
+        match (entry.key, &entry.value) {
+            (0, MetadataValue::Byte(value)) => update.flags = Some(*value as u8),
+            (2, MetadataValue::OptChat(value)) => {
+                update.custom_name = Reported::Reported(value.as_deref().map(Text::from_json));
+            }
+            (3, MetadataValue::Bool(value)) => update.custom_name_visible = Some(*value),
+            _ => {}
+        }
+    }
+    update
+}
+
+fn metadata_directive(entity_id: i32, metadata: &EntityMetadata) -> Option<Directive> {
+    let update = metadata_update(metadata);
+    (!update.is_empty()).then_some(Directive::Emit(ClientEvent::EntityMetadataUpdated {
+        entity_id,
+        metadata: update,
+    }))
+}
+
+fn legacy_attribute_identifier(raw: &str) -> Result<lodestone_model::Identifier, AdapterError> {
+    if raw.contains(':') {
+        return raw
+            .parse()
+            .map_err(|_| AdapterError::Decode(format!("invalid attribute identifier {raw:?}")));
+    }
+    let path = raw
+        .rsplit_once('.')
+        .map(|(_, path)| path)
+        .unwrap_or(raw);
+    let mut normalized = String::with_capacity(path.len() + 8);
+    for ch in path.chars() {
+        if ch.is_ascii_uppercase() {
+            normalized.push('_');
+            normalized.push(ch.to_ascii_lowercase());
+        } else {
+            normalized.push(ch);
+        }
+    }
+    format!("minecraft:{normalized}")
+        .parse()
+        .map_err(|_| AdapterError::Decode(format!("invalid attribute identifier {raw:?}")))
+}
+
+/// Decodes the textual attribute list used by protocol 404. Modifier ids are
+/// UUIDs on this wire while the model uses namespaced identifiers; preserving
+/// them as `minecraft:uuid/<uuid>` retains identity without pretending they
+/// are a built-in registry entry.
+fn decode_attributes(payload: &[u8]) -> Result<(i32, Vec<EntityAttributeSnapshot>), AdapterError> {
+    let mut reader = Reader::new(payload);
+    let entity_id = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(reader.i32().map_err(dec_err)?)
+        .map_err(|_| AdapterError::Decode("negative attribute count".to_owned()))?;
+    if count > 256 {
+        return Err(AdapterError::Decode(format!("attribute count {count} exceeds 256")));
+    }
+    let mut attributes = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = reader.string(32767).map_err(dec_err)?;
+        let attribute = legacy_attribute_identifier(&name)?;
+        let base = reader.f64().map_err(dec_err)?;
+        let modifiers_count = usize::try_from(reader.var_i32().map_err(dec_err)?)
+            .map_err(|_| AdapterError::Decode("negative modifier count".to_owned()))?;
+        if modifiers_count > 1024 {
+            return Err(AdapterError::Decode(format!(
+                "modifier count {modifiers_count} exceeds 1024"
+            )));
+        }
+        let mut modifiers = Vec::with_capacity(modifiers_count);
+        for _ in 0..modifiers_count {
+            let id = reader.uuid().map_err(dec_err)?;
+            let amount = reader.f64().map_err(dec_err)?;
+            let operation = reader.i8().map_err(dec_err)?;
+            let operation = u8::try_from(operation)
+                .map_err(|_| AdapterError::Decode(format!("attribute operation {operation} < 0")))?;
+            if operation > 2 {
+                return Err(AdapterError::Decode(format!(
+                    "attribute operation {operation} outside 0..=2"
+                )));
+            }
+            let id = format!("minecraft:uuid/{id}")
+                .parse()
+                .map_err(|_| AdapterError::Decode("failed to preserve modifier UUID".to_owned()))?;
+            modifiers.push(EntityAttributeModifier { id, amount, operation });
+        }
+        attributes.push(EntityAttributeSnapshot { attribute, base, modifiers });
+    }
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok((entity_id, attributes))
 }
 
 /// Maps a `boss_bar` varint colour ordinal to the canonical [`BossColor`].
@@ -987,7 +1116,7 @@ impl V404Adapter {
             })?
             .parse()
             .map_err(|_| AdapterError::Decode(format!("mob type id {} is not a key", body.kind)))?;
-        Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+        let mut directives = vec![Directive::Emit(ClientEvent::EntitySpawned {
             entity_id: body.entity_id,
             uuid: Some(body.entity_uuid),
             entity_type,
@@ -998,7 +1127,11 @@ impl V404Adapter {
                 f64::from(body.velocity_y) / VELOCITY_SCALE,
                 f64::from(body.velocity_z) / VELOCITY_SCALE,
             )),
-        })])
+        })];
+        if let Some(metadata) = metadata_directive(body.entity_id, &body.metadata) {
+            directives.push(metadata);
+        }
+        Ok(directives)
     }
 
     /// `minecraft:spawn_entity`.
@@ -1048,14 +1181,18 @@ impl V404Adapter {
         let entity_type = entity_types::PLAYER
             .parse()
             .map_err(|_| AdapterError::Decode("player key invalid".to_owned()))?;
-        Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+        let mut directives = vec![Directive::Emit(ClientEvent::EntitySpawned {
             entity_id: body.entity_id,
             uuid: Some(body.player_uuid),
             entity_type,
             pos: Vec3::new(body.x, body.y, body.z),
             rotation: Rotation::new(unpack_degrees(body.yaw), unpack_degrees(body.pitch)),
             velocity: None,
-        })])
+        })];
+        if let Some(metadata) = metadata_directive(body.entity_id, &body.metadata) {
+            directives.push(metadata);
+        }
+        Ok(directives)
     }
 
     /// `minecraft:rel_entity_move`.
@@ -1528,6 +1665,205 @@ impl V404Adapter {
                 pos.y.rem_euclid(16) as u8,
                 pos.z.rem_euclid(16) as u8,
             ]],
+        })])
+    }
+
+    /// `minecraft:multi_block_change`. 404 packs each record as a horizontal
+    /// byte (`x` high nibble, `z` low nibble), a full-column `y` byte, then this
+    /// protocol's flat block-state VarInt. Records are grouped by the
+    /// owning section so one packet still produces one dirty-region signal per
+    /// section.
+    fn handle_play_multi_block_change(
+        adapter: &V404Adapter,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let chunk_x = reader.i32().map_err(dec_err)?;
+        let chunk_z = reader.i32().map_err(dec_err)?;
+        let count = usize::try_from(reader.var_i32().map_err(dec_err)?)
+            .map_err(|_| AdapterError::Decode("negative multi_block_change count".to_owned()))?;
+        if count > 65_536 {
+            return Err(AdapterError::Decode(format!(
+                "multi_block_change count {count} exceeds a full column"
+            )));
+        }
+        let mut by_section: std::collections::BTreeMap<i32, Vec<[u8; 3]>> =
+            std::collections::BTreeMap::new();
+        let mut updates = Vec::with_capacity(count);
+        let mut tally = FallbackTally::default();
+        for _ in 0..count {
+            let horizontal = reader.u8().map_err(dec_err)?;
+            let y_wire = reader.u8().map_err(dec_err)?;
+            let raw = reader.var_i32().map_err(dec_err)?;
+            let raw = u32::try_from(raw)
+                .map_err(|_| AdapterError::Decode(format!("negative block state id {raw}")))?;
+            let state = adapter.current_shape().canonical.resolve_or_air(raw, &mut tally).raw();
+            let x_rel = horizontal >> 4;
+            let z_rel = horizontal & 0xF;
+            let x = chunk_x * 16 + i32::from(x_rel);
+            let z = chunk_z * 16 + i32::from(z_rel);
+            let y = i32::from(y_wire);
+            updates.push((x, y, z, state));
+            by_section.entry(y >> 4).or_default().push([
+                x_rel,
+                (y_wire & 0xF),
+                z_rel,
+            ]);
+        }
+        reader.ensure_empty().map_err(dec_err)?;
+        // Do not mutate a loaded world until the complete packet, including
+        // its trailing-byte check, has been validated. A malformed suffix
+        // must not leave a valid prefix partially applied.
+        for (x, y, z, state) in updates {
+            world.set_block(x, y, z, state);
+            world.sync_block_entity(
+                x,
+                y,
+                z,
+                lodestone_data::block_states::StateId::new(state)
+                    .and_then(block_entity_type)
+                    .map(|kind| kind.raw()),
+            );
+        }
+        Ok(by_section
+            .into_iter()
+            .map(|(section_y, blocks)| {
+                Directive::Emit(ClientEvent::SectionBlocksChanged {
+                    section: SectionPos::new(chunk_x, section_y, chunk_z),
+                    blocks,
+                })
+            })
+            .collect())
+    }
+
+    /// `minecraft:block_break_animation`.
+    fn handle_play_block_break_animation(
+        adapter: &V404Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: BlockBreakAnimation = adapter.decode_body_exact(payload)?;
+        Ok(vec![Directive::Emit(ClientEvent::BlockDestruction {
+            entity_id: body.entity_id,
+            pos: body.location.0,
+            progress: body.destroy_stage as u8,
+        })])
+    }
+
+    /// `minecraft:explosion`. The legacy frame carries removed-block offsets
+    /// and an unconditional local-player impulse; zero motion is therefore a
+    /// present zero vector, not an absent value.
+    fn handle_play_explosion(
+        adapter: &V404Adapter,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: Explosion = adapter.decode_body_exact(payload)?;
+        let origin = (
+            explosion_origin(body.x, "x")?,
+            explosion_origin(body.y, "y")?,
+            explosion_origin(body.z, "z")?,
+        );
+        let removed_positions: Vec<(i32, i32, i32)> = body
+            .affected_block_offsets
+            .iter()
+            .map(|[x, y, z]| {
+                Ok((
+                    origin.0.checked_add(i32::from(*x)).ok_or_else(|| {
+                        AdapterError::Decode(
+                            "explosion removed-block x coordinate overflows".to_owned(),
+                        )
+                    })?,
+                    origin.1.checked_add(i32::from(*y)).ok_or_else(|| {
+                        AdapterError::Decode(
+                            "explosion removed-block y coordinate overflows".to_owned(),
+                        )
+                    })?,
+                    origin.2.checked_add(i32::from(*z)).ok_or_else(|| {
+                        AdapterError::Decode(
+                            "explosion removed-block z coordinate overflows".to_owned(),
+                        )
+                    })?,
+                ))
+            })
+            .collect::<Result<_, AdapterError>>()?;
+        let air = lodestone_data::block_states::air_state_id();
+        for (x, y, z) in removed_positions {
+            world.set_block(x, y, z, air);
+            world.sync_block_entity(x, y, z, None);
+        }
+        Ok(vec![Directive::Emit(ClientEvent::Explosion {
+            pos: Vec3::new(f64::from(body.x), f64::from(body.y), f64::from(body.z)),
+            radius: body.radius,
+            affected_blocks: body.affected_block_offsets,
+            knockback: Some(Vec3::new(
+                f64::from(body.player_motion_x),
+                f64::from(body.player_motion_y),
+                f64::from(body.player_motion_z),
+            )),
+        })])
+    }
+
+    /// `minecraft:game_state_change`; reasons 1, 2, 3, 7 and 8 are the
+    /// weather/game-mode state that the model can represent. Other reasons
+    /// are fully decoded and intentionally produce no event.
+    fn handle_play_game_state_change(
+        adapter: &V404Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: GameStateChange = adapter.decode_body_exact(payload)?;
+        Ok(match body.reason {
+            1 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: Some(true),
+                rain_level: None,
+                thunder_level: None,
+            })],
+            2 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: Some(false),
+                rain_level: None,
+                thunder_level: None,
+            })],
+            3 => vec![Directive::Emit(ClientEvent::GameModeChanged {
+                game_mode: game_mode_change(body.value)?,
+            })],
+            7 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: Some(body.value),
+                thunder_level: None,
+            })],
+            8 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: None,
+                thunder_level: Some(body.value),
+            })],
+            _ => Vec::new(),
+        })
+    }
+
+    /// `minecraft:entity_metadata`. Only entity-base fields with stable
+    /// indices are raised; class-specific fields remain in the version codec.
+    fn handle_play_entity_metadata(
+        adapter: &V404Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: EntityMetadataPacket = adapter.decode_body_exact(payload)?;
+        Ok(metadata_directive(body.entity_id, &body.metadata).into_iter().collect())
+    }
+
+    /// `minecraft:entity_update_attributes`, whose attribute names are textual
+    /// in 404 and whose modifiers use UUIDs.
+    fn handle_play_entity_update_attributes(
+        _adapter: &V404Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let (entity_id, attributes) = decode_attributes(payload)?;
+        Ok(vec![Directive::Emit(ClientEvent::EntityAttributesUpdated {
+            entity_id,
+            attributes,
         })])
     }
 
@@ -2470,6 +2806,48 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:multi_block_change",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V404Adapter::handle_play_multi_block_change,
+        ),
+    ),
+    (
+        "minecraft:block_break_animation",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V404Adapter::handle_play_block_break_animation,
+        ),
+    ),
+    (
+        "minecraft:explosion",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V404Adapter::handle_play_explosion,
+        ),
+    ),
+    (
+        "minecraft:game_state_change",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V404Adapter::handle_play_game_state_change,
+        ),
+    ),
+    (
+        "minecraft:entity_metadata",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V404Adapter::handle_play_entity_metadata,
+        ),
+    ),
+    (
+        "minecraft:entity_update_attributes",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V404Adapter::handle_play_entity_update_attributes,
+        ),
+    ),
+    (
         "minecraft:experience",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2613,10 +2991,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     ),
     lodestone_core::dispatch::IGNORED::new("minecraft:statistics", "v26-2 has this; backport (AWARD_STATS)"),
     lodestone_core::dispatch::IGNORED::new(
-        "minecraft:block_break_animation",
-        "v26-2 has this; backport (BLOCK_DESTRUCTION)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
         "minecraft:tile_entity_data",
         "v26-2 has this; backport (BLOCK_ENTITY_DATA)",
     ),
@@ -2636,11 +3010,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:named_sound_effect",
         "v26-2 has this; backport (SOUND)",
-    ),
-    lodestone_core::dispatch::IGNORED::new("minecraft:explosion", "v26-2 has this; backport (EXPLODE)"),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:game_state_change",
-        "v26-2 has this; backport (GAME_EVENT)",
     ),
     lodestone_core::dispatch::IGNORED::new("minecraft:world_event", "v26-2 has this; backport (LEVEL_EVENT)"),
     lodestone_core::dispatch::IGNORED::new(
@@ -2670,14 +3039,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "v26-2 has this; backport (RESOURCE_PACK_PUSH)",
     ),
     lodestone_core::dispatch::IGNORED::new(
-        "minecraft:multi_block_change",
-        "v26-2 has this; backport (SECTION_BLOCKS_UPDATE)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_metadata",
-        "v26-2 has this; backport (SET_ENTITY_DATA)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
         "minecraft:entity_equipment",
         "v26-2 has this; backport (SET_EQUIPMENT)",
     ),
@@ -2690,10 +3051,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:advancements",
         "v26-2 has this; backport (UPDATE_ADVANCEMENTS)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_update_attributes",
-        "v26-2 has this; backport (UPDATE_ATTRIBUTES)",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:declare_recipes",
@@ -3461,6 +3818,160 @@ mod mob_effect_tests {
             V404Adapter::legacy_mob_effect_id(i32::MIN).is_err(),
             "checked subtraction must keep an extreme wire value from overflowing"
         );
+    }
+}
+
+#[cfg(test)]
+mod legacy_state_tests {
+    use super::*;
+    use lodestone_core::{Nbt, Writer};
+    use lodestone_world::{ChunkColumn, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World};
+
+    #[test]
+    fn explosion_removes_floored_signed_offset_and_leaves_neighbor() {
+        let adapter = V404Adapter::new();
+        let target = (9, 64, -1);
+        let untouched = (10, 64, -1);
+        let solid = 1;
+        let mut column = ChunkColumn::new(
+            -64,
+            24,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            lodestone_data::block_states::air_state_id(),
+            0,
+        );
+        column.set_block(target.0 as usize, target.1, 15, solid);
+        column.set_block(untouched.0 as usize, untouched.1, 15, solid);
+        let mut world = World::new();
+        world.load(
+            lodestone_world::ChunkPos::new(0, -1),
+            LoadedChunk::new(column, ColumnLight::new(24), Heightmaps::new(), Vec::new()),
+        );
+        world.set_block_entity(target.0, target.1, target.2, 77, Nbt::End);
+
+        let payload = adapter
+            .encode_body(&Explosion {
+                x: 10.75,
+                y: 64.25,
+                z: -2.75,
+                radius: 2.0,
+                affected_block_offsets: vec![[-1, 0, 2]],
+                player_motion_x: 0.0,
+                player_motion_y: 0.0,
+                player_motion_z: 0.0,
+            })
+            .expect("explosion encodes");
+        let directives = V404Adapter::handle_play_explosion(&adapter, &mut world, &payload)
+            .expect("explosion decodes");
+        assert!(matches!(directives.as_slice(), [Directive::Emit(ClientEvent::Explosion { .. })]));
+        assert_eq!(
+            world.block_state_at(target.0, target.1, target.2),
+            Some(lodestone_data::block_states::air_state_id()),
+            "floor(center) + signed offset must be canonical air"
+        );
+        assert!(world
+            .get(lodestone_world::ChunkPos::new(0, -1))
+            .expect("loaded chunk remains present")
+            .block_entities
+            .iter()
+            .all(|entity| (i32::from(entity.rel_x), i32::from(entity.y), i32::from(entity.rel_z))
+                != (target.0, target.1, target.2)),
+            "air replacement must remove the target block entity"
+        );
+        assert_eq!(world.block_state_at(untouched.0, untouched.1, untouched.2), Some(solid));
+    }
+
+    #[test]
+    fn multi_block_change_trailing_garbage_does_not_apply_prefix() {
+        let adapter = V404Adapter::new();
+        let mut column = ChunkColumn::new(
+            -64,
+            24,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            lodestone_data::block_states::air_state_id(),
+            0,
+        );
+        column.set_block(0, 64, 0, 2);
+        let mut world = World::new();
+        world.load(
+            lodestone_world::ChunkPos::new(0, 0),
+            LoadedChunk::new(column, ColumnLight::new(24), Heightmaps::new(), Vec::new()),
+        );
+
+        let mut writer = Writer::default();
+        writer.i32(0);
+        writer.i32(0);
+        writer.var_i32(1);
+        writer.u8(0);
+        writer.u8(64);
+        writer.var_i32(1);
+        writer.u8(0xff);
+        let error = V404Adapter::handle_play_multi_block_change(
+            &adapter,
+            &mut world,
+            writer.as_slice(),
+        )
+        .expect_err("trailing packet bytes must fail closed");
+        assert!(error.to_string().contains("trailing"));
+        assert_eq!(
+            world.block_state_at(0, 64, 0),
+            Some(2),
+            "a malformed suffix must not apply a valid prefix"
+        );
+    }
+
+    #[test]
+    fn game_mode_change_requires_finite_integral_value_in_range() {
+        let adapter = V404Adapter::new();
+        let mut world = World::new();
+        for value in [0.0, 1.0, 2.0, 3.0] {
+            let payload = adapter
+                .encode_body(&GameStateChange { reason: 3, value })
+                .expect("game state encodes");
+            V404Adapter::handle_play_game_state_change(&adapter, &mut world, &payload)
+                .expect("valid mode decodes");
+        }
+        for value in [3.5, -1.0, 4.0, f32::NAN, f32::INFINITY] {
+            let payload = adapter
+                .encode_body(&GameStateChange { reason: 3, value })
+                .expect("game state encodes");
+            let error = V404Adapter::handle_play_game_state_change(&adapter, &mut world, &payload)
+                .expect_err("invalid mode must fail closed");
+            assert!(error.to_string().contains("expected finite integer 0..=3"));
+        }
+    }
+
+    fn attribute_prefix(properties: i32) -> Writer {
+        let mut writer = Writer::default();
+        writer.var_i32(42);
+        writer.i32(properties);
+        writer
+    }
+
+    #[test]
+    fn attributes_reject_invalid_operation_and_enforce_absolute_caps() {
+        let mut operation = attribute_prefix(1);
+        operation.string("generic.maxHealth");
+        operation.f64(20.0);
+        operation.var_i32(1);
+        operation.uuid(uuid::Uuid::from_u128(1));
+        operation.f64(1.0);
+        operation.i8(3);
+        let error = decode_attributes(operation.as_slice()).expect_err("operation 3 is invalid");
+        assert!(error.to_string().contains("outside 0..=2"));
+
+        let properties = attribute_prefix(257);
+        let error = decode_attributes(properties.as_slice()).expect_err("property cap is absolute");
+        assert!(error.to_string().contains("exceeds 256"));
+
+        let mut modifiers = attribute_prefix(1);
+        modifiers.string("generic.maxHealth");
+        modifiers.f64(20.0);
+        modifiers.var_i32(1025);
+        let error = decode_attributes(modifiers.as_slice()).expect_err("modifier cap is absolute");
+        assert!(error.to_string().contains("exceeds 1024"));
     }
 }
 

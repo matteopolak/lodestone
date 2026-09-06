@@ -43,6 +43,32 @@ ignored. Two `IGNORED` entries name no later packet at all and say so:
 `minecraft:bed` (removed in 1.14, when sleeping became an entity-metadata
 pose) and `minecraft:entity` (an abstract base packet no real server sends).
 
+The clientbound world/event path now also consumes the legacy explosion frame,
+game-state reasons 1/2/3/7/8 (rain start/stop, game mode, rain strength and
+thunder strength), multi-block changes, and block-break overlays. Flat 404
+state ids go through the committed canonical table before bulk writes; each
+write synchronizes block-entity presence and emits a section-scoped dirty
+signal. Explosion offsets and the always-present local impulse are preserved
+as an `Explosion` event, including an explicit zero impulse. Before that event
+is emitted, every removed offset is applied to a loaded world at
+`floor(center) + signed_offset` as canonical air and its block-entity record
+is removed, so the event does not leave world storage stale. The entity
+metadata codec is wired for spawn-time and incremental lists, but only the
+three entity-base fields whose index/serializer pair is universal here
+(flags, optional custom name and name visibility) are raised. Attribute names
+are textual on this wire; modifier UUIDs are retained losslessly as
+`minecraft:uuid/<uuid>` identifiers.
+
+Two historical-registry surfaces remain deliberately refused. `block_action`
+needs the 404 block-type registry, which is not the block-state report in
+`tests/support/blocks_1_13_2_jar.json`; that report's state id 25 is a birch
+sapling while the block-action type numbering is a different space. Likewise,
+`entity_equipment` needs the 404 item registry to turn a flat numeric slot id
+into a canonical item key, and no authoritative local item mapping is
+committed. Reusing the current registry would create plausible but wrong
+items, so both packets stay explicitly ignored until their own historical
+reports are available.
+
 ### What breaks at each side
 
 | difference | 1.12.2 | **1.13.2** | 1.14.4 |

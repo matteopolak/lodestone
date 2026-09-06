@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
 use crate::error::{ClientError, SessionOutcome};
+use crate::handle::QueuedAction;
 use crate::state::SharedState;
 
 /// Outcome of a bounded packet read.
@@ -36,6 +37,18 @@ enum ReadError {
 enum Step {
     Continue,
     Stop(Box<SessionOutcome>),
+}
+
+/// Whether an action was submitted before the correction generation that just
+/// became authoritative. Only movement is discarded: protocol liveness actions
+/// remain valid on either side of a position correction.
+fn is_pre_correction_move(action: &QueuedAction, correction_generation: u64) -> bool {
+    action.generation < correction_generation && matches!(action.action, ClientAction::Move { .. })
+}
+
+#[derive(Debug)]
+struct CorrectionTransaction {
+    response: Option<(i32, Vec<u8>)>,
 }
 
 /// Owns the connection and turns adapter directives into I/O.
@@ -75,6 +88,9 @@ pub(crate) struct Driver<T: Transport> {
     /// the wire when the adapter encodes a `player_loaded` packet (older versions
     /// encode `None`).
     awaiting_player_load: bool,
+    /// A protocol acknowledgement held until the simulation has adopted the
+    /// matching authoritative player correction.
+    pending_correction: Option<CorrectionTransaction>,
     /// The selected authentication policy. This must remain a typed intent:
     /// `Offline` is permitted to encrypt without Mojang, while an unresolved
     /// online account is not.
@@ -382,6 +398,7 @@ impl<T: Transport> Driver<T> {
             // this reset to take effect — see `docs/secure-chat.md`.
             chat_tracker: LastSeenTracker::vanilla(),
             awaiting_player_load: false,
+            pending_correction: None,
             #[cfg(not(target_arch = "wasm32"))]
             authentication_intent,
             // Same "deliberately fresh" note as `chat_tracker` above: `None`
@@ -424,10 +441,11 @@ impl<T: Transport> Driver<T> {
     /// has already unwound and there is no sender left.
     pub(crate) async fn run(
         mut self,
-        actions: mpsc::UnboundedReceiver<ClientAction>,
+        actions: mpsc::UnboundedReceiver<QueuedAction>,
+        corrections: mpsc::UnboundedReceiver<(u64, Vec3, Rotation)>,
         shutdown: oneshot::Receiver<()>,
     ) -> SessionOutcome {
-        let outcome = self.run_session(actions, shutdown).await;
+        let outcome = self.run_session(actions, corrections, shutdown).await;
         if let SessionOutcome::Failed(error) = &outcome {
             // `let _`: a consumer that has already dropped its receiver is not
             // an error, and there is nothing left to do about it either way.
@@ -444,7 +462,8 @@ impl<T: Transport> Driver<T> {
     /// The session loop itself. See [`Self::run`] for why it is wrapped.
     async fn run_session(
         &mut self,
-        mut actions: mpsc::UnboundedReceiver<ClientAction>,
+        mut actions: mpsc::UnboundedReceiver<QueuedAction>,
+        mut corrections: mpsc::UnboundedReceiver<(u64, Vec3, Rotation)>,
         mut shutdown: oneshot::Receiver<()>,
     ) -> SessionOutcome {
         // wasm32 has no tokio runtime timer, so a read timeout cannot be
@@ -475,6 +494,42 @@ impl<T: Transport> Driver<T> {
         let mut last_packet_id = None;
 
         loop {
+            if self
+                .pending_correction
+                .as_ref()
+                .is_some_and(|transaction| transaction.response.is_some())
+            {
+                tokio::select! {
+                    _ = &mut shutdown => {
+                        tracing::debug!("local shutdown requested");
+                        self.graceful_local_close().await;
+                        return SessionOutcome::LocalClose;
+                    }
+                    correction = corrections.recv() => {
+                        let Some((generation, pos, rotation)) = correction else {
+                            return SessionOutcome::Failed(ClientError::Adapter(AdapterError::Unsupported(
+                                "correction owner closed before applying an authoritative player position".to_owned(),
+                            )));
+                        };
+                        if let Err(error) = self.complete_correction(pos, rotation).await {
+                            return SessionOutcome::Failed(error);
+                        }
+                        while let Ok(queued) = actions.try_recv() {
+                            if is_pre_correction_move(&queued, generation) {
+                                tracing::debug!(
+                                    target: "net_join",
+                                    correction_generation = generation,
+                                    action_generation = queued.generation,
+                                    "discarding movement submitted before an authoritative correction was adopted"
+                                );
+                            } else {
+                                self.handle_action(queued.action).await;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             tokio::select! {
                 biased;
 
@@ -490,7 +545,7 @@ impl<T: Transport> Driver<T> {
                 // is detected by the read branch.
                 maybe_action = actions.recv(), if actions_open => {
                     match maybe_action {
-                        Some(action) => self.handle_action(action).await,
+                        Some(queued) => self.handle_action(queued.action).await,
                         None => {
                             // All handles dropped; keep serving events until the
                             // server closes.
@@ -735,7 +790,17 @@ impl<T: Transport> Driver<T> {
     async fn execute(&mut self, directives: Vec<Directive>) -> Step {
         for directive in directives {
             match directive {
+                Directive::AwaitTeleportCorrection => {
+                    debug_assert!(self.pending_correction.is_none());
+                    self.pending_correction = Some(CorrectionTransaction { response: None });
+                }
                 Directive::Send { packet_id, payload } => {
+                    if let Some(transaction) = self.pending_correction.as_mut()
+                        && transaction.response.is_none()
+                    {
+                        transaction.response = Some((packet_id, payload));
+                        continue;
+                    }
                     if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
                         return Step::Stop(Box::new(SessionOutcome::Failed(
                             ClientError::Transport(error),
@@ -1020,15 +1085,20 @@ impl<T: Transport> Driver<T> {
         // can produce more than one: a keep-alive both answers the heartbeat and
         // is the tick that flushes any pending chat acknowledgement.
         let mut auto_actions: Vec<ClientAction> = Vec::new();
+        // A position correction requires two protocol responses: the adapter's
+        // immediate teleport-id acknowledgement, followed by a movement packet
+        // echoing the resolved pose. The latter is assembled here because only
+        // the driver owns the previous pose needed to resolve relative fields.
+        let mut teleport_echo: Option<ClientAction> = None;
         // Set by `TransferRequested` below; checked after the event is
         // forwarded so a caller still observes it before the session ends.
         let mut transfer: Option<SessionOutcome> = None;
-
-        if let ClientEvent::TeleportPlayer {
+        if self.pending_correction.is_none()
+            && let ClientEvent::TeleportPlayer {
             pos,
             rotation,
             flags,
-            ..
+            velocity,
         } = &event
         {
             let predicted_pos = self.read_model.position().unwrap_or_default();
@@ -1083,6 +1153,7 @@ impl<T: Transport> Driver<T> {
                 relative_z = flags.relative_z,
                 relative_yaw = flags.relative_yaw,
                 relative_pitch = flags.relative_pitch,
+                velocity = ?velocity,
                 resolved_x = resolved_pos.x,
                 resolved_y = resolved_pos.y,
                 resolved_z = resolved_pos.z,
@@ -1091,6 +1162,12 @@ impl<T: Transport> Driver<T> {
                 correction_distance = (dx * dx + dy * dy + dz * dz).sqrt(),
                 "server player correction decoded; any protocol acknowledgement required by this family is written before this event"
             );
+            teleport_echo = Some(ClientAction::Move {
+                pos: resolved_pos,
+                rotation: resolved_rotation,
+                on_ground: false,
+                horizontal_collision: false,
+            });
         }
         if let ClientEvent::EntityVelocity {
             entity_id,
@@ -1098,12 +1175,12 @@ impl<T: Transport> Driver<T> {
         } = &event
         {
             tracing::debug!(
-                target: "net_join",
+                target: "net_velocity",
                 entity_id,
                 velocity_x = velocity.x,
                 velocity_y = velocity.y,
                 velocity_z = velocity.z,
-                "server entity velocity decoded; compare entity_id with the session login id"
+                "server entity velocity decoded"
             );
         }
 
@@ -1481,6 +1558,11 @@ impl<T: Transport> Driver<T> {
             _ => {}
         }
 
+        // Keep `PlayerLoaded` ahead of the movement echo on the first
+        // placement so existing load-epoch semantics remain unchanged. Both
+        // still precede surfacing the correction to a potentially slow event
+        // consumer, and the adapter's acknowledgement was already written by
+        // `execute` before `emit` was entered.
         for action in auto_actions {
             match self.adapter.encode_action(self.state, &action) {
                 Ok(Some((packet_id, payload))) => {
@@ -1496,6 +1578,22 @@ impl<T: Transport> Driver<T> {
                     return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Adapter(
                         error,
                     ))));
+                }
+            }
+        }
+
+        if let Some(action) = teleport_echo {
+            match self.adapter.encode_correction_echo(self.state, &action) {
+                Ok(Some((packet_id, payload))) => {
+                    if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
+                        return Step::Stop(Box::new(SessionOutcome::Failed(
+                            ClientError::Transport(error),
+                        )));
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(%error, ?action, "failed to encode correction echo");
                 }
             }
         }
@@ -1560,6 +1658,45 @@ impl<T: Transport> Driver<T> {
         Step::Continue
     }
 
+    async fn complete_correction(
+        &mut self,
+        pos: Vec3,
+        rotation: Rotation,
+    ) -> Result<(), ClientError> {
+        let (packet_id, payload) = self
+            .pending_correction
+            .take()
+            .and_then(|transaction| transaction.response)
+            .ok_or_else(|| {
+                ClientError::Adapter(AdapterError::Unsupported(
+                    "correction completion without a deferred protocol response".to_owned(),
+                ))
+            })?;
+        self.conn
+            .write_packet(packet_id, &payload)
+            .await
+            .map_err(ClientError::Transport)?;
+        let action = ClientAction::Move {
+            pos,
+            rotation,
+            on_ground: false,
+            horizontal_collision: false,
+        };
+        let Some((packet_id, payload)) = self
+            .adapter
+            .encode_correction_echo(self.state, &action)
+            .map_err(ClientError::Adapter)?
+        else {
+            return Ok(());
+        };
+        self.conn
+            .write_packet(packet_id, &payload)
+            .await
+            .map_err(ClientError::Transport)?;
+        self.read_model.set_local_movement(pos, rotation, false);
+        Ok(())
+    }
+
     /// Encodes and writes a user action. Non-fatal: unrepresentable actions are
     /// dropped and encode/write failures are logged, leaving the session alive.
     ///
@@ -1607,6 +1744,18 @@ impl<T: Transport> Driver<T> {
                         on_ground,
                         horizontal_collision,
                         "outbound movement encoded"
+                    );
+                }
+                if let ClientAction::SetPlayerInput(input) = &action {
+                    tracing::debug!(
+                        target: "net_input",
+                        state = ?self.state,
+                        packet_id,
+                        payload_len = payload.len(),
+                        shift = input.shift,
+                        jump = input.jump,
+                        sprint = input.sprint,
+                        "outbound player input encoded"
                     );
                 }
                 if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
@@ -1755,6 +1904,42 @@ mod tests {
     use rsa::{RsaPrivateKey, RsaPublicKey};
 
     use super::*;
+
+    #[test]
+    fn correction_generation_discards_only_prior_movement() {
+        let before = QueuedAction {
+            generation: 4,
+            action: ClientAction::Move {
+                pos: Vec3::new(1.0, 64.0, 1.0),
+                rotation: Rotation::new(0.0, 0.0),
+                on_ground: true,
+                horizontal_collision: false,
+            },
+        };
+        let after = QueuedAction {
+            generation: 5,
+            action: ClientAction::Move {
+                pos: Vec3::new(2.0, 64.0, 1.0),
+                rotation: Rotation::new(15.0, 0.0),
+                on_ground: true,
+                horizontal_collision: false,
+            },
+        };
+        let keep_alive = QueuedAction {
+            generation: 4,
+            action: ClientAction::KeepAliveResponse { id: 9 },
+        };
+
+        assert!(is_pre_correction_move(&before, 5));
+        assert!(
+            !is_pre_correction_move(&after, 5),
+            "a move submitted after the simulation acknowledged the correction must survive"
+        );
+        assert!(
+            !is_pre_correction_move(&keep_alive, 5),
+            "non-movement protocol responses remain live across the rendezvous"
+        );
+    }
 
     /// The same fixed PKCS#8-DER RSA-2048 test key `lodestone-auth`'s own
     /// `chat_session` tests use (`openssl genpkey`-generated, no code or

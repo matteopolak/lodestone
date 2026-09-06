@@ -1,6 +1,10 @@
 //! The [`ClientBuilder`] entry point.
 
 use std::collections::HashMap;
+use std::sync::{
+    Arc,
+    atomic::AtomicU64,
+};
 use std::time::Duration;
 
 use lodestone_model::{LoginProfile, ResourceKey, ServerAddress, VersionAdapter};
@@ -391,6 +395,8 @@ impl ClientBuilder {
     {
         let (events_tx, events_rx) = mpsc::channel(self.event_buffer);
         let (actions_tx, actions_rx) = mpsc::unbounded_channel();
+        let (correction_tx, correction_rx) = mpsc::unbounded_channel();
+        let action_generation = Arc::new(AtomicU64::new(0));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         // The maintained read-model. The driver holds the sole writing clone;
@@ -419,8 +425,15 @@ impl ClientBuilder {
             self.authentication_intent,
         );
 
-        let task = crate::spawn::spawn_driver(driver.run(actions_rx, shutdown_rx));
-        let handle = ClientHandle::new(actions_tx, shutdown_tx, task, read_model);
+        let task = crate::spawn::spawn_driver(driver.run(actions_rx, correction_rx, shutdown_rx));
+        let handle = ClientHandle::new(
+            actions_tx,
+            correction_tx,
+            action_generation,
+            shutdown_tx,
+            task,
+            read_model,
+        );
         let stream = EventStream::new(events_rx);
         (handle, stream)
     }

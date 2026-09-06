@@ -76,7 +76,8 @@ use crate::packets::game::{
     PlayDisconnect, PlayerAction, PlayerCommandPacket, PlayerInputPacket, PlayerLoaded,
     RecipeBookChangeSettings, RemoveMobEffect, Respawn, SectionBlocksUpdate, SetDefaultSpawnPosition,
     SetExperience, SetHealth, SetTime, Swing, TabList, TeleportToEntity, TickingState, TickingStep,
-    UpdateMobEffect, UseItem, UseItemOn, movement_flags, player_input_flags,
+    BlockDestruction as BlockDestructionPacket, UpdateMobEffect, UseItem, UseItemOn, movement_flags,
+    player_input_flags,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{
@@ -1675,6 +1676,38 @@ impl V774Adapter {
         })])
     }
 
+    /// `minecraft:block_destruction` — an incremental crack stage for a block
+    /// another entity is mining. The stage is deliberately kept raw: values
+    /// outside the visible `0..=9` range clear an existing overlay.
+    fn handle_play_block_destruction(
+        adapter: &V774Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: BlockDestructionPacket = adapter.decode_body_exact(payload)?;
+        Ok(vec![Directive::Emit(ClientEvent::BlockDestruction {
+            entity_id: body.entity_id,
+            pos: body.location.0,
+            progress: body.progress,
+        })])
+    }
+
+    /// `minecraft:explode` — protocol 774's post-1.21 explosion frame.
+    ///
+    /// The centre is three big-endian `f64`s, the block count is a fixed-width
+    /// `i32`, and player knockback is an optional three-`f64` vector. The
+    /// particle/sound/block-particle tail is consumed as well; stopping after
+    /// knockback would leave the next packet's id in the current frame. This
+    /// family has no particle or sound event bridge, so those values are read
+    /// for framing and are not surfaced as cosmetic events.
+    fn handle_play_explode(
+        _adapter: &V774Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        decode_explode_774(payload)
+    }
+
     /// `minecraft:section_blocks_update` — many changes inside one section.
     ///
     /// Both the section coordinate and each record are bit-packed, so the
@@ -2226,6 +2259,181 @@ impl V774Adapter {
     }
 }
 
+/// Constants used by the 774 explosion-tail decoder.
+/// Number of particle types in the 1.21.11 jar's generated particle registry.
+/// The report assigns dense ids `0..=114`; this is kept local to the wire
+/// decoder and is not shared with the newer canonical data tables.
+const PARTICLE_TYPE_COUNT_774: i32 = 115;
+
+/// Consumes one 774 particle option. Simple particle types carry only their
+/// registry id. Parameterised forms are consumed using the independently
+/// generated 774 particle schema; unsupported discriminants fail closed
+/// instead of guessing their byte width.
+fn skip_particle_options_774(
+    reader: &mut Reader<'_>,
+    particle_id: i32,
+) -> Result<(), AdapterError> {
+    if !(0..PARTICLE_TYPE_COUNT_774).contains(&particle_id) {
+        return Err(AdapterError::Decode(format!(
+            "unknown 774 particle registry id {particle_id}"
+        )));
+    }
+    match particle_id {
+        // block, block_marker, falling_dust and block_crumble each carry a
+        // 774 block-state registry id.
+        1 | 2 | 29 | 113 => {
+            reader.var_i32().map_err(dec_err)?;
+        }
+        // Dust options are RGB plus scale; the transition form appends a
+        // second RGB triplet. These widths are the 774 option schema, not a
+        // reuse of the 26.2 registry numbering.
+        14 => {
+            for _ in 0..4 {
+                reader.f32().map_err(dec_err)?;
+            }
+        }
+        15 => {
+            for _ in 0..7 {
+                reader.f32().map_err(dec_err)?;
+            }
+        }
+        // Dragon breath, sculk charge and shriek carry one float, one float
+        // and one VarInt respectively.
+        8 | 38 => {
+            reader.f32().map_err(dec_err)?;
+        }
+        103 => {
+            reader.var_i32().map_err(dec_err)?;
+        }
+        // The potion-effect forms carry a packed colour and a power; the
+        // ambient-effect, tinted-leaf and flash forms carry only a packed
+        // colour. The packed colour is an i32 on the wire even where the
+        // renderer later interprets its channels differently.
+        16 | 46 => {
+            reader.i32().map_err(dec_err)?;
+            reader.f32().map_err(dec_err)?;
+        }
+        21 | 36 | 42 => {
+            reader.i32().map_err(dec_err)?;
+        }
+        // Item particles carry the era's component-map slot codec. An empty
+        // slot is valid and, for non-empty slots, the codec rejects unknown
+        // component shapes instead of guessing their lengths.
+        47 => {
+            Slot::decode(reader, Ctx { version: 774 }).map_err(dec_err)?;
+        }
+        // Vibration chooses a packed block position or an entity source, then
+        // carries the arrival delay. The source discriminator is a VarInt and
+        // must be one of the two schema values.
+        48 => {
+            match reader.var_i32().map_err(dec_err)? {
+                0 => {
+                    Position::decode(reader, Ctx { version: 774 }).map_err(dec_err)?;
+                }
+                1 => {
+                    reader.var_i32().map_err(dec_err)?;
+                    reader.f32().map_err(dec_err)?;
+                }
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "invalid 774 vibration source {other}"
+                    )));
+                }
+            }
+            reader.var_i32().map_err(dec_err)?;
+        }
+        // Trail particles carry a target center followed by one raw colour
+        // byte. The byte is not an i32 or VarInt; consuming either wider
+        // shape would steal the weighted entry's scaling bytes.
+        49 => {
+            for _ in 0..3 {
+                reader.f64().map_err(dec_err)?;
+            }
+            reader.u8().map_err(dec_err)?;
+        }
+        // Dust pillar shares the block-state option codec with the other
+        // block-particle entries.
+        109 => {
+            reader.var_i32().map_err(dec_err)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Reads the explosion packet's `Holder<SoundEvent>` without resolving its
+/// version-local numeric id. A positive value is a registry reference (`id +
+/// 1`); zero introduces an inline name and optional range.
+fn skip_sound_holder_774(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+    let holder = reader.var_i32().map_err(dec_err)?;
+    if holder < 0 {
+        return Err(AdapterError::Decode(format!(
+            "negative 774 sound holder {holder}"
+        )));
+    }
+    if holder == 0 {
+        reader.string(32767).map_err(dec_err)?;
+        if reader.bool().map_err(dec_err)? {
+            reader.f32().map_err(dec_err)?;
+        }
+    }
+    Ok(())
+}
+
+/// Decodes the 774 explosion packet and consumes its verified tail.
+fn decode_explode_774(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let x = reader.f64().map_err(dec_err)?;
+    let y = reader.f64().map_err(dec_err)?;
+    let z = reader.f64().map_err(dec_err)?;
+    let radius = reader.f32().map_err(dec_err)?;
+    let block_count = reader.i32().map_err(dec_err)?;
+    if block_count < 0 {
+        return Err(AdapterError::Decode(format!(
+            "negative 774 explosion block count {block_count}"
+        )));
+    }
+    let knockback = if reader.bool().map_err(dec_err)? {
+        Some(Vec3::new(
+            reader.f64().map_err(dec_err)?,
+            reader.f64().map_err(dec_err)?,
+            reader.f64().map_err(dec_err)?,
+        ))
+    } else {
+        None
+    };
+
+    // The explosion particle is a plain particle registry id, not a holder.
+    let explosion_particle = reader.var_i32().map_err(dec_err)?;
+    skip_particle_options_774(&mut reader, explosion_particle)?;
+    skip_sound_holder_774(&mut reader)?;
+
+    // WeightedList<ExplosionParticleInfo>: count, then particle options,
+    // scaling, speed and weight for each entry. A zero-length list is the
+    // normal server tail for explosions without custom block debris.
+    let particle_count = reader.var_i32().map_err(dec_err)?;
+    if particle_count < 0 {
+        return Err(AdapterError::Decode(format!(
+            "negative 774 explosion particle count {particle_count}"
+        )));
+    }
+    for _ in 0..particle_count {
+        let particle_id = reader.var_i32().map_err(dec_err)?;
+        skip_particle_options_774(&mut reader, particle_id)?;
+        reader.f32().map_err(dec_err)?;
+        reader.f32().map_err(dec_err)?;
+        reader.var_i32().map_err(dec_err)?;
+    }
+    reader.ensure_empty().map_err(dec_err)?;
+
+    Ok(vec![Directive::Emit(ClientEvent::Explosion {
+        pos: Vec3::new(x, y, z),
+        radius,
+        affected_blocks: Vec::new(),
+        knockback,
+    })])
+}
+
 /// Every clientbound play packet this era decodes, by name.
 static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = &[
     (
@@ -2467,6 +2675,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:block_destruction",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V774Adapter::handle_play_block_destruction,
+        ),
+    ),
+    (
         "minecraft:section_blocks_update",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2663,6 +2878,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:explode",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V774Adapter::handle_play_explode,
+        ),
+    ),
+    (
         "minecraft:bundle_delimiter",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2687,11 +2909,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "minecraft:block_changed_ack",
         "block-prediction acknowledgement is the server confirming a sequence this client \
          already applied optimistically",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:block_destruction",
-        "the crack overlay on another player's mining progress is cosmetic and has no world \
-         effect",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:block_entity_data",
@@ -2766,11 +2983,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:debug_sample",
         "tick-timing samples are only sent to a client that asked for them",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:explode",
-        "the blast's block changes arrive as their own updates; the particle and knockback \
-         detail is cosmetic",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:game_test_highlight_pos",

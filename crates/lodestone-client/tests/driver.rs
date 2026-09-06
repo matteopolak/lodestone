@@ -35,6 +35,7 @@ struct FakeAdapter {
     keepalive_resp_id: i32,
     respawn_resp_id: Option<i32>,
     player_loaded_resp_id: Option<i32>,
+    move_resp_id: Option<i32>,
     brand_resp_id: Option<i32>,
     pong_resp_id: Option<i32>,
     resource_pack_resp_id: Option<i32>,
@@ -92,6 +93,11 @@ impl FakeAdapter {
     /// stays unrepresentable (`Ok(None)`).
     fn player_loaded_to(mut self, id: i32) -> Self {
         self.player_loaded_resp_id = Some(id);
+        self
+    }
+
+    fn move_to(mut self, id: i32) -> Self {
+        self.move_resp_id = Some(id);
         self
     }
 
@@ -240,6 +246,22 @@ impl VersionAdapter for FakeAdapter {
             ClientAction::PlayerLoaded => Ok(self
                 .player_loaded_resp_id
                 .map(|id| (id, vec![state_code(state)]))),
+            ClientAction::Move {
+                pos,
+                rotation,
+                on_ground,
+                horizontal_collision,
+            } => Ok(self.move_resp_id.map(|id| {
+                let mut payload = Vec::new();
+                payload.extend_from_slice(&pos.x.to_be_bytes());
+                payload.extend_from_slice(&pos.y.to_be_bytes());
+                payload.extend_from_slice(&pos.z.to_be_bytes());
+                payload.extend_from_slice(&rotation.yaw.to_be_bytes());
+                payload.extend_from_slice(&rotation.pitch.to_be_bytes());
+                payload.push(u8::from(*on_ground));
+                payload.push(u8::from(*horizontal_collision));
+                (id, payload)
+            })),
             // Observable only when a test opts in via `brand_to`; the payload is
             // the raw brand bytes so a test can assert the announced string.
             ClientAction::SendBrand { brand } => Ok(self
@@ -980,6 +1002,85 @@ async fn player_loaded_auto_sent_on_first_teleport_after_login() {
         "driver should auto-send player_loaded on the first placement teleport"
     );
     assert_eq!(events.recv().await, Some(teleport_event()));
+
+    drop(handle);
+}
+
+#[tokio::test]
+async fn position_correction_is_immediately_echoed_with_relative_fields_resolved() {
+    const FIRST: i32 = 0x51;
+    const SECOND: i32 = 0x52;
+    const MOVE_ID: i32 = 0x53;
+
+    let absolute = ClientEvent::TeleportPlayer {
+        pos: Vec3::new(10.0, 64.0, -4.0),
+        rotation: Rotation::new(30.0, -10.0),
+        flags: TeleportFlags::default(),
+        velocity: None,
+    };
+    let relative = ClientEvent::TeleportPlayer {
+        pos: Vec3::new(2.0, 1.5, -3.0),
+        rotation: Rotation::new(5.0, 2.0),
+        flags: TeleportFlags {
+            relative_x: true,
+            relative_y: true,
+            relative_z: true,
+            relative_yaw: true,
+            relative_pitch: true,
+        },
+        velocity: None,
+    };
+    let adapter = FakeAdapter::new()
+        .move_to(MOVE_ID)
+        .on(
+            ConnectionState::Handshaking,
+            FIRST,
+            vec![Directive::Emit(absolute.clone())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            SECOND,
+            vec![Directive::Emit(relative.clone())],
+        );
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+
+    peer.write_packet(FIRST, &[]).await.unwrap();
+    let (id, first) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, MOVE_ID);
+    assert_eq!(events.recv().await, Some(absolute));
+
+    peer.write_packet(SECOND, &[]).await.unwrap();
+    let (id, second) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, MOVE_ID);
+    assert_eq!(events.recv().await, Some(relative));
+
+    let f64_at = |bytes: &[u8], offset: usize| {
+        f64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap())
+    };
+    let f32_at = |bytes: &[u8], offset: usize| {
+        f32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    };
+    assert_eq!(
+        (f64_at(&first, 0), f64_at(&first, 8), f64_at(&first, 16)),
+        (10.0, 64.0, -4.0)
+    );
+    assert_eq!(
+        (
+            f64_at(&second, 0),
+            f64_at(&second, 8),
+            f64_at(&second, 16)
+        ),
+        (12.0, 65.5, -7.0)
+    );
+    assert_eq!(
+        (f32_at(&second, 24), f32_at(&second, 28)),
+        (35.0, -8.0)
+    );
+    assert_eq!(
+        &second[32..],
+        &[0, 0],
+        "correction echoes clear both contact flags"
+    );
 
     drop(handle);
 }

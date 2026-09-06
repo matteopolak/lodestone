@@ -33,3 +33,4 @@ lodestone-model = { workspace = true }
 # `bevy_ecs` in the graph.
 bevy_ecs = { workspace = true }
 bevy_app = { workspace = true }
+tracing = { workspace = true }

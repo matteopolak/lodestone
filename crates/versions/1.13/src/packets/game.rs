@@ -5,6 +5,108 @@ use uuid::Uuid;
 
 use crate::packets::position::Position;
 
+/// Clientbound `explosion` (protocol 404).
+///
+/// Coordinates and the player impulse are single-precision values on this
+/// wire.  The offset records are signed bytes relative to the floored centre;
+/// the count is a signed `i32`, so decoding validates it before allocating.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Explosion {
+    /// Explosion centre.
+    pub x: f32,
+    /// Explosion centre.
+    pub y: f32,
+    /// Explosion centre.
+    pub z: f32,
+    /// Blast radius.
+    pub radius: f32,
+    /// Removed-block offsets from the floored centre.
+    pub affected_block_offsets: Vec<[i8; 3]>,
+    /// Player knockback impulse, always present (zero means no impulse).
+    pub player_motion_x: f32,
+    /// Player knockback impulse, always present.
+    pub player_motion_y: f32,
+    /// Player knockback impulse, always present.
+    pub player_motion_z: f32,
+}
+
+impl lodestone_core::Decode for Explosion {
+    fn decode(r: &mut lodestone_core::Reader<'_>, _ctx: lodestone_core::Ctx) -> lodestone_core::Result<Self> {
+        let x = r.f32()?;
+        let y = r.f32()?;
+        let z = r.f32()?;
+        let radius = r.f32()?;
+        let count = r.i32()?;
+        if count < 0 {
+            return Err(lodestone_core::Error::NegativeLength(count));
+        }
+        let count = usize::try_from(count).map_err(|_| lodestone_core::Error::UnexpectedEof)?;
+        const MOTION_BYTES: usize = 12;
+        let offset_bytes = r.remaining().checked_sub(MOTION_BYTES).ok_or(lodestone_core::Error::UnexpectedEof)?;
+        if count > offset_bytes / 3 {
+            return Err(lodestone_core::Error::LimitExceeded { limit: offset_bytes / 3, actual: count });
+        }
+        let mut affected_block_offsets = Vec::with_capacity(count);
+        for _ in 0..count {
+            affected_block_offsets.push([r.i8()?, r.i8()?, r.i8()?]);
+        }
+        Ok(Self {
+            x,
+            y,
+            z,
+            radius,
+            affected_block_offsets,
+            player_motion_x: r.f32()?,
+            player_motion_y: r.f32()?,
+            player_motion_z: r.f32()?,
+        })
+    }
+}
+
+impl lodestone_core::Encode for Explosion {
+    fn encode(&self, w: &mut lodestone_core::Writer, _ctx: lodestone_core::Ctx) -> lodestone_core::Result<()> {
+        w.f32(self.x);
+        w.f32(self.y);
+        w.f32(self.z);
+        w.f32(self.radius);
+        let count = i32::try_from(self.affected_block_offsets.len())
+            .map_err(|_| lodestone_core::Error::Custom("too many explosion offsets".to_owned()))?;
+        w.i32(count);
+        for [x, y, z] in &self.affected_block_offsets {
+            w.i8(*x);
+            w.i8(*y);
+            w.i8(*z);
+        }
+        w.f32(self.player_motion_x);
+        w.f32(self.player_motion_y);
+        w.f32(self.player_motion_z);
+        Ok(())
+    }
+}
+
+/// Clientbound `game_state_change`.
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:game_state_change", state = Play, bound = Client)]
+pub struct GameStateChange {
+    /// Reason code (1/2 rain, 3 game mode, 7 rain strength, 8 thunder strength).
+    pub reason: u8,
+    /// Reason-specific value.
+    pub value: f32,
+}
+
+/// Clientbound `block_break_animation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:block_break_animation", state = Play, bound = Client)]
+pub struct BlockBreakAnimation {
+    /// Entity performing the break animation.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Animated block position.
+    pub location: Position,
+    /// Raw destruction-stage byte.
+    pub destroy_stage: i8,
+}
+
 /// Clientbound `login` (game-join) packet.
 ///
 /// 1.13.2 sits between two rewrites of this packet and shares neither
@@ -466,4 +568,64 @@ pub struct CraftingBookData {
     pub smelting_open: bool,
     /// Whether the furnace book's filter is active.
     pub smelting_filter: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlockBreakAnimation, Explosion, GameStateChange};
+    use crate::packets::position::Position;
+    use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
+
+    const CTX: Ctx = Ctx { version: 404 };
+
+    #[test]
+    fn explosion_wire_is_byte_exact_and_round_trips() {
+        let value = Explosion {
+            x: 1.5,
+            y: -2.25,
+            z: 3.25,
+            radius: 2.0,
+            affected_block_offsets: vec![[-1, 2, -3]],
+            player_motion_x: 0.0,
+            player_motion_y: 0.5,
+            player_motion_z: -1.0,
+        };
+        let mut writer = Writer::default();
+        value.encode(&mut writer, CTX).expect("encode");
+        assert_eq!(
+            writer.as_slice(),
+            &[
+                0x3f, 0xc0, 0x00, 0x00, 0xc0, 0x10, 0x00, 0x00, 0x40, 0x50, 0x00, 0x00,
+                0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xff, 0x02, 0xfd, 0x00, 0x00,
+                0x00, 0x00, 0x3f, 0x00, 0x00, 0x00, 0xbf, 0x80, 0x00, 0x00,
+            ]
+        );
+        let mut reader = Reader::new(writer.as_slice());
+        assert_eq!(Explosion::decode(&mut reader, CTX).expect("decode"), value);
+        reader.ensure_empty().expect("no trailing bytes");
+    }
+
+    #[test]
+    fn game_state_change_wire_is_reason_then_float() {
+        let mut writer = Writer::default();
+        GameStateChange { reason: 7, value: 0.25 }
+            .encode(&mut writer, CTX)
+            .expect("encode");
+        assert_eq!(writer.as_slice(), &[7, 0x3e, 0x80, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn block_break_animation_uses_varint_position_stage() {
+        let value = BlockBreakAnimation {
+            entity_id: 300,
+            location: Position::new(-1, 64, 2),
+            destroy_stage: 9,
+        };
+        let mut writer = Writer::default();
+        value.encode(&mut writer, CTX).expect("encode");
+        assert_eq!(
+            writer.as_slice(),
+            &[0xac, 0x02, 0xff, 0xff, 0xff, 0xc1, 0x00, 0x00, 0x00, 0x02, 0x09]
+        );
+    }
 }

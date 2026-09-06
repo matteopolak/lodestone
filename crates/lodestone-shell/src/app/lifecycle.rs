@@ -1820,7 +1820,7 @@ impl WindowApp {
             self.ui.begin(SessionKind::Multiplayer);
             self.sim.connect(
                 self.config.host.clone(),
-                Some(self.config.port),
+                self.config.explicit_port(),
                 self.config.protocol,
             );
             let net = self

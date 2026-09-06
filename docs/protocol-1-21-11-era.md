@@ -76,6 +76,32 @@ The last row is why the recorded join sends a chat message rather than only
 receiving one: a serverbound acknowledgement tail that a real server rejects is
 not otherwise observable from a capture.
 
+### Explosions and mining overlays
+
+The 774 `explode` body begins with an `f64` centre `(x, y, z)`, an `f32`
+radius, a fixed-width `i32` block count, and an optional knockback vector of
+three `f64`s. It then carries a particle registry entry, a sound holder and a
+weighted block-particle list. Particle options use the local 774 schema,
+including block-state, colour, power, item-slot, vibration and trail
+(`vec3f64` plus one raw `u8`) payloads;
+the vibration source discriminator is validated before its position body is
+read. The adapter consumes that complete tail and requires the packet to end
+there; stopping after knockback would leave the following packet misframed.
+The event model intentionally receives only the centre, radius and optional
+impulse because block removals arrive as ordinary block updates and this
+family has no particle/sound bridge.
+
+The `block_destruction` packet is also wired through the adapter. It decodes a
+VarInt breaker id, packed block position and raw stage byte into
+`ClientEvent::BlockDestruction`; stages outside the visible range remain raw so
+the session overlay can clear an existing crack.
+
+The family does not claim `set_equipment`, `update_attributes` or
+`block_event`: each needs a version-local item, attribute or block registry
+numeric mapping. No authoritative 1.21.11 bridge for those registries is
+committed here, so decoding them with the canonical 26.2 ids would silently
+name the wrong value.
+
 ### The evidence, and where each claim rests
 
 Three sources, in descending authority, and the doc says which carries which:

@@ -282,6 +282,15 @@ rolled against its chance and consumed even on a failed roll; at fill level 8
 vanilla's item-offer dispatch falls through to the empty-hand handler for any
 click the offer does not itself consume.
 
+`brewing::Bottle` deliberately keeps its contained potion as a validated
+`lodestone_data::potion::PotionId`, rather than carrying a canonical name
+string through the brew state machine. The recipe table resolves its static
+names at that one internal boundary; a future registry/table mismatch fails
+loudly instead of making a bottle silently unbrewable.
+The chunk-NBT persistence boundary converts it back to a name for
+`lodestone:potions` and validates that name again on load, so malformed stored
+data cannot become a live built-in bottle.
+
 Block entities persist across a reopen: each type has a `restore` associated
 function taking **every** field at once, deliberately, so adding a field
 without updating the save schema is a compile error rather than a silent

@@ -29,36 +29,36 @@ fn play_dispatch_table_builds_for_every_entries_id() {
 
 #[test]
 fn negative_control_dropping_an_ignored_entry_fails_construction() {
-    // `minecraft:update_time` (id 3) has no handler in CLIENTBOUND and is
-    // deliberately on IGNORED ("v26-2 has this; backport"). Drop it from a
+    // `minecraft:bed` (id 10) has no handler in CLIENTBOUND and is
+    // deliberately on IGNORED. Drop it from a
     // local copy of the list and require Table::build to notice the id is
     // now unaccounted for -- the `_ =>` island, reborn as a build error,
     // actually firing rather than merely being present in the source.
-    let mut without_update_time: Vec<_> = IGNORED
+    let mut without_bed: Vec<_> = IGNORED
         .iter()
         .copied()
-        .filter(|entry| entry.name != "minecraft:update_time")
+        .filter(|entry| entry.name != "minecraft:bed")
         .collect();
     assert_eq!(
-        without_update_time.len(),
+        without_bed.len(),
         IGNORED.len() - 1,
         "the filter must actually remove exactly one entry"
     );
-    without_update_time.sort_by_key(|entry| entry.name);
+    without_bed.sort_by_key(|entry| entry.name);
 
     let err = Table::build(
         PROTOCOL,
         play::clientbound::ENTRIES,
         CLIENTBOUND,
-        &without_update_time,
+        &without_bed,
     )
-    .expect_err("dropping update_time's IGNORED entry must fail construction");
+    .expect_err("dropping bed's IGNORED entry must fail construction");
 
     assert_eq!(
         err,
         DispatchError::UnlistedId {
-            name: "minecraft:update_time",
-            id: 3,
+            name: "minecraft:bed",
+            id: 10,
         }
     );
 }

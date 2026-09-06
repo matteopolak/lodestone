@@ -215,7 +215,7 @@ pub(crate) fn run_connect(_owned: lodestone_auth::Entitlement, config: Config) -
     // nothing for it to be shared *with*.
     let net = NetClient::connect(
         config.host.clone(),
-        Some(config.port),
+        config.explicit_port(),
         config.protocol,
         None,
     );

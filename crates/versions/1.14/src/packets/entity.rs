@@ -1,4 +1,4 @@
-//! Entity packets for protocol 754 that carry [`EntityMetadata`].
+//! Entity packets for the 1.14 era that carry [`EntityMetadata`].
 //!
 //! Both the mob-spawn packet and the standalone metadata packet end with a
 //! metadata list; because [`EntityMetadata`](super::metadata::EntityMetadata)
@@ -11,15 +11,17 @@ use super::metadata::EntityMetadata;
 
 /// Clientbound `spawn_entity_living` — spawns a mob.
 ///
-/// # 1.16 shape
+/// # Era shape
 ///
 /// Carries an **entity UUID**, a **VarInt type** and **`f64` coordinates**. The
-/// trailing metadata list that pre-1.15 packets appended was **removed** in 1.15
-/// — metadata now arrives only via the separate `entity_metadata` packet — so
-/// this struct ends at the velocity components.
+/// trailing metadata list that protocol 498 appended was **removed** in 1.15
+/// — metadata now arrives only via the separate `entity_metadata` packet from
+/// 578 onward. The protocol gate is load-bearing: leaving 498's terminator
+/// unread makes the next packet frame start one byte late.
 ///
 /// Wire layout: varint entity id, UUID, varint type, three `f64` coordinates,
-/// signed-byte yaw/pitch/head-pitch, three `i16` velocity components.
+/// signed-byte yaw/pitch/head-pitch, three `i16` velocity components, then a
+/// metadata list only at 498.
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:spawn_entity_living", state = Play, bound = Client)]
 pub struct SpawnEntityLiving {
@@ -49,6 +51,9 @@ pub struct SpawnEntityLiving {
     pub velocity_y: i16,
     /// Velocity Z (fixed-point).
     pub velocity_z: i16,
+    /// Spawn-time metadata, present only in protocol 498.
+    #[mc(until = 498)]
+    pub metadata: EntityMetadata,
 }
 
 /// Clientbound `entity_metadata` — an incremental metadata update for an entity.

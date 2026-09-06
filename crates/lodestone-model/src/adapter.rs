@@ -25,6 +25,13 @@ pub use lodestone_world::{LoadedChunk, WorldSink};
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Directive {
+    /// Start a local-player correction transaction.
+    ///
+    /// The following [`Directive::Emit`] supplies the authoritative pose and
+    /// the following [`Directive::Send`] is held until the simulation has
+    /// adopted it. This preserves the required order: local state first, then
+    /// the protocol acknowledgement and forced movement echo.
+    AwaitTeleportCorrection,
     /// Write a packet with this protocol-specific id and body.
     Send {
         /// Protocol-specific packet id.
@@ -812,6 +819,24 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
         state: ConnectionState,
         action: &ClientAction,
     ) -> Result<Option<(i32, Vec<u8>)>, AdapterError>;
+
+    /// Encodes the immediate movement echo that follows a player-position
+    /// correction. Protocols whose ordinary movement encoder can omit
+    /// unchanged fields should override this and force the complete
+    /// position-and-rotation wire shape. Older adapters may use the ordinary
+    /// action path when their wire format has no such distinction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] under the same conditions as
+    /// [`Self::encode_action`].
+    fn encode_correction_echo(
+        &self,
+        state: ConnectionState,
+        action: &ClientAction,
+    ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+        self.encode_action(state, action)
+    }
 
     /// Frames the serverbound encryption-response packet for this protocol.
     ///

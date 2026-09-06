@@ -11,8 +11,9 @@ use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockStateRef, ChatKind, ChatMode,
     ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule, ConnectionState, Difficulty,
-    Directive, DisplayedSkinParts, DisplaySlot, EntityEquipment, EntityInteraction,
-    EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile, ObjectiveMode,
+    Directive, DisplayedSkinParts, DisplaySlot, EntityAttributeModifier, EntityAttributeSnapshot,
+    EntityEquipment, EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack,
+    LoginProfile, ObjectiveMode,
     LevelEventData, ObjectiveRenderType, PlayerCommand, PlayerListEntry, ProfileProperty,
     ResourceKey, Rotation, SectionPos, ServerAddress, SoundCategory, TeamAction, TeamColor,
     TeamParameters,
@@ -30,14 +31,14 @@ use crate::packets::entity::{
     Animation, AttachEntity, ClientboundEntityEquipment, Collect, EntityDestroy, EntityEffect,
     EntityLook, EntityMetadataPacket, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
     RelEntityMove, RemoveEntityEffect, SpawnEntityExperienceOrb, SpawnEntityLiving,
-    SpawnEntityPainting, SpawnEntityWeather, SpawnObject,
+    SpawnEntityPainting, SpawnEntityWeather, SpawnObject, UpdateAttributes,
 };
 use crate::packets::game::{
     BlockDig, BlockPlace, CameraPacket, ClientCommand, ClientboundChat, ClientboundPositionLook,
-    DifficultyPacket, EntityAction, Experience, JoinGame, KickDisconnect, PlayerlistHeader,
-    PlaySetCompression, Respawn, ServerboundChat, ServerboundFlying, ServerboundLook,
-    ServerboundPosition, ServerboundPositionLook, Spectate, SpawnPosition, UpdateHealth,
-    UseEntity, UseEntityAt,
+    DifficultyPacket, EntityAction, Experience, GameStateChange, JoinGame, KickDisconnect,
+    PlayerlistHeader, PlaySetCompression, Respawn, ServerboundChat, ServerboundFlying,
+    ServerboundLook, ServerboundPosition, ServerboundPositionLook, Spectate, SpawnPosition,
+    UpdateHealth, UpdateTime, UseEntity, UseEntityAt,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -50,7 +51,7 @@ use crate::packets::window::{
     ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowItems,
 };
 use crate::packets::world::{
-    BlockAction, BlockBreakAnimation, NamedSoundEffect, OpenSignEntity, WorldEvent,
+    BlockAction, BlockBreakAnimation, Explosion, NamedSoundEffect, OpenSignEntity, WorldEvent,
 };
 
 /// Protocol version implemented by this adapter.
@@ -95,6 +96,13 @@ const REL_Y: i8 = 0x02;
 const REL_Z: i8 = 0x04;
 const REL_YAW: i8 = 0x08;
 const REL_PITCH: i8 = 0x10;
+
+/// Game-state reason codes with canonical event carriers.
+const GAME_STATE_RAIN_STOPS: u8 = 1;
+const GAME_STATE_RAIN_STARTS: u8 = 2;
+const GAME_STATE_GAME_MODE: u8 = 3;
+const GAME_STATE_RAIN_LEVEL: u8 = 7;
+const GAME_STATE_THUNDER_LEVEL: u8 = 8;
 
 /// Per-connection state used by 1.8.9's client-side player-movement-send tick.
 ///
@@ -558,6 +566,68 @@ fn game_mode(value: u8) -> Result<GameMode, AdapterError> {
         3 => Ok(GameMode::Spectator),
         other => Err(AdapterError::Decode(format!("unknown game mode {other}"))),
     }
+}
+
+/// Converts the game-mode value in a game-state packet.
+///
+/// Unlike a join or respawn byte, this packet's `f32` is the game-mode id
+/// itself: it carries neither a hardcore bit nor fractional values. Checking
+/// the raw float before converting prevents `3.5` from being silently treated
+/// as spectator through an integer cast.
+fn game_state_game_mode(value: f32) -> Result<GameMode, AdapterError> {
+    match value {
+        0.0 => Ok(GameMode::Survival),
+        1.0 => Ok(GameMode::Creative),
+        2.0 => Ok(GameMode::Adventure),
+        3.0 => Ok(GameMode::Spectator),
+        other => Err(AdapterError::Decode(format!(
+            "game_state_change game mode {other} is not survival, creative, adventure or spectator"
+        ))),
+    }
+}
+
+/// Floors one finite explosion-centre coordinate into the block grid.
+///
+/// The offset list is relative to this floored location, not to a rounded or
+/// truncated centre. Range-check before narrowing so a malformed float cannot
+/// saturate to an unrelated edge coordinate through `as i32`.
+fn explosion_origin(value: f32, axis: &str) -> Result<i32, AdapterError> {
+    let floor = f64::from(value).floor();
+    if !floor.is_finite() || !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&floor) {
+        return Err(AdapterError::Decode(format!(
+            "explosion {axis} centre {value} cannot be represented as a block coordinate"
+        )));
+    }
+    Ok(floor as i32)
+}
+
+/// Adds one signed legacy explosion offset without allowing edge-coordinate
+/// overflow to wrap into the opposite side of the world.
+fn explosion_offset(origin: i32, offset: i8, axis: &str) -> Result<i32, AdapterError> {
+    origin.checked_add(i32::from(offset)).ok_or_else(|| {
+        AdapterError::Decode(format!(
+            "explosion {axis} offset {offset} overflows floored centre {origin}"
+        ))
+    })
+}
+
+/// Resolves a textual legacy attribute key to its canonical identifier.
+///
+/// The seven keys below are the complete pre-namespaced set. Unknown keys are
+/// intentionally skipped at ingress: this packet publishes independent
+/// snapshots, so a new server-side attribute must not erase known ones.
+fn attribute_key(key: &str) -> Option<ResourceKey> {
+    let canonical = match key {
+        "generic.maxHealth" => "minecraft:max_health",
+        "generic.followRange" => "minecraft:follow_range",
+        "generic.knockbackResistance" => "minecraft:knockback_resistance",
+        "generic.movementSpeed" => "minecraft:movement_speed",
+        "generic.attackDamage" => "minecraft:attack_damage",
+        "horse.jumpStrength" => "minecraft:jump_strength",
+        "zombie.spawnReinforcements" => "minecraft:spawn_reinforcements",
+        _ => return None,
+    };
+    canonical.parse().ok()
 }
 
 /// Converts a decoded 1.8 [`Slot`] into the canonical
@@ -1395,6 +1465,19 @@ impl V47Adapter {
             })]);
             }
 
+    /// `play::clientbound::UPDATE_TIME`.
+    fn handle_play_update_time(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: UpdateTime = decode_body_exact(payload)?;
+        Ok(vec![Directive::Emit(ClientEvent::TimeChanged {
+            world_age: body.age,
+            time_of_day: body.time,
+        })])
+    }
+
     /// Extracted from the former if-chain arm for
     /// `play::clientbound::RESPAWN`.
     fn handle_play_respawn(
@@ -2016,6 +2099,42 @@ impl V47Adapter {
             })]);
             }
 
+    /// `play::clientbound::GAME_STATE_CHANGE`.
+    fn handle_play_game_state_change(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: GameStateChange = decode_body_exact(payload)?;
+        let event = match body.reason {
+            GAME_STATE_RAIN_STOPS => ClientEvent::WeatherChanged {
+                raining: Some(false),
+                rain_level: None,
+                thunder_level: None,
+            },
+            GAME_STATE_RAIN_STARTS => ClientEvent::WeatherChanged {
+                raining: Some(true),
+                rain_level: None,
+                thunder_level: None,
+            },
+            GAME_STATE_GAME_MODE => ClientEvent::GameModeChanged {
+                game_mode: game_state_game_mode(body.value)?,
+            },
+            GAME_STATE_RAIN_LEVEL => ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: Some(body.value),
+                thunder_level: None,
+            },
+            GAME_STATE_THUNDER_LEVEL => ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: None,
+                thunder_level: Some(body.value),
+            },
+            _ => return Ok(Vec::new()),
+        };
+        Ok(vec![Directive::Emit(event)])
+    }
+
     /// Extracted from the former if-chain arm for
     /// `play::clientbound::SPAWN_POSITION`.
     fn handle_play_spawn_position(
@@ -2138,6 +2257,60 @@ impl V47Adapter {
                 action,
             })]);
             }
+
+    /// `play::clientbound::UPDATE_ATTRIBUTES`.
+    fn handle_play_update_attributes(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: UpdateAttributes = decode_body_exact(payload)?;
+        let mut attributes = Vec::with_capacity(body.properties.len());
+        for property in body.properties {
+            for modifier in &property.modifiers {
+                if !(0..=2).contains(&modifier.operation) {
+                    return Err(AdapterError::Decode(format!(
+                        "update_attributes modifier operation {} is outside 0..=2",
+                        modifier.operation
+                    )));
+                }
+            }
+            let Some(attribute) = attribute_key(&property.key) else {
+                tracing::debug!(
+                    target: "v1-8::attributes",
+                    key = %property.key,
+                    "no canonical attribute for this key; skipping the entry"
+                );
+                continue;
+            };
+            let mut modifiers = Vec::with_capacity(property.modifiers.len());
+            for modifier in property.modifiers {
+                // The legacy wire has UUIDs but no modifier key. Rendering the
+                // UUID into a private canonical path preserves identity across
+                // replacement snapshots without inventing a gameplay name.
+                let id = format!("lodestone:legacy_modifier_{}", modifier.uuid.simple());
+                let Ok(id) = id.parse() else {
+                    continue;
+                };
+                modifiers.push(EntityAttributeModifier {
+                    id,
+                    amount: modifier.amount,
+                    // Checked above before the key filter, so even an unknown
+                    // property cannot hide an invalid operation byte.
+                    operation: modifier.operation as u8,
+                });
+            }
+            attributes.push(EntityAttributeSnapshot {
+                attribute,
+                base: property.value,
+                modifiers,
+            });
+        }
+        Ok(vec![Directive::Emit(ClientEvent::EntityAttributesUpdated {
+            entity_id: body.entity_id,
+            attributes,
+        })])
+    }
 
     /// Extracted from the former if-chain arm for
     /// `play::clientbound::ENTITY_EQUIPMENT`.
@@ -2349,6 +2522,52 @@ impl V47Adapter {
                 amount: 1,
             })]);
             }
+
+    /// `play::clientbound::EXPLOSION`.
+    fn handle_play_explosion(
+        &self,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: Explosion = decode_body_exact(payload)?;
+        let origin_x = explosion_origin(body.x, "x")?;
+        let origin_y = explosion_origin(body.y, "y")?;
+        let origin_z = explosion_origin(body.z, "z")?;
+
+        // Resolve every target before mutating the world. A malformed centre
+        // or overflowing offset must reject the packet as a whole rather than
+        // leave a prefix of its removed blocks applied.
+        let mut removed_blocks = Vec::with_capacity(body.affected_block_offsets.len());
+        for [offset_x, offset_y, offset_z] in &body.affected_block_offsets {
+            removed_blocks.push((
+                explosion_offset(origin_x, *offset_x, "x")?,
+                explosion_offset(origin_y, *offset_y, "y")?,
+                explosion_offset(origin_z, *offset_z, "z")?,
+            ));
+        }
+
+        let air = block_states::air_state().raw();
+        for (x, y, z) in removed_blocks {
+            world.set_block(x, y, z, air);
+            // A removed block cannot own a block entity. Keep the state-write
+            // tail identical to block_change so stale client-side records are
+            // removed with their former block instead of surviving invisibly.
+            world.sync_block_entity(x, y, z, None);
+        }
+
+        Ok(vec![Directive::Emit(ClientEvent::Explosion {
+            pos: Vec3::new(f64::from(body.x), f64::from(body.y), f64::from(body.z)),
+            radius: body.radius,
+            affected_blocks: body.affected_block_offsets,
+            // These fields are unconditional in protocol 47; a zero vector
+            // is therefore distinct from an absent modern optional impulse.
+            knockback: Some(Vec3::new(
+                f64::from(body.player_motion_x),
+                f64::from(body.player_motion_y),
+                f64::from(body.player_motion_z),
+            )),
+        })])
+    }
 
     /// Extracted from the former if-chain arm for
     /// `play::clientbound::BLOCK_ACTION`.
@@ -2899,6 +3118,13 @@ pub static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandlerFn
         ),
     ),
     (
+        "minecraft:update_time",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_update_time as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:position",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -3102,6 +3328,13 @@ pub static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandlerFn
         ),
     ),
     (
+        "minecraft:game_state_change",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_game_state_change as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:spawn_position",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -3151,6 +3384,13 @@ pub static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandlerFn
         ),
     ),
     (
+        "minecraft:update_attributes",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_update_attributes as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:world_border",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -3183,6 +3423,13 @@ pub static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandlerFn
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
             V47Adapter::handle_play_collect as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:explosion",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V47Adapter::handle_play_explosion as PlayHandlerFn,
         ),
     ),
     (
@@ -3284,13 +3531,9 @@ pub static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandlerFn
 /// `play::clientbound::ENTRIES` declares, and that removing an entry breaks
 /// construction.
 pub static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
-    lodestone_core::dispatch::IGNORED::new("minecraft:update_time", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:bed", "removed from the wire after protocol 340 (1.12.2); vanilla folds sleeping state into entity metadata (a Pose value) from 1.14 onward, so there is no v26-2 clientbound packet to backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:entity", "entity-tracker no-op heartbeat: minecraft-data's own schema is a bare entityId with no other field, and no protocol family in this workspace (v1-9, v1-14, v26-2) translates it either"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:update_attributes", "v26-2 has this; backport"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:explosion", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:world_particles", "v26-2 has this; backport"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:game_state_change", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:transaction", "removed from the wire after protocol 754 (1.16.5, still present in v1-14); v26-2 has no clientbound-or-serverbound transaction-ack packet at all, so there is nothing to backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:update_sign", "the clientbound arm was removed after protocol 754 (v1-9 and v1-14 both carry it serverbound-only); modern sign text travels through block-entity NBT instead, so there is no v26-2 clientbound packet to backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:map", "v26-2 has this; backport"),

@@ -10,9 +10,10 @@ use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
     ChatAckInfo, ChatKind, ChatMode, ChatSessionInfo, ChunkPos, ClientAction, ClientEvent,
     ClientSettings, CollisionRule,
-    ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityInteraction,
-    EntityMovement, GameMode, Hand, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
-    PlayerCommand, PlayerListEntry, ProfileProperty, RecipeBookType, ResourceKey,
+    ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityAttributeModifier,
+    EntityAttributeSnapshot, EntityInteraction, EntityMetadataUpdate, EntityMovement, GameMode, Hand,
+    LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType, PlayerCommand, PlayerListEntry,
+    ProfileProperty, RecipeBookType, ResourceKey,
     ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, TeamAction, TeamColor,
     TeamParameters, TeleportFlags, Text, Vec3, VersionAdapter, Visibility, WorldSink,
 };
@@ -26,17 +27,18 @@ use crate::packets::chat::{
     ChatCommand, ChatMessage, MessageAcknowledgement, PlayerChat, ProfilelessChat, SystemChat,
 };
 use crate::packets::entity::{
-    EntityDestroy, EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
-    NamedEntitySpawn, RelEntityMove, SpawnEntityExperienceOrb, SpawnObject,
+    EntityDestroy, EntityLook, EntityMetadataPacket, EntityMoveLook, EntityTeleport,
+    EntityVelocityPacket, NamedEntitySpawn, RelEntityMove, SpawnEntityExperienceOrb, SpawnObject,
 };
 use crate::packets::game::{
     AttachEntity, BlockDig, BlockPlace, ClientCommand, ClientboundPositionLook, Collect,
-    DifficultyPacket, EntityAction, EntityEffect, JoinGame, KickDisconnect, OpenSignEntity,
-    PlayerlistHeader, RecipeBook, RemoveEntityEffect, Respawn, ServerboundArmAnimation,
-    ServerboundFlying, ServerboundLook, ServerboundPosition, ServerboundPositionLook,
-    SetPassengers, Spectate, SpawnPosition, TeleportConfirm, UpdateHealth, UpdateTime, UseEntity,
-    UseEntityAt, UseEntityInteract, UseItem,
+    DifficultyPacket, EntityAction, EntityEffect, GameStateChange, JoinGame, KickDisconnect,
+    OpenSignEntity, PlayerlistHeader, RecipeBook, RemoveEntityEffect, Respawn,
+    ServerboundArmAnimation, ServerboundFlying, ServerboundLook, ServerboundPosition,
+    ServerboundPositionLook, SetPassengers, Spectate, SpawnPosition, TeleportConfirm,
+    UpdateHealth, UpdateTime, UseEntity, UseEntityAt, UseEntityInteract, UseItem,
 };
+use crate::packets::metadata::MetadataValue;
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
 use crate::packets::player_info::{PlayerInfoRemove, PlayerInfoUpdate};
@@ -246,6 +248,19 @@ const REL_Y: i8 = 0x02;
 const REL_Z: i8 = 0x04;
 const REL_YAW: i8 = 0x08;
 const REL_PITCH: i8 = 0x10;
+
+/// The base entity's shared metadata flags have this index in protocol 762.
+/// It is the only metadata index whose meaning does not depend on entity type.
+const METADATA_INDEX_SHARED_FLAGS: u8 = 0;
+
+/// A 1.19.4 server's attribute registry contains thirteen built-in entries;
+/// this cap leaves room for data-pack additions without allowing a hostile
+/// count to reserve arbitrary memory before any entry has been read.
+const MAX_ATTRIBUTE_ENTRIES: usize = 128;
+
+/// Attribute strings and modifier identifiers are protocol strings, whose
+/// maximum permitted character count is the standard packet string limit.
+const MAX_ATTRIBUTE_STRING: usize = 32_767;
 
 /// Per-connection state used by this era's client-side player-position-send tick.
 #[derive(Debug, Clone, Copy)]
@@ -599,6 +614,51 @@ fn game_mode(value: u8) -> Result<GameMode, AdapterError> {
         3 => Ok(GameMode::Spectator),
         other => Err(AdapterError::Decode(format!("unknown game mode {other}"))),
     }
+}
+
+/// Maps the textual attribute ids in protocol 762 onto the model's canonical
+/// ids.  The bundled 1.19.4 registry dump is the source for this complete
+/// thirteen-entry table: this era writes `minecraft:generic.max_health`, for
+/// example, while the version-neutral model calls that same attribute
+/// `minecraft:max_health`.
+fn attribute_key(wire_key: &str) -> Option<ResourceKey> {
+    let canonical = match wire_key {
+        "minecraft:generic.armor" => "minecraft:armor",
+        "minecraft:generic.armor_toughness" => "minecraft:armor_toughness",
+        "minecraft:generic.attack_damage" => "minecraft:attack_damage",
+        "minecraft:generic.attack_knockback" => "minecraft:attack_knockback",
+        "minecraft:generic.attack_speed" => "minecraft:attack_speed",
+        "minecraft:generic.flying_speed" => "minecraft:flying_speed",
+        "minecraft:generic.follow_range" => "minecraft:follow_range",
+        "minecraft:generic.knockback_resistance" => "minecraft:knockback_resistance",
+        "minecraft:generic.luck" => "minecraft:luck",
+        "minecraft:generic.max_health" => "minecraft:max_health",
+        "minecraft:generic.movement_speed" => "minecraft:movement_speed",
+        "minecraft:horse.jump_strength" => "minecraft:jump_strength",
+        "minecraft:zombie.spawn_reinforcements" => "minecraft:spawn_reinforcements",
+        _ => return None,
+    };
+    canonical.parse().ok()
+}
+
+/// Reads a bounded protocol count.  `available_entries` is a wire-derived
+/// upper bound used for fixed-width entries, so a malformed count cannot
+/// allocate memory or make the decoder consume a following field as a list.
+fn checked_count(
+    raw: i32,
+    cap: usize,
+    available_entries: usize,
+    what: &str,
+) -> Result<usize, AdapterError> {
+    let count = usize::try_from(raw)
+        .map_err(|_| AdapterError::Decode(format!("negative {what} {raw}")))?;
+    let limit = cap.min(available_entries);
+    if count > limit {
+        return Err(AdapterError::Decode(format!(
+            "{what} {count} exceeds bounded limit {limit}"
+        )));
+    }
+    Ok(count)
 }
 
 /// Parses a 1.16 namespaced world name (e.g. `minecraft:overworld`) into a
@@ -1562,6 +1622,239 @@ impl V762Adapter {
             pos: Vec3::new(body.x, body.y, body.z),
             rotation: Rotation::new(0.0, 0.0),
             velocity: None,
+        })])
+    }
+
+    /// `minecraft:block_break_animation`.  The signed stage byte is retained
+    /// bit-for-bit in the event's raw `u8`: values outside the visible range
+    /// clear an overlay, so clamping it would lose a real wire distinction.
+    fn handle_play_block_break_animation(
+        adapter: &V762Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let entity_id = reader.var_i32().map_err(dec_err)?;
+        let pos = Position::decode(&mut reader, adapter.ctx()).map_err(dec_err)?.0;
+        let progress = reader.i8().map_err(dec_err)? as u8;
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::BlockDestruction {
+            entity_id,
+            pos,
+            progress,
+        })])
+    }
+
+    /// `minecraft:explosion`.
+    ///
+    /// Protocol 762 keeps the legacy offset-list and unconditional three-float
+    /// knockback tail, but its list length is a VarInt.  In particular it is
+    /// not the fixed-width `i32` count used by the oldest protocol family.
+    fn handle_play_explosion(
+        adapter: &V762Adapter,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let pos = Vec3::new(
+            reader.f64().map_err(dec_err)?,
+            reader.f64().map_err(dec_err)?,
+            reader.f64().map_err(dec_err)?,
+        );
+        let radius = reader.f32().map_err(dec_err)?;
+        let raw_count = reader.var_i32().map_err(dec_err)?;
+        // Each offset is three bytes, and the three f32 knockback components
+        // are an unconditional twelve-byte tail.  Budget against both before
+        // allocating so a count cannot eat that tail as fake offsets.
+        const KNOCKBACK_BYTES: usize = 3 * size_of::<f32>();
+        let offset_bytes = reader
+            .remaining()
+            .checked_sub(KNOCKBACK_BYTES)
+            .ok_or_else(|| AdapterError::Decode("explosion lacks knockback tail".to_owned()))?;
+        let count = checked_count(
+            raw_count,
+            offset_bytes / 3,
+            offset_bytes / 3,
+            "explosion affected-block count",
+        )?;
+        let mut affected_blocks = Vec::with_capacity(count);
+        for _ in 0..count {
+            affected_blocks.push([
+                reader.i8().map_err(dec_err)?,
+                reader.i8().map_err(dec_err)?,
+                reader.i8().map_err(dec_err)?,
+            ]);
+        }
+        let knockback = Some(Vec3::new(
+            f64::from(reader.f32().map_err(dec_err)?),
+            f64::from(reader.f32().map_err(dec_err)?),
+            f64::from(reader.f32().map_err(dec_err)?),
+        ));
+        reader.ensure_empty().map_err(dec_err)?;
+        // The offsets are authoritative block removals, not only particle
+        // placement hints. Apply the ordinary block-write tail before
+        // announcing the blast, so a consumer that reads the world from the
+        // event observes canonical air and no stale block entity at each
+        // removed coordinate.
+        let origin_x = pos.x.floor() as i32;
+        let origin_y = pos.y.floor() as i32;
+        let origin_z = pos.z.floor() as i32;
+        let air = adapter.current_shape().air_id;
+        for offset in &affected_blocks {
+            let x = origin_x
+                .checked_add(i32::from(offset[0]))
+                .ok_or_else(|| AdapterError::Decode("explosion x offset overflows".to_owned()))?;
+            let y = origin_y
+                .checked_add(i32::from(offset[1]))
+                .ok_or_else(|| AdapterError::Decode("explosion y offset overflows".to_owned()))?;
+            let z = origin_z
+                .checked_add(i32::from(offset[2]))
+                .ok_or_else(|| AdapterError::Decode("explosion z offset overflows".to_owned()))?;
+            world.set_block(x, y, z, air);
+            world.sync_block_entity(x, y, z, None);
+        }
+        Ok(vec![Directive::Emit(ClientEvent::Explosion {
+            pos,
+            radius,
+            affected_blocks,
+            knockback,
+        })])
+    }
+
+    /// `minecraft:game_state_change`.  Reasons 1, 2, 3, 7 and 8 are the
+    /// complete subset with a direct canonical carrier; every other reason is
+    /// still decoded exactly, then deliberately has no directive.
+    fn handle_play_game_state_change(
+        adapter: &V762Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: GameStateChange = adapter.decode_body_exact(payload)?;
+        let directives = match body.reason {
+            1 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: Some(true),
+                rain_level: None,
+                thunder_level: None,
+            })],
+            2 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: Some(false),
+                rain_level: None,
+                thunder_level: None,
+            })],
+            3 if body.value.is_finite()
+                && body.value.fract() == 0.0
+                && (0.0..=3.0).contains(&body.value) =>
+            {
+                let mode = game_mode(body.value as u8)?;
+                vec![Directive::Emit(ClientEvent::GameModeChanged { game_mode: mode })]
+            }
+            3 => {
+                return Err(AdapterError::Decode(format!(
+                    "game-state game-mode argument {} is not an ordinal in 0..=3",
+                    body.value
+                )));
+            }
+            7 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: Some(body.value),
+                thunder_level: None,
+            })],
+            8 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: None,
+                thunder_level: Some(body.value),
+            })],
+            _ => Vec::new(),
+        };
+        Ok(directives)
+    }
+
+    /// `minecraft:entity_metadata`.  The existing 762 metadata codec owns
+    /// the type-tagged sentinel list; only index zero is entity-type agnostic,
+    /// so exposing any other index without a tracked entity category would be
+    /// a plausible but incorrect semantic update.
+    fn handle_play_entity_metadata(
+        adapter: &V762Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: EntityMetadataPacket = adapter.decode_body_exact(payload)?;
+        let flags = body.metadata.0.iter().find_map(|entry| match (entry.key, &entry.value) {
+            (METADATA_INDEX_SHARED_FLAGS, MetadataValue::Byte(bits)) => Some(*bits as u8),
+            _ => None,
+        });
+        let Some(flags) = flags else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![Directive::Emit(ClientEvent::EntityMetadataUpdated {
+            entity_id: body.entity_id,
+            metadata: EntityMetadataUpdate {
+                flags: Some(flags),
+                ..EntityMetadataUpdate::default()
+            },
+        })])
+    }
+
+    /// `minecraft:entity_update_attributes`.  Unlike modern protocol 776,
+    /// protocol 762 sends every attribute as a textual registry key.  Its
+    /// modifiers identify themselves by UUID, so their stable model ids are
+    /// namespaced UUID paths rather than a made-up numeric registry.
+    fn handle_play_entity_update_attributes(
+        _adapter: &V762Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let entity_id = reader.var_i32().map_err(dec_err)?;
+        let count = checked_count(
+            reader.var_i32().map_err(dec_err)?,
+            MAX_ATTRIBUTE_ENTRIES,
+            reader.remaining(),
+            "attribute count",
+        )?;
+        let mut attributes = Vec::with_capacity(count);
+        for _ in 0..count {
+            let wire_key = reader.string(MAX_ATTRIBUTE_STRING).map_err(dec_err)?;
+            let base = reader.f64().map_err(dec_err)?;
+            let modifier_count = checked_count(
+                reader.var_i32().map_err(dec_err)?,
+                reader.remaining() / (16 + size_of::<f64>() + 1),
+                reader.remaining() / (16 + size_of::<f64>() + 1),
+                "attribute modifier count",
+            )?;
+            let mut modifiers = Vec::with_capacity(modifier_count);
+            for _ in 0..modifier_count {
+                let uuid = reader.uuid().map_err(dec_err)?;
+                let amount = reader.f64().map_err(dec_err)?;
+                let operation = reader.u8().map_err(dec_err)?;
+                if operation > 2 {
+                    return Err(AdapterError::Decode(format!(
+                        "attribute modifier operation {operation} is outside 0..=2"
+                    )));
+                }
+                let id = format!("lodestone:legacy_modifier_{}", uuid.simple())
+                    .parse()
+                    .map_err(|_| AdapterError::Decode("invalid modifier identifier".to_owned()))?;
+                modifiers.push(EntityAttributeModifier {
+                    id,
+                    amount,
+                    operation,
+                });
+            }
+            // The packet is a partial update, so an unknown attribute must not
+            // discard correctly decoded snapshots preceding or following it.
+            if let Some(attribute) = attribute_key(&wire_key) {
+                attributes.push(EntityAttributeSnapshot {
+                    attribute,
+                    base,
+                    modifiers,
+                });
+            }
+        }
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::EntityAttributesUpdated {
+            entity_id,
+            attributes,
         })])
     }
 
@@ -2654,6 +2947,41 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:block_break_animation",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V762Adapter::handle_play_block_break_animation,
+        ),
+    ),
+    (
+        "minecraft:explosion",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V762Adapter::handle_play_explosion,
+        ),
+    ),
+    (
+        "minecraft:game_state_change",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V762Adapter::handle_play_game_state_change,
+        ),
+    ),
+    (
+        "minecraft:entity_metadata",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V762Adapter::handle_play_entity_metadata,
+        ),
+    ),
+    (
+        "minecraft:entity_update_attributes",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V762Adapter::handle_play_entity_update_attributes,
+        ),
+    ),
+    (
         "minecraft:block_change",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2884,9 +3212,9 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
 /// [`CLIENTBOUND`] above — `Table::build` rejects construction otherwise,
 /// which is the anti-island guard replacing the old if-chain's trailing
 /// `Ok(Vec::new())`. Re-derived by grepping the pre-conversion if-chain for
-/// every `play::clientbound::X` it tested (54 handled) against the full
+/// every `play::clientbound::X` it tested (59 handled) against the full
 /// 92-entry `ENTRIES` table, then checking `crates/versions/26.2/src/adapter/`
-/// for each of the 38 gaps by canonical name or an obvious Mojang-naming
+/// for each of the 33 gaps by canonical name or an obvious Mojang-naming
 /// synonym (v26-2 uses Mojang's own names, which differ from minecraft-data's
 /// for the same packet).
 static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
@@ -2894,10 +3222,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:acknowledge_player_digging",
         "v26-2 has this; backport (BLOCK_CHANGED_ACK)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:block_break_animation",
-        "v26-2 has this; backport (BLOCK_DESTRUCTION)",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:tile_entity_data",
@@ -2917,11 +3241,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new("minecraft:set_slot", "v26-2 has this; backport (CONTAINER_SET_SLOT)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:set_cooldown", "v26-2 has this; backport (COOLDOWN)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:custom_payload", "v26-2 has this; backport (CUSTOM_PAYLOAD)"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:explosion", "v26-2 has this; backport (EXPLODE)"),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:game_state_change",
-        "v26-2 has this; backport (GAME_EVENT)",
-    ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:open_horse_window",
         "v26-2 has this; backport (MOUNT_SCREEN_OPEN)",
@@ -2953,10 +3272,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "v26-2 has this; backport (SECTION_BLOCKS_UPDATE)",
     ),
     lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_metadata",
-        "v26-2 has this; backport (SET_ENTITY_DATA)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
         "minecraft:entity_equipment",
         "v26-2 has this; backport (SET_EQUIPMENT)",
     ),
@@ -2973,10 +3288,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:advancements",
         "v26-2 has this; backport (UPDATE_ADVANCEMENTS)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_update_attributes",
-        "v26-2 has this; backport (UPDATE_ATTRIBUTES)",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:declare_recipes",

@@ -207,10 +207,77 @@ pub struct ClientboundAbilities {
 #[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:game_state_change", state = Play, bound = Client, protocols = "766..=766")]
 pub struct GameStateChange {
-    /// Reason id; `3` is a game-mode change, whose new mode is `value`.
+    /// Reason id; `1`/`2` start/stop rain, `3` changes game mode, and `7`/`8`
+    /// set rain/thunder intensity.
     pub reason: u8,
     /// Reason-dependent argument.
     pub value: f32,
+}
+
+/// Clientbound `multi_block_change` — sparse updates inside one 16×16×16
+/// section.
+///
+/// The first long has signed section x/z/y fields of 22/22/20 bits. Its
+/// records are **VarInt** values, not VarLong values: the low twelve bits are
+/// `x << 8 | z << 4 | y`, and the remaining bits are the flat block-state id.
+/// This shape is local to this protocol generation; it is decoded by hand so
+/// each bit field is sign-extended before it becomes a world coordinate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiBlockChange {
+    /// Section x coordinate.
+    pub section_x: i32,
+    /// Section y coordinate.
+    pub section_y: i32,
+    /// Section z coordinate.
+    pub section_z: i32,
+    /// Section-relative `(x, y, z)` and the source-protocol state id.
+    pub blocks: Vec<([u8; 3], i32)>,
+}
+
+impl Decode for MultiBlockChange {
+    fn decode(r: &mut Reader<'_>, _ctx: Ctx) -> Result<Self> {
+        let packed = r.i64()?;
+        let section_x = ((packed >> 42) << 42 >> 42) as i32;
+        let section_y = ((packed << 44) >> 44) as i32;
+        let section_z = ((packed << 22) >> 42) as i32;
+        let count = r.var_i32()?;
+        if count < 0 {
+            return Err(lodestone_core::Error::NegativeLength(count));
+        }
+        let mut blocks = Vec::with_capacity((count as usize).min(r.remaining()));
+        for _ in 0..count {
+            let record = r.var_i32()?;
+            let local = (record & 0x0fff) as u16;
+            blocks.push((
+                [
+                    ((local >> 8) & 0x0f) as u8,
+                    (local & 0x0f) as u8,
+                    ((local >> 4) & 0x0f) as u8,
+                ],
+                record >> 12,
+            ));
+        }
+        Ok(Self {
+            section_x,
+            section_y,
+            section_z,
+            blocks,
+        })
+    }
+}
+
+/// Clientbound `block_break_animation` — one entity's raw crack-overlay
+/// stage at a packed block position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:block_break_animation", state = Play, bound = Client, protocols = "766..=766")]
+pub struct BlockBreakAnimation {
+    /// Entity currently breaking the block.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Block carrying the overlay.
+    pub location: Position,
+    /// Raw wire stage; values outside visible stages clear the overlay.
+    pub destroy_stage: i8,
 }
 
 /// Clientbound `start_configuration` — the server pulls a playing connection

@@ -86,6 +86,50 @@ profile, and online-mode login is not implemented for this era. The oracle
 therefore sets `enforce-secure-profile=false`; with enforcement on, the server
 rejects the *join*, not the message.
 
+### Bounded gameplay updates
+
+The adapter consumes five small gameplay paths that are not represented by the
+flat-world join capture. `block_break_animation` preserves its entity id,
+packed position and raw stage byte as `ClientEvent::BlockDestruction` so the
+overlay consumer can also see its clear sentinel. `entity_metadata` reuses the
+era's typed, sentinel-terminated codec, but reports only index zero's shared
+flags byte: all other indexes need an entity category the packet does not
+carry. Its serializer table is not inherited from 1.17: the real capture's
+index-9 float has serializer id 3, proving protocol 762 inserted `VarLong` at
+id 2 and shifted every later id. A copied pre-762 table reads the float's first
+byte as a string length and fails before the sentinel. The complete tail is
+also versioned: id 15 is optional block state, 16 is compound NBT, 17 is the
+registry-dependent particle payload (rejected until that registry is modeled),
+18 is the three-VarInt villager tuple, 19 is optional unsigned integer, 20 is
+pose, and 21 through 27 carry the later variant, optional-global-position,
+vector, and quaternion forms. The codec has literal fixtures that distinguish
+the settled ids, rather than inferring them from a nearby family. Particle (17)
+still needs a particle registry, while the committed local schema describes
+optional-global-position (23) as an optional string despite the same value
+elsewhere carrying a packed position too. Both therefore fail loudly instead
+of choosing a payload width that could desynchronise the list.
+
+`explosion` retains the old offset-list shape, with three `f64` coordinates,
+an `f32` radius, three signed bytes per affected block, and an unconditional
+three-`f32` knockback tail. Its count is a **VarInt**, not the fixed-width
+`i32` used by the oldest family. The decoder budgets the count against the
+remaining bytes after reserving that tail before allocating, then requires the
+whole packet to be consumed. After that exact frame check, it floors the center
+and applies every listed signed offset to the loaded world as canonical air,
+then removes any block entity at that coordinate, before emitting the explosion
+event.
+
+`game_state_change` reaches the canonical weather/game-mode state for reason
+codes 1 (rain starts), 2 (rain stops), 3 (mode), 7 (rain level), and 8
+(thunder level). Other reasons still receive an exact frame check but have no
+model event. `entity_update_attributes` uses textual attribute names in this
+protocol; the complete 1.19.4 attribute registry from the committed jar dump
+maps its thirteen `generic.*`, `horse.*`, and `zombie.*` names onto the
+version-neutral keys. A modifier's UUID becomes its stable
+`lodestone:legacy_modifier_<uuid>` model id. Both outer and inner lists are
+bounded before allocation; unknown textual attributes are decoded and omitted
+without losing the recognised snapshots in the same incremental update.
+
 ### One spawn packet, and why the entity table is per era
 
 1.19.4 removed the separate mob-spawn packet the four eras below all carry. Its
@@ -282,7 +326,7 @@ Replaying what those logins produced:
 
 | neighbour | errored | silent | plausible wrong events | ids 762 does not carry |
 |---|---|---|---|---|
-| 1.18.2 (758) | 35 | 19 | **10** | 0 |
+| 1.18.2 (758) | 36 | 18 | **10** | 0 |
 | 1.20.6 (766) | 39 | 13 | **3** | 10 |
 
 Two of the lower neighbour's ten are wrong in a way nothing downstream could
@@ -353,10 +397,11 @@ optional, because an enforcing server rejects the join rather than the message.
 
 Two things this era does **not** settle. `minecraft-data` models 1.19.4's
 `multi_block_change` records as VarInts where every neighbouring release uses
-VarLongs; this crate does not translate that packet, so the disagreement is
-recorded rather than resolved. And it models `player_info`'s `update_listed`
-field as a VarInt where the wire writes a boolean — the two coincide for the
-only values that occur, so nothing here depends on which is right.
+VarLongs; the committed real capture has no such packet and this crate does
+not translate it until a capture or local source resolves that width. And it
+models `player_info`'s `update_listed` field as a VarInt where the wire writes
+a boolean — the two coincide for the only values that occur, so nothing here
+depends on which is right.
 
 ## Dependencies
 

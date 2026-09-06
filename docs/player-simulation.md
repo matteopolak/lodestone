@@ -279,61 +279,34 @@ step first turns the current velocity through the correction's yaw/pitch change.
 `TeleportVelocity::resolve` is the shared rule used by local-player and remote-
 entity corrections. Older protocol families do not carry this record and retain
 their stop-on-teleport behavior. Explosion knockback is separate and additive;
-the 26.2 adapter must emit `ClientEvent::Explosion` as well as its particle and
-sound events so the shell's existing impulse path can consume it.
+every family routes `ClientEvent::Explosion` through the shell's impulse path.
+Families whose packet includes removed-block offsets first write canonical air
+to the shared world; the shell groups those offsets by section, retires any
+overlapping placement prediction, and rebuilds the affected meshes. Protocols
+774 and 776 carry no offsets in this packet, so their ordinary block updates
+drive the same mesh-rebuild path instead.
 
-That stale claim is a real window, and closing it takes a rewrite at **three**
-points because a movement action crosses three queues on its way out: the
-simulation's own action channel (`net.rs`, `NetClient::send_action`), the net
-loop's drain of it, and the driver's queue inside the client
-(`V770Adapter::select_move_packet`). Staleness is a property of the moment an
-action was *built*, not of the moment it is drained, and each pair of adjacent
-points is up to a full loop iteration apart — so a rewrite that only consults
-the teleport bookkeeping at one of them reads "level with the server" for an
-action built before the simulation adopted the teleport, and waves it through
-after the confirmation is already on the wire.
+Every player-position correction opens a transaction: the adapter surfaces the
+authoritative event, the shell applies its pose and velocity, and only then does
+the driver write the acknowledgement and an unconditional full movement echo
+with both contact flags clear. Ordinary movement compression is bypassed so the
+response always includes the resolved rotation. Movement actions carry a
+generation token; a pre-correction action is discarded at this boundary, while
+a post-correction action is kept without spatial rewriting.
 
-**The last of the three is the one that actually guarantees it**, and the
-measurements say so. Rewriting at the first two alone still left five
-corrections in twelve teleports against the oracle, because the driver writes
-the confirmation the instant the packet decodes while an action that had
-already left the shell sits in its queue and is encoded afterwards — out of
-reach of everything upstream. The adapter's movement mutex is where the
-confirmation is recorded, so it is the last point that can see both; it rewrites
-the first move after an absolute teleport onto that teleport's target whenever
-the claim carries **both** halves of staleness's signature — more than a block
-from the target (one tick of real movement is well under half a block, so a
-producer that had adopted the teleport could not be out there) *and* still
-within a block of the pose the adapter last put on the wire, because that is
-the pre-teleport pose an overtaken claim was built from.
+A direct entity-velocity packet is a complete replacement rather than an
+additive impulse. The net thread first folds it into entity state, then mirrors
+the same value through `NetUpdate::EntityVelocity`. `Sim::step` drains that
+mirror before its fixed-timestep loop and applies it only when the packet names
+the local server entity id. This ordering prevents the next outbound movement
+packet from integrating the previous frame's velocity while remote entities
+remain on the ordinary ECS ingest path.
 
-The second half is not optional, and distance from the target alone is not the
-signature. The two upstream rewrites are counter-based — they fire only while
-the simulation is behind the teleports the net thread forwarded — but the
-adapter has no such counter, and reading distance alone as staleness makes it
-swallow a caller's own deliberate long move. That is not hypothetical for a
-library whose headless callers are the product: `ClientHandle::move_to` /
-`set_position` / `walk_to` run no physics and place the player wherever asked,
-so a bot's *first* move after the join placement is routinely hundreds of
-blocks from it and has nothing to do with the pose before it. Rewritten onto
-the target, that move leaves the server believing the player never moved, with
-no error, no disconnect and no log line on either end — and every consequence
-of moving is then computed at the spawn: the streamed view never follows the
-player, no column is ever forgotten, and a melee knockback direction measured
-from the attacker's tracked position points from the wrong place. Four live
-gates failed on exactly that, in three files with nothing in common but this
-one line. The discriminating control is
-`movement_selection::a_first_move_to_a_third_location_is_the_callers_own_and_reaches_the_wire`:
-a first post-teleport claim that is neither the target nor the last sent pose,
-which the stale-claim gate on its own cannot tell from a real stale one.
-
-The two upstream
-rewrites are kept rather than deleted: each closes an ordering the next one down
-cannot see, all three write the same pose, so applying them together is
-idempotent. A relative teleport authorises no absolute target and therefore
-*clears* the yardstick — the previous target is where the player was before the
-relative move, so snapping a later claim onto it would be worse than doing
-nothing.
+An absolute correction sets both current and previous position to the target,
+so it is immediately authoritative even when adjacent server positions are
+close. Relative axes add their delta to the previous position independently.
+Visual interpolation remains a property of locally predicted movement rather
+than a heuristic over server placements.
 
 `crates/lodestone-shell/tests/live/live_edge_back_off_rubber_band.rs` is the
 live confirmation of all of it against the survival oracle: sneaking at a real

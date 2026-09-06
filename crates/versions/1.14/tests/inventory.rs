@@ -231,6 +231,7 @@ fn spawn_entity_living_round_trips() {
         velocity_x: 1,
         velocity_y: 0,
         velocity_z: -2,
+        metadata: EntityMetadata::default(),
     });
 }
 

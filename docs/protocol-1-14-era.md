@@ -205,6 +205,56 @@ trailing-bytes or truncation error, or lands it on an ignored id.
 `misrouting_between_protocols_is_never_a_plausible_wrong_event` holds that
 line for the whole capture, so a future lenient decode cannot quietly undo it.
 
+### Incremental world and entity signals
+
+The adapter applies a single changed block and bulk changes through the same
+per-protocol canonical state table used for chunk palettes. Every changed cell
+also synchronizes its block-entity record and emits a section-local dirty
+signal, so a server update changes both the stored world and the mesh consumer.
+The bulk packet has two layouts: 498/578 name a chunk and encode each local
+`x/z`, `y`, state triple; 754 names a packed section and encodes each update as
+`state << 12 | local-position`. The tests use one fixture of each layout,
+including negative section coordinates, rather than the adapter's encoder.
+
+Explosions lift their three floating-point centre coordinates, radius,
+signed affected-block offsets, and the always-present local-player impulse.
+The offsets are authoritative removals: the adapter floors the centre, adds
+each signed offset, writes that protocol's canonical air into a loaded world
+section, and clears a block entity at the same position before publishing the
+event. A loaded-world fixture checks the negative-offset coordinate and an
+adjacent untouched cell separately.
+Break-progress packets preserve the stage byte exactly, including a value used
+to clear an overlay. Game-state reasons 1, 2, 3, 7, and 8 become the shared
+rain-start, rain-stop, game-mode, rain-level, and thunder-level events. Other
+reasons are fully consumed but intentionally have no model event. The mode
+argument is accepted only when it is a finite integral value from 0 through 3;
+fractional and non-finite floats are protocol errors rather than truncated
+into a plausible mode.
+
+The era's existing metadata list codec is now consumed at ingress. Only index
+zero's shared entity-flags byte is exported: later indices are reused by
+different entity categories, and this adapter does not retain enough category
+state to report one without inventing meaning. Attribute snapshots are fully
+consumed. 498/578 dotted camel-case keys and 754 namespaced `generic.*` keys
+both map to the model's canonical attribute names; unknown keys are skipped
+only after their modifiers have been consumed. Legacy modifier UUIDs become
+stable `lodestone:legacy_modifier_*` identifiers because the model requires an
+identifier where this wire only provides a UUID. A packet accepts at most 128
+properties and 1,024 modifiers per property, and only operation ids 0, 1, and
+2; these checks keep untrusted counts and enum values out of the model.
+
+Protocol 498 also appends a metadata list to a living-entity spawn, unlike
+578 and 754. The codec consumes that tail only at 498 and emits its shared
+flags immediately after the spawn event; later rows keep the standalone
+metadata packet path. The fixture's terminator makes an omitted protocol gate
+fail as trailing bytes rather than silently losing the flags.
+
+Equipment and block-event packets remain deliberately unhandled. Their item or
+block-type numeric ids need an authoritative registry for every protocol in
+this era; the only committed item/block registries describe the current
+protocol and would silently name the wrong resource. Add jar-derived 498, 578,
+and 754 registries before wiring either packet.
+
 ### External-client acceptance
 
 The opt-in release-client gate covers all three hosted rows in this era: protocol 498 (1.14.4),
@@ -240,6 +290,14 @@ client until their manual runs produce passing `report.json` files.
   moves the wire.
 - `minecraft-data` ships 1.14.4 and 1.15.2 under their own directories (unlike
   the 1.9 era's same-major fallbacks), so pass the real version and protocol.
+- For an incremental-world packet, preserve the order `decode → canonicalize →
+  write world → synchronize block entity → emit dirty section`. Omitting the
+  last two steps creates stored-but-invisible blocks or stale block entities.
+  Keep fixtures field-assembled and route each packet through all applicable
+  generated id tables.
+- Do not wire equipment or block events from a modern registry lookup. Generate
+  and commit one historical registry per protocol first, then test a numeric id
+  whose mapping differs between at least two rows.
 
 ## Configuration
 

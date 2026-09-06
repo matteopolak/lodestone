@@ -44,7 +44,9 @@ pub use status::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use status::server_status;
 #[cfg(not(target_arch = "wasm32"))]
-pub use resolve::{lookup_minecraft_srv, resolve_server_address};
+pub use resolve::{
+    lookup_minecraft_srv, resolve_server_address, resolve_server_address_with_lookup,
+};
 pub use transport::{DEFAULT_MEMORY_BUFFER, Transport, memory_pair};
 #[cfg(all(feature = "ws-native", not(target_arch = "wasm32")))]
 pub use ws_native::WsTransport;

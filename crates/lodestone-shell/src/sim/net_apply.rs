@@ -45,11 +45,25 @@ fn embedded_disconnect_component(mut reason: lodestone_model::Text) -> lodestone
             break;
         }
 
+        let literal = lodestone_model::Text::literal(candidate);
         let parsed = lodestone_model::Text::from_json(candidate);
-        if parsed == lodestone_model::Text::literal(candidate) {
+        if parsed != literal {
+            reason = parsed;
+            continue;
+        }
+
+        // Some proxy stacks remove the surrounding JSON string quotes but
+        // leave its inner component escaped (`{\"text\":...}`). Restore that
+        // one missing string boundary, then let the next bounded iteration
+        // parse the resulting component object normally.
+        let quoted = format!("\"{candidate}\"");
+        let Ok(unescaped) = serde_json::from_str::<String>(&quoted) else {
+            break;
+        };
+        if unescaped == candidate {
             break;
         }
-        reason = parsed;
+        reason = lodestone_model::Text::literal(unescaped);
     }
     reason
 }
@@ -180,6 +194,32 @@ impl Sim {
                     // now. Without this the first portal trip of a session would
                     // compare against `None` and skip its reset entirely.
                     self.record_login_dimension();
+                }
+                NetUpdate::EntityVelocity {
+                    entity_id,
+                    velocity,
+                } => {
+                    if self.server_entity_id() == Some(entity_id) {
+                        let (position, velocity_before) = self.player_mut(|player| {
+                            let velocity_before = player.velocity;
+                            player.velocity = Vec3d::new(velocity.x, velocity.y, velocity.z);
+                            (player.position, velocity_before)
+                        });
+                        tracing::debug!(
+                            target: "net_join",
+                            entity_id,
+                            position_x = position.x,
+                            position_y = position.y,
+                            position_z = position.z,
+                            velocity_before_x = velocity_before.x,
+                            velocity_before_y = velocity_before.y,
+                            velocity_before_z = velocity_before.z,
+                            velocity_after_x = velocity.x,
+                            velocity_after_y = velocity.y,
+                            velocity_after_z = velocity.z,
+                            "local authoritative velocity applied before physics"
+                        );
+                    }
                 }
                 NetUpdate::Chunk { x, z } => {
                     // §12.24 dirty-region signal: no block data travels on the
@@ -313,27 +353,60 @@ impl Sim {
                     self.gateway_cooldowns.apply_block_event(pos, b0, b1);
                 }
                 NetUpdate::Explosion {
-                    pos: _,
+                    pos,
                     radius: _,
-                    affected_blocks: _,
+                    affected_blocks,
                     knockback,
                 } => {
-                    // Only the local-player knockback lands here today. The
-                    // block removals (pre-26.2 families only —
-                    // `ClientEvent::Explosion::affected_blocks`'s own doc
-                    // explains why 26.2 never populates it) and the cosmetic
-                    // particle/sound burst are deliberately not wired: this
-                    // fold's job is routing the event to the right place
-                    // (`docs/plugin-api.md`'s three-router convention this
-                    // event follows — world/block state, not per-entity or
-                    // session), not the gameplay effect itself, which is a
-                    // separate piece of work.
+                    // Adapters for protocols before 774 have already replaced
+                    // these blocks with air in the shared world. Translate the
+                    // packet's explosion-relative offsets back into section
+                    // coordinates so those authoritative writes reach meshes
+                    // and retire any overlapping placement predictions. Later
+                    // protocols carry no offsets here; their ordinary block
+                    // updates take this same path through `SectionBlocks`.
+                    let base = [pos.x.floor(), pos.y.floor(), pos.z.floor()];
+                    if base.iter().all(|value| {
+                        value.is_finite()
+                            && *value >= f64::from(i32::MIN)
+                            && *value <= f64::from(i32::MAX)
+                    }) {
+                        let mut sections = std::collections::BTreeMap::<
+                            (i32, i32, i32),
+                            Vec<[u8; 3]>,
+                        >::new();
+                        for offset in affected_blocks {
+                            let Some(x) = (base[0] as i32).checked_add(i32::from(offset[0])) else {
+                                continue;
+                            };
+                            let Some(y) = (base[1] as i32).checked_add(i32::from(offset[1])) else {
+                                continue;
+                            };
+                            let Some(z) = (base[2] as i32).checked_add(i32::from(offset[2])) else {
+                                continue;
+                            };
+                            let absolute = [x, y, z];
+                            let section = (
+                                absolute[0].div_euclid(16),
+                                absolute[1].div_euclid(16),
+                                absolute[2].div_euclid(16),
+                            );
+                            sections.entry(section).or_default().push([
+                                absolute[0].rem_euclid(16) as u8,
+                                absolute[1].rem_euclid(16) as u8,
+                                absolute[2].rem_euclid(16) as u8,
+                            ]);
+                        }
+                        for ((sx, sy, sz), blocks) in sections {
+                            self.reconcile_predictions(sx, sy, sz, &blocks);
+                            self.remesh_changed_blocks(sx, sy, sz, &blocks);
+                        }
+                    }
+
                     //
-                    // An **additive** velocity delta, matching vanilla's own
-                    // `Entity::addDeltaMovement` (`ClientPacketListener`'s
-                    // `handleExplosion` calls exactly that, not an assignment)
-                    // — a second explosion's push stacks onto whatever this
-                    // one already imparted rather than overwriting it.
+                    // The velocity delta is additive: a second explosion's
+                    // push stacks onto whatever the first one imparted rather
+                    // than overwriting it.
                     if let Some(kb) = knockback {
                         let (position, velocity_before, velocity_after) = self.player_mut(|player| {
                             let position = player.position;
@@ -413,6 +486,7 @@ impl Sim {
                     // of stranded over the unmeshed demo platform. `prev_position`
                     // is moved with it so the frame interpolator does not smear the
                     // camera across the teleport.
+                    let old_position = self.prev_position();
                     let placed = self.player_mut(|player| {
                         let base = player.position;
                         player.position = Vec3d::new(
@@ -467,15 +541,22 @@ impl Sim {
                         (base, player.position)
                     });
                     let (was, placed) = placed;
-                    self.set_prev_position(placed);
+                    // The previous pose is transformed from its own previous
+                    // value, not used as a visual smoothing anchor. Absolute
+                    // components therefore snap both positions to the target;
+                    // relative components preserve one correction delta.
+                    self.set_prev_position(Vec3d::new(
+                        if flags.relative_x { old_position.x + pos.x } else { pos.x },
+                        if flags.relative_y { old_position.y + pos.y } else { pos.y },
+                        if flags.relative_z { old_position.z + pos.z } else { pos.z },
+                    ));
                     self.teleport_count += 1;
-                    // The simulation is now level with the server, so the net
-                    // thread can stop overriding the pose our outbound `Move`s
-                    // claim. Published here — after the pose is actually
-                    // adopted, never before — because that is precisely the
-                    // edge the override exists to bridge. See
-                    // `crate::net::with_authorised_pose`.
-                    crate::net::note_teleport_applied();
+                    if let Some(net) = &self.net {
+                        net.acknowledge_teleport_correction(
+                            lodestone_client::Vec3::new(placed.x, placed.y, placed.z),
+                            Rotation::new(self.player().yaw, self.player().pitch),
+                        );
+                    }
                     // The `transfer` target's simulation-side hop, and the one
                     // that dates the window: the driver wrote
                     // `ACCEPT_TELEPORTATION` when the packet decoded, but the

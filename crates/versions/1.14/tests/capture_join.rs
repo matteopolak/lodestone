@@ -552,7 +552,10 @@ fn the_1_14_4_capture_does_not_replay_as_1_16_5() {
     // before the era merge `adapter_for(498)` returned exactly this adapter.
     assert_eq!(
         (logins, chunks, outcome.errors.len()),
-        (0, 0, 10),
+        // One formerly ignored id is now decoded strictly by the incremental
+        // world/event handlers. Its 498 body is not the 754 shape, so it adds
+        // one expected framing error without producing a plausible event.
+        (0, 0, 11),
         "the pre-merge failure mode has changed shape; re-derive it rather than \
          adjusting the numbers"
     );
@@ -782,4 +785,3 @@ async fn record_1_14_4() {
 async fn record_1_15_2() {
     record(&MEMBERS[1]).await;
 }
-

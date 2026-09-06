@@ -1229,6 +1229,59 @@ fn connected_sim_emits_one_move_per_physics_tick() {
     );
 }
 
+/// Production folds an entity-velocity event into ECS first and then mirrors
+/// it over the shell channel. The mirror must win the race with the next
+/// physics tick: that tick's outbound position has to follow the new velocity,
+/// not the velocity from the preceding frame.
+#[test]
+fn local_velocity_mirror_reaches_physics_before_the_next_outbound_move() {
+    use crate::net::NetUpdate;
+
+    let (net, actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    ingest(&mut sim, login_event(7));
+    feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+    sim.poll_net();
+    while actions.try_recv().is_ok() {}
+
+    sim.player_mut(|player| {
+        player.position = Vec3d::new(0.0, 100.0, 0.0);
+        player.velocity = Vec3d::new(0.75, 0.0, 0.0);
+    });
+    let impulse = lodestone_model::Vec3::new(0.0, 0.2, 1.4);
+    // The real driver performs this ingest before it calls `forward`.
+    ingest(
+        &mut sim,
+        lodestone_client::ClientEvent::EntityVelocity {
+            entity_id: 7,
+            velocity: impulse,
+        },
+    );
+    feed.send(NetUpdate::EntityVelocity {
+        entity_id: 7,
+        velocity: impulse,
+    })
+    .unwrap();
+
+    sim.step(lodestone_ecs::TICK_PERIOD);
+
+    let moved = std::iter::from_fn(|| actions.try_recv().ok())
+        .find_map(|action| match action {
+            ClientAction::Move { pos, .. } => Some(pos),
+            _ => None,
+        })
+        .expect("the connected simulation sends one move each physics tick");
+    assert!(
+        moved.x.abs() < 0.01,
+        "the stale +X velocity ran before the mirror: outbound position was {moved:?}"
+    );
+    assert!(
+        moved.z > 1.0,
+        "the new +Z impulse did not drive this tick's outbound position: {moved:?}"
+    );
+}
+
 /// The live-server loop (owner report): a repeated `PLAYER_POSITION` to the
 /// same absolute coordinate, a fresh teleport id every time, forever. Traced
 /// to `Sim::step`'s own documented ordering — "one `Update` schedule, then N
@@ -1385,6 +1438,107 @@ fn teleport_velocity_correction_rotates_then_applies_per_axis_deltas() {
     assert!((velocity.x + 2.5).abs() < 1.0e-9, "rotated x plus delta: {velocity:?}");
     assert!((velocity.y - 7.0).abs() < 1.0e-9, "absolute y: {velocity:?}");
     assert!((velocity.z - 0.75).abs() < 1.0e-9, "rotated z plus delta: {velocity:?}");
+}
+
+/// An absolute correction resets both the current and previous positions. The
+/// correction is an authoritative pose change, not a render interpolation
+/// sample, even when two adjacent positions are close together.
+#[test]
+fn short_absolute_corrections_snap_the_previous_position() {
+    use crate::net::NetUpdate;
+    use lodestone_model::event::TeleportFlags;
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    sim.poll_net();
+    let before = Vec3d::new(10.0, 70.0, -4.0);
+    sim.player_mut(|player| player.position = before);
+    sim.set_prev_position(before);
+
+    let sample = lodestone_client::Vec3::new(10.4, 70.6, -4.5);
+    feed.send(NetUpdate::Teleport {
+        pos: sample,
+        rotation: Rotation::new(0.0, 0.0),
+        flags: TeleportFlags::default(),
+        velocity: None,
+    })
+    .unwrap();
+    sim.poll_net();
+
+    assert_eq!(sim.player().position, Vec3d::new(sample.x, sample.y, sample.z));
+    assert_eq!(
+        sim.prev_position(),
+        Vec3d::new(sample.x, sample.y, sample.z),
+        "an absolute correction snaps the previous position with the current position"
+    );
+}
+
+#[test]
+fn relative_corrections_apply_the_delta_to_the_previous_position() {
+    use crate::net::NetUpdate;
+    use lodestone_model::event::TeleportFlags;
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    sim.poll_net();
+    sim.player_mut(|player| player.position = Vec3d::new(12.0, 72.0, -2.0));
+    sim.set_prev_position(Vec3d::new(10.0, 70.0, -4.0));
+
+    feed.send(NetUpdate::Teleport {
+        pos: lodestone_client::Vec3::new(1.5, -0.25, 2.0),
+        rotation: Rotation::new(0.0, 0.0),
+        flags: TeleportFlags {
+            relative_x: true,
+            relative_y: true,
+            relative_z: true,
+            ..TeleportFlags::default()
+        },
+        velocity: None,
+    })
+    .unwrap();
+    sim.poll_net();
+
+    assert_eq!(sim.player().position, Vec3d::new(13.5, 71.75, 0.0));
+    assert_eq!(
+        sim.prev_position(),
+        Vec3d::new(11.5, 69.75, -2.0),
+        "relative axes are resolved from the old previous position, not the current one"
+    );
+}
+
+#[test]
+fn long_authoritative_teleports_snap_the_interpolation_anchor() {
+    use crate::net::NetUpdate;
+    use lodestone_model::event::TeleportFlags;
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    sim.poll_net();
+    sim.player_mut(|player| player.position = Vec3d::new(10.0, 70.0, -4.0));
+
+    let destination = lodestone_client::Vec3::new(40.0, 90.0, 12.0);
+    feed.send(NetUpdate::Teleport {
+        pos: destination,
+        rotation: Rotation::new(0.0, 0.0),
+        flags: TeleportFlags::default(),
+        velocity: None,
+    })
+    .unwrap();
+    sim.poll_net();
+
+    let placed = Vec3d::new(destination.x, destination.y, destination.z);
+    assert_eq!(sim.player().position, placed);
+    assert_eq!(
+        sim.prev_position(),
+        placed,
+        "a real teleport must not smear the camera through intervening space"
+    );
 }
 
 /// The player-rotation packet changes the pose the visible camera is built
@@ -2359,6 +2513,42 @@ fn net_particles_reaches_the_emitter_and_resolves() {
     assert_eq!(frame.drawn, 9);
 }
 
+/// Explosion knockback is an impulse, so it stacks on the predicted velocity
+/// the local simulation already has. A packet without a player-specific
+/// knockback vector must leave that velocity untouched.
+#[test]
+fn net_explosion_adds_knockback_and_none_is_a_noop() {
+    use crate::net::NetUpdate;
+    use lodestone_client::Vec3;
+
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    sim.poll_net();
+    sim.player_mut(|player| player.velocity = Vec3d::new(1.0, -2.0, 3.0));
+
+    feed.send(NetUpdate::Explosion {
+        pos: Vec3::new(10.0, 64.0, -4.0),
+        radius: 4.0,
+        affected_blocks: vec![[1, -2, 3]],
+        knockback: Some(Vec3::new(0.25, 1.5, -0.75)),
+    })
+    .unwrap();
+    sim.poll_net();
+    assert_eq!(sim.player().velocity, Vec3d::new(1.25, -0.5, 2.25));
+
+    feed.send(NetUpdate::Explosion {
+        pos: Vec3::new(10.0, 64.0, -4.0),
+        radius: 4.0,
+        affected_blocks: Vec::new(),
+        knockback: None,
+    })
+    .unwrap();
+    sim.poll_net();
+    assert_eq!(sim.player().velocity, Vec3d::new(1.25, -0.5, 2.25));
+}
+
 /// How many particles the two hold measurements below run over. High enough
 /// to be a real workload rather than an empty engine trivially satisfying
 /// the assertion below — the *world*-species guard `CLAUDE.md` asks for —
@@ -3079,6 +3269,35 @@ fn disconnect_reason_recovers_child_and_repeated_json_wrappers() {
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].style.color, Some(TextColor::Gray));
     assert_eq!(spans[0].style.strikethrough, Some(true));
+}
+
+/// Mineplex's proxy path has been observed stripping a serialized JSON
+/// string's outer quotes while retaining the backslash escapes inside it.
+/// That is neither a component object nor a valid JSON string until the
+/// missing boundary is restored at the disconnect-only compatibility seam.
+#[test]
+fn disconnect_reason_recovers_unquoted_escaped_component() {
+    use crate::net::NetUpdate;
+    use lodestone_model::{Text, TextColor};
+
+    let raw = r#"{\"text\":\"-----\",\"strikethrough\":true,\"color\":\"gray\",\"extra\":[{\"text\":\"Mineplex!\",\"strikethrough\":false,\"color\":\"red\"}]}"#;
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::Disconnected(Box::new(Text::literal(raw))))
+        .unwrap();
+    sim.poll_net();
+
+    let SessionPhase::Ended(end) = sim.session_phase() else {
+        panic!("expected Ended");
+    };
+    assert_eq!(end.plain(), "-----Mineplex!");
+    let spans = end.reason.to_spans();
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0].style.color, Some(TextColor::Gray));
+    assert_eq!(spans[0].style.strikethrough, Some(true));
+    assert_eq!(spans[1].style.color, Some(TextColor::Red));
+    assert_eq!(spans[1].style.strikethrough, Some(false));
 }
 
 #[test]
@@ -4984,6 +5203,75 @@ fn sprint_edges_reach_the_wire_as_player_commands() {
             entity_id: 7,
             command: PlayerCommand::StopSprinting,
         }]
+    );
+}
+
+/// Sneaking can cancel sprint on the same tick. The dedicated sprint command
+/// must reach the queue after the changed input bitset and before the position
+/// computed from that input.
+#[test]
+fn sneak_that_stops_sprinting_orders_command_input_then_move() {
+    use crate::net::NetUpdate;
+    use lodestone_ecs::player::{LastPlayerInput, LastSprintingSent};
+    use lodestone_model::{PlayerCommand, PlayerInput};
+
+    let (net, actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(client_config());
+    sim.attach_net(net);
+    ingest(&mut sim, login_event(7));
+    feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+    sim.poll_net();
+    while actions.try_recv().is_ok() {}
+
+    // The preceding physics phase has already ended sprinting for this sneak
+    // edge. Pin that result directly: a loopback client has no collision view,
+    // so its physics path deliberately cannot derive the live-world result.
+    sim.player_mut(|player| player.sprinting = false);
+    sim.write_local(|world, local| {
+        world.insert_resource(Egress {
+            in_world: true,
+            live: true,
+        });
+        world.get_mut::<LastSprintingSent>(local).unwrap().0 = Some(true);
+        world.get_mut::<LastPlayerInput>(local).unwrap().0 = Some(PlayerInput {
+            sprint: true,
+            ..PlayerInput::EMPTY
+        });
+        world.resource_mut::<RawInput>().0.set(
+            lodestone_controller::Action::Sneak,
+            true,
+        );
+        world.run_schedule(lodestone_ecs::GameTick);
+    });
+    sim.drain_action_queue();
+
+    let relevant = std::iter::from_fn(|| actions.try_recv().ok())
+        .filter(|action| {
+            matches!(
+                action,
+                ClientAction::PlayerCommand { .. }
+                    | ClientAction::SetPlayerInput(_)
+                    | ClientAction::Move { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(
+            relevant.as_slice(),
+            [
+                ClientAction::SetPlayerInput(PlayerInput {
+                    shift: true,
+                    sprint: false,
+                    ..
+                }),
+                ClientAction::PlayerCommand {
+                    command: PlayerCommand::StopSprinting,
+                    ..
+                },
+                ClientAction::Move { .. }
+            ]
+        ),
+        "combined sneak/sprint edge must be PlayerInput -> StopSprinting -> Move, got {relevant:?}"
     );
 }
 

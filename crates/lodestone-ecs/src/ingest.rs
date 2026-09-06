@@ -437,13 +437,11 @@ pub fn apply_entity_movement(
 /// so server-sent knockback was silently absorbed into a component the
 /// physics pipeline never looks at: the client took a hit and never moved.
 ///
-/// # No staging component needed
-///
-/// This module's own docs ("How events get in") record that `NetIngest` runs
-/// synchronously on the net thread as each packet decodes, strictly before
-/// the driver's next `GameTick` — so a plain overwrite here is picked up by
-/// that tick's `player_physics` exactly once, matching vanilla's own
-/// one-shot delta-movement setter, with nothing buffered in between.
+/// The shell mirrors this event after the synchronous ingest run. That ordered
+/// mirror closes the cross-thread window in which a frame could begin after
+/// decode but before this write acquired the shared world lock; see
+/// `NetUpdate::EntityVelocity`. Replacing the value here remains necessary for
+/// ECS-only consumers and keeps remote entities on their single ingest path.
 pub fn apply_entity_velocity(
     batch: Res<IngestBatch>,
     index: Res<EntityIndex>,

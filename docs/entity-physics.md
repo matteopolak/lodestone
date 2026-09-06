@@ -11,6 +11,26 @@ in.
 
 ## How it works
 
+### Local player input ordering
+
+Each fixed tick computes one `MovementIntent`, applies it to local physics, then queues the changed
+`SetPlayerInput` bitset, any sprint edge, and the resulting `Move`, in that order. When sneaking
+cancels sprint in the same tick, the required order is changed input, `StopSprinting`, then movement.
+The server uses those states while validating the following position. This is observable
+for airborne sneak, where reporting shift while the server still considers the player sprinting can
+activate a different server-side movement rule. Keep the input-to-move ordering in
+`lodestone_controller::ecs::ControllerPlugin` and the sprint-edge ordering in the shell interaction
+plugin. There is no configuration switch. The flow depends on `lodestone-ecs`'s `TickSet` ordering
+and `ActionQueue` preserving insertion order through `lodestone-client`.
+
+Raw shift and movement slowdown are deliberately separate. The shift bit immediately controls
+edge back-off, bounce suppression, water descent, and the pose chosen at the end of the tick, while
+the `0.3` movement-input scale reads the pose established by the preceding tick. Consequently the
+first shift tick retains full-speed input and the first release tick retains one final slowed input.
+Collapsing both decisions onto the current raw bit changes an airborne knockback trajectory on each
+edge and can make a validating server issue position corrections. The split lives in
+`lodestone_physics::player::set_sprint_and_modify_input`; change it only alongside a two-edge test.
+
 ### Collision shapes and block-physics constants
 
 Per-state collision geometry comes from a **census** (`lodestone-data`'s generated `collision_shapes`

@@ -717,9 +717,9 @@ impl Sim {
             //
             // Since Stage 5 that includes the sprint edge and the hold-to-mine
             // loop, which used to be sent *after* this drain by a hand-written
-            // `drive_interaction()` below. Wire order is unchanged: they are now
-            // `TickSet::Send` systems ordered after `send_player_input`, so their
-            // actions sit behind the movement packet in the same single queue.
+            // `drive_interaction()` below. Player input is ordered before the
+            // sprint edge, then movement follows; mining and placement sit
+            // behind that movement packet in the same single queue.
             self.drain_action_queue();
             // The tick was counted and withdrawn by `FrameClock::take_tick` at the
             // top of this loop, so there is nothing to book-keep here any more.
