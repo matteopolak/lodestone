@@ -1076,12 +1076,13 @@ impl VegPlacement {
         }
     }
 
-pub(super)     fn get_positions<R: RandomSource>(
+    pub(super)     fn get_positions<R: RandomSource>(
         &self,
         random: &mut R,
         pos: BlockPos,
         grid: &VegGrid,
         tags: &VegTags,
+        placed_feature_id: Option<&str>,
     ) -> Positions {
         match self {
             VegPlacement::Count(ip) => {
@@ -1105,7 +1106,10 @@ pub(super)     fn get_positions<R: RandomSource>(
                     Positions::None
                 }
             }
-            VegPlacement::Biome => Positions::One(pos),
+            VegPlacement::Biome => grid
+                .biome_allows_placed_feature(placed_feature_id, pos.x, pos.y, pos.z)
+                .then_some(Positions::One(pos))
+                .unwrap_or(Positions::None),
             VegPlacement::RarityFilter(chance) => {
                 if random.next_float() < 1.0 / *chance as f32 {
                     Positions::One(pos)
@@ -1699,12 +1703,17 @@ pub enum ConfiguredFeature {
 /// uniformly rather than special-casing "top level" vs "nested".
 #[derive(Clone, Debug)]
 pub struct PlacedRef {
+    /// Registry identity of this placed feature when it came from a registry
+    /// holder. Inline holders have no identity and therefore cannot be checked
+    /// against biome feature membership.
+    pub registry_id: Option<String>,
     pub placements: Vec<VegPlacement>,
     pub feature: Box<ConfiguredFeature>,
 }
 
 pub(super) fn unsupported_placed_ref(why: &str) -> PlacedRef {
     PlacedRef {
+        registry_id: None,
         placements: Vec::new(),
         feature: Box::new(ConfiguredFeature::Unsupported(why.to_string())),
     }
@@ -1725,7 +1734,9 @@ pub fn resolve_placed_feature_ref(resolver: &dyn Resolver, value: &Value) -> Pla
             if doc.is_null() {
                 return unsupported_placed_ref("missing placed_feature data");
             }
-            parse_placed_feature_doc(resolver, &doc)
+            let mut placed = parse_placed_feature_doc(resolver, &doc);
+            placed.registry_id = Some(id.clone());
+            placed
         }
         Value::Object(_) => parse_placed_feature_doc(resolver, value),
         _ => unsupported_placed_ref("unexpected placed-feature ref shape"),
@@ -1743,6 +1754,7 @@ pub(super) fn parse_placed_feature_doc(resolver: &dyn Resolver, doc: &Value) -> 
     };
     let feature = resolve_configured_feature_ref(resolver, feature_ref);
     PlacedRef {
+        registry_id: None,
         placements,
         feature: Box::new(feature),
     }

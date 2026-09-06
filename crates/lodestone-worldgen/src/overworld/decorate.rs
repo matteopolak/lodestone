@@ -355,7 +355,7 @@ impl OverworldGenerator {
         // source terrain, a write still shadows it for later reads in the same
         // step, and the padding ring still answers air because no source covers
         // it.
-        let mut grid = crate::feature::vegetation::VegGrid::with_sources(
+        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_biomes(
             Arc::clone(&self.interner),
             self.min_y,
             self.height,
@@ -402,6 +402,8 @@ impl OverworldGenerator {
                     Some(Arc::clone(&self.pre_ore_stage(cx + dx, cz + dz).0))
                 }
             },
+            |dx, dz| Some(Arc::clone(&self.pre_ore_stage(cx + dx, cz + dz).3)),
+            self.decoration_catalog.feature_biomes(),
         );
 
         // A source's decorated feature set is the union of section biomes in

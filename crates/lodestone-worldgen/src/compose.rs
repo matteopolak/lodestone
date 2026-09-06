@@ -269,6 +269,20 @@ impl DecorationCatalog {
             })
             .collect()
     }
+
+    /// The biomes which list each placed feature at any decoration step.
+    /// [`crate::feature::vegetation::VegGrid`] uses this with its 3-D biome
+    /// cells when a placement pipeline reaches the `biome` modifier.
+    #[must_use]
+    pub fn feature_biomes(&self) -> HashMap<String, HashSet<String>> {
+        let mut out = HashMap::<String, HashSet<String>>::new();
+        for (biome, entries) in &self.members {
+            for (_, feature) in entries {
+                out.entry(feature.clone()).or_default().insert(biome.clone());
+            }
+        }
+        out
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
