@@ -87,7 +87,8 @@ use lodestone_server::crafting::{
 };
 use lodestone_world::{
     ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
-    LightProperties, Neighbourhood, compute_column_light, compute_column_light_with_neighbours,
+    LightData, LightProperties, Neighbourhood, compute_column_light,
+    compute_column_light_with_neighbours,
 };
 use lodestone_data::block::Block;
 use lodestone_data::item::Item;
@@ -2915,6 +2916,20 @@ fn compute_served_light(column: &WorldChunkColumn) -> ColumnLight {
     compute_column_light(column, &V770LightProps)
 }
 
+/// Initial chunk packets omit block-light sections whose computed values are
+/// uniformly zero. A present zero section is meaningful for a light update,
+/// where it clears a previously known value, but the initial chunk packet has
+/// no prior block-light state to clear. Keep non-zero arrays and uniform sky
+/// sections unchanged; only the initial-chunk wire representation uses this
+/// elision.
+fn elide_zero_block_light_for_chunk(light: &mut ColumnLight) {
+    for section in 0..light.light_section_count() {
+        if matches!(light.block(section), LightData::Uniform(0)) {
+            *light.block_mut(section) = LightData::Missing;
+        }
+    }
+}
+
 /// Computes a served light update with the loaded 3×3 neighbourhood. The
 /// server supplies every neighbouring source column after a block change; this
 /// conversion keeps state resolution and the light census on the same side of
@@ -3338,7 +3353,8 @@ impl ChunkEncoder for V770ServerProtocol {
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ServerChunkColumn) -> ServerDirective {
         let shape = shape_for_column(column);
         let world_column = build_world_column(&shape, column);
-        let light = compute_served_light(&world_column);
+        let mut light = compute_served_light(&world_column);
+        elide_zero_block_light_for_chunk(&mut light);
         let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
         ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
@@ -4919,7 +4935,8 @@ impl ServerProtocol for V770ServerProtocol {
     ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
         let shape = shape_for_column(column);
         let world_column = build_world_column(&shape, column);
-        let light = compute_served_light_with_neighbours(column, neighbours);
+        let mut light = compute_served_light_with_neighbours(column, neighbours);
+        elide_zero_block_light_for_chunk(&mut light);
         let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
         Ok(ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
@@ -7271,6 +7288,82 @@ mod block_edit_tests {
 
         assert_eq!(isolated, 0, "control: no local source reaches this cell");
         assert_eq!(with_east, 14, "east-neighbour source crosses one air cell");
+    }
+
+    /// Initial chunk packets omit uniformly dark block-light sections, while a
+    /// real emitter still produces a present block-light array. This is the
+    /// wire distinction observed in independent chunk captures: an omitted
+    /// initial section means there is no prior block-light state, whereas an
+    /// explicit zero remains reserved for clearing an existing state in a
+    /// light-update packet.
+    #[test]
+    fn initial_chunk_elides_zero_block_light_but_keeps_emission() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::overworld_1_21();
+        let proto = V770ServerProtocol;
+        let decode = |column: &ServerChunkColumn| {
+            let ServerDirective::Send { payload, .. } =
+                ServerProtocol::encode_chunk(&proto, 0, 0, column)
+            else {
+                panic!("chunk encoder must send a packet");
+            };
+            let mut reader = Reader::new(&payload);
+            let packet = LevelChunkWithLight::decode(&mut reader, &shape).expect("decode chunk");
+            reader.ensure_empty().expect("no trailing bytes");
+            packet
+        };
+
+        let empty = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        let empty_packet = decode(&empty);
+        assert!(
+            (0..empty_packet.light.light_section_count())
+                .all(|section| matches!(empty_packet.light.block(section), LightData::Missing)),
+            "all-zero initial block-light sections must be omitted"
+        );
+
+        let mut emitted = empty.clone();
+        emitted.set_block(8, 0, 8, "minecraft:glowstone");
+        let emitted_packet = decode(&emitted);
+        assert!(
+            (0..emitted_packet.light.light_section_count())
+                .any(|section| matches!(emitted_packet.light.block(section), LightData::Values(_))),
+            "a block-light emitter must keep a present per-cell array"
+        );
+        assert!(
+            emitted_packet
+                .light
+                .section_light(5)
+                .block_at(8, 0, 8)
+                > 0,
+            "the emitted cell must carry non-zero block light"
+        );
+    }
+
+    /// Standalone light updates retain an explicit zero block-light section:
+    /// unlike an initial chunk, an update merges into an existing client
+    /// column, so the zero is the clear operation rather than an omission.
+    #[test]
+    fn light_update_preserves_explicit_zero_block_light() {
+        let mut light = ColumnLight::new(1);
+        *light.block_mut(1) = LightData::Uniform(0);
+
+        let ServerDirective::Send { payload, .. } =
+            ServerProtocol::encode_light_update(&V770ServerProtocol, 7, -3, &light)
+        else {
+            panic!("light update encoder must send a packet");
+        };
+        let mut reader = Reader::new(&payload);
+        assert_eq!(reader.var_i32().expect("chunk x"), 7);
+        assert_eq!(reader.var_i32().expect("chunk z"), -3);
+        let decoded = ColumnLight::decode(1, &mut reader).expect("decode light update");
+        reader.ensure_empty().expect("no trailing bytes");
+
+        assert_eq!(
+            *decoded.block(1),
+            LightData::Uniform(0),
+            "an update's empty block mask must remain an explicit zero"
+        );
     }
 
     /// The island check for real per-quart biome assignment: it must
