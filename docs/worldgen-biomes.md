@@ -47,6 +47,15 @@ applied only where the fill left the *default* block — since surface rules onl
 cell that still holds the default block, a vein must be applied inside `materialize_world` in the
 right order or the surface pass silently erases it.
 
+The direct quart answer is not the answer to a block-position biome query. For each candidate
+position, biome-gated features use the seed-derived three-dimensional zoom over the eight
+surrounding quart cells, including the Y axis. This distinction is observable underground: at seed
+42, block `(-1907, 24, -1914)` has direct quart climate `[5830, -1034, 3485, -152, 5432, 4387]`
+and its containing cell selects `dripstone_caves`, while the external JVM's block lookup selects
+`badlands` from a neighbouring jittered corner. The feature predicate therefore must zoom first;
+reading `BiomeCells::at_quart` directly can admit a feature and consume its RNG when the reference
+rejects it, shifting every later feature in the stream.
+
 ### Surface rules
 
 `SurfaceSystem` interprets the bundled `surface_rule` tree per block. Its biome context is a
@@ -92,6 +101,10 @@ and need no repeated range fallback.
   pass either the 16-entry surface biome array or the direct wire `BiomeCells` lookup to
   `SurfaceSystem::build_surface`; use `OverworldGenerator::surface_biome_context`. Either shortcut
   erases valid cave-biome material rules at boundary cells.
+- **Block-position biome predicates also use the zoomed nearby-cell context.** The direct quart
+  answer is the wire cell, not the block biome accessor's answer. Keep the seed-derived fiddle and
+  all three axes in `overworld::biome::zoomed_biome`; otherwise an underground feature can consume
+  RNG on a candidate the reference rejects.
 - **Never seed the biome search.** A "pruning hint" reproducing vanilla's `lastResult` carry-over
   makes output depend on search history, which is incompatible with a generator whose columns can be
   requested in any order on any thread.

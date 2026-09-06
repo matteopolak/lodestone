@@ -120,9 +120,72 @@ fn fiddled_distance(seed: i64, x: i32, y: i32, z: i32, dx: f64, dy: f64, dz: f64
     x * x + y * y + z * z
 }
 
+/// Resolves a block position through the same three-dimensional quart zoom
+/// used by the world biome accessor. The wire biome grid stores the climate
+/// answer at each quart corner, but a block lookup chooses one of the eight
+/// surrounding corners after applying the seed-derived positional fiddle.
+/// Keeping this here makes candidate biome predicates use the same category
+/// lookup as surface rules instead of silently reading only the containing
+/// quart cell.
+pub(super) fn zoomed_biome<'a, F>(
+    zoom_seed: i64,
+    x: i32,
+    y: i32,
+    z: i32,
+    source_at: F,
+) -> Option<&'a str>
+where
+    F: Fn(i32, i32) -> Option<&'a BiomeCells>,
+{
+    let shifted_x = x - 2;
+    let shifted_y = y - 2;
+    let shifted_z = z - 2;
+    let parent_x = shifted_x >> 2;
+    let parent_y = shifted_y >> 2;
+    let parent_z = shifted_z >> 2;
+    let fract_x = f64::from(shifted_x.rem_euclid(4)) / 4.0;
+    let fract_y = f64::from(shifted_y.rem_euclid(4)) / 4.0;
+    let fract_z = f64::from(shifted_z.rem_euclid(4)) / 4.0;
+
+    let mut selected = 0;
+    let mut best = f64::INFINITY;
+    for corner in 0..8 {
+        let x_low = corner & 4 == 0;
+        let y_low = corner & 2 == 0;
+        let z_low = corner & 1 == 0;
+        let qx = if x_low { parent_x } else { parent_x + 1 };
+        let qy = if y_low { parent_y } else { parent_y + 1 };
+        let qz = if z_low { parent_z } else { parent_z + 1 };
+        let dx = if x_low { fract_x } else { fract_x - 1.0 };
+        let dy = if y_low { fract_y } else { fract_y - 1.0 };
+        let dz = if z_low { fract_z } else { fract_z - 1.0 };
+        let distance = fiddled_distance(zoom_seed, qx, qy, qz, dx, dy, dz);
+        if best > distance {
+            selected = corner;
+            best = distance;
+        }
+    }
+
+    let qx = if selected & 4 == 0 { parent_x } else { parent_x + 1 };
+    let qy = if selected & 2 == 0 { parent_y } else { parent_y + 1 };
+    let qz = if selected & 1 == 0 { parent_z } else { parent_z + 1 };
+    let block_x = qx * 4;
+    let block_z = qz * 4;
+    let cells = source_at(block_x.div_euclid(16), block_z.div_euclid(16))?;
+    let local_qx = block_x.rem_euclid(16).div_euclid(4) as usize;
+    let local_qz = block_z.rem_euclid(16).div_euclid(4) as usize;
+    let local_qy = (qy * 4 - cells.min_y()).div_euclid(4);
+    (local_qy >= 0 && local_qy < cells.y_quarts() as i32)
+        .then(|| cells.at_quart(local_qx, local_qy as usize, local_qz))
+}
+
 fn zoom_seed(seed: i64) -> i64 {
     let digest = Sha256::digest(seed.to_le_bytes());
     i64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest prefix"))
+}
+
+pub(super) fn biome_zoom_seed(seed: i64) -> i64 {
+    zoom_seed(seed)
 }
 
 impl OverworldGenerator {
@@ -337,10 +400,29 @@ impl OverworldGenerator {
 
 #[cfg(test)]
 mod tests {
-    use super::zoom_seed;
+    use super::{zoom_seed, zoomed_biome, BiomeCells};
 
     #[test]
     fn zoom_seed_matches_the_independently_captured_seed_42_value() {
         assert_eq!(zoom_seed(42), -4_111_196_313_959_201_555);
+    }
+
+    #[test]
+    fn block_zoom_selects_the_external_seed_42_candidate_biome() {
+        // Independent JVM evidence for (-1907, 24, -1914) reports badlands.
+        // The direct climate cell at (-477, 6, -479) reports dripstone_caves;
+        // only the nearby-cell zoom can distinguish these two answers. Make
+        // the externally selected corner the sole badlands cell so this test
+        // exercises the selector rather than the table search.
+        let cells = BiomeCells::from_fn(-64, 384, |qx, qy, qz| {
+            if (qx, qy, qz) == (3, 21, 2) {
+                "minecraft:badlands".to_string()
+            } else {
+                "minecraft:dripstone_caves".to_string()
+            }
+        });
+        assert_eq!(cells.at_quart(3, 22, 1), "minecraft:dripstone_caves");
+        let got = zoomed_biome(zoom_seed(42), -1907, 24, -1914, |_, _| Some(&cells));
+        assert_eq!(got, Some("minecraft:badlands"));
     }
 }
