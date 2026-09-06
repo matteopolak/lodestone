@@ -496,12 +496,9 @@ impl GpuAtlas {
     /// exactly.
     ///
     /// `mag_filter` is the one thing that differs between the two kinds of
-    /// consumer, and vanilla differs the same way: `TextureAtlas` keeps its own
-    /// sampler at `getClampToEdge(FilterMode.NEAREST)` — right for a GUI, item
-    /// or particle sheet, which is only ever drawn at or above 1:1 and must
-    /// stay crisp — while `LevelRenderer` builds a **separate**
-    /// `chunkLayerSampler` for terrain with `LINEAR` for *both* filters. See
-    /// [`Self::from_atlas_terrain`].
+    /// consumer. The ordinary atlas uses nearest magnification for GUI, item,
+    /// and particle sheets; the terrain path selects its magnification policy
+    /// separately through [`Self::from_atlas_terrain`].
     fn upload_mips(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -589,16 +586,15 @@ impl GpuAtlas {
         )
     }
 
-    /// [`Self::from_atlas`] with the sampler **terrain** wants: `LINEAR`
-    /// magnification as well as minification.
+    /// [`Self::from_atlas`] with the sampler used by terrain passes. The
+    /// default keeps magnified atlas texels discrete; minification and mip
+    /// transitions remain linear.
     ///
-    /// Vanilla keeps two samplers over the same block atlas, and this is the
-    /// second one: `TextureAtlas`'s own is `getClampToEdge(FilterMode.NEAREST)`,
-    /// but `LevelRenderer` creates `chunkLayerSampler` as
-    /// `createSampler(CLAMP_TO_EDGE, CLAMP_TO_EDGE, LINEAR, LINEAR,
-    /// maxAnisotropy, empty)` and binds *that* as `Sampler0` for every chunk
-    /// layer. So the mag filter is not a preference here, it is which of the
-    /// two samplers a draw is using.
+    /// Terrain uses a separate sampler from the ordinary atlas consumers. The
+    /// terrain path selects nearest by default; linear is diagnostic.
+    /// It keeps minification and mip transitions linear.
+    /// The magnification choice is therefore part of the sampler supplied to
+    /// terrain draws, not a shader-side preference.
     ///
     /// It matters because `model.wgsl`'s default sampling path is now
     /// `sample_nearest`, and that function's whole mechanism is `snap_uv`:
@@ -608,9 +604,10 @@ impl GpuAtlas {
     /// a `Nearest` sampler that whole rescale is a **no-op** — moving a
     /// coordinate inside a texel cannot change a point fetch — so the ramp
     /// vanishes and magnified terrain gets hard, aliased texel edges instead of
-    /// vanilla's. Use this for anything the terrain pass samples; use
+    /// the smoothed diagnostic path. Use this for anything the terrain pass
+    /// samples; use
     /// [`Self::from_atlas`] for GUI, item, container and particle sheets, where
-    /// `Nearest` magnification is what vanilla does and what keeps them crisp.
+    /// `Nearest` magnification keeps them crisp.
     #[must_use]
     pub fn from_atlas_terrain(device: &wgpu::Device, queue: &wgpu::Queue, atlas: &Atlas) -> Self {
         let mips = atlas_mip_levels(atlas);
@@ -626,13 +623,13 @@ impl GpuAtlas {
 }
 
 /// The magnification filter [`GpuAtlas::from_atlas_terrain`] builds its sampler
-/// with. Vanilla's is `LINEAR` and so is the default here; the environment
-/// variable exists so the previous `Nearest` can be put back **live**, without
-/// a rebuild, to settle attribution against a real session.
+/// with. `Nearest` is the default so magnified block and fluid texels remain
+/// discrete. The environment variable keeps `Linear` available as a live
+/// diagnostic without requiring a rebuild.
 ///
 /// ```text
-/// LODESTONE_TERRAIN_MAG_FILTER=nearest    # the pre-fix sampler
-/// LODESTONE_TERRAIN_MAG_FILTER=linear     # vanilla's, and the default
+/// LODESTONE_TERRAIN_MAG_FILTER=nearest    # pixelated, and the default
+/// LODESTONE_TERRAIN_MAG_FILTER=linear     # diagnostic smoothing
 /// ```
 ///
 /// Read once per process, like `model_pipeline::TextureFiltering::selected`,
@@ -653,8 +650,8 @@ pub fn terrain_mag_filter() -> wgpu::FilterMode {
 #[must_use]
 pub fn terrain_mag_filter_from(value: Option<&str>) -> wgpu::FilterMode {
     match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-        Some("nearest") => wgpu::FilterMode::Nearest,
-        _ => wgpu::FilterMode::Linear,
+        Some("linear") => wgpu::FilterMode::Linear,
+        _ => wgpu::FilterMode::Nearest,
     }
 }
 
@@ -842,13 +839,12 @@ mod tests {
         assert!(atlas < 4 * 1024 * 1024, "atlas {atlas}");
     }
 
-    /// Vanilla's `chunkLayerSampler` is `LINEAR` for both filters, so `LINEAR`
-    /// is the default and anything unrecognised resolves to it rather than
-    /// panicking — this is a diagnostic switch, and a typo must not stop the
-    /// game starting.
+    /// Nearest magnification is the default; `linear` is an explicit
+    /// diagnostic switch. Anything unrecognised resolves to the default rather
+    /// than panicking, so a typo must not stop the game starting.
     #[test]
-    fn terrain_mag_filter_defaults_to_vanillas_linear_and_only_nearest_opts_out() {
-        assert_eq!(terrain_mag_filter_from(None), wgpu::FilterMode::Linear);
+    fn terrain_mag_filter_defaults_to_nearest_and_only_linear_opts_out() {
+        assert_eq!(terrain_mag_filter_from(None), wgpu::FilterMode::Nearest);
         assert_eq!(
             terrain_mag_filter_from(Some("linear")),
             wgpu::FilterMode::Linear
@@ -861,10 +857,10 @@ mod tests {
             terrain_mag_filter_from(Some("  NEAREST ")),
             wgpu::FilterMode::Nearest
         );
-        assert_eq!(terrain_mag_filter_from(Some("")), wgpu::FilterMode::Linear);
+        assert_eq!(terrain_mag_filter_from(Some("")), wgpu::FilterMode::Nearest);
         assert_eq!(
             terrain_mag_filter_from(Some("bilinear")),
-            wgpu::FilterMode::Linear
+            wgpu::FilterMode::Nearest
         );
     }
 
