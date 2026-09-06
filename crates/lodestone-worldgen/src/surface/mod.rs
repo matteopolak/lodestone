@@ -617,7 +617,7 @@ impl SurfaceSystem {
         &self,
         pre: &dyn Fn(i32, i32, i32) -> PreState,
         heightmap: &dyn Fn(i32, i32) -> i32,
-        biome_at: &dyn Fn(i32, i32) -> (&'b str, bool),
+        biome_at: &dyn Fn(i32, i32, i32) -> (&'b str, bool),
         min_block_x: i32,
         min_block_z: i32,
     ) -> SurfaceDiff {
@@ -662,7 +662,6 @@ impl SurfaceSystem {
                 let block_x = min_block_x + x;
                 let block_z = min_block_z + z;
                 let surface_depth = self.surface_depth(block_x, block_z);
-                let (biome, cold_enough_to_snow) = biome_at(x, z);
                 let mut ctx = Ctx {
                     block_x,
                     block_z,
@@ -681,8 +680,8 @@ impl SurfaceSystem {
                     water_height: NO_WATER,
                     stone_depth_above: 0,
                     stone_depth_below: 0,
-                    biome,
-                    cold_enough_to_snow,
+                    biome: "",
+                    cold_enough_to_snow: false,
                 };
 
                 let height = heightmap(x, z) + 1;
@@ -726,6 +725,9 @@ impl SurfaceSystem {
                         ctx.water_height = water_height;
                         ctx.stone_depth_above = stone_above_depth;
                         ctx.stone_depth_below = stone_below_depth;
+                        let (biome, cold_enough_to_snow) = biome_at(x, y, z);
+                        ctx.biome = biome;
+                        ctx.cold_enough_to_snow = cold_enough_to_snow;
 
                         if old.state == self.default_block {
                             if let Some(state) = self.try_apply(&self.rule, heightmap, &ctx) {

@@ -171,7 +171,7 @@ fn run_fixture(label: &str, text: &str) {
     // Fixed for the whole fixture (biome became a runtime input, but
     // this fixture — like the JVM dump it compares against — only ever ran
     // under one biome).
-    let biome_at = |_x: i32, _z: i32| -> (&str, bool) { (r.biome.as_str(), false) };
+    let biome_at = |_x: i32, _y: i32, _z: i32| -> (&str, bool) { (r.biome.as_str(), false) };
 
     // `build_surface` now returns a sparse diff (only positions a surface rule
     // actually rewrote — see its doc comment); a position absent from it is

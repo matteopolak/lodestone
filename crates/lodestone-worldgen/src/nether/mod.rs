@@ -838,7 +838,7 @@ impl NetherGenerator {
         // `cold_enough_to_snow` is false for every Nether biome (they all declare
         // `temperature: 2.0`), and nothing in vanilla's own bundled Nether surface-rule data reads it
         // — there is no `temperature` condition in the Nether rule tree.
-        let biome_at = |lx: i32, lz: i32| -> (&str, bool) {
+        let biome_at = |lx: i32, _y: i32, lz: i32| -> (&str, bool) {
             (
                 biome_quarts[((lz >> 2) * 4 + (lx >> 2)) as usize].as_str(),
                 false,

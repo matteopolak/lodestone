@@ -261,7 +261,7 @@ fn one_chunk(scene: &Scene) -> Run {
             .unwrap_or(PreState::AIR)
     };
     let hm_fn = |x: i32, z: i32| -> i32 { *scene.fixture.hm.get(&(x, z)).expect("heightmap") };
-    let biome_at = |_x: i32, _z: i32| -> (&str, bool) { (scene.fixture.biome.as_str(), false) };
+    let biome_at = |_x: i32, _y: i32, _z: i32| -> (&str, bool) { (scene.fixture.biome.as_str(), false) };
 
     let (diff, allocs) = allocs_of(|| {
         scene.surface.build_surface(

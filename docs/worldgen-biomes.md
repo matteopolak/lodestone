@@ -49,9 +49,10 @@ right order or the surface pass silently erases it.
 
 ### Surface rules
 
-`SurfaceSystem` interprets vanilla's `surface_rule` tree per column, now against a per-column `Ctx`
-carrying the real sampled biome and temperature (before biome variety existed, these were build-time
-constants for one fixed biome). Vanilla's Badlands surface rule (its own terracotta-banding
+`SurfaceSystem` interprets vanilla's `surface_rule` tree per block, reading that block's quart cell
+from `BiomeCells` for its biome and temperature. This matters for underground biome conditions:
+the sulfur-cave branch can replace default stone with cinnabar or sulfur far below a column whose
+surface biome is unrelated. Vanilla's Badlands surface rule (its own terracotta-banding
 lookup) is ported — `Rule::Bandlands`/`BandBlocks`, a 192-entry table built once per
 world seed and now interned to `StateId`s rather than re-derived per probe, with `math::round`
 providing Java's half-up rounding semantics `f64::round`'s half-away-from-zero does not match.
@@ -86,6 +87,9 @@ and need no repeated range fallback.
 
 - **Do not unify the y=0 and surface-height biome sampling conventions.** They answer genuinely
   different questions for genuinely different consumers.
+- **Surface-rule biome conditions use the block's own quart Y.** Do not pass the 16-entry surface
+  biome array to `SurfaceSystem::build_surface`; it is only for surface consumers such as vegetation
+  and would erase cave-biome material rules.
 - **Never seed the biome search.** A "pruning hint" reproducing vanilla's `lastResult` carry-over
   makes output depend on search history, which is incompatible with a generator whose columns can be
   requested in any order on any thread.
