@@ -126,7 +126,7 @@ impl BiomeCells {
     /// Builds from a closure over every cell, interning as it goes. `f` is called
     /// once per cell in `(qy, qz, qx)` order — the same order the field is laid
     /// out in, so a caller whose sampler has any locality gets it.
-    pub(super) fn from_fn<F>(min_y: i32, height: i32, mut f: F) -> Self
+    pub(crate) fn from_fn<F>(min_y: i32, height: i32, mut f: F) -> Self
     where
         F: FnMut(usize, usize, usize) -> String,
     {

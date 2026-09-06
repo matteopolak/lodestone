@@ -3,6 +3,7 @@
 //!
 //! Moved here verbatim from `feature/vegetation.rs` by U16 Phase B.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::dense_grid::DenseBlockGrid;
@@ -10,6 +11,7 @@ use crate::feature::region_view::{
     Overlay, WIDE_RADIUS, WIDE_SLOTS, WriteLog, wide_slot_of_offset, wide_source_slot,
 };
 use crate::interner::{StateId, StateInterner};
+use crate::overworld::BiomeCells;
 
 use self::census::bump as census_bump;
 use super::base_id;
@@ -125,6 +127,14 @@ pub struct VegGrid {
     /// spilling into the pad is still writable and still readable back, unchanged;
     /// only what an *unwritten* pad cell reads has changed.
     sources: [Option<Arc<DenseBlockGrid>>; WIDE_SLOTS],
+    /// The matching biome cells for [`Self::sources`]. `None` keeps compact
+    /// feature fixtures independent of a biome source; production fills all
+    /// slots so the biome placement modifier can query the candidate's 3-D cell.
+    biome_sources: Option<[Option<Arc<BiomeCells>>; WIDE_SLOTS]>,
+    /// Top-level placed-feature id to eligible biome ids. This is deliberately
+    /// keyed by the placed feature, rather than its configured body: a selector
+    /// branch can share a body while carrying a different placement contract.
+    feature_biomes: HashMap<String, HashSet<String>>,
     /// Resolves this grid's [`StateId`]s. Shared with the generator's dense
     /// grids, which is what lets `stitch_veg_region` move ids across without a
     /// string round-trip — ids from a different interner are meaningless here
@@ -222,6 +232,8 @@ impl VegGrid {
         Self {
             blocks: Overlay::default(),
             sources: std::array::from_fn(|_| None),
+            biome_sources: None,
+            feature_biomes: HashMap::new(),
             interner,
             dirty: WriteLog::default(),
             origin_x,
@@ -291,6 +303,77 @@ impl VegGrid {
             }
         }
         grid
+    }
+
+    /// [`Self::with_sources`] plus the 3-D biome data and placed-feature
+    /// membership required by the `biome` placement modifier. The terrain and
+    /// biome closures use the same 5×5 offset convention, so a candidate always
+    /// reads the biome column that owns its terrain position.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_sources_and_biomes(
+        interner: Arc<StateInterner>,
+        min_y: i32,
+        height: i32,
+        origin_x: i32,
+        origin_z: i32,
+        local_lo: i32,
+        local_hi: i32,
+        source_at: impl Fn(i32, i32) -> Option<Arc<DenseBlockGrid>>,
+        biome_at: impl Fn(i32, i32) -> Option<Arc<BiomeCells>>,
+        feature_biomes: HashMap<String, HashSet<String>>,
+    ) -> Self {
+        let mut grid = Self::with_sources(
+            interner, min_y, height, origin_x, origin_z, local_lo, local_hi, source_at,
+        );
+        let mut biomes = std::array::from_fn(|_| None);
+        for dx in -WIDE_RADIUS..=WIDE_RADIUS {
+            for dz in -WIDE_RADIUS..=WIDE_RADIUS {
+                let slot = wide_slot_of_offset(dx, dz);
+                biomes[slot] = biome_at(dx, dz);
+            }
+        }
+        grid.biome_sources = Some(biomes);
+        grid.feature_biomes = feature_biomes;
+        grid
+    }
+
+    /// Whether the biome at this exact candidate location lists `feature_id`.
+    /// A grid without biome sources is a compact unit fixture and deliberately
+    /// preserves the historical unconstrained behaviour. A production grid
+    /// rejects an inline/unidentified feature, missing sources, and out-of-range
+    /// cells instead of turning an unknown membership into a permissive answer.
+    #[must_use]
+    pub fn biome_allows_placed_feature(
+        &self,
+        feature_id: Option<&str>,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> bool {
+        let Some(sources) = &self.biome_sources else {
+            return true;
+        };
+        let Some(feature_id) = feature_id else {
+            return false;
+        };
+        let lx = x - self.origin_x;
+        let lz = z - self.origin_z;
+        let Some(slot) = wide_source_slot(lx, lz) else {
+            return false;
+        };
+        let Some(cells) = sources[slot].as_deref() else {
+            return false;
+        };
+        let qx = lx.rem_euclid(16).div_euclid(4) as usize;
+        let qz = lz.rem_euclid(16).div_euclid(4) as usize;
+        let qy = (y - cells.min_y()).div_euclid(4);
+        if qy < 0 || qy >= cells.y_quarts() as i32 {
+            return false;
+        }
+        self.feature_biomes
+            .get(feature_id)
+            .is_some_and(|biomes| biomes.contains(cells.at_quart(qx, qy as usize, qz)))
     }
 
     /// The state one of the 25 source chunks holds at **local** `(lx, y, lz)`,

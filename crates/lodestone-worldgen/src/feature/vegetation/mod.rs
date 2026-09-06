@@ -458,6 +458,7 @@ fn place_placed_feature<R: RandomSource>(
         grid: &mut VegGrid,
         tags: &VegTags,
         feature: &ConfiguredFeature,
+        placed_feature_id: Option<&str>,
     ) {
         if i == mods.len() {
             place_configured_feature(random, pos, feature, grid, tags);
@@ -468,12 +469,12 @@ fn place_placed_feature<R: RandomSource>(
         // recursion in the same order — `Repeat(p, n)` recurses `n` times on the
         // same position, exactly as `for next in vec![p; n]` did. See
         // [`Positions`]'s own doc for why three shapes are exhaustive here.
-        match mods[i].get_positions(random, pos, grid, tags) {
+        match mods[i].get_positions(random, pos, grid, tags, placed_feature_id) {
             Positions::None => {}
-            Positions::One(next) => recurse(random, mods, i + 1, next, grid, tags, feature),
+            Positions::One(next) => recurse(random, mods, i + 1, next, grid, tags, feature, placed_feature_id),
             Positions::Repeat(next, n) => {
                 for _ in 0..n {
-                    recurse(random, mods, i + 1, next, grid, tags, feature);
+                    recurse(random, mods, i + 1, next, grid, tags, feature, placed_feature_id);
                 }
             }
             // This modifier's fan-out shape — a *different* position per recursion,
@@ -481,7 +482,7 @@ fn place_placed_feature<R: RandomSource>(
             // order the modifier produced.
             Positions::List(list) => {
                 for next in list {
-                    recurse(random, mods, i + 1, next, grid, tags, feature);
+                    recurse(random, mods, i + 1, next, grid, tags, feature, placed_feature_id);
                 }
             }
         }
@@ -494,6 +495,7 @@ fn place_placed_feature<R: RandomSource>(
         grid,
         tags,
         &placed.feature,
+        placed.registry_id.as_deref(),
     );
 }
 
@@ -709,11 +711,14 @@ fn place_configured_feature<R: RandomSource>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::{BTreeMap, HashMap, HashSet}, sync::Arc};
 
     use super::*;
+    use crate::dense_grid::DenseBlockGrid;
     use crate::density::Resolver;
     use crate::feature::IntProvider;
+    use crate::interner::StateInterner;
+    use crate::overworld::BiomeCells;
     use serde_json::Value;
     use crate::rng::{LegacyRandomSource, XoroshiroRandomSource};
 
@@ -730,6 +735,80 @@ mod tests {
             }
         }
         grid
+    }
+
+    /// The captured large-parity first mismatch has a sulfur feature candidate
+    /// at `(13, -11, 5)` in a cave biome, while the same column is plains at
+    /// height. This control makes the membership decision independently
+    /// observable at both heights: the filter must use the candidate's 3-D
+    /// biome cell, not its source chunk's surface biome or the union that made
+    /// the feature eligible to run.
+    #[test]
+    fn biome_modifier_accepts_the_underground_sulfur_cell_and_rejects_plains_above() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let terrain = Arc::new(DenseBlockGrid::with_interner(
+            Arc::clone(&interner), 0, -64, 0, 16, 128, 16, air,
+        ));
+        let cells = Arc::new(BiomeCells::from_fn(-64, 128, |_, qy, _| {
+            if qy == 13 {
+                "minecraft:sulfur_caves".to_string()
+            } else {
+                "minecraft:plains".to_string()
+            }
+        }));
+        let grid = VegGrid::with_sources_and_biomes(
+            interner,
+            -64,
+            128,
+            0,
+            0,
+            0,
+            16,
+            |_, _| Some(Arc::clone(&terrain)),
+            |_, _| Some(Arc::clone(&cells)),
+            HashMap::from([(
+                "minecraft:sulfur_spike".to_string(),
+                HashSet::from(["minecraft:sulfur_caves".to_string()]),
+            )]),
+        );
+        let candidate = BlockPos { x: 13, y: -11, z: 5 };
+        let mut random = LegacyRandomSource::new(0);
+
+        assert_eq!(
+            VegPlacement::Biome.get_positions(
+                &mut random,
+                candidate,
+                &grid,
+                &VegTags::default(),
+                Some("minecraft:sulfur_spike"),
+            ),
+            Positions::One(candidate),
+            "the cave cell lists the eligible sulfur placed feature",
+        );
+        let above = BlockPos { y: 68, ..candidate };
+        assert_eq!(
+            VegPlacement::Biome.get_positions(
+                &mut random,
+                above,
+                &grid,
+                &VegTags::default(),
+                Some("minecraft:sulfur_spike"),
+            ),
+            Positions::None,
+            "the plains cell above must not inherit cave membership",
+        );
+        assert_eq!(
+            VegPlacement::Biome.get_positions(
+                &mut random,
+                candidate,
+                &grid,
+                &VegTags::default(),
+                None,
+            ),
+            Positions::None,
+            "a production biome gate must not admit an inline feature without membership identity",
+        );
     }
 
     struct SpeleothemResolver;
@@ -2565,7 +2644,7 @@ mod tests {
         tags.supports_vegetation.insert("minecraft:stone".to_string());
         tags.bind(grid.interner());
         let cfg = super::features::RootSystemCfg {
-            feature: PlacedRef { placements: Vec::new(), feature: Box::new(ConfiguredFeature::SimpleBlock(BlockStateProvider::Simple("minecraft:oak_log".to_string()))) },
+            feature: PlacedRef { registry_id: None, placements: Vec::new(), feature: Box::new(ConfiguredFeature::SimpleBlock(BlockStateProvider::Simple("minecraft:oak_log".to_string()))) },
             required_vertical_space_for_tree: 3, level_test_distance: 0, max_level_deviation: 0,
             root_radius: 3, root_replaceable: HashSet::from(["minecraft:stone".to_string()]),
             root_state_provider: BlockStateProvider::Simple("minecraft:rooted_dirt".to_string()), root_placement_attempts: 20,

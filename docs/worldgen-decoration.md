@@ -12,6 +12,17 @@ index)` pair — never a flattened running count — is what isolates its RNG st
 
 ## How it works
 
+The decoration driver first uses the complete 3×3 section-biome union to decide
+which globally ordered placed features receive a random stream. A `biome`
+placement modifier is a second, narrower gate: it checks the candidate's exact
+three-dimensional biome cell against the biome memberships of that placed
+feature. These two decisions cannot be collapsed. In particular, a cave feature
+can be eligible because one section contains its cave biome while an above-ground
+candidate from the same source column must still be rejected. The gate is
+fail-closed when production biome cells are available but the placed feature has
+no registry identity; compact unit fixtures without biome sources retain their
+unconstrained form.
+
 ### Decoration steps and feature types
 
 `compose::build_biome_decoration` resolves a biome's `features` array over the driven steps —
