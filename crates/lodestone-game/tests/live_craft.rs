@@ -279,7 +279,7 @@ async fn server_full_state(shared: &Shared, handle: &ClientHandle, window: i32) 
     handle
         .send_action(ClientAction::ContainerClick {
             window_id: window,
-            state_id: STALE_STATE_ID,
+            state_id: lodestone_model::ContainerStateId::from_wire(STALE_STATE_ID),
             slot: 0,
             button: 0,
             click_type: ContainerClickType::Clone,

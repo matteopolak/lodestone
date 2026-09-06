@@ -184,7 +184,8 @@ fn generated_command_redirects_match_the_independent_walk() {
             prop_assert_eq!(
                 production_children(&graph),
                 expected_children(&graph),
-                "generated graph: {graph:?}",
+                "generated graph: {:?}",
+                graph,
             );
             Ok(())
         })
@@ -200,7 +201,8 @@ fn redirect_omission_detector_is_rejected_and_shrunk() {
             prop_assert_eq!(
                 own_children_only(&graph),
                 expected_children(&graph),
-                "redirect omission detector control: {graph:?}",
+                "redirect omission detector control: {:?}",
+                graph,
             );
             Ok(())
         })

@@ -1440,6 +1440,8 @@ mod tests {
                     pitch_millidegrees: -30_000,
                 },
                 game_mode: Some(lodestone_model::GameMode::Spectator),
+                runtime: None,
+                inventory: None,
             })
             .expect("seed typed native player");
         drop(storage);
@@ -1489,6 +1491,8 @@ mod tests {
                     dimension: lodestone_storage_schema::BuiltinDimension::Nether,
                     position: lodestone_model::Vec3::new(3.5, 70.0, 4.5),
                     rotation: lodestone_model::Rotation::new(25.0, -10.0),
+                    motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+                    state: None,
                 }],
             )
             .expect("seed typed native entity");

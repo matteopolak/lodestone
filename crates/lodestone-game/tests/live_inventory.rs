@@ -95,7 +95,7 @@ const UNTOUCHED_MENU: usize = 40;
 struct Window0 {
     slots: Vec<Option<ModelItem>>,
     carried: Option<ModelItem>,
-    state_id: i32,
+    state_id: lodestone_model::ContainerStateId,
     saw_content: bool,
 }
 
@@ -148,7 +148,7 @@ fn map_click_type(input: ContainerInput) -> ContainerClickType {
 fn intent_to_action(window_id: i32, intent: &ClickIntent) -> ClientAction {
     ClientAction::ContainerClick {
         window_id,
-        state_id: intent.state_id.as_wire(),
+        state_id: intent.state_id,
         slot: intent.slot,
         button: intent.button,
         click_type: map_click_type(intent.input),
@@ -654,7 +654,7 @@ async fn container_click_pickup_round_trips_through_client() {
             .collect();
         let mut menu = ClientMenu::new(Menu::player());
         menu.reconcile(ServerUpdate::SetContent {
-            state_id: lodestone_model::ContainerStateId::from_wire(w.state_id),
+            state_id: w.state_id,
             items,
             carried: w.carried.as_ref().map(model_to_game),
         });

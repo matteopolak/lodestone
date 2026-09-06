@@ -443,8 +443,7 @@ impl Session {
 /// Builds a version-free [`Menu`] mirroring a captured server state.
 fn menu_from(state: &SetContent) -> Menu {
     let mut menu = Menu::player();
-    #[allow(clippy::cast_sign_loss)]
-    menu.set_state_id(state.state_id as u32);
+    menu.set_state_id(lodestone_model::ContainerStateId::from_wire(state.state_id));
     for (i, item) in state.items.iter().enumerate() {
         menu.set_slot_item(i, item.clone());
     }

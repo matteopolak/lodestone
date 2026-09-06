@@ -119,6 +119,8 @@ fn realistic_stats() -> DebugStats {
         status: "local world".into(),
         difficulty: Some((lodestone_model::Difficulty::Normal, false)),
         simulation_distance: Some(11),
+        server_motd: Some("Copper Canyon".into()),
+        combat_session: Some(lodestone_ecs::CombatSession::Active),
         light: Some((15, 4)),
         adapter: vec![
             "Apple M5 (IntegratedGpu)".into(),
