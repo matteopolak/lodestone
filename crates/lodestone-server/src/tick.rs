@@ -875,6 +875,82 @@ fn resolve_overload(
     }
 }
 
+/// The target-specific clock edge around the otherwise shared world simulation.
+///
+/// Native keeps its existing bounded catch-up and overload accounting. The browser
+/// delegates to [`crate::browser_timer::BrowserInterval`], whose `Delay` policy
+/// runs one delayed simulation pass and re-anchors instead of replaying a burst.
+/// The simulation below deliberately has no target split.
+#[cfg(not(target_arch = "wasm32"))]
+struct TickDriver {
+    next_tick_at: tokio::time::Instant,
+    last_overload_warning_at: Option<tokio::time::Instant>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type TickInstant = tokio::time::Instant;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TickDriver {
+    fn new() -> Self {
+        Self {
+            next_tick_at: tokio::time::Instant::now(),
+            last_overload_warning_at: None,
+        }
+    }
+
+    async fn wait_for_tick(&mut self, clock: &TickClock, mobs: &MobHandle) {
+        let now = tokio::time::Instant::now();
+        let (adjusted_next, adjusted_warning, overload) =
+            resolve_overload(now, self.next_tick_at, self.last_overload_warning_at);
+        self.next_tick_at = adjusted_next;
+        self.last_overload_warning_at = adjusted_warning;
+        if let Some(event) = overload {
+            let item_probes = mobs.with(|sim| sim.items_settled_probe_count());
+            clock.record_overrun();
+            tracing::warn!(
+                ticks_behind = event.ticks_behind,
+                behind_ms = event.behind_ms,
+                item_settle_probes = item_probes,
+                "Can't keep up! Is the server overloaded? Running {}ms or {} ticks behind",
+                event.behind_ms,
+                event.ticks_behind,
+            );
+        }
+        self.next_tick_at += TICK_PERIOD;
+        tokio::time::sleep_until(self.next_tick_at).await;
+    }
+
+    fn now(&self) -> TickInstant {
+        tokio::time::Instant::now()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct TickDriver {
+    interval: crate::browser_timer::BrowserInterval,
+}
+
+#[cfg(target_arch = "wasm32")]
+type TickInstant = lodestone_time::Instant;
+
+#[cfg(target_arch = "wasm32")]
+impl TickDriver {
+    fn new() -> Self {
+        Self {
+            interval: crate::browser_timer::BrowserInterval::new(TICK_PERIOD),
+        }
+    }
+
+    async fn wait_for_tick(&mut self, _clock: &TickClock, _mobs: &MobHandle) {
+        self.interval.tick().await;
+    }
+
+    fn now(&self) -> TickInstant {
+        lodestone_time::Instant::now()
+    }
+}
+
 /// MSPT/TPS/overrun accounting for one [`run_tick_loop`].
 ///
 /// Every field is an [`AtomicU64`] (plus a [`Mutex`]-guarded ring buffer for
@@ -1316,12 +1392,12 @@ fn run_command_block_command(
 /// documented performance gap for anything wider than a handful of chunks,
 /// not a correctness one.
 ///
-/// # wasm32
+/// # Platform clock driver
 ///
-/// Native only, like the two loops it replaces: `tokio::time::sleep_until`
-/// needs `tokio::time`, unavailable on `wasm32` (see `mobs::run_mob_tick_loop`'s
-/// own doc comment for the established precedent this repeats).
-#[cfg(not(target_arch = "wasm32"))]
+/// The simulation body is target-independent. Native keeps the existing
+/// Tokio deadline and bounded catch-up policy; wasm32 waits through
+/// [`crate::browser_timer::BrowserInterval`], whose `Delay` policy runs one
+/// delayed tick and never replays a catch-up burst.
 pub(crate) async fn run_tick_loop<W>(
     mobs: MobHandle,
     mob_out: LiveMobSource,
@@ -1331,7 +1407,7 @@ pub(crate) async fn run_tick_loop<W>(
     block_tick_out: BlockTickFeed,
     tick_area: (RangeInclusive<i32>, RangeInclusive<i32>),
     explosion_out: ExplosionFeed,
-    scheduled: crate::region_source::ScheduledTickHandle,
+    scheduled: crate::scheduled_tick::ScheduledTickHandle,
     // Which dimension this loop serves and where its players are, so `tick_area`
     // above becomes a *fallback* rather than the whole story. `TickFollow::default()`
     // carries an empty anchor set and therefore reproduces the fixed-area behaviour
@@ -1395,7 +1471,6 @@ pub(crate) async fn run_tick_loop<W>(
 /// This preserves the generic loop used by independently managed dimensions
 /// and test fixtures. [`run_primary_tick_loop_with_weather`] adds the one
 /// primary-world behavior without changing those callers.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn run_tick_loop_with_weather<W>(
     mobs: MobHandle,
     mob_out: LiveMobSource,
@@ -1409,7 +1484,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     weather: WeatherState,
     sleep_vote: &SleepVote,
     sleep_feed: &SleepFeed,
-    scheduled: crate::region_source::ScheduledTickHandle,
+    scheduled: crate::scheduled_tick::ScheduledTickHandle,
     world_state: crate::world_state::WorldStateHandle,
     follow: crate::tick_area::TickFollow,
     border: BorderFeed,
@@ -1444,7 +1519,6 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
 /// schedule runs after the existing scheduled-and-physics timing sample and
 /// immediately before the completed-tick accounting. Loops for independently
 /// managed dimensions continue to use [`run_tick_loop_with_weather`].
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn run_primary_tick_loop_with_weather<W>(
     server_world: World,
     mobs: MobHandle,
@@ -1459,7 +1533,7 @@ pub(crate) async fn run_primary_tick_loop_with_weather<W>(
     weather: WeatherState,
     sleep_vote: &SleepVote,
     sleep_feed: &SleepFeed,
-    scheduled: crate::region_source::ScheduledTickHandle,
+    scheduled: crate::scheduled_tick::ScheduledTickHandle,
     world_state: crate::world_state::WorldStateHandle,
     follow: crate::tick_area::TickFollow,
     border: BorderFeed,
@@ -1492,7 +1566,6 @@ pub(crate) async fn run_primary_tick_loop_with_weather<W>(
 /// drain. Queue owners keep due records local until this boundary; this
 /// central consumer validates the complete tick-start batch set and restores
 /// the existing global drain order before any block or fluid callback runs.
-#[cfg(not(target_arch = "wasm32"))]
 fn apply_scheduled_tick_owner_batches<T>(
     batches: Vec<ScheduledTickOwnerBatch<T>>,
 ) -> Vec<ScheduledTick<T>> {
@@ -1507,7 +1580,6 @@ fn apply_scheduled_tick_owner_batches<T>(
 /// plan's established order, preserving today's deterministic behavior while
 /// making a later cross-owner executor return messages instead of borrowing a
 /// second region's world state.
-#[cfg(not(target_arch = "wasm32"))]
 fn apply_block_entity_effect_batches<W: ChunkSource>(
     world: &W,
     block_tick_out: &BlockTickFeed,
@@ -1541,7 +1613,6 @@ fn apply_block_entity_effect_batches<W: ChunkSource>(
 /// not imply that their owners ran in parallel. Their effects are restored to
 /// their former serial visit sequence before publication, preserving current
 /// cross-chunk behavior while making a later worker hand-off explicit.
-#[cfg(not(target_arch = "wasm32"))]
 fn apply_entity_effect_batches(
     block_tick_out: &BlockTickFeed,
     batches: Vec<EntityTickEffectBatch>,
@@ -1571,7 +1642,6 @@ fn apply_entity_effect_batches(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 async fn run_tick_loop_with_weather_impl<W>(
     mobs: MobHandle,
     mob_out: LiveMobSource,
@@ -1624,7 +1694,7 @@ async fn run_tick_loop_with_weather_impl<W>(
     // prevents a clock-domain mismatch: `SET_TIME` decoded and really darkened the
     // sky, every link in the wire green, while the value was wall-clock
     // elapsed-since-join rather than the tick counter.
-    scheduled: crate::region_source::ScheduledTickHandle,
+    scheduled: crate::scheduled_tick::ScheduledTickHandle,
     // The world's shared game rules, difficulty and clock use the same handle
     // every connection reads (see `crate::world_state`). Mob griefing and time
     // advancement read it directly; weather advancement and the required
@@ -1661,8 +1731,7 @@ async fn run_tick_loop_with_weather_impl<W>(
     // second call rather than folded into `publish` itself.
     mob_out.publish_boss_bars(mobs.with(|sim| sim.boss_bars()));
 
-    let mut next_tick_at = tokio::time::Instant::now();
-    let mut last_overload_warning_at: Option<tokio::time::Instant> = None;
+    let mut driver = TickDriver::new();
     let mut game_tick: u64 = 0;
     // The day clock is world-state behavior, advanced one
     // per tick in lockstep with `game_tick` until a night skip jumps it — the
@@ -1810,41 +1879,9 @@ async fn run_tick_loop_with_weather_impl<W>(
     // in — see this function's own parameter comment.
 
     loop {
-        let now = tokio::time::Instant::now();
-        let (adjusted_next, adjusted_warning, overload) =
-            resolve_overload(now, next_tick_at, last_overload_warning_at);
-        next_tick_at = adjusted_next;
-        last_overload_warning_at = adjusted_warning;
-        if let Some(event) = overload {
-            // The item-settling pass's own cost rides along, because it is the one
-            // thing in this loop whose work scales with something a *player* controls
-            // and it is otherwise invisible here: `MobSim` settles every dropped item
-            // through swept collision against real per-block-state shapes, so a floor
-            // covered in drops does strictly more work per tick than the one boolean
-            // lookup this used to be. Measured at 36 cell probes per item per tick, so
-            // a four-figure number here means items are a real share of the overrun
-            // and a five-figure one means they are most of it.
-            //
-            // Read from the *previous* tick (this runs before the body), which is
-            // exactly the tick that ran long. `serve_play`'s own `LoopStallWatch` does
-            // not cover this — that watches the connection task's `select!` arms, and
-            // this is a different task entirely.
-            let item_probes = mobs.with(|sim| sim.items_settled_probe_count());
-            tracing::warn!(
-                ticks_behind = event.ticks_behind,
-                behind_ms = event.behind_ms,
-                item_settle_probes = item_probes,
-                "Can't keep up! Is the server overloaded? Running {}ms or {} ticks behind",
-                event.behind_ms,
-                event.ticks_behind,
-            );
-            clock.record_overrun();
-        }
+        driver.wait_for_tick(&clock, &mobs).await;
 
-        next_tick_at += TICK_PERIOD;
-        tokio::time::sleep_until(next_tick_at).await;
-
-        let tick_start = tokio::time::Instant::now();
+        let tick_start = driver.now();
         // **Where the world is ticking this tick.** Integer arithmetic over at most
         // a few dozen coordinate pairs, so it is affordable every tick; the
         // expensive half (the terrain snapshot below) is gated on the `true` this
@@ -2519,7 +2556,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // out everything from `tick_start` through the spawner-block pass
         // just above. A bare timestamp, no lock held, so it cannot
         // deadlock and cannot fold in the top-of-loop `sleep_until` wait.
-        let t_mobs_end = tokio::time::Instant::now();
+        let t_mobs_end = driver.now();
         clock.record_phase(TickPhase::MobsAndItems, t_mobs_end.duration_since(tick_start));
 
         // The clock is the **world's**, not this loop's: one
@@ -2626,7 +2663,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // closes out the weather cycle and the night-skip vote above. Taken
         // *before* `scheduled.with` opens below, never from inside it — see
         // `TickPhase::ScheduledAndPhysics`'s doc for why.
-        let t_weather_end = tokio::time::Instant::now();
+        let t_weather_end = driver.now();
         clock.record_phase(TickPhase::WeatherAndSleep, t_weather_end.duration_since(t_mobs_end));
 
         // both queues are borrowed out of `scheduled` for the whole
@@ -3762,7 +3799,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // closes out everything `scheduled.with`'s closure just ran. Taken
         // immediately after the closure returns (the mutex is already
         // released by here), so this timestamp is outside the lock too.
-        let t_scheduled_end = tokio::time::Instant::now();
+        let t_scheduled_end = driver.now();
         clock.record_phase(TickPhase::ScheduledAndPhysics, t_scheduled_end.duration_since(t_weather_end));
 
         clock.record_tick(tick_start.elapsed());

@@ -26,7 +26,7 @@ publish = false
 # invoked from this directory, never touches `server` even though it is now a
 # workspace member.
 [workspace]
-members = ["server"]
+members = ["server", "worker"]
 
 [features]
 # Keep the deployed browser's current behavior. A security-conscious deployment

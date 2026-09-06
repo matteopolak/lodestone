@@ -112,6 +112,13 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+#[cfg(target_arch = "wasm32")]
+use std::io;
+#[cfg(target_arch = "wasm32")]
+use std::pin::Pin;
+#[cfg(target_arch = "wasm32")]
+use std::task::{Context, Poll};
+
 use lodestone_client::{
     BlockPos, ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle,
     EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, RespawnPolicy,
@@ -134,6 +141,13 @@ use lodestone_model::event::{
 use lodestone_render::{SectionLight as _, SkyDefault, WorldSectionLight};
 
 use uuid::Uuid;
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, JsValue};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::closure::Closure;
+#[cfg(target_arch = "wasm32")]
+use web_sys::{ErrorEvent, MessageChannel, MessageEvent, Worker};
 
 use crate::offline_identity::OfflineIdentity;
 
@@ -1696,6 +1710,186 @@ impl std::fmt::Debug for Origin {
     }
 }
 
+/// Browser-only client endpoint for an integrated session.
+///
+/// Before the worker reports ready, [`launch_browser_worker`] may refuse and
+/// `run_async` keeps the old in-page duplex path. Once this variant exists its
+/// `Worker` is retained for the entire connection; a later worker failure closes
+/// the port and the ordinary client EOF path reports a disconnect rather than
+/// quietly recreating a second world on the page.
+#[cfg(target_arch = "wasm32")]
+enum BrowserIntegratedTransport {
+    InPage(tokio::io::DuplexStream),
+    Worker {
+        _worker: Worker,
+        port: lodestone_net::MessagePortTransport,
+        _on_error: Closure<dyn FnMut(ErrorEvent)>,
+    },
+}
+
+#[cfg(target_arch = "wasm32")]
+impl tokio::io::AsyncRead for BrowserIntegratedTransport {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::InPage(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Worker { port, .. } => Pin::new(port).poll_read(cx, buf),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl tokio::io::AsyncWrite for BrowserIntegratedTransport {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match &mut *self {
+            Self::InPage(stream) => Pin::new(stream).poll_write(cx, data),
+            Self::Worker { port, .. } => Pin::new(port).poll_write(cx, data),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::InPage(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Worker { port, .. } => Pin::new(port).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::InPage(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Worker { port, .. } => Pin::new(port).poll_shutdown(cx),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn world_preset_wire_id(preset: crate::menu::create_world::WorldTypePreset) -> u8 {
+    use crate::menu::create_world::WorldTypePreset;
+    match preset {
+        WorldTypePreset::Normal => 0,
+        WorldTypePreset::LargeBiomes => 1,
+        WorldTypePreset::Amplified => 2,
+        WorldTypePreset::SingleBiomeSurface => 3,
+        WorldTypePreset::Flat => 4,
+        WorldTypePreset::FlatAllDimensions => 5,
+        WorldTypePreset::DebugAllBlockStates => 6,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn world_preset_from_wire_id(id: u8) -> Option<crate::menu::create_world::WorldTypePreset> {
+    use crate::menu::create_world::WorldTypePreset;
+    Some(match id {
+        0 => WorldTypePreset::Normal,
+        1 => WorldTypePreset::LargeBiomes,
+        2 => WorldTypePreset::Amplified,
+        3 => WorldTypePreset::SingleBiomeSurface,
+        4 => WorldTypePreset::Flat,
+        5 => WorldTypePreset::FlatAllDimensions,
+        6 => WorldTypePreset::DebugAllBlockStates,
+        _ => return None,
+    })
+}
+
+/// Starts the server worker and waits for its synchronous world construction.
+///
+/// The transferred port contains protocol bytes only. The ordinary Worker
+/// channel carries this launch object and its ready/error response, which gives
+/// us a precise point at which falling back to the legacy page-owned server is
+/// still safe: no worker world exists before `ready`.
+#[cfg(target_arch = "wasm32")]
+async fn launch_browser_worker(
+    protocol: i32,
+    seed: i64,
+    preset: crate::menu::create_world::WorldTypePreset,
+) -> Result<BrowserIntegratedTransport, String> {
+    let worker = Worker::new("lodestone-server-worker.js")
+        .map_err(|e| e.as_string().unwrap_or_else(|| "cannot create server worker".to_string()))?;
+    let channel = MessageChannel::new()
+        .map_err(|e| e.as_string().unwrap_or_else(|| "cannot create worker channel".to_string()))?;
+    let page_port = channel.port1();
+    let worker_port = channel.port2();
+    // Build this before waiting for `ready` so the worker error callback can
+    // wake a client read after startup. A MessagePort itself has no close event.
+    let transport = lodestone_net::MessagePortTransport::new(page_port);
+    let port_shutdown = transport.shutdown_handle();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    let ready_tx = std::rc::Rc::new(std::cell::RefCell::new(Some(ready_tx)));
+    let on_message = {
+        let ready_tx = std::rc::Rc::clone(&ready_tx);
+        Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+            let value = event.data();
+            let kind = js_sys::Reflect::get(&value, &JsValue::from_str("kind"))
+                .ok()
+                .and_then(|v| v.as_string());
+            let result = match kind.as_deref() {
+                Some("ready") => Ok(()),
+                Some("error") => Err(js_sys::Reflect::get(&value, &JsValue::from_str("message"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_else(|| "server worker failed during startup".to_string())),
+                _ => Err("server worker sent an invalid startup response".to_string()),
+            };
+            if let Some(tx) = ready_tx.borrow_mut().take() {
+                let _ = tx.send(result);
+            }
+        })
+    };
+    worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    let on_error = {
+        let ready_tx = std::rc::Rc::clone(&ready_tx);
+        let port_shutdown = port_shutdown.clone();
+        Closure::<dyn FnMut(ErrorEvent)>::new(move |event: ErrorEvent| {
+            let message = if event.message().is_empty() {
+                "server worker stopped".to_string()
+            } else {
+                event.message()
+            };
+            if let Some(tx) = ready_tx.borrow_mut().take() {
+                let _ = tx.send(Err(message));
+            } else {
+                port_shutdown.signal(message);
+            }
+        })
+    };
+    worker.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+    let launch = js_sys::Object::new();
+    js_sys::Reflect::set(&launch, &JsValue::from_str("kind"), &JsValue::from_str("start"))
+        .expect("plain launch object accepts kind");
+    js_sys::Reflect::set(&launch, &JsValue::from_str("protocol"), &JsValue::from_f64(f64::from(protocol)))
+        .expect("plain launch object accepts protocol");
+    js_sys::Reflect::set(&launch, &JsValue::from_str("seed"), &JsValue::from_str(&seed.to_string()))
+        .expect("plain launch object accepts seed");
+    js_sys::Reflect::set(&launch, &JsValue::from_str("preset"), &JsValue::from_f64(f64::from(world_preset_wire_id(preset))))
+        .expect("plain launch object accepts preset");
+    let transfer = js_sys::Array::new();
+    transfer.push(&worker_port);
+    worker.post_message_with_transfer(&launch, &transfer).map_err(|e| {
+        e.as_string().unwrap_or_else(|| "cannot transfer server port to worker".to_string())
+    })?;
+    let startup = ready_rx.await.map_err(|_| "server worker stopped during startup".to_string())?;
+    worker.set_onmessage(None);
+    drop(on_message);
+    if let Err(error) = startup {
+        worker.set_onerror(None);
+        drop(on_error);
+        worker.terminate();
+        return Err(error);
+    }
+    Ok(BrowserIntegratedTransport::Worker {
+        _worker: worker,
+        port: transport,
+        _on_error: on_error,
+    })
+}
+
 /// The `ServerAddress` a singleplayer session presents to the client.
 ///
 /// The client needs one for its handshake (`begin_login` puts the host and port
@@ -3105,12 +3299,15 @@ async fn run_async(
                     },
                     None => None,
                 };
-                #[cfg(target_arch = "wasm32")]
-                let stored: Option<(Arc<dyn lodestone_server::ChunkSource>, i32, i32)> = None;
+                // The worker builds the browser's source itself. In particular,
+                // do not build it here "just to validate" launch settings: that
+                // would make page-side worldgen a second authoritative world.
                 // An override is a source whose local surface semantics we do
                 // not have a query for. Preserve that distinction instead of
                 // drawing a stock Overworld estimate over a custom world.
+                #[cfg(not(target_arch = "wasm32"))]
                 let use_local_horizon_query = stored.is_none();
+                #[cfg(not(target_arch = "wasm32"))]
                 let (source, min_y, height) = match stored {
                     Some(built) => built,
                     None => {
@@ -3135,6 +3332,8 @@ async fn run_async(
                 // chunk-generation or cache requests. Publishing only after
                 // `preset_chunk_source` succeeded prevents a failed launch
                 // from leaving a plausible query behind.
+                #[cfg(target_arch = "wasm32")]
+                let use_local_horizon_query = true;
                 if use_local_horizon_query {
                     if let Some(query) = crate::horizon::HorizonSurfaceQuery::for_preset(seed, world_type) {
                         let _ = horizon_surface.set(query);
@@ -3309,38 +3508,56 @@ async fn run_async(
                     }
                 };
                 #[cfg(target_arch = "wasm32")]
-                let (server, client_io, lan_address): (_, _, Option<ServerAddress>) = {
-                    // `open_in_memory_with_items_and_commands`, not
-                    // `open_in_memory`: the
-                    // latter's `NoEntities` source meant a block break rolled
-                    // its loot into a real (but unstreamed) `MobHandle` and
-                    // never once reached the wire — a real item entity,
-                    // zero pixels, no error anywhere. This target still gets
-                    // no tick loop (needs `tokio::time`, unavailable here),
-                    // so a drop still does not fall, merge or despawn on its
-                    // own; it is at least visible and pickable now. See that
-                    // constructor's own doc comment.
-                    // This is the same local-only bridge the native
-                    // singleplayer route installs. It deliberately uses the
-                    // current session's ECS registry and never escapes to a
-                    // LAN listener (which browser singleplayer has none of).
-                    let commands = session.as_ref().map_or_else(
-                        lodestone_server::CommandDispatch::none,
-                        |(ecs, _)| {
-                            lodestone_server::CommandDispatch::installed(Arc::new(EcsCommandSink {
+                let (server, client_io, lan_address): (_, _, Option<ServerAddress>) = match launch_browser_worker(
+                    protocol,
+                    seed,
+                    world_type,
+                )
+                .await
+                {
+                    Ok(worker_io) => (None, Some(worker_io), None),
+                    Err(error) => {
+                        // A fallback is safe only before the worker's `ready`
+                        // acknowledgement. Once ready, a port/worker failure is
+                        // EOF and disconnects the session; restarting here would
+                        // create a second mutable world behind the same UI.
+                        tracing::warn!("browser server worker unavailable; using page server until next launch: {error}");
+                        let (fallback_source, _, _) = match preset_chunk_source(
+                            server_protocol.worldgen_scope(),
+                            seed,
+                            world_type,
+                        ) {
+                            Ok(source) => source,
+                            Err(mismatch) => {
+                                let _ = tx.try_send(NetUpdate::Error(format!(
+                                    "cannot start this world: {mismatch}"
+                                )));
+                                return;
+                            }
+                        };
+                        let commands = session.as_ref().map_or_else(
+                            lodestone_server::CommandDispatch::none,
+                            |(ecs, _)| lodestone_server::CommandDispatch::installed(Arc::new(EcsCommandSink {
                                 ecs: Arc::clone(ecs),
-                            }))
-                        },
-                    );
-                    let (server, io) = lodestone_server::IntegratedServer::open_in_memory_with_items_and_commands(
-                        server_protocol,
-                        source,
-                        view_radius,
-                        commands,
-                    );
-                    (server, Some(io), None)
+                            })),
+                        );
+                        let (server, io) = lodestone_server::IntegratedServer::open_in_memory_with_items_and_commands(
+                            server_protocol,
+                            fallback_source,
+                            view_radius,
+                            commands,
+                        );
+                        (Some(server), Some(BrowserIntegratedTransport::InPage(io)), None)
+                    }
                 };
-                integrated_server = Some(server);
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    integrated_server = Some(server);
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    integrated_server = server;
+                }
                 match (client_io, lan_address) {
                     // Singleplayer over the in-memory duplex: the address is
                     // synthetic and only echoed into the handshake.
@@ -4295,6 +4512,56 @@ fn preset_chunk_source(
             Ok((Arc::new(s), bounds.min_y(), bounds.height()))
         }
     }
+}
+
+/// The page's plugin registry is deliberately not copied into the server
+/// worker. A command that needs that synchronous page-side ECS dispatch is
+/// refused with a visible reply instead of being accepted and silently dropped.
+#[cfg(target_arch = "wasm32")]
+struct WorkerCommandSink;
+
+#[cfg(target_arch = "wasm32")]
+impl lodestone_server::CommandSink for WorkerCommandSink {
+    fn run(
+        &self,
+        _caller: &lodestone_server::CommandCaller,
+        _command: &str,
+    ) -> lodestone_server::CommandResponse {
+        lodestone_server::CommandResponse::refused(
+            "commands registered by page-side plugins are unavailable while browser singleplayer runs in its server worker",
+        )
+    }
+}
+
+/// Starts an authoritative browser integrated server on a supplied worker port.
+///
+/// This is called by `web/worker`, never by the page. The world source, server,
+/// tick tasks, and the duplex-to-port bridge therefore all live in one Worker;
+/// the page retains only its client, rendering and input state. The bridge is
+/// protocol-blind and owns no world state.
+#[cfg(target_arch = "wasm32")]
+pub fn start_browser_integrated_worker(
+    port: web_sys::MessagePort,
+    protocol: i32,
+    seed: i64,
+    preset: u8,
+) -> Result<(), String> {
+    let preset = world_preset_from_wire_id(preset)
+        .ok_or_else(|| format!("unknown browser worker world preset {preset}"))?;
+    let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
+        .ok_or_else(|| format!("no server protocol compiled for protocol {protocol}"))?;
+    let (source, _min_y, _height) = preset_chunk_source(server_protocol.worldgen_scope(), seed, preset)
+        .map_err(|error| format!("cannot build browser worker world: {error}"))?;
+    let commands = lodestone_server::CommandDispatch::installed(Arc::new(WorkerCommandSink));
+    let worker_io = lodestone_net::MessagePortTransport::new(port);
+    lodestone_server::IntegratedServer::serve_with_transport(
+        server_protocol,
+        source,
+        8,
+        commands,
+        worker_io,
+    );
+    Ok(())
 }
 
 /// The world name a LAN ping advertises — the world directory's own final

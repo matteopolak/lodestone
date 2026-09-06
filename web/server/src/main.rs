@@ -12,8 +12,9 @@
 //! upgrade request first, falling back to this binary's `--target` when
 //! absent — see "Per-connection destination" below. Every other request is
 //! served as a static file out of `--dist` (the directory `trunk
-//! build`/`trunk watch` writes to), falling back to `index.html` for
-//! anything not found.
+//! build`/`trunk watch` writes to). Missing assets return `404`; returning
+//! `index.html` for them would make an optional JSON manifest look present and
+//! turn the direct-asset fallback into a JSON parse error.
 //!
 //! # This replaces `web/Trunk.toml`'s `[[proxies]]` entry, not `trunk`
 //!
@@ -93,7 +94,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 #[cfg(feature = "multiplayer")]
 use tokio::net::TcpStream;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Size of the scratch buffer used when forwarding TCP -> WebSocket. Matches
@@ -208,8 +209,7 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "multiplayer"))]
     println!("lodestone-web-server: http://{bound}/ (static-only; multiplayer disabled)");
 
-    let index = config.dist.join("index.html");
-    let serve_dir = ServeDir::new(&config.dist).fallback(ServeFile::new(index));
+    let serve_dir = ServeDir::new(&config.dist);
 
     // Same two headers web/Trunk.toml's `[serve]` sets under `trunk serve` —
     // see that file and web/README.md's "COOP/COEP" section for why they are

@@ -40,9 +40,10 @@ other than `main.rs` as unverified until it is swept.
   which was **false**: no terrain pixel had ever reached the canvas.
 - **Assets:** the sync, byte-based `lodestone-assets` `ResourceSource` pipeline
   runs unchanged once bytes are `fetch`ed (zip + PNG decoded in-browser).
-- **Singleplayer:** the real `lodestone-client` ↔ `lodestone-server` ↔
-  `lodestone-worldgen` stack, connected in-process over an in-memory duplex
-  under `spawn_local` — no relay, no socket, no Docker.
+- **Singleplayer:** the page owns client/render/input while a dedicated Worker
+  owns the real server and world generator. A `MessageChannel` carries raw
+  framed protocol bytes between them — no relay, no socket, and no duplicate
+  world state.
 - **Server-list ping, over the relay:** `lodestone-shell`'s multiplayer server
   list now really pings a server from the browser, through `lodestone-relay`
   linked into `lodestone-web-server` (`web/server/`) — see "Live multiplayer
@@ -213,6 +214,10 @@ rather than running it as a spawned child. It serves the built page out of
 `--dist` (default `./dist`, what `trunk build`/`trunk watch` write) **and**
 answers `/relay` as a WebSocket upgrade bridged to `--target` — one listener,
 one process, so there is no second port and nothing to keep in sync by hand.
+Static misses return HTTP 404 rather than the page shell. This is part of the
+asset-loader contract: `client.jar.parts.json` is optional, and its 404 selects
+the direct `client.jar`; serving `index.html` with status 200 at that path makes
+the missing manifest look present and fail later as invalid JSON.
 
 This relay exists only with the server's default `multiplayer` feature. A
 `--no-default-features` server is intentionally static-only and has no `/relay`
@@ -265,11 +270,10 @@ Cross-Origin-Opener-Policy:   same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-These make the page **cross-origin isolated**, which is a hard requirement for
-`SharedArrayBuffer` and therefore for any future threading
-(`wasm-bindgen-rayon`, or moving worldgen off the main thread). They are set now,
-while the spike is single-threaded and doesn't need them, precisely so the
-substrate is already isolated when threading lands.
+These make the page **cross-origin isolated**, which remains useful for future
+shared-memory work. The integrated server does not need it: it runs in a
+dedicated Worker through a transferable `MessagePort`, not a shared-memory or
+rayon worker pool.
 
 **The trap:** a plain static file server (`python -m http.server`, most CDNs by
 default, etc.) does **not** send these headers. The build renders fine without
@@ -279,13 +283,18 @@ later depends on cross-origin isolation will **silently fail** with
 `lodestone-web-server` sets both unconditionally (`tower_http::set_header`);
 if you serve `dist/` with something else entirely, replicate both headers.
 
-## Worldgen is the singleplayer gate, not the transport
+## Integrated-server Worker
 
-In-browser worldgen measured at **~1 s per column, single-threaded (release)**.
-It is synchronous, so it blocks the event loop while it runs — a 5×5 view is
-~25 s of frozen tab. Browser singleplayer is therefore gated on getting worldgen
-off the main thread (a Web Worker, or the `wasm-bindgen-rayon` path the COOP/COEP
-headers above already enable), **not** on the transport, which is proven.
+`web/worker/` is a separate wasm package staged by
+`web/scripts/stage_worker.sh` during Trunk's post-build hook. Its bootstrap
+receives launch settings and one endpoint of a `MessageChannel`, builds the
+world and server before reporting ready, then bridges only raw protocol bytes.
+The page keeps the other endpoint as `MessagePortTransport` for the normal
+client driver. Worker startup failures fall back to the legacy in-page server;
+after ready, a worker crash is a disconnect rather than a hidden second world.
+
+Page-side plugin commands are explicitly refused in worker singleplayer until
+there is a request/reply command bridge with an authorization policy.
 
 ## Guarding the browser build — `scripts/wasm-check.sh`
 
@@ -460,8 +469,9 @@ just run-wasm
 ```
 
 `host`/`port` are only what the **handshake advertises**; where the bytes go is the
-relay's `--target`. `?join=1` skips the singleplayer probe on purpose — in-browser
-worldgen is synchronous, so its ~1 s columns starve the live socket.
+relay's `--target`. `?join=1` selects the remote-join path on page load; local
+singleplayer world generation runs in its dedicated Worker and does not starve
+the page's relay socket.
 
 ### The clock wall
 
@@ -525,19 +535,13 @@ default rather than a workaround. The File System Access API is what the owner's
 somewhere the user can see and back up. Browser storage also stays **evictable**
 unless `navigator.storage.persist()` is granted, which matters for a save file.
 
-## Deferred: `tokio::time` on wasm
+## Browser tick timing
 
-`mobs::run_mob_tick_loop` needs `tokio::time`, which wasm lacks, so the browser
-takes the mob-free `IntegratedServer::open_in_memory` path. That loop is
-**server-side**, so a browser acting as a pure client against a remote server never
-runs it — which is why neither `tokio-with-wasm` nor a frame-driven tick was
-adopted here. Both would be real work with a real dependency cost (browser timers
-are not tokio's timers: clamping, background-tab throttling, no multi-threaded
-runtime), and neither is on the critical path to a rendered frame or a
-multiplayer join. Revisit only if in-browser *singleplayer* with mobs becomes the
-goal; prefer consolidating scheduling instead of adding another periodic timer,
-and account for browser timer clamping, background-tab throttling, and the lack
-of a multithreaded runtime.
+The worker uses the server's browser timer seam, not `tokio::time`, for the
+integrated world's periodic work. Browser timer clamping and background-tab
+throttling still apply, so the timer uses delay semantics rather than replaying
+a catch-up burst when a tab resumes. A remote browser client never runs this
+server loop.
 
 Related trap, and the reason the whole wasm build was red: `tokio::time::Instant`
 is **not** a wasm-safe substitute for `std::time::Instant`. It bottoms out in

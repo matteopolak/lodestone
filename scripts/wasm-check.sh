@@ -336,6 +336,25 @@ for entry in "${CRATES[@]}"; do
   fi
 done
 
+# The page bundle is not the only browser wasm artifact. Browser
+# singleplayer's authoritative server is a dedicated Worker package, built by
+# web/scripts/stage_worker.sh during Trunk's post-build staging. Check its Rust
+# half explicitly here so a worker-only dependency break is named before the
+# final page build obscures it behind a hook failure.
+if (( CONFINEMENT_ONLY == 0 )); then
+  worker_log="$LOGDIR/lodestone-server-worker.log"
+  printf '  %-34s ' "lodestone-server-worker"
+  if CARGO_TERM_COLOR=never \
+    cargo build --manifest-path "$ROOT/web/worker/Cargo.toml" --target "$TARGET" > "$worker_log" 2>&1; then
+    echo "PASS"
+  else
+    echo "FAIL"
+    fails+=("lodestone-server-worker")
+    report_build_failure "$worker_log"
+    echo "      └─ reproduce: cargo build --manifest-path web/worker/Cargo.toml --target $TARGET"
+  fi
+fi
+
 # --- Confinement guards ------------------------------------------------------
 # A family of calls compile to wasm32 and then die at runtime (see header). The
 # type system can't forbid them and the compile pass above is blind to them, so
@@ -420,7 +439,7 @@ CONFINEMENT_RULES=(
   # thread were. The status one was REACHABLE -- it fires when the player opens the
   # Multiplayer screen -- and no `cargo check` at any target could see it.
   #
-  # Allowlist = the three files that genuinely confine it behind
+  # Allowlist = the files that genuinely confine it behind
   # `cfg(not(target_arch = "wasm32"))`, each with a browser arm beside it. A new
   # ungated `thread::spawn` anywhere else in the crate is what this catches.
   #
@@ -432,7 +451,9 @@ CONFINEMENT_RULES=(
   # production one, so allowlisting those two files to add a `sleep` rule would buy
   # one hazard and blind two files to it. If you add `thread::sleep` to production
   # code here, nothing will stop you: gate it yourself.
-  "lodestone-shell thread-spawn-confinement|crates/lodestone-shell/src|thread::spawn|mesher.rs,accounts.rs,status.rs,runners.rs"
+  # `terminal.rs` is itself declared only by `lib.rs`'s native target arm, so
+  # its blocking stdin reader never enters the browser compilation graph.
+  "lodestone-shell thread-spawn-confinement|crates/lodestone-shell/src|thread::spawn|mesher.rs,accounts.rs,status.rs,runners.rs,terminal.rs"
   # --- the clock, in every other crate the browser reaches ---
   #
   # **These exist because `lodestone-shell`'s three rules were not enough, and the way

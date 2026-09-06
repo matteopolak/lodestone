@@ -11,7 +11,8 @@ mod crypto;
 mod error;
 #[cfg(any(
     all(feature = "ws-native", not(target_arch = "wasm32")),
-    all(feature = "ws-web", target_arch = "wasm32")
+    all(feature = "ws-web", target_arch = "wasm32"),
+    all(feature = "worker-web", target_arch = "wasm32")
 ))]
 mod inbox;
 mod ping;
@@ -22,6 +23,8 @@ mod transport;
 mod ws_native;
 #[cfg(all(feature = "ws-web", target_arch = "wasm32"))]
 mod ws_web;
+#[cfg(all(feature = "worker-web", target_arch = "wasm32"))]
+mod worker_web;
 
 pub use codec::{Codec, MAX_DECOMPRESSED_LEN, MAX_LENGTH_VARINT_BYTES, MAX_PACKET_LEN};
 pub use connection::Connection;
@@ -52,3 +55,5 @@ pub use transport::{DEFAULT_MEMORY_BUFFER, Transport, memory_pair};
 pub use ws_native::WsTransport;
 #[cfg(all(feature = "ws-web", target_arch = "wasm32"))]
 pub use ws_web::WsWebTransport;
+#[cfg(all(feature = "worker-web", target_arch = "wasm32"))]
+pub use worker_web::{MessagePortShutdown, MessagePortTransport};

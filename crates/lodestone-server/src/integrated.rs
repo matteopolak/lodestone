@@ -41,6 +41,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lodestone_net::{Connection, memory_pair};
+#[cfg(target_arch = "wasm32")]
+use lodestone_net::Transport;
 use tokio::io::DuplexStream;
 use tokio::sync::Notify;
 
@@ -75,27 +77,8 @@ use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 // `source.primary().tickets()` into every real join path this file spawns —
 // see each call site's own comment for why that handle, not a fresh default.
 use crate::ticket::TicketStoreHandle;
-// `run_primary_tick_loop_with_weather` (like `open_in_memory_with_mobs`
-// and `bind` — their callers — are
-// `#[cfg(not(target_arch = "wasm32"))]`-gated in `tick.rs` — these imports must
-// carry the identical `cfg`, or they are unresolved-import hard errors on
-// wasm32 regardless of whether the names are ever reached at that target.
-// The cfg is required here because these imports are unavailable on
-// `wasm32-unknown-unknown`; keeping the gate on the imports matches the native-only
-// tick-loop entry points and lets the browser build resolve all imports.
-#[cfg(not(target_arch = "wasm32"))]
 use crate::tick::run_primary_tick_loop_with_weather;
-// the night-skip vote and its feed, wired into
-// `open_in_memory_with_mobs_using` (singleplayer) — see that constructor and
-// `crate::sleep`'s module doc. Native-only for the same reason the tick-loop
-// import above is: `run_primary_tick_loop_with_weather` is `cfg`-gated, and the
-// sleep-feed `container_sync_tick` arm in `serve_play` is native-only too.
-#[cfg(not(target_arch = "wasm32"))]
 use crate::sleep::{SleepFeed, SleepVote};
-// The primary-world variant carries the real sleep vote and needs the weather
-// pair even though this crate does not wire weather yet — see the call in
-// `open_in_memory_with_mobs_using`.
-#[cfg(not(target_arch = "wasm32"))]
 use crate::weather::{WeatherFeed, WeatherState};
 
 /// Chebyshev radius, in chunks, of the region [`IntegratedServer::bind`]'s
@@ -384,19 +367,69 @@ fn start_sibling_tick_loop(
     }
 }
 
-/// wasm32 has no [`crate::tick::run_tick_loop`] at all (see that function's
-/// own "native only" note) — this is the same no-op every other tick-related
-/// wasm32 arm in this crate is, kept as a same-named twin rather than
-/// a call-site `cfg` so `with_nether`'s closure is identical on both targets.
+/// Builds the shared context a lazy sibling needs to become a world-owned
+/// tick task. Keeping this construction separate makes the browser constructor
+/// prove that the primary and every later portal sibling share one world state
+/// and one shutdown boundary, rather than quietly allocating lookalikes.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn sibling_tick_context(
+    world_state: &crate::world_state::WorldStateHandle,
+    shutdown: &Arc<ShutdownSignal>,
+) -> crate::dimension_tick::DimensionTickContext {
+    crate::dimension_tick::DimensionTickContext {
+        world_state: world_state.clone(),
+        shutdown: Arc::clone(shutdown),
+    }
+}
+
+/// Browser siblings use the same simulation body as native dimensions. Only
+/// that body's `TickDriver` changes target: `BrowserInterval` supplies its
+/// delay-without-burst clock while this launcher keeps one task per sibling
+/// source and races it against the server shutdown signal.
 #[cfg(target_arch = "wasm32")]
 fn start_sibling_tick_loop(
-    _dimension: Dimension,
-    _source: &Arc<dyn ChunkSource>,
-    _block_entities: BlockEntityHandle,
-    _scheduled: crate::scheduled_tick::ScheduledTickHandle,
-    _block_tick_feed: BlockTickFeed,
-    _ticking: &Option<crate::dimension_tick::DimensionTickContext>,
+    dimension: Dimension,
+    source: &Arc<dyn ChunkSource>,
+    block_entities: BlockEntityHandle,
+    scheduled: crate::scheduled_tick::ScheduledTickHandle,
+    block_tick_feed: BlockTickFeed,
+    ticking: &Option<crate::dimension_tick::DimensionTickContext>,
 ) {
+    let Some(ctx) = ticking else {
+        return;
+    };
+    let world_state = ctx.world_state.clone();
+    let shutdown = Arc::clone(&ctx.shutdown);
+    let world: Arc<Arc<dyn ChunkSource>> = Arc::new(Arc::clone(source));
+    let radius = crate::chunk_store::CONCURRENT_TICK_RADIUS;
+    let follow = crate::tick_area::TickFollow {
+        dimension,
+        radius,
+        anchors: world_state.tick_anchors().clone(),
+    };
+    let _ = spawn_tick_task(&shutdown, async move {
+        let sleep_vote = SleepVote::new();
+        let sleep_feed = SleepFeed::default();
+        crate::tick::run_tick_loop_with_weather(
+            MobHandle::default(),
+            LiveMobSource::default(),
+            block_entities,
+            Arc::new(TickClock::new()),
+            world,
+            block_tick_feed,
+            (-radius..=radius, -radius..=radius),
+            ExplosionFeed::default(),
+            WeatherFeed::default(),
+            WeatherState::default(),
+            &sleep_vote,
+            &sleep_feed,
+            scheduled,
+            world_state,
+            follow,
+            crate::border::BorderFeed::default(),
+        )
+        .await;
+    });
 }
 
 /// Builds one sibling dimension's [`ChunkSource`] — persisted under
@@ -536,10 +569,10 @@ where
 /// starts (`tick::run_tick_loop`) needs exactly this shape, so it
 /// exists once here rather than once per call site.
 ///
-/// Both the singleplayer and LAN constructors use this wrapper for their native
+/// Both native and browser singleplayer constructors use this wrapper for their
 /// world-tick task. Keeping the shutdown race in one helper ensures every caller
-/// joins or cancels the same task shape. Native only, like the tick loop itself
-/// and every caller of this function.
+/// joins or cancels the same task shape; only the timer inside the tick loop is
+/// target-specific.
 /// `pub(crate)`: [`crate::dimension_tick::spawn_for_dimension`] reuses this
 /// rather than re-implementing the same shutdown race a second time — see its
 /// own doc comment.
@@ -547,6 +580,20 @@ where
 pub(crate) fn spawn_tick_task<F>(shutdown: &Arc<ShutdownSignal>, fut: F) -> Task
 where
     F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let signal = shutdown.clone();
+    spawn(async move {
+        tokio::select! {
+            _ = signal.notified() => {}
+            _ = fut => {}
+        }
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn spawn_tick_task<F>(shutdown: &Arc<ShutdownSignal>, fut: F) -> Task
+where
+    F: std::future::Future<Output = ()> + 'static,
 {
     let signal = shutdown.clone();
     spawn(async move {
@@ -913,8 +960,9 @@ pub struct IntegratedServer {
     shutdown: Arc<ShutdownSignal>,
     task: Task,
     /// The unified world-tick task (mob sim + block entities, one
-    /// loop), present only when this handle was built by
-    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs). Kept
+    /// loop), present when this handle was built by
+    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs) or browser
+    /// [`open_in_memory_with_items`](Self::open_in_memory_with_items). Kept
     /// separate from `task` (rather than folded into the same future) because
     /// the world is meant to keep ticking independently of any one
     /// connection — see that constructor's own doc comment. The mob and
@@ -1280,31 +1328,12 @@ impl IntegratedServer {
     /// which does, and which fails against `open_in_memory`'s wiring and
     /// passes against this constructor's.
     ///
-    /// This is `wasm32`'s own singleplayer entry point —
-    /// `crates/lodestone-shell/src/net.rs`'s `#[cfg(target_arch = "wasm32")]`
-    /// arm is the one production caller, the only target that reaches
-    /// [`open_in_memory`](Self::open_in_memory) instead of
-    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs), because
-    /// that constructor's tick loop needs `tokio::time`, unavailable on
-    /// `wasm32` (see this module's own doc on `run_tick_loop`).
-    ///
-    /// No tick loop is spawned here either, for the identical reason — this
-    /// fixes *visibility*, not physics. [`MobHandle`] is already a legitimate
-    /// [`EntitySource`] on its own for a caller that mutates the sim directly
-    /// and needs no ticked republish (see that impl's own doc comment), which
-    /// is exactly `destroy_block`'s access pattern: it calls
-    /// `mobs.with(|sim| sim.spawn_item(..))` synchronously from packet
-    /// handling, no timer involved, so a fresh `snapshots()` read on the very
-    /// next streaming pass already sees it.
-    ///
-    /// The timer-driven behaviors this does **not** provide, because they are genuinely
-    /// timer-shaped and `wasm32` has no timer to drive them: a dropped item
-    /// never falls, merges with a neighbour, ages toward its despawn time, or
-    /// attracts any AI, and no mob spawns or moves, ever — the same
-    /// behavior [`open_in_memory`](Self::open_in_memory) carries. Pickup
-    /// still works: `collect_nearby_items` is dispatched from
-    /// every inbound movement packet in both `serve_play` definitions, not
-    /// from a tick, so a player can still walk over and bank what they mined.
+    /// This is browser singleplayer's world-owning entry point. It starts the
+    /// same simulation body native integrated worlds use, over the source,
+    /// registry handles, feeds, and `MobHandle` the duplex connection shares.
+    /// The platform difference is only the clock driver: browser ticks wait on
+    /// `BrowserInterval` with `Delay` missed-tick behavior, so a delayed tab
+    /// executes one current tick rather than replaying a catch-up burst.
     #[must_use]
     pub fn open_in_memory_with_items<P, S>(
         protocol: P,
@@ -1343,6 +1372,11 @@ impl IntegratedServer {
         let (client_end, server_end) = memory_pair();
         let shutdown = ShutdownSignal::new();
         let signal = shutdown.clone();
+        let world_state = crate::world_state::WorldStateHandle::default();
+        #[cfg(target_arch = "wasm32")]
+        let sibling_ticking = Some(sibling_tick_context(&world_state, &shutdown));
+        #[cfg(not(target_arch = "wasm32"))]
+        let sibling_ticking = None;
         let source = Arc::new(with_nether(
             ChunkStore::for_integrated_view_radius(source, view_radius),
             view_radius,
@@ -1352,34 +1386,52 @@ impl IntegratedServer {
             // `open_in_memory_with_entities`.
             crate::portal::PortalIndex::new(),
             None,
-            // Same "spawns no tick loop" contract as `open_in_memory_with_entities` —
-            // see that constructor's own comment on this argument.
-            None,
+            sibling_ticking,
         ));
         let tickets = source.primary().tickets();
-        // A fresh, empty registry for this one connection's lifetime — see
-        // `open_in_memory_with_entities`'s identical field for why nothing
-        // ticks it here.
+        // These are the registries the source itself exposes. The connection
+        // schedules into them and the shared tick body drains the same handles;
+        // a fresh default here would make scheduled water or redstone ticks an
+        // island even though the browser had a running timer.
+        #[cfg(target_arch = "wasm32")]
+        let registries = source.world_registries();
+        #[cfg(target_arch = "wasm32")]
+        let block_entities = registries
+            .as_ref()
+            .map_or_else(BlockEntityHandle::default, |r| r.block_entities.clone());
+        #[cfg(not(target_arch = "wasm32"))]
         let block_entities = BlockEntityHandle::default();
-        // The one handle that plays both roles: `destroy_block` mutates it
-        // directly through the `mobs` parameter below, and the very same
-        // handle is what `stream_pass` diffs through the `entities`
-        // parameter — see this function's own doc comment for why
-        // `MobHandle` can be its own `EntitySource` with no tick loop
-        // involved.
+        #[cfg(target_arch = "wasm32")]
+        let scheduled = registries
+            .as_ref()
+            .map_or_else(Default::default, |r| r.scheduled.clone());
         let mobs = MobHandle::default();
+        #[cfg(target_arch = "wasm32")]
+        let live_mobs = LiveMobSource::default();
+        let block_ticks = BlockTickFeed::default();
+        let explosions = ExplosionFeed::default();
+        let sleep_vote = SleepVote::default();
+        let sleep_feed = SleepFeed::default();
+        let border = crate::border::BorderFeed::default();
 
-        let world_state = crate::world_state::WorldStateHandle::default();
         let conn_world_state = world_state.clone();
         let live_save = crate::live_save::LiveSaveSlot::default();
         let conn_live_save = live_save.clone();
+        let conn_source = Arc::clone(&source);
+        let conn_mobs = mobs.clone();
+        #[cfg(target_arch = "wasm32")]
+        let conn_entities = live_mobs.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        let conn_entities = mobs.clone();
+        let conn_block_entities = block_entities.clone();
+        let conn_tickets = tickets.clone();
+        let conn_block_ticks = block_ticks.clone();
+        let conn_explosions = explosions.clone();
+        let conn_sleep_vote = sleep_vote.clone();
+        let conn_sleep_feed = sleep_feed.clone();
+        let conn_border = border.clone();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
-            let block_ticks = BlockTickFeed::default();
-            let explosions = ExplosionFeed::default();
-            let sleep_vote = crate::sleep::SleepVote::default();
-            let sleep_feed = crate::sleep::SleepFeed::default();
-            let border = crate::border::BorderFeed::default();
             let resource_packs = crate::server::ResourcePackPushFeed::default();
             let plugin_channels = crate::plugin_channels::PluginChannelRegistry::default();
             #[cfg(not(target_arch = "wasm32"))]
@@ -1389,19 +1441,19 @@ impl IntegratedServer {
                 _ = serve_connection_with_mob_events_and_commands_shared(
                     &mut conn,
                     &protocol,
-                    &source,
-                    &mobs,
+                    &conn_source,
+                    &conn_entities,
                     view_radius,
                     crate::server::MAX_CLIENT_VIEW_RADIUS,
-                    &block_entities,
-                    &mobs,
-                    &tickets,
-                    &block_ticks,
-                    &explosions,
-                    &sleep_vote,
-                    &sleep_feed,
+                    &conn_block_entities,
+                    &conn_mobs,
+                    &conn_tickets,
+                    &conn_block_ticks,
+                    &conn_explosions,
+                    &conn_sleep_vote,
+                    &conn_sleep_feed,
                     &commands,
-                    &border,
+                    &conn_border,
                     &resource_packs,
                     &plugin_channels,
                     &conn_world_state,
@@ -1414,16 +1466,78 @@ impl IntegratedServer {
             }
         });
 
+        #[cfg(target_arch = "wasm32")]
+        let clock = Arc::new(TickClock::new());
+        #[cfg(target_arch = "wasm32")]
+        let server_app = crate::ecs::ServerApp::bootstrap();
+        #[cfg(target_arch = "wasm32")]
+        let server_tick = server_app.witness();
+        #[cfg(target_arch = "wasm32")]
+        let server_world = server_app.into_world();
+        #[cfg(target_arch = "wasm32")]
+        let tick_clock = Arc::clone(&clock);
+        #[cfg(target_arch = "wasm32")]
+        let tick_source = Arc::clone(&source);
+        #[cfg(target_arch = "wasm32")]
+        let tick_mobs = mobs.clone();
+        #[cfg(target_arch = "wasm32")]
+        let tick_live_mobs = live_mobs.clone();
+        #[cfg(target_arch = "wasm32")]
+        let tick_block_entities = block_entities.clone();
+        #[cfg(target_arch = "wasm32")]
+        let tick_block_ticks = block_ticks.clone();
+        #[cfg(target_arch = "wasm32")]
+        let tick_explosions = explosions.clone();
+        #[cfg(target_arch = "wasm32")]
+        let tick_world_state = world_state.clone();
+        #[cfg(target_arch = "wasm32")]
+        let follow = crate::tick_area::TickFollow {
+            dimension: (*source).dimension(),
+            radius: crate::chunk_store::CONCURRENT_TICK_RADIUS,
+            anchors: world_state.tick_anchors().clone(),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let tick_task = spawn_tick_task(&shutdown, async move {
+            run_primary_tick_loop_with_weather(
+                server_world,
+                tick_mobs,
+                tick_live_mobs,
+                tick_block_entities,
+                tick_clock,
+                tick_source,
+                tick_block_ticks,
+                (
+                    -crate::chunk_store::CONCURRENT_TICK_RADIUS
+                        ..=crate::chunk_store::CONCURRENT_TICK_RADIUS,
+                    -crate::chunk_store::CONCURRENT_TICK_RADIUS
+                        ..=crate::chunk_store::CONCURRENT_TICK_RADIUS,
+                ),
+                tick_explosions,
+                WeatherFeed::default(),
+                WeatherState::default(),
+                &sleep_vote,
+                &sleep_feed,
+                scheduled,
+                tick_world_state,
+                follow,
+                border,
+            )
+            .await;
+        });
+        #[cfg(target_arch = "wasm32")]
+        let (tick_task, clock, server_tick) = (Some(tick_task), Some(clock), Some(server_tick));
+        #[cfg(not(target_arch = "wasm32"))]
+        let (tick_task, clock, server_tick) = (None, None, None);
+
         (
             Self {
                 #[cfg(not(target_arch = "wasm32"))]
                 local_addr: None,
                 shutdown,
                 task,
-                tick_task: None,
-                clock: None,
-                // No tick task, so nobody owns a server `World`.
-                server_tick: None,
+                tick_task,
+                clock,
+                server_tick,
                 #[cfg(not(target_arch = "wasm32"))]
                 spawn_proposals: None,
                 // Nothing seeds a mob population through this constructor
@@ -1476,6 +1590,43 @@ impl IntegratedServer {
             },
             client_end,
         )
+    }
+
+    /// Starts browser singleplayer over a caller-supplied byte transport.
+    ///
+    /// The Worker supplies a `MessagePort` transport while retaining this
+    /// server handle inside the same task that bridges the port to the existing
+    /// connection loop. The page therefore never sees a server handle or world
+    /// source. Keeping this constructor here, rather than making the shell copy
+    /// bytes around an `open_in_memory` result, keeps transport lifetime and
+    /// authoritative-world lifetime coupled.
+    #[cfg(target_arch = "wasm32")]
+    pub fn serve_with_transport<P, S, T>(
+        protocol: P,
+        source: S,
+        view_radius: i32,
+        commands: CommandDispatch,
+        mut transport: T,
+    ) where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+        T: Transport + 'static,
+    {
+        let (server, mut server_io) = Self::open_in_memory_with_items_and_commands(
+            protocol,
+            source,
+            view_radius,
+            commands,
+        );
+        spawn(async move {
+            if let Err(error) = tokio::io::copy_bidirectional(&mut server_io, &mut transport).await {
+                tracing::warn!("browser supplied server transport ended: {error}");
+            }
+            // The supplied transport is the session boundary. Once it reaches
+            // EOF/error, dropping the only handle cooperatively stops the
+            // connection and tick tasks that own this world.
+            drop(server);
+        });
     }
 
     /// Like [`open_in_memory`](Self::open_in_memory) but also streams entities:
@@ -4894,6 +5045,32 @@ fn spawn_lan_discovery(shutdown: &Arc<ShutdownSignal>, discovery: &LanDiscovery,
 }
 
 /// The gate: **world open must generate nothing at all.**
+#[cfg(test)]
+mod sibling_tick_context_tests {
+    use super::*;
+
+    #[test]
+    fn a_portal_sibling_reuses_the_primary_world_state_and_shutdown() {
+        let world_state = crate::world_state::WorldStateHandle::new();
+        world_state
+            .set_rule("random_tick_speed", "11")
+            .expect("known game rule");
+        let shutdown = ShutdownSignal::new();
+
+        let context = sibling_tick_context(&world_state, &shutdown);
+
+        assert_eq!(
+            context.world_state.random_tick_speed(),
+            11,
+            "a portal sibling must tick the primary world's rule store, not a default copy"
+        );
+        assert!(
+            Arc::ptr_eq(&context.shutdown, &shutdown),
+            "a portal sibling must stop on the same shutdown signal as its primary world"
+        );
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::collections::HashMap;
@@ -5295,7 +5472,7 @@ mod tests {
             .expect("a ticking integrated server exposes its inbound tick feed")
             .request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if server
                 .resident_block_state_id(16, 1, 0)
@@ -5304,7 +5481,7 @@ mod tests {
                 return;
             }
             assert!(
-                tokio::time::Instant::now() < deadline,
+                lodestone_time::Instant::now() < deadline,
                 "the integrated tick loop reached {:?} ticks without moving the scheduled water into chunk (1, 0)",
                 server.tick_stats().map(|stats| stats.tick_count),
             );
@@ -5340,7 +5517,7 @@ mod tests {
             .expect("a ticking integrated server exposes its inbound tick feed")
             .request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if server.resident_block_state_id(16, 1, 0).is_some_and(|state| {
                 state.name() == "minecraft:redstone_torch"
@@ -5349,7 +5526,7 @@ mod tests {
                 return;
             }
             assert!(
-                tokio::time::Instant::now() < deadline,
+                lodestone_time::Instant::now() < deadline,
                 "the integrated tick loop reached {:?} ticks without consuming the scheduled torch in column (1, 0)",
                 server.tick_stats().map(|stats| stats.tick_count),
             );
@@ -5407,7 +5584,7 @@ mod tests {
             .expect("a ticking integrated server exposes its inbound tick feed")
             .request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if server.resident_block_state_id(1, 1, 1).is_some_and(|state| {
                 state.name() == "minecraft:furnace"
@@ -5416,7 +5593,7 @@ mod tests {
                 return;
             }
             assert!(
-                tokio::time::Instant::now() < deadline,
+                lodestone_time::Instant::now() < deadline,
                 "the integrated tick loop reached {:?} ticks without handing the origin furnace effect to its world writer",
                 server.tick_stats().map(|stats| stats.tick_count),
             );
@@ -5438,7 +5615,7 @@ mod tests {
             0,
             2,
         );
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let reseeded = server
                 .mobs()
@@ -5448,7 +5625,7 @@ mod tests {
                 break;
             }
             assert!(
-                tokio::time::Instant::now() < deadline,
+                lodestone_time::Instant::now() < deadline,
                 "the integrated server never completed its initial mob simulation seed"
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -5478,7 +5655,7 @@ mod tests {
                 return;
             }
             assert!(
-                tokio::time::Instant::now() < deadline,
+                lodestone_time::Instant::now() < deadline,
                 "the integrated tick loop reached {:?} ticks without centrally publishing the cow's owned ambient effect",
                 server.tick_stats().map(|stats| stats.tick_count),
             );
@@ -6041,10 +6218,7 @@ mod tests {
             ChunkRecord, ChunkSection, StorageRecord, generated::storage_record,
         };
 
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let world_dir = std::env::temp_dir().join(format!(
             "lodestone-world-storage-{}-{unique}",
             std::process::id()
@@ -6128,10 +6302,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn persistent_server_native_dirty_save_and_reopen_uses_complete_record() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let world_dir = std::env::temp_dir().join(format!(
             "lodestone-native-production-lifecycle-{}-{unique}",
             std::process::id()
@@ -6158,7 +6329,7 @@ mod tests {
         )
         .expect("open persistent server with native lifecycle storage");
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
         while !server
             .generation_spawns
             .as_ref()
@@ -6166,7 +6337,7 @@ mod tests {
             .contains((0, 0))
         {
             assert!(
-                tokio::time::Instant::now() < deadline,
+                lodestone_time::Instant::now() < deadline,
                 "generation-spawn handoff was never acknowledged"
             );
             tokio::task::yield_now().await;
@@ -6260,10 +6431,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "manual generated native-storage measurement"]
     async fn measure_generated_mutation_heavy_native_save() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let world_dir = std::env::temp_dir().join(format!(
             "lodestone-native-generated-measurement-{}-{unique}",
             std::process::id()
@@ -6308,7 +6476,7 @@ mod tests {
             .map(|(_, _, column)| lodestone_world::ColumnLight::new(column.section_count()))
             .collect();
 
-        let started = std::time::Instant::now();
+        let started = lodestone_time::Instant::now();
         let records = storage
             .write_dirty_chunks(columns.iter().zip(&lights).map(|((cx, cz, column), light)| {
                 crate::world_storage::NativeDirtyChunkRecord::new(
@@ -6337,10 +6505,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn persistent_server_reopens_native_extension_table() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let world_dir = std::env::temp_dir().join(format!(
             "lodestone-native-extensions-server-{}-{unique}",
             std::process::id()
@@ -6421,10 +6586,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn persistent_server_reopens_native_player_without_replacing_anvil_data() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let world_dir = std::env::temp_dir().join(format!(
             "lodestone-native-player-server-{}-{unique}",
             std::process::id()
@@ -6532,10 +6694,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn persistent_server_restores_and_resaves_native_entity_roster() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let world_dir = std::env::temp_dir().join(format!(
             "lodestone-native-entity-server-{}-{unique}",
             std::process::id()
@@ -6579,7 +6738,7 @@ mod tests {
             first_storage,
         )
         .expect("open first persistent server");
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             let restored = server.mobs().is_some_and(|mobs| {
                 mobs.with(|sim| {
@@ -6595,7 +6754,7 @@ mod tests {
             if restored {
                 break;
             }
-            assert!(tokio::time::Instant::now() < deadline, "native roster never reached live MobSim");
+            assert!(lodestone_time::Instant::now() < deadline, "native roster never reached live MobSim");
             tokio::task::yield_now().await;
         }
         server.shutdown().await;
@@ -6627,10 +6786,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn persistent_server_reopens_native_chunk_with_biome_metadata_and_light() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let world_dir = std::env::temp_dir().join(format!(
             "lodestone-native-chunk-server-{}-{unique}",
             std::process::id()

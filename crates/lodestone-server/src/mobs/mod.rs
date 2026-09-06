@@ -11265,10 +11265,10 @@ mod item_owner_tests {
             let sim = dense_item_owner_fixture(item_count);
             let world = sim.world;
             let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
-            let started = std::time::Instant::now();
+            let started = lodestone_time::Instant::now();
             let _ = sim.tick_item_owner_batches_with_workers(&state_at, 1);
             let serial = started.elapsed();
-            let started = std::time::Instant::now();
+            let started = lodestone_time::Instant::now();
             let _ = sim.tick_item_owner_batches_with_workers(&state_at, 4);
             let parallel = started.elapsed();
             eprintln!(
@@ -11622,10 +11622,10 @@ mod follow_range_tests {
     #[ignore = "manual dense-scene throughput measurement"]
     fn measure_dense_entity_push_region_workers() {
         let sim = dense_push_owner_fixture(2_048);
-        let started = std::time::Instant::now();
+        let started = lodestone_time::Instant::now();
         let _ = serial_pair_push_impulses(&sim);
         let serial = started.elapsed();
-        let started = std::time::Instant::now();
+        let started = lodestone_time::Instant::now();
         let _ = sim.tick_entity_push_owner_batches_with_workers(4);
         let parallel = started.elapsed();
         eprintln!(
@@ -11776,10 +11776,10 @@ mod follow_range_tests {
     fn measure_dense_burn_owner_workers() {
         for mob_count in [128, 256, 512, 1_024, 2_048] {
             let sim = dense_burn_owner_fixture(mob_count);
-            let started = std::time::Instant::now();
+            let started = lodestone_time::Instant::now();
             let _ = sim.tick_burning_owner_batches_with_workers(1);
             let serial = started.elapsed();
-            let started = std::time::Instant::now();
+            let started = lodestone_time::Instant::now();
             let _ = sim.tick_burning_owner_batches_with_workers(4);
             let parallel = started.elapsed();
             eprintln!(
@@ -13890,10 +13890,10 @@ mod leash_tests {
     fn measure_dense_leash_owner_workers() {
         for leash_count in [256, 2_048] {
             let sim = dense_leash_owner_fixture(leash_count);
-            let started = std::time::Instant::now();
+            let started = lodestone_time::Instant::now();
             let _ = sim.tick_leash_owner_batches_with_workers(1);
             let serial = started.elapsed();
-            let started = std::time::Instant::now();
+            let started = lodestone_time::Instant::now();
             let _ = sim.tick_leash_owner_batches_with_workers(4);
             let parallel = started.elapsed();
             eprintln!(

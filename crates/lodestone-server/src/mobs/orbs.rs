@@ -922,10 +922,10 @@ mod experience_orb_tests {
         for orb_count in [256, 2_048] {
             let sim = dense_orb_owner_fixture(&world, orb_count).0;
             let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
-            let started = std::time::Instant::now();
+            let started = lodestone_time::Instant::now();
             let _ = sim.tick_orb_owner_batches_with_workers(&state_at, 1);
             let serial = started.elapsed();
-            let started = std::time::Instant::now();
+            let started = lodestone_time::Instant::now();
             let _ = sim.tick_orb_owner_batches_with_workers(&state_at, 4);
             let parallel = started.elapsed();
             eprintln!(

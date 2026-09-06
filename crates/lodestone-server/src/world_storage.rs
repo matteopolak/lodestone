@@ -3185,10 +3185,7 @@ mod tests {
 
     #[test]
     fn native_player_locator_reopens_without_touching_anvil_player_data() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-player-record-{}-{unique}",
             std::process::id()
@@ -3255,10 +3252,7 @@ mod tests {
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
 
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-world-properties-{}-{unique}",
             std::process::id()
@@ -3289,10 +3283,7 @@ mod tests {
 
     #[test]
     fn native_player_locator_refuses_the_same_compact_key_for_another_uuid() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-player-collision-{}-{unique}",
             std::process::id()
@@ -3414,10 +3405,7 @@ mod tests {
 
     #[test]
     fn native_resident_entity_reopens_with_stable_identity_type_and_pose() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-entity-record-{}-{unique}",
             std::process::id()
@@ -3458,10 +3446,7 @@ mod tests {
 
     #[test]
     fn native_entity_roster_is_atomic_liveness_and_skips_unchanged_bodies() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-entity-roster-{}-{unique}",
             std::process::id()
@@ -3515,10 +3500,7 @@ mod tests {
 
     #[test]
     fn native_player_and_entity_with_the_same_uuid_use_separate_typed_keys() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-general-key-domains-{}-{unique}",
             std::process::id()
@@ -3564,10 +3546,7 @@ mod tests {
 
     #[test]
     fn native_general_snapshot_decodes_reserved_typed_records_in_key_order() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-general-snapshot-{}-{unique}",
             std::process::id()
@@ -3637,10 +3616,7 @@ mod tests {
 
     #[test]
     fn native_general_snapshot_refuses_a_typed_body_under_the_wrong_key() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-general-snapshot-key-{}-{unique}",
             std::process::id()
@@ -3684,10 +3660,7 @@ mod tests {
 
     #[test]
     fn native_chunk_snapshot_decodes_complete_records_in_coordinate_order() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-chunk-snapshot-{}-{unique}",
             std::process::id()
@@ -3754,10 +3727,7 @@ mod tests {
 
     #[test]
     fn native_chunk_snapshot_refuses_a_terrain_only_record_before_export() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-chunk-snapshot-incomplete-{}-{unique}",
             std::process::id()
@@ -3839,10 +3809,7 @@ mod tests {
 
     #[test]
     fn native_chunk_reopens_as_the_same_real_block_grid() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-chunk-record-{}-{unique}",
             std::process::id()
@@ -3922,10 +3889,7 @@ mod tests {
 
     #[test]
     fn native_chunk_reopens_canonical_light_without_expanding_uniform_layers() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-chunk-light-{}-{unique}",
             std::process::id()
@@ -3988,10 +3952,7 @@ mod tests {
 
     #[test]
     fn native_chunk_reopen_refuses_a_terrain_only_record() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-chunk-missing-light-{}-{unique}",
             std::process::id()
@@ -4016,10 +3977,7 @@ mod tests {
 
     #[test]
     fn native_chunk_reopens_surface_and_three_dimensional_biomes() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let directory = std::env::temp_dir().join(format!(
             "lodestone-native-chunk-biomes-{}-{unique}",
             std::process::id()
