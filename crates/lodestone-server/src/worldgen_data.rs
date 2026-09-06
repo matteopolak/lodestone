@@ -3910,6 +3910,11 @@ mod single_biome_and_debug_world_selection {
             "minecraft:sulfur",
             "the external surface oracle reports sulfur at this fixed-biome point"
         );
+        assert_eq!(
+            column.block_state(13, -11, 5),
+            "minecraft:cinnabar",
+            "the external surface oracle reports cinnabar at this fixed-biome point"
+        );
     }
 
     #[test]
