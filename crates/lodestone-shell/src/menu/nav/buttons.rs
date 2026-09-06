@@ -12,8 +12,7 @@ use super::{Screen, SessionKind};
 /// banned account, vanilla's own title-screen rendering).
 ///
 /// The three 20×20 icon buttons use the shared icon-button row;
-/// the layout positions them with
-/// `getHorizontalPosition(i, 3, 20)`.
+/// the layout positions them evenly across the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainButton {
     /// Open the singleplayer world list ([`Screen::WorldSelect`]) —
@@ -432,9 +431,7 @@ impl PauseButton {
     }
 }
 
-/// The multiplayer screen's title — `multiplayer.title`'s `en_us` string
-///, which
-/// `HeaderAndFooterLayout.addTitleHeader` centres in the header band.
+/// The multiplayer screen's title, centred in the header band.
 pub const SERVER_LIST_TITLE: &str = "Play Multiplayer";
 
 /// The multiplayer screen's seven footer buttons, in the order they are

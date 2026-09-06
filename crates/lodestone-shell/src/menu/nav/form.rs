@@ -47,11 +47,11 @@ pub mod sign_edit_row {
 /// permanently inactive, on the grounds that `ServerEntry` carried no
 /// `pack_status` field to cycle; that gap is closed.
 pub const RESOURCE_PACK_ROW: usize = 2;
-/// `CommonComponents.GUI_DONE` — saves the
+/// The Done row — saves the
 /// form. A real, clickable row alongside the existing Enter/Tab keyboard path
 /// (see [`MenuNav::click`]'s `Screen::ServerEdit` arm).
 pub const DONE_ROW: usize = 3;
-/// `CommonComponents.GUI_CANCEL` — discards
+/// The Cancel row — discards
 /// the form. See [`DONE_ROW`].
 pub const CANCEL_ROW: usize = 4;
 
@@ -59,10 +59,10 @@ pub const CANCEL_ROW: usize = 4;
 ///
 /// It matters for exactly two things — the **relative** y order of the two
 /// fields (which is what makes Up/Down move between them, since arrow
-/// navigation is geometric) and the box **width** `displayPos` scrolls against.
+/// navigation is geometric) and the box **width** scrolls against.
 /// `super::render::row_rect` centres the stack vertically, so the ordering holds
-/// at every canvas, and it clamps the width to `ROW_W` at every canvas at least
-/// `ROW_W + 2 * PAD` wide — so a seeded box is correct everywhere that is not a
+/// at every canvas, and it clamps the width to the configured row width at every
+/// canvas at least one horizontal padding unit wider — so a seeded box is correct everywhere that is not a
 /// pathologically narrow window.
 ///
 /// It is a *seed*, not the draw geometry: `super::render::build` moves a
@@ -136,8 +136,8 @@ pub enum FormOutcome {
 /// [`super::render::frame_for`], every frame. That is fine for a button, whose
 /// whole state is derivable, and impossible for a text field: rebuilding one
 /// would reset the caret, the selection and the scroll offset sixty times a
-/// second. `Screen.rebuildWidgets` has exactly this consequence in vanilla too
-/// — it calls `clearFocus()`, so a rebuilt screen has no
+/// second. Rebuilding the screen has exactly this consequence in the reference
+/// client too — it clears focus, so a rebuilt screen has no
 /// focus by construction.
 ///
 /// This is menu widget state rather than derived state. The layout's
@@ -188,8 +188,8 @@ impl EditForm {
         let [name_rect, address_rect] =
             super::render::field_row_rects(SEED_CANVAS.0, SEED_CANVAS.1);
         // The narration text was "Name"/"Address" — plausible-looking and
-        // wrong. Vanilla's are `manageServer.enterName`/`manageServer.enterIp`
-        //, whose English language-table values are
+        // wrong. The reference labels are
+        // "Server Name"/"Server Address", whose English language-table values are
         // "Server Name"/"Server Address" — which happen to already be what
         // `render.rs`'s (unrelated) `detail` line under each field shows, so
         // this was invisible on screen and only wrong to a screen reader.
@@ -197,8 +197,8 @@ impl EditForm {
             EditBox::new(name_rect.0, name_rect.1, name_rect.2, name_rect.3, "Server Name")
                 .with_max_length(MAX_NAME_CHARS);
         // Vanilla shows a default hint name here while the field is empty and
-        // unfocused (`EditBox.hint`'s own doc) — this is Lodestone's own hint
-        // text rather than vanilla's `selectServer.defaultName`, since the
+        // unfocused — this is Lodestone's own hint text rather than the
+        // reference client's default server name, since the
         // field labels a server the user is adding, not naming our product.
         name.hint = Some("My Server".to_string());
         let mut fields = FormFields {
@@ -306,9 +306,9 @@ impl EditForm {
     /// 262/263 and declines 264/265, so the vertical
     /// pair falls through to navigation and the horizontal pair never gets there.
     pub fn handle_key(&mut self, key: MenuKey) -> FormOutcome {
-        // A printable character is `charTyped`, a *different* callback in vanilla
+        // A printable character is handled by a *different* callback in the reference client
         // — see `super::focus::KeyEvent::from_menu_key`. Routing it through
-        // `keyPressed` would make the letter `a` and Ctrl+A the same event.
+        // routing it through the key handler would make the letter `a` and Ctrl+A the same event.
         if let MenuKey::Char(ch) = key {
             self.focus.char_typed(&mut self.fields, ch);
             return FormOutcome::Handled;
@@ -395,7 +395,7 @@ impl EditForm {
     /// Moves focus to the other field, through real Tab traversal.
     ///
     /// With two children this is also the wrap, and the wrap is vanilla's
-    /// `clearFocus()`-then-retry rather than modular arithmetic — see
+    /// clear-focus-then-retry rather than modular arithmetic — see
     /// [`super::focus`].
     pub fn next_field(&mut self) {
         self.focus
