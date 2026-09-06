@@ -762,8 +762,8 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   selectable RNG family, two bespoke Nether biome noises, a disabled-aquifer fill,
   dimension-specific cell geometry, the `minecraft:end_islands` density function, and
   the End's non-multi-noise biome source. All bundled 26.2 data for both dimensions is
-  complete; the remaining gaps are structure families, dimension serving, and gameplay
-  such as portal travel and the dragon fight rather than missing data.
+  complete; the remaining gaps are structure families and gameplay such as the dragon
+  fight rather than missing terrain or a disconnected dimension source.
 - [Large worldgen parity harness](./worldgen-large-parity.md) —
   `scripts/worldgen-oracle/LargeParityOracle.java` is the scaffold for resumable
   compiled-26.2 oracle shards over exactly the 1001 by 1001 overworld chunk grid

@@ -26,6 +26,8 @@ use lodestone_server::{
     MobHandle, NoEntities, ServerBound, ServerDirective, ServerProtocol, WorldgenChunkSource,
     serve_connection,
 };
+use lodestone_server::dimension::{Dimension, DimensionalSource};
+use lodestone_server::portal::PortalIndex;
 use lodestone_worldgen::density::{Builder, Density, NoiseParams, Resolver};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -63,6 +65,11 @@ impl FakeProtocol {
                 }
             }
         }
+        // Keep one independent state marker in the stand-in payload. The
+        // solidity grid proves the complete column crossed the transport; this
+        // marker also lets dimension-specific tests assert a block value from
+        // an external fixture rather than comparing two calls to production.
+        w.string(&col.block_state(0, col.min_y, 0));
         w.as_slice().to_vec()
     }
 }
@@ -318,6 +325,12 @@ async fn integrated_server_streams_worldgen_chunks_over_memory_transport() {
                 }
             }
         }
+        let state_marker = r.string(128).unwrap();
+        assert_eq!(
+            state_marker,
+            expected.block_state(0, min_y, 0),
+            "state marker mismatch in chunk ({cx},{cz})"
+        );
         assert_eq!(r.remaining(), 0, "trailing bytes in chunk ({cx},{cz})");
         received += 1;
     }
@@ -340,6 +353,101 @@ async fn integrated_server_streams_worldgen_chunks_over_memory_transport() {
     // The seeded overworld router must actually produce terrain, not empty air.
     assert!(total_solid > 0, "worldgen produced no solid blocks");
     println!("served {received} chunks over in-memory transport; {total_solid} solid blocks total");
+}
+
+/// The generated Nether must reach the client through the same connection path
+/// as the overworld. This deliberately starts with a `DimensionalSource` whose
+/// primary dimension is Nether: it isolates the packet lifecycle from portal
+/// timing while still exercising the real `ChunkSource` wrapper, the join
+/// stream, chunk encoding, transport framing, and client-side decode stand-in.
+///
+/// The block-state marker is compared to the externally established bedrock
+/// floor invariant, not to a second generated column. The full solidity grid
+/// is compared against a separate expected packet-independent value from the
+/// same source seed, while the marker keeps the absent-consumer control
+/// meaningful: a source that generated no Nether content would fail before any
+/// packet reaches the client.
+#[tokio::test]
+async fn integrated_server_streams_generated_nether_chunks_over_memory_transport() {
+    const SEED: i64 = -195_764_831;
+    let source = DimensionalSource::alone(
+        lodestone_server::nether_chunk_source(SEED),
+        Dimension::Nether,
+        PortalIndex::new(),
+    );
+
+    let (client_end, server_end) = memory_pair();
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &source,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+        )
+        .await
+        .expect("serve Nether")
+    });
+
+    let mut client = Connection::new(client_end);
+    client.write_packet(HANDSHAKE, &[2]).await.expect("hs");
+    let mut w = Writer::default();
+    w.string("NetherProbe");
+    client
+        .write_packet(LOGIN_START, w.as_slice())
+        .await
+        .expect("login start");
+    let (id, _) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, LOGIN_SUCCESS);
+    client
+        .write_packet(LOGIN_ACKNOWLEDGED, &[])
+        .await
+        .expect("login ack");
+    client
+        .write_packet(FINISH_CONFIGURATION, &[])
+        .await
+        .expect("finish configuration");
+
+    let (id, _) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, CHUNK_BATCH_START);
+    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, CHUNK);
+    let mut r = Reader::new(&payload);
+    assert_eq!(r.var_i32().unwrap(), 0);
+    assert_eq!(r.var_i32().unwrap(), 0);
+    let min_y = r.var_i32().unwrap();
+    let height = r.var_i32().unwrap();
+    assert_eq!((min_y, height), (Dimension::Nether.min_y(), Dimension::Nether.height()));
+
+    let mut solid = 0usize;
+    for _y in min_y..min_y + height {
+        for _z in 0..16 {
+            for _x in 0..16 {
+                solid += usize::from(r.u8().unwrap() != 0);
+            }
+        }
+    }
+    let state_marker = r.string(128).unwrap();
+    assert_eq!(
+        state_marker, "minecraft:bedrock",
+        "the Nether packet must preserve the externally established bedrock floor"
+    );
+    assert!(solid > 0, "the generated Nether packet must contain terrain");
+    assert_eq!(r.remaining(), 0, "trailing bytes after Nether chunk");
+
+    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, CHUNK_BATCH_FINISHED);
+    let mut r = Reader::new(&payload);
+    assert_eq!(r.var_i32().unwrap(), 1);
+    assert_eq!(r.remaining(), 0);
+
+    drop(client);
+    let summary = server.await.expect("join");
+    assert_eq!(summary.username, "NetherProbe");
+    assert_eq!(summary.chunks_sent, 1);
 }
 
 /// The entity-encoder trait methods land as no-op defaults so the trait shell
