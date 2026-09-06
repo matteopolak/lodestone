@@ -87,7 +87,7 @@ use lodestone_server::crafting::{
 };
 use lodestone_world::{
     ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
-    LightProperties, compute_column_light,
+    LightProperties, Neighbourhood, compute_column_light, compute_column_light_with_neighbours,
 };
 use lodestone_data::block::Block;
 use lodestone_data::item::Item;
@@ -2730,20 +2730,16 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
 
 /// Encodes one [`WorldChunkColumn`] into the `level_chunk_with_light` body,
 /// mirroring `LevelChunkWithLight`'s decode in `packets::chunk` exactly:
-/// `x`, `z`, empty heightmaps, the length-prefixed section blob (per section
-/// two leading shorts — non-air count then fluid count, always `0` — then the
+/// `x`, `z`, the four client heightmaps, the length-prefixed section blob (per
+/// section two leading shorts — non-air count then fluid count — then the
 /// block-state container then the biome container), the block-entity list
 /// ([`encode_block_entities`]), then the trailing light payload.
 ///
-/// Heightmaps now carry the generator's real `MOTION_BLOCKING` map when the
-/// column has one — `Heightmap::new(world_height)` picks its own
-/// 9-bit width from `height_bits`, so no width is chosen here. A column from
-/// anywhere but the generator (`ChunkColumn::new`, a region-file load) still
-/// sends the zero-entry NBT it always sent: valid and decodable, simply empty.
-/// The other three sent maps (`WORLD_SURFACE`, `OCEAN_FLOOR`,
-/// `MOTION_BLOCKING_NO_LEAVES`) are deliberately still absent — see
-/// `docs/motion-blocking-heightmap.md` for why sending `NO_LEAVES` today would
-/// send a knowingly wrong map.
+/// Every client heightmap is freshly scanned from the exact state ids this
+/// packet writes. That makes a generated, imported, or player-edited column
+/// agree with its own payload; a retained generator `MOTION_BLOCKING` snapshot
+/// is no longer a stale special case. `Heightmap::new` picks the 9-bit width
+/// from the shape, so no width is chosen here.
 ///
 /// **`light` is no longer all-`Missing`.** It is the caller's
 /// computed [`ColumnLight`]; see [`compute_served_light`] for where it comes
@@ -2760,16 +2756,7 @@ fn encode_column_body(
     w.i32(cx);
     w.i32(cz);
 
-    let mut heightmaps = Heightmaps::new();
-    if let Some(stored) = source.motion_blocking() {
-        let mut map = Heightmap::new(source.height as u32);
-        for lz in 0..16usize {
-            for lx in 0..16usize {
-                map.set(lx, lz, u32::from(stored[lx + lz * 16]));
-            }
-        }
-        heightmaps.insert(MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, map);
-    }
+    let heightmaps = served_heightmaps(shape, source);
     heightmaps.encode(&mut w);
 
     let mut section_blob = Writer::default();
@@ -2791,7 +2778,7 @@ fn encode_column_body(
             }
         };
         section_blob.i16(section.non_air_count() as i16);
-        section_blob.i16(0); // fluid count: this pipeline models no fluids yet
+        section_blob.i16(fluid_count(section) as i16);
         section.block_states().encode(&mut section_blob);
         section.biomes().encode(&mut section_blob);
     }
@@ -2809,6 +2796,95 @@ fn encode_column_body(
     light.encode(&mut w);
 
     w.into_vec()
+}
+
+/// The four client-visible heightmap type ids in the protocol-776 registry.
+/// They are explicit ids, not declaration positions: the source registry gives
+/// the two world-generation-only forms ids 0 and 2, leaving the client forms
+/// at 1, 3, 4, and 5.
+const WORLD_SURFACE_HEIGHTMAP_TYPE_ID: u32 = 1;
+const OCEAN_FLOOR_HEIGHTMAP_TYPE_ID: u32 = 3;
+const MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID: u32 = 5;
+
+/// Builds every heightmap a completed chunk sends from its current state ids.
+///
+/// The stored value is the first free Y relative to the wire shape's minimum,
+/// so the all-air answer is zero. Scanning the shape rather than the source's
+/// allocation is deliberate: short test columns are padded with air on the
+/// wire and must therefore have the same heightmaps as their decoded form.
+type HeightmapPredicate = fn(lodestone_data::block_states::StateId) -> bool;
+
+fn served_heightmaps(shape: &ChunkShape, source: &ServerChunkColumn) -> Heightmaps {
+    let mut maps = Heightmaps::new();
+    let predicates: [(u32, HeightmapPredicate); 4] = [
+        (WORLD_SURFACE_HEIGHTMAP_TYPE_ID, heightmap_world_surface),
+        (OCEAN_FLOOR_HEIGHTMAP_TYPE_ID, heightmap_ocean_floor),
+        (MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, heightmap_motion_blocking),
+        (
+            MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
+            heightmap_motion_blocking_no_leaves,
+        ),
+    ];
+    for (type_id, includes) in predicates {
+        let mut map = Heightmap::new(shape.world_height);
+        for z in 0..16i32 {
+            for x in 0..16i32 {
+                let stored = (shape.min_y..shape.min_y + shape.world_height as i32)
+                    .rev()
+                    .find(|&y| includes(source.resolved_block_state_id(x, y, z)))
+                    .map_or(0, |y| (y + 1 - shape.min_y) as u32);
+                map.set(x as usize, z as usize, stored);
+            }
+        }
+        maps.insert(type_id, map);
+    }
+    maps
+}
+
+fn heightmap_world_surface(state: lodestone_data::block_states::StateId) -> bool {
+    state != lodestone_data::block_states::air_state()
+}
+
+fn heightmap_ocean_floor(state: lodestone_data::block_states::StateId) -> bool {
+    lodestone_data::block_solidity::blocks_motion(state)
+}
+
+fn heightmap_motion_blocking(state: lodestone_data::block_states::StateId) -> bool {
+    heightmap_ocean_floor(state) || lodestone_data::snow_support::has_fluid_state(state)
+}
+
+fn heightmap_motion_blocking_no_leaves(state: lodestone_data::block_states::StateId) -> bool {
+    heightmap_motion_blocking(state) && !is_leaves(state.block())
+}
+
+fn is_leaves(block: Block) -> bool {
+    matches!(
+        block,
+        Block::OakLeaves
+            | Block::SpruceLeaves
+            | Block::BirchLeaves
+            | Block::JungleLeaves
+            | Block::AcaciaLeaves
+            | Block::CherryLeaves
+            | Block::DarkOakLeaves
+            | Block::PaleOakLeaves
+            | Block::MangroveLeaves
+            | Block::AzaleaLeaves
+            | Block::FloweringAzaleaLeaves
+    )
+}
+
+/// Counts states with a non-empty fluid state in one section. The field counts
+/// waterlogged blocks as well as liquid blocks, and is derived from the exact
+/// container the encoder writes so it cannot disagree with the following state
+/// bytes even when a short test column is padded to a dimension window.
+fn fluid_count(section: &ChunkSection) -> u16 {
+    (0..section.block_states().entry_count())
+        .filter(|&index| {
+            lodestone_data::block_states::StateId::new(section.block_states().get(index))
+                .is_some_and(lodestone_data::snow_support::has_fluid_state)
+        })
+        .count() as u16
 }
 
 /// Writes the chunk packet's block-entity array: a VarInt count
@@ -2917,23 +2993,41 @@ impl LightProperties for V770LightProps {
 /// light decays at least one level per block and `15 < 16` so no source beyond
 /// the immediate neighbours can reach the centre.
 ///
-/// This function cannot call it: `encode_chunk` is handed one column, and at
-/// join the columns arrive in spiral ring order, so a column's *outward*
-/// neighbours have not been generated yet when it is encoded. Consulting only
-/// the neighbours seen so far would bias every column's outward edge dark —
-/// worse than a symmetric residual.
-///
-/// So this is the isolated compute, and the residual is a **measured, gated
-/// number**, not a caveat: `tests/server_light.rs`'s
-/// `served_light_has_no_cross_chunk_seam_residual` recomputes the same terrain
-/// with a full 3×3 neighbourhood and fails, printing a bounding box, if the two
-/// disagree anywhere. The day the generator grows terrain whose light genuinely
-/// spans a seam, that gate goes red and the fix is the brokered
-/// `lodestone-server` patch recorded in `DESIGN.md` §12.117: compute light in the
-/// chunk source, where the neighbourhood is already resident, and carry it on
-/// [`ServerChunkColumn`].
+/// The one-column `ChunkEncoder` remains isolated because it is movable into a
+/// worker that only owns one generated column. The ordinary server path detects
+/// this family's cross-column capability, keeps that work on the connection
+/// task, and calls `try_encode_chunk_with_neighbours` with every already
+/// resident neighbour. A missing neighbour is an opaque seam rather than an
+/// implicit generation request, so join order never changes terrain or blocks
+/// input handling. The same 3×3 computation serves light updates.
 fn compute_served_light(column: &WorldChunkColumn) -> ColumnLight {
     compute_column_light(column, &V770LightProps)
+}
+
+/// Computes a served light update with the loaded 3×3 neighbourhood. The
+/// server supplies every neighbouring source column after a block change; this
+/// conversion keeps state resolution and the light census on the same side of
+/// the version seam as the ordinary column encoder.
+fn compute_served_light_with_neighbours(
+    column: &ServerChunkColumn,
+    neighbours: &[(i32, i32, ServerChunkColumn)],
+) -> ColumnLight {
+    let shape = shape_for_column(column);
+    let center = build_world_column(&shape, column);
+    let neighbour_columns = neighbours
+        .iter()
+        .map(|(_, _, neighbour)| build_world_column(&shape, neighbour))
+        .collect::<Vec<_>>();
+    let mut neighbourhood = Neighbourhood::new(&center);
+    for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_columns) {
+        if (*dx, *dz) == (0, 0) {
+            // Persistent-save callers carry a full 3×3 snapshot including the
+            // centre; `Neighbourhood` already owns that one separately.
+            continue;
+        }
+        neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
+    }
+    compute_column_light_with_neighbours(&neighbourhood, &V770LightProps)
 }
 
 /// Server-side implementation of the protocol-776 (Minecraft 26.2) wire
@@ -3326,8 +3420,9 @@ fn shape_for_column(column: &ServerChunkColumn) -> ChunkShape {
 /// therefore movable into the `spawn_blocking` closure that generated the column
 /// — which is where these 62 M instructions per column belong, and specifically
 /// not on the connection task that owes the player a reply to their block break.
-/// `ServerProtocol::encode_chunk` calls straight through, so the two cannot
-/// drift.
+/// `ServerProtocol::encode_chunk` calls straight through for a one-column
+/// caller, so those two forms cannot drift. The server uses its separate
+/// neighbour-bearing encode hook when resident adjacent columns exist.
 impl ChunkEncoder for V770ServerProtocol {
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ServerChunkColumn) -> ServerDirective {
         let shape = shape_for_column(column);
@@ -4885,12 +4980,11 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// The same computation [`encode_chunk`](ServerProtocol::encode_chunk)
-    /// performs — [`build_world_column`] to resolve state ids, then
-    /// [`compute_served_light`] — so a `light_update` and a full column resend
-    /// carry identical light for identical terrain. Read
-    /// [`compute_served_light`]'s doc for why this is the isolated compute and
-    /// what the residual is.
+    /// The isolated fallback computation: [`build_world_column`] resolves state
+    /// ids, then [`compute_served_light`] floods one column. The server calls
+    /// [`Self::compute_column_light_with_neighbours`] for this family, so this
+    /// remains for one-column callers and must not become a second source of
+    /// cross-column policy.
     fn compute_column_light(&self, column: &ServerChunkColumn) -> Option<ColumnLight> {
         // Through `shape_for_column` for the same reason `encode_chunk` is: a
         // `light_update` that framed a Nether column against the overworld's 24
@@ -4899,6 +4993,35 @@ impl ServerProtocol for V770ServerProtocol {
         // happen.
         let shape = shape_for_column(column);
         Some(compute_served_light(&build_world_column(&shape, column)))
+    }
+
+    fn uses_cross_column_light(&self) -> bool {
+        true
+    }
+
+    fn try_encode_chunk_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ServerChunkColumn,
+        neighbours: &[(i32, i32, ServerChunkColumn)],
+    ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
+        let shape = shape_for_column(column);
+        let world_column = build_world_column(&shape, column);
+        let light = compute_served_light_with_neighbours(column, neighbours);
+        let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
+        Ok(ServerDirective::Send {
+            packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
+            payload,
+        })
+    }
+
+    fn compute_column_light_with_neighbours(
+        &self,
+        column: &ServerChunkColumn,
+        neighbours: &[(i32, i32, ServerChunkColumn)],
+    ) -> Option<ColumnLight> {
+        Some(compute_served_light_with_neighbours(column, neighbours))
     }
 
     fn welcome_message(&self) -> Vec<ServerDirective> {
@@ -7085,8 +7208,8 @@ mod block_edit_tests {
         // variance assertion here would be false, not stronger.)
         assert!(expected.iter().all(|&h| h > 0), "{expected:?}");
 
-        // An all-air column has no generated map at all, and still frames a
-        // valid zero-entry NBT.
+        // An all-air column still carries all four client maps, each at its
+        // documented zero (the first available Y is the build minimum).
         let empty = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
         let directive = ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &empty);
         let payload = match directive {
@@ -7096,7 +7219,151 @@ mod block_edit_tests {
         let mut r = Reader::new(&payload);
         let decoded = LevelChunkWithLight::decode(&mut r, &shape).expect("decode empty column");
         r.ensure_empty().expect("no trailing bytes");
-        assert!(decoded.heightmaps.is_empty());
+        assert_eq!(decoded.heightmaps.len(), 4);
+        for (_, map) in decoded.heightmaps.iter() {
+            assert!(
+                (0..16).all(|z| (0..16).all(|x| map.get(x, z) == 0)),
+                "all-air heightmap must be zero: {map:?}"
+            );
+        }
+    }
+
+    /// Both chunk-section count shorts are client-visible fields. This is the
+    /// control the older all-zero fluid counter could not pass: two distinct
+    /// fluid levels must retain their exact state ids *and* raise the section
+    /// fluid count to two, while non-fluid air remains out of both counts.
+    #[test]
+    fn encode_chunk_counts_and_preserves_fluid_levels() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::overworld_1_21();
+        let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        source.set_block(1, shape.min_y, 2, "minecraft:water[level=7]");
+        source.set_block(3, shape.min_y, 4, "minecraft:lava[level=3]");
+
+        let directive = ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &source);
+        let payload = match directive {
+            ServerDirective::Send { payload, .. } => payload,
+            other => panic!("expected Send, got {other:?}"),
+        };
+
+        // Read the section prefix directly. The public decoder deliberately
+        // discards these redundant counters after consuming them, so decoding
+        // a round trip alone cannot distinguish a truthful count from zero.
+        let mut r = Reader::new(&payload);
+        r.i32().expect("chunk x");
+        r.i32().expect("chunk z");
+        Heightmaps::decode(shape.world_height, &mut r).expect("heightmaps");
+        let blob_len = r.var_i32().expect("section blob length") as usize;
+        let mut blob = r.take_reader(blob_len).expect("section blob");
+        assert_eq!(blob.i16().expect("non-air count"), 2);
+        assert_eq!(blob.i16().expect("fluid count"), 2);
+
+        let mut decoder = Reader::new(&payload);
+        let decoded = LevelChunkWithLight::decode(&mut decoder, &shape).expect("decode chunk");
+        decoder.ensure_empty().expect("no trailing bytes");
+        for (x, z, expected_level) in [(1, 2, "7"), (3, 4, "3")] {
+            let state = decoded.column.get_block(x, shape.min_y, z);
+            assert_eq!(
+                lodestone_data::block_states::StateId::new(state)
+                    .expect("built-in state")
+                    .properties(),
+                [("level", expected_level)],
+                "fluid level at ({x}, {z})"
+            );
+        }
+    }
+
+    /// The four heightmaps do not share one predicate: a top leaf and water
+    /// distinguish the visible surface, material floor, and no-leaves maps.
+    /// The expected stored heights use the external registry's four predicates
+    /// and the `first free Y - min Y` representation, not this encoder's scan.
+    #[test]
+    fn encode_chunk_carries_each_client_heightmap() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::overworld_1_21();
+        let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        source.set_block(0, -60, 0, "minecraft:stone");
+        source.set_block(0, -56, 0, "minecraft:water[level=0]");
+        source.set_block(0, -52, 0, "minecraft:oak_leaves[persistent=true,distance=7,waterlogged=false]");
+
+        let directive = ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &source);
+        let payload = match directive {
+            ServerDirective::Send { payload, .. } => payload,
+            other => panic!("expected Send, got {other:?}"),
+        };
+        let mut r = Reader::new(&payload);
+        let decoded = LevelChunkWithLight::decode(&mut r, &shape).expect("decode chunk");
+        r.ensure_empty().expect("no trailing bytes");
+
+        assert_eq!(decoded.heightmaps.len(), 4);
+        assert_eq!(
+            decoded
+                .heightmaps
+                .get(WORLD_SURFACE_HEIGHTMAP_TYPE_ID)
+                .expect("WORLD_SURFACE")
+                .get(0, 0),
+            13
+        );
+        assert_eq!(
+            decoded
+                .heightmaps
+                .get(OCEAN_FLOOR_HEIGHTMAP_TYPE_ID)
+                .expect("OCEAN_FLOOR")
+                .get(0, 0),
+            13
+        );
+        assert_eq!(
+            decoded
+                .heightmaps
+                .get(MOTION_BLOCKING_HEIGHTMAP_TYPE_ID)
+                .expect("MOTION_BLOCKING")
+                .get(0, 0),
+            13
+        );
+        assert_eq!(
+            decoded
+                .heightmaps
+                .get(MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID)
+                .expect("MOTION_BLOCKING_NO_LEAVES")
+                .get(0, 0),
+            9
+        );
+    }
+
+    /// The server's initial-chunk path supplies resident neighbours to the
+    /// version encoder. A source in the east column must illuminate the centre
+    /// column's east edge; the one-column encoder is the control that must not
+    /// accidentally pass this test.
+    #[test]
+    fn neighbour_aware_chunk_encoding_lights_across_the_east_seam() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::overworld_1_21();
+        let center = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        let mut east = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        east.set_block(0, 0, 0, "minecraft:glowstone");
+
+        let proto = V770ServerProtocol;
+        let decode_light = |directive: ServerDirective| {
+            let ServerDirective::Send { payload, .. } = directive else {
+                panic!("chunk encoder must send a packet");
+            };
+            let mut r = Reader::new(&payload);
+            let decoded = LevelChunkWithLight::decode(&mut r, &shape).expect("decode chunk");
+            r.ensure_empty().expect("no trailing bytes");
+            decoded.light.section_light(5).block_at(15, 0, 0)
+        };
+        let isolated = decode_light(ServerProtocol::encode_chunk(&proto, 0, 0, &center));
+        let with_east = decode_light(
+            proto
+                .try_encode_chunk_with_neighbours(0, 0, &center, &[(1, 0, east)])
+                .expect("neighbour-aware encoding"),
+        );
+
+        assert_eq!(isolated, 0, "control: no local source reaches this cell");
+        assert_eq!(with_east, 14, "east-neighbour source crosses one air cell");
     }
 
     /// The island check for real per-quart biome assignment: it must
