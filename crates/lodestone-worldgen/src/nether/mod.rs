@@ -6,13 +6,14 @@
 //! The Nether counterpart of [`crate::overworld::OverworldGenerator`]: build one
 //! per world seed from `noise_settings/nether.json` plus a [`Resolver`] carrying
 //! the Nether's documents, then call [`NetherGenerator::column`] per chunk. It
-//! runs vanilla's own stage order — fill, per-quart biome, surface rules, carvers
-//! — and holds no version data.
+//! runs vanilla's own stage order — fill, per-quart biome, surface rules,
+//! carvers, mixed underground decoration and vegetal decoration — and holds no
+//! version data.
 //!
 //! It is a **separate type rather than a generalised `OverworldGenerator`**
-//! because five of the Overworld generator's stages have no Nether counterpart at
-//! all (ore veins, `freeze_top_layer`, the 3×3 vegetation driver, structure
-//! placement, the staged neighbour store that exists to serve those drivers), and
+//! because three of the Overworld generator's stages have no Nether counterpart at
+//! all (ore veins, `freeze_top_layer`, and the staged neighbour store that exists
+//! to serve those drivers), and
 //! four of its stages behave differently rather than merely being configured
 //! differently. Sharing the type would have meant `if nether` inside the one file
 //! this repo's own notes name as a choke point.
@@ -79,14 +80,15 @@
 //! is vanilla's behaviour and not a gap; it is written down because the opposite
 //! assumption is the natural one.
 //!
-//! ## Decoration is not here
+//! ## Decoration uses the Nether's mixed step
 //!
-//! Fill, biome, surface, carve and structures are composed. The
-//! `UNDERGROUND_ORES` / `VEGETAL_DECORATION` steps that place glowstone, fire,
-//! nether wart, crimson/warped vegetation and basalt pillars are **not**. The
-//! biome documents already carry the step wiring and every configured/placed
-//! feature is bundled, so that is composition work in `crate::feature`, not
-//! missing data. See `docs/worldgen-nether.md`.
+//! The bundled Nether biome documents carry a mixed feature list at step 7:
+//! springs, fire, glowstone and mushrooms share raw indices with ore entries.
+//! This module separates those two bodies while preserving every raw index and
+//! seeding both with step 7; deleting the non-ore entries would shift every ore
+//! stream. Step 9 is driven through the existing vegetation interpreter. Both
+//! passes use `WorldgenRandom<LegacyRandomSource>` because this dimension's
+//! settings select the legacy random family.
 //!
 //! # How to change it
 //!
@@ -104,8 +106,9 @@
 //! # Dependencies
 //!
 //! [`crate::aquifer`], [`crate::biome`], [`crate::carver`], [`crate::compose`],
-//! [`crate::surface`], [`crate::dense_grid`], [`crate::interner`], and
-//! `lodestone-worldgen-core`'s density interpreter. Nothing version-specific.
+//! [`crate::feature`], [`crate::surface`], [`crate::dense_grid`],
+//! [`crate::interner`], and `lodestone-worldgen-core`'s density interpreter.
+//! Nothing version-specific.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -118,10 +121,11 @@ use crate::biome::{BiomeTable, ClimateSampler};
 use crate::carver::{CarveGrid, CarverConfig, NoObserver};
 use crate::density::{Builder, Resolver};
 use crate::engine::Program;
+use crate::feature::PlacedOre;
 use crate::interner::StateInterner;
 use crate::overworld::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
 use crate::structure::beardifier::Beardifier;
-use crate::structure::{HeightmapKind, StartContext, StructureRegistry, StructureStart};
+use crate::structure::{HeightmapKind, PieceRefinement, StartContext, StructureRegistry, StructureStart};
 use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
 
 /// One generated Nether chunk: the block column plus its 16 horizontal biome
@@ -142,6 +146,14 @@ pub struct NetherColumn {
     /// for this dimension, see the module doc's 2-D section.
     biome_quarts: [String; 16],
 }
+
+type PreDecorationResult = (
+    Arc<crate::dense_grid::DenseBlockGrid>,
+    [i32; 256],
+    [String; 16],
+);
+
+type DecorationFeatures = Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>;
 
 impl NetherColumn {
     /// World Y of the lowest block row (0 for the Nether).
@@ -241,6 +253,13 @@ pub struct NetherGenerator {
     /// no-data-supplied convention every other stage here follows.
     carver_replaceable: HashSet<String>,
     carvers_by_biome: HashMap<String, Vec<CarverConfig>>,
+    /// Step-7 ore entries, retaining each entry's raw index for its seed.
+    ores_by_biome: HashMap<String, Vec<PlacedOre>>,
+    ore_tag_map: HashMap<String, HashSet<String>>,
+    /// The non-ore step-7 entries plus step-9 vegetal entries. Every tuple
+    /// keeps its original `(step, index)` seed identity.
+    decoration_by_biome: HashMap<String, DecorationFeatures>,
+    veg_tags: crate::feature::vegetation::VegTags,
     /// The Nether's structure engine, or `None` for a resolver that supplies no
     /// structure sets (every shape/surface fixture in this workspace). `None` makes
     /// every structure stage below an early return, so nothing distinguishes "no
@@ -259,6 +278,8 @@ pub struct NetherGenerator {
     /// [`STARTS_MEMO_CEILING`] for why the crude policy is sound where the
     /// Overworld needed a view-pinned one.
     starts: Mutex<HashMap<(i32, i32), Arc<Vec<Arc<StructureStart>>>>>,
+    pre_decoration: Mutex<HashMap<(i32, i32), Arc<PreDecorationResult>>>,
+    post_ore: Mutex<HashMap<(i32, i32), Arc<crate::dense_grid::DenseBlockGrid>>>,
 }
 
 /// Entries [`NetherGenerator::starts`] holds before it is cleared wholesale.
@@ -275,6 +296,68 @@ pub struct NetherGenerator {
 /// `(seed, cx, cz)`: a miss costs a recomputation and returns the identical value,
 /// so the worst an eviction can do is make a column slower.
 const STARTS_MEMO_CEILING: usize = 8192;
+/// The ruined-portal terrain pass can grow fourteen blocks beyond the frame,
+/// so references used for placement must reach farther than the beardifier.
+const PORTAL_TERRAIN_REACH: i32 = 14;
+/// Thirty-two full pre/post fields are enough for one 5×5 decoration read
+/// closure plus a small sequential sweep, without retaining hundreds of MiB of
+/// 16×128×16 grids in a long-lived generator.
+const DECORATION_MEMO_CEILING: usize = 32;
+
+/// Splits the Nether's deliberately mixed step 7 without changing the raw
+/// `(step, index)` identity either engine seeds from. Step 9 contains the
+/// usual vegetal pass. This is dimension-specific data interpretation: the
+/// Overworld's step-6 ore helper must not be taught that every data pack has
+/// the Nether's mixed layout.
+fn build_nether_feature_lists(
+    resolver: &dyn Resolver,
+    biome: &str,
+) -> (Vec<PlacedOre>, DecorationFeatures) {
+    let document = resolver.biome_document(biome);
+    let Some(steps) = document.get("features").and_then(Value::as_array) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut ores = Vec::new();
+    let mut decoration = Vec::new();
+    for &step in &[7_i32, crate::feature::STEP_VEGETAL_DECORATION] {
+        let Some(entries) = steps.get(step as usize).and_then(Value::as_array) else {
+            continue;
+        };
+        for (index, entry) in entries.iter().enumerate() {
+            let Some(placed_id) = entry.as_str() else {
+                continue;
+            };
+            let placed = resolver.placed_feature(placed_id);
+            if placed.is_null() {
+                continue;
+            }
+            let configured = placed
+                .get("feature")
+                .and_then(Value::as_str)
+                .map(|id| resolver.configured_feature(id));
+            if step == 7
+                && configured
+                    .as_ref()
+                    .and_then(|feature| feature.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("minecraft:ore")
+            {
+                ores.push(PlacedOre {
+                    index,
+                    placements: crate::feature::parse_placements(&placed),
+                    config: crate::feature::parse_ore_config(&configured.expect("checked above")["config"]),
+                });
+            } else {
+                decoration.push((
+                    step,
+                    index,
+                    crate::feature::vegetation::resolve_placed_feature_ref(resolver, entry),
+                ));
+            }
+        }
+    }
+    (ores, decoration)
+}
 
 impl NetherGenerator {
     /// Builds the generator for `seed` from `noise_settings/nether.json` and a
@@ -345,6 +428,8 @@ impl NetherGenerator {
         }
 
         let mut carvers_by_biome = HashMap::new();
+        let mut ores_by_biome = HashMap::new();
+        let mut decoration_by_biome = HashMap::new();
         // Vanilla's own multi-noise biome source's "possible biomes" for this dimension, derived from
         // the parameter table rather than written down: a hardcoded list of the
         // Nether's five would be a second copy of the data, and a datapack that
@@ -355,7 +440,15 @@ impl NetherGenerator {
             carvers_by_biome
                 .entry(point.biome.clone())
                 .or_insert_with(|| crate::compose::build_biome_carvers(resolver, &point.biome));
+            let (ores, decoration) = build_nether_feature_lists(resolver, &point.biome);
+            ores_by_biome.entry(point.biome.clone()).or_insert(ores);
+            decoration_by_biome
+                .entry(point.biome.clone())
+                .or_insert(decoration);
         }
+        let all_ores: Vec<PlacedOre> = ores_by_biome.values().flatten().cloned().collect();
+        let ore_tag_map = crate::compose::build_ore_tag_map(resolver, &all_ores);
+        let veg_tags = crate::feature::vegetation::build_veg_tags(resolver);
 
         // Structure placement's dimension half. Filtered by `possible_biomes`
         // because vanilla filters the same way when building per-dimension
@@ -392,34 +485,22 @@ impl NetherGenerator {
             default_fluid_pre,
             carver_replaceable,
             carvers_by_biome,
+            ores_by_biome,
+            ore_tag_map,
+            decoration_by_biome,
+            veg_tags,
             structures,
             starts: Mutex::new(HashMap::new()),
+            pre_decoration: Mutex::new(HashMap::new()),
+            post_ore: Mutex::new(HashMap::new()),
         }
     }
 
     /// The generated column for chunk `(cx, cz)`.
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> NetherColumn {
-        let base_x = cx * 16;
-        let base_z = cz * 16;
-
-        // Stages 0a/0b, above the fill for the reason
-        // `crate::overworld::structures`' module doc gives: the beardifier consults
-        // the structure bounds intersecting this chunk, so the bounds have to exist
-        // before a single density sample is taken.
-        let refs = self.structure_refs(cx, cz);
-        let beard = self.beardifier_for(cx, cz, &refs);
-
-        let aquifer = self.build_fill(cx, cz);
-        let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
-        let heights = self.heights_from_field(&field);
-        let biome_quarts = self.biome_quarts(cx, cz);
-        let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
-        let world = self.materialize_world(&field, surface_diff, base_x, base_z);
-        let world = self.carve_stage(cx, cz, &aquifer, world);
-        // Stage 4b: `surface_structures` sits after carving, and no Nether
-        // decoration step runs here yet, so this is the last writer.
-        let world = self.structure_place_stage(cx, cz, &refs, world);
+        let pre = self.pre_decoration_stage(cx, cz);
+        let world = self.decoration_stage(cx, cz, self.post_ore_world(cx, cz));
 
         let (palette, blocks) = world.into_palette_and_blocks();
         NetherColumn {
@@ -427,7 +508,220 @@ impl NetherGenerator {
             height: self.height,
             palette,
             blocks,
+            biome_quarts: pre.2.clone(),
+        }
+    }
+
+    /// The complete prefix decorations read: terrain through structure pieces.
+    /// It is cached by exact chunk coordinate because both 3×3 drivers need
+    /// neighbours' real terrain, not a copy of the centre field.
+    fn pre_decoration_stage(&self, cx: i32, cz: i32) -> Arc<PreDecorationResult> {
+        if let Some(existing) = self
+            .pre_decoration
+            .lock()
+            .expect("nether pre-decoration memo poisoned")
+            .get(&(cx, cz))
+            .cloned()
+        {
+            return existing;
+        }
+        let base_x = cx * 16;
+        let base_z = cz * 16;
+        let refs = self.structure_refs(cx, cz);
+        let beard = self.beardifier_for(cx, cz, &refs);
+        let aquifer = self.build_fill(cx, cz);
+        let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
+        let heights = self.heights_from_field(&field);
+        let biome_quarts = self.biome_quarts(cx, cz);
+        let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
+        let world = self.materialize_world(&field, surface_diff, base_x, base_z);
+        let world = self.carve_stage(cx, cz, &aquifer, world);
+        let computed = Arc::new((
+            Arc::new(self.structure_place_stage(cx, cz, &refs, world)),
+            heights,
             biome_quarts,
+        ));
+        let mut memo = self
+            .pre_decoration
+            .lock()
+            .expect("nether pre-decoration memo poisoned");
+        if memo.len() >= DECORATION_MEMO_CEILING {
+            memo.clear();
+        }
+        Arc::clone(memo.entry((cx, cz)).or_insert_with(|| Arc::clone(&computed)))
+    }
+
+    /// The ore-composed field for one source chunk. This depends strictly
+    /// downward on [`Self::pre_decoration_stage`], so the cache cannot form a
+    /// recursive wait graph.
+    fn post_ore_world(&self, cx: i32, cz: i32) -> Arc<crate::dense_grid::DenseBlockGrid> {
+        if let Some(existing) = self
+            .post_ore
+            .lock()
+            .expect("nether post-ore memo poisoned")
+            .get(&(cx, cz))
+            .cloned()
+        {
+            return existing;
+        }
+        let pre = self.pre_decoration_stage(cx, cz);
+        let computed = Arc::new(self.ore_stage(cx, cz, (*pre.0).clone(), &pre.1));
+        let mut memo = self.post_ore.lock().expect("nether post-ore memo poisoned");
+        if memo.len() >= DECORATION_MEMO_CEILING {
+            memo.clear();
+        }
+        Arc::clone(memo.entry((cx, cz)).or_insert_with(|| Arc::clone(&computed)))
+    }
+
+    /// The Nether's step-7 ore subset over its real 3×3 write neighbourhood.
+    fn ore_stage(
+        &self,
+        cx: i32,
+        cz: i32,
+        center_world: crate::dense_grid::DenseBlockGrid,
+        center_heights: &[i32; 256],
+    ) -> crate::dense_grid::DenseBlockGrid {
+        if self.ores_by_biome.values().all(Vec::is_empty) {
+            return center_world;
+        }
+        let mut pre: [Option<Arc<PreDecorationResult>>; 9] = std::array::from_fn(|_| None);
+        for dx in -1..=1_i32 {
+            for dz in -1..=1_i32 {
+                if dx != 0 || dz != 0 {
+                    pre[Self::region_slot(dx, dz)] = Some(self.pre_decoration_stage(cx + dx, cz + dz));
+                }
+            }
+        }
+        let mut heights = crate::feature::RegionHeights::unset();
+        Self::stitch_heights(&mut heights, 0, 0, center_heights);
+        for dx in -1..=1_i32 {
+            for dz in -1..=1_i32 {
+                if dx != 0 || dz != 0 {
+                    let neighbour = pre[Self::region_slot(dx, dz)]
+                        .as_ref()
+                        .expect("all eight ore sources are present");
+                    Self::stitch_heights(&mut heights, dx * 16, dz * 16, &neighbour.1);
+                }
+            }
+        }
+        let ores_for_source = |source_x: i32, source_z: i32| -> &[PlacedOre] {
+            self.ores_by_biome
+                .get(self.biome_for_carver_source(source_x, source_z))
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        };
+        let in_tag = |block: &str, tag: &str| {
+            self.ore_tag_map
+                .get(tag)
+                .is_some_and(|members| members.contains(block))
+        };
+        let centre_source = &center_world;
+        let mut view = crate::feature::region_view::RegionView::over_sources(
+            Arc::clone(&self.interner),
+            cx,
+            cz,
+            self.min_y,
+            self.height,
+            |dx, dz| {
+                if dx == 0 && dz == 0 {
+                    Some(centre_source)
+                } else {
+                    pre[Self::region_slot(dx, dz)]
+                        .as_ref()
+                        .map(|source| &*source.0)
+                }
+            },
+        );
+        let mut random = crate::rng::WorldgenRandom::new(crate::rng::LegacyRandomSource::new(0));
+        crate::feature::apply_ore_step_3x3_per_source(
+            &mut random,
+            self.seed,
+            cx,
+            cz,
+            self.min_y,
+            self.height,
+            self.min_y,
+            self.height,
+            &heights,
+            &in_tag,
+            &mut view,
+            &ores_for_source,
+        );
+        let writes = view.centre_writes_in_scan_order();
+        drop(view);
+        let mut world = center_world;
+        for (lx, y, lz, state) in writes {
+            world.set_id(cx * 16 + lx, y, cz * 16 + lz, state);
+        }
+        world
+    }
+
+    /// Runs all non-ore Nether decoration entries over the same 3×3 sources.
+    fn decoration_stage(
+        &self,
+        cx: i32,
+        cz: i32,
+        world: Arc<crate::dense_grid::DenseBlockGrid>,
+    ) -> crate::dense_grid::DenseBlockGrid {
+        if self.decoration_by_biome.values().all(Vec::is_empty) {
+            return (*world).clone();
+        }
+        let mut grid = crate::feature::vegetation::VegGrid::with_sources(
+            Arc::clone(&self.interner),
+            self.min_y,
+            self.height,
+            cx * 16,
+            cz * 16,
+            crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
+            crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
+            |dx, dz| {
+                if dx == 0 && dz == 0 {
+                    Some(Arc::clone(&world))
+                } else if dx.abs() <= 1 && dz.abs() <= 1 {
+                    Some(self.post_ore_world(cx + dx, cz + dz))
+                } else {
+                    Some(Arc::clone(&self.pre_decoration_stage(cx + dx, cz + dz).0))
+                }
+            },
+        );
+        let features_for_source = |source_x: i32, source_z: i32| -> &[(i32, usize, crate::feature::vegetation::PlacedRef)] {
+            self.decoration_by_biome
+                .get(self.biome_for_carver_source(source_x, source_z))
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        };
+        let mut random = crate::rng::WorldgenRandom::new(crate::rng::LegacyRandomSource::new(0));
+        crate::feature::vegetation::apply_decoration_steps_3x3_per_source(
+            &mut random,
+            self.seed,
+            cx,
+            cz,
+            &mut grid,
+            &self.veg_tags,
+            &features_for_source,
+        );
+        let mut world = (*world).clone();
+        for (x, y, z, state) in grid.dirty_cell_ids() {
+            world.set_id(x, y, z, state);
+        }
+        world
+    }
+
+    fn region_slot(dx: i32, dz: i32) -> usize {
+        crate::feature::region_view::source_slot(dx * 16, dz * 16)
+            .expect("a 3x3 source origin is always in the region")
+    }
+
+    fn stitch_heights(
+        heights: &mut crate::feature::RegionHeights,
+        offset_x: i32,
+        offset_z: i32,
+        source: &[i32; 256],
+    ) {
+        for lz in 0..16_i32 {
+            for lx in 0..16_i32 {
+                heights.set(offset_x + lx, offset_z + lz, source[(lz * 16 + lx) as usize]);
+            }
         }
     }
 
@@ -788,10 +1082,18 @@ impl NetherGenerator {
         for sx in (cx - REFS_RADIUS)..=(cx + REFS_RADIUS) {
             for sz in (cz - REFS_RADIUS)..=(cz + REFS_RADIUS) {
                 for start in self.structure_starts_stage(sx, sz).iter() {
-                    if start
+                    let beard_reaches = start
                         .adjusted_bounding_box()
-                        .is_close_to_chunk(cx, cz, BEARD_REACH)
-                    {
+                        .is_close_to_chunk(cx, cz, BEARD_REACH);
+                    let portal_terrain_reaches = start.pieces.iter().any(|piece| {
+                        matches!(
+                            piece.refine.as_ref(),
+                            Some(PieceRefinement::RuinedPortalTerrain { .. })
+                        ) && piece
+                            .bounding_box
+                            .is_close_to_chunk(cx, cz, PORTAL_TERRAIN_REACH)
+                    });
+                    if beard_reaches || portal_terrain_reaches {
                         entries.push((sx, sz, Arc::clone(start)));
                     }
                 }
@@ -843,7 +1145,15 @@ impl NetherGenerator {
             // is not a per-piece value and it is not the chunk.
             let reference = crate::structure::jigsaw::reference_position(&start.pieces);
             for piece in &start.pieces {
-                if !piece.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) {
+                let portal_terrain_reaches = matches!(
+                    piece.refine.as_ref(),
+                    Some(PieceRefinement::RuinedPortalTerrain { .. })
+                ) && piece
+                    .bounding_box
+                    .is_close_to_chunk(cx, cz, PORTAL_TERRAIN_REACH);
+                if !piece.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15)
+                    && !portal_terrain_reaches
+                {
                     continue;
                 }
                 if let Some(blocks) = &piece.blocks {
@@ -871,6 +1181,25 @@ impl NetherGenerator {
                         seed,
                     };
                     extra.template.place(origin, &extra.settings, &mut world);
+                }
+                if let Some(PieceRefinement::RuinedPortalTerrain {
+                    placement,
+                    cold,
+                    overgrown,
+                    vines,
+                    features_cannot_replace,
+                }) = piece.refine.as_ref()
+                {
+                    crate::overworld::structures::place_ruined_portal_terrain(
+                        &mut world,
+                        piece.bounding_box,
+                        seed,
+                        *placement,
+                        *cold,
+                        *overgrown,
+                        *vines,
+                        features_cannot_replace,
+                    );
                 }
             }
         }
