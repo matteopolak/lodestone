@@ -621,6 +621,10 @@ fn place_configured_feature<R: RandomSource>(
             census_bump(|c| c.other_feature += 1);
             features::place_multiface_growth(random, pos, cfg, grid)
         }
+        ConfiguredFeature::Speleothem(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_speleothem(random, pos, cfg, grid)
+        }
         ConfiguredFeature::Lake(cfg) => {
             census_bump(|c| c.other_feature += 1);
             features::place_lake(random, pos, cfg, grid, tags)
@@ -701,6 +705,8 @@ fn place_configured_feature<R: RandomSource>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::density::Resolver;
     use crate::feature::IntProvider;
@@ -720,6 +726,126 @@ mod tests {
             }
         }
         grid
+    }
+
+    struct SpeleothemResolver;
+
+    impl Resolver for SpeleothemResolver {
+        fn density_function(&self, _id: &str) -> Value {
+            Value::Null
+        }
+
+        fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+            unreachable!("the speleothem fixture does not use noise")
+        }
+
+        fn block_tag(&self, id: &str) -> Value {
+            (id == "minecraft:sulfur_spike_replaceable_blocks")
+                .then(|| serde_json::json!({"values": ["minecraft:sulfur", "minecraft:cinnabar"]}))
+                .unwrap_or(Value::Null)
+        }
+    }
+
+    fn bundled_sulfur_speleothem(option: usize) -> ConfiguredFeature {
+        let doc: Value = serde_json::from_str(include_str!(
+            "../../../tests/support/worldgen_data/configured_feature/sulfur_spike.json"
+        ))
+        .expect("bundled sulfur speleothem JSON");
+        let selector = parse_configured_feature_doc(&SpeleothemResolver, &doc);
+        let ConfiguredFeature::SimpleRandomSelector(options) = selector else {
+            panic!("bundled sulfur selector must remain a simple selector");
+        };
+        let ConfiguredFeature::Speleothem(cfg) = options[option].feature.as_ref() else {
+            panic!("every sulfur selector branch must parse to Speleothem");
+        };
+        ConfiguredFeature::Speleothem(cfg.clone())
+    }
+
+    /// The compiled-server capture is deliberately centered at x=16: the
+    /// configured patch writes x=15, across the source chunk's western seam.
+    /// A local-only grid, a missing tag resolution, or using only a pointed
+    /// block without its base patch all fail this exact map.
+    #[test]
+    fn sulfur_speleothem_matches_external_seam_fixture() {
+        let fixture = include_str!("../../../tests/support/speleothem_feature_jvm.txt");
+        let expected: BTreeMap<_, _> = fixture
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, ' ');
+                let label = fields.next()?;
+                let position = fields.next()?;
+                let state = fields.next()?;
+                (label == "edge_field.0" && position.contains(','))
+                    .then_some((position.to_string(), state.to_string()))
+            })
+            .collect();
+        assert!(fixture.contains("edge_field.0 result=true"));
+        assert!(fixture.contains("control.absent result=false"));
+        assert!(expected.contains_key("15,63,0"), "fixture must retain the seam-spill control");
+
+        let feature = bundled_sulfur_speleothem(0);
+        let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
+        for x in 13..=19 {
+            for z in -3..=3 {
+                grid.seed(x, 63, z, "minecraft:cinnabar".to_string());
+            }
+        }
+        let mut random = LegacyRandomSource::new(0);
+        place_configured_feature(
+            &mut random,
+            BlockPos { x: 16, y: 64, z: 0 },
+            &feature,
+            &mut grid,
+            &VegTags::default(),
+        );
+        let actual: BTreeMap<_, _> = grid
+            .dirty_cells()
+            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.to_string()))
+            .collect();
+        assert_eq!(actual, expected, "base patch, pointed state, or placement RNG order drifted from the external seam fixture");
+
+        let expected_ceiling: BTreeMap<_, _> = fixture
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, ' ');
+                let label = fields.next()?;
+                let position = fields.next()?;
+                let state = fields.next()?;
+                (label == "ceiling.6" && position.contains(','))
+                    .then_some((position.to_string(), state.to_string()))
+            })
+            .collect();
+        let feature = bundled_sulfur_speleothem(1);
+        let mut ceiling = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
+        for x in -3..=3 {
+            for z in -3..=3 {
+                ceiling.seed(x, 65, z, "minecraft:cinnabar".to_string());
+            }
+        }
+        let mut random = LegacyRandomSource::new(6);
+        place_configured_feature(
+            &mut random,
+            BlockPos { x: 0, y: 64, z: 0 },
+            &feature,
+            &mut ceiling,
+            &VegTags::default(),
+        );
+        let actual_ceiling: BTreeMap<_, _> = ceiling
+            .dirty_cells()
+            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.to_string()))
+            .collect();
+        assert_eq!(actual_ceiling, expected_ceiling, "the ceiling selector branch must preserve downward pointed-state direction and segment order");
+
+        let mut absent = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
+        let mut random = LegacyRandomSource::new(0);
+        place_configured_feature(
+            &mut random,
+            BlockPos { x: 16, y: 64, z: 0 },
+            &feature,
+            &mut absent,
+            &VegTags::default(),
+        );
+        assert_eq!(absent.dirty_cells().count(), 0, "no base anchor must leave the configured feature inert");
     }
 
     #[test]

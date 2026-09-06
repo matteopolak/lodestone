@@ -149,6 +149,24 @@ pub(super) fn parse_id_list(v: &Value) -> Vec<String> {
     }
 }
 
+/// Resolves a configured feature's block holder set. Unlike the older
+/// literal-only helper above, speleothem anchors use a tag in every bundled
+/// record, so leaving `#…` unresolved would make every valid support look
+/// absent and silently suppress the feature.
+fn resolve_block_set(resolver: &dyn Resolver, v: &Value) -> Option<HashSet<String>> {
+    match v {
+        Value::String(tag) if tag.starts_with('#') => {
+            let mut out = HashSet::new();
+            let mut seen = HashSet::new();
+            crate::compose::resolve_block_tag(resolver, &tag[1..], &mut out, &mut seen);
+            Some(out)
+        }
+        Value::String(id) => Some(HashSet::from([id.clone()])),
+        Value::Array(_) => Some(parse_id_list(v).into_iter().collect()),
+        _ => None,
+    }
+}
+
 pub(super) fn parse_offset(v: &Value) -> (i32, i32, i32) {
     let Some(arr) = v.as_array() else {
         return (0, 0, 0);
@@ -1648,6 +1666,7 @@ pub enum ConfiguredFeature {
     TwistingVines(super::features::TwistingVinesCfg),
     WeepingVines,
     MultifaceGrowth(Box<super::features::MultifaceGrowthCfg>),
+    Speleothem(Box<super::features::SpeleothemCfg>),
     Lake(Box<super::features::LakeCfg>),
     HugeMushroom(Box<super::features::HugeMushroomCfg>),
     Bamboo(f64),
@@ -1972,6 +1991,38 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 can_be_placed_on: parse_id_list(&c["can_be_placed_on"]).into_iter().collect(),
             }))
         }
+        "speleothem" => {
+            let c = &doc["config"];
+            let parsed = (
+                c["base_block"]["Name"].as_str(),
+                c["pointed_block"]["Name"].as_str(),
+                resolve_block_set(resolver, &c["replaceable_blocks"]),
+            );
+            match parsed {
+                (Some(base_block), Some(pointed_block), Some(replaceable_blocks)) => {
+                    ConfiguredFeature::Speleothem(Box::new(super::features::SpeleothemCfg {
+                        base_block: base_block.to_string(),
+                        pointed_block: pointed_block.to_string(),
+                        replaceable_blocks,
+                        chance_of_taller_generation: c["chance_of_taller_generation"]
+                            .as_f64()
+                            .unwrap_or(0.2) as f32,
+                        chance_of_directional_spread: c["chance_of_directional_spread"]
+                            .as_f64()
+                            .unwrap_or(0.7) as f32,
+                        chance_of_spread_radius2: c["chance_of_spread_radius2"]
+                            .as_f64()
+                            .unwrap_or(0.5) as f32,
+                        chance_of_spread_radius3: c["chance_of_spread_radius3"]
+                            .as_f64()
+                            .unwrap_or(0.5) as f32,
+                    }))
+                }
+                _ => ConfiguredFeature::Unsupported(
+                    "speleothem: unsupported base/pointed/replaceable blocks".into(),
+                ),
+            }
+        }
         "lake" => {
             let c = &doc["config"];
             match (
@@ -2189,6 +2240,7 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             | ConfiguredFeature::TwistingVines(_)
             | ConfiguredFeature::WeepingVines
             | ConfiguredFeature::MultifaceGrowth(_)
+            | ConfiguredFeature::Speleothem(_)
             | ConfiguredFeature::Lake(_)
             | ConfiguredFeature::HugeMushroom(_)
             | ConfiguredFeature::Bamboo(_)

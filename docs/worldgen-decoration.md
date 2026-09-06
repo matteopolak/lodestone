@@ -25,8 +25,8 @@ Placement modifiers (count, in_square, heightmap, biome, rarity_filter,
 surface_water_depth_filter, noise_threshold_count, random_offset, block_predicate_filter,
 height_range, and the list fan-out `Positions::List`/`count_on_every_layer`/`fixed_placement` need)
 compose as a depth-first flat-map, exactly reproducing vanilla's `Stream` pipeline's draw order.
-Configured-feature bodies (`simple_block`, `tree`, `random_selector`/`simple_random_selector`, and
-the vegetation-specific ones below) each reproduce their vanilla `place()` body's exact draw
+Configured-feature bodies (`simple_block`, `tree`, `random_selector`/`simple_random_selector`,
+`speleothem`, and the vegetation-specific ones below) each reproduce their vanilla `place()` body's exact draw
 sequence. An unmodelled feature type or placement modifier degrades to a silent, RNG-free no-op
 (`ConfiguredFeature::Unsupported`) rather than a panic — the census resolves every bundled biome's
 step list at generator construction time, including biomes nobody has tested yet, so a hard failure
@@ -43,6 +43,15 @@ selection time; dual noise first selects the fast-field frequency, then selects 
 Block columns also accept weighted nested height providers and randomized integer state properties,
 which covers the hanging cave-vine records; bamboo uses the configured floor tag, stalk states and
 optional podzol disk.
+
+The single speleothem feature resolves its anchor-holder tag at construction, chooses an upward or
+downward point from the two adjacent anchor candidates, then writes its base patch before its one-
+or two-segment pointed state. Its horizontal patch branches and their nested direction draws occur
+whether or not a candidate cell can be replaced; that draw order is part of the feature's result.
+It runs through the same 3×3 per-source decoration driver as every other configured feature, so an
+anchor patch from a source at a chunk edge may legitimately write into its neighbouring chunk. The
+external `speleothem_feature_jvm.txt` fixture places at the east edge and asserts the western spill,
+the tag-backed cinnabar-to-sulfur replacement, and the generated pointed-state properties together.
 
 **One stated ordering deviation from vanilla**: because ore runs as its own earlier stage here,
 decoration steps 0–4 run after ores in this engine and before them in vanilla. Nothing in those

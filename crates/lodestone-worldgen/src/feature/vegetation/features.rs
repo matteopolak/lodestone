@@ -82,6 +82,142 @@ fn water_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
     base_at(grid, x, y, z) == "minecraft:water"
 }
 
+fn speleothem_base_at(
+    grid: &VegGrid,
+    cfg: &SpeleothemCfg,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> bool {
+    let state = base_at(grid, x, y, z);
+    state == cfg.base_block || cfg.replaceable_blocks.contains(state)
+}
+
+fn place_speleothem_base_if_possible(
+    grid: &mut VegGrid,
+    cfg: &SpeleothemCfg,
+    x: i32,
+    y: i32,
+    z: i32,
+) {
+    if cfg.replaceable_blocks.contains(base_at(grid, x, y, z)) {
+        grid.set_if_in_bounds(x, y, z, cfg.base_block.clone());
+    }
+}
+
+fn pointed_speleothem_state(
+    cfg: &SpeleothemCfg,
+    dy: i32,
+    thickness: &str,
+    waterlogged: bool,
+) -> String {
+    let direction = if dy > 0 { "up" } else { "down" };
+    format!(
+        "{}[thickness={thickness},vertical_direction={direction},waterlogged={waterlogged}]",
+        cfg.pointed_block
+    )
+}
+
+/// Places one configured speleothem and its small patch of anchor material.
+///
+/// The branch and draw ordering deliberately follows the configured feature:
+/// choose a direction only when both anchors qualify, expand every horizontal
+/// arm independently, then decide whether the point has a second segment.
+/// The radius-two and radius-three direction draws occur even when the target
+/// cannot be replaced; they belong to placement order, not to successful
+/// writes.
+pub fn place_speleothem<R: RandomSource>(
+    random: &mut R,
+    pos: BlockPos,
+    cfg: &SpeleothemCfg,
+    grid: &mut VegGrid,
+) {
+    let above = speleothem_base_at(grid, cfg, pos.x, pos.y + 1, pos.z);
+    let below = speleothem_base_at(grid, cfg, pos.x, pos.y - 1, pos.z);
+    let Some(dy) = (match (above, below) {
+        (true, true) => Some(if random.next_bool() { -1 } else { 1 }),
+        (true, false) => Some(-1),
+        (false, true) => Some(1),
+        (false, false) => None,
+    }) else {
+        return;
+    };
+
+    let root = BlockPos {
+        x: pos.x,
+        y: pos.y - dy,
+        z: pos.z,
+    };
+    place_speleothem_base_if_possible(grid, cfg, root.x, root.y, root.z);
+    for (dx, dz) in HORIZONTAL {
+        if random.next_float() > cfg.chance_of_directional_spread {
+            continue;
+        }
+        let first = BlockPos {
+            x: root.x + dx,
+            y: root.y,
+            z: root.z + dz,
+        };
+        place_speleothem_base_if_possible(grid, cfg, first.x, first.y, first.z);
+        if random.next_float() > cfg.chance_of_spread_radius2 {
+            continue;
+        }
+        let (dx2, dy2, dz2) =
+            DIRECTIONS[random.next_int_bounded(DIRECTIONS.len() as i32) as usize];
+        let second = BlockPos {
+            x: first.x + dx2,
+            y: first.y + dy2,
+            z: first.z + dz2,
+        };
+        place_speleothem_base_if_possible(grid, cfg, second.x, second.y, second.z);
+        if random.next_float() > cfg.chance_of_spread_radius3 {
+            continue;
+        }
+        let (dx3, dy3, dz3) =
+            DIRECTIONS[random.next_int_bounded(DIRECTIONS.len() as i32) as usize];
+        place_speleothem_base_if_possible(
+            grid,
+            cfg,
+            second.x + dx3,
+            second.y + dy3,
+            second.z + dz3,
+        );
+    }
+
+    let height = if random.next_float() < cfg.chance_of_taller_generation
+        && (air_at(grid, pos.x, pos.y + dy, pos.z) || water_at(grid, pos.x, pos.y + dy, pos.z))
+    {
+        2
+    } else {
+        1
+    };
+    // The patch may have changed the root from a replaceable state into the
+    // base state. Keep the anchor test after that write, as the feature does.
+    if !speleothem_base_at(grid, cfg, root.x, root.y, root.z) {
+        return;
+    }
+    for segment in 0..height {
+        let thickness = match (height, segment) {
+            (1, _) => "tip",
+            (2, 0) => "frustum",
+            (_, 0) => "base",
+            (_, segment) if segment == height - 1 => "tip",
+            _ => "middle",
+        };
+        let at = BlockPos {
+            x: pos.x,
+            y: pos.y + dy * segment,
+            z: pos.z,
+        };
+        grid.set_if_in_bounds(
+            at.x,
+            at.y,
+            at.z,
+            pointed_speleothem_state(cfg, dy, thickness, water_at(grid, at.x, at.y, at.z)),
+        );
+    }
+}
+
 /// The six direction offsets, in vanilla's own declaration order
 /// (DOWN, UP, NORTH, SOUTH, WEST, EAST) — several features below iterate
 /// vanilla's own all-directions order and stop at the first hit, so the order is not cosmetic.
@@ -162,6 +298,23 @@ pub struct MultifaceGrowthCfg {
     pub can_place_on_wall: bool,
     pub chance_of_spreading: f32,
     pub can_be_placed_on: HashSet<String>,
+}
+
+/// Configuration for a single floor- or ceiling-anchored speleothem.
+///
+/// The base and pointed states are kept as base ids because the placement body
+/// derives the pointed block's direction, thickness, and waterlogged
+/// properties for every segment. `replaceable_blocks` is the resolved block
+/// tag from the configured record; it is also accepted as an existing anchor.
+#[derive(Clone, Debug)]
+pub struct SpeleothemCfg {
+    pub base_block: String,
+    pub pointed_block: String,
+    pub replaceable_blocks: HashSet<String>,
+    pub chance_of_taller_generation: f32,
+    pub chance_of_directional_spread: f32,
+    pub chance_of_spread_radius2: f32,
+    pub chance_of_spread_radius3: f32,
 }
 
 /// `LakeFeature.Configuration`.
