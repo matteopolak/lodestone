@@ -84,19 +84,26 @@ not by any test here.
 
 ### The ownership gate
 
-Nothing in the client is reachable until the local account roster holds at least one account
-that owns the game — singleplayer, world creation, the multiplayer list and the offline
-identity included. `Screen::Ownership` is what the player sees instead: a title, one paragraph
-saying what is being asked, and two buttons (Add Account, Quit). Add Account opens the ordinary
-account switcher, so an account added through the gate lands in the same `profiles.json` the
-switcher reads — there is no second store and no second sign-in path.
+In a multiplayer-capable build, nothing in the client is reachable until the local account roster
+holds at least one account that owns the game — singleplayer, world creation, the multiplayer list
+and the offline identity included. `Screen::Ownership` is what the player sees instead: a title,
+one paragraph saying what is being asked, and two buttons (Add Account, Quit). Add Account opens
+the ordinary account switcher, so an account added through the gate lands in the same
+`profiles.json` the switcher reads — there is no second store and no second sign-in path.
+
+A build compiled without the shell's `multiplayer` feature skips this account gate and may start
+the bundled local server with its stable offline identity. That build has no remote join, status
+probe, LAN publication, or browser relay surface, so an online ownership proof would add a network
+prerequisite to singleplayer without authorizing any remaining capability.
 
 **The enforcement is a type, not a check, and that distinction is the whole design.**
 `lodestone_auth::Entitlement` has private fields and exactly one constructor,
-`Entitlement::from_metadata`, which answers `Some` only for a roster holding an account. Both
-play verbs — `nav::MenuAction::Singleplayer` and `nav::MenuAction::Connect` — carry one, so a
-future entry path that forgets the gate does not compile. A `bool` consulted at one call site
-would have been forgotten by exactly that path, silently.
+`Entitlement::from_metadata`, which answers `Some` only for a roster holding an account.
+`nav::MenuAction::Connect` carries one directly. `nav::MenuAction::Singleplayer` carries a
+`SingleplayerPermit`, whose multiplayer-capable variant contains the same entitlement and whose
+singleplayer-only variant exists only when the remote capability is absent. A future entry path
+must therefore choose and construct the appropriate authorization rather than silently omitting
+the gate.
 
 Two consequences worth knowing:
 

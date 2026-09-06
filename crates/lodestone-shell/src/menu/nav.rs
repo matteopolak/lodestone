@@ -155,6 +155,20 @@ pub enum SingleplayerLaunch {
     },
 }
 
+/// Proof that this build may start its bundled singleplayer server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SingleplayerPermit {
+    /// The normal build's proof that the local roster contains an owning
+    /// account. Keeping the token in the action prevents another native entry
+    /// path from accidentally bypassing the ownership gate.
+    #[cfg(feature = "multiplayer")]
+    Entitled(Entitlement),
+    /// A build that cannot contact arbitrary servers may start its bundled
+    /// in-memory server without asking for an online account.
+    #[cfg(not(feature = "multiplayer"))]
+    LocalBuild,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
     /// Nothing to do; the menu handled it internally.
@@ -177,19 +191,14 @@ pub enum MenuAction {
     /// path supplies a fresh directory and configuration for `Created`. Keeping these
     /// payloads in the action makes the app's launch hand-off explicit.
     ///
-    /// **The leading [`Entitlement`] is the ownership gate**, and it is a type
-    /// rather than a check on purpose: `Entitlement`'s fields are private and
-    /// its only constructor reads an account roster holding a real account, so
-    /// this variant cannot be built — here, in a test, or by a future second
-    /// entry path someone adds next year — without one. A `bool` consulted in
-    /// [`MenuNav::key`] would be forgotten by that future path and nothing
-    /// would go red; this fails to compile instead.
-    Singleplayer(Entitlement, SingleplayerLaunch),
+    /// The leading [`SingleplayerPermit`] preserves the normal ownership gate
+    /// while allowing a build with no multiplayer capability to enter its
+    /// bundled local server without online credentials.
+    Singleplayer(SingleplayerPermit, SingleplayerLaunch),
     /// Connect to this server (the app opens the session and shows Connecting).
     ///
-    /// Carries an [`Entitlement`] for [`Self::Singleplayer`]'s reason — the two
-    /// are the only verbs that start a session, so they are the two the gate has
-    /// to be expressed in.
+    /// Carries an [`Entitlement`] because every remote session requires an
+    /// owning account. This variant has no local-only authorization arm.
     Connect(Entitlement, ServerEntry),
     /// Shut the game down cleanly.
     Quit,
@@ -1707,6 +1716,21 @@ impl MenuNav {
         self.accounts.entitlement()
     }
 
+    /// Authorization for a local world. A multiplayer-capable build keeps the
+    /// account ownership proof; a deliberately confined build has no remote
+    /// join surface and can therefore play locally without online credentials.
+    #[must_use]
+    fn singleplayer_permit(&self) -> Option<SingleplayerPermit> {
+        #[cfg(feature = "multiplayer")]
+        {
+            self.entitlement().map(SingleplayerPermit::Entitled)
+        }
+        #[cfg(not(feature = "multiplayer"))]
+        {
+            Some(SingleplayerPermit::LocalBuild)
+        }
+    }
+
     /// Whether the ownership gate must be showing instead of whatever `ui` is
     /// on.
     ///
@@ -1736,6 +1760,9 @@ impl MenuNav {
     /// reconciling the gate onto the gate is a no-op.
     #[must_use]
     pub fn ownership_gate_blocks(&self, ui: &UiState) -> bool {
+        if !MULTIPLAYER_ENABLED {
+            return false;
+        }
         let screen = ui.screen();
         if matches!(screen, Screen::Accounts | Screen::Error)
             || screen.in_session()
@@ -4458,7 +4485,7 @@ impl MenuNav {
             // `None` and the press does nothing rather than opening the saves root
             // itself as a world.
             WorldSelectOutcome::Play(dir_name) => {
-                let Some(auth) = self.entitlement() else {
+                let Some(auth) = self.singleplayer_permit() else {
                     return self.refuse_unowned(ui);
                 };
                 match crate::saves::world_dir_in(&self.saves_root, &dir_name) {
@@ -4674,7 +4701,7 @@ impl MenuNav {
             // "decorative" list already records for difficulty, structures, bonus
             // chest and cheats.
             CreateWorldOutcome::Create(config) => {
-                let Some(auth) = self.entitlement() else {
+                let Some(auth) = self.singleplayer_permit() else {
                     return self.refuse_unowned(ui);
                 };
                 let game_type = match config.game_mode {
@@ -7621,6 +7648,19 @@ mod tests {
             MainButton::Multiplayer.tooltip(),
             Some("Multiplayer is disabled in this build of the game."),
             "hovering the disabled control must explain the build capability"
+        );
+
+        let (mut nav, _) = nav("singleplayer-only-entry");
+        let mut ui = UiState::new();
+        assert!(
+            !nav.ownership_gate_blocks(&ui),
+            "a build with no remote capability must not require an online account"
+        );
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(
+            ui.screen(),
+            Screen::WorldSelect,
+            "the default Singleplayer button must reach the local world flow"
         );
     }
 
