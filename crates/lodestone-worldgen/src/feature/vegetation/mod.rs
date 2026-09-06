@@ -625,6 +625,10 @@ fn place_configured_feature<R: RandomSource>(
             census_bump(|c| c.other_feature += 1);
             features::place_speleothem(random, pos, cfg, grid)
         }
+        ConfiguredFeature::SpeleothemCluster(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_speleothem_cluster(random, pos, cfg, grid)
+        }
         ConfiguredFeature::Lake(cfg) => {
             census_bump(|c| c.other_feature += 1);
             features::place_lake(random, pos, cfg, grid, tags)
@@ -759,6 +763,53 @@ mod tests {
             panic!("every sulfur selector branch must parse to Speleothem");
         };
         ConfiguredFeature::Speleothem(cfg.clone())
+    }
+
+    fn bundled_sulfur_speleothem_cluster() -> ConfiguredFeature {
+        let doc: Value = serde_json::from_str(include_str!(
+            "../../../tests/support/worldgen_data/configured_feature/sulfur_spike_cluster.json"
+        ))
+        .expect("bundled sulfur cluster JSON");
+        parse_configured_feature_doc(&SpeleothemResolver, &doc)
+    }
+
+    #[test]
+    fn sulfur_speleothem_cluster_matches_external_fixture() {
+        let fixture = include_str!("../../../tests/support/speleothem_cluster_jvm.txt");
+        assert!(fixture.contains("cluster.0 result=true"));
+        let expected: BTreeMap<_, _> = fixture
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, ' ');
+                let label = fields.next()?;
+                let position = fields.next()?;
+                let state = fields.next()?;
+                (label == "cluster.0" && position.contains(','))
+                    .then_some((position.to_string(), state.to_string()))
+            })
+            .collect();
+        let cluster = bundled_sulfur_speleothem_cluster();
+        assert!(matches!(cluster, ConfiguredFeature::SpeleothemCluster(_)));
+        let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 16);
+        for x in -1..=1 {
+            for z in -1..=1 {
+                grid.seed(x, 60, z, "minecraft:cinnabar".to_string());
+                grid.seed(x, 68, z, "minecraft:cinnabar".to_string());
+            }
+        }
+        let mut random = LegacyRandomSource::new(0);
+        place_configured_feature(
+            &mut random,
+            BlockPos { x: 0, y: 64, z: 0 },
+            &cluster,
+            &mut grid,
+            &VegTags::default(),
+        );
+        let actual: BTreeMap<_, _> = grid
+            .dirty_cells()
+            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.to_string()))
+            .collect();
+        assert_eq!(actual, expected, "cluster scan, branch order, base layers, or pointed-state assembly drifted from the external fixture");
     }
 
     /// The compiled-server capture is deliberately centered at x=16: the

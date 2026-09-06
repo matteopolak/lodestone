@@ -1667,6 +1667,7 @@ pub enum ConfiguredFeature {
     WeepingVines,
     MultifaceGrowth(Box<super::features::MultifaceGrowthCfg>),
     Speleothem(Box<super::features::SpeleothemCfg>),
+    SpeleothemCluster(Box<super::features::SpeleothemClusterCfg>),
     Lake(Box<super::features::LakeCfg>),
     HugeMushroom(Box<super::features::HugeMushroomCfg>),
     Bamboo(f64),
@@ -2023,6 +2024,65 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 ),
             }
         }
+        "speleothem_cluster" => {
+            let c = &doc["config"];
+            let parsed = (
+                c["base_block"]["Name"].as_str(),
+                c["pointed_block"]["Name"].as_str(),
+                resolve_block_set(resolver, &c["replaceable_blocks"]),
+                try_parse_int_provider(&c["height"]),
+                try_parse_int_provider(&c["radius"]),
+                try_parse_int_provider(&c["speleothem_block_layer_thickness"]),
+                super::features::FloatProvider::try_parse(&c["density"]),
+                super::features::FloatProvider::try_parse(&c["wetness"]),
+            );
+            match parsed {
+                (
+                    Some(base_block),
+                    Some(pointed_block),
+                    Some(replaceable_blocks),
+                    Some(height),
+                    Some(radius),
+                    Some(speleothem_block_layer_thickness),
+                    Some(density),
+                    Some(wetness),
+                ) => ConfiguredFeature::SpeleothemCluster(Box::new(
+                    super::features::SpeleothemClusterCfg {
+                        base_block: base_block.to_string(),
+                        pointed_block: pointed_block.to_string(),
+                        replaceable_blocks,
+                        floor_to_ceiling_search_range: c["floor_to_ceiling_search_range"]
+                            .as_i64()
+                            .unwrap_or(12) as i32,
+                        height,
+                        radius,
+                        max_stalagmite_stalactite_height_diff: c
+                            ["max_stalagmite_stalactite_height_diff"]
+                            .as_i64()
+                            .unwrap_or(1) as i32,
+                        height_deviation: c["height_deviation"].as_i64().unwrap_or(3) as i32,
+                        speleothem_block_layer_thickness,
+                        density,
+                        wetness,
+                        chance_of_speleothem_at_max_distance_from_center: c
+                            ["chance_of_speleothem_at_max_distance_from_center"]
+                            .as_f64()
+                            .unwrap_or(0.1) as f32,
+                        max_distance_from_edge_affecting_chance_of_speleothem: c
+                            ["max_distance_from_edge_affecting_chance_of_speleothem"]
+                            .as_i64()
+                            .unwrap_or(3) as i32,
+                        max_distance_from_center_affecting_height_bias: c
+                            ["max_distance_from_center_affecting_height_bias"]
+                            .as_i64()
+                            .unwrap_or(8) as i32,
+                    },
+                )),
+                _ => ConfiguredFeature::Unsupported(
+                    "speleothem_cluster: unsupported blocks or providers".into(),
+                ),
+            }
+        }
         "lake" => {
             let c = &doc["config"];
             match (
@@ -2241,6 +2301,7 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             | ConfiguredFeature::WeepingVines
             | ConfiguredFeature::MultifaceGrowth(_)
             | ConfiguredFeature::Speleothem(_)
+            | ConfiguredFeature::SpeleothemCluster(_)
             | ConfiguredFeature::Lake(_)
             | ConfiguredFeature::HugeMushroom(_)
             | ConfiguredFeature::Bamboo(_)

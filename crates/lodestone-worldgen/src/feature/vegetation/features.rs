@@ -218,6 +218,273 @@ pub fn place_speleothem<R: RandomSource>(
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum FloatProvider {
+    Constant(f32),
+    Uniform { min: f32, max: f32 },
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
+        min: f32,
+        max: f32,
+    },
+}
+
+impl FloatProvider {
+    pub(super) fn try_parse(v: &serde_json::Value) -> Option<Self> {
+        match v {
+            serde_json::Value::Number(n) => Some(Self::Constant(n.as_f64()? as f32)),
+            serde_json::Value::Object(_) => match v["type"]
+                .as_str()?
+                .strip_prefix("minecraft:")
+                .unwrap_or(v["type"].as_str()?)
+            {
+                "constant" => Some(Self::Constant(v["value"].as_f64()? as f32)),
+                "uniform" => Some(Self::Uniform {
+                    min: v["min_inclusive"].as_f64()? as f32,
+                    max: v["max_exclusive"].as_f64()? as f32,
+                }),
+                "clamped_normal" => Some(Self::ClampedNormal {
+                    mean: v["mean"].as_f64()? as f32,
+                    deviation: v["deviation"].as_f64()? as f32,
+                    min: v["min"].as_f64()? as f32,
+                    max: v["max"].as_f64()? as f32,
+                }),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn sample<R: RandomSource>(&self, random: &mut R) -> f32 {
+        match self {
+            Self::Constant(value) => *value,
+            Self::Uniform { min, max } => random.next_float() * (max - min) + min,
+            Self::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => (*mean + random.next_gaussian() as f32 * *deviation).clamp(*min, *max),
+        }
+    }
+}
+
+/// Configuration for the broad cave cluster form of a speleothem.
+#[derive(Clone, Debug)]
+pub struct SpeleothemClusterCfg {
+    pub base_block: String,
+    pub pointed_block: String,
+    pub replaceable_blocks: HashSet<String>,
+    pub floor_to_ceiling_search_range: i32,
+    pub height: IntProvider,
+    pub radius: IntProvider,
+    pub max_stalagmite_stalactite_height_diff: i32,
+    pub height_deviation: i32,
+    pub speleothem_block_layer_thickness: IntProvider,
+    pub density: FloatProvider,
+    pub wetness: FloatProvider,
+    pub chance_of_speleothem_at_max_distance_from_center: f32,
+    pub max_distance_from_edge_affecting_chance_of_speleothem: i32,
+    pub max_distance_from_center_affecting_height_bias: i32,
+}
+
+#[derive(Clone, Copy)]
+struct SpeleothemColumn {
+    floor: Option<i32>,
+    ceiling: Option<i32>,
+}
+
+impl SpeleothemColumn {
+    fn height(self) -> Option<i32> {
+        Some(self.ceiling? - self.floor? - 1)
+    }
+}
+
+fn empty_or_water_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
+    air_at(grid, x, y, z) || water_at(grid, x, y, z)
+}
+
+fn scan_speleothem_column(
+    grid: &VegGrid,
+    pos: BlockPos,
+    search_range: i32,
+) -> Option<SpeleothemColumn> {
+    if !empty_or_water_at(grid, pos.x, pos.y, pos.z) {
+        return None;
+    }
+    let scan = |dy: i32| {
+        let mut y = pos.y;
+        for _ in 1..search_range {
+            if !empty_or_water_at(grid, pos.x, y, pos.z) {
+                break;
+            }
+            y += dy;
+        }
+        (!empty_or_water_at(grid, pos.x, y, pos.z)).then_some(y)
+    };
+    Some(SpeleothemColumn {
+        ceiling: scan(1),
+        floor: scan(-1),
+    })
+}
+
+fn replace_speleothem_base_layer(
+    grid: &mut VegGrid,
+    cfg: &SpeleothemClusterCfg,
+    pos: BlockPos,
+    count: i32,
+    dy: i32,
+) {
+    for offset in 0..count {
+        let y = pos.y + dy * offset;
+        if !cfg.replaceable_blocks.contains(base_at(grid, pos.x, y, pos.z)) {
+            return;
+        }
+        grid.set_if_in_bounds(pos.x, y, pos.z, cfg.base_block.clone());
+    }
+}
+
+fn grow_cluster_speleothem(
+    grid: &mut VegGrid,
+    cfg: &SpeleothemClusterCfg,
+    start: BlockPos,
+    dy: i32,
+    height: i32,
+    merge_tips: bool,
+) {
+    let root_y = start.y - dy;
+    let root = base_at(grid, start.x, root_y, start.z);
+    if root != cfg.base_block && !cfg.replaceable_blocks.contains(root) {
+        return;
+    }
+    for segment in 0..height {
+        let thickness = match segment {
+            value if value == height - 1 && merge_tips => "tip_merge",
+            value if value == height - 1 => "tip",
+            value if value == height - 2 => "frustum",
+            0 => "base",
+            _ => "middle",
+        };
+        let y = start.y + dy * segment;
+        grid.set_if_in_bounds(
+            start.x,
+            y,
+            start.z,
+            pointed_speleothem_state_for(&cfg.pointed_block, dy, thickness, water_at(grid, start.x, y, start.z)),
+        );
+    }
+}
+
+fn pointed_speleothem_state_for(
+    pointed_block: &str,
+    dy: i32,
+    thickness: &str,
+    waterlogged: bool,
+) -> String {
+    let direction = if dy > 0 { "up" } else { "down" };
+    format!("{pointed_block}[thickness={thickness},vertical_direction={direction},waterlogged={waterlogged}]")
+}
+
+fn cluster_height<R: RandomSource>(
+    random: &mut R,
+    dx: i32,
+    dz: i32,
+    density: f32,
+    max_height: i32,
+    cfg: &SpeleothemClusterCfg,
+) -> i32 {
+    if random.next_float() > density {
+        return 0;
+    }
+    let distance = (dx.abs() + dz.abs()) as f32;
+    let limit = cfg.max_distance_from_center_affecting_height_bias as f32;
+    let t = (distance / limit).clamp(0.0, 1.0);
+    let mean = max_height as f32 / 2.0 * (1.0 - t);
+    (random.next_gaussian() as f32 * cfg.height_deviation as f32 + mean)
+        .clamp(0.0, max_height as f32) as i32
+}
+
+/// Places a cave-wide cluster. The per-column scan and every random branch run
+/// in rectangular x/z order; successful writes must not decide which later
+/// columns consume random values.
+pub fn place_speleothem_cluster<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    cfg: &SpeleothemClusterCfg,
+    grid: &mut VegGrid,
+) {
+    if !empty_or_water_at(grid, origin.x, origin.y, origin.z) {
+        return;
+    }
+    let cluster_max_height = cfg.height.sample(random);
+    let wetness = cfg.wetness.sample(random);
+    let density = cfg.density.sample(random);
+    let x_radius = cfg.radius.sample(random);
+    let z_radius = cfg.radius.sample(random);
+    for dx in -x_radius..=x_radius {
+        for dz in -z_radius..=z_radius {
+            let edge_distance = (x_radius - dx.abs()).min(z_radius - dz.abs()) as f32;
+            let chance = cfg.chance_of_speleothem_at_max_distance_from_center
+                + (1.0 - cfg.chance_of_speleothem_at_max_distance_from_center)
+                    * (edge_distance / cfg.max_distance_from_edge_affecting_chance_of_speleothem as f32)
+                        .clamp(0.0, 1.0);
+            let pos = BlockPos { x: origin.x + dx, y: origin.y, z: origin.z + dz };
+            let Some(column) = scan_speleothem_column(grid, pos, cfg.floor_to_ceiling_search_range) else {
+                continue;
+            };
+            if column.floor.is_none() && column.ceiling.is_none() {
+                continue;
+            }
+            // Sulfur has zero wetness, but the float draw still belongs to each
+            // accepted column. The pool branch is intentionally absent until a
+            // full base-stone tag predicate is available; it cannot run here.
+            let _want_pool = random.next_float() < wetness;
+            let want_stalactite = random.next_double() < chance as f64;
+            let stalactite_height = if let Some(ceiling) = column.ceiling {
+                if want_stalactite && base_at(grid, pos.x, ceiling, pos.z) != "minecraft:lava" {
+                    let thickness = cfg.speleothem_block_layer_thickness.sample(random);
+                    replace_speleothem_base_layer(grid, cfg, BlockPos { y: ceiling, ..pos }, thickness, 1);
+                    let max = column.floor.map_or(cluster_max_height, |floor| cluster_max_height.min(ceiling - floor));
+                    cluster_height(random, dx, dz, density, max, cfg)
+                } else { 0 }
+            } else { 0 };
+            let want_stalagmite = random.next_double() < chance as f64;
+            let stalagmite_height = if let Some(floor) = column.floor {
+                if want_stalagmite && base_at(grid, pos.x, floor, pos.z) != "minecraft:lava" {
+                    let thickness = cfg.speleothem_block_layer_thickness.sample(random);
+                    replace_speleothem_base_layer(grid, cfg, BlockPos { y: floor, ..pos }, thickness, -1);
+                    if column.ceiling.is_some() {
+                        (stalactite_height + random.next_int_bounded(cfg.max_stalagmite_stalactite_height_diff * 2 + 1)
+                            - cfg.max_stalagmite_stalactite_height_diff).max(0)
+                    } else {
+                        cluster_height(random, dx, dz, density, cluster_max_height, cfg)
+                    }
+                } else { 0 }
+            } else { 0 };
+            let (actual_stalactite, actual_stalagmite) = match (column.ceiling, column.floor) {
+                (Some(ceiling), Some(floor)) if ceiling - stalactite_height <= floor + stalagmite_height => {
+                    let low = (ceiling - stalactite_height).max(floor + 1);
+                    let high = (floor + stalagmite_height).min(ceiling - 1) + 1;
+                    let bottom = low + random.next_int_bounded(high - low + 1);
+                    (ceiling - bottom, bottom - 1 - floor)
+                }
+                _ => (stalactite_height, stalagmite_height),
+            };
+            let merge_tips = random.next_bool()
+                && actual_stalactite > 0
+                && actual_stalagmite > 0
+                && column.height().is_some_and(|height| actual_stalactite + actual_stalagmite == height);
+            if let Some(ceiling) = column.ceiling {
+                grow_cluster_speleothem(grid, cfg, BlockPos { y: ceiling - 1, ..pos }, -1, actual_stalactite, merge_tips);
+            }
+            if let Some(floor) = column.floor {
+                grow_cluster_speleothem(grid, cfg, BlockPos { y: floor + 1, ..pos }, 1, actual_stalagmite, merge_tips);
+            }
+        }
+    }
+}
+
 /// The six direction offsets, in vanilla's own declaration order
 /// (DOWN, UP, NORTH, SOUTH, WEST, EAST) — several features below iterate
 /// vanilla's own all-directions order and stop at the first hit, so the order is not cosmetic.
