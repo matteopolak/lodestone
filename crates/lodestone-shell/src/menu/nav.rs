@@ -839,6 +839,14 @@ pub const OWNERSHIP_BUTTONS: [OwnershipButton; 2] =
 /// means. False in a browser tab — see [`MainButton::enabled_on`].
 pub const CAN_EXIT_PROCESS: bool = !cfg!(target_arch = "wasm32");
 
+/// Whether this build is allowed to initiate a remote multiplayer session.
+///
+/// This is a build capability, not a temporary server-list failure: without the
+/// `multiplayer` feature the button remains in its vanilla position but cannot
+/// open a screen that could send traffic through a remote server or browser
+/// relay.
+pub const MULTIPLAYER_ENABLED: bool = cfg!(feature = "multiplayer");
+
 impl MainButton {
     /// The label drawn on the button, or narrated for an icon-only one.
     ///
@@ -890,8 +898,8 @@ impl MainButton {
             // the state vanilla itself ships for a feature that is unavailable
             // rather than absent.
             MainButton::Quit => can_exit_process,
+            MainButton::Multiplayer => MULTIPLAYER_ENABLED,
             MainButton::Singleplayer
-            | MainButton::Multiplayer
             | MainButton::Options
             | MainButton::Accounts
             // Both destination screens are built now — see the variants' own
@@ -900,6 +908,17 @@ impl MainButton {
             | MainButton::Accessibility => true,
             MainButton::Realms => false,
             MainButton::Friends => true,
+        }
+    }
+
+    /// A capability explanation for an otherwise-present disabled button.
+    #[must_use]
+    pub fn tooltip(self) -> Option<&'static str> {
+        match self {
+            MainButton::Multiplayer if !MULTIPLAYER_ENABLED => {
+                Some("Multiplayer is disabled in this build of the game.")
+            }
+            _ => None,
         }
     }
 
@@ -2739,7 +2758,7 @@ impl MenuNav {
     /// apart on its own.
     #[must_use]
     pub fn open_to_lan_available(&self) -> bool {
-        self.has_singleplayer_server && !self.lan_published
+        MULTIPLAYER_ENABLED && self.has_singleplayer_server && !self.lan_published
     }
 
     /// The pause menu's active row list: [`PAUSE_BUTTONS_PUBLISHED`] once
@@ -7584,6 +7603,24 @@ mod tests {
         assert!(
             MAIN_BUTTONS.contains(&MainButton::Quit),
             "the row must still occupy its vanilla slot on every host"
+        );
+    }
+
+    #[cfg(not(feature = "multiplayer"))]
+    #[test]
+    fn singleplayer_only_build_keeps_multiplayer_visible_but_disabled_with_an_explanation() {
+        assert!(
+            MAIN_BUTTONS.contains(&MainButton::Multiplayer),
+            "the disabled control must retain its title-screen slot"
+        );
+        assert!(
+            !MainButton::Multiplayer.enabled(),
+            "a build without the multiplayer feature must not open the server list"
+        );
+        assert_eq!(
+            MainButton::Multiplayer.tooltip(),
+            Some("Multiplayer is disabled in this build of the game."),
+            "hovering the disabled control must explain the build capability"
         );
     }
 

@@ -219,6 +219,21 @@ pub const ALLOW_CHEATS_LABEL: &str = "Allow Cheats";
 /// signed in with rather than to a per-world creation setting. See
 /// [`WorldCreationConfig::online_mode`] for what this actually does.
 pub const ONLINE_MODE_LABEL: &str = "Online Mode (Open to LAN)";
+
+/// The title shown for the present-but-disabled LAN control in a build without
+/// multiplayer. Keeping the row visible makes the unavailable capability
+/// explicit instead of silently accepting a setting that the launch path must
+/// ignore.
+pub const ONLINE_MODE_DISABLED_LABEL: &str =
+    "Online Mode (Open to LAN): Multiplayer disabled in this build";
+
+fn online_mode_label(online_mode: bool) -> String {
+    if cfg!(feature = "multiplayer") {
+        toggle_label(ONLINE_MODE_LABEL, online_mode)
+    } else {
+        ONLINE_MODE_DISABLED_LABEL.to_string()
+    }
+}
 /// `selectWorld.create`, reused verbatim for this screen's own submit button
 /// — vanilla uses the same string for both.
 pub const CREATE_LABEL: &str = "Create New World";
@@ -908,7 +923,7 @@ impl CreateWorldNav {
             structures: button(STRUCTURES_ROW, toggle_label(STRUCTURES_LABEL, config.generate_structures)),
             bonus_chest: button(BONUS_CHEST_ROW, toggle_label(BONUS_CHEST_LABEL, config.bonus_chest)),
             allow_cheats: button(ALLOW_CHEATS_ROW, toggle_label(ALLOW_CHEATS_LABEL, config.allow_cheats)),
-            online_mode: button(ONLINE_MODE_ROW, toggle_label(ONLINE_MODE_LABEL, config.online_mode)),
+            online_mode: button(ONLINE_MODE_ROW, online_mode_label(config.online_mode)),
             world_type: button(WORLD_TYPE_ROW, cycle_label(WORLD_TYPE_LABEL, config.world_type.caption())),
             create: button(CREATE_ROW, CREATE_LABEL),
             cancel: button(CANCEL_ROW, CANCEL_LABEL),
@@ -1044,7 +1059,8 @@ impl CreateWorldNav {
         self.widgets.seed.widget.active = world;
         self.widgets.structures.active = world;
         self.widgets.bonus_chest.active = world;
-        self.widgets.online_mode.active = world;
+        self.widgets.online_mode.active =
+            world && cfg!(feature = "multiplayer") && !cfg!(target_arch = "wasm32");
         self.widgets.world_type.active = world;
         let more = self.active_tab == MORE_TAB;
         self.widgets.game_rules.active = more;
@@ -1087,7 +1103,7 @@ impl CreateWorldNav {
         self.widgets.structures.message = toggle_label(STRUCTURES_LABEL, self.config.generate_structures);
         self.widgets.bonus_chest.message = toggle_label(BONUS_CHEST_LABEL, self.config.bonus_chest);
         self.widgets.allow_cheats.message = toggle_label(ALLOW_CHEATS_LABEL, self.config.allow_cheats);
-        self.widgets.online_mode.message = toggle_label(ONLINE_MODE_LABEL, self.config.online_mode);
+        self.widgets.online_mode.message = online_mode_label(self.config.online_mode);
         self.widgets.world_type.message = cycle_label(WORLD_TYPE_LABEL, self.config.world_type.caption());
         self.apply_hardcore_lock();
         self.apply_customize_availability();
@@ -1244,8 +1260,10 @@ impl CreateWorldNav {
                 CreateWorldOutcome::Handled
             }
             ONLINE_MODE_ROW => {
-                self.config.online_mode = !self.config.online_mode;
-                self.refresh_labels();
+                if self.widgets.online_mode.active {
+                    self.config.online_mode = !self.config.online_mode;
+                    self.refresh_labels();
+                }
                 CreateWorldOutcome::Handled
             }
             WORLD_TYPE_ROW => {
@@ -3031,6 +3049,7 @@ mod tests {
     /// than decorative like the other three — this is the pair the toggle's
     /// own gate needs: the default stays off, and clicking flips only this
     /// field.
+    #[cfg(feature = "multiplayer")]
     #[test]
     fn online_mode_defaults_off_and_toggles_independently() {
         let mut nav = CreateWorldNav::new();
@@ -3043,6 +3062,28 @@ mod tests {
 
         nav.click_focus(ONLINE_MODE_ROW);
         assert!(!nav.config().online_mode, "toggles back off");
+    }
+
+    #[cfg(not(feature = "multiplayer"))]
+    #[test]
+    fn singleplayer_only_build_disables_and_explains_online_mode() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(ONLINE_MODE_ROW);
+
+        assert_eq!(nav.active_tab(), WORLD_TAB, "the row remains visible on World");
+        assert!(
+            !nav.widgets.online_mode.active,
+            "a build without multiplayer must not focus or activate Open to LAN"
+        );
+        assert_eq!(
+            nav.widgets.online_mode.message,
+            ONLINE_MODE_DISABLED_LABEL,
+            "the disabled row must say why it cannot be selected"
+        );
+        assert!(
+            !nav.config().online_mode,
+            "clicking a disabled online-mode row must not leave a launch setting behind"
+        );
     }
 
     #[test]

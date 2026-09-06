@@ -201,7 +201,7 @@ fn write_ppm(path: &str, w: u32, h: u32, rgba: &[u8]) -> std::io::Result<()> {
 /// on wasm32 — measured, executed in a wasm VM: `RuntimeError: unreachable`. Latent
 /// rather than reachable today, because nothing in a browser can select this mode, but
 /// gated rather than left as a trap one `Config` change away.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
 pub(crate) fn run_connect(_owned: lodestone_auth::Entitlement, config: Config) -> anyhow::Result<()> {
     println!(
         "connecting to {}:{} (protocol {}) for {}s…",
@@ -231,4 +231,11 @@ pub(crate) fn run_connect(_owned: lodestone_auth::Entitlement, config: Config) -
     }
     println!("streamed {seen} update(s); exiting");
     Ok(())
+}
+
+#[cfg(all(not(feature = "multiplayer"), not(target_arch = "wasm32")))]
+pub(crate) fn run_connect(_owned: lodestone_auth::Entitlement, _config: Config) -> anyhow::Result<()> {
+    Err(anyhow::anyhow!(
+        "multiplayer is disabled in this build of the game; rebuild with the `multiplayer` Cargo feature"
+    ))
 }

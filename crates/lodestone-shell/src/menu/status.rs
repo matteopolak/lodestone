@@ -353,7 +353,12 @@ pub const STATUS_PROTOCOL: i32 = 776;
 /// a dead function.
 #[must_use]
 pub fn net_probe(protocol: i32) -> Probe {
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(not(feature = "multiplayer"))]
+    {
+        let _ = protocol;
+        return unavailable_probe();
+    }
+    #[cfg(all(feature = "multiplayer", target_arch = "wasm32"))]
     {
         let _ = protocol;
         return Arc::new(|entry: &ServerEntry| {
@@ -366,7 +371,7 @@ pub fn net_probe(protocol: i32) -> Probe {
             ))
         });
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
     Arc::new(move |entry: &ServerEntry| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -401,7 +406,7 @@ pub fn net_probe(protocol: i32) -> Probe {
 /// indistinguishable from a server that is down.
 #[must_use]
 pub fn unavailable_probe() -> Probe {
-    Arc::new(|_| Err("status ping disabled in this build".to_string()))
+    Arc::new(|_| Err("multiplayer is disabled in this build of the game".to_string()))
 }
 
 /// How long [`relay_probe`] waits for a full status exchange before giving up.
@@ -412,7 +417,7 @@ pub fn unavailable_probe() -> Probe {
 /// modes this function's doc distinguishes. Short enough that a row visibly
 /// resolves to `Failed` well inside the time a person will wait looking at a
 /// server list before assuming the client is broken.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(feature = "multiplayer", target_arch = "wasm32"))]
 const RELAY_PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The real browser status probe: dial the `ws-web` relay, then run the
@@ -457,7 +462,7 @@ const RELAY_PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 /// "deployed builds" note and `relay_ws_url_for`'s doc); the status exchange
 /// itself failed (bad handshake, malformed JSON, EOF); or [`RELAY_PING_TIMEOUT`]
 /// elapsed before either resolved.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(feature = "multiplayer", target_arch = "wasm32"))]
 async fn relay_probe(entry: ServerEntry, protocol: i32) -> Result<ServerStatus, String> {
     let port = entry.effective_port();
     let url = crate::platform::relay::relay_ws_url_for(&entry.host, port);
@@ -671,13 +676,21 @@ impl StatusCache {
         // wasm32 (measured, executed in a wasm VM: `RuntimeError: unreachable`,
         // fatal under this crate's `panic = "abort"`) — so `spawn_local` is not
         // a preference, it is the only thing that can run this future at all.
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(feature = "multiplayer", target_arch = "wasm32"))]
         {
             let protocol = STATUS_PROTOCOL;
             wasm_bindgen_futures::spawn_local(async move {
                 let out = relay_probe(entry, protocol).await;
                 let _ = tx.send((key, out));
             });
+        }
+
+        // A singleplayer-only browser build has no relay client at all. Deliver
+        // the same explicit failure native builds use rather than scheduling a
+        // WebSocket task that could reach an arbitrary server.
+        #[cfg(all(not(feature = "multiplayer"), target_arch = "wasm32"))]
+        {
+            let _ = tx.send((key, unavailable_probe()(&entry)));
         }
     }
 

@@ -75,25 +75,36 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use axum::Router;
+#[cfg(feature = "multiplayer")]
 use axum::extract::{RawQuery, State};
+#[cfg(feature = "multiplayer")]
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderName, HeaderValue};
+#[cfg(feature = "multiplayer")]
 use axum::response::IntoResponse;
+#[cfg(feature = "multiplayer")]
 use axum::routing::get;
+#[cfg(feature = "multiplayer")]
 use futures_util::{SinkExt, StreamExt};
+#[cfg(feature = "multiplayer")]
 use lodestone_relay::destination_from_query;
+#[cfg(feature = "multiplayer")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
+#[cfg(feature = "multiplayer")]
+use tokio::net::TcpStream;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Size of the scratch buffer used when forwarding TCP -> WebSocket. Matches
 /// `lodestone_relay::FORWARD_CHUNK`, which is not itself `pub`.
+#[cfg(feature = "multiplayer")]
 const FORWARD_CHUNK: usize = 16 * 1024;
 
 struct Config {
     listen: String,
     dist: PathBuf,
+    #[cfg(feature = "multiplayer")]
     target: String,
     port_file: Option<PathBuf>,
 }
@@ -101,6 +112,7 @@ struct Config {
 fn parse_config() -> Result<Config> {
     let mut listen = "127.0.0.1:8080".to_string();
     let mut dist = PathBuf::from("dist");
+    #[cfg(feature = "multiplayer")]
     let mut target = "127.0.0.1:25565".to_string();
     let mut port_file = None;
     let mut args = std::env::args().skip(1);
@@ -108,19 +120,37 @@ fn parse_config() -> Result<Config> {
         match arg.as_str() {
             "--listen" => listen = args.next().context("--listen needs a value")?,
             "--dist" => dist = PathBuf::from(args.next().context("--dist needs a value")?),
+            #[cfg(feature = "multiplayer")]
             "--target" => target = args.next().context("--target needs a value")?,
+            #[cfg(not(feature = "multiplayer"))]
+            "--target" => anyhow::bail!(
+                "--target requires the `multiplayer` Cargo feature; this server is static-only"
+            ),
             "--port-file" => {
                 port_file = Some(PathBuf::from(
                     args.next().context("--port-file needs a value")?,
                 ));
             }
             "-h" | "--help" => {
+                #[cfg(feature = "multiplayer")]
                 eprintln!(
                     "lodestone-web-server --listen <addr:port> --dist <dir> --target <host:port> [--port-file <path>]\n\
                      \n\
                      Serves the built browser page (--dist, default ./dist) and the\n\
                      WebSocket->TCP relay under /relay (bridged to --target, a real\n\
                      Minecraft server) from one listener.\n\
+                     \n\
+                     --listen 127.0.0.1:0 asks the OS for a free port. Pass --port-file\n\
+                     to have the actually-bound port written there as a bare decimal, for\n\
+                     a script to read without a pipeline."
+                );
+                #[cfg(not(feature = "multiplayer"))]
+                eprintln!(
+                    "lodestone-web-server --listen <addr:port> --dist <dir> [--port-file <path>]\n\
+                     \n\
+                     Serves the built browser page (--dist, default ./dist). This\n\
+                     build is static-only because the multiplayer Cargo feature is\n\
+                     disabled.\n\
                      \n\
                      --listen 127.0.0.1:0 asks the OS for a free port. Pass --port-file\n\
                      to have the actually-bound port written there as a bare decimal, for\n\
@@ -134,11 +164,13 @@ fn parse_config() -> Result<Config> {
     Ok(Config {
         listen,
         dist,
+        #[cfg(feature = "multiplayer")]
         target,
         port_file,
     })
 }
 
+#[cfg(feature = "multiplayer")]
 #[derive(Clone)]
 struct RelayTarget(String);
 
@@ -167,13 +199,14 @@ async fn main() -> Result<()> {
             .with_context(|| format!("failed to write bound port to {}", path.display()))?;
     }
 
-    tracing::info!(
-        listen = %bound,
-        dist = %config.dist.display(),
-        target = %config.target,
-        "lodestone-web-server listening"
-    );
+    #[cfg(feature = "multiplayer")]
+    tracing::info!(listen = %bound, dist = %config.dist.display(), target = %config.target, "lodestone-web-server listening");
+    #[cfg(not(feature = "multiplayer"))]
+    tracing::info!(listen = %bound, dist = %config.dist.display(), "lodestone-web-server listening (static-only)");
+    #[cfg(feature = "multiplayer")]
     println!("lodestone-web-server: http://{bound}/ (relay -> {})", config.target);
+    #[cfg(not(feature = "multiplayer"))]
+    println!("lodestone-web-server: http://{bound}/ (static-only; multiplayer disabled)");
 
     let index = config.dist.join("index.html");
     let serve_dir = ServeDir::new(&config.dist).fallback(ServeFile::new(index));
@@ -181,8 +214,16 @@ async fn main() -> Result<()> {
     // Same two headers web/Trunk.toml's `[serve]` sets under `trunk serve` —
     // see that file and web/README.md's "COOP/COEP" section for why they are
     // required the moment threading lands and free to set today.
-    let app = Router::new()
-        .route("/relay", get(relay_handler))
+    let app = {
+        #[cfg(feature = "multiplayer")]
+        {
+            Router::new()
+                .route("/relay", get(relay_handler))
+                .with_state(RelayTarget(config.target))
+        }
+        #[cfg(not(feature = "multiplayer"))]
+        Router::new()
+    }
         .fallback_service(serve_dir)
         .layer(SetResponseHeaderLayer::if_not_present(
             HeaderName::from_static("cross-origin-opener-policy"),
@@ -191,14 +232,14 @@ async fn main() -> Result<()> {
         .layer(SetResponseHeaderLayer::if_not_present(
             HeaderName::from_static("cross-origin-embedder-policy"),
             HeaderValue::from_static("require-corp"),
-        ))
-        .with_state(RelayTarget(config.target));
+        ));
 
     axum::serve(listener, app)
         .await
         .context("lodestone-web-server: server error")
 }
 
+#[cfg(feature = "multiplayer")]
 async fn relay_handler(
     ws: WebSocketUpgrade,
     RawQuery(query): RawQuery,
@@ -222,6 +263,7 @@ async fn relay_handler(
 /// `target`. See this file's module doc for why this does not call
 /// `lodestone_relay::bridge` directly — the forwarding logic below is
 /// otherwise identical to it.
+#[cfg(feature = "multiplayer")]
 async fn bridge(socket: WebSocket, target: String) {
     let tcp = match TcpStream::connect(&target).await {
         Ok(tcp) => tcp,

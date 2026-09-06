@@ -114,7 +114,7 @@ pub(crate) use input::{
 };
 #[allow(unused_imports)]
 pub(crate) use launch::{LaunchError, launch_singleplayer};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
 #[allow(unused_imports)]
 pub(crate) use launch::launch_open_to_lan_online;
 #[allow(unused_imports)]

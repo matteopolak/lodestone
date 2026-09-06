@@ -9499,11 +9499,13 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
         // — the whole function is native-only, like `run_connect`/`run_headless`
         // right beside it in the same file, and has no browser arm because
         // `Mode::HeadlessSession` itself is refused on wasm32 (`app.rs`'s `run`).
+        // `terminal.rs` is declared only by `lib.rs`'s native target arm. Its
+        // blocking stdin reader has no browser caller or compiled browser code.
         ConfinementRule {
             label: "lodestone-shell thread-spawn-confinement",
             src_dir: "crates/lodestone-shell/src",
             banned: "thread::spawn",
-            allowlist: &["mesher.rs", "accounts.rs", "status.rs", "runners.rs"],
+            allowlist: &["mesher.rs", "accounts.rs", "status.rs", "runners.rs", "terminal.rs"],
         },
         // --- the clock, in every other crate the browser reaches ---
         //

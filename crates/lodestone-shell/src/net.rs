@@ -1802,6 +1802,7 @@ impl NetClient {
     /// no chunks — and a gate must not silently join as the developer's real
     /// premium account either. Use [`Self::connect_as`] with
     /// `lodestone-testsupport`'s `unique_username()`.
+    #[cfg(any(feature = "multiplayer", test))]
     #[must_use]
     pub fn connect(
         host: String,
@@ -1846,6 +1847,7 @@ impl NetClient {
     ///
     /// [`unit_tests_never_resolve_a_real_microsoft_account`]: tests::unit_tests_never_resolve_a_real_microsoft_account
     /// [`a_production_join_requests_the_selected_microsoft_account`]: tests::a_production_join_requests_the_selected_microsoft_account
+    #[cfg(any(feature = "multiplayer", test))]
     fn production_origin(host: String, port: Option<u16>) -> Origin {
         Origin::Remote {
             host,
@@ -1861,6 +1863,7 @@ impl NetClient {
     /// dials — [`Self::connect_as`]'s, i.e. every live gate's. Paired with
     /// [`Self::production_origin`] so the two sit next to each other and a gate
     /// can assert they differ.
+    #[cfg(any(feature = "multiplayer", test))]
     fn offline_origin(host: String, port: u16) -> Origin {
         Origin::Remote {
             host,
@@ -1896,6 +1899,7 @@ impl NetClient {
     /// only, where an account happens to be selected. Every live gate would then
     /// share one premium player file, which is the eviction/blackout hazard this
     /// constructor exists to avoid, wearing a new hat.
+    #[cfg(any(feature = "multiplayer", test))]
     #[must_use]
     pub fn connect_as(
         host: String,
@@ -1949,7 +1953,7 @@ impl NetClient {
     /// Native-only: it takes a real [`lodestone_client::Session`], which only the
     /// native `lodestone-auth` chain can produce. A browser join is offline-identity
     /// only, and goes through the relay rather than this path.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(any(feature = "multiplayer", test), not(target_arch = "wasm32")))]
     #[must_use]
     pub fn connect_online(
         host: String,
@@ -2077,7 +2081,7 @@ impl NetClient {
     /// ownership check on every connection this listener accepts (the
     /// shell-side control) — `false` matches every other constructor
     /// here and keeps the listener exactly as offline as it has always been.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
     #[must_use]
     pub fn open_to_lan(
         server_protocol: Box<dyn lodestone_server::ServerProtocol>,
@@ -2338,7 +2342,7 @@ impl NetClient {
     /// second press of the pause menu's Open to LAN button before
     /// [`crate::menu::nav::MenuNav`] catches up with [`NetUpdate::LanOpened`]
     /// and stops offering it.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
     pub fn publish_to_lan(&self, port: u16) {
         let _ = self.publish_tx.send(port);
     }

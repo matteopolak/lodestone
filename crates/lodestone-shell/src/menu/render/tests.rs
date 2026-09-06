@@ -40,6 +40,38 @@ fn a_server_list_tooltip_snaps_its_box_to_the_same_origin_as_its_text() {
     );
 }
 
+#[cfg(not(feature = "multiplayer"))]
+#[test]
+fn title_frame_renders_the_multiplayer_disabled_tooltip_on_hover() {
+    const W: f32 = 854.0;
+    const H: f32 = 480.0;
+    let mut nav = test_nav("multiplayer-disabled-tooltip");
+    let ui = UiState::new();
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut favicons = FaviconCache::new();
+
+    let before = frame_for(&ui, &nav, &statuses, &mut favicons).expect("title frame");
+    let row = before
+        .rows
+        .iter()
+        .position(|row| row.label == "Multiplayer")
+        .expect("the Multiplayer title row must remain present");
+    assert!(!before.rows[row].enabled, "the row must be disabled");
+    assert_eq!(
+        before.rows[row].tooltip.as_deref(),
+        Some("Multiplayer is disabled in this build of the game."),
+        "the title-frame adapter must carry the capability explanation"
+    );
+
+    let (x, y, w, h) = row_rect(&before.rows, row, W, H).expect("the title row has a hit box");
+    nav.set_menu_cursor(x + w * 0.5, y + h * 0.5, W, H);
+    let hovered = frame_for(&ui, &nav, &statuses, &mut favicons).expect("hovered title frame");
+    assert!(
+        colour_bounds(&geometry(&hovered, W, H), W, H, TOOLTIP_BG).is_some(),
+        "hovering Multiplayer must rasterize its explanatory tooltip"
+    );
+}
+
 /// A nav with a temporary (never-loaded) list path, so no test reads the
 /// developer's real `servers.json`.
 fn test_nav(tag: &str) -> MenuNav {

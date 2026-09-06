@@ -15,6 +15,25 @@ wrong" below).
 
 ## How it works
 
+### Large browser assets
+
+The browser boot loader normally fetches a direct, page-relative `client.jar` and
+passes its bytes through `lodestone::platform::assets::install`. Static hosts with
+a per-file cap instead serve `client.jar.parts.json` alongside ordered,
+content-addressed `client.jar.part-NNN-<sha256>` files.
+`web::client_jar::ClientJarParts` validates the manifest's version, exact
+names/order/digests, total and per-part size bounds, and every SHA-256 digest before
+reconstructing the archive. The mutable manifest is fetched with `cache: "no-store"`;
+part names change with their content, so a deploy cannot combine a fresh manifest
+with a stale cached part. A malformed present manifest is fatal; only a 404 falls
+back to the direct jar, which keeps local development simple without making a broken
+production deployment look healthy.
+
+`web/scripts/stage_client_jar_parts.py` emits the deterministic 20 MiB parts and
+manifest. `web/Trunk.toml` runs it when `LODESTONE_WEB_CLIENT_JAR_PARTS=1`; package
+workflows must omit the direct jar afterward for hosts that reject it. URLs are
+intentionally relative, so the same output works below a deployment subpath.
+
 ### The measurement that reorders the whole census
 
 Hazard calls that compile for `wasm32-unknown-unknown` and "die at runtime" are usually

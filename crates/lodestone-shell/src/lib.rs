@@ -143,6 +143,20 @@ pub use config::{CliOutcome, Config, Mode};
 /// this build was not compiled with one.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run(config: Config) -> anyhow::Result<()> {
+    // This is deliberately before the window/no-window dispatch and every
+    // account check below. An explicit remote request is a request for a
+    // capability this binary does not contain, not an ownership failure or a
+    // title-screen fallback. Keeping it at the library boundary also covers
+    // `--surface stdio`/`terminal` builds, which never enter `app::run`.
+    #[cfg(not(feature = "multiplayer"))]
+    if config.connect_in_window
+        || config.address_given
+        || matches!(config.mode, Mode::Connect | Mode::Stdio | Mode::Terminal)
+    {
+        return Err(anyhow::anyhow!(
+            "multiplayer is disabled in this build of the game; rebuild with the `multiplayer` Cargo feature to use --live, --host, --port, --connect, or --surface stdio/terminal"
+        ));
+    }
     #[cfg(feature = "window")]
     {
         app::run(config)

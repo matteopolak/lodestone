@@ -1067,7 +1067,7 @@ impl WindowApp {
     /// used to be one variant, and every "already published" reply rode in on
     /// the session-ending one, which is exactly the disconnect this doc
     /// used to (wrongly) say could not happen.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
     pub(super) fn open_current_world_to_lan(&mut self) {
         if self.hosted_world.is_none() {
             self.sim
@@ -1260,7 +1260,7 @@ impl WindowApp {
         // Selected World) has none, so an existing world always takes the
         // ordinary offline path below. See
         // `WorldCreationConfig::online_mode`'s own doc for the full picture.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
         let online_mode = matches!(
             &launch,
             SingleplayerLaunch::Created { config, .. } if config.online_mode
@@ -1286,7 +1286,7 @@ impl WindowApp {
         let view_radius = i32::try_from(self.config.render_distance)
             .unwrap_or(i32::MAX)
             .saturating_add(1);
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
         let launch_result = if online_mode {
             launch_open_to_lan_online(
                 self.config.protocol,
@@ -1306,6 +1306,15 @@ impl WindowApp {
                 world_dir,
             )
         };
+        #[cfg(all(not(feature = "multiplayer"), not(target_arch = "wasm32")))]
+        let launch_result = launch_singleplayer(
+            self.config.protocol,
+            view_radius,
+            session,
+            seed,
+            world_type,
+            world_dir,
+        );
         #[cfg(target_arch = "wasm32")]
         let launch_result = launch_singleplayer(
             self.config.protocol,

@@ -116,7 +116,7 @@ pub(crate) fn launch_singleplayer(
 /// mode. `port` is always `0` — the caller has not joined anyone in yet, this
 /// is "host this new world from the moment it exists", not a fixed address to
 /// remember.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
 pub(crate) fn launch_open_to_lan_online(
     protocol: i32,
     view_radius: i32,
@@ -210,5 +210,5 @@ pub(super) fn java_string_hash_code(s: &str) -> i32 {
 /// command line and got the title screen. [`Config::address_given`] now records
 /// whether the flag was *seen*, which is the question actually being asked.
 pub(super) fn requested_a_connection(config: &Config) -> bool {
-    config.connect_in_window || config.address_given
+    cfg!(feature = "multiplayer") && (config.connect_in_window || config.address_given)
 }
