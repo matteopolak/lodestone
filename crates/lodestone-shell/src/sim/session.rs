@@ -246,6 +246,11 @@ impl Sim {
         // so nothing below can race a still-running poll against state this
         // method is about to reset out from under it.
         self.net = None;
+        // The session component is restored to its default below; drop its
+        // read-side snapshot at the same boundary so a new session cannot
+        // briefly expose the previous server's display ids.
+        self.recipe_book_cache = lodestone_game::recipe_sync::RecipeBookSync::default();
+        self.recipe_book_cache_revision = None;
 
         self.teleport_count = 0;
         // A reconnect that hits the same id-space mismatch must warn again: see
@@ -1804,21 +1809,45 @@ impl Sim {
     /// `PLACE_GHOST_RECIPE` and `UPDATE_RECIPES` as last folded into
     /// `lodestone_ecs::session::SessionRecipeBook` (missing hop 3).
     ///
-    /// Same shape as [`Self::recipe_book_settings`] and [`Self::difficulty`]: a
-    /// plain read of a local-player session component through the ordinary
-    /// `NetIngest` path. Cloned rather than borrowed so the caller (the
-    /// recipe-toast dispatcher) can diff it against its own "already toasted"
-    /// set without holding the ECS guard across the comparison.
-    #[must_use]
-    pub fn known_recipes(&self) -> lodestone_game::recipe_sync::RecipeBookSync {
-        self.read(|w| {
+    /// Refresh the stable snapshot of the server's recipe-book sync store.
+    pub fn refresh_known_recipes(&mut self) {
+        let cached_revision = self.recipe_book_cache_revision;
+        let fresh = self.read(|w| {
             // Full module path: like `SessionRecipeBookSettings`, this is not
             // re-exported at `lodestone_ecs`'s crate root.
-            w.get::<lodestone_ecs::session::SessionRecipeBook>(self.local)
+            let source = &w
+                .get::<lodestone_ecs::session::SessionRecipeBook>(self.local)
                 .expect("the local player always carries SessionRecipeBook")
-                .0
-                .clone()
-        })
+                .0;
+            (cached_revision != Some(source.revision()))
+                .then(|| (source.revision(), source.clone()))
+        });
+        if let Some((revision, snapshot)) = fresh {
+            self.recipe_book_cache = snapshot;
+            self.recipe_book_cache_revision = Some(revision);
+        }
+    }
+
+    /// Same shape as [`Self::recipe_book_settings`] and [`Self::difficulty`]: a
+    /// read of the local-player session component through the ordinary
+    /// `NetIngest` path. The revision check refreshes a stable `Sim`-owned
+    /// snapshot, so an unchanged frame borrows the previous book instead of
+    /// cloning its nested maps and registry sets.
+    #[must_use]
+    pub fn known_recipes(&mut self) -> &lodestone_game::recipe_sync::RecipeBookSync {
+        self.refresh_known_recipes();
+        self.cached_known_recipes()
+    }
+
+    /// Borrow the most recently refreshed recipe snapshot without taking an ECS
+    /// guard. Redraw uses this after its post-tick refresh because the atlas
+    /// borrow it keeps across the HUD assembly prevents a second mutable borrow
+    /// of `Sim`.
+    #[must_use]
+    pub(crate) fn cached_known_recipes(
+        &self,
+    ) -> &lodestone_game::recipe_sync::RecipeBookSync {
+        &self.recipe_book_cache
     }
 
     /// The current member of a server-declared recipe property set.

@@ -1597,6 +1597,10 @@ impl WindowApp {
             Vec::new()
         };
 
+        // The tick above may have folded a recipe event after
+        // `drive_ui_from_session`; refresh before taking the long-lived
+        // immutable atlas borrow used by the rest of this frame.
+        self.sim.refresh_known_recipes();
         let item_models = self.sim.vanilla_atlas().and_then(|a| a.models());
 
         // Assemble the HUD frame: debug overlay, chat log + prompt, tab list,
@@ -2199,12 +2203,11 @@ impl WindowApp {
             // window — the same "no window id of its own" contract
             // `bundle_selection` below already established, because
             // `ContainerFrame` itself has nothing to compare `window_id`
-            // against. `known_recipes()` is a cheap clone of the session's
-            // own recipe-sync store (`Sim::known_recipes`'s own doc), so
-            // reading it unconditionally here costs nothing when no ghost is
-            // showing.
+            // against. The revision-gated snapshot borrows the session's
+            // recipe-sync store, so reading it unconditionally here costs no
+            // full-book clone when no ghost is showing.
             let ghost_window_id = open_menu.as_ref().map_or(0, |open| open.window_id);
-            let known_recipes = self.sim.known_recipes();
+            let known_recipes = self.sim.cached_known_recipes();
             let recipe_ghost_stack = known_recipes
                 .ghost()
                 .filter(|ghost| ghost.window_id == ghost_window_id)
@@ -2217,7 +2220,7 @@ impl WindowApp {
             // a non-stonecutter screen and for an input with no cuts, and the
             // grid draws nothing in both cases.
             let stonecutter_matches = container_menu.map_or_else(Vec::new, |menu| {
-                crate::container::stonecutter::server_results_for_menu(menu, &known_recipes)
+                crate::container::stonecutter::server_results_for_menu(menu, known_recipes)
             });
             let stonecutter_start_index = crate::container::stonecutter::start_index_for_scroll(
                 self.stonecutter_scroll,

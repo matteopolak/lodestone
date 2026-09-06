@@ -67,7 +67,12 @@ and replayed onto whichever corpus the process later adopts, making
 registration order-independent. The shell re-clones the merged book only
 when `RecipeRegistry::revision` has moved, so a mid-session registration
 reaches the screen at the cost of one `u64` comparison per frame rather than
-cloning a 1,585-recipe corpus every frame.
+cloning a 1,585-recipe corpus every frame. The server's `RecipeBookSync` follows
+the same rule: its source revision advances for each recipe-sync event, and the
+shell borrows a `Sim`-owned snapshot until that revision changes. This keeps
+redraws from repeatedly cloning known entries and their nested registry sets,
+while still exposing the complete unlock, ghost, property-set, and stonecutter
+state to every consumer.
 
 Gotchas: `TagResolver`'s memo must be an `RwLock`, not a `RefCell` — `RefCell`
 is `!Sync`, which propagates through `RecipeBook`, which cannot then be a
