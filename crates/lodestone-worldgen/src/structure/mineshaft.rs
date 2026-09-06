@@ -57,19 +57,19 @@
 //!   crosses. [`View::can_be_replaced`] is that override; dropping it produces a
 //!   mineshaft with no woodwork wherever two pieces touch.
 //!
-//! # Deviations, all three of them the same shape
+//! # Remaining deviations
 //!
 //! A faithful implementation runs its block-writing walk once **per decorating chunk**, with that chunk's own
 //! feature random, and clips every write to that chunk's own box. A corridor spanning two
 //! chunks therefore draws its cobwebs twice, from two unrelated streams, and keeps
 //! whichever half landed. There is no single deterministic answer to reproduce, exactly as
-//! `swamp_hut`'s average ground height had none. Resolved eagerly here, once:
+//! `swamp_hut`'s average ground height had none. The liquid-shell check now replays
+//! per decorating chunk; the remaining deviations are:
 //!
 //! | reference behaviour | here | ledger row |
 //! |---|---|---|
 //! | the block-writing walk's random is the decorating chunk's | the structure's own stream, continuing after piece layout | `coded:region_random` |
-//! | the invalid-location check clamps its shell walk to the decorating chunk's box, so a piece can be invalid in one chunk and valid in another | the walk covers the whole inflated box, once | `mineshaft:invalid_location_scope` |
-//! | the sturdy-neighbours check / block placement skip positions outside the decorating chunk's box | no chunk gate; `structure_place_stage` clips instead | as above |
+//! | the sturdy-neighbours check / block placement skip positions outside the decorating chunk's box | no chunk gate; `structure_place_stage` clips instead | `mineshaft:post_process_scope` |
 //!
 //! # Dependencies
 //!
@@ -313,6 +313,46 @@ pub fn generate<R: RandomSource>(
     blocking_biomes: &std::collections::HashSet<String>,
     random: &mut R,
 ) -> (Vec<StructurePiece>, [i32; 3]) {
+    generate_inner(cx, cz, ctx, wood, blocking_biomes, random, None)
+}
+
+/// Regenerates one mineshaft's block-writing pass for one decorating chunk.
+///
+/// The start still owns the tree and its persisted boxes, but the liquid-shell
+/// predicate is evaluated by the chunk that actually receives a piece.  This
+/// preserves the per-chunk boundary of that predicate without changing start
+/// selection or the tree's RNG stream.
+#[must_use]
+pub(crate) fn generate_for_chunk<R: RandomSource>(
+    cx: i32,
+    cz: i32,
+    decorating_chunk: (i32, i32),
+    ctx: &dyn StartContext,
+    wood: Wood,
+    blocking_biomes: &std::collections::HashSet<String>,
+    random: &mut R,
+) -> Vec<StructurePiece> {
+    generate_inner(
+        cx,
+        cz,
+        ctx,
+        wood,
+        blocking_biomes,
+        random,
+        Some(DecoratingChunk::new(decorating_chunk.0, decorating_chunk.1)),
+    )
+    .0
+}
+
+fn generate_inner<R: RandomSource>(
+    cx: i32,
+    cz: i32,
+    ctx: &dyn StartContext,
+    wood: Wood,
+    blocking_biomes: &std::collections::HashSet<String>,
+    random: &mut R,
+    decorating_chunk: Option<DecoratingChunk>,
+) -> (Vec<StructurePiece>, [i32; 3]) {
     // One discarded double draw — the canonical
     // stream-shifting trap. Without it every draw below lands one value early.
     let _ = random.next_double();
@@ -366,7 +406,7 @@ pub fn generate<R: RandomSource>(
         shaft.move_below_sea_level(sea_level, ctx.min_y(), random, 10)
     };
 
-    let pieces = into_pieces(shaft, ctx, blocking_biomes, random);
+    let pieces = into_pieces(shaft, ctx, blocking_biomes, random, decorating_chunk);
     (
         pieces,
         [cx * 16 + 8, MAGIC_START_Y + dy, cz * 16],
@@ -801,8 +841,36 @@ fn room_children<R: RandomSource>(
 /// reads the level, which by then holds both the terrain and whatever earlier pieces
 /// of the same start wrote. So the overlay is not an optimisation — without it a
 /// corridor's pillars would be decided against bare stone and would never appear.
+#[derive(Clone, Copy)]
+struct DecoratingChunk {
+    min_x: i32,
+    max_x: i32,
+    min_z: i32,
+    max_z: i32,
+}
+
+impl DecoratingChunk {
+    fn new(cx: i32, cz: i32) -> Self {
+        Self {
+            min_x: cx * 16,
+            max_x: cx * 16 + 15,
+            min_z: cz * 16,
+            max_z: cz * 16 + 15,
+        }
+    }
+
+    fn contains(self, x: i32, z: i32) -> bool {
+        (self.min_x..=self.max_x).contains(&x) && (self.min_z..=self.max_z).contains(&z)
+    }
+
+    fn intersects(self, box_: BoundingBox) -> bool {
+        box_.intersects_xz(self.min_x, self.min_z, self.max_x, self.max_z)
+    }
+}
+
 struct View<'a> {
     ctx: &'a dyn StartContext,
+    decorating_chunk: Option<DecoratingChunk>,
     overlay: HashMap<[i32; 3], Arc<str>>,
     /// The current piece's own writes, in order. Drained at each piece boundary.
     emitted: Vec<CodedBlock>,
@@ -903,6 +971,12 @@ impl<'a> View<'a> {
     /// The raw write, with no replaceability check and
     /// no transform. Four helpers use it directly.
     fn set(&mut self, pos: [i32; 3], state: &str) {
+        if self
+            .decorating_chunk
+            .is_some_and(|chunk| !chunk.contains(pos[0], pos[2]))
+        {
+            return;
+        }
         let shared: Arc<str> = Arc::from(state);
         self.overlay.insert(pos, Arc::clone(&shared));
         self.emitted.push(CodedBlock {
@@ -1064,8 +1138,17 @@ impl Place<'_, '_> {
         let box_ = self.node.box_;
         let min_y = self.view.ctx.min_y();
         let max_y = min_y + self.view.ctx.dimension_height() - 1;
-        let (x0, z0) = (box_.min[0] - 1, box_.min[2] - 1);
-        let (x1, z1) = (box_.max[0] + 1, box_.max[2] + 1);
+        let (mut x0, mut z0) = (box_.min[0] - 1, box_.min[2] - 1);
+        let (mut x1, mut z1) = (box_.max[0] + 1, box_.max[2] + 1);
+        if let Some(chunk) = self.view.decorating_chunk {
+            x0 = x0.max(chunk.min_x);
+            x1 = x1.min(chunk.max_x);
+            z0 = z0.max(chunk.min_z);
+            z1 = z1.min(chunk.max_z);
+        }
+        if x0 > x1 || z0 > z1 {
+            return false;
+        }
         let y0 = (box_.min[1] - 1).max(min_y);
         let y1 = (box_.max[1] + 1).min(max_y);
         let centre = [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2];
@@ -1282,15 +1365,33 @@ fn into_pieces<R: RandomSource>(
     ctx: &dyn StartContext,
     blocking_biomes: &std::collections::HashSet<String>,
     random: &mut R,
+    decorating_chunk: Option<DecoratingChunk>,
 ) -> Vec<StructurePiece> {
     let wood = shaft.wood;
     let mut view = View {
         ctx,
+        decorating_chunk,
         overlay: HashMap::new(),
         emitted: Vec::new(),
     };
     let mut out = Vec::with_capacity(shaft.pieces.len());
     for node in &shaft.pieces {
+        if decorating_chunk.is_some_and(|chunk| !chunk.intersects(node.box_)) {
+            out.push(StructurePiece {
+                id: node.piece_id().to_string(),
+                bounding_box: node.box_,
+                orientation: node.orientation.map(Facing::data_2d),
+                gen_depth: node.gen_depth,
+                template: None,
+                placement: None,
+                extra_placements: Vec::new(),
+                blocks: Some(Arc::new(Vec::new())),
+                loot: Vec::new(),
+                beard: None,
+                refine: None,
+            });
+            continue;
+        }
         let (mirror, rotation) = node.transform();
         let mut loot = Vec::new();
         {
@@ -1593,6 +1694,64 @@ mod tests {
         r
     }
 
+    struct Corridor44LiquidShell;
+
+    impl StartContext for Corridor44LiquidShell {
+        fn first_occupied_height(&self, _x: i32, _z: i32, _h: HeightmapKind) -> i32 {
+            63
+        }
+        fn biome_at_quart(&self, _qx: i32, _qy: i32, _qz: i32) -> String {
+            "minecraft:deep_ocean".to_string()
+        }
+        fn sea_level(&self) -> i32 {
+            63
+        }
+        fn block_kind_at(&self, x: i32, y: i32, z: i32) -> BlockKind {
+            ([x, y, z] == [-3976, 11, 3988])
+                .then_some(BlockKind::Water)
+                .unwrap_or(BlockKind::Stone)
+        }
+    }
+
+    #[test]
+    fn corridor_44s_decorating_chunk_shell_excludes_the_other_chunk() {
+        let ctx = Corridor44LiquidShell;
+        let node = Node {
+            box_: BoundingBox {
+                min: [-3975, 12, 3988],
+                max: [-3973, 14, 4007],
+            },
+            orientation: Some(Facing::South),
+            gen_depth: 9,
+            kind: Kind::Corridor {
+                has_rails: true,
+                spider_corridor: false,
+                sections: 4,
+            },
+        };
+        let blocked = |decorating_chunk| {
+            let mut view = View {
+                ctx: &ctx,
+                decorating_chunk,
+                overlay: HashMap::new(),
+                emitted: Vec::new(),
+            };
+            let place = Place {
+                node: &node,
+                view: &mut view,
+                wood: Wood::Normal,
+                mirror: Mirror::None,
+                rotation: Rotation::None,
+            };
+            place.is_in_invalid_location(&HashSet::new())
+        };
+        assert!(blocked(None), "the old whole-shell survey sees the liquid control");
+        assert!(
+            !blocked(Some(DecoratingChunk::new(-249, 250))),
+            "the (-249, 250) decorating chunk excludes the liquid from its (-249, 249) neighbour"
+        );
+    }
+
 
     /// A grown shaft, with **counted** rather than eyeballed results: the tree at
     /// this seed is exactly 101 pieces and 14,344 blocks, and both numbers are the
@@ -1784,6 +1943,7 @@ mod tests {
         let ctx = Solid { surface: 70 };
         let mut view = View {
             ctx: &ctx,
+            decorating_chunk: None,
             overlay: HashMap::new(),
             emitted: Vec::new(),
         };

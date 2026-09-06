@@ -721,8 +721,25 @@ impl OverworldGenerator {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Structure);
         let seed = registry.seed();
         let (bx, bz) = (cx * 16, cz * 16);
+        let mineshaft_sampler = StartSampler {
+            generator: self,
+            aquifers: RefCell::new(HashMap::new()),
+        };
         for (_, _, start) in &self.structure_refs_stage(cx, cz).entries {
             if !start.pieces_complete {
+                continue;
+            }
+            if start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15)
+                && let Some(blocks) = registry.mineshaft_blocks_for_chunk(
+                    start,
+                    cx,
+                    cz,
+                    &mineshaft_sampler,
+                )
+            {
+                for block in blocks {
+                    world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+                }
                 continue;
             }
             // `StructureStart.placeInChunk` derives one `referencePos` for the whole
