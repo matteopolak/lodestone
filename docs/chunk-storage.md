@@ -3,8 +3,8 @@
 ## What it is
 
 How a server-side `ChunkColumn` holds its block-state data in memory, how those states reach a
-real client on the wire as the `level_chunk_with_light` packet body, and how the one heightmap this
-server currently computes (`MOTION_BLOCKING`) is derived and sent alongside them.
+real client on the wire as the `level_chunk_with_light` packet body, including the four typed
+heightmaps, per-section fluid counters, and resident-neighbour lighting sent alongside them.
 
 ## How it works
 
@@ -50,8 +50,10 @@ coincidentally agree for water and lava specifically).
 Per-section block/fluid-count wire fields are derived from the same real ids the container holds,
 which happens to also correct a second, narrower undercount a real client would otherwise trust
 verbatim for any fluid-bearing section (a real client stores what the wire tells it and never
-recomputes the count itself). Heightmap and light data sent alongside a column are separate,
-independently-tracked gaps from the block-state fix described here.
+recomputes the count itself). The encoder writes all four client-visible heightmaps from those
+same resolved ids and receives the light result from the resident 3x3 chunk neighbourhood when
+that context is available. The one-column encoder remains an isolated fallback for callers that
+cannot supply neighbours.
 
 Biome palettes use a different id space from block states: each entry is a holder index in the
 ordered `minecraft:worldgen/biome` registry sent during Configuration. The server derives that
@@ -65,7 +67,9 @@ later biome ids even when the generated biome names are correct.
 The generator computes a real per-column `MOTION_BLOCKING` heightmap (the height of the first block
 from the top that blocks motion or carries a fluid) as the final step of generation, and the server
 carries it across to the encoder rather than sending an empty, well-framed-but-zero-entry heightmap
-as it used to. A column with no such block anywhere reports height zero (the world's own minimum),
+as it used to. The wire encoder now sends the four client-visible maps (`WORLD_SURFACE`,
+`OCEAN_FLOOR`, `MOTION_BLOCKING`, and `MOTION_BLOCKING_NO_LEAVES`) using their explicit registry
+ids. A column with no such block anywhere reports height zero (the world's own minimum),
 which is deliberately different from "no heightmap at all" — an absent heightmap tells a real client
 nothing and it computes its own, while a wrong one sent as real data is trusted outright, so sending
 a knowingly-wrong map is worse than sending none. For that reason a column with no generator-derived
@@ -75,10 +79,13 @@ empty case rather than a guessed one.
 This is a **snapshot taken once, at generation time**, not a maintained live value — a later block
 edit does not update it, matching this crate's choice not to persist heightmaps at all and to rely
 on a real client re-deriving them after any edit, the same way vanilla re-derives them on load. The
-other three heightmap kinds vanilla also sends are not computed here at all; sending one of them
-today would mean sending a knowingly wrong map (in particular, the "exclude leaves" variant has no
-real exclusion logic behind it yet), which is exactly the failure mode the `MOTION_BLOCKING` fix
-was careful to avoid.
+no-leaves predicate excludes the generated leaf states explicitly; it is not inferred by
+subtracting the ordinary motion-blocking answer. Each map is derived from the current source column
+that feeds the packet, so imported and edited columns do not inherit a stale generation snapshot.
+
+Fluid-bearing states are counted in the section prefix, including waterlogged blocks. The counter
+is read from the exact palette written after it, while the packet retains each fluid state's level
+properties in the block-state palette.
 
 ## How to change it
 

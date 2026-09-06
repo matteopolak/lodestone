@@ -1,4 +1,4 @@
-//! A captured initial chunk's palette-backed blocks and heightmap through public client state.
+//! A captured initial chunk's palette-backed blocks, heightmaps, fluids, and light through public client state.
 #![cfg(feature = "v26-2")]
 
 use std::time::Duration;
@@ -7,13 +7,17 @@ use lodestone_client::{
     BlockPos, ChunkPos, ClientBuilder, ClientEvent, ConnectionState, Directive, EventStream,
     LoginProfile, ServerAddress, VersionAdapter,
 };
-#[cfg(feature = "rcon-oracle")]
 use lodestone_core::Reader;
 use lodestone_data::block_states::state_id;
 use lodestone_model::{AdapterError, ClientAction, WorldSink};
 use lodestone_net::{Connection, memory_pair};
-use lodestone_v26_2::{V770Adapter, packet_ids::play};
+use lodestone_v26_2::{
+    V770Adapter,
+    packet_ids::play,
+    packets::chunk::{ChunkShape, LevelChunkWithLight},
+};
 use serde::{Deserialize, Serialize};
+use lodestone_world::{Heightmaps, LightData, PalettedContainer};
 use tokio::io::DuplexStream;
 use tokio::runtime::{Builder, Runtime};
 use uuid::Uuid;
@@ -295,6 +299,69 @@ fn captured_chunk_content_reaches_public_client_state() {
     client
         .compare_content(&capture)
         .expect("captured palette and heightmap comparison");
+}
+
+/// The external packet is also a raw-wire control for fields the public client
+/// state deliberately normalizes. In particular, a decode/encode cycle would
+/// not prove that the section fluid counter was truthful because the decoder
+/// consumes that redundant short and does not retain it. Read the captured
+/// section prefixes directly, then decode the same bytes through the
+/// production packet type and require light data to reach client state as
+/// well. This particular external fixture is deliberately superflat and has
+/// no fluid placement, so its outside-derived control is that every fluid
+/// counter is zero; the positive fluid-count control lives beside the
+/// production encoder and uses distinct water/lava levels.
+#[test]
+fn external_chunk_fixture_preserves_wire_counters_and_light() {
+    let capture = captured_fixture();
+    let shape = ChunkShape::overworld_1_21();
+
+    let mut raw = Reader::new(&capture.packet.payload);
+    assert_eq!(raw.i32().expect("chunk x"), capture.chunk[0]);
+    assert_eq!(raw.i32().expect("chunk z"), capture.chunk[1]);
+    Heightmaps::decode(shape.world_height, &mut raw).expect("external heightmaps");
+    let section_blob_len = raw.var_i32().expect("section blob length") as usize;
+    let mut section_blob = raw
+        .take_reader(section_blob_len)
+        .expect("external section blob");
+
+    let mut fluid_sections = 0usize;
+    let mut fluid_cells = 0usize;
+    for _ in 0..shape.section_count {
+        let _non_air = section_blob.i16().expect("external non-air count");
+        let fluid = section_blob.i16().expect("external fluid count");
+        if fluid > 0 {
+            fluid_sections += 1;
+            fluid_cells += fluid as usize;
+        }
+        PalettedContainer::decode(shape.block_kind, &mut section_blob)
+            .expect("external block palette");
+        PalettedContainer::decode(shape.biome_kind, &mut section_blob)
+            .expect("external biome palette");
+    }
+    section_blob
+        .ensure_empty()
+        .expect("external section blob has no trailing bytes");
+    assert_eq!(
+        fluid_sections, 0,
+        "external superflat fixture's source commands place no fluids"
+    );
+    assert_eq!(
+        fluid_cells, 0,
+        "external superflat fixture must not invent fluid-bearing states"
+    );
+
+    let mut decoded_reader = Reader::new(&capture.packet.payload);
+    let decoded = LevelChunkWithLight::decode(&mut decoded_reader, &shape)
+        .expect("external chunk packet");
+    decoded_reader
+        .ensure_empty()
+        .expect("external chunk has no trailing bytes");
+    assert!(
+        (0..decoded.light.light_section_count())
+            .any(|index| !matches!(decoded.light.sky(index), LightData::Missing)),
+        "external chunk light payload must reach the production decoder"
+    );
 }
 
 #[test]
