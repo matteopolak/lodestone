@@ -4056,6 +4056,69 @@ mod single_biome_and_debug_world_selection {
         ));
     }
 
+    /// The source's possible-biome sequence, rather than every bundled biome,
+    /// determines the global decoration graph. This fixed reference capture
+    /// reaches `seagrass_warm` through the real Overworld source and records
+    /// the first placement draws. Enumerating every bundled document is a
+    /// deliberately wrong control: it has a different graph and must not
+    /// silently become the production source order.
+    #[test]
+    fn overworld_source_order_controls_the_seagrass_feature_seed() {
+        use lodestone_worldgen::{
+            biome::{parse_table, usable_overworld_table},
+            compose::build_decoration_catalog,
+            density::Resolver,
+            rng::{RandomSource, WorldgenRandom, XoroshiroRandomSource},
+        };
+
+        let resolver = super::embedded_resolver();
+        let mut source_order = Vec::new();
+        for point in usable_overworld_table(parse_table(&resolver.biome_parameters())) {
+            if !source_order.contains(&point.biome) {
+                source_order.push(point.biome);
+            }
+        }
+        assert_eq!(source_order.len(), 55, "the source order is the 55-biome climate set");
+
+        let catalog = build_decoration_catalog(&resolver, &source_order);
+        let (_, index, _) = catalog
+            .select(["minecraft:warm_ocean"])
+            .into_iter()
+            .find(|(step, _, placed)| {
+                *step == 9 && placed.registry_id.as_deref() == Some("minecraft:seagrass_warm")
+            })
+            .expect("warm ocean must select its seagrass placed feature");
+        assert_eq!(index, 97, "the captured source-order control fixes the feature seed index");
+
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = random.set_decoration_seed(42, 4_000, 4_000);
+        random.set_feature_seed(decoration_seed, index as i32, 9);
+        assert_eq!(
+            [
+                random.next_int_bounded(16),
+                random.next_int_bounded(16),
+                random.next_int_bounded(8),
+                random.next_int_bounded(8),
+                random.next_int_bounded(8),
+                random.next_int_bounded(8),
+            ],
+            [13, 8, 4, 3, 3, 4],
+            "the external source control predicts square (13,8) and body offsets (4,3), (3,4)"
+        );
+
+        let complete_registry_order = lodestone_data::biomes::all().collect::<Vec<_>>();
+        let wrong_catalog = build_decoration_catalog(&resolver, &complete_registry_order);
+        let (_, wrong_index, _) = wrong_catalog
+            .select(["minecraft:warm_ocean"])
+            .into_iter()
+            .find(|(step, _, placed)| {
+                *step == 9 && placed.registry_id.as_deref() == Some("minecraft:seagrass_warm")
+            })
+            .expect("the all-biome control still contains seagrass");
+        assert_eq!(wrong_index, 104, "the all-biome control must remain distinguishable");
+        assert_ne!(wrong_index, index, "full registry enumeration is not the source's feature order");
+    }
+
     #[test]
     fn surface_rules_choose_the_zoomed_biome_not_the_raw_packet_cell() {
         let source = super::overworld_chunk_source(42);

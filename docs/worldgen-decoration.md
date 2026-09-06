@@ -42,6 +42,14 @@ union selects `sulfur_spike_cluster` and `sulfur_spike` at step-7 indices 2 and 
 indices 0 and 1. `decoration_selection_jvm.txt` preserves that external control
 alongside the server-worldgen test.
 
+The source order is not a complete-registry enumeration. The Overworld climate
+table yields 55 distinct biomes in first-occurrence order; its external seed-42
+control places `seagrass_warm` at step-9 index 97 and predicts square `(13,8)`
+followed by body offsets `(4,3)` and `(3,4)`. Enumerating all bundled biome
+documents instead gives index 104, a deliberately retained failing-control
+value. The catalog must therefore use the biome source's possible-biome order
+and use biome membership only when selecting which already-indexed features run.
+
 `UNDERGROUND_ORES` is dispatched through the same catalog rather than treated as an ore-only
 list. `select_ores` emits the configured ore entries, while `select_step6_disks` emits disk
 features to the existing `VegGrid` placement interpreter; both walks count every raw step entry
@@ -128,10 +136,12 @@ their distinct trunk, branched and hollow-shell geometries.
 
 Tree `place_on_ground` decorators use the lowest trunk/root positions as their horizontal bounds,
 expand that box by the configured radius and vertical height, and try the configured state provider
-above solid, motion-blocking ground. Each try consumes one inclusive x, y and z draw before any
-candidate checks, including rejected candidates; this is important for the paired 96-try and 150-try
-leaf-litter decorators used by mixed oak trees. The provider is evaluated only after the air, ground
-and no-leaves heightmap checks pass, so a rejected candidate consumes no provider-specific draws.
+above a solid-rendering ground block. The support check uses the exact canonical block-state
+capability, while the separate no-leaves heightmap scan continues to use motion blocking. Each try
+consumes one inclusive x, y and z draw before any candidate checks, including rejected candidates;
+this is important for the paired 96-try and 150-try leaf-litter decorators used by mixed oak trees.
+The provider is evaluated only after the air, solid-rendering ground and no-leaves heightmap checks
+pass, so a rejected candidate consumes no provider-specific draws.
 
 The direct compiled-server maps for root systems and all three coral forms are exact, including
 their blocked-origin and dry-water controls. Their real-biome composition captures remain an
