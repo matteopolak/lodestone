@@ -257,12 +257,13 @@ splitting both at once puts two refactors in the path of one feature stream.
 existence to decide whether a family implements `ServerProtocol` at all. Teach the instrument the
 directory form *before* the split, exactly as was done for `adapter/`.
 
-### 5. `crates/lodestone-shell/src/hud.rs` — 7,841 lines — **SPLIT NOW**, cheaply
+### 5. `crates/lodestone-shell/src/hud.rs` — 13,039 lines — **SPLIT NOW**, cheaply
 
-26 commits in 7 days, and a `hud/` directory already exists holding `item_icon.rs` (2,559),
-`vanilla_font.rs` (1,723), `anim.rs` (653) and `font.rs` (337). The top-level file is the remainder.
-This is a small, well-understood move that can be folded into the `lodestone-gui` extraction as its
-first commits rather than run as its own unit.
+26 commits in 7 days, and a `hud/` directory already exists holding `item_icon.rs`, `vanilla_font.rs`,
+`anim.rs` and `font.rs`. The Tab overlay's geometry/constants are now in `hud/tab_panel.rs` and
+re-exported from `hud.rs`; this is a pure move that keeps `hud::TabPanel` and all existing internal
+constant paths intact. The remaining debug model and draw builder are still coupled to the HUD frame,
+so they stay in the top-level file until a lower-risk seam is identified.
 
 ### 6. `crates/lodestone-shell/src/menu/nav.rs` — 9,037 lines — **SPLIT LATER**
 
