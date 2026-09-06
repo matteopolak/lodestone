@@ -736,9 +736,8 @@ fn place_on_ground_decorator<R: RandomSource>(
             continue;
         }
         let below_id = grid.get_id(pos.x, pos.y, pos.z);
-        let below_name = super::base_id(grid.interner().name_of(below_id));
         if tags.has(grid.interner(), Tag::Fluid, below_id)
-            || !super::config::blocks_motion(below_name)
+            || !tags.simple_block_support.solid_render.test(grid.interner().name_of(below_id))
             || tags.has(grid.interner(), Tag::Leaves, below_id)
         {
             continue;
@@ -770,14 +769,21 @@ fn height_motion_blocking_no_leaves(grid: &VegGrid, tags: &VegTags, x: i32, z: i
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
+
     use super::*;
     use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
+    use crate::feature::top_layer::StatePredicate;
 
     #[test]
     fn place_on_ground_mixed_oak_try_counts_and_output_are_stable() {
         let mut grid = VegGrid::new(-4, 9, 0, 0);
         grid.seed(0, 0, 0, "minecraft:grass_block".to_string());
-        let tags = VegTags::default();
+        let mut tags = VegTags::default();
+        tags.simple_block_support.solid_render = StatePredicate::new(
+            HashSet::from(["minecraft:grass_block".to_string()]),
+            HashMap::new(),
+        );
         let provider = BlockStateProvider::Simple("minecraft:short_grass".to_string());
         let logs = [BlockPos { x: 0, y: 0, z: 0 }];
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
@@ -807,6 +813,59 @@ mod tests {
 
         assert_eq!(random.count(), (96 + 150) * 3);
         assert_eq!(grid.get(0, 1, 0), "minecraft:short_grass");
+    }
+
+    #[test]
+    fn place_on_ground_uses_solid_render_and_gates_provider_draws() {
+        let logs = [BlockPos { x: 0, y: 0, z: 0 }];
+        let provider = BlockStateProvider::Weighted(vec![
+            (1, "minecraft:short_grass".to_string()),
+            (1, "minecraft:fern".to_string()),
+        ]);
+        let mut tags = VegTags::default();
+        tags.simple_block_support.solid_render = StatePredicate::new(
+            HashSet::from(["minecraft:grass_block".to_string()]),
+            HashMap::new(),
+        );
+
+        let mut supported = VegGrid::new(-1, 3, 0, 0);
+        supported.seed(0, 0, 0, "minecraft:grass_block".to_string());
+        let mut supported_random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        place_on_ground_decorator(
+            &mut supported_random,
+            &logs,
+            &[],
+            &provider,
+            0,
+            0,
+            2,
+            &mut supported,
+            &tags,
+        );
+        assert_eq!(supported.get(0, 1, 0), "minecraft:short_grass");
+        // The first attempt accepts and consumes one weighted-provider draw;
+        // its write makes the second attempt fail the above-air check.
+        assert_eq!(supported_random.count(), 7);
+
+        // Glass blocks motion but is not solid-rendering. It therefore passes
+        // the heightmap check but must fail PlaceOnGround's support predicate;
+        // the provider's weighted selection must not consume a draw.
+        let mut rejected = VegGrid::new(-1, 3, 0, 0);
+        rejected.seed(0, 0, 0, "minecraft:glass".to_string());
+        let mut rejected_random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        place_on_ground_decorator(
+            &mut rejected_random,
+            &logs,
+            &[],
+            &provider,
+            0,
+            0,
+            2,
+            &mut rejected,
+            &tags,
+        );
+        assert_eq!(rejected.get(0, 1, 0), "minecraft:air");
+        assert_eq!(rejected_random.count(), 6);
     }
 }
 
