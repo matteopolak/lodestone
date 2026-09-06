@@ -510,7 +510,7 @@ fn bed_facing_steps(state: &str) -> Option<(i32, i32)> {
 /// Fail-closed on both halves, which is the safe direction here: an unrecognised
 /// block is not somewhere the search will place a player, so it moves on to the
 /// next offset rather than dropping them into it.
-fn is_standable<S: ChunkSource + ?Sized>(source: &S, pos: BlockPos) -> bool {
+pub(crate) fn is_standable<S: ChunkSource + ?Sized>(source: &S, pos: BlockPos) -> bool {
     let feet = source.block_state(pos.x, pos.y, pos.z);
     let head = source.block_state(pos.x, pos.y + 1, pos.z);
     let below = source.block_state(pos.x, pos.y - 1, pos.z);

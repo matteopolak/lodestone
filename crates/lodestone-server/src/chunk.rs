@@ -635,7 +635,7 @@ impl ChunkColumn {
                 (
                     BlockPos::new(gateway.pos.0, gateway.pos.1, gateway.pos.2),
                     BlockEntity::EndGateway {
-                        exit: BlockPos::new(gateway.exit.0, gateway.exit.1, gateway.exit.2),
+                        exit: Some(BlockPos::new(gateway.exit.0, gateway.exit.1, gateway.exit.2)),
                         exact: gateway.exact,
                     },
                 )

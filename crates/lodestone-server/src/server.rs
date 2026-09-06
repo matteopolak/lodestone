@@ -753,7 +753,49 @@ fn end_gateway_destination<S: ChunkSource + ?Sized>(
     let configured = block_entities
         .with(|registry| registry.get(pos).and_then(BlockEntity::gateway_destination))
         .or_else(|| source.block_entity(pos.x, pos.y, pos.z).and_then(|entity| entity.gateway_destination()));
-    configured.and_then(|(exit, exact)| crate::portal::end_gateway_arrival(exit, exact))
+    configured.and_then(|(exit, exact)| {
+        crate::portal::end_gateway_arrival_in_world(source, exit, exact)
+    })
+}
+
+fn end_gateway_contact_allowed(dimension: crate::dimension::Dimension, is_player: bool) -> bool {
+    dimension == crate::dimension::Dimension::End && is_player
+}
+
+fn player_has_mount(mobs: &MobHandle, player_entity_id: i32) -> bool {
+    mobs.with(|sim| {
+        sim.vehicle_ridden_by(player_entity_id).is_some()
+            || sim.minecart_ridden_by(player_entity_id).is_some()
+            || sim.mob_ridden_by(player_entity_id).is_some()
+    })
+}
+
+const END_GATEWAY_CONTACT_COOLDOWN: u8 = 40;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EndGatewayTeleport {
+    position: Vec3,
+    dimension: crate::dimension::Dimension,
+    cooldown: u8,
+}
+
+fn resolve_end_gateway_contact<S: ChunkSource + ?Sized>(
+    source: &S,
+    block_entities: &BlockEntityHandle,
+    pos: BlockPos,
+    dimension: crate::dimension::Dimension,
+    cooldown: u8,
+    is_player: bool,
+    mounted: bool,
+) -> Option<EndGatewayTeleport> {
+    if cooldown != 0 || mounted || !end_gateway_contact_allowed(dimension, is_player) {
+        return None;
+    }
+    end_gateway_destination(source, block_entities, pos).map(|position| EndGatewayTeleport {
+        position,
+        dimension,
+        cooldown: END_GATEWAY_CONTACT_COOLDOWN,
+    })
 }
 
 /// Which block-entity registry and tick-scheduling feed a connection should
@@ -14675,10 +14717,25 @@ where
                         // `death.gateway_blocks` contains the positions from
                         // `outcome.spawn_gateway`'s formula and its shuffled
                         // 20-slice pool. The list is empty when spawning is
-                        // disabled or the pool is exhausted. The visible
-                        // structure has no teleport behavior here.
+                        // disabled or the pool is exhausted. Publish the centre
+                        // block's empty destination into the End registry as
+                        // well as writing the visible structure; the contact
+                        // loop resolves its delayed safe exit on use.
                         for (pos, state) in &death.gateway_blocks {
                             destination.set_block(pos.x, pos.y, pos.z, state);
+                            if *state == crate::portal::END_GATEWAY_BLOCK
+                                && let Some(registries) = destination.world_registries()
+                            {
+                                registries.block_entities.with(|registry| {
+                                    registry.insert(
+                                        *pos,
+                                        BlockEntity::EndGateway {
+                                            exit: None,
+                                            exact: false,
+                                        },
+                                    );
+                                });
+                            }
                         }
                     }
                 }
@@ -14801,15 +14858,26 @@ where
                 if end_gateway_cooldown > 0 {
                     end_gateway_cooldown -= 1;
                 }
-                if end_gateway_cooldown == 0
-                    && source.dimension() == crate::dimension::Dimension::End
-                    && let Some((x, y, z)) = player_pos
-                {
+                if let Some((x, y, z)) = player_pos {
                     let contact = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
-                    if let Some(destination) = end_gateway_destination(source.get(), block_entities, contact) {
+                    // A mounted player and its vehicle are one contact unit. The
+                    // current movement seam can update the player and view, but
+                    // has no atomic vehicle relocation operation; leave the
+                    // pair in place rather than splitting passenger state.
+                    if let Some(teleport) = resolve_end_gateway_contact(
+                        source.get(),
+                        block_entities,
+                        contact,
+                        source.dimension(),
+                        end_gateway_cooldown,
+                        true,
+                        player_has_mount(mobs, player_entity_id),
+                    ) {
+                        let destination = teleport.position;
+                        debug_assert_eq!(teleport.dimension, source.dimension());
                         let rotation = player_rot.unwrap_or_default();
                         player_pos = Some((destination.x, destination.y, destination.z));
-                        end_gateway_cooldown = 40;
+                        end_gateway_cooldown = teleport.cooldown;
                         apply(
                             conn,
                             &mut state,
@@ -16352,7 +16420,7 @@ mod tests {
             generated: Some((
                 gateway,
                 BlockEntity::EndGateway {
-                    exit: BlockPos::new(100, 50, 0),
+                    exit: Some(BlockPos::new(100, 50, 0)),
                     exact: true,
                 },
             )),
@@ -16369,7 +16437,7 @@ mod tests {
             entries.insert(
                 gateway,
                 BlockEntity::EndGateway {
-                    exit: BlockPos::new(-20, 80, 30),
+                    exit: Some(BlockPos::new(-20, 80, 30)),
                     exact: true,
                 },
             );
@@ -16389,6 +16457,96 @@ mod tests {
             None,
             "a stale sidecar must not teleport through a removed gateway block"
         );
+
+        let missing_metadata = EndGatewaySource {
+            state: crate::portal::END_GATEWAY_BLOCK.to_owned(),
+            generated: None,
+        };
+        assert_eq!(
+            end_gateway_destination(&missing_metadata, &BlockEntityHandle::new(), gateway),
+            None,
+            "a gateway without an exit must leave the player in place"
+        );
+    }
+
+    #[test]
+    fn gateway_contact_is_end_player_only() {
+        assert!(end_gateway_contact_allowed(
+            crate::dimension::Dimension::End,
+            true
+        ));
+        assert!(!end_gateway_contact_allowed(
+            crate::dimension::Dimension::Overworld,
+            true
+        ));
+        assert!(!end_gateway_contact_allowed(
+            crate::dimension::Dimension::End,
+            false
+        ));
+    }
+
+    #[test]
+    fn gateway_contact_production_decision_updates_position_and_cooldown() {
+        let gateway = BlockPos::new(12, 70, -4);
+        let source = EndGatewaySource {
+            state: crate::portal::END_GATEWAY_BLOCK.to_owned(),
+            generated: Some((
+                gateway,
+                BlockEntity::EndGateway {
+                    exit: Some(BlockPos::new(100, 50, 0)),
+                    exact: true,
+                },
+            )),
+        };
+        let registry = BlockEntityHandle::new();
+
+        let teleport = resolve_end_gateway_contact(
+            &source,
+            &registry,
+            gateway,
+            crate::dimension::Dimension::End,
+            0,
+            true,
+            false,
+        )
+        .expect("the production contact seam must produce a visible teleport");
+        assert_eq!(teleport.position, Vec3::new(100.5, 50.0, 0.5));
+        assert_eq!(teleport.dimension, crate::dimension::Dimension::End);
+        assert_eq!(teleport.cooldown, END_GATEWAY_CONTACT_COOLDOWN);
+
+        assert!(resolve_end_gateway_contact(
+            &source,
+            &registry,
+            gateway,
+            crate::dimension::Dimension::End,
+            END_GATEWAY_CONTACT_COOLDOWN,
+            true,
+            false,
+        )
+        .is_none());
+        assert!(resolve_end_gateway_contact(
+            &EndGatewaySource {
+                state: crate::portal::END_GATEWAY_BLOCK.to_owned(),
+                generated: None,
+            },
+            &registry,
+            gateway,
+            crate::dimension::Dimension::End,
+            0,
+            true,
+            false,
+        )
+        .is_none());
+        assert!(resolve_end_gateway_contact(
+            &source,
+            &registry,
+            gateway,
+            crate::dimension::Dimension::End,
+            0,
+            false,
+            true,
+        )
+        .is_none());
     }
 
     #[tokio::test]

@@ -111,8 +111,10 @@ passes through lighting and the selected protocol's chunk encoder. The in-memory
 `crates/lodestone-server/tests/integrated_memory.rs` drives that connection path and checks the
 Nether's 256-row wire window plus a bedrock floor marker against the external full-region oracle
 at `crates/lodestone-worldgen/tests/support/nether_vanilla_oracle.txt`. End portal entry lands on
-the generated fixed platform, and generated outer-island return gateways carry an exact destination
-sidecar that the server consumes on contact. The integrated-server restart gate in
+the generated fixed platform, and generated outer-island return gateways carry a destination sidecar
+that the server consumes on contact. Exact exits use the stored point; delayed exits search the
+destination terrain for a safe standing cell, and missing exits remain inert. The integrated-server
+restart gate in
 `integrated::tests::persistent_generated_nether_sibling_survives_portal_restart` also verifies
 generated Nether edits and both dimension portal indexes survive and remain findable after reopening.
 A full external-client movement replay remains outside this hermetic fixture. The remaining

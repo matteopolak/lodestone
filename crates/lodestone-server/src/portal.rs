@@ -84,6 +84,7 @@ use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
 use crate::neighbor_update::Direction;
 use crate::redstone::{base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property};
+use crate::world_spawn::is_standable;
 
 /// The narrowest a portal frame's interior may be.
 pub const MIN_WIDTH: i32 = 2;
@@ -1449,12 +1450,7 @@ pub fn is_end_gateway(state: &str) -> bool {
     state == END_GATEWAY_BLOCK
 }
 
-/// Resolves a gateway block entity's configured exit into the player's arrival
-/// point. Generated return gateways carry `exact=true`, so their destination is
-/// the block centre on X/Z and the configured block Y. An inexact destination
-/// deliberately returns `None` until the destination-search path exists; this
-/// keeps a generated exact gateway functional without pretending that a direct
-/// block-centre teleport is the safe-location search used for other gateways.
+/// Resolves an exact gateway exit into the player's arrival point.
 #[must_use]
 pub fn end_gateway_arrival(exit: BlockPos, exact: bool) -> Option<Vec3> {
     exact.then_some(Vec3::new(
@@ -1462,6 +1458,52 @@ pub fn end_gateway_arrival(exit: BlockPos, exact: bool) -> Option<Vec3> {
         f64::from(exit.y),
         f64::from(exit.z) + 0.5,
     ))
+}
+
+/// Resolves a gateway exit against the destination terrain.
+///
+/// Exact exits retain their configured Y and do not inspect terrain. Inexact
+/// exits search the configured column and its five-block neighbourhood from the
+/// highest safe standing cell downward. The search is deliberately fail-closed:
+/// two clear body cells and a full supporting face are required before a point is
+/// returned, so a blocked or void destination leaves the player at the source.
+#[must_use]
+pub fn end_gateway_arrival_in_world<S: ChunkSource + ?Sized>(
+    source: &S,
+    exit: BlockPos,
+    exact: bool,
+) -> Option<Vec3> {
+    if let Some(arrival) = end_gateway_arrival(exit, exact) {
+        return Some(arrival);
+    }
+
+    for radius in 0i32..=5 {
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                if radius != 0 && dx.abs() != radius && dz.abs() != radius {
+                    continue;
+                }
+                let x = exit.x + dx;
+                let z = exit.z + dz;
+                let column = source.column(x.div_euclid(16), z.div_euclid(16));
+                let top = column.min_y + column.height - 2;
+                if top < column.min_y {
+                    continue;
+                }
+                for y in (column.min_y..=top).rev() {
+                    let candidate = BlockPos::new(x, y, z);
+                    if is_standable(source, candidate) {
+                        return Some(Vec3::new(
+                            f64::from(x) + 0.5,
+                            f64::from(y),
+                            f64::from(z) + 0.5,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The blocks [`ensure_end_platform`] writes for the fixed 5×5×4 obsidian
@@ -2375,6 +2417,21 @@ mod tests {
     #[test]
     fn inexact_end_gateway_exit_waits_for_safe_destination_search() {
         assert_eq!(end_gateway_arrival(BlockPos::new(100, 50, 0), false), None);
+    }
+
+    #[test]
+    fn inexact_end_gateway_uses_the_first_safe_neighbour_when_exit_is_blocked() {
+        let world = FlatWorld::new();
+        for y in 0..256 {
+            world.put(0, y, 0, "minecraft:stone");
+        }
+        world.put(1, 0, 0, "minecraft:stone");
+
+        assert_eq!(
+            end_gateway_arrival_in_world(&world, BlockPos::new(0, 20, 0), false),
+            Some(Vec3::new(1.5, 1.0, 0.5)),
+            "an inexact exit must not place a player inside a blocked column"
+        );
     }
 
     /// `is_end_portal_frame` matches any facing/eye combination, unlike
