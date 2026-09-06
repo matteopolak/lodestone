@@ -358,15 +358,12 @@ pub fn gateway_position(gateway: i32) -> BlockPos {
 ///
 /// # What this does not attempt
 ///
-/// **The gateway's own teleport mechanic is not ported at all.** Standing in
-/// a `minecraft:end_gateway` block does nothing in this crate: there is no
-/// `TheEndGatewayBlockEntity`, no lazy exit-portal search (the outer-islands
-/// scan `END_GATEWAY_DELAYED`'s `exact = false` triggers on first use), and
-/// no teleport-on-contact entity tick. This function only places the real,
-/// visible block structure the dragon's death signals — a player can see and
-/// walk up to a gateway after a kill, but walking into it is inert. A real,
-/// disclosed gap, the same shape [`crate::dragon::fight`]'s own module doc
-/// already draws around the obsidian pillars.
+/// This function only places the visible block structure and its generated
+/// metadata. Player contact is consumed by the integrated server's movement
+/// tick: exact exits use their configured point, while delayed exits search for
+/// a safe standing cell. Gateways without an exit remain inert until metadata
+/// is available, and mounted contacts are left untouched because the current
+/// vehicle seam cannot relocate a passenger and vehicle atomically.
 #[must_use]
 pub fn gateway_blocks(pos: BlockPos) -> Vec<(BlockPos, &'static str)> {
     let mut out = Vec::new();

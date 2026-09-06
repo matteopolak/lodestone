@@ -1106,13 +1106,13 @@ pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, Block
 pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
     let (id, mut extra): (&str, Vec<(String, Nbt)>) = match entity {
         BlockEntity::Opaque { nbt, .. } => return nbt.clone(),
-        BlockEntity::EndGateway { exit, exact } => (
-            "minecraft:end_gateway",
-            vec![
-                ("ExitPortal".to_owned(), Nbt::IntArray(vec![exit.x, exit.y, exit.z])),
-                ("ExactTeleport".to_owned(), Nbt::Byte(i8::from(*exact))),
-            ],
-        ),
+        BlockEntity::EndGateway { exit, exact } => {
+            let mut fields = vec![("ExactTeleport".to_owned(), Nbt::Byte(i8::from(*exact)))];
+            if let Some(exit) = exit {
+                fields.insert(0, ("ExitPortal".to_owned(), Nbt::IntArray(vec![exit.x, exit.y, exit.z])));
+            }
+            ("minecraft:end_gateway", fields)
+        }
         BlockEntity::Furnace(f) => {
             let (lit_remaining, lit_total, cooking_spent, cooking_total) = f.burn_state();
             let recipes: Vec<(String, Nbt)> = {
@@ -1435,8 +1435,10 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
     let entity = match id {
         "minecraft:end_gateway" => {
             let exit = match field(nbt, "ExitPortal") {
-                Some(Nbt::IntArray(values)) if values.len() == 3 => BlockPos::new(values[0], values[1], values[2]),
-                _ => return None,
+                Some(Nbt::IntArray(values)) if values.len() == 3 => {
+                    Some(BlockPos::new(values[0], values[1], values[2]))
+                }
+                _ => None,
             };
             BlockEntity::EndGateway {
                 exit,
@@ -1872,7 +1874,7 @@ mod end_gateway_nbt_tests {
     fn end_gateway_exit_and_exact_teleport_round_trip() {
         let position = BlockPos::new(18, 72, -9);
         let entity = BlockEntity::EndGateway {
-            exit: BlockPos::new(100, 50, 0),
+            exit: Some(BlockPos::new(100, 50, 0)),
             exact: true,
         };
         let nbt = block_entity_to_nbt(position, &entity);
@@ -1886,13 +1888,36 @@ mod end_gateway_nbt_tests {
     #[test]
     fn end_gateway_without_exact_teleport_remains_inexact() {
         let entity = BlockEntity::EndGateway {
-            exit: BlockPos::new(-10, 70, 22),
+            exit: Some(BlockPos::new(-10, 70, 22)),
             exact: false,
         };
         let nbt = block_entity_to_nbt(BlockPos::new(0, 64, 0), &entity);
         let (_, decoded) = block_entity_from_nbt(&nbt).expect("gateway must decode");
 
         assert_eq!(decoded.gateway_destination(), Some((BlockPos::new(-10, 70, 22), false)));
+    }
+
+    #[test]
+    fn end_gateway_without_exit_metadata_is_retained_but_not_teleportable() {
+        let nbt = lodestone_core::Nbt::Compound(vec![
+            ("id".to_owned(), lodestone_core::Nbt::String("minecraft:end_gateway".to_owned())),
+            ("x".to_owned(), lodestone_core::Nbt::Int(18)),
+            ("y".to_owned(), lodestone_core::Nbt::Int(72)),
+            ("z".to_owned(), lodestone_core::Nbt::Int(-9)),
+            ("ExactTeleport".to_owned(), lodestone_core::Nbt::Byte(0)),
+        ]);
+        let (position, decoded) = block_entity_from_nbt(&nbt).expect("gateway id is known");
+
+        assert_eq!(position, BlockPos::new(18, 72, -9));
+        assert_eq!(decoded, BlockEntity::EndGateway { exit: None, exact: false });
+        assert_eq!(decoded.gateway_destination(), None);
+
+        let encoded = block_entity_to_nbt(position, &decoded);
+        assert!(matches!(
+            encoded,
+            lodestone_core::Nbt::Compound(fields)
+                if !fields.iter().any(|(key, _)| key == "ExitPortal")
+        ));
     }
 }
 

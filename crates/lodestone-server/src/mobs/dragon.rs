@@ -217,8 +217,10 @@ pub struct DragonDeathOutcome {
     /// otherwise (never both `spawn_gateway` true and this empty for a
     /// reason other than pool exhaustion, since a kill always pops
     /// successfully until the twenty-first). See
-    /// [`fight::gateway_blocks`]'s own doc for the real, disclosed
-    /// limit: this is the *block structure* only, not a working teleport.
+    /// [`fight::gateway_blocks`]'s own doc for the placement limit. The
+    /// integrated server attaches an empty delayed-exit block entity when it
+    /// applies this structure, so contact resolution remains in the connection
+    /// tick rather than this connection-free simulation.
     pub gateway_blocks: Vec<(BlockPos, &'static str)>,
 }
 

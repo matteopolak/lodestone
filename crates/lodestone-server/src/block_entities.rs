@@ -61,9 +61,10 @@ use crate::hopper::Hopper;
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockEntity {
     /// `minecraft:end_gateway`: a generated return gateway with its configured
-    /// destination. It does not tick; a future contact handler can read the
-    /// destination through [`Self::gateway_destination`].
-    EndGateway { exit: BlockPos, exact: bool },
+    /// destination. The destination is optional because a newly placed gateway
+    /// may not have received an exit yet; such a gateway is safe to contact but
+    /// cannot teleport until the metadata is populated.
+    EndGateway { exit: Option<BlockPos>, exact: bool },
     /// `minecraft:composter`.
     Composter(Composter),
     /// `minecraft:furnace`/`minecraft:smoker`/`minecraft:blast_furnace`
@@ -302,13 +303,12 @@ impl BlockEntity {
     /// Return the configured destination for an End gateway.
     ///
     /// This is deliberately a data access point, not a teleport operation: the
-    /// current movement loop has no block-contact dispatch. Keeping the decision
-    /// here lets that loop consume a persisted or generated gateway without
-    /// teaching it about NBT fields.
+    /// integrated movement loop consumes the optional result and leaves missing
+    /// metadata inert without teaching that loop about NBT fields.
     #[must_use]
     pub fn gateway_destination(&self) -> Option<(BlockPos, bool)> {
         match self {
-            Self::EndGateway { exit, exact } => Some((*exit, *exact)),
+            Self::EndGateway { exit, exact } => exit.map(|exit| (exit, *exact)),
             _ => None,
         }
     }

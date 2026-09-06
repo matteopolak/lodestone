@@ -161,8 +161,12 @@ branch, same shape the wither uses); an actual kill places the egg (first kill o
 activates the exit portal, and pops a shuffled gateway slot to place a real
 `minecraft:end_gateway`. Generated outer-island return gateways carry an exact
 destination block entity; the integrated server consumes that metadata on player
-contact, sends a same-dimension teleport, and recentres the streamed view. The
-boss bar needs no new wire path. Missing: the summoning beam
+contact, sends a same-dimension teleport, and recentres the streamed view. An
+inexact configured exit searches the destination terrain for a safe two-cell
+standing space, while a missing exit remains inert. The contact cooldown is 40
+ticks; mounted players are left in place because the current vehicle seam cannot
+relocate a passenger and vehicle atomically. The boss bar needs no new wire path.
+Missing: the summoning beam
 (`EndCrystal.DATA_BEAM_TARGET` streams
 as `None`, nothing computes a real target) and a darken-screen bit on
 `BossBarSnapshot`. Fight state and the gateway pool are process-lifetime only, not
