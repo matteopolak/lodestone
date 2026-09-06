@@ -90,6 +90,13 @@ pub trait BlockVolume {
     /// apron above and below).
     fn block(&self, x: usize, y: i32, z: usize) -> u32;
 
+    /// State id treated as air by [`Self::block`]. The default preserves the
+    /// long-standing zero-id test volumes; real palette-backed columns override
+    /// it because the air id belongs to the column's registry, not this engine.
+    fn air_state(&self) -> u32 {
+        0
+    }
+
     /// Lowest world `y` of the built column.
     fn min_y(&self) -> i32;
 
@@ -100,6 +107,9 @@ pub trait BlockVolume {
 impl BlockVolume for crate::ChunkColumn {
     fn block(&self, x: usize, y: i32, z: usize) -> u32 {
         self.get_block(x, y, z)
+    }
+    fn air_state(&self) -> u32 {
+        self.air_id()
     }
     fn min_y(&self) -> i32 {
         crate::ChunkColumn::min_y(self)
@@ -176,9 +186,16 @@ pub fn compute_column_light(
     };
     // Single column: every field cell is the centre chunk (offset 0,0), never a
     // barrier, so this reduces exactly to a 16×16 computation.
-    compute_lit(section_count, min_y, field, 0, 0, props, |x, world_y, z| {
-        Some(blocks.block(x, world_y, z))
-    })
+    compute_lit(
+        section_count,
+        min_y,
+        field,
+        0,
+        0,
+        blocks.air_state(),
+        props,
+        |x, world_y, z| Some(blocks.block(x, world_y, z)),
+    )
 }
 
 /// Up to nine chunk columns — a centre plus its eight neighbours — supplied to
@@ -284,6 +301,7 @@ pub fn compute_column_light_with_neighbours(
         field,
         EDGE,
         EDGE,
+        center.air_state(),
         props,
         |fx, world_y, fz| {
             let dx = (fx / EDGE) as i32 - 1;
@@ -304,6 +322,7 @@ fn compute_lit(
     field: Field,
     ox: usize,
     oz: usize,
+    air_state: u32,
     props: &impl LightProperties,
     sample: impl Fn(usize, i32, usize) -> Option<u32>,
 ) -> ColumnLight {
@@ -317,6 +336,7 @@ fn compute_lit(
     let mut opacity = vec![0u8; field.len()];
     let mut block = vec![0u8; field.len()];
     let mut block_buckets = Buckets::new();
+    let mut highest_non_air_light_section = None;
     for y_rel in 0..field.height {
         let world_y = field_bottom_y + y_rel as i32;
         for fz in 0..field.wz {
@@ -324,6 +344,14 @@ fn compute_lit(
                 let idx = field.cell(fx, y_rel, fz);
                 match sample(fx, world_y, fz) {
                     Some(state) => {
+                        if fx >= ox
+                            && fx < ox + EDGE
+                            && fz >= oz
+                            && fz < oz + EDGE
+                            && state != air_state
+                        {
+                            highest_non_air_light_section = Some(y_rel / EDGE);
+                        }
                         opacity[idx] = props.opacity(state).min(MAX_LIGHT);
                         let emission = props.emission(state).min(MAX_LIGHT);
                         if emission > 0 {
@@ -342,7 +370,9 @@ fn compute_lit(
     let sky = compute_sky(&field, &opacity);
     propagate(&field, &mut block, &opacity, &mut block_buckets);
 
-    pack(section_count, light_sections, &field, ox, oz, &sky, &block)
+    let mut packed = pack(section_count, light_sections, &field, ox, oz, &sky, &block);
+    trim_sky_after_first_full_section(&mut packed, highest_non_air_light_section);
+    packed
 }
 
 /// Sky light: seed every cell open to the sky at 15, then propagate.
@@ -487,6 +517,30 @@ fn pack_section(field: &Field, ox: usize, oz: usize, data: &[u8], s: usize) -> L
         }
     }
     LightData::from_array(NibbleArray::from_bytes(&bytes).expect("2048 bytes"))
+}
+
+/// Keeps the first full-sky section above terrain and elides only the sections
+/// above it. A missing sky section is meaningful wire state: the client supplies
+/// the dimension's daylight default, while a present full section consumes a
+/// full update array. If the premise is false — the section immediately above
+/// the highest non-air terrain is not uniformly full sky — the function leaves
+/// the result untouched rather than inventing a cutoff.
+fn trim_sky_after_first_full_section(
+    light: &mut ColumnLight,
+    highest_non_air_light_section: Option<usize>,
+) {
+    let Some(highest) = highest_non_air_light_section else {
+        return;
+    };
+    let first_full = highest + 1;
+    if first_full >= light.light_section_count()
+        || !matches!(light.sky(first_full), LightData::Uniform(MAX_LIGHT))
+    {
+        return;
+    }
+    for section in (first_full + 1)..light.light_section_count() {
+        *light.sky_mut(section) = LightData::Missing;
+    }
 }
 
 /// The outcome of diffing our computed light against another source (typically a
@@ -1111,6 +1165,34 @@ mod tests {
             &LightData::Uniform(15),
             "above-world apron is full sky"
         );
+    }
+
+    #[test]
+    fn sky_wire_keeps_one_full_section_above_terrain() {
+        let light = compute_column_light(&ground_column(), &FakeProps::new());
+
+        // The ground reaches world y=-40, which is light section 2. Section 3
+        // is the first full-sky section above it; higher full sections are wire
+        // omissions rather than redundant full arrays.
+        assert_eq!(light.sky(3), &LightData::Uniform(15));
+        assert_eq!(light.sky(4), &LightData::Missing);
+        assert_eq!(light.sky(5), &LightData::Missing);
+    }
+
+    #[test]
+    fn sky_wire_does_not_trim_when_the_premise_is_false() {
+        let mut light = ColumnLight::new(4);
+        *light.sky_mut(1) = LightData::Uniform(7);
+        *light.sky_mut(2) = LightData::Uniform(15);
+        *light.sky_mut(3) = LightData::Uniform(15);
+
+        // Section 1 is the proposed first full section above terrain, but it is
+        // not full sky. The helper must leave later sections untouched rather
+        // than guessing that section 2 is the cutoff.
+        trim_sky_after_first_full_section(&mut light, Some(0));
+        assert_eq!(light.sky(1), &LightData::Uniform(7));
+        assert_eq!(light.sky(2), &LightData::Uniform(15));
+        assert_eq!(light.sky(3), &LightData::Uniform(15));
     }
 
     #[test]
