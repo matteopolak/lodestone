@@ -530,8 +530,7 @@ fn menu_from_generic(state: &SetContent, size: usize) -> Menu {
 }
 
 fn apply_state(mut menu: Menu, state: &SetContent) -> Menu {
-    #[allow(clippy::cast_sign_loss)]
-    menu.set_state_id(state.state_id as u32);
+    menu.set_state_id(lodestone_model::ContainerStateId::from_wire(state.state_id));
     for (i, item) in state.items.iter().enumerate() {
         menu.set_slot_item(i, item.clone());
     }

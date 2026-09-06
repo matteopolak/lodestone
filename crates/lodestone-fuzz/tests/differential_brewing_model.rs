@@ -403,7 +403,10 @@ fn prefix() -> Vec<BrewOp> {
 }
 
 fn production_bottle(bottle: Option<RefBottle>) -> Option<Bottle> {
-    bottle.map(|bottle| Bottle::new(bottle.kind, potion_name(bottle.potion)))
+    bottle.map(|bottle| {
+        Bottle::from_potion_name(bottle.kind, potion_name(bottle.potion))
+            .expect("modeled potion has a production registry id")
+    })
 }
 
 fn production_stack<T>(stack: Option<RefStack<T>>, name: fn(T) -> &'static str) -> Option<(String, u32)> {
@@ -414,7 +417,7 @@ fn production_observation(stand: &BrewingStand, tick: Option<BrewTick>) -> Obser
     let bottles = std::array::from_fn(|slot| {
         stand.bottle(slot).map(|bottle| RefBottle {
             kind: bottle.kind,
-            potion: parse_potion(&bottle.potion),
+            potion: parse_potion(lodestone_data::potion::potion_name(bottle.potion)),
         })
     });
     let ingredient = stand.ingredient().map(|(name, count)| RefStack {

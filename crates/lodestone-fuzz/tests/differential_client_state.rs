@@ -24,8 +24,8 @@ use lodestone_fuzz::differential::{
     Action, DifferentialOutcome, Script, ScriptStep, WorldOracle, run_differential,
 };
 use lodestone_model::{
-    AdapterError, ChunkPos as ModelChunkPos, EntityMovement, Identifier, ItemComponents, ItemStack,
-    SectionPos, Text, WorldSink,
+    AdapterError, ChunkPos as ModelChunkPos, ContainerStateId, EntityMovement, Identifier,
+    ItemComponents, ItemStack, SectionPos, Text, WorldSink,
 };
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
@@ -191,7 +191,7 @@ impl VersionAdapter for ScriptedAdapter {
                 });
                 Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
                     window_id: 0,
-                    state_id: 7,
+                    state_id: ContainerStateId::new(7),
                     items,
                     carried_item: None,
                 })])
@@ -239,7 +239,7 @@ impl VersionAdapter for ScriptedAdapter {
                 });
                 Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
                     window_id: CONTAINER_WINDOW_ID,
-                    state_id: 11,
+                    state_id: ContainerStateId::new(11),
                     items,
                     carried_item: None,
                 })])
@@ -264,7 +264,7 @@ impl VersionAdapter for ScriptedAdapter {
                 });
                 Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
                     window_id: CONTAINER_WINDOW_ID,
-                    state_id: 12,
+                    state_id: ContainerStateId::new(12),
                     slot,
                     item,
                 })])

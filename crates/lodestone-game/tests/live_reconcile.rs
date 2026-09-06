@@ -380,8 +380,7 @@ async fn live_reconcile_agrees_with_server() {
     // Build the version-free client model from the live server's authoritative
     // snapshot and stamp it with the server's state id.
     let mut menu = Menu::player();
-    #[allow(clippy::cast_sign_loss)]
-    menu.set_state_id(content.state_id as u32);
+    menu.set_state_id(lodestone_model::ContainerStateId::from_wire(content.state_id));
     let faithful = ClientMenu::new(menu);
 
     // ---- Assertion 2 (agreement): a faithful model does not get corrected ----
@@ -402,8 +401,7 @@ async fn live_reconcile_agrees_with_server() {
     // the SAME authoritative live snapshot back. Reconciliation must detect the
     // divergence and roll the prediction back to the server's truth.
     let mut wrong_menu = Menu::player();
-    #[allow(clippy::cast_sign_loss)]
-    wrong_menu.set_state_id(content.state_id as u32);
+    wrong_menu.set_state_id(lodestone_model::ContainerStateId::from_wire(content.state_id));
     wrong_menu.set_slot_item(
         9,
         Some(ItemStack::new("minecraft:stone".parse().unwrap(), 64)),
