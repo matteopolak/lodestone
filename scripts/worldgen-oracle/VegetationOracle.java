@@ -615,6 +615,12 @@ public final class VegetationOracle {
                     int cx = bp.getX() >> 4, cz = bp.getZ() >> 4;
                     return predicate.test(chunkAt(cx, cz).getFluidState(bp));
                 }
+                // Vegetal decoration can ask whether a naturally generated
+                // mushroom may survive at a candidate position. Lighting has
+                // not been initialized during this stage, so the generation
+                // level reports zero raw brightness, as the real worldgen
+                // light engine does before INITIALIZE_LIGHT.
+                case "getRawBrightness": return 0;
                 // The actual write path for every non-ore feature this
                 // oracle places (`SimpleBlockFeature`/`TreeFeature`/
                 // `BlockColumnFeature` all call `WorldGenLevel.setBlock`

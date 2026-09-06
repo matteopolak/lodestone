@@ -64,7 +64,11 @@ tags, a random four-to-six-block stem height, and their distinct directional cap
 square versus red's three rim layers and smaller filled top). Every reachable overworld biome's tree content is now
 covered by a real placer. Multiface growth writes complete directional state, checks its support,
 and performs its one seeded outward spread; the external single-source and 3×3 fixtures compare that
-layout exactly. The remaining named gaps degrade individually rather than disabling the whole tree.
+layout exactly. The fixed-seed `vegetation_mushroom_fields_neg1_0_jvm.txt` and
+`vegetation_mushroom_fields_5_5_jvm.txt` external captures exercise the production mushroom-fields
+selector; their composed 3×3 replays contain both cap variants and their stems, so the selector path
+cannot regress while feature-local geometry tests remain green. The
+remaining named gaps degrade individually rather than disabling the whole tree.
 Root systems scan upward for a valid nested feature site, scatter the root-column replacement only
 after that nested placement succeeds, then independently scatter hanging roots from supported ceilings.
 Coral tree, claw and mushroom forms share the tagged coral state choice and water gate but retain

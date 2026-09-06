@@ -1629,21 +1629,23 @@ pub(super) fn place_lake<R: RandomSource>(
 }
 
 /// Turns the configured all-connected cap state into the state for one cap
-/// position. A `false` face is exposed; a `true` face touches another cap
-/// block. The bundled providers carry all six properties, and retaining the
+/// position. A `true` face is exposed at the cap's edge; an interior face is
+/// `false`. The bundled providers carry all six properties, and retaining the
 /// provider's spelling for the other properties keeps arbitrary valid inputs
 /// intact.
-fn mushroom_cap_state(state: &str, west: bool, east: bool, north: bool, south: bool) -> String {
+fn mushroom_cap_state(state: &str, west: bool, east: bool, north: bool, south: bool, up: bool) -> String {
     let mut out = state.to_string();
-    for (property, exposed) in [
-        ("west=true", west),
-        ("east=true", east),
-        ("north=true", north),
-        ("south=true", south),
+    for (name, exposed) in [
+        ("west", west),
+        ("east", east),
+        ("north", north),
+        ("south", south),
+        ("up", up),
     ] {
-        if exposed {
-            out = out.replacen(property, &property.replace("true", "false"), 1);
-        }
+        let value = if exposed { "true" } else { "false" };
+        out = out
+            .replacen(&format!("{name}=true"), &format!("{name}={value}"), 1)
+            .replacen(&format!("{name}=false"), &format!("{name}={value}"), 1);
     }
     out
 }
@@ -1707,7 +1709,7 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
         }
     }
 
-    let mut place_cap = |at: BlockPos, west: bool, east: bool, north: bool, south: bool| {
+    let mut place_cap = |at: BlockPos, west: bool, east: bool, north: bool, south: bool, up: bool| {
         if sturdy_at(grid, at.x, at.y, at.z) {
             return;
         }
@@ -1716,7 +1718,7 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
                 at.x,
                 at.y,
                 at.z,
-                mushroom_cap_state(state, west, east, north, south),
+                mushroom_cap_state(state, west, east, north, south, up),
             );
         }
     };
@@ -1724,57 +1726,69 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
     match cfg.kind {
         HugeMushroomKind::Brown => {
             let radius = cfg.foliage_radius;
-            for dx in -radius..=radius {
-                for dz in -radius..=radius {
-                    let west = dx == -radius;
-                    let east = dx == radius;
-                    let north = dz == -radius;
-                    let south = dz == radius;
-                    // The four corners are deliberately absent from the brown cap.
-                    if (west || east) && (north || south) {
-                        continue;
-                    }
-                    place_cap(
-                        BlockPos { x: pos.x + dx, y: pos.y + height, z: pos.z + dz },
-                        west,
-                        east,
-                        north,
-                        south,
-                    );
-                }
+            let positions: Vec<_> = (-radius..=radius)
+                .flat_map(|dx| {
+                    (-radius..=radius).filter_map(move |dz| {
+                        // The four corners are deliberately absent from the brown cap.
+                        ((dx != -radius || dz != -radius)
+                            && (dx != -radius || dz != radius)
+                            && (dx != radius || dz != -radius)
+                            && (dx != radius || dz != radius))
+                            .then_some((dx, dz))
+                    })
+                })
+                .collect();
+            let occupied: HashSet<_> = positions.iter().copied().collect();
+            for (dx, dz) in positions {
+                place_cap(
+                    BlockPos { x: pos.x + dx, y: pos.y + height, z: pos.z + dz },
+                    !occupied.contains(&(dx - 1, dz)),
+                    !occupied.contains(&(dx + 1, dz)),
+                    !occupied.contains(&(dx, dz - 1)),
+                    !occupied.contains(&(dx, dz + 1)),
+                    true,
+                );
             }
         }
         HugeMushroomKind::Red => {
             for y in (height - 3)..=height {
                 let radius = if y < height { cfg.foliage_radius } else { cfg.foliage_radius - 1 };
-                for dx in -radius..=radius {
-                    for dz in -radius..=radius {
-                        let west = dx == -radius;
-                        let east = dx == radius;
-                        let north = dz == -radius;
-                        let south = dz == radius;
-                        // The three lower layers are a plus-shaped rim; the
-                        // top layer is a filled smaller square.
-                        if y < height && (west || east) == (north || south) {
-                            continue;
-                        }
-                        place_cap(
-                            BlockPos { x: pos.x + dx, y: pos.y + y, z: pos.z + dz },
-                            west,
-                            east,
-                            north,
-                            south,
-                        );
-                    }
+                let positions: Vec<_> = (-radius..=radius)
+                    .flat_map(|dx| {
+                        (-radius..=radius).filter_map(move |dz| {
+                            // The three lower layers are a plus-shaped rim; the
+                            // top layer is a filled smaller square.
+                            (y == height || (west_or_east(dx, radius) != north_or_south(dz, radius)))
+                                .then_some((dx, dz))
+                        })
+                    })
+                    .collect();
+                for (dx, dz) in positions {
+                    place_cap(
+                        BlockPos { x: pos.x + dx, y: pos.y + y, z: pos.z + dz },
+                        dx < 0,
+                        dx > 0,
+                        dz < 0,
+                        dz > 0,
+                        y >= height - 1,
+                    );
                 }
             }
         }
     }
 }
 
-/// Vanilla's own vegetation-patch feature's place (and its waterlogged subclass) — lush-cave
-/// moss/clay floors and the dripstone patches, plus whatever placed feature the
-/// config hangs on the resulting surface.
+fn west_or_east(value: i32, radius: i32) -> bool {
+    value == -radius || value == radius
+}
+
+fn north_or_south(value: i32, radius: i32) -> bool {
+    value == -radius || value == radius
+}
+
+/// Places a vegetation patch (and its waterlogged variant): a replaceable
+/// floor/ceiling patch followed by the configured feature on the resulting
+/// surface.
 pub(super) fn place_vegetation_patch<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
