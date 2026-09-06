@@ -127,6 +127,7 @@ fn parse_placed_ore(resolver: &dyn Resolver, placed_id: &str) -> Option<PlacedOr
     let cf_id = placed.get("feature").and_then(Value::as_str)?;
     let configured = resolver.configured_feature(cf_id);
     (configured.get("type").and_then(Value::as_str) == Some("minecraft:ore")).then(|| PlacedOre {
+        registry_id: Some(placed_id.to_string()),
         index: 0,
         placements: parse_placements(&placed),
         config: parse_ore_config(&configured["config"]),

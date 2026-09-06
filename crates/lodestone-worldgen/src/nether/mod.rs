@@ -343,6 +343,7 @@ fn build_nether_feature_lists(
                     == Some("minecraft:ore")
             {
                 ores.push(PlacedOre {
+                    registry_id: None,
                     index,
                     placements: crate::feature::parse_placements(&placed),
                     config: crate::feature::parse_ore_config(&configured.expect("checked above")["config"]),
@@ -646,6 +647,7 @@ impl NetherGenerator {
             crate::feature::REGION_MAX,
             &heights,
             &in_tag,
+            None,
             &mut view,
             &ores_for_source,
         );

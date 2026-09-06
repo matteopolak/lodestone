@@ -559,6 +559,7 @@ mod tests {
             read_max: ORE_READ_MAX,
             ocean_floor_wg: heights,
             in_tag: &|_, _| false,
+            biome_allows: None,
         };
         let config = OreConfig {
             size: 1,
