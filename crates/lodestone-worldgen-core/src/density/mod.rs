@@ -234,6 +234,16 @@ pub trait Resolver {
         Value::Null
     }
 
+    /// The exact state predicates simple-block survival needs. The document has
+    /// the same complete default-plus-override shape as
+    /// [`Self::block_freeze_facts`], with `solid_render`, `sturdy_up`,
+    /// `center_support_down`, and `fire_flammable` columns. Default:
+    /// [`Value::Null`], so fixture resolvers need not carry a version-specific
+    /// compiled-state census.
+    fn block_survival_facts(&self) -> Value {
+        Value::Null
+    }
+
     /// `tags/block/<name>.json` (the raw tag document, `{"values": [...]}`,
     /// with sub-tag references as `"#minecraft:..."` entries needing their
     /// own recursive lookup — see `crate::compose::resolve_block_tag`).

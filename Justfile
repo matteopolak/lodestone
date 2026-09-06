@@ -284,6 +284,22 @@ oracle-snow-support:
         java -cp "/work:$CP" SnowSupportOracle
       ' > crates/lodestone-data/tests/support/snow_support_jvm.txt
 
+# Re-dump the exact simple-block survival predicates from the real 26.2 server.
+oracle-block-survival:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CACHE="$(cd .cache/mc/26.2 && pwd)"
+    HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
+    container system start >/dev/null 2>&1 || true
+    container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work \
+      eclipse-temurin:25-jdk bash -c '
+        set -e
+        CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+        mkdir -p /work && cp /oracle/BlockSurvivalOracle.java /work/
+        javac -cp "$CP" -d /work /work/BlockSurvivalOracle.java
+        java -cp "/work:$CP" BlockSurvivalOracle
+      ' > crates/lodestone-data/tests/support/block_survival_jvm.txt
+
 # Re-dump the four freeze_top_layer whole-chunk parity fixtures (issue #404's
 # U2) from the real 26.2 server. Each is one container run of a few minutes.
 # The gate reading them is crates/lodestone-server/src/worldgen_data.rs ::

@@ -203,6 +203,7 @@ fn embedded_resolver() -> TableResolver<'static> {
     TableResolver::new(EMBEDDED_WORLDGEN)
         .with_structure_templates(EMBEDDED_STRUCTURE_TEMPLATES)
         .with_block_freeze_facts(freeze_facts)
+        .with_block_survival_facts(survival_facts)
 }
 
 /// Builds [`Resolver::block_freeze_facts`]'s document by walking all 32,366
@@ -290,6 +291,78 @@ fn freeze_facts() -> &'static Value {
                 serde_json::json!({
                     "default": names,
                     "states": Value::Object(overrides[c].clone()),
+                }),
+            );
+        }
+        Value::Object(out)
+    })
+}
+
+/// Builds [`Resolver::block_survival_facts`]'s exact state-predicate document.
+///
+/// The engine's temporary state handles are private to each generator, so this
+/// bridge is deliberately keyed by canonical state spelling: the default answer
+/// for each block plus every state that differs. The source arrays remain compact
+/// global-state bitsets in `lodestone-data`; the server is the version seam that
+/// may translate them into the version-free generator representation.
+fn survival_facts() -> &'static Value {
+    static FACTS: OnceLock<Value> = OnceLock::new();
+    FACTS.get_or_init(|| {
+        use lodestone_data::{block_states, block_survival};
+
+        type Reader = fn(lodestone_data::block_states::StateId) -> bool;
+        const COLUMNS: [(&str, Reader); 4] = [
+            ("solid_render", block_survival::solid_render),
+            ("sturdy_up", block_survival::sturdy_up),
+            ("center_support_down", block_survival::center_support_down),
+            ("fire_flammable", block_survival::fire_flammable),
+        ];
+        assert_eq!(block_survival::STATE_COUNT, block_states::STATE_COUNT);
+
+        let mut default_answers: std::collections::HashMap<&'static str, [bool; COLUMNS.len()]> =
+            std::collections::HashMap::new();
+        for id in 0..block_survival::STATE_COUNT {
+            let state = block_states::StateId::new(id).expect("generated state-table index is valid");
+            if state.is_default() {
+                default_answers.insert(
+                    state.name(),
+                    std::array::from_fn(|c| COLUMNS[c].1(state)),
+                );
+            }
+        }
+        assert_eq!(default_answers.len(), lodestone_data::block_states::BLOCK_COUNT as usize);
+
+        let mut defaults: [Vec<&'static str>; COLUMNS.len()] = Default::default();
+        let mut overrides: [serde_json::Map<String, Value>; COLUMNS.len()] = Default::default();
+        for (name, answers) in &default_answers {
+            for (column, &answer) in answers.iter().enumerate() {
+                if answer {
+                    defaults[column].push(name);
+                }
+            }
+        }
+        for id in 0..block_survival::STATE_COUNT {
+            let state = block_states::StateId::new(id).expect("generated state-table index is valid");
+            let default = default_answers
+                .get(state.name())
+                .expect("every state belongs to a block with a default state");
+            for (column, &(_, read)) in COLUMNS.iter().enumerate() {
+                let answer = read(state);
+                if answer != default[column] {
+                    overrides[column].insert(canonical_state(id), Value::Bool(answer));
+                }
+            }
+        }
+
+        let mut out = serde_json::Map::new();
+        for (column, (name, _)) in COLUMNS.iter().enumerate() {
+            let mut default = defaults[column].clone();
+            default.sort_unstable();
+            out.insert(
+                (*name).to_owned(),
+                serde_json::json!({
+                    "default": default,
+                    "states": Value::Object(overrides[column].clone()),
                 }),
             );
         }
@@ -1097,6 +1170,36 @@ pub fn end_chunk_source(seed: i64) -> crate::chunk::EndChunkSource {
 mod tests {
     use super::*;
     use crate::chunk::ChunkSource;
+
+    #[test]
+    fn bundled_survival_facts_are_complete_and_preserve_state_overrides() {
+        let facts = embedded_resolver().block_survival_facts();
+        let columns = [
+            ("solid_render", 149),
+            ("sturdy_up", 3_183),
+            ("center_support_down", 4_167),
+            ("fire_flammable", 1_217),
+        ];
+        for (name, overrides) in columns {
+            assert!(
+                facts[name]["default"].as_array().is_some_and(|v| !v.is_empty()),
+                "{name} has no default-state answers"
+            );
+            assert_eq!(
+                facts[name]["states"].as_object().map_or(0, serde_json::Map::len),
+                overrides,
+                "{name} must include every state differing from its base default"
+            );
+        }
+        assert!(facts["solid_render"]["default"]
+            .as_array()
+            .is_some_and(|v| v.iter().any(|name| name == "minecraft:stone")));
+        assert_eq!(
+            facts["fire_flammable"]["states"]
+                ["minecraft:oak_fence[east=false,north=false,south=false,waterlogged=true,west=false]"],
+            false
+        );
+    }
 
     /// The wiring-layer discriminator asks for: at the same seed and
     /// the same chunk coordinates, [`end_chunk_source`] must produce terrain that

@@ -188,6 +188,14 @@ pub enum IntProvider {
     /// `y_spread` are exactly this symmetric trapezoid shape. See
     /// [`IntProvider::sample`] for the exact vanilla formula, ported.
     Trapezoid { min: i32, max: i32, plateau: i32 },
+    /// A Gaussian sample converted to a float, clamped to the inclusive bounds,
+    /// then truncated toward zero. Used by cave speleothem random offsets.
+    ClampedNormal {
+        mean: f32,
+        deviation: f32,
+        min: i32,
+        max: i32,
+    },
 }
 
 impl IntProvider {
@@ -201,6 +209,12 @@ impl IntProvider {
                         IntProvider::Constant(v["value"].as_i64().expect("constant value") as i32)
                     }
                     "uniform" => IntProvider::Uniform {
+                        min: v["min_inclusive"].as_i64().expect("min_inclusive") as i32,
+                        max: v["max_inclusive"].as_i64().expect("max_inclusive") as i32,
+                    },
+                    "clamped_normal" => IntProvider::ClampedNormal {
+                        mean: v["mean"].as_f64().expect("mean") as f32,
+                        deviation: v["deviation"].as_f64().expect("deviation") as f32,
                         min: v["min_inclusive"].as_i64().expect("min_inclusive") as i32,
                         max: v["max_inclusive"].as_i64().expect("max_inclusive") as i32,
                     },
@@ -283,6 +297,13 @@ impl IntProvider {
                     }
                 }
             }
+            IntProvider::ClampedNormal {
+                mean,
+                deviation,
+                min,
+                max,
+            } => (*mean + random.next_gaussian() as f32 * *deviation)
+                .clamp(*min as f32, *max as f32) as i32,
         }
     }
 }

@@ -1089,6 +1089,94 @@ mod tests {
     }
 
     #[test]
+    fn clamped_normal_offsets_match_compiled_server_samples() {
+        let horizontal = try_parse_int_provider(&serde_json::json!({
+            "type": "minecraft:clamped_normal",
+            "mean": 0.0,
+            "deviation": 3.0,
+            "min_inclusive": -10,
+            "max_inclusive": 10
+        })).expect("horizontal clamped-normal provider must parse");
+        let vertical = try_parse_int_provider(&serde_json::json!({
+            "type": "minecraft:clamped_normal",
+            "mean": 0.0,
+            "deviation": 0.6,
+            "min_inclusive": -2,
+            "max_inclusive": 2
+        })).expect("vertical clamped-normal provider must parse");
+        let samples = [
+            (0, 2, 0, 6),
+            (1, 4, 0, -3),
+            (2, 0, 0, 0),
+            (19, 3, 0, 0),
+            (42, 3, 0, -2),
+        ];
+        for (seed, first_horizontal, vertical_offset, second_horizontal) in samples {
+            let mut random = LegacyRandomSource::new(seed);
+            assert_eq!(
+                horizontal.sample(&mut random),
+                first_horizontal,
+                "first horizontal sample at seed {seed}"
+            );
+            assert_eq!(
+                vertical.sample(&mut random),
+                vertical_offset,
+                "vertical sample at seed {seed}"
+            );
+            assert_eq!(
+                horizontal.sample(&mut random),
+                second_horizontal,
+                "cached-Gaussian follow-up at seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn sulfur_spike_keeps_its_clamped_normal_random_offset() {
+        struct Resolver;
+        impl crate::density::Resolver for Resolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                unreachable!()
+            }
+            fn placed_feature(&self, id: &str) -> Value {
+                if id == "minecraft:sulfur_spike" {
+                    serde_json::from_str(include_str!(
+                        "../../../tests/support/worldgen_data/placed_feature/sulfur_spike.json"
+                    ))
+                    .expect("fixture JSON")
+                } else {
+                    Value::Null
+                }
+            }
+        }
+        let placed = resolve_placed_feature_ref(
+            &Resolver,
+            &Value::String("minecraft:sulfur_spike".to_string()),
+        );
+        assert!(
+            matches!(
+                placed.placements.as_slice(),
+                [
+                    VegPlacement::Count(_),
+                    VegPlacement::InSquare,
+                    VegPlacement::HeightRange(_),
+                    VegPlacement::Count(_),
+                    VegPlacement::RandomOffset {
+                        xz: IntProvider::ClampedNormal { .. },
+                        y: IntProvider::ClampedNormal { .. }
+                    },
+                    VegPlacement::Biome
+                ]
+            ),
+            "the clamped-normal modifier must remain in sulfur_spike's pipeline: {:?}",
+            placed.placements
+        );
+    }
+
+    #[test]
     fn unsupported_configured_feature_type_degrades_not_panics() {
         struct EmptyResolver;
         impl Resolver for EmptyResolver {

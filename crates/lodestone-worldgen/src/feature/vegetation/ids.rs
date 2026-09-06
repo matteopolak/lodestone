@@ -138,12 +138,26 @@ pub(super) enum Tag {
     HugeRedMushroomCanPlaceOn,
     /// `#minecraft:supports_bamboo` — bamboo's own floor survival rule.
     SupportsBamboo,
+    /// Dedicated floors for simple-block dry vegetation.
+    SupportsDryVegetation,
+    /// Dedicated floors for simple-block azaleas.
+    SupportsAzalea,
+    /// Dedicated floors for simple-block crimson roots.
+    SupportsCrimsonRoots,
+    /// Dedicated floors for simple-block small dripleaves.
+    SupportsSmallDripleaf,
+    /// Dedicated floors for simple-block soul fire.
+    SoulFireBaseBlocks,
+    /// Mushroom floors that bypass the world-generation brightness gate.
+    OverridesMushroomLightRequirement,
+    /// Solid floors that support lily pads when the floor is not water.
+    SupportsLilyPad,
 }
 
 impl Tag {
     /// Every variant, in declaration order. `TAG_COUNT` and the mask layout are
     /// both derived from this, so it is the single place a new tag registers.
-    pub(super) const ALL: [Tag; 18] = [
+    pub(super) const ALL: [Tag; 25] = [
         Tag::CannotReplaceBelowTreeTrunk,
         Tag::SupportsVegetation,
         Tag::ReplaceableByTrees,
@@ -162,6 +176,13 @@ impl Tag {
         Tag::HugeBrownMushroomCanPlaceOn,
         Tag::HugeRedMushroomCanPlaceOn,
         Tag::SupportsBamboo,
+        Tag::SupportsDryVegetation,
+        Tag::SupportsAzalea,
+        Tag::SupportsCrimsonRoots,
+        Tag::SupportsSmallDripleaf,
+        Tag::SoulFireBaseBlocks,
+        Tag::OverridesMushroomLightRequirement,
+        Tag::SupportsLilyPad,
     ];
 
     const fn slot(self) -> usize {
@@ -384,6 +405,13 @@ impl VegTags {
             Tag::HugeBrownMushroomCanPlaceOn => self.huge_brown_mushroom_can_place_on.contains(base),
             Tag::HugeRedMushroomCanPlaceOn => self.huge_red_mushroom_can_place_on.contains(base),
             Tag::SupportsBamboo => self.supports_bamboo.contains(base),
+            Tag::SupportsDryVegetation => self.supports_dry_vegetation.contains(base),
+            Tag::SupportsAzalea => self.supports_azalea.contains(base),
+            Tag::SupportsCrimsonRoots => self.supports_crimson_roots.contains(base),
+            Tag::SupportsSmallDripleaf => self.supports_small_dripleaf.contains(base),
+            Tag::SoulFireBaseBlocks => self.soul_fire_base_blocks.contains(base),
+            Tag::OverridesMushroomLightRequirement => self.overrides_mushroom_light_requirement.contains(base),
+            Tag::SupportsLilyPad => self.supports_lily_pad.contains(base),
         }
     }
 
