@@ -6,6 +6,22 @@ The multiplayer connection path turns a saved or command-line server address int
 
 ## How it works
 
+### Build boundary
+
+`lodestone-shell`'s `multiplayer` Cargo feature is the explicit authority for
+remote joins and saved-server status probes. It is enabled by the default build
+and is intentionally independent of `live`: `live` selects the protocol family
+used by both remote joins and the in-memory integrated server, whereas
+`multiplayer` decides whether a shell build may contact a server it does not
+own or publish its integrated world to other machines. Without it, the title screen keeps its Multiplayer button in place but
+renders it disabled and explains why on hover; command-line and terminal
+remote-join surfaces return a named refusal instead of opening a socket.
+
+The browser package forwards the same feature. Its paired native page server
+also has `multiplayer` on by default; disabling it removes the `/relay`
+WebSocket-to-TCP route and does not link `lodestone-relay`, so serving a
+singleplayer-only page cannot turn that page host into an arbitrary TCP proxy.
+
 Movement reconciliation has a dedicated `net_join` tracing target. It records
 each decoded server correction with its raw relative flags and resolved pose,
 each correction adopted by the simulation, every encoded outbound movement
@@ -74,6 +90,24 @@ The packet ID in a timeout diagnostic is state-relative: interpret it together w
 
 ## Configuration
 
+Remote networking is on in normal builds. For a singleplayer-only native shell,
+omit its default features and select only the presentation/protocol features
+needed by the build, for example:
+
+```text
+cargo check -p lodestone-shell --no-default-features --features live,window
+```
+
+For the browser deployment, build both halves without their default features:
+
+```text
+(cd web && cargo check --no-default-features --target wasm32-unknown-unknown)
+(cd web && cargo check -p lodestone-web-server --no-default-features)
+```
+
+The second command is important: a singleplayer-only WASM bundle served by a
+relay-enabled native server would still leave an arbitrary-server route exposed.
+
 The shell currently fixes TCP connection timeout at 10 seconds and inbound packet idle timeout at 30 seconds in `lodestone_shell::net`. For focused join logs without GPU or shader compiler noise, run:
 
 ```text
@@ -87,4 +121,4 @@ An explicitly entered port suppresses SRV lookup. A bare hostname enables it.
 
 ## Dependencies
 
-Address resolution uses `lodestone-net` and the system DNS configuration through `hickory-resolver`. Session startup and timeout errors come from `lodestone-client`; `lodestone-shell` owns the server-list entry and loading screen. The focused tracing targets use `tracing` in the client driver and controller.
+Address resolution uses `lodestone-net` and the system DNS configuration through `hickory-resolver` when `multiplayer` is enabled. Session startup and timeout errors come from `lodestone-client`; `lodestone-shell` owns the server-list entry and loading screen. The focused tracing targets use `tracing` in the client driver and controller.

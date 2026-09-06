@@ -28,6 +28,13 @@ publish = false
 [workspace]
 members = ["server"]
 
+[features]
+# Keep the deployed browser's current behavior. A security-conscious deployment
+# can use `--no-default-features` on both this package and `web/server` to make
+# a singleplayer-only page and a static-only server.
+default = ["multiplayer"]
+multiplayer = ["lodestone-shell/multiplayer"]
+
 [dependencies]
 # **The whole game.** The same crate the native `lodestone` binary is built from:
 # the menu, `Sim`, the renderer, physics, the integrated server. Everything on
@@ -39,7 +46,7 @@ members = ["server"]
 # the same version. Every other Lodestone crate arrives transitively — listing them
 # here as well would let this manifest drift from the shell's own graph, which is
 # the thing that made `web/` a separate application in the first place.
-lodestone-shell = { path = "../crates/lodestone-shell" }
+lodestone-shell = { path = "../crates/lodestone-shell", default-features = false, features = ["live", "runtime-presentation", "window"] }
 
 # --- The three things a browser needs that a native `main` does not ---
 # `spawn_local` for the boot task (fetch the assets, then start the shell), and the
@@ -49,11 +56,17 @@ lodestone-shell = { path = "../crates/lodestone-shell" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 web-sys = { version = "0.3", features = [
   "Window",
   "Document",
   "Element",
   "HtmlElement",
+  "Request",
+  "RequestCache",
+  "RequestInit",
   "Response",
 ] }
 # `console_log` replaces the native `tracing-subscriber` (there is no stderr), and

@@ -330,9 +330,9 @@ impl WindowApp {
             // The pause menu's Open to LAN. Native only: there is no
             // TCP listener to bind in a browser, which is the same reason
             // `Origin::Integrated`'s `lan_port` is `cfg`'d out there.
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
             MenuAction::OpenToLan => self.open_current_world_to_lan(),
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(any(not(feature = "multiplayer"), target_arch = "wasm32"))]
             MenuAction::OpenToLan => {}
             // The resource-pack prompt's Accept/Decline (`nav.rs`'s
             // `apply_resource_pack_prompt`). Goes out through `Sim`'s own

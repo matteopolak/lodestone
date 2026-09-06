@@ -66,6 +66,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Where the process-wide tracing formatter writes its text output.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogDestination {
     Stdout,
@@ -73,6 +74,7 @@ enum LogDestination {
 }
 
 /// Keep tracing off the stream every non-window presentation surface owns.
+#[cfg(not(target_arch = "wasm32"))]
 fn logging_destination(mode: Mode) -> LogDestination {
     match mode {
         Mode::Window => LogDestination::Stdout,
@@ -136,7 +138,7 @@ fn init_logging(mode: Mode) -> Option<tracing_chrome::FlushGuard> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

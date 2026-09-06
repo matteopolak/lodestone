@@ -92,6 +92,7 @@ impl Sim {
     /// [`NetClient::connect`]. A **live gate must use [`Self::connect_as`]**
     /// instead: a shared offline name is a shared player file, and a dead player
     /// is held on the death screen, which sends no chunks.
+    #[cfg(any(feature = "multiplayer", test))]
     pub fn connect(&mut self, host: String, port: Option<u16>, protocol: i32) {
         let net = NetClient::connect(
             host,
@@ -102,9 +103,19 @@ impl Sim {
         self.attach_net(net);
     }
 
+    /// Refuse an attempted remote join in a singleplayer-only build. This has
+    /// the same public shape as the multiplayer implementation so windowed
+    /// launch code can report a failed session without compiling a TCP or relay
+    /// constructor into a shipped build.
+    #[cfg(all(not(feature = "multiplayer"), not(test)))]
+    pub fn connect(&mut self, _host: String, _port: Option<u16>, _protocol: i32) {
+        self.status = "multiplayer disabled in this build".into();
+    }
+
     /// As [`Self::connect`], but joining under `username` rather than the
     /// persisted offline identity — [`NetClient::connect_as`] with this `Sim`'s
     /// `World` threaded in. For live gates, which need a fresh name per run.
+    #[cfg(any(feature = "multiplayer", test))]
     pub fn connect_as(&mut self, host: String, port: u16, protocol: i32, username: String) {
         let net = NetClient::connect_as(
             host,

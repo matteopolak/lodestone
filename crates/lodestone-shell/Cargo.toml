@@ -415,7 +415,14 @@ harness = false
 # explicitly instead — `cargo check -p lodestone-shell --no-default-features` is in
 # `CLAUDE.md`'s health checks. Keep it there; it is the only thing standing between
 # the seam and a hardcoded `v26-2` dependency creeping into shell code.
-default = ["live", "runtime-presentation", "window"]
+default = ["live", "multiplayer", "runtime-presentation", "window"]
+# Enables remote-server joins, saved-server status probes, and the browser's
+# WebSocket relay transport. It is separate from `live`: the latter selects a
+# protocol family for both the in-memory integrated server and remote joins,
+# while this feature is the explicit authority to send traffic to a server the
+# build does not own. Keep it in `default` so shipped native and browser builds
+# preserve their current behavior; omit it for a singleplayer-only build.
+multiplayer = []
 live = ["lodestone-registry/v26-2"]
 # Switches a running session between headless and windowed at
 # runtime rather than only at startup. Gates `Sim::attach_presentation`/

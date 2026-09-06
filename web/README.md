@@ -6,6 +6,23 @@ workspace (empty `[workspace]` in `Cargo.toml`), deliberately outside the
 parent `crates/lodestone-*` glob, so it never affects other crates' `cargo
 build --workspace`.
 
+## Singleplayer-only deployment
+
+Both the browser package and its native page server expose a `multiplayer`
+feature, enabled by default. To build a page that cannot join or probe public
+servers, disable defaults on **both** packages:
+
+```sh
+cd web
+cargo check --no-default-features --target wasm32-unknown-unknown
+cargo check -p lodestone-web-server --no-default-features
+```
+
+The shell leaves the Multiplayer title button visible but disabled with an
+explanation. More importantly, the server build neither links
+`lodestone-relay` nor registers `/relay`; it is static-only, so it cannot be
+used as a WebSocket-to-TCP proxy even if a client bypasses the button.
+
 **Much of the section-level detail below (the "Multiplayer: a real browser
 join" section especially) still describes an earlier version of this crate
 that had its own `src/multiplayer.rs`/`src/singleplayer.rs`/`src/input.rs`/
@@ -107,6 +124,30 @@ and draws nothing. So a blank page with that message means "populate `.cache/`",
 not "the browser build is broken" — and the two are worth telling apart, which is
 the whole reason the failure moved out of the build.
 
+#### Hosts with a per-file cap
+
+`client.jar` is larger than Cloudflare Pages' per-file limit. For that deployment,
+stage an ordered manifest and 20 MiB-or-smaller siblings instead of the direct jar:
+
+```sh
+python3 web/scripts/stage_client_jar_parts.py \
+  --jar .cache/mc/26.2/client.jar --out web/dist
+rm web/dist/client.jar  # do not package the over-limit development fallback
+```
+
+The output is `client.jar.parts.json` plus content-addressed names such as
+`client.jar.part-000-<sha256>`. The manifest records exact byte sizes and SHA-256
+digests for every part and the reconstructed archive; the browser rejects bad
+order, path, size, or hash rather than starting with corrupt assets. Part names
+change with their content and the browser fetches the mutable manifest with
+`cache: "no-store"`, so a new deployment cannot combine a fresh manifest with a
+previous deployment's cached part. Names are plain relative URLs, so a deployment
+under `/lodestone/` fetches its own sibling assets, not `/client.jar` at the domain
+root. `just run-wasm` and ordinary `trunk` work
+continue to use a direct `client.jar`: when the manifest returns 404, that is the
+intentional fallback. To make Trunk emit parts directly, run
+`LODESTONE_WEB_CLIENT_JAR_PARTS=1 trunk build --release`.
+
 They used to be `data-trunk rel="copy-file"` links in `index.html`, i.e. a
 build-time hard dependency on 46 MB of gitignored files. That made `trunk build`
 fail outright on every CI runner and on every contributor's first build, with the
@@ -172,6 +213,11 @@ rather than running it as a spawned child. It serves the built page out of
 `--dist` (default `./dist`, what `trunk build`/`trunk watch` write) **and**
 answers `/relay` as a WebSocket upgrade bridged to `--target` — one listener,
 one process, so there is no second port and nothing to keep in sync by hand.
+
+This relay exists only with the server's default `multiplayer` feature. A
+`--no-default-features` server is intentionally static-only and has no `/relay`
+route or `lodestone-relay` dependency; use that build with the matching
+singleplayer-only WASM bundle above.
 
 ```sh
 web/target/release/lodestone-web-server \

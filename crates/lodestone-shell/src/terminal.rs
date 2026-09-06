@@ -90,6 +90,7 @@ fn input_lines() -> Receiver<Input> {
 }
 
 /// Run the newline-delimited, GPU-free chat surface.
+#[cfg(feature = "multiplayer")]
 pub(crate) fn run_stdio(
     _owned: lodestone_auth::Entitlement,
     config: Config,
@@ -140,6 +141,16 @@ pub(crate) fn run_stdio(
         std::thread::sleep(Duration::from_millis(20));
     }
     Ok(())
+}
+
+#[cfg(not(feature = "multiplayer"))]
+pub(crate) fn run_stdio(
+    _owned: lodestone_auth::Entitlement,
+    _config: Config,
+) -> anyhow::Result<()> {
+    Err(anyhow::anyhow!(
+        "multiplayer is disabled in this build of the game; the stdio surface only joins remote servers"
+    ))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -227,6 +238,7 @@ fn render_dimensions(area: Rect, terminal_pixels: Option<(u32, u32, u32, u32)>) 
 }
 
 /// Run the live game in a Ratatui layout with a coloured Unicode image pane.
+#[cfg(feature = "multiplayer")]
 pub(crate) fn run_terminal(
     _owned: lodestone_auth::Entitlement,
     config: Config,
@@ -465,6 +477,16 @@ pub(crate) fn run_terminal(
     }
     reset_terminal_input(&mut held, &mut sim);
     Ok(())
+}
+
+#[cfg(not(feature = "multiplayer"))]
+pub(crate) fn run_terminal(
+    _owned: lodestone_auth::Entitlement,
+    _config: Config,
+) -> anyhow::Result<()> {
+    Err(anyhow::anyhow!(
+        "multiplayer is disabled in this build of the game; the terminal surface only joins remote servers"
+    ))
 }
 
 fn handle_key(

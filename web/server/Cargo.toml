@@ -13,18 +13,27 @@ publish = false
 name = "lodestone-web-server"
 path = "src/main.rs"
 
+[features]
+# The public deployment keeps the relay by default. Without this feature the
+# server is deliberately static-only: it does not link lodestone-relay and does
+# not register `/relay`, so a page host cannot become an arbitrary TCP proxy.
+default = ["multiplayer"]
+multiplayer = ["dep:lodestone-relay", "dep:futures-util"]
+
 [dependencies]
 # The whole reason this crate exists: link the relay in as a library instead of
 # spawning it as a second process. `bridge`/`serve` are not called directly (see
 # main.rs's module doc for why), but the dependency is real — this binary and
 # the standalone `lodestone-relay` binary share the same protocol-blind bridge
 # design, just wired into two different listeners.
-lodestone-relay = { path = "../../crates/lodestone-relay" }
+lodestone-relay = { path = "../../crates/lodestone-relay", optional = true }
 
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util", "fs"] }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["fs", "set-header"] }
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"], optional = true }
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+# The static-only build still parses `RUST_LOG`; do not rely on the relay's
+# dependency graph to enable this API through feature unification.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

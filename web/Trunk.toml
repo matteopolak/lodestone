@@ -35,7 +35,10 @@ headers = { "Cross-Origin-Opener-Policy" = "same-origin", "Cross-Origin-Embedder
 # were `data-trunk rel="copy-file"` links, which made `trunk build` a hard
 # dependency on 46 MB of gitignored files and so failed on every CI runner and on
 # every contributor's first build. A `post_build` hook can be conditional; a
-# `copy-file` link cannot.
+# `copy-file` link cannot. Normal local development keeps the direct jar. Set
+# `LODESTONE_WEB_CLIENT_JAR_PARTS=1` for a static host with a per-file cap: the
+# hook then emits relative, content-addressed 20 MiB `client.jar.part-*` files and
+# their manifest instead, which `src/client_jar.rs` validates before reconstruction.
 #
 # Three things about the shape:
 #   * `stage = "post_build"` runs after the wasm bundle is written and BEFORE the
@@ -52,7 +55,7 @@ stage = "post_build"
 command = "sh"
 command_arguments = [
   "-c",
-  "for f in ../.cache/mc/26.2/client.jar ../.cache/mc/26.2/generated/reports/blocks.json; do if [ -f \"$f\" ]; then cp \"$f\" \"$TRUNK_STAGING_DIR/\"; else echo \"trunk hook: $f is absent, not staged — the page will report ASSET LOAD FAILED and draw nothing (see web/README.md)\"; fi; done",
+  "if [ -f ../.cache/mc/26.2/client.jar ]; then if [ \"${LODESTONE_WEB_CLIENT_JAR_PARTS:-0}\" = 1 ]; then python3 scripts/stage_client_jar_parts.py --jar ../.cache/mc/26.2/client.jar --out \"$TRUNK_STAGING_DIR\"; else cp ../.cache/mc/26.2/client.jar \"$TRUNK_STAGING_DIR/\"; fi; else echo \"trunk hook: ../.cache/mc/26.2/client.jar is absent, not staged — the page will report ASSET LOAD FAILED and draw nothing (see web/README.md)\"; fi; if [ -f ../.cache/mc/26.2/generated/reports/blocks.json ]; then cp ../.cache/mc/26.2/generated/reports/blocks.json \"$TRUNK_STAGING_DIR/\"; else echo \"trunk hook: ../.cache/mc/26.2/generated/reports/blocks.json is absent, not staged — the page will report ASSET LOAD FAILED and draw nothing (see web/README.md)\"; fi",
 ]
 
 # Stage the real (non-stub) title-screen panorama faces, IF the local

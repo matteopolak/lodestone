@@ -222,6 +222,7 @@ pub fn frame_for<'a>(
                     enabled: b.enabled(),
                     slot: Some(title_slot(*b)),
                     icon: b.icon(),
+                    tooltip: b.tooltip().map(str::to_owned),
                     ..Default::default()
                 })
                 .collect(),

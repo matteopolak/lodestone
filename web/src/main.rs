@@ -41,9 +41,10 @@
 //! — which is the defect class this repo keeps paying for.
 
 use lodestone::{CliOutcome, Config};
+use lodestone_web::client_jar;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
-use web_sys::{Response, window};
+use web_sys::{Request, RequestCache, RequestInit, Response, window};
 
 /// The renderable corpus: blockstates, models, textures, lang, fonts, GUI sprites,
 /// sounds index. Copied into `dist/` by trunk from the local `.cache/mc/26.2` —
@@ -108,6 +109,59 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(js_sys::Uint8Array::new(&buf).to_vec())
 }
 
+/// Fetches a deployment manifest without a browser cache entry. Its parts have
+/// content-addressed names, but the manifest is the mutable pointer to a new
+/// deployment and must not point a fresh page at a previous deployment's parts.
+async fn fetch_bytes_no_store(url: &str) -> Result<Vec<u8>, String> {
+    let win = window().ok_or("no window")?;
+    let init = RequestInit::new();
+    init.set_cache(RequestCache::NoStore);
+    let request = Request::new_with_str_and_init(url, &init)
+        .map_err(|e| format!("request {url} failed: {e:?}"))?;
+    let resp_val = JsFuture::from(win.fetch_with_request(&request))
+        .await
+        .map_err(|e| format!("fetch {url} failed: {e:?}"))?;
+    let resp: Response = resp_val.dyn_into().map_err(|_| "not a Response")?;
+    if !resp.ok() {
+        return Err(format!("HTTP {} for {url}", resp.status()));
+    }
+    let buf = JsFuture::from(resp.array_buffer().map_err(|e| format!("{e:?}"))?)
+        .await
+        .map_err(|e| format!("array_buffer for {url} failed: {e:?}"))?;
+    Ok(js_sys::Uint8Array::new(&buf).to_vec())
+}
+
+/// Fetches a deployment's split jar when its manifest is present, preserving
+/// the one-file `client.jar` fallback for local `trunk`/`just run-wasm` work.
+///
+/// A manifest is authoritative once served: corruption must fail visibly rather
+/// than quietly falling back to a potentially stale direct jar. Only a 404 means
+/// the deployment deliberately has no multipart asset. All paths remain plain
+/// relative URLs, so a page served as `/lodestone/` fetches
+/// `/lodestone/client.jar.parts.json` and its sibling parts.
+async fn fetch_client_jar() -> Result<Vec<u8>, String> {
+    let manifest_bytes = match fetch_bytes_no_store(client_jar::PARTS_MANIFEST_URL).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.starts_with("HTTP 404 ") => {
+            log::info!(
+                "[boot] {} is absent; using direct {CLIENT_JAR_URL}",
+                client_jar::PARTS_MANIFEST_URL
+            );
+            return fetch_bytes(CLIENT_JAR_URL).await;
+        }
+        Err(error) => return Err(format!("fetch {} failed: {error}", client_jar::PARTS_MANIFEST_URL)),
+    };
+    let manifest = client_jar::ClientJarParts::parse(&manifest_bytes)?;
+    let mut jar = Vec::with_capacity(manifest.total_len());
+    for part in manifest.parts() {
+        let bytes = fetch_bytes(&part.name).await?;
+        part.verify_download(&bytes)?;
+        jar.extend_from_slice(&bytes);
+    }
+    manifest.verify_complete(&jar)?;
+    Ok(jar)
+}
+
 /// Best-effort fetch of the real (non-stub) title-screen panorama faces.
 ///
 /// `client.jar` ships only a 69-byte 1×1 grey stub for each of the six panorama
@@ -157,9 +211,7 @@ async fn fetch_panorama_faces() -> Vec<(String, Vec<u8>)> {
 
 /// Parses `web/scripts/stage_sounds.py`'s manifest — a flat JSON array of
 /// object-name strings — via the browser's own `JSON.parse` rather than
-/// pulling `serde_json` into this size-sensitive crate (`just wasm-size`
-/// enforces a gzip ceiling on the compiled `.wasm`, and this is the one call
-/// site that would need it) for one small, fixed shape. `None` covers
+/// using a dynamically-typed deserializer for one small, fixed shape. `None` covers
 /// malformed JSON or anything other than an all-string array; the caller
 /// degrades to "no samples staged" either way, exactly as a missing manifest
 /// does.
@@ -225,7 +277,7 @@ async fn fetch_sound_bundle() -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
 /// and install them all as the session's asset bundle.
 async fn install_assets() -> Result<(), String> {
     status("fetching client.jar …");
-    let client_jar = fetch_bytes(CLIENT_JAR_URL).await?;
+    let client_jar = fetch_client_jar().await?;
     status(&format!(
         "client.jar {:.1} MiB — fetching blocks.json …",
         client_jar.len() as f64 / (1024.0 * 1024.0)
