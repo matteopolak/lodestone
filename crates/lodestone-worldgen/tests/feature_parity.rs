@@ -198,6 +198,7 @@ fn build_plains_ores() -> Vec<PlacedOre> {
         let configured = read_json(&root.join(format!("configured_feature/{}.json", strip(cf_id))));
         if configured["type"].as_str() == Some("minecraft:ore") {
             ores.push(PlacedOre {
+                registry_id: None,
                 index: i,
                 placements: parse_placements(&placed),
                 config: parse_ore_config(&configured["config"]),

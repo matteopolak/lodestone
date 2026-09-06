@@ -102,6 +102,7 @@ impl OverworldGenerator {
                     Some(self.pre_ore_stage(cx + dx, cz + dz));
             }
         }
+        let centre_biomes = Arc::clone(&self.pre_ore_stage(cx, cz).3);
 
         // The `OCEAN_FLOOR_WG` heightmap is still gathered into a small map,
         // deliberately: at most 80 × 80 = 6,400 entries across the whole read context,
@@ -154,6 +155,38 @@ impl OverworldGenerator {
                 .get(tag)
                 .is_some_and(|members| members.contains(block))
         };
+        let feature_biomes = self.decoration_catalog.feature_biomes();
+        let biome_allows = |pos: crate::feature::BlockPos, feature_id: &str| {
+            let source_x = pos.x.div_euclid(16);
+            let source_z = pos.z.div_euclid(16);
+            let dx = source_x - cx;
+            let dz = source_z - cz;
+            let cells = if dx == 0 && dz == 0 {
+                Some(&*centre_biomes)
+            } else if (-crate::feature::region_view::WIDE_RADIUS
+                ..=crate::feature::region_view::WIDE_RADIUS)
+                .contains(&dx)
+                && (-crate::feature::region_view::WIDE_RADIUS
+                    ..=crate::feature::region_view::WIDE_RADIUS)
+                    .contains(&dz)
+            {
+                wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
+                    .as_ref()
+                    .map(|pre| &*pre.3)
+            } else {
+                None
+            };
+            let Some(cells) = cells else { return false };
+            let qy = (pos.y - cells.min_y()).div_euclid(4);
+            if qy < 0 || qy >= cells.y_quarts() as i32 {
+                return false;
+            }
+            let qx = pos.x.rem_euclid(16).div_euclid(4) as usize;
+            let qz = pos.z.rem_euclid(16).div_euclid(4) as usize;
+            feature_biomes
+                .get(feature_id)
+                .is_some_and(|eligible| eligible.contains(cells.at_quart(qx, qy as usize, qz)))
+        };
 
         // Borrowed once, outside the closure, so the view's lifetime is plainly
         // tied to two locals rather than to whatever the closure captured.
@@ -202,6 +235,7 @@ impl OverworldGenerator {
                 read_max: crate::feature::ORE_READ_MAX,
                 ocean_floor_wg: &ocean_floor_wg,
                 in_tag: &in_tag,
+                biome_allows: Some(&biome_allows),
             };
             crate::feature::apply_ore_step(&mut random, self.seed, &input, &mut view, ores);
         } else {
@@ -218,6 +252,7 @@ impl OverworldGenerator {
                 crate::feature::ORE_READ_MAX,
                 &ocean_floor_wg,
                 &in_tag,
+                Some(&biome_allows),
                 &mut view,
                 &ores_for_source,
             );

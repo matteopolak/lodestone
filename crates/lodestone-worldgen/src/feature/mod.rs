@@ -485,7 +485,14 @@ impl Placement {
             }
             // Vanilla's own biome filter for a single-biome world always keeps the position and
             // draws nothing (topFeature is in the biome by construction).
-            Placement::Biome => OrePositions::One(pos),
+            Placement::Biome => {
+                let allowed = match (ctx.biome_allows, ctx.feature_id) {
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                    (Some(biome_allows), Some(feature_id)) => biome_allows(pos, feature_id),
+                };
+                allowed.then_some(pos).map_or(OrePositions::None, OrePositions::One)
+            }
         }
     }
 }
@@ -584,14 +591,20 @@ pub struct OreConfig {
 /// `setFeatureSeed`), its ordered placement modifiers, and its ore config.
 #[derive(Clone, Debug)]
 pub struct PlacedOre {
+    /// Registry id of the placed feature owning this ore configuration.
+    /// Compact fixtures can omit it because they do not provide a candidate
+    /// biome predicate; production-resolved features always retain the id.
+    pub registry_id: Option<String>,
     pub index: usize,
     pub placements: Vec<Placement>,
     pub config: OreConfig,
 }
 
-struct Ctx {
+struct Ctx<'a> {
     min_gen_y: i32,
     gen_depth: i32,
+    biome_allows: Option<&'a dyn Fn(BlockPos, &str) -> bool>,
+    feature_id: Option<&'a str>,
 }
 
 /// Canonicalise an ore JSON `state` object (`{Name, Properties?}`) the same way
@@ -851,6 +864,10 @@ pub struct OreInput<'a> {
     /// `true` iff the given block base name is in the given tag (closure already
     /// resolved by the caller).
     pub in_tag: &'a dyn Fn(&str, &str) -> bool,
+    /// Exact candidate-position membership for a placed feature's biome
+    /// modifier. Fixture callers leave this unset and preserve fixed-biome
+    /// behaviour.
+    pub biome_allows: Option<&'a dyn Fn(BlockPos, &str) -> bool>,
 }
 
 impl std::fmt::Debug for OreInput<'_> {
@@ -927,11 +944,13 @@ fn apply_one_source<R: RandomSource>(
     ore_probe::bump_source_pass(1);
     let origin = input.origin();
     let decoration_seed = random.set_decoration_seed(seed, origin.x, origin.z);
-    let ctx = Ctx {
-        min_gen_y: input.min_gen_y,
-        gen_depth: input.gen_depth,
-    };
     for ore in ores {
+        let ctx = Ctx {
+            min_gen_y: input.min_gen_y,
+            gen_depth: input.gen_depth,
+            biome_allows: input.biome_allows,
+            feature_id: ore.registry_id.as_deref(),
+        };
         random.set_feature_seed(decoration_seed, ore.index as i32, STEP_UNDERGROUND_ORES);
         place_placed_feature(random, origin, ore, input, &ctx, working);
     }
@@ -1023,6 +1042,7 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
         REGION_MAX,
         &dense,
         in_tag,
+        None,
         view,
         &|_source_x, _source_z| ores,
     )
@@ -1051,6 +1071,7 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
     read_max: i32,
     ocean_floor_wg: &RegionHeights,
     in_tag: &dyn Fn(&str, &str) -> bool,
+    biome_allows: Option<&dyn Fn(BlockPos, &str) -> bool>,
     view: &mut RegionView<'_>,
     ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
 ) -> i64 {
@@ -1073,6 +1094,7 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
                 read_max,
                 ocean_floor_wg,
                 in_tag,
+                biome_allows,
             };
             let ores = ores_for_source(source_x, source_z);
             let ds = apply_one_source(random, seed, &input, ores, view);
@@ -1758,7 +1780,36 @@ fn is_air(base: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::XoroshiroRandomSource;
     use std::collections::HashSet;
+
+    #[test]
+    fn biome_modifier_uses_the_candidate_feature_membership() {
+        let membership = |pos: BlockPos, feature: &str| match feature {
+            // Independent NE control: this large-copper candidate is in river.
+            "minecraft:ore_copper_large" => false,
+            // Independent SE control: this ordinary-copper candidate is in warm ocean.
+            "minecraft:ore_copper" => pos == BlockPos { x: 3_994, y: 28, z: 3_996 },
+            _ => false,
+        };
+        let mut random = XoroshiroRandomSource::new(42);
+        let large = BlockPos { x: 3_984, y: 47, z: -3_997 };
+        let ordinary = BlockPos { x: 3_994, y: 28, z: 3_996 };
+        let ne = Ctx {
+            min_gen_y: -64,
+            gen_depth: 384,
+            biome_allows: Some(&membership),
+            feature_id: Some("minecraft:ore_copper_large"),
+        };
+        assert_eq!(Placement::Biome.get_positions(&mut random, large, &ne), OrePositions::None);
+        let se = Ctx {
+            min_gen_y: -64,
+            gen_depth: 384,
+            biome_allows: Some(&membership),
+            feature_id: Some("minecraft:ore_copper"),
+        };
+        assert_eq!(Placement::Biome.get_positions(&mut random, ordinary, &se), OrePositions::One(ordinary));
+    }
 
     /// The height a probe resolves to must be, for **every** probe coordinate the
     /// ore driver can produce, exactly what the `HashMap<(i32, i32), i32>` this
@@ -1822,6 +1873,7 @@ mod tests {
             read_max: REGION_MAX,
             ocean_floor_wg: &dense,
             in_tag: &|_, _| false,
+            biome_allows: None,
         };
         // Probe range: the whole region PLUS a wide ring outside it, because the
         // largest blob ores really do probe past the 3x3 and the clamp is the
