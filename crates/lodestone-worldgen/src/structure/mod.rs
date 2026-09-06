@@ -2856,12 +2856,12 @@ impl StructureRegistry {
             unsupported.insert(
                 "mineshaft:post_process_scope".into(),
                 "a mineshaft piece's block-writing walk normally runs once **per decorating \
-                 chunk** and clips every read and write to that chunk, so \
-                 the invalid-location liquid survey, the sturdy-neighbours check and every \
-                 block read see only part of the piece and a corridor spanning two \
-                 chunks draws its cobwebs twice from two unrelated streams. Resolved \
-                 eagerly here, once, over the whole box — a deviation with no single \
-                 deterministic answer to reproduce, the same class as \
+                 chunk** and clips every read and write to that chunk. The liquid-shell \
+                 survey follows that boundary now; the sturdy-neighbours check and every \
+                 other block read still see the eager piece overlay, and a corridor spanning two \
+                 chunks draws its cobwebs twice from two unrelated streams. This engine \
+                 replays one deterministic start stream per decorating chunk — a deviation \
+                 with no single deterministic answer to reproduce, the same class as \
                  `coded:average_ground_height`"
                     .into(),
             );
@@ -2996,6 +2996,39 @@ impl StructureRegistry {
     #[must_use]
     pub fn seed(&self) -> i64 {
         self.seed
+    }
+
+    /// Regenerates a mineshaft's block-writing pass for the chunk currently
+    /// receiving it.  Starts retain the complete, eager tree for persistence;
+    /// this narrow placement-time replay gives the liquid-shell predicate the
+    /// decorating chunk's boundary instead of the whole piece box.
+    pub(crate) fn mineshaft_blocks_for_chunk(
+        &self,
+        start: &StructureStart,
+        chunk_x: i32,
+        chunk_z: i32,
+        ctx: &dyn StartContext,
+    ) -> Option<Vec<CodedBlock>> {
+        let StructureKind::Mineshaft { wood, blocking } = &self.structures.get(&start.structure)?.kind else {
+            return None;
+        };
+        let mut random = structure_random(self.seed, start.chunk_x, start.chunk_z);
+        let pieces = mineshaft::generate_for_chunk(
+            start.chunk_x,
+            start.chunk_z,
+            (chunk_x, chunk_z),
+            ctx,
+            *wood,
+            blocking,
+            &mut random,
+        );
+        let mut blocks = Vec::new();
+        for piece in pieces {
+            if let Some(piece_blocks) = piece.blocks {
+                blocks.extend(piece_blocks.iter().cloned());
+            }
+        }
+        Some(blocks)
     }
 
     /// The loaded jigsaw template pools.

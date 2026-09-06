@@ -1,0 +1,9 @@
+# Retained external packet control, seed 42, chunk -249 250.
+# Each state was decoded from the external column packet after its block-state
+# palette was expanded. These cells are in one mineshaft corridor that a
+# whole-start liquid-shell survey previously rejected. Its retained pre-fix
+# output at every sentinel was minecraft:stone.
+-3975 12 4000 minecraft:oak_fence[east=false,north=false,south=false,waterlogged=false,west=true]
+-3974 12 4000 minecraft:rail[shape=north_south,waterlogged=false]
+-3975 12 4001 minecraft:cave_air
+-3974 13 4004 minecraft:cave_air

@@ -24,11 +24,18 @@ structure_place_stage     write every referenced start's pieces into this chunk 
 ```
 
 A structure's pieces reach the grid one of three ways: **eager blocks** built once at start time
-against a `StartContext` (every coded piece — pyramids, mineshafts), a **template** placed by
+against a `StartContext` (every coded piece except mineshafts), a **template** placed by
 `structure_place_stage` (shipwreck, ocean ruin, igloo, ruined portal, every jigsaw structure), or a
 **refinement** the placement stage runs against the chunk's real, already-surfaced-and-carved grid
 (`buried_treasure`'s chest, whose termination condition needs a material distinction that does not
 exist yet at start time).
+
+Mineshaft starts eagerly retain their complete tree and bounding boxes, because the vertical shift
+depends on the finished tree. Their block-writing walk is replayed for the decorating chunk instead:
+the liquid-shell refusal is clipped to that chunk before the piece writes. This matters at a chunk
+border, where water just outside the current chunk must not discard a corridor that is otherwise
+valid inside it. The replay still uses the start's deterministic stream; its remaining chunk-local
+read and RNG differences stay explicitly recorded in the structure ledger.
 
 A ruined portal combines the latter two forms: the template first writes the frame, then its
 placement-time refinement grows the netherrack skirt and downward columns and adds optional vines or
