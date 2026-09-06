@@ -231,8 +231,11 @@ impl ServerProtocol for FakeProtocol {
 
     fn encode_chunk(&self, cx: i32, cz: i32, _column: &ChunkColumn) -> ServerDirective {
         let mut w = Writer::default();
-        w.var_i32(cx);
-        w.var_i32(cz);
+        // The level-chunk coordinates are fixed-width big-endian integers.
+        // Keeping this fixture's encoder independent from the parser makes
+        // the nonzero-coordinate assertions below catch a VarInt regression.
+        w.i32(cx);
+        w.i32(cz);
         ServerDirective::Send {
             packet_id: CHUNK,
             payload: w.as_slice().to_vec(),
@@ -314,8 +317,8 @@ async fn drive_login_and_join_with_mode(
     let (id, payload) = client.read_packet().await.expect("read").expect("packet");
     assert_eq!(id, CHUNK);
     let mut chunk = Reader::new(&payload);
-    let cx = chunk.var_i32().expect("chunk x");
-    let cz = chunk.var_i32().expect("chunk z");
+    let cx = chunk.i32().expect("chunk x");
+    let cz = chunk.i32().expect("chunk z");
     let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
     assert_eq!(id, CHUNK_BATCH_FINISHED);
     ((cx, cz), mode)
