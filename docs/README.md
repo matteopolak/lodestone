@@ -531,6 +531,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   and nine explicitly-carried shape deltas, rather than four copies of a family. It
   demonstrates the range and per-protocol-table rules in
   [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md).
+- [The 26.2 protocol era: generated chunks on the wire](./protocol-26-2-era.md) —
+  `crates/versions/26.2` (package `lodestone-v26-2`, registry feature `v26-2`) hosts
+  protocol 776. Its `level_chunk_with_light` encoder turns a server `ChunkColumn` into
+  a complete 26.2 chunk body: state and biome sections, client heightmaps, block
+  entities, and light.
 - [Protocol packet ranges and data-driven dispatch](./protocol-dispatch.md) — Two
   additions that let one packet definition serve a range of protocol versions, and let
   a family's clientbound dispatch be checked at construction time instead of falling
@@ -757,8 +762,19 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   selectable RNG family, two bespoke Nether biome noises, a disabled-aquifer fill,
   dimension-specific cell geometry, the `minecraft:end_islands` density function, and
   the End's non-multi-noise biome source. All bundled 26.2 data for both dimensions is
-  complete; every remaining gap is engine (unwritten decoration/structures) or
-  gameplay (portal travel, the dragon fight) rather than missing data.
+  complete; the remaining gaps are structure families, dimension serving, and gameplay
+  such as portal travel and the dragon fight rather than missing data.
+- [Large worldgen parity harness](./worldgen-large-parity.md) —
+  `scripts/worldgen-oracle/LargeParityOracle.java` is the scaffold for resumable
+  compiled-26.2 oracle shards over exactly the 1001 by 1001 overworld chunk grid
+  centred at `(0, 0)`: `cx, cz = -500..=500`. Version 2 stores the first 16 bits of
+  SHA-256 for each packet payload. A complete manifest is 2,004,002 bytes of
+  fingerprints plus a 160-byte header (about 1.91 MiB), not a million retained chunk
+  snapshots.
+- [Nether world generation](./worldgen-nether.md) —
+  `lodestone_worldgen::nether::NetherGenerator` produces a complete Nether column from
+  the bundled noise, biome, feature, tag and structure documents. It uses the legacy
+  world-generation random family required by the Nether settings.
 - [Structure generation](./worldgen-structures.md) — The structure engine: deciding
   which chunk gets which structure for a seed, and turning that decision into real
   blocks — jittered-grid and concentric-ring placement, `.nbt` structure templates
