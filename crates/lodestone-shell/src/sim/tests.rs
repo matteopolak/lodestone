@@ -35,6 +35,38 @@ fn ingest(sim: &mut Sim, event: lodestone_client::ClientEvent) {
     });
 }
 
+#[test]
+fn recipe_snapshot_reuses_the_cache_until_the_source_revision_moves() {
+    let mut sim = Sim::new(client_config());
+    assert_eq!(sim.known_recipes().revision(), 0);
+    assert_eq!(sim.recipe_book_cache_revision, Some(0));
+
+    ingest(
+        &mut sim,
+        lodestone_client::ClientEvent::RecipeBookAdded {
+            entries: vec![lodestone_model::event::RecipeBookEntry {
+                display_id: 7,
+                result_items: vec![10],
+                station_items: vec![11],
+                group: None,
+                category: 0,
+                crafting_requirements: None,
+                notification: true,
+                highlight: true,
+            }],
+            replace: true,
+        },
+    );
+    assert_eq!(sim.recipe_book_cache_revision, Some(0));
+    assert_eq!(sim.known_recipes().known().len(), 1);
+    assert_eq!(sim.recipe_book_cache_revision, Some(1));
+
+    sim.reset_for_server_transfer();
+    assert!(sim.recipe_book_cache_revision.is_none());
+    assert!(!sim.known_recipes().has_data());
+    assert!(sim.known_recipes().known().is_empty());
+}
+
 /// A `ClientEvent::Login` for `entity_id`, creative in the overworld — the
 /// event that seeds `ServerEntityId` **and** the local player's `EntityIndex`
 /// entry.

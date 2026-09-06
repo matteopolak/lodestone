@@ -395,7 +395,14 @@ impl Sim {
             if let Some(mut bars) = w.get_mut::<lodestone_ecs::session::SessionBossBars>(local) {
                 bars.0 = lodestone_game::bossbar::BossBarSet::default();
             }
+            if let Some(mut recipes) =
+                w.get_mut::<lodestone_ecs::session::SessionRecipeBook>(local)
+            {
+                recipes.0 = lodestone_game::recipe_sync::RecipeBookSync::default();
+            }
         });
+        self.recipe_book_cache = lodestone_game::recipe_sync::RecipeBookSync::default();
+        self.recipe_book_cache_revision = None;
     }
 
     /// The reset [`Sim::end_session`] needs from this cluster, so the two paths

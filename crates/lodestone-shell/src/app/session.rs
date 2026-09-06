@@ -714,21 +714,28 @@ impl WindowApp {
             &menu,
             book_type,
         );
-        let sync = self.sim.known_recipes();
-        for id in &page_ids {
-            let Some(item_reg_id) = Item::from_name(&id.to_string())
-                .map(|item| i32::from(item.registry_id()))
-            else {
-                continue;
-            };
-            for (display_id, recipe) in sync.unlocked_producing(item_reg_id) {
-                if !recipe.highlight {
+        let seen = {
+            let sync = self.sim.known_recipes();
+            let mut seen = Vec::new();
+            for id in &page_ids {
+                let Some(item_reg_id) = Item::from_name(&id.to_string())
+                    .map(|item| i32::from(item.registry_id()))
+                else {
                     continue;
-                }
-                if self.recipe_book_seen.insert(display_id) {
-                    self.sim.send_recipe_book_seen_recipe(display_id);
+                };
+                for (display_id, recipe) in sync.unlocked_producing(item_reg_id) {
+                    if !recipe.highlight {
+                        continue;
+                    }
+                    if self.recipe_book_seen.insert(display_id) {
+                        seen.push(display_id);
+                    }
                 }
             }
+            seen
+        };
+        for display_id in seen {
+            self.sim.send_recipe_book_seen_recipe(display_id);
         }
     }
 

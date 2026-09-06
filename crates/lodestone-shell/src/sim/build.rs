@@ -390,6 +390,8 @@ impl Sim {
             ecs: std::sync::Arc::new(lodestone_ecs::parking_lot::RwLock::new(ecs)),
             local,
             net: None,
+            recipe_book_cache: lodestone_game::recipe_sync::RecipeBookSync::new(),
+            recipe_book_cache_revision: None,
             adopted_live_world: false,
             // Every construction path composes the four presentation plugins
             // unconditionally (`Sim::client_app`, above) — see the field's own

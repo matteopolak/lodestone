@@ -456,6 +456,13 @@ pub struct Sim {
     /// give every `With<LocalPlayer>` system two players.
     local: Entity,
     net: Option<NetClient>,
+    /// Stable read-side snapshot of the session's recipe sync store. The ECS
+    /// component remains authoritative; this cache only avoids cloning its
+    /// nested maps and registry sets on every redraw.
+    recipe_book_cache: lodestone_game::recipe_sync::RecipeBookSync,
+    /// Source revision represented by [`Self::recipe_book_cache`], or `None`
+    /// before the first snapshot (and after a session replacement).
+    recipe_book_cache_revision: Option<u64>,
     /// Whether the [`ChunkWorld`] resource in [`Self::ecs`] is the *client's*
     /// store rather than this `Sim`'s own offline one.
     ///

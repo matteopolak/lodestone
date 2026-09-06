@@ -94,6 +94,10 @@ pub struct RecipeBookSync {
     /// remove empties `known` again, and without this flag a consumer could not
     /// tell "no data yet" from "genuinely nothing unlocked".
     has_data: bool,
+    /// Increments whenever a recipe-book sync event is applied. This includes
+    /// an accepted no-op packet, which keeps the invalidation boundary simple;
+    /// consumers can use it to avoid cloning the nested book on every frame.
+    revision: u64,
 }
 
 impl RecipeBookSync {
@@ -120,6 +124,12 @@ impl RecipeBookSync {
     #[must_use]
     pub fn has_data(&self) -> bool {
         self.has_data
+    }
+
+    /// The source revision for cache invalidation at read boundaries.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// The current ghost preview, if any.
@@ -197,6 +207,7 @@ impl RecipeBookSync {
                     );
                 }
                 self.has_data = true;
+                self.revision = self.revision.wrapping_add(1);
                 true
             }
             ClientEvent::RecipeBookRemoved { display_ids } => {
@@ -204,6 +215,7 @@ impl RecipeBookSync {
                     self.known.remove(id);
                 }
                 self.has_data = true;
+                self.revision = self.revision.wrapping_add(1);
                 true
             }
             ClientEvent::GhostRecipeShown {
@@ -214,6 +226,7 @@ impl RecipeBookSync {
                     window_id: *window_id,
                     result_items: result_items.clone(),
                 });
+                self.revision = self.revision.wrapping_add(1);
                 true
             }
             ClientEvent::RecipePropertySetsUpdated {
@@ -223,6 +236,7 @@ impl RecipeBookSync {
                 // A whole replace: the packet carries the complete set.
                 self.property_sets = item_sets.iter().cloned().collect();
                 self.stonecutter_results = stonecutter_results.clone();
+                self.revision = self.revision.wrapping_add(1);
                 true
             }
             _ => false,
@@ -281,19 +295,49 @@ mod tests {
     fn has_data_survives_an_add_then_remove() {
         let mut store = RecipeBookSync::new();
         assert!(!store.has_data());
+        assert_eq!(store.revision(), 0);
         store.apply(&ClientEvent::RecipeBookAdded {
             entries: vec![entry(1, 10)],
             replace: false,
         });
+        assert_eq!(store.revision(), 1);
         store.apply(&ClientEvent::RecipeBookRemoved {
             display_ids: vec![1],
         });
+        assert_eq!(store.revision(), 2);
         assert!(store.known().is_empty());
         assert!(
             store.has_data(),
             "an emptied set is not the same as no data -- a consumer would otherwise \
              fall back to showing everything unlocked"
         );
+    }
+
+    #[test]
+    fn every_recipe_sync_family_advances_the_revision() {
+        let mut store = RecipeBookSync::new();
+        let mut revision = 0;
+        for event in [
+            ClientEvent::RecipeBookAdded {
+                entries: vec![entry(1, 10)],
+                replace: false,
+            },
+            ClientEvent::GhostRecipeShown {
+                window_id: 4,
+                result_items: vec![10],
+            },
+            ClientEvent::RecipePropertySetsUpdated {
+                item_sets: Vec::new(),
+                stonecutter_results: Vec::new(),
+            },
+            ClientEvent::RecipeBookRemoved {
+                display_ids: vec![1],
+            },
+        ] {
+            assert!(store.apply(&event));
+            revision += 1;
+            assert_eq!(store.revision(), revision);
+        }
     }
 
     /// The join a panel needs, given that a display id carries no recipe name.
