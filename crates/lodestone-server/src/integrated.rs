@@ -972,6 +972,9 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
     let scheduled = context.save.scheduled_ticks();
     let protocol: &dyn ServerProtocol = &**context.protocol;
     let source: &dyn ChunkSource = context.source.0.as_ref();
+    let dimension = source
+        .dimension()
+        .unwrap_or(crate::dimension::Dimension::Overworld);
     let mut lights = Vec::with_capacity(snapshots.len());
     for snapshot in &snapshots {
         if snapshot.column.motion_blocking().is_none() {
@@ -990,9 +993,13 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
                     ));
                 }
             }
-            protocol.compute_column_light_with_neighbours(&snapshot.column, &neighbours)
+            protocol.compute_column_light_with_neighbours_in_dimension(
+                &snapshot.column,
+                &neighbours,
+                dimension,
+            )
         } else {
-            protocol.compute_column_light(&snapshot.column)
+            protocol.compute_column_light_in_dimension(&snapshot.column, dimension)
         };
         let Some(light) = light else {
             return Err(crate::world_storage::Error::Chunk(

@@ -2433,8 +2433,11 @@ fn encode_chunk_with_source<P: ServerProtocol>(
     cz: i32,
     column: &ChunkColumn,
 ) -> Result<ServerDirective, ChunkEncodeError> {
+    let dimension = source
+        .dimension()
+        .unwrap_or(crate::dimension::Dimension::Overworld);
     if !proto.uses_cross_column_light() {
-        return proto.try_encode_chunk(cx, cz, column);
+        return proto.try_encode_chunk_in_dimension(cx, cz, column, dimension);
     }
     let neighbours = (-1..=1)
         .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
@@ -2445,7 +2448,7 @@ fn encode_chunk_with_source<P: ServerProtocol>(
                 .map(|column| (dx, dz, column))
         })
         .collect::<Vec<_>>();
-    proto.try_encode_chunk_with_neighbours(cx, cz, column, &neighbours)
+    proto.try_encode_chunk_with_neighbours_in_dimension(cx, cz, column, &neighbours, dimension)
 }
 
 fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
@@ -5732,6 +5735,9 @@ where
     S: ChunkSource + ?Sized,
 {
     let column = source.column(cx, cz);
+    let dimension = source
+        .dimension()
+        .unwrap_or(crate::dimension::Dimension::Overworld);
     // Both halves have to be present for the cheap path: a family that can
     // compute light but not encode the packet (or the reverse) would otherwise
     // silently send nothing, which is the exact island this replaces.
@@ -5741,9 +5747,9 @@ where
             .filter(|&(dx, dz)| (dx, dz) != (0, 0))
             .map(|(dx, dz)| (dx, dz, source.column(cx + dx, cz + dz)))
             .collect::<Vec<_>>();
-        proto.compute_column_light_with_neighbours(&column, &neighbours)
+        proto.compute_column_light_with_neighbours_in_dimension(&column, &neighbours, dimension)
     } else {
-        proto.compute_column_light(&column)
+        proto.compute_column_light_in_dimension(&column, dimension)
     };
     if let Some(light) = light {
         let directive = proto.encode_light_update(cx, cz, &light);
@@ -5757,7 +5763,7 @@ where
     // module uses — vanilla's flow control counts batches, so a bare
     // `encode_chunk` outside one leaves the client's accounting short.
     apply(conn, state, proto.begin_chunk_batch()).await?;
-    let directive = match proto.try_encode_chunk(cx, cz, &column) {
+    let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &column, dimension) {
         Ok(directive) => directive,
         Err(error) => return return_chunk_encode_error(conn, proto, state, Some(0), error).await,
     };
@@ -5813,10 +5819,13 @@ where
     let Some((column, neighbours)) = resident_light_neighbourhood(source, cx, cz, radius) else {
         return Ok(());
     };
+    let dimension = source
+        .dimension()
+        .unwrap_or(crate::dimension::Dimension::Overworld);
     let light = if radius != 0 {
-        proto.compute_column_light_with_neighbours(&column, &neighbours)
+        proto.compute_column_light_with_neighbours_in_dimension(&column, &neighbours, dimension)
     } else {
-        proto.compute_column_light(&column)
+        proto.compute_column_light_in_dimension(&column, dimension)
     };
     if let Some(light) = light {
         let directive = proto.encode_light_update(cx, cz, &light);
@@ -5828,7 +5837,7 @@ where
     // The lightweight path is optional per protocol family. The already-cloned
     // centre column keeps the compatible full-column fallback non-generating.
     apply(conn, state, proto.begin_chunk_batch()).await?;
-    let directive = match proto.try_encode_chunk(cx, cz, &column) {
+    let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &column, dimension) {
         Ok(directive) => directive,
         Err(error) => return return_chunk_encode_error(conn, proto, state, Some(0), error).await,
     };

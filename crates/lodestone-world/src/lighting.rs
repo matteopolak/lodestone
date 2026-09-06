@@ -66,6 +66,12 @@ use crate::section::ChunkSection;
 /// block *state*, not the block — a lit vs unlit furnace, or an open vs closed
 /// shulker, differ.
 pub trait LightProperties {
+    /// Whether this dimension receives skylight. The default keeps existing
+    /// callers (which predate dimension-aware serving) on the overworld rule.
+    fn has_skylight(&self) -> bool {
+        true
+    }
+
     /// How much light the state removes as light passes *into* it, `0..=15`
     /// (vanilla's own light-dampening value). Air and fully transparent
     /// blocks are `0`; full solids are `15`. The engine applies `max(1, ·)`
@@ -367,7 +373,11 @@ fn compute_lit(
         }
     }
 
-    let sky = compute_sky(&field, &opacity);
+    let sky = if props.has_skylight() {
+        compute_sky(&field, &opacity)
+    } else {
+        vec![0; field.len()]
+    };
     propagate(&field, &mut block, &opacity, &mut block_buckets);
 
     let mut packed = pack(section_count, light_sections, &field, ox, oz, &sky, &block);
@@ -753,6 +763,22 @@ mod tests {
         }
     }
 
+    struct NoSkyProps(FakeProps);
+
+    impl LightProperties for NoSkyProps {
+        fn has_skylight(&self) -> bool {
+            false
+        }
+
+        fn opacity(&self, state: u32) -> u8 {
+            self.0.opacity(state)
+        }
+
+        fn emission(&self, state: u32) -> u8 {
+            self.0.emission(state)
+        }
+    }
+
     /// A small column: min_y = -64, 4 sections (y = -64..0), air-filled.
     fn column() -> ChunkColumn {
         ChunkColumn::new(
@@ -788,6 +814,18 @@ mod tests {
                 sky_at(&light, -64, 5, y, 9),
                 15,
                 "open column stays 15 at y={y}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_skylight_dimension_keeps_an_open_column_dark() {
+        let light = compute_column_light(&column(), &NoSkyProps(FakeProps::new()));
+        for section in 0..light.light_section_count() {
+            assert_eq!(
+                *light.sky(section),
+                LightData::Uniform(0),
+                "a no-skylight dimension must not seed sky light in section {section}"
             );
         }
     }
