@@ -112,7 +112,7 @@ the terrain sampler. `CrackPipeline` owns a clamped sampler with nearest magnifi
 so each enlarged crack texel stays discrete; minification and mip transitions remain
 linear to avoid distant shimmer. Passing only the atlas `TextureView` into
 `CrackPipeline::atlas_bind_group` makes that separation structural: terrain can keep
-its linear magnification without silently blurring the overlay.
+its independently selected magnification without silently blurring the overlay.
 
 To change the crack filtering, update `crack_sampler_descriptor` and its unit test in
 `lodestone-render::crack_pipeline`. The block atlas upload and resource-pack reload
@@ -270,13 +270,14 @@ gutter bleed, and fog. Two real defects were found this way instead:
   resource pack does.
 
 Texture filtering has two independently switchable axes, both read once per process
-and both defaulting to vanilla: which sampling function the terrain shader takes
+with the shader sampling function defaulting to the reference behavior, while
+terrain magnification defaults to nearest: which sampling function the terrain shader takes
 (`none` — a plain isotropic sample vanilla actually ships by default — versus `rgss`,
 a supersampled mode this client shipped unconditionally for a while, which is
 anisotropy-aware and therefore *undersamples* on a hardware sampler with no real
 anisotropic filtering, aliasing a distant grazing surface into a visible lattice); and
-the terrain atlas's magnification filter (`linear`, vanilla's default, versus
-`nearest`). A separate, now-fixed defect at `mipmapLevels = 0` invented mip levels no
+the terrain atlas's magnification filter (`nearest`, the pixelated default, versus
+diagnostic `linear`). A separate, now-fixed defect at `mipmapLevels = 0` invented mip levels no
 sprite could support with an unwritten (fully transparent) gutter — real, but
 reachable only at that one slider position and not the cause of the pinprick reports.
 What remains genuinely unported is anisotropic filtering itself (needs a real
