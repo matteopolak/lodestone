@@ -4158,12 +4158,12 @@ mod tests {
             column.set_block(4, 5, 5, &redstone_torch::set_standing_lit(true));
             column.set_block(7, 5, 5, "minecraft:moving_piston[facing=east,type=normal]");
             let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-            let pending_entity = crate::piston::MovingBlockEntity {
-                moved_state: "minecraft:dirt".to_string(),
-                direction: Direction::East,
-                extending: true,
-                source: false,
-            };
+            let pending_entity = crate::piston::MovingBlockEntity::new(
+                "minecraft:dirt".to_string(),
+                Direction::East,
+                true,
+                false,
+            );
             block_ticks.schedule(
                 (two_pos.x, two_pos.y, two_pos.z),
                 crate::piston::finish_kind(&pending_entity),

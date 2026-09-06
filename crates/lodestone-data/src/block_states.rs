@@ -132,6 +132,34 @@ impl StateId {
         table::PROPERTY_SETS[set as usize]
     }
 
+    /// This state's canonical `name[key=value,...]` spelling.
+    ///
+    /// This is the text form for storage and other serialized boundaries. Keep
+    /// a [`StateId`] while state-specific work is in process; reconstruct this
+    /// string only when a format requires it.
+    #[must_use]
+    pub fn canonical_state(self) -> String {
+        let name = self.name();
+        let properties = self.properties();
+        if properties.is_empty() {
+            return name.to_owned();
+        }
+
+        let mut out = String::with_capacity(name.len() + properties.len() * 12 + 2);
+        out.push_str(name);
+        out.push('[');
+        for (index, (key, value)) in properties.iter().enumerate() {
+            if index != 0 {
+                out.push(',');
+            }
+            out.push_str(key);
+            out.push('=');
+            out.push_str(value);
+        }
+        out.push(']');
+        out
+    }
+
     /// Whether this is its block's own default-block-state. Total, O(1).
     #[must_use]
     pub fn is_default(self) -> bool {
@@ -512,6 +540,20 @@ impl Default for BlockStateTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_state_round_trips_a_non_default_property_set() {
+        let state = StateId::from_state_str("minecraft:redstone_wire[power=7]")
+            .expect("the generated census contains redstone wire power 7");
+
+        let text = state.canonical_state();
+        assert_eq!(
+            StateId::from_state_str(&text),
+            Some(state),
+            "canonical output must preserve every generated property, including defaults omitted by the input"
+        );
+        assert!(text.contains("power=7"), "the requested property must survive the boundary spelling");
+    }
 
     /// The discriminating case for a partial-property lookup: on a
     /// block with many states it must land on the *named* state, not on the

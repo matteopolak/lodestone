@@ -180,7 +180,8 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<String> + ?Sized>(
             // move claimed it), and committing over that would resurrect a
             // block without a matching pending move.
             if crate::piston::is_moving_piston(state) {
-                crate::piston::parse_finish_kind(kind).map(|entity| entity.moved_state)
+                crate::piston::parse_finish_kind(kind)
+                    .map(|entity| entity.committed_state().to_string())
             } else {
                 None
             }

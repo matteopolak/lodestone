@@ -120,7 +120,9 @@ from a chunk: it returns `Option<StateId>`, never a raw integer. A built-in name
 name whose omitted properties use the registered default) becomes a validated generated ID; a
 plug-in or data-pack name stays `None` for its owner to handle. Keep that `Option` at new server
 consumers rather than converting a custom name to air or fabricating a numeric ID; call `raw()` only
-at a packet or other explicitly numeric boundary.
+at a packet or other explicitly numeric boundary. `StateId::canonical_state` reconstructs the full
+sorted `name[key=value,...]` spelling only where a text format requires it; do not derive a runtime
+state from that spelling when it can carry server-only companion data.
 
 Per-state outline (`getShape`, what block **selection** uses) and interaction
 (`getInteractionShape`, refines the hit *face* only, never adds a hit) shapes,

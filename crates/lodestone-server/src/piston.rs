@@ -102,6 +102,7 @@
 //! [`crate::neighbor_update::Direction`]. No block-state census: push reaction is
 //! per *block*, not per state, so a name table is the right shape.
 
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, Vec3};
 
 use crate::neighbor_update::ALL_DIRECTIONS;
@@ -808,9 +809,15 @@ pub const TICK_PISTON_FINISH: &str = "redstone:piston_finish";
 /// second source of truth for a value nothing here ever changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MovingBlockEntity {
-    /// `blockState` — the state travelling through this cell, and exactly what
-    /// lands here when the move commits.
-    pub moved_state: String,
+    /// The census state used for the client's moving-block NBT, when the
+    /// runtime state belongs to the built-in census. Companion properties the
+    /// server keeps outside that census are intentionally absent here.
+    pub moved_state: Option<StateId>,
+    /// The exact runtime state that commits after the animation. This is kept
+    /// private so consumers must choose either [`Self::moved_state`] for a
+    /// validated visual projection or [`Self::committed_state`] for the world
+    /// write, rather than accidentally treating the two as interchangeable.
+    runtime_state: String,
     /// `facing` — the **piston's** facing, not the direction blocks travel. The
     /// two differ on every retraction, and a client derives the travel direction
     /// itself from `facing` plus `extending`
@@ -828,6 +835,35 @@ pub struct MovingBlockEntity {
 }
 
 impl MovingBlockEntity {
+    /// Creates a moving record from the exact runtime state that will commit.
+    ///
+    /// A built-in state gets a validated visual projection. Synthetic companion
+    /// properties and data-pack states remain in `runtime_state` unchanged so a
+    /// piston move has the same world result as its one-step counterpart.
+    #[must_use]
+    pub fn new(
+        runtime_state: String,
+        direction: Direction,
+        extending: bool,
+        source: bool,
+    ) -> Self {
+        let moved_state = StateId::from_state_str(&runtime_state);
+        Self {
+            moved_state,
+            runtime_state,
+            direction,
+            extending,
+            source,
+        }
+    }
+
+    /// The exact runtime state to write when the move completes or a carried
+    /// block is interrupted. This can include server-only companion properties.
+    #[must_use]
+    pub fn committed_state(&self) -> &str {
+        &self.runtime_state
+    }
+
     /// `Direction.get3DDataValue()` — the byte `Direction.LEGACY_ID_CODEC` stores
     /// for `facing`.
     ///
@@ -914,8 +950,9 @@ pub fn is_moving_piston(state: &str) -> bool {
 /// record, and "read the moving block entity at this cell" is "find the pending
 /// commit at this cell". [`parse_finish_kind`] is the other half.
 ///
-/// `|` is the separator because a canonical block-state string can contain
-/// `:`, `[`, `]`, `,` and `=` but never a pipe.
+/// `|` is the separator because built-in state spellings contain `:`, `[`, `]`,
+/// `,` and `=` but never a pipe. The parser takes the final field whole, so a
+/// data-pack runtime value containing a pipe is still retained verbatim.
 #[must_use]
 pub fn finish_kind(entity: &MovingBlockEntity) -> String {
     format!(
@@ -923,7 +960,7 @@ pub fn finish_kind(entity: &MovingBlockEntity) -> String {
         facing_name(entity.direction),
         entity.extending,
         entity.source,
-        entity.moved_state
+        entity.committed_state()
     )
 }
 
@@ -936,9 +973,8 @@ pub fn is_finish_kind(kind: &str) -> bool {
 
 /// [`finish_kind`]'s inverse. `None` for any kind this did not write.
 ///
-/// `splitn(4, '|')` rather than `split`: the moved state is the last field and
-/// must be taken whole even though it is the only one that could ever contain a
-/// separator, which it cannot.
+/// `splitn(4, '|')` rather than `split`: the runtime state is the last field and
+/// is taken whole, including any data-pack text it contains.
 #[must_use]
 pub fn parse_finish_kind(kind: &str) -> Option<MovingBlockEntity> {
     let rest = kind.strip_prefix(TICK_PISTON_FINISH)?.strip_prefix('|')?;
@@ -946,16 +982,9 @@ pub fn parse_finish_kind(kind: &str) -> Option<MovingBlockEntity> {
     let direction = direction_named(parts.next()?)?;
     let extending = parse_bool(parts.next()?)?;
     let source = parse_bool(parts.next()?)?;
-    let moved_state = parts.next()?;
-    if moved_state.is_empty() {
-        return None;
-    }
-    Some(MovingBlockEntity {
-        moved_state: moved_state.to_string(),
-        direction,
-        extending,
-        source,
-    })
+    let runtime_state = parts.next()?;
+    (!runtime_state.is_empty())
+        .then(|| MovingBlockEntity::new(runtime_state.to_string(), direction, extending, source))
 }
 
 fn parse_bool(text: &str) -> Option<bool> {
@@ -1000,7 +1029,8 @@ pub struct MoveStart {
 ///
 /// `piston_state` is the base's state *before* the move — its stickiness and its
 /// other properties are read off it, so a caller must not have rewritten the base
-/// cell yet.
+/// cell yet. The record keeps an exact runtime state for the final write and a
+/// separate validated census projection for visual/NBT consumers when one exists.
 #[must_use]
 pub fn begin_move(
     writes: &[MoveWrite],
@@ -1025,12 +1055,7 @@ pub fn begin_move(
         start.moving.push((
             write.pos,
             moving_piston_state(direction, source && sticky),
-            MovingBlockEntity {
-                moved_state: write.to.clone(),
-                direction,
-                extending,
-                source,
-            },
+            MovingBlockEntity::new(write.to.clone(), direction, extending, source),
         ));
     }
 
@@ -1045,12 +1070,12 @@ pub fn begin_move(
         start.moving.push((
             piston_pos,
             moving_piston_state(direction, sticky),
-            MovingBlockEntity {
-                moved_state: redstone::with_property(piston_state, "extended", "false"),
+            MovingBlockEntity::new(
+                redstone::with_property(piston_state, "extended", "false"),
                 direction,
-                extending: false,
-                source: true,
-            },
+                false,
+                true,
+            ),
         ));
     }
 
@@ -1076,7 +1101,7 @@ pub fn finish_move(start: &MoveStart) -> Vec<MoveWrite> {
         .iter()
         .map(|(pos, _, entity)| MoveWrite {
             pos: *pos,
-            to: entity.moved_state.clone(),
+            to: entity.committed_state().to_string(),
         })
         .collect()
 }
@@ -1135,7 +1160,7 @@ pub fn interrupt(pos: BlockPos, entity: &MovingBlockEntity) -> MoveWrite {
     if entity.source {
         MoveWrite { pos, to: "minecraft:air".to_string() }
     } else {
-        MoveWrite { pos, to: entity.moved_state.clone() }
+        MoveWrite { pos, to: entity.committed_state().to_string() }
     }
 }
 
@@ -1159,6 +1184,19 @@ mod tests {
 
     fn at(x: i32, y: i32, z: i32) -> BlockPos {
         BlockPos::new(x, y, z)
+    }
+
+    fn state(text: &str) -> StateId {
+        StateId::from_state_str(text).expect("test state is in the generated census")
+    }
+
+    fn moving(
+        text: &str,
+        direction: Direction,
+        extending: bool,
+        source: bool,
+    ) -> MovingBlockEntity {
+        MovingBlockEntity::new(text.to_string(), direction, extending, source)
     }
 
     /// The push-reaction table is sorted (both name lists are binary-searched) and
@@ -1726,7 +1764,12 @@ mod tests {
                 let states: Vec<String> = due
                     .iter()
                     .filter(|t| is_finish_kind(&t.kind))
-                    .map(|t| parse_finish_kind(&t.kind).expect("a parseable record").moved_state)
+                    .map(|t| {
+                        parse_finish_kind(&t.kind)
+                            .expect("a parseable record")
+                            .committed_state()
+                            .to_string()
+                    })
                     .collect();
                 assert!(
                     states.contains(&"minecraft:gravel".to_string())
@@ -1794,7 +1837,8 @@ mod tests {
                     pending.trigger_tick,
                     parse_finish_kind(&pending.kind)
                         .expect("a parseable record")
-                        .moved_state,
+                        .committed_state()
+                        .to_string(),
                 )
             })
             .collect();
@@ -1901,12 +1945,12 @@ mod tests {
     /// of any other.
     #[test]
     fn a_finish_kind_round_trips_and_a_foreign_kind_does_not_parse() {
-        let entity = MovingBlockEntity {
-            moved_state: "minecraft:piston_head[facing=west,short=true,type=sticky]".to_string(),
-            direction: Direction::North,
-            extending: false,
-            source: true,
-        };
+        let entity = moving(
+            "minecraft:piston_head[facing=west,short=true,type=sticky]",
+            Direction::North,
+            false,
+            true,
+        );
         let kind = finish_kind(&entity);
         assert!(is_finish_kind(&kind), "{kind} must be recognised as a commit");
         assert_eq!(parse_finish_kind(&kind).as_ref(), Some(&entity));
@@ -1923,6 +1967,10 @@ mod tests {
             None,
             "an empty moved state is not a record"
         );
+        let unknown = parse_finish_kind("redstone:piston_finish|north|false|true|minecraft:not_a_block")
+            .expect("an unknown runtime state must still survive the scheduler");
+        assert_eq!(unknown.moved_state, None, "only the visual projection is absent");
+        assert_eq!(unknown.committed_state(), "minecraft:not_a_block");
         assert_eq!(
             parse_finish_kind("redstone:piston_finish|nowhere|false|true|minecraft:stone"),
             None,
@@ -1935,6 +1983,61 @@ mod tests {
         for direction in ALL_DIRECTIONS {
             assert_eq!(direction_named(facing_name(direction)), Some(direction));
         }
+    }
+
+    #[test]
+    fn begin_move_preserves_an_unknown_carried_state_through_completion() {
+        let writes = vec![MoveWrite {
+            pos: at(4, 5, 6),
+            to: "example:unregistered_block".to_string(),
+        }];
+
+        let start = begin_move(
+            &writes,
+            "minecraft:piston[extended=false,facing=east]",
+            at(3, 5, 6),
+            Direction::East,
+            true,
+        );
+        let (_, _, entity) = start.moving.first().expect("the unknown state still animates");
+        assert_eq!(entity.moved_state, None, "unknown states have no census visual projection");
+        assert_eq!(entity.committed_state(), "example:unregistered_block");
+        assert_eq!(
+            finish_move(&start),
+            writes,
+            "the completion must replay an unknown runtime state verbatim"
+        );
+    }
+
+    #[test]
+    fn a_synthetic_comparator_output_survives_normal_piston_completion() {
+        let runtime = "minecraft:comparator[facing=east,mode=compare,powered=true,output=9]";
+        let entity = moving(runtime, Direction::East, true, false);
+        assert!(entity.moved_state.is_some(), "the real comparator portion has a typed visual state");
+
+        let parsed = parse_finish_kind(&finish_kind(&entity)).expect("the scheduled record parses");
+        let start = MoveStart {
+            moving: vec![(at(4, 5, 6), moving_piston_state(Direction::East, false), parsed)],
+            cleared: Vec::new(),
+            base_now: None,
+        };
+        assert_eq!(
+            finish_move(&start),
+            vec![MoveWrite { pos: at(4, 5, 6), to: runtime.to_string() }],
+            "completion must retain the server-only output=9 companion property"
+        );
+    }
+
+    #[test]
+    fn a_synthetic_comparator_output_survives_piston_interruption() {
+        let runtime = "minecraft:comparator[facing=east,mode=compare,powered=true,output=9]";
+        let entity = moving(runtime, Direction::East, true, false);
+
+        assert_eq!(
+            interrupt(at(4, 5, 6), &entity),
+            MoveWrite { pos: at(4, 5, 6), to: runtime.to_string() },
+            "interrupting a carried state must not reset its output companion property"
+        );
     }
 
     /// `source` is set for the piston's **own** cell and nothing else, and which
@@ -1968,7 +2071,7 @@ mod tests {
             .expect("the arm cell moves");
         assert_eq!(
             arm.moved_state,
-            "minecraft:piston_head[facing=east,short=false,type=sticky]"
+            Some(state("minecraft:piston_head[facing=east,short=false,type=sticky]"))
         );
         assert!(arm.extending);
         assert_eq!(
@@ -2011,7 +2114,7 @@ mod tests {
         assert_eq!(moving_state, "minecraft:moving_piston[facing=east,type=sticky]");
         assert!(!base.extending);
         assert_eq!(
-            base.moved_state, "minecraft:sticky_piston[extended=false,facing=east]",
+            base.moved_state, Some(state("minecraft:sticky_piston[extended=false,facing=east]")),
             "the base's own retracted state is what commits, and it is the record \
              `PistonHeadRenderer` builds a homecoming head from"
         );
@@ -2053,13 +2156,7 @@ mod tests {
     /// direction — which is the ordering a hand-count reaches for.
     #[test]
     fn facing_3d_values_follow_vanillas_declaration_order() {
-        let of = |direction| MovingBlockEntity {
-            moved_state: "minecraft:stone".to_string(),
-            direction,
-            extending: true,
-            source: false,
-        }
-        .facing_3d_value();
+        let of = |direction| moving("minecraft:stone", direction, true, false).facing_3d_value();
         assert_eq!(of(Direction::Down), 0);
         assert_eq!(of(Direction::Up), 1);
         assert_eq!(of(Direction::North), 2);
@@ -2085,18 +2182,18 @@ mod tests {
     /// alone.
     #[test]
     fn interrupting_a_source_entity_writes_air_never_the_moved_state() {
-        let extending_head = MovingBlockEntity {
-            moved_state: format!("{PISTON_HEAD}[facing=east,short=false,type=normal]"),
-            direction: Direction::East,
-            extending: true,
-            source: true,
-        };
-        let retracting_base = MovingBlockEntity {
-            moved_state: "minecraft:piston[facing=south,extended=false]".to_string(),
-            direction: Direction::South,
-            extending: false,
-            source: true,
-        };
+        let extending_head = moving(
+            &format!("{PISTON_HEAD}[facing=east,short=false,type=normal]"),
+            Direction::East,
+            true,
+            true,
+        );
+        let retracting_base = moving(
+            "minecraft:piston[facing=south,extended=false]",
+            Direction::South,
+            false,
+            true,
+        );
         for (label, entity) in [("extending arm", &extending_head), ("retracting base", &retracting_base)] {
             let write = interrupt(at(9, 9, 9), entity);
             assert_eq!(
@@ -2118,12 +2215,7 @@ mod tests {
     /// regardless of the arm's interruption happening one cell closer.
     #[test]
     fn interrupting_a_carried_block_writes_its_moved_state_same_as_ordinary_completion() {
-        let carried = MovingBlockEntity {
-            moved_state: "minecraft:dirt".to_string(),
-            direction: Direction::South,
-            extending: true,
-            source: false,
-        };
+        let carried = moving("minecraft:dirt", Direction::South, true, false);
         let write = interrupt(at(3, 4, 5), &carried);
         assert_eq!(write, MoveWrite { pos: at(3, 4, 5), to: "minecraft:dirt".to_string() });
 
@@ -2154,18 +2246,13 @@ mod tests {
 
         let arm_pos = at(1, 1, 1);
         let other_pos = at(9, 1, 1);
-        let entity = MovingBlockEntity {
-            moved_state: format!("{PISTON_HEAD}[facing=east,short=false,type=normal]"),
-            direction: Direction::East,
-            extending: true,
-            source: true,
-        };
-        let other_entity = MovingBlockEntity {
-            moved_state: "minecraft:dirt".to_string(),
-            direction: Direction::East,
-            extending: true,
-            source: false,
-        };
+        let entity = moving(
+            &format!("{PISTON_HEAD}[facing=east,short=false,type=normal]"),
+            Direction::East,
+            true,
+            true,
+        );
+        let other_entity = moving("minecraft:dirt", Direction::East, true, false);
 
         let mut ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         ticks.schedule(
