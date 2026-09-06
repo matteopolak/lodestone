@@ -1231,8 +1231,9 @@ impl OverworldGenerator {
         // bucket rather than given one of its own, because for a chunk with no
         // structure in reach it is a single early return.
         let world = self.structure_place_stage(cx, cz, world);
+        let ore_heights = self.ore_heights_from_world(&world);
         let t_ore_start = lodestone_time::Instant::now();
-        let world = self.ore_stage(cx, cz, world, &heights);
+        let world = self.ore_stage(cx, cz, world, &ore_heights);
         let t_vegetation_start = lodestone_time::Instant::now();
         // `Arc::new` rather than a store lookup: this path builds its own world
         // locally (it is the per-stage timing split, not the memoised serve path),
