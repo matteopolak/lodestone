@@ -20,7 +20,7 @@
 //!     module's own doc named but had never measured against a real dump —
 //!     see [`single_chunk_only_undercounts_real_vanilla_centre_content`].
 //!
-//! Four fixtures, seed 42: two `minecraft:plains` — chunk `(-120,-120)` (this
+//! Six fixtures, seed 42: two `minecraft:plains` — chunk `(-120,-120)` (this
 //! crate's own "land chunk" convention, `feature_parity.rs`) and chunk
 //! `(5,5)` (picked once, before any number was known, specifically so the
 //! measured spill fraction couldn't be cherry-picked to look small — see
@@ -28,7 +28,10 @@
 //! structure, not a vacuous sweep) — plus two `minecraft:savanna` (added
 //! alongside [`crate::feature::vegetation::TrunkPlacerCfg::Forking`]/
 //! [`crate::feature::vegetation::FoliagePlacerCfg::Acacia`]): chunk `(20,-5)`
-//! and chunk `(-30,15)`.
+//! and chunk `(-30,15)` — plus two `minecraft:mushroom_fields` captures chosen
+//! to exercise both huge-mushroom branches. The cross-chunk spill control uses
+//! only the first four because these captures are branch-consumer evidence,
+//! not spill-ratio evidence.
 //!
 //! ## A real bug in the oracle itself, found while picking the savanna pair
 //!
@@ -260,12 +263,24 @@ fn load(name: &str) -> Fixture {
     f
 }
 
-/// Two plains fixtures plus two savanna fixtures,
+/// Two plains fixtures, two savanna fixtures, and two mushroom-fields fixtures,
 /// picked from a scan of several savanna coordinates specifically because
 /// they contain real acacia — see this module's own doc "The acacia oracle
 /// bug" section for why most savanna coordinates tried during that scan did
-/// NOT, before the fix). Every test below iterates all four uniformly.
+/// NOT, before the fix). The exact parity tests iterate all six uniformly.
 const FIXTURES: &[&str] = &[
+    "vegetation_plains_land_jvm.txt",
+    "vegetation_plains_chunk5_5_jvm.txt",
+    "vegetation_savanna_chunk20_neg5_jvm.txt",
+    "vegetation_savanna_neg30_15_jvm.txt",
+    "vegetation_mushroom_fields_neg1_0_jvm.txt",
+    "vegetation_mushroom_fields_5_5_jvm.txt",
+];
+
+// Only the plains/savanna captures are controls for cross-chunk spill. The
+// mushroom-fields captures deliberately exercise the production selector's
+// widened write-radius path instead of this single-source undercount metric.
+const SPILL_FIXTURES: &[&str] = &[
     "vegetation_plains_land_jvm.txt",
     "vegetation_plains_chunk5_5_jvm.txt",
     "vegetation_savanna_chunk20_neg5_jvm.txt",
@@ -437,7 +452,7 @@ fn composed_biome_evidence_must_match_before_closing_coral_or_root_system() {
 #[test]
 fn single_chunk_only_undercounts_real_vanilla_centre_content() {
     let mut ratios = Vec::new();
-    for &name in FIXTURES {
+    for &name in SPILL_FIXTURES {
         let f = load(name);
         assert!(f.single_centre_changed > 0, "{name}: fixture must be non-vacuous (plains, not an ocean chunk)");
         assert!(
@@ -459,7 +474,7 @@ fn single_chunk_only_undercounts_real_vanilla_centre_content() {
     // Measured band across both fixtures: 0.781 and 0.787. A wide-but-real
     // band (not 0..1) so this remains a meaningful regression control
     // rather than a tautology.
-    for (name, ratio) in FIXTURES.iter().zip(&ratios) {
+    for (name, ratio) in SPILL_FIXTURES.iter().zip(&ratios) {
         assert!(
             (0.60..=0.95).contains(ratio),
             "{name}: single/full3x3 ratio {ratio:.3} outside the measured band [0.60, 0.95] — \
@@ -661,6 +676,41 @@ fn our_engine_matches_jvm_full3x3_pass() {
             f.full_centre_changed,
             100.0 * (1.0 - f.single_centre_changed as f64 / f.full_centre_changed as f64)
         );
+    }
+}
+
+/// A synthetic configured-feature test can prove the cap geometry while a
+/// production selector still silently drops the feature. This fixture is the
+/// control for that wrong hypothesis: its real mushroom-fields decoration
+/// pass contains both a brown and a red huge mushroom, and the composed 3×3
+/// driver must reproduce those exact states and coordinates.
+#[test]
+fn mushroom_fields_fixture_proves_both_huge_mushroom_branches_are_consumed() {
+    let resolver = FsResolver { root: data_dir() };
+    for (name, cap) in [
+        ("vegetation_mushroom_fields_neg1_0_jvm.txt", "brown_mushroom_block"),
+        ("vegetation_mushroom_fields_5_5_jvm.txt", "red_mushroom_block"),
+    ] {
+        let fixture = load(name);
+        let expected: HashMap<_, _> = fixture
+            .single_diff
+            .iter()
+            .filter(|(_, state)| state.contains(cap) || state.contains("mushroom_stem"))
+            .map(|(pos, state)| (*pos, state.clone()))
+            .collect();
+        assert!(!expected.is_empty(), "{name}: external capture must contain the selected huge-mushroom branch");
+        assert!(expected.values().any(|state| state.contains("mushroom_stem")), "{name}: external capture must contain stems");
+
+        // The production stage uses the widened 3x3 write-radius grid.  The
+        // single-source helper intentionally drops writes outside the centre
+        // chunk, which would hide the north half of a cap placed across this
+        // fixture's z=0 seam.
+        let ours = run_our_engine_full3x3(&fixture, &resolver);
+        let actual: HashMap<_, _> = ours
+            .into_iter()
+            .filter(|(pos, _)| expected.contains_key(pos))
+            .collect();
+        assert_eq!(actual, expected, "{name}: mushroom-fields production selector must reach the huge-mushroom placer with exact states");
     }
 }
 

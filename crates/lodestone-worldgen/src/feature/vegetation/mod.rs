@@ -2481,13 +2481,13 @@ mod tests {
         assert_eq!(base_id(grid.get(5, 74, 5)), "minecraft:air", "a brown-cap corner is absent");
         assert_eq!(
             grid.get(5, 74, 8),
-            "minecraft:brown_mushroom_block[down=false,east=true,north=true,south=true,up=true,west=false]",
+            "minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=true]",
             "the west edge must expose only its west face"
         );
         assert_eq!(
             grid.get(8, 74, 8),
-            "minecraft:brown_mushroom_block[down=false,east=true,north=true,south=true,up=true,west=true]",
-            "the cap centre retains the fixture's all-connected state"
+            "minecraft:brown_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]",
+            "the cap centre must hide all covered horizontal faces"
         );
     }
 
@@ -2526,7 +2526,7 @@ mod tests {
         assert_eq!(top, 9, "the top layer is a filled 3×3 cap");
         assert_eq!(
             grid.get(7, 74, 7),
-            "minecraft:red_mushroom_block[down=false,east=true,north=false,south=true,up=true,west=false]",
+            "minecraft:red_mushroom_block[down=false,east=false,north=true,south=false,up=true,west=true]",
             "a top corner exposes both outward horizontal faces"
         );
     }
