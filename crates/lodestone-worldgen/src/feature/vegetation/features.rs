@@ -20,7 +20,7 @@
 //! |---|---|---|
 //! | `isFaceSturdy(UP)` | "not air, not a fluid, and [`blocks_motion`]" | no per-state occlusion table in this crate |
 //! | `state.isSolid()` | same | same |
-//! | `canSurvive` | the target's own family rule, or "support below is not air" | see [`super::config::BlockPredicate`]'s own doc for the same narrowing |
+//! | `canSurvive` | the target's own family rule, or "support below is not air" | vegetation blocks use `#supports_vegetation`; support-free blocks such as potent sulfur opt out |
 //! | `level.getSeaLevel()` | [`SEA_LEVEL`] | the overworld constant; a preset that moves it would need this parameterised |
 //! | `scheduleTick` | dropped | there is no tick queue at generation time; the *block* still lands |
 //! | block entities | dropped | the generator has no block-entity layer yet |
@@ -44,6 +44,7 @@
 use std::collections::HashSet;
 
 use crate::feature::{BlockPos, IntProvider};
+use crate::interner::StateId;
 use crate::rng::RandomSource;
 
 use super::config::{
@@ -76,6 +77,23 @@ fn air_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
 fn sturdy_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
     let base = base_at(grid, x, y, z);
     !is_air(base) && !is_fluid(base) && blocks_motion(base)
+}
+
+/// The simple-block feature asks the placed state's own survival rule, not a
+/// vegetation-only support predicate. Most bundled simple blocks are plants and
+/// therefore use the compact `#supports_vegetation` approximation; support-free
+/// blocks such as potent sulfur must still be placeable on a solid/water
+/// interface created by another feature.
+pub(super) fn simple_block_can_survive(
+    grid: &VegGrid,
+    tags: &super::config::VegTags,
+    state: StateId,
+    pos: BlockPos,
+) -> bool {
+    match super::base_id(grid.interner().name_of(state)) {
+        "minecraft:potent_sulfur" => true,
+        _ => super::ids::tag_at(grid, tags, super::ids::Tag::SupportsVegetation, pos.x, pos.y - 1, pos.z),
+    }
 }
 
 fn water_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
@@ -2526,4 +2544,54 @@ pub(super) fn place_fallen_tree<R: RandomSource>(
         }
     }
     apply_fallen_tree_decorators(random, &fallen_log, &cfg.log_decorators, grid, tags);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rng::LegacyRandomSource;
+
+    #[test]
+    fn potent_sulfur_simple_block_uses_state_survival_not_vegetation_support() {
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        grid.seed(5, 69, 5, "minecraft:deepslate[axis=y]".to_string());
+        grid.seed(5, 70, 5, "minecraft:sulfur".to_string());
+        grid.seed(5, 71, 5, "minecraft:water[level=0]".to_string());
+        grid.seed(6, 69, 6, "minecraft:deepslate[axis=y]".to_string());
+        grid.seed(6, 70, 6, "minecraft:air".to_string());
+        grid.seed(6, 71, 6, "minecraft:water[level=0]".to_string());
+        let mut tags = VegTags::default();
+        tags.supports_vegetation.insert("minecraft:grass_block".to_string());
+        let potent = BlockStateProvider::Simple(
+            "minecraft:potent_sulfur[potent_sulfur_state=wet]".to_string(),
+        );
+        let grass = BlockStateProvider::Simple("minecraft:short_grass".to_string());
+        let mut random = LegacyRandomSource::new(1);
+
+        super::super::place::place_simple_block(
+            &mut random,
+            BlockPos { x: 5, y: 70, z: 5 },
+            &potent,
+            &mut grid,
+            &tags,
+        );
+        assert_eq!(
+            grid.get(5, 70, 5),
+            "minecraft:potent_sulfur[potent_sulfur_state=wet]",
+            "potent sulfur has its own support-free survival rule"
+        );
+
+        super::super::place::place_simple_block(
+            &mut random,
+            BlockPos { x: 6, y: 70, z: 6 },
+            &grass,
+            &mut grid,
+            &tags,
+        );
+        assert_eq!(
+            grid.get(6, 70, 6),
+            "minecraft:air",
+            "vegetation still requires a supports_vegetation block below"
+        );
+    }
 }

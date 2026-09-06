@@ -71,6 +71,10 @@ silent.
 Simple-block state providers include fixed, weighted, threshold-noise, noise and dual-noise forms.
 The two noise forms construct their deterministic fields from the bundled seed and octave data at
 selection time; dual noise first selects the fast-field frequency, then selects the output state.
+Simple-block placement uses the target state's survival family: vegetation states require a
+`supports_vegetation` block below, while support-free states such as `potent_sulfur` may replace a
+solid block at a water interface. Applying the vegetation rule to every provider would leave the
+lake feature's wet potent-sulfur cap as plain sulfur.
 Block columns also accept weighted nested height providers and randomized integer state properties,
 which covers the hanging cave-vine records; bamboo uses the configured floor tag, stalk states and
 optional podzol disk.
