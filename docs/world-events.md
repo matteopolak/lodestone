@@ -158,9 +158,12 @@ performs the init. This gate is
 `tick_dragons` drives phase/crystal ticking every tick; player melee/arrows route
 into `damage_dragon` (a dragon lives outside `self.mobs`, so it needs its own attack
 branch, same shape the wither uses); an actual kill places the egg (first kill only),
-activates the exit portal, and pops a shuffled gateway slot to place a real but
-non-functional (no teleport-on-contact) `minecraft:end_gateway`. The boss bar needs
-no new wire path. Missing: the summoning beam (`EndCrystal.DATA_BEAM_TARGET` streams
+activates the exit portal, and pops a shuffled gateway slot to place a real
+`minecraft:end_gateway`. Generated outer-island return gateways carry an exact
+destination block entity; the integrated server consumes that metadata on player
+contact, sends a same-dimension teleport, and recentres the streamed view. The
+boss bar needs no new wire path. Missing: the summoning beam
+(`EndCrystal.DATA_BEAM_TARGET` streams
 as `None`, nothing computes a real target) and a darken-screen bit on
 `BossBarSnapshot`. Fight state and the gateway pool are process-lifetime only, not
 saved.

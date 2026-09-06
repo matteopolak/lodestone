@@ -103,10 +103,11 @@ pre-surface density field and applies intersecting template pieces before palett
 positive `end_city_jvm.txt` capture gates one start, its nine-piece sequence, and two placed block
 states. The terrain fixture deliberately stops before later writers, so it is not evidence that they
 were placed.
-Portal travel, the dimension registry, and reaching either dimension from a live server are
-`lodestone-server`-side gaps: `EmbeddedResolver` still hardcodes the Overworld's documents for the
-default singleplayer path, though `EndChunkSource`/`NetherChunkSource`-shaped wrappers and a real
-`Dimension` enum variant exist for both — see `docs/nether-portals.md` for the remaining diff.
+The dimension registry and reaching either dimension from a live server are wired through the
+integrated server. End portal entry lands on the generated fixed platform, and generated outer-island
+return gateways carry an exact destination sidecar that the server consumes on contact. The remaining
+worldgen-side gap is that `EmbeddedResolver` still hardcodes the Overworld's documents for the default
+singleplayer path, so a future resolver split must preserve the End generator's own data source.
 
 ## How to change it
 
