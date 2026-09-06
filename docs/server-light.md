@@ -69,6 +69,20 @@ resident lookup, never a generated-column read.
 The update still travels on the acting connection. Broadcasting the result to other players sharing
 the world remains separate multiplayer work.
 
+World-tick updates have a stricter loading rule than a player action. Their timer may observe a
+mutation in a column that the joining connection has not streamed, so it copies the complete light
+footprint through `ChunkSource::resident_column` and sends nothing when any member is absent. The
+later chunk snapshot is authoritative and already includes that mutation. This avoids making a
+connection timer synchronously generate a cold 3×3 footprint, which would otherwise monopolize the
+current-thread connection runtime and prevent that very join stream from progressing. The compatible
+whole-column fallback also uses the resident centre snapshot.
+
+The connection sends every tick-feed block update even while its initial join stream is still in
+flight. A pending chunk snapshot supersedes an earlier update when it eventually arrives, but it
+cannot repair a column the client already received while later columns are still pending. Lighting
+is still deduplicated by affected column and uses only resident data, so this correctness path never
+turns a cache miss into join-time terrain generation.
+
 ### Validated against a real, already-lit vanilla world
 
 The engine's correctness is checked against a real vanilla server's own generated-and-lit world data
@@ -104,6 +118,10 @@ fail in.
   and re-sends a whole column's worth of data; firing it on every ordinary, non-light-relevant edit
   (a block swapped for another of identical light behavior) turns routine building into a stream of
   unnecessary full-column resends.
+- **Keep timer-driven relights resident-only.** A direct player edit can deliberately load its own
+  known area, but a world-tick feed may precede a join snapshot. Use
+  `send_resident_lighting_for_tick` for the latter so a background mutation cannot starve connection
+  progress by generating terrain from the connection runtime.
 - **Never compute light on the client's own live (multiplayer) path.** The client's contract is that
   a live server connection supplies light and a local/offline world computes its own — this
   subsystem exists precisely so the server side of that contract is actually held up.

@@ -1216,36 +1216,50 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         cache.capacity = cache.capacity.max(want);
     }
 
-    /// Writes through to the inner source **first**, then to the retained
-    /// column if one is resident.
+    /// Persists a retained mutation through the inner source, then leaves the
+    /// matching cache entry current.
     ///
-    /// That order is what makes eviction lossless — see the module docs. If no
-    /// entry is resident this deliberately does not create one: the next read
-    /// regenerates through the inner source, which for
+    /// A source that can retain a complete snapshot receives the cache's
+    /// already-mutated column, avoiding a second cold generation merely to make
+    /// an edit record. If no entry is resident this deliberately does not create
+    /// one: the next read regenerates through the inner source, which for
     /// [`crate::chunk::OverworldChunkSource`] consults its `edits` map and so
     /// returns the edited column.
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
-        self.source.set_block(x, y, z, name);
-
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        let mut guard = self.lock();
-        let cache = &mut *guard;
-        let stamp = cache.next_stamp();
-        if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
-            // A `y` outside the column's vertical extent is a no-op rather than
-            // an index panic. `ChunkColumn::set_block` indexes unguarded, and
-            // the inner source's own `set_block` may have accepted the edit (or
-            // rejected it its own way) without this retained column being able
-            // to hold it — so the store guards its own update rather than
-            // relying on the source to reject out-of-range `y`.
-            if y >= entry.column.min_y && y < entry.column.min_y + entry.column.height {
-                entry.column.set_block(lx, y, lz, name);
-                entry.last_used = stamp;
+        let retained = {
+            let mut guard = self.lock();
+            let cache = &mut *guard;
+            let stamp = cache.next_stamp();
+            if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
+                // A `y` outside the column's vertical extent is a no-op rather
+                // than an index panic. `ChunkColumn::set_block` indexes
+                // unguarded, and the inner source's own `set_block` may have
+                // accepted the edit (or rejected it its own way) without this
+                // retained column being able to hold it — so the store guards its
+                // own update rather than relying on the source to reject
+                // out-of-range `y`.
+                if y >= entry.column.min_y && y < entry.column.min_y + entry.column.height {
+                    entry.column.set_block(lx, y, lz, name);
+                    entry.last_used = stamp;
+                    Some(entry.column.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
             }
+        };
+        if retained
+            .as_ref()
+            .is_some_and(|column| self.source.store_resident_column(cx, cz, column))
+        {
+            return;
         }
+        self.source.set_block(x, y, z, name);
     }
 
     /// Forwarded for the same reason `world_registries`/`dimension` above are:

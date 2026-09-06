@@ -27,22 +27,37 @@ use std::future::Future;
 /// A handle to a spawned server task, owned by
 /// [`IntegratedServer`](crate::IntegratedServer).
 ///
-/// Native: wraps a [`tokio::task::JoinHandle`].
+/// Native: wraps either a [`tokio::task::JoinHandle`] or the dedicated thread
+/// that drives a world tick loop.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
-pub(crate) struct Task(tokio::task::JoinHandle<()>);
+pub(crate) enum Task {
+    Tokio(tokio::task::JoinHandle<()>),
+    Thread(Option<std::thread::JoinHandle<()>>),
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Task {
     /// Aborts the task if it is still running.
     pub(crate) fn abort(&self) {
-        self.0.abort();
+        if let Self::Tokio(task) = self {
+            task.abort();
+        }
     }
 
     /// Awaits the task to completion. Takes `&mut self` so the owning handle,
     /// which also implements `Drop`, need not be moved out of.
     pub(crate) async fn join(&mut self) {
-        let _ = (&mut self.0).await;
+        match self {
+            Self::Tokio(task) => {
+                let _ = task.await;
+            }
+            Self::Thread(thread) => {
+                if let Some(thread) = thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
     }
 }
 
@@ -52,7 +67,29 @@ pub(crate) fn spawn<F>(fut: F) -> Task
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    Task(tokio::spawn(fut))
+    Task::Tokio(tokio::spawn(fut))
+}
+
+/// Runs a long-lived async task on its own OS thread and current-thread Tokio
+/// runtime. This keeps CPU-heavy world work out of both the shell runtime and
+/// its blocking pool: generation also uses that pool, so occupying a worker for
+/// the lifetime of the world would prevent the join stream from producing
+/// terrain.
+pub(crate) fn spawn_isolated_runtime<F>(fut: F) -> Task
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let thread = std::thread::Builder::new()
+        .name("lodestone-world-tick".to_owned())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("the integrated tick runtime must construct");
+            runtime.block_on(fut);
+        })
+        .expect("the integrated tick thread must spawn");
+    Task::Thread(Some(thread))
 }
 
 /// A handle to a spawned server task, owned by

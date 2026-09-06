@@ -5766,6 +5766,136 @@ where
     Ok(())
 }
 
+/// Clones the exact footprint needed for one live light update without turning
+/// an unloaded neighbour into a synchronous generation request. Tick-driven
+/// edits can happen before a connection has streamed that area, while direct
+/// player edits use [`send_column_light`] and intentionally retain its loading
+/// behavior.
+fn resident_light_neighbourhood<S>(
+    source: &S,
+    cx: i32,
+    cz: i32,
+    radius: i32,
+) -> Option<(ChunkColumn, Vec<(i32, i32, ChunkColumn)>)>
+where
+    S: ChunkSource + ?Sized,
+{
+    let column = source.resident_column(cx, cz)?;
+    let mut neighbours = Vec::new();
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            if (dx, dz) != (0, 0) {
+                neighbours.push((dx, dz, source.resident_column(cx + dx, cz + dz)?));
+            }
+        }
+    }
+    Some((column, neighbours))
+}
+
+/// Sends one changed column's light from a snapshot that is already resident.
+/// Unlike [`send_column_light`], this never generates terrain while running a
+/// connection timer. A missing member means the future chunk snapshot, not a
+/// live relight, is responsible for carrying the world-tick mutation.
+async fn send_resident_column_light<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    cx: i32,
+    cz: i32,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + ?Sized,
+{
+    let radius = i32::from(proto.uses_cross_column_light());
+    let Some((column, neighbours)) = resident_light_neighbourhood(source, cx, cz, radius) else {
+        return Ok(());
+    };
+    let light = if radius != 0 {
+        proto.compute_column_light_with_neighbours(&column, &neighbours)
+    } else {
+        proto.compute_column_light(&column)
+    };
+    if let Some(light) = light {
+        let directive = proto.encode_light_update(cx, cz, &light);
+        if !matches!(directive, ServerDirective::None) {
+            apply(conn, state, directive).await?;
+            return Ok(());
+        }
+    }
+    // The lightweight path is optional per protocol family. The already-cloned
+    // centre column keeps the compatible full-column fallback non-generating.
+    apply(conn, state, proto.begin_chunk_batch()).await?;
+    let directive = match proto.try_encode_chunk(cx, cz, &column) {
+        Ok(directive) => directive,
+        Err(error) => return return_chunk_encode_error(conn, proto, state, Some(0), error).await,
+    };
+    apply(conn, state, directive).await?;
+    apply(conn, state, proto.end_chunk_batch(1)).await?;
+    Ok(())
+}
+
+/// Recomputes every light payload a tick-driven edit can affect, but only from
+/// cached columns. A later join-stream chunk contains the same world state for
+/// an unloaded column, so generating it here would add work without producing
+/// a client-visible correction.
+async fn send_resident_lighting_for_tick<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    cx: i32,
+    cz: i32,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + ?Sized,
+{
+    let radius = i32::from(proto.uses_cross_column_light());
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            send_resident_column_light(conn, proto, source, state, cx + dx, cz + dz).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Sends every block mutation published by the world tick and then refreshes
+/// lighting once per affected resident column.
+///
+/// This deliberately has no join-stream gate. A column snapshot that has not
+/// been sent yet will supersede an earlier block update, but a snapshot that
+/// was already sent will not. Dropping the shared feed while a later join
+/// column remains would therefore leave an already-visible column stale.
+async fn send_tick_block_updates<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    changes: Vec<(i32, i32, i32, String)>,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + ?Sized,
+{
+    let mut relight: Vec<(i32, i32)> = Vec::new();
+    for (x, y, z, block_state) in changes {
+        apply(conn, state, proto.encode_block_update(x, y, z, &block_state)).await?;
+        let column = (x.div_euclid(16), z.div_euclid(16));
+        if !relight.contains(&column) {
+            relight.push(column);
+        }
+    }
+    for (cx, cz) in relight {
+        send_resident_lighting_for_tick(conn, proto, source, state, cx, cz).await?;
+    }
+    Ok(())
+}
+
 /// Recomputes every column a boundary edit can affect. A light source can cross
 /// either seam and a corner, so the correct bounded footprint is the edited
 /// column plus all eight neighbours; the light engine's 15-block radius cannot
@@ -15046,26 +15176,21 @@ where
                 // block and its light. Fire, grass, crops, redstone torches, and
                 // landing falling blocks use this update flow.
                 //
-                // Deduplicated by column, and that is what makes it affordable: a
-                // fluid cascade rewrites many cells in one column in a single tick,
-                // and each relight is a whole-column flood. `send_lighting_for_edit`
-                // is used because the feed carries only
-                // the replacement state; without a comparison baseline, a
-                // predicate cannot gate the resend.
-                let mut relight: Vec<(i32, i32)> = Vec::new();
-                for (x, y, z, block_state) in block_ticks.drain_all() {
-                    apply(conn, &mut state, proto.encode_block_update(x, y, z, &block_state)).await?;
-                    let column = (x.div_euclid(16), z.div_euclid(16));
-                    if !relight.contains(&column) {
-                        relight.push(column);
-                    }
-                }
-                // `source.get()`, like every other non-batch read here: one
-                // column at a time has nothing to offload, and it is the same
-                // accessor `resend_column_for_light`'s callers already use.
-                for (cx, cz) in relight {
-                    send_lighting_for_edit(conn, proto, source.get(), &mut state, cx, cz).await?;
-                }
+                // A join snapshot arriving after this update remains
+                // authoritative for a not-yet-visible column. It cannot repair
+                // a column that was sent before the rest of the stream, so
+                // every drained block mutation still needs its cheap update.
+                // `send_tick_block_updates` keeps the expensive light portion
+                // resident-only, avoiding cold generation while the stream is
+                // in flight.
+                send_tick_block_updates(
+                    conn,
+                    proto,
+                    source.get(),
+                    &mut state,
+                    block_ticks.drain_all(),
+                )
+                .await?;
                 // Drain the feed's effect lane: world-tick sounds, particles,
                 // and level events. These effects share the feed's single
                 // consumer, as described by `BlockTickFeed`.
@@ -16236,6 +16361,7 @@ mod tests {
     use crate::furnace::{Furnace, FurnaceKind};
     use crate::protocol::MetadataField;
     use lodestone_model::{Rotation, Vec3};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
 
     #[test]
@@ -16365,6 +16491,13 @@ mod tests {
                 payload: Vec::new(),
             }
         }
+
+        fn encode_block_update(&self, x: i32, y: i32, z: i32, _state: &str) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: 43,
+                payload: vec![x as u8, y as u8, z as u8],
+            }
+        }
     }
 
     struct OneColumnSource;
@@ -16372,6 +16505,32 @@ mod tests {
     impl ChunkSource for OneColumnSource {
         fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
             ChunkColumn::new(0, 256)
+        }
+
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            "minecraft:air".to_owned()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
+    struct ColdColumnSource {
+        column_reads: AtomicUsize,
+        resident: bool,
+    }
+
+    impl ChunkSource for ColdColumnSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            self.column_reads.fetch_add(1, Ordering::Relaxed);
+            ChunkColumn::new(0, 256)
+        }
+
+        fn resident_column(&self, _cx: i32, _cz: i32) -> Option<ChunkColumn> {
+            self.resident.then(|| ChunkColumn::new(0, 256))
         }
 
         fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
@@ -16410,6 +16569,67 @@ mod tests {
         }
 
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
+    #[test]
+    fn tick_relight_requires_a_resident_light_footprint_without_generating() {
+        let cold = ColdColumnSource {
+            column_reads: AtomicUsize::new(0),
+            resident: false,
+        };
+        assert!(resident_light_neighbourhood(&cold, 0, 0, 1).is_none());
+        assert_eq!(
+            cold.column_reads.load(Ordering::Relaxed),
+            0,
+            "a missing tick-light neighbour must defer to the future chunk snapshot, not generate"
+        );
+
+        let warm = ColdColumnSource {
+            column_reads: AtomicUsize::new(0),
+            resident: true,
+        };
+        let (_, neighbours) = resident_light_neighbourhood(&warm, 0, 0, 1)
+            .expect("a resident 3x3 footprint must be available for a live relight");
+        assert_eq!(neighbours.len(), 8, "the cross-column footprint has all eight neighbours");
+        assert_eq!(
+            warm.column_reads.load(Ordering::Relaxed),
+            0,
+            "a complete resident footprint must also avoid the generating accessor"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_block_updates_are_sent_before_the_join_stream_finishes() {
+        let (client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut state = State::Play;
+
+        // Model one already-sent column and one still pending join column:
+        // routing cannot know which one owns a drained feed entry, so it must
+        // preserve both updates. A future chunk snapshot may supersede either
+        // packet, but dropping this first one would leave the sent column stale.
+        send_tick_block_updates(
+            &mut conn,
+            &RefusingChunkProtocol,
+            &OneColumnSource,
+            &mut state,
+            vec![
+                (1, 64, 1, "minecraft:grass_block".to_owned()),
+                (17, 64, 1, "minecraft:dirt".to_owned()),
+            ],
+        )
+        .await
+        .expect("tick updates write without a complete join stream");
+
+        let mut peer = Connection::new(client_end);
+        assert_eq!(
+            peer.read_packet().await.expect("first tick update frame decodes"),
+            Some((43, vec![1, 64, 1]))
+        );
+        assert_eq!(
+            peer.read_packet().await.expect("second tick update frame decodes"),
+            Some((43, vec![17, 64, 1]))
+        );
     }
 
     #[test]
