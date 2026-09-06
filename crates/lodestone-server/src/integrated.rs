@@ -81,6 +81,33 @@ use crate::tick::run_primary_tick_loop_with_weather;
 use crate::sleep::{SleepFeed, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
 
+/// Save handles for dimensions that are constructed lazily after the primary
+/// world opens. The primary save path owns its handle directly; siblings need a
+/// shared registry because their `RegionChunkSource` only exists after the
+/// first portal trip.
+#[derive(Clone, Debug, Default)]
+struct DimensionSaveHandles(
+    Arc<std::sync::Mutex<HashMap<Dimension, crate::region_source::WorldSaveHandle>>>,
+);
+
+impl DimensionSaveHandles {
+    fn register(&self, dimension: Dimension, handle: crate::region_source::WorldSaveHandle) {
+        self.0
+            .lock()
+            .expect("dimension save handle lock poisoned")
+            .insert(dimension, handle);
+    }
+
+    fn snapshot(&self) -> Vec<(Dimension, crate::region_source::WorldSaveHandle)> {
+        self.0
+            .lock()
+            .expect("dimension save handle lock poisoned")
+            .iter()
+            .map(|(&dimension, handle)| (dimension, handle.clone()))
+            .collect()
+    }
+}
+
 /// Chebyshev radius, in chunks, of the region [`IntegratedServer::bind`]'s
 /// world tick loop random-ticks around the origin.
 ///
@@ -294,6 +321,7 @@ fn with_nether<S>(
     uncapped: bool,
     portals: crate::portal::PortalIndex,
     world_dir: Option<PathBuf>,
+    dimension_saves: Option<DimensionSaveHandles>,
     ticking: Option<crate::dimension_tick::DimensionTickContext>,
 ) -> DimensionalSource<S>
 where
@@ -311,6 +339,7 @@ where
                     uncapped,
                     shared.clone(),
                     world_dir.as_deref(),
+                    dimension_saves.as_ref(),
                 )
             }
             Dimension::End => {
@@ -322,6 +351,7 @@ where
                     uncapped,
                     shared.clone(),
                     world_dir.as_deref(),
+                    dimension_saves.as_ref(),
                 )
             }
             Dimension::Overworld => return None,
@@ -461,6 +491,7 @@ fn sibling_chunk_source<S>(
     uncapped: bool,
     portals: crate::portal::PortalIndex,
     world_dir: Option<&std::path::Path>,
+    dimension_saves: Option<&DimensionSaveHandles>,
 ) -> (
     Arc<dyn ChunkSource>,
     BlockEntityHandle,
@@ -504,6 +535,9 @@ where
             dimension.height(),
         ) {
             Ok(persistent) => {
+                if let Some(saves) = dimension_saves {
+                    saves.register(dimension, persistent.save_handle());
+                }
                 let block_entities = persistent.block_entities();
                 let scheduled = persistent.scheduled_ticks();
                 let store = if uncapped {
@@ -1005,6 +1039,9 @@ pub struct IntegratedServer {
     /// is the common case rather than the rare one.
     #[cfg(not(target_arch = "wasm32"))]
     save: Option<crate::region_source::WorldSaveHandle>,
+    /// Save handles for lazily-created persistent sibling dimensions.
+    #[cfg(not(target_arch = "wasm32"))]
+    dimension_saves: Option<DimensionSaveHandles>,
     /// The autosave timer task, `Some` alongside `save`.
     ///
     /// A fourth task rather than a step inside `run_tick_loop`, for the same
@@ -1386,6 +1423,7 @@ impl IntegratedServer {
             // `open_in_memory_with_entities`.
             crate::portal::PortalIndex::new(),
             None,
+            None,
             sibling_ticking,
         ));
         let tickets = source.primary().tickets();
@@ -1548,6 +1586,8 @@ impl IntegratedServer {
                 #[cfg(not(target_arch = "wasm32"))]
                 save: None,
                 #[cfg(not(target_arch = "wasm32"))]
+                dimension_saves: None,
+                #[cfg(not(target_arch = "wasm32"))]
                 autosave_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 level_dat: None,
@@ -1686,6 +1726,7 @@ impl IntegratedServer {
             // No world directory, so a sibling stays in-memory-only — the
             // in-memory constructor does not persist dimension data.
             None,
+            None,
             // This constructor's own contract is "spawns no tick loop" (see
             // the `block_entities`/`mobs` comments just below) — this
             // sibling loop must not silently start one the first time a test
@@ -1749,6 +1790,8 @@ impl IntegratedServer {
                 generation_spawns: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 save: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                dimension_saves: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 autosave_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2216,6 +2259,10 @@ impl IntegratedServer {
         // it (via `ticking`, below) to hand a Nether/End sibling's tick loop
         // the same anchor set this connection publishes into.
         let world_state = crate::world_state::WorldStateHandle::new();
+        // Sibling dimensions are lazy. A persistent world therefore needs a
+        // registry that can receive each dimension's save handle when its
+        // source is first built, before autosave or shutdown flushes it.
+        let dimension_saves = world_dir.as_ref().map(|_| DimensionSaveHandles::default());
         // A persistent world's `datapacks/` folder is loaded from `world_dir`.
         // The directory is borrowed, so `with_nether` receives a separate
         // source value; `None` leaves function data unconfigured
@@ -2230,6 +2277,7 @@ impl IntegratedServer {
             true,
             portals,
             world_dir,
+            dimension_saves.clone(),
             Some(crate::dimension_tick::DimensionTickContext {
                 world_state: world_state.clone(),
                 shutdown: Arc::clone(&shutdown),
@@ -2631,6 +2679,8 @@ impl IntegratedServer {
                 #[cfg(not(target_arch = "wasm32"))]
                 save: None,
                 #[cfg(not(target_arch = "wasm32"))]
+                dimension_saves,
+                #[cfg(not(target_arch = "wasm32"))]
                 autosave_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 level_dat: None,
@@ -2887,6 +2937,7 @@ impl IntegratedServer {
         server.world_storage = storage;
         let native_save_context = server.native_save_context();
         let autosave_handle = save.clone();
+        let autosave_dimension_saves = server.dimension_saves.clone();
         let autosave_level_dat = std::sync::Arc::clone(&level_dat);
         // the world's scalars, loaded from disk before any connection can
         // change them and stamped on every autosave.
@@ -2956,6 +3007,14 @@ impl IntegratedServer {
                 let result = tokio::task::spawn_blocking(move || save_job.save()).await;
                 if let Ok(Err(err)) = result {
                     tracing::warn!("autosave failed, chunks stay dirty for the next attempt: {err}");
+                }
+                if let Some(saves) = &autosave_dimension_saves {
+                    for (dimension, handle) in saves.snapshot() {
+                        let result = tokio::task::spawn_blocking(move || handle.save()).await;
+                        if let Ok(Err(err)) = result {
+                            tracing::warn!("autosave failed for {dimension:?} chunks: {err}");
+                        }
+                    }
                 }
                 // `level.dat` rides the same blocking pool and the same
                 // interval. It is a few hundred bytes, so unlike a region
@@ -3868,6 +3927,7 @@ impl IntegratedServer {
             // No world directory reaches this constructor, so a Nether/End
             // sibling stays in-memory-only, same as the LAN overworld itself.
             None,
+            None,
             Some(crate::dimension_tick::DimensionTickContext {
                 world_state: lan_world_state.clone(),
                 shutdown: Arc::clone(&shutdown),
@@ -4322,6 +4382,8 @@ impl IntegratedServer {
             generation_spawns: None,
             #[cfg(not(target_arch = "wasm32"))]
             save: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            dimension_saves: None,
             #[cfg(not(target_arch = "wasm32"))]
             autosave_task: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -4911,6 +4973,22 @@ impl IntegratedServer {
                 }
                 Ok(Err(err)) => tracing::warn!("world save on shutdown failed: {err}"),
                 Err(err) => tracing::warn!("world save on shutdown panicked: {err}"),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(saves) = self.dimension_saves.take() {
+            for (dimension, handle) in saves.snapshot() {
+                match tokio::task::spawn_blocking(move || handle.save()).await {
+                    Ok(Ok(written)) => {
+                        tracing::debug!("dimension saved on shutdown ({dimension:?}): {written} chunk columns");
+                    }
+                    Ok(Err(err)) => {
+                        tracing::warn!("dimension save on shutdown failed ({dimension:?}): {err}");
+                    }
+                    Err(err) => {
+                        tracing::warn!("dimension save on shutdown panicked ({dimension:?}): {err}");
+                    }
+                }
             }
         }
         // the mobs and dropped items, last, and for the same
@@ -5681,7 +5759,7 @@ mod tests {
         let portals = crate::portal::PortalIndex::new();
         // `ticking: None` — this test is about reachability, not about the
         // loop actually running, so no Tokio runtime is required.
-        let wrapped = with_nether(primary, VIEW_RADIUS, false, portals, None, None);
+        let wrapped = with_nether(primary, VIEW_RADIUS, false, portals, None, None, None);
 
         let nether = wrapped
             .sibling(Dimension::Nether)
@@ -5742,6 +5820,155 @@ mod tests {
             "the primary `DimensionalSource` (no `RegionChunkSource`, no stored own_registries) \
              must not suddenly answer Some just because its Nether sibling does"
         );
+    }
+
+    fn install_test_portal(
+        world: &dyn ChunkSource,
+        portals: &crate::portal::PortalIndex,
+        dimension: Dimension,
+        origin: lodestone_model::BlockPos,
+    ) -> Vec<lodestone_model::BlockPos> {
+        for across in -1..=2 {
+            for up in -1..=3 {
+                let state = if across == -1 || across == 2 || up == -1 || up == 3 {
+                    "minecraft:obsidian"
+                } else {
+                    "minecraft:air"
+                };
+                world.set_block(origin.x + across, origin.y + up, origin.z, state);
+            }
+        }
+        let lit = crate::portal::ignite(world, dimension, origin)
+            .expect("the production portal igniter accepts the test frame");
+        let cells: Vec<_> = lit.iter().map(|(pos, _)| *pos).collect();
+        for (pos, state) in lit {
+            world.set_block(pos.x, pos.y, pos.z, &state);
+        }
+        portals.extend(dimension, cells.iter().copied());
+        cells
+    }
+
+    #[derive(Debug, Clone)]
+    struct PersistentAirSource;
+
+    impl ChunkSource for PersistentAirSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 256)
+        }
+
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            "minecraft:air".to_owned()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
+    /// A lazy, generated Nether sibling must be the same persistent source the
+    /// integrated server flushes and rebuilds on restart. This uses the actual
+    /// `with_nether` factory through `IntegratedServer`, places a generated
+    /// Nether marker and portals in both dimensions, then verifies the restored
+    /// index can find both portals beyond the fallback scan radius.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn persistent_generated_nether_sibling_survives_portal_restart() {
+        let directory = tempfile::tempdir().expect("temporary persistent world");
+        let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs(
+            Silent,
+            directory.path(),
+            PersistentAirSource,
+            0,
+            256,
+            (0..=0, 0..=0),
+            (8, 8),
+            0,
+            1,
+            std::time::Duration::from_secs(3600),
+        )
+        .expect("open persistent integrated world");
+
+        let home = server
+            .world_source
+            .as_ref()
+            .expect("persistent server exposes its production source")
+            .0
+            .clone();
+        let nether = home
+            .sibling(Dimension::Nether)
+            .expect("the production source lazily builds a Nether sibling");
+        let generated = nether.column(0, 0);
+        assert_eq!(generated.height, Dimension::Nether.height());
+        assert_eq!(generated.block_state(0, 0, 0), "minecraft:bedrock");
+
+        let marker = lodestone_model::BlockPos::new(0, 20, 0);
+        nether.set_block(marker.x, marker.y, marker.z, "minecraft:gold_block");
+        let portals = server.portals().expect("persistent server owns a portal index").clone();
+        let overworld_cells = install_test_portal(
+            home.as_ref(),
+            &portals,
+            Dimension::Overworld,
+            lodestone_model::BlockPos::new(0, 64, 0),
+        );
+        let nether_cells = install_test_portal(
+            nether.as_ref(),
+            &portals,
+            Dimension::Nether,
+            lodestone_model::BlockPos::new(0, 40, 0),
+        );
+        server.shutdown().await;
+
+        let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs(
+            Silent,
+            directory.path(),
+            PersistentAirSource,
+            0,
+            256,
+            (0..=0, 0..=0),
+            (8, 8),
+            0,
+            1,
+            std::time::Duration::from_secs(3600),
+        )
+        .expect("reopen persistent integrated world");
+        let home = server
+            .world_source
+            .as_ref()
+            .expect("reopened server exposes its production source")
+            .0
+            .clone();
+        let nether = home
+            .sibling(Dimension::Nether)
+            .expect("reopened production source rebuilds the Nether sibling");
+        assert_eq!(
+            nether.block_state(marker.x, marker.y, marker.z),
+            "minecraft:gold_block",
+            "generated Nether edits must survive the integrated-server restart"
+        );
+
+        let restored = server.portals().expect("reopened server restores its portal index");
+        let overworld_arrival = crate::portal::find_exit_portal(
+            home.as_ref(),
+            Dimension::Overworld,
+            Some(restored),
+            lodestone_model::BlockPos::new(12, 64, 1),
+        );
+        assert!(
+            overworld_arrival.is_some_and(|pos| overworld_cells.contains(&pos)),
+            "the restored Overworld portal must be reusable: {overworld_arrival:?}"
+        );
+        let nether_arrival = crate::portal::find_exit_portal(
+            nether.as_ref(),
+            Dimension::Nether,
+            Some(restored),
+            lodestone_model::BlockPos::new(12, 40, 1),
+        );
+        assert!(
+            nether_arrival.is_some_and(|pos| nether_cells.contains(&pos)),
+            "the restored Nether portal must be reusable: {nether_arrival:?}"
+        );
+        server.shutdown().await;
     }
 
     /// The shell's own singleplayer parameters (`lodestone-shell/src/net.rs`),
