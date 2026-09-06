@@ -32,8 +32,9 @@
 //! **The surface array is derived from this grid, not sampled separately.** A
 //! quart's surface sample uses `y = (height >> 2) << 2`, which is already
 //! quart-aligned, so indexing this grid at that `qy` gives the identical answer.
-//! `biome_stage` therefore takes this grid as a parameter and samples nothing of
-//! its own -- see its doc comment.
+//! This is the output/decoration surface array; the surface-rule interpreter has
+//! a distinct nearby-corner lookup at each block and must not substitute this
+//! raw wire grid for that context.
 //!
 //! ## How to change it, and the gotcha
 //!
@@ -43,7 +44,9 @@
 //! the surface. See [`crate::biome`]'s "y = 0 trap" section: at `y = 0` the `depth`
 //! gradient is already ≈ +1.0, so a surface `dark_forest` chunk resolves as
 //! `lush_caves`. Having a 3-D grid gives each consumer its own correct Y; it does
-//! **not** license collapsing them onto one.
+//! **not** license collapsing them onto one. Surface rules additionally select from
+//! eight adjacent quart cells after a seed-derived positional jitter; use
+//! `OverworldGenerator::surface_biome_context` rather than this grid for them.
 //!
 //! ## Cost
 //!

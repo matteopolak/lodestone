@@ -3932,6 +3932,7 @@ dependencies = [
  "lodestone-worldgen-core",
  "memory-stats",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

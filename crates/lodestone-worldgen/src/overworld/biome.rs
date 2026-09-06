@@ -6,6 +6,7 @@
 //! sampler itself and its "y = 0 trap" section.
 
 use crate::biome::{BiomeTable, ClimateSampler};
+use sha2::{Digest as _, Sha256};
 
 use super::OverworldGenerator;
 use super::biome_cells::BiomeCells;
@@ -25,7 +26,146 @@ pub(super) struct DynamicBiome {
     pub(super) temperatures: std::collections::HashMap<String, f32>,
 }
 
+/// Read-only biome answers for the surface scan's expanded block footprint.
+///
+/// The wire grid is indexed directly by quart coordinates. Surface rules use a
+/// nearby-corner selection instead, so this context precomputes the extra
+/// border cells once and keeps the per-block rule callback allocation-free.
+pub(super) struct SurfaceBiomeContext {
+    min_qx: i32,
+    min_qy: i32,
+    min_qz: i32,
+    width: usize,
+    height: usize,
+    depth: usize,
+    cells: Vec<String>,
+    zoom_seed: i64,
+}
+
+impl SurfaceBiomeContext {
+    fn index(&self, qx: i32, qy: i32, qz: i32) -> usize {
+        let x = usize::try_from(qx - self.min_qx).expect("surface biome x is precomputed");
+        let y = usize::try_from(qy - self.min_qy).expect("surface biome y is precomputed");
+        let z = usize::try_from(qz - self.min_qz).expect("surface biome z is precomputed");
+        assert!(x < self.width && y < self.height && z < self.depth, "surface biome lookup escaped its precomputed footprint");
+        (y * self.depth + z) * self.width + x
+    }
+
+    fn quart(&self, qx: i32, qy: i32, qz: i32) -> &str {
+        &self.cells[self.index(qx, qy, qz)]
+    }
+
+    pub(super) fn at_block(&self, x: i32, y: i32, z: i32) -> &str {
+        let shifted_x = x - 2;
+        let shifted_y = y - 2;
+        let shifted_z = z - 2;
+        let parent_x = shifted_x >> 2;
+        let parent_y = shifted_y >> 2;
+        let parent_z = shifted_z >> 2;
+        let fract_x = f64::from(shifted_x.rem_euclid(4)) / 4.0;
+        let fract_y = f64::from(shifted_y.rem_euclid(4)) / 4.0;
+        let fract_z = f64::from(shifted_z.rem_euclid(4)) / 4.0;
+
+        let mut selected = 0;
+        let mut best = f64::INFINITY;
+        for corner in 0..8 {
+            let x_low = corner & 4 == 0;
+            let y_low = corner & 2 == 0;
+            let z_low = corner & 1 == 0;
+            let qx = if x_low { parent_x } else { parent_x + 1 };
+            let qy = if y_low { parent_y } else { parent_y + 1 };
+            let qz = if z_low { parent_z } else { parent_z + 1 };
+            let dx = if x_low { fract_x } else { fract_x - 1.0 };
+            let dy = if y_low { fract_y } else { fract_y - 1.0 };
+            let dz = if z_low { fract_z } else { fract_z - 1.0 };
+            let distance = fiddled_distance(self.zoom_seed, qx, qy, qz, dx, dy, dz);
+            if best > distance {
+                selected = corner;
+                best = distance;
+            }
+        }
+
+        self.quart(
+            if selected & 4 == 0 { parent_x } else { parent_x + 1 },
+            if selected & 2 == 0 { parent_y } else { parent_y + 1 },
+            if selected & 1 == 0 { parent_z } else { parent_z + 1 },
+        )
+    }
+}
+
+fn next_zoom_random(value: i64, addend: i64) -> i64 {
+    value
+        .wrapping_mul(value.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407))
+        .wrapping_add(addend)
+}
+
+fn zoom_fiddle(value: i64) -> f64 {
+    let uniform = (value >> 24).rem_euclid(1024) as f64 / 1024.0;
+    (uniform - 0.5) * 0.9
+}
+
+fn fiddled_distance(seed: i64, x: i32, y: i32, z: i32, dx: f64, dy: f64, dz: f64) -> f64 {
+    let mut value = seed;
+    for coordinate in [x, y, z, x, y, z] {
+        value = next_zoom_random(value, i64::from(coordinate));
+    }
+    let fx = zoom_fiddle(value);
+    value = next_zoom_random(value, seed);
+    let fy = zoom_fiddle(value);
+    value = next_zoom_random(value, seed);
+    let fz = zoom_fiddle(value);
+    let x = dx + fx;
+    let y = dy + fy;
+    let z = dz + fz;
+    x * x + y * y + z * z
+}
+
+fn zoom_seed(seed: i64) -> i64 {
+    let digest = Sha256::digest(seed.to_le_bytes());
+    i64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest prefix"))
+}
+
 impl OverworldGenerator {
+    /// Precomputes the raw quart cells that the surface scan's zoomed biome
+    /// lookup can select. The extra one-cell border comes from shifting the
+    /// block position before choosing between adjacent corners.
+    pub(super) fn surface_biome_context(&self, base_x: i32, base_z: i32) -> SurfaceBiomeContext {
+        let min_qx = (base_x - 2) >> 2;
+        let max_qx = ((base_x + 15 - 2) >> 2) + 1;
+        let min_qz = (base_z - 2) >> 2;
+        let max_qz = ((base_z + 15 - 2) >> 2) + 1;
+        let min_qy = (self.min_y - 2) >> 2;
+        let max_qy = ((self.min_y + self.height - 2) >> 2) + 1;
+        let width = usize::try_from(max_qx - min_qx + 1).expect("surface biome x footprint");
+        let height = usize::try_from(max_qy - min_qy + 1).expect("surface biome y footprint");
+        let depth = usize::try_from(max_qz - min_qz + 1).expect("surface biome z footprint");
+        let mut cells = Vec::with_capacity(width * height * depth);
+        for qy in min_qy..=max_qy {
+            for qz in min_qz..=max_qz {
+                for qx in min_qx..=max_qx {
+                    let biome = match &self.dynamic_biome {
+                        Some(dynamic) => {
+                            let target = dynamic.climate.target(qx * 4, qy * 4, qz * 4);
+                            dynamic.table.nearest(&target)
+                        }
+                        None => self.fallback_biome.as_str(),
+                    };
+                    cells.push(biome.to_string());
+                }
+            }
+        }
+        SurfaceBiomeContext {
+            min_qx,
+            min_qy,
+            min_qz,
+            width,
+            height,
+            depth,
+            cells,
+            zoom_seed: zoom_seed(self.seed),
+        }
+    }
+
     /// Stage 2: the 16 **surface** quarts —
     /// `(qx, qz)` in `0..4`, row-major `qz * 4 + qx`, matching `ChunkSection`'s own
     /// `BIOME_EDGE` of 4 — each read at that quart's own already-generated surface
@@ -192,5 +332,15 @@ impl OverworldGenerator {
                 d.table.biome_at(row)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::zoom_seed;
+
+    #[test]
+    fn zoom_seed_matches_the_independently_captured_seed_42_value() {
+        assert_eq!(zoom_seed(42), -4_111_196_313_959_201_555);
     }
 }
