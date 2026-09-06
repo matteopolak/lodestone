@@ -69,6 +69,18 @@ keep-alive challenge and lifts the exact serverbound echo to
 Protocol 5 uses a fixed signed `i32` body in both directions; the server
 protocol test pins literal bytes and rejects a trailing byte instead of
 acknowledging a malformed response.
+The clientbound `explosion` frame is decoded from its independently sourced
+legacy layout: four `f32` values for centre and radius, an `i32` offset count,
+signed-byte `(x, y, z)` offsets, then three unconditional `f32` player-motion
+components. Negative offsets remain signed, and the count is checked against
+the bytes available before allocation. The adapter emits the exact centre,
+radius, and offsets as `ClientEvent::Explosion` and applies every offset to the
+loaded `WorldSink` as canonical air, synchronising block-entity removal. The
+motion triple becomes `Some` even when all three values are zero, because this
+era has no presence flag. Negative, truncated, and trailing-byte forms are
+rejected by the exact body decoder. The wire layout and world mutation are
+anchored by `tests/explosion.rs`, including a literal byte fixture, negative
+offsets, and an unaffected-neighbor control.
 The host also emits `update_health` whenever the shared vitals path reports
 damage or completes a respawn. Its frame is `f32` health, big-endian `i16`
 food, then `f32` saturation; newer legacy families use a VarInt food field, so
@@ -351,6 +363,7 @@ exists:
 | block ids and metadata | `minecraft-data` 1.7's `blocks.json` for the wire values; expected canonical states come from `lodestone_data::block_states`, the jar-derived 26.2 registry |
 | chunk array grouping | the biome footer's *position* in a real bulk packet — both groupings give the same total length, so length cannot discriminate |
 | nibble parity | four wool blocks at adjacent x with metadata 14, 1, 5 and 11, chosen so no value equals its byte-partner, read back off a real server; `minecraft-data`'s variation list agrees on the colours independently |
+| explosion frame | `vendor/minecraft-data/data/pc/1.7/protocol.json` supplies the field widths and order; the literal and malformed-count controls in `tests/explosion.rs` independently pin signed offsets and the unconditional motion tail |
 | movement field order | the server's behaviour over a 320-block walk, three independent ways (position corrections, columns streamed, saved logout position) |
 | the eye-position reading | an RCON teleport to an exact y of 80.0 producing 81.62 on the wire, plus the server's own login log |
 | chunk unload framing | 420 recorded unloads from one walk; twelve bytes of one of them are inlined in `tests/chunk.rs` |

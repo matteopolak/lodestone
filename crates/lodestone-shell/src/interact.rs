@@ -18,16 +18,17 @@
 //!
 //! # How it works
 //!
-//! [`InteractPlugin`] registers five systems in `TickSet::Send`, ordered after
-//! `lodestone_controller::ecs::send_player_input` by virtue of being added later
-//! into the same set via an explicit `.after()`:
+//! [`InteractPlugin`] registers five systems in `TickSet::Send`, explicitly
+//! ordered around the controller's input and movement senders:
 //!
 //! 1. [`send_abilities`] — the flight/abilities state the server acks.
-//! 2. [`send_sprint_command`] — vanilla's own send-is-sprinting-if-needed.
-//! 3. [`drive_select_slot`] — a plugin's hotbar-selection wish, the same
+//! 2. `lodestone_controller::ecs::send_player_input`.
+//! 3. [`send_sprint_command`] — the sprint-state edge.
+//! 4. `lodestone_controller::ecs::send_move_action`.
+//! 5. [`drive_select_slot`] — a plugin's hotbar-selection wish, the same
 //!    write-plus-echo `Sim::select_slot` uses.
-//! 4. [`drive_mining`] — one tick of the hold-to-mine predictor.
-//! 5. [`drive_placement`] — one tick of the placement predictor.
+//! 6. [`drive_mining`] — one tick of the hold-to-mine predictor.
+//! 7. [`drive_placement`] — one tick of the placement predictor.
 //!
 //! **If you add a system here, update this list in the same edit.**
 //!
@@ -1288,16 +1289,15 @@ pub fn drive_placement(
     outcome.status = PlaceStatus::Predicted;
 }
 
-/// Registers the live-interaction half of the `GameTick`: [`send_sprint_command`]
-/// and [`drive_mining`], both in [`TickSet::Send`].
+/// Registers the live-interaction half of the `GameTick` in [`TickSet::Send`].
 ///
 /// # Ordering
 ///
-/// Explicitly `.after(lodestone_controller::ecs::send_player_input)` rather than
-/// merely "added later". `add_systems` gives no ordering guarantee from
-/// registration order, and the wire order here is load-bearing: the server's
-/// sneak state comes from the player-input packet, so a `use_item_on` or a mining
-/// `START` that overtook it would be judged against the previous tick's crouch.
+/// `send_player_input` precedes `send_sprint_command`, which precedes the
+/// movement packet. A sneak edge can cancel sprint in the same tick, and the
+/// three messages form one ordered report of that tick's state.
+/// Selection, mining, and placement follow `send_move_action`, so interactions
+/// are judged against the pose and input state reported by that tick.
 ///
 /// Deliberately **does not** insert `ControllerPlugin` for itself, even though it
 /// orders against one of its systems. `add_systems` does not deduplicate, so
@@ -1343,12 +1343,25 @@ pub(crate) fn add_presentation_systems(world: &mut lodestone_ecs::ecs::world::Wo
         .resource_mut::<lodestone_ecs::ecs::schedule::Schedules>()
         .add_systems(
             GameTick,
-            // It must stay **inside** the `.chain()`: it shares
-            // `ResMut<ActionQueue>` with `drive_mining`, and this app runs with
-            // `ambiguity_detection: LogLevel::Error`.
+            send_abilities
+                .before(lodestone_controller::ecs::send_player_input)
+                .in_set(TickSet::Send)
+                .in_set(crate::sim::presentation::PresentationSet),
+        )
+        .add_systems(
+            GameTick,
+            send_sprint_command
+                .after(lodestone_controller::ecs::send_player_input)
+                .before(lodestone_controller::ecs::send_move_action)
+                .in_set(TickSet::Send)
+                .in_set(crate::sim::presentation::PresentationSet),
+        )
+        .add_systems(
+            GameTick,
+            // It must stay **inside** the `.chain()`: these systems share
+            // mutable presentation resources and this app runs with strict
+            // ambiguity detection.
             (
-                send_abilities,
-                send_sprint_command,
                 // Before `drive_mining`/`drive_placement` deliberately: both
                 // resolve the held item from `SelectedSlot`, and a plugin that
                 // changes the slot and edits in one tick must edit with the
@@ -1366,7 +1379,7 @@ pub(crate) fn add_presentation_systems(world: &mut lodestone_ecs::ecs::world::Wo
                 crate::consume::emit_consume_particles,
             )
                 .chain()
-                .after(lodestone_controller::ecs::send_player_input)
+                .after(lodestone_controller::ecs::send_move_action)
                 .in_set(TickSet::Send)
                 .in_set(crate::sim::presentation::PresentationSet),
         );

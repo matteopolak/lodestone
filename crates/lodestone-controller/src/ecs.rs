@@ -13,7 +13,7 @@
 //! GameTick
 //!   TickSet::Intent    compute_movement_intent → tick_sprint_window
 //!   TickSet::Physics   lodestone_ecs::player::player_physics
-//!   TickSet::Send      send_move_action → send_player_input
+//!   TickSet::Send      send_player_input → send_move_action
 //! ```
 //!
 //! # Two orderings inside `TickSet::Intent` that are behaviour, not style
@@ -246,18 +246,26 @@ pub fn send_move_action(
 /// disconnected would record the current input into [`LastPlayerInput`] as
 /// "already sent", and the first real change after connecting would then be
 /// suppressed as a redundant resend.
+///
+/// The changed input must precede this tick's [`ClientAction::Move`] in the
+/// queue. Physics has already consumed the same [`MovementIntent`], including
+/// sneak's airborne edge-back-off rule, so sending the move first makes the
+/// server replay that position with the previous shift state for one packet.
 pub fn send_player_input(
     egress: Res<Egress>,
     mut queue: ResMut<ActionQueue>,
     // The player-move veto registry. `Option`, so a client with no plugin installed
     // is unchanged.
     vetoes: Option<Res<lodestone_ecs::veto::ActionVetoes>>,
-    mut players: Query<(&MovementIntent, &mut LastPlayerInput), With<LocalPlayer>>,
+    mut players: Query<
+        (&MovementIntent, &PhysicsState, &mut LastPlayerInput),
+        With<LocalPlayer>,
+    >,
 ) {
     if !(egress.in_world && egress.live) {
         return;
     }
-    for (intent, mut last) in &mut players {
+    for (intent, state, mut last) in &mut players {
         let intent = intent.0;
         let next = PlayerInput {
             forward: intent.forward > 0.0,
@@ -289,6 +297,21 @@ pub fn send_player_input(
         }
         last.0 = Some(next);
         queue.0.push(ClientAction::SetPlayerInput(next));
+        tracing::debug!(
+            target: "sim_input",
+            shift = next.shift,
+            jump = next.jump,
+            sprint = next.sprint,
+            pose = ?state.0.pose,
+            x = state.0.position.x,
+            y = state.0.position.y,
+            z = state.0.position.z,
+            velocity_x = state.0.velocity.x,
+            velocity_y = state.0.velocity.y,
+            velocity_z = state.0.velocity.z,
+            on_ground = state.0.on_ground,
+            "changed player input queued after local physics"
+        );
     }
 }
 
@@ -339,7 +362,7 @@ impl Plugin for ControllerPlugin {
         );
         app.add_systems(
             GameTick,
-            (send_move_action, send_player_input)
+            (send_player_input, send_move_action)
                 .chain()
                 .in_set(TickSet::Send),
         );
@@ -752,6 +775,39 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, ClientAction::SetPlayerInput(_))),
             "…but the input packet is edge-triggered"
+        );
+    }
+
+    /// The server applies the input bitset while replaying the following move.
+    /// The input-change edge must therefore be queued before the move physics
+    /// derived from that same intent, particularly for an airborne sneak where
+    /// edge back-off can change the reported horizontal position.
+    #[test]
+    fn changed_player_input_precedes_the_move_it_affects() {
+        let (mut app, _entity) = app();
+        app.world_mut().insert_resource(Egress {
+            in_world: true,
+            live: true,
+        });
+        press(&mut app, Action::Sneak, true);
+        tick(&mut app);
+        let queued = drain(&mut app);
+        let input = queued
+            .iter()
+            .position(|action| {
+                matches!(
+                    action,
+                    ClientAction::SetPlayerInput(PlayerInput { shift: true, .. })
+                )
+            })
+            .expect("the changed sneak state must be sent");
+        let movement = queued
+            .iter()
+            .position(|action| matches!(action, ClientAction::Move { .. }))
+            .expect("a live player still reports this tick's position");
+        assert!(
+            input < movement,
+            "the server must receive sneak before replaying the position it changed"
         );
     }
 

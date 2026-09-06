@@ -1,5 +1,9 @@
 //! The user-facing handle and event stream.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 use lodestone_model::{
@@ -17,6 +21,15 @@ use lodestone_game::menu::Menu;
 use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::TabList;
 use lodestone_world::{ChunkSection, SectionLight};
+
+/// An action labelled with the correction generation that was current when its
+/// caller submitted it. The driver uses this only at the authoritative-pose
+/// rendezvous; it never changes how ordinary actions are ordered.
+#[derive(Debug)]
+pub(crate) struct QueuedAction {
+    pub(crate) generation: u64,
+    pub(crate) action: ClientAction,
+}
 
 /// A handle to a running client session.
 ///
@@ -37,7 +50,9 @@ use lodestone_world::{ChunkSection, SectionLight};
 /// to stop it deliberately.
 #[derive(Debug)]
 pub struct ClientHandle {
-    actions: mpsc::UnboundedSender<ClientAction>,
+    actions: mpsc::UnboundedSender<QueuedAction>,
+    correction_applied: mpsc::UnboundedSender<(u64, Vec3, Rotation)>,
+    action_generation: Arc<AtomicU64>,
     shutdown: Option<oneshot::Sender<()>>,
     task: DriverTask,
     state: SharedState,
@@ -45,13 +60,17 @@ pub struct ClientHandle {
 
 impl ClientHandle {
     pub(crate) fn new(
-        actions: mpsc::UnboundedSender<ClientAction>,
+        actions: mpsc::UnboundedSender<QueuedAction>,
+        correction_applied: mpsc::UnboundedSender<(u64, Vec3, Rotation)>,
+        action_generation: Arc<AtomicU64>,
         shutdown: oneshot::Sender<()>,
         task: DriverTask,
         state: SharedState,
     ) -> Self {
         Self {
             actions,
+            correction_applied,
+            action_generation,
             shutdown: Some(shutdown),
             task,
             state,
@@ -68,7 +87,30 @@ impl ClientHandle {
     ///
     /// Returns [`ClientClosed`] if the session has already ended.
     pub fn send_action(&self, action: ClientAction) -> Result<(), ClientClosed> {
-        self.actions.send(action).map_err(|_| ClientClosed)
+        let generation = self.action_generation.load(Ordering::Acquire);
+        self.actions
+            .send(QueuedAction { generation, action })
+            .map_err(|_| ClientClosed)
+    }
+
+    /// Completes a server-position correction after the caller has adopted the
+    /// authoritative local pose. The driver then writes the pending protocol
+    /// acknowledgement and a forced position-and-rotation echo before allowing
+    /// ordinary movement to continue.
+    ///
+    /// This is a shell-integration seam, not a general movement action.
+    pub fn acknowledge_teleport_correction(
+        &self,
+        pos: Vec3,
+        rotation: Rotation,
+    ) -> Result<(), ClientClosed> {
+        // This increment and `send_action`'s load form the ordering boundary:
+        // a movement action that read the earlier generation belongs before
+        // this correction even if it reaches the driver's queue later.
+        let generation = self.action_generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.correction_applied
+            .send((generation, pos, rotation))
+            .map_err(|_| ClientClosed)
     }
 
     /// Requests a clean local shutdown.

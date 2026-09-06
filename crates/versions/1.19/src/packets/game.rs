@@ -127,6 +127,21 @@ pub struct ClientboundPositionLook {
     pub teleport_id: i32,
 }
 
+/// Clientbound `game_state_change` — a compact, reason-keyed world update.
+///
+/// The reason is an unsigned byte and the argument is always an `f32`, even
+/// when the selected reason interprets it as an ordinal.  Keeping the shared
+/// frame here makes the adapter's reason-specific conversion subject to an
+/// exact trailing-byte check.
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:game_state_change", state = Play, bound = Client)]
+pub struct GameStateChange {
+    /// Reason selecting the argument's meaning.
+    pub reason: u8,
+    /// Reason-dependent argument.
+    pub value: f32,
+}
+
 /// Serverbound `teleport_confirm` packet.
 ///
 /// # Architectural note

@@ -91,6 +91,29 @@ sneak ordinal, trailing bytes, and all non-Play states. The client adapter's
 leave-bed action is then decoded through the registry-selected protocol, which
 proves this version-family frame reaches the common consumer boundary.
 
+The joining adapter translates four additional clientbound state packets.
+`update_time` is two raw `i64` values and becomes `ClientEvent::TimeChanged`;
+its second value remains signed so a frozen day-night cycle is not lost.
+`game_state_change` reason `1` ends rain and reason `2` begins it; its
+game-mode, rain-level, and thunder-level reasons map to their corresponding
+canonical events. Other reasons
+are consumed but ignored because they have no non-invented canonical carrier;
+the game-mode value is accepted only for integral ids `0..=3`. The legacy
+`explosion` body keeps its signed byte block offsets and always emits a
+`Some` knockback vector, including an all-zero vector, because those three
+motion fields are unconditional on this wire. Before emitting that event, the
+adapter applies every offset to `floor(center) + offset` in the loaded world as
+canonical air and synchronizes the block-entity tail with `None`, so removed
+blocks stop contributing pixels and collision immediately. Finally, textual attribute
+snapshots use a VarInt entity id, fixed-width property count, and VarInt
+modifier count. The adapter maps the seven established legacy names to
+canonical keys, represents UUID-only modifiers with stable private ids, and
+skips unrecognized attribute names without dropping neighboring snapshots;
+modifier operation bytes outside `0..=2` reject the packet.
+`crates/versions/1.8/tests/misc_events.rs` uses literal packet bodies for
+these paths so field-order or count-width regressions cannot self-confirm via
+the version codec.
+
 ### External-client acceptance
 
 The opt-in release-client gate covers hosted protocol **47** (1.8.9). Run it with

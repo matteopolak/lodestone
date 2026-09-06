@@ -106,8 +106,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lodestone_model::Vec3;
-
 /// Process-wide ordering counter for the `transfer` target. See the module doc.
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -119,48 +117,3 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn next_seq() -> u64 {
     SEQ.fetch_add(1, Ordering::Relaxed)
 }
-
-/// The last fully-absolute teleport this connection accepted — the yardstick
-/// [`super::V770Adapter::select_move_packet`] measures an outbound movement
-/// packet's claimed position against.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct AcceptedTeleport {
-    /// The `transfer`-target [`next_seq`] value of the line that recorded it,
-    /// so a move's log line points back at the exact teleport it is measured
-    /// against rather than at "the last one, probably".
-    pub(crate) seq: u64,
-    /// The wire teleport id we echoed in `ACCEPT_TELEPORTATION`.
-    pub(crate) id: i32,
-    /// The absolute position the server placed us at.
-    pub(crate) target: Vec3,
-}
-
-impl AcceptedTeleport {
-    /// Distance from `pos` to the teleport target.
-    pub(crate) fn distance_to(&self, pos: Vec3) -> f64 {
-        distance(pos, self.target)
-    }
-}
-
-/// Straight-line distance between two positions, in blocks.
-pub(crate) fn distance(a: Vec3, b: Vec3) -> f64 {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    let dz = a.z - b.z;
-    (dx * dx + dy * dy + dz * dz).sqrt()
-}
-
-/// How far an outbound move may sit from the teleport target that immediately
-/// precedes it before the instrument calls it out.
-///
-/// One tick of ordinary movement is well under half a block (sprint-jumping
-/// tops out around `0.4`), so a first post-teleport move beyond a block did not
-/// come from a simulation that had adopted the teleport.
-///
-/// This used to be diagnostic only. It now sets both bounds of the staleness
-/// test [`super::V770Adapter::select_move_packet`] applies before rewriting a
-/// first claim onto the teleport target — how far from the target counts as
-/// "could not have adopted it", and how far from the last sent pose still
-/// counts as "was built from it". Raising it re-opens the window the rewrite
-/// closes; lowering it risks reading a fast tick as a stale claim.
-pub(crate) const STALE_MOVE_BLOCKS: f64 = 1.0;

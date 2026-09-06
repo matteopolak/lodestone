@@ -258,3 +258,41 @@ impl Decode for EntityMetadata {
         Ok(EntityMetadata(entries))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{EntityMetadata, MetadataEntry, MetadataValue};
+    use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
+
+    const CTX: Ctx = Ctx { version: 404 };
+
+    #[test]
+    fn universal_base_metadata_wire_is_byte_exact() {
+        let value = EntityMetadata(vec![
+            MetadataEntry {
+                key: 0,
+                value: MetadataValue::Byte(0x41),
+            },
+            MetadataEntry {
+                key: 2,
+                value: MetadataValue::OptChat(Some(r#"{"text":"Hi"}"#.to_owned())),
+            },
+            MetadataEntry {
+                key: 3,
+                value: MetadataValue::Bool(true),
+            },
+        ]);
+        let mut writer = Writer::default();
+        value.encode(&mut writer, CTX).expect("encode");
+        assert_eq!(
+            writer.as_slice(),
+            &[
+                0x00, 0x00, 0x41, 0x02, 0x05, 0x01, 0x0d, 0x7b, 0x22, 0x74, 0x65, 0x78,
+                0x74, 0x22, 0x3a, 0x22, 0x48, 0x69, 0x22, 0x7d, 0x03, 0x07, 0x01, 0xff,
+            ]
+        );
+        let mut reader = Reader::new(writer.as_slice());
+        assert_eq!(EntityMetadata::decode(&mut reader, CTX).expect("decode"), value);
+        reader.ensure_empty().expect("no trailing bytes");
+    }
+}

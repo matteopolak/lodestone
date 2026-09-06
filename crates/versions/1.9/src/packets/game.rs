@@ -1,5 +1,6 @@
 //! Play-state packets for protocol 340.
 
+use lodestone_core::{Ctx, Error, Reader, Result, Writer};
 use lodestone_macros::{Decode, Encode, Packet};
 use uuid::Uuid;
 
@@ -116,6 +117,120 @@ pub struct UpdateHealth {
     pub food: i32,
     /// Current food saturation.
     pub food_saturation: f32,
+}
+
+/// Clientbound `explosion`.
+///
+/// The removed-block list is counted by a fixed big-endian `i32`, followed by
+/// signed-byte offsets from the explosion centre, then the local player's
+/// knockback vector. A fixed count cannot use the derive's collection support,
+/// so this packet keeps the allocation bound explicit in its codec.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Explosion {
+    /// Explosion centre.
+    pub x: f32,
+    /// Explosion centre.
+    pub y: f32,
+    /// Explosion centre.
+    pub z: f32,
+    /// Blast radius in blocks.
+    pub radius: f32,
+    /// Signed block offsets relative to the centre's floored coordinates.
+    pub affected_blocks: Vec<[i8; 3]>,
+    /// Local player's additive knockback impulse.
+    pub player_motion_x: f32,
+    /// Local player's additive knockback impulse.
+    pub player_motion_y: f32,
+    /// Local player's additive knockback impulse.
+    pub player_motion_z: f32,
+}
+
+/// A packet can never usefully remove thousands of blocks at once, but a
+/// count precedes every allocation. This bound makes an invalid frame a decode
+/// error instead of an attacker-controlled reservation.
+const MAX_EXPLOSION_BLOCKS: i32 = 8_192;
+
+impl lodestone_core::Decode for Explosion {
+    fn decode(reader: &mut Reader<'_>, _ctx: Ctx) -> Result<Self> {
+        let x = reader.f32()?;
+        let y = reader.f32()?;
+        let z = reader.f32()?;
+        let radius = reader.f32()?;
+        let count = reader.i32()?;
+        if count < 0 {
+            return Err(Error::NegativeLength(count));
+        }
+        if count > MAX_EXPLOSION_BLOCKS {
+            return Err(Error::LimitExceeded {
+                limit: MAX_EXPLOSION_BLOCKS as usize,
+                actual: count as usize,
+            });
+        }
+        let mut affected_blocks = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            affected_blocks.push([reader.i8()?, reader.i8()?, reader.i8()?]);
+        }
+        Ok(Self {
+            x,
+            y,
+            z,
+            radius,
+            affected_blocks,
+            player_motion_x: reader.f32()?,
+            player_motion_y: reader.f32()?,
+            player_motion_z: reader.f32()?,
+        })
+    }
+}
+
+impl lodestone_core::Encode for Explosion {
+    fn encode(&self, writer: &mut Writer, _ctx: Ctx) -> Result<()> {
+        writer.f32(self.x);
+        writer.f32(self.y);
+        writer.f32(self.z);
+        writer.f32(self.radius);
+        let count = i32::try_from(self.affected_blocks.len()).map_err(|_| {
+            Error::Custom(format!(
+                "explosion carries {} removed blocks, which overflows the i32 count",
+                self.affected_blocks.len()
+            ))
+        })?;
+        if count > MAX_EXPLOSION_BLOCKS {
+            return Err(Error::LimitExceeded {
+                limit: MAX_EXPLOSION_BLOCKS as usize,
+                actual: count as usize,
+            });
+        }
+        writer.i32(count);
+        for [x, y, z] in &self.affected_blocks {
+            writer.i8(*x);
+            writer.i8(*y);
+            writer.i8(*z);
+        }
+        writer.f32(self.player_motion_x);
+        writer.f32(self.player_motion_y);
+        writer.f32(self.player_motion_z);
+        Ok(())
+    }
+}
+
+impl lodestone_core::Packet for Explosion {
+    const NAME: &'static str = "minecraft:explosion";
+    const STATE: lodestone_core::State = lodestone_core::State::Play;
+    const BOUND: lodestone_core::Bound = lodestone_core::Bound::Client;
+    const PROTOCOLS: lodestone_core::ProtocolRange = lodestone_core::ProtocolRange::new(110, 340);
+}
+
+/// Clientbound `game_state_change`.
+///
+/// The one-byte reason selects the interpretation of the shared `f32` value.
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:game_state_change", state = Play, bound = Client)]
+pub struct GameStateChange {
+    /// Reason code.
+    pub reason: u8,
+    /// Reason-dependent value.
+    pub value: f32,
 }
 
 /// Clientbound `respawn` packet.
@@ -690,4 +805,3 @@ pub struct OpenSignEntity {
     /// Block position of the sign.
     pub location: super::position::Position,
 }
-

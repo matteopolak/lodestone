@@ -1831,20 +1831,32 @@ fn snap_small_velocity(v: Vec3d) -> Vec3d {
 }
 
 /// The sprint-flag write plus the client-side input transform shared by the
-/// air, water and lava travel paths: `state.sprinting = input.sprint` then
-/// vanilla's own input modifier.
+/// air, water and lava travel paths.
+///
+/// The slowdown reads the pose established by the preceding tick, not this
+/// tick's raw shift bit. The client computes its moving-slowly state before it
+/// refreshes keyboard input, then applies that state during travel. Keeping
+/// those values distinct makes both shift edges one tick delayed: the press
+/// gets one final full-speed input sample and the release gets one final
+/// slowed sample. The raw bit still drives edge back-off, bounce suppression,
+/// water descent, and the pose selected at the end of this tick.
 fn set_sprint_and_modify_input(
     state: &mut PlayerState,
     input: MovementInput,
     profile: &PhysicsProfile,
 ) -> (f32, f32) {
     state.sprinting = input.sprint;
+    // The ordinary walking/airborne case. Visual crawling also counts as
+    // moving slowly, but needs the separate in-water predicate owned by the
+    // fluid dispatch; do not infer it from `state.swimming`, which is the
+    // sprint-swim state rather than the in-water state.
+    let moving_slowly = state.pose == Pose::Crouching;
     modify_input(
         profile.input_model,
         input.strafe,
         input.forward,
         input.using_item,
-        input.sneak,
+        moving_slowly,
         profile.sneaking_speed,
     )
 }
@@ -4101,6 +4113,42 @@ mod tests {
             (sy - both).abs() < 1.0e-6,
             "expected both scales combined ({both}), got {sy} (sneak-only would \
              be {sneak_only}, use-item-only would be {use_item_only})"
+        );
+    }
+
+    #[test]
+    fn moving_slowly_scale_trails_both_shift_edges_by_one_tick() {
+        let profile = PhysicsProfile::mc_1_21();
+        let input = MovementInput {
+            forward: 1.0,
+            sneak: true,
+            ..MovementInput::NONE
+        };
+        let mut state = PlayerState::at(Vec3d::new(0.5, 80.0, 0.5), 0.0)
+            .with_pose(Pose::Standing);
+
+        let (_, first_press_forward) =
+            set_sprint_and_modify_input(&mut state, input, &profile);
+        assert_eq!(
+            first_press_forward.to_bits(),
+            0.98_f32.to_bits(),
+            "the first shift tick still reads the preceding standing state"
+        );
+
+        state = state.with_pose(Pose::Crouching);
+        let (_, first_release_forward) = set_sprint_and_modify_input(
+            &mut state,
+            MovementInput {
+                forward: 1.0,
+                sneak: false,
+                ..MovementInput::NONE
+            },
+            &profile,
+        );
+        assert_eq!(
+            first_release_forward.to_bits(),
+            (0.98_f32 * profile.sneaking_speed).to_bits(),
+            "the first unshift tick still reads the preceding crouching state"
         );
     }
 

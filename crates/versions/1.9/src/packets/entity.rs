@@ -4,11 +4,143 @@
 //! metadata list; because [`EntityMetadata`](super::metadata::EntityMetadata)
 //! implements `Encode`/`Decode`, these are ordinary derived structs.
 
+use lodestone_core::{Ctx, Error, Reader, Result, Writer};
 use lodestone_macros::{Decode, Encode, Packet};
 use uuid::Uuid;
 
 use super::metadata::EntityMetadata;
 use super::position::Position;
+
+/// Clientbound `entity_update_attributes`.
+///
+/// The outer property count is a fixed `i32`, while each property's modifier
+/// count is a VarInt. Both are decoded manually so a malformed packet cannot
+/// choose either allocation size.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateAttributes {
+    /// Entity whose attributes changed.
+    pub entity_id: i32,
+    /// Complete snapshots of the named properties included in this update.
+    pub properties: Vec<AttributeProperty>,
+}
+
+/// One textual legacy attribute snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttributeProperty {
+    /// Legacy dotted-camel-case key, such as `generic.maxHealth`.
+    pub key: String,
+    /// Base value before modifiers.
+    pub value: f64,
+    /// Modifiers applied to the base value.
+    pub modifiers: Vec<AttributeModifier>,
+}
+
+/// One UUID-identified legacy attribute modifier.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AttributeModifier {
+    /// Stable modifier identity on the wire.
+    pub uuid: Uuid,
+    /// Modifier amount.
+    pub amount: f64,
+    /// Operation ordinal: `0` add, `1` multiply base, `2` multiply total.
+    pub operation: u8,
+}
+
+const MAX_ATTRIBUTE_ENTRIES: i32 = 128;
+const MAX_ATTRIBUTE_MODIFIERS: i32 = 1_024;
+const MAX_ATTRIBUTE_KEY: usize = 32_767;
+
+fn checked_count(count: i32, cap: i32) -> Result<usize> {
+    if count < 0 {
+        return Err(Error::NegativeLength(count));
+    }
+    if count > cap {
+        return Err(Error::LimitExceeded {
+            limit: cap as usize,
+            actual: count as usize,
+        });
+    }
+    Ok(count as usize)
+}
+
+impl lodestone_core::Decode for UpdateAttributes {
+    fn decode(reader: &mut Reader<'_>, _ctx: Ctx) -> Result<Self> {
+        let entity_id = reader.var_i32()?;
+        let count = checked_count(reader.i32()?, MAX_ATTRIBUTE_ENTRIES)?;
+        let mut properties = Vec::with_capacity(count);
+        for _ in 0..count {
+            let key = reader.string(MAX_ATTRIBUTE_KEY)?;
+            let value = reader.f64()?;
+            let modifier_count = checked_count(reader.var_i32()?, MAX_ATTRIBUTE_MODIFIERS)?;
+            let mut modifiers = Vec::with_capacity(modifier_count);
+            for _ in 0..modifier_count {
+                let uuid = reader.uuid()?;
+                let amount = reader.f64()?;
+                let operation = reader.u8()?;
+                if operation > 2 {
+                    return Err(Error::InvalidEnumVariant {
+                        name: "legacy attribute modifier operation",
+                        value: i32::from(operation),
+                    });
+                }
+                modifiers.push(AttributeModifier {
+                    uuid,
+                    amount,
+                    operation,
+                });
+            }
+            properties.push(AttributeProperty {
+                key,
+                value,
+                modifiers,
+            });
+        }
+        Ok(Self {
+            entity_id,
+            properties,
+        })
+    }
+}
+
+impl lodestone_core::Encode for UpdateAttributes {
+    fn encode(&self, writer: &mut Writer, _ctx: Ctx) -> Result<()> {
+        writer.var_i32(self.entity_id);
+        let count = i32::try_from(self.properties.len()).map_err(|_| {
+            Error::Custom(format!(
+                "entity_update_attributes carries {} entries, which overflows the i32 count",
+                self.properties.len()
+            ))
+        })?;
+        checked_count(count, MAX_ATTRIBUTE_ENTRIES)?;
+        writer.i32(count);
+        for property in &self.properties {
+            writer.string(&property.key);
+            writer.f64(property.value);
+            let modifier_count = i32::try_from(property.modifiers.len()).map_err(|_| {
+                Error::Custom(format!(
+                    "attribute {} carries {} modifiers, which overflows the VarInt count",
+                    property.key,
+                    property.modifiers.len()
+                ))
+            })?;
+            checked_count(modifier_count, MAX_ATTRIBUTE_MODIFIERS)?;
+            writer.var_i32(modifier_count);
+            for modifier in &property.modifiers {
+                writer.uuid(modifier.uuid);
+                writer.f64(modifier.amount);
+                writer.u8(modifier.operation);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl lodestone_core::Packet for UpdateAttributes {
+    const NAME: &'static str = "minecraft:entity_update_attributes";
+    const STATE: lodestone_core::State = lodestone_core::State::Play;
+    const BOUND: lodestone_core::Bound = lodestone_core::Bound::Client;
+    const PROTOCOLS: lodestone_core::ProtocolRange = lodestone_core::ProtocolRange::new(110, 340);
+}
 
 /// Clientbound `spawn_entity_living` — spawns a mob with its initial metadata.
 ///

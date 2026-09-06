@@ -55,7 +55,7 @@
 //!   `max_stack_size`/`max_damage`/`equippable`/`has_unmodeled`, nothing
 //!   potion-shaped) — adding one is a shared-model change well outside this
 //!   issue's file ownership. [`Bottle`] is this module's own minimal stand-in
-//!   (container kind + potion id string) rather than a real `ItemStack`; see
+//!   (container kind + validated built-in potion id) rather than a real `ItemStack`; see
 //!   the top-level report for this as a declared, named gap.
 //! * **Empty glass bottles sitting in a bottle slot.** Vanilla allows it (the
 //!   real slot-acceptance rule for slots 0-2 also accepts a plain glass bottle),
@@ -67,6 +67,8 @@
 //! * **Ingredient item validation beyond the mix table itself.** Vanilla's
 //!   real slot-acceptance rule for slot 3 calls the same is-ingredient check
 //!   this module's [`is_ingredient`] performs — no separate allow-list.
+
+use lodestone_data::potion::{potion_id, potion_name, PotionId};
 
 /// The literal `400` from the real per-tick rule — see the module doc comment
 /// for why this is not derived from the unused `BREWING_TIME_SECONDS` constant.
@@ -87,22 +89,27 @@ pub enum BottleKind {
 }
 
 /// A brewing-stand bottle slot's contents: a container kind plus the potion
-/// id it currently holds (e.g. `"minecraft:water"`, `"minecraft:awkward"`,
-/// `"minecraft:swiftness"`) — see the module doc comment for why this is a
+/// id it currently holds — see the module doc comment for why this is a
 /// dedicated small type rather than a real `ItemStack`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bottle {
     pub kind: BottleKind,
-    pub potion: String,
+    pub potion: PotionId,
 }
 
 impl Bottle {
     #[must_use]
-    pub fn new(kind: BottleKind, potion: impl Into<String>) -> Self {
-        Self {
-            kind,
-            potion: potion.into(),
-        }
+    pub const fn new(kind: BottleKind, potion: PotionId) -> Self {
+        Self { kind, potion }
+    }
+
+    /// Resolves a canonical potion name at a storage or import boundary. An
+    /// unknown name cannot enter the built-in brewing table as a valid bottle.
+    #[must_use]
+    pub fn from_potion_name(kind: BottleKind, potion: &str) -> Option<Self> {
+        potion_id(potion)
+            .and_then(PotionId::from_registry_id)
+            .map(|potion| Self::new(kind, potion))
     }
 }
 
@@ -120,14 +127,23 @@ fn container_mix(kind: BottleKind, ingredient: &str) -> Option<BottleKind> {
     }
 }
 
+/// Converts a recipe-table name into the validated built-in type held by
+/// [`Bottle`]. The table is internal static data, so a failure means its entry
+/// disagrees with the generated potion census rather than untrusted input.
+fn built_in_potion(name: &str) -> PotionId {
+    Bottle::from_potion_name(BottleKind::Potion, name)
+        .expect("brewing recipe names a generated built-in potion")
+        .potion
+}
+
 /// The potion-type transition table, transcribed directly from the real
 /// vanilla-mixes registration — every mix and start-mix registration, with each
 /// start-mix registration expanded to its documented pair (`WATER + ingredient ->
 /// MUNDANE`, `AWKWARD + ingredient -> potion`).
 #[must_use]
 #[allow(clippy::too_many_lines)]
-fn potion_mix(from: &str, ingredient: &str) -> Option<&'static str> {
-    match (from, ingredient) {
+fn potion_mix(from: PotionId, ingredient: &str) -> Option<PotionId> {
+    match (potion_name(from), ingredient) {
         ("minecraft:water", "minecraft:glowstone_dust") => Some("minecraft:thick"),
         ("minecraft:water", "minecraft:redstone") => Some("minecraft:mundane"),
         ("minecraft:water", "minecraft:nether_wart") => Some("minecraft:awkward"),
@@ -219,6 +235,7 @@ fn potion_mix(from: &str, ingredient: &str) -> Option<&'static str> {
 
         _ => None,
     }
+    .map(built_in_potion)
 }
 
 /// Every ingredient item referenced anywhere in [`potion_mix`] — used by
@@ -266,7 +283,7 @@ pub fn is_ingredient(item: &str) -> bool {
 /// on this specific `bottle` (container promotion or potion-type change).
 #[must_use]
 pub fn has_mix(bottle: &Bottle, ingredient: &str) -> bool {
-    container_mix(bottle.kind, ingredient).is_some() || potion_mix(&bottle.potion, ingredient).is_some()
+    container_mix(bottle.kind, ingredient).is_some() || potion_mix(bottle.potion, ingredient).is_some()
 }
 
 /// The real mix rule: applies `ingredient` to `bottle`,
@@ -276,9 +293,9 @@ pub fn has_mix(bottle: &Bottle, ingredient: &str) -> bool {
 #[must_use]
 pub fn mix_bottle(bottle: &Bottle, ingredient: &str) -> Bottle {
     if let Some(new_kind) = container_mix(bottle.kind, ingredient) {
-        return Bottle::new(new_kind, bottle.potion.clone());
+        return Bottle::new(new_kind, bottle.potion);
     }
-    if let Some(new_potion) = potion_mix(&bottle.potion, ingredient) {
+    if let Some(new_potion) = potion_mix(bottle.potion, ingredient) {
         return Bottle::new(bottle.kind, new_potion);
     }
     bottle.clone()
@@ -503,8 +520,28 @@ impl BrewingStand {
 mod tests {
     use super::*;
 
+    fn potion(name: &str) -> PotionId {
+        built_in_potion(name)
+    }
+
+    fn bottle(kind: BottleKind, potion_name: &str) -> Bottle {
+        Bottle::new(kind, potion(potion_name))
+    }
+
     fn water() -> Bottle {
-        Bottle::new(BottleKind::Potion, "minecraft:water")
+        bottle(BottleKind::Potion, "minecraft:water")
+    }
+
+    #[test]
+    fn bottle_keeps_a_validated_potion_id() {
+        let water = water();
+        let _: PotionId = water.potion;
+        assert_eq!(potion_name(water.potion), "minecraft:water");
+    }
+
+    #[test]
+    fn bottle_rejects_an_unknown_persisted_potion_name() {
+        assert!(Bottle::from_potion_name(BottleKind::Potion, "example:unknown").is_none());
     }
 
     #[test]
@@ -517,22 +554,22 @@ mod tests {
 
     #[test]
     fn nether_wart_turns_water_into_awkward() {
-        let bottle = mix_bottle(&water(), "minecraft:nether_wart");
-        assert_eq!(bottle, Bottle::new(BottleKind::Potion, "minecraft:awkward"));
+        let mixed = mix_bottle(&water(), "minecraft:nether_wart");
+        assert_eq!(mixed, bottle(BottleKind::Potion, "minecraft:awkward"));
     }
 
     #[test]
     fn gunpowder_promotes_potion_to_splash_not_the_potion_type() {
-        let awkward = Bottle::new(BottleKind::Potion, "minecraft:awkward");
+        let awkward = bottle(BottleKind::Potion, "minecraft:awkward");
         let splashed = mix_bottle(&awkward, "minecraft:gunpowder");
-        assert_eq!(splashed, Bottle::new(BottleKind::Splash, "minecraft:awkward"));
+        assert_eq!(splashed, bottle(BottleKind::Splash, "minecraft:awkward"));
     }
 
     #[test]
     fn dragon_breath_promotes_splash_to_lingering() {
-        let splash = Bottle::new(BottleKind::Splash, "minecraft:swiftness");
+        let splash = bottle(BottleKind::Splash, "minecraft:swiftness");
         let lingering = mix_bottle(&splash, "minecraft:dragon_breath");
-        assert_eq!(lingering, Bottle::new(BottleKind::Lingering, "minecraft:swiftness"));
+        assert_eq!(lingering, bottle(BottleKind::Lingering, "minecraft:swiftness"));
     }
 
     /// **Control**: dragon's breath must not promote a plain `Potion`
@@ -540,7 +577,7 @@ mod tests {
     /// bottle, matching vanilla's two-step chain rather than a shortcut.
     #[test]
     fn dragon_breath_does_not_promote_a_plain_potion_bottle() {
-        let potion = Bottle::new(BottleKind::Potion, "minecraft:swiftness");
+        let potion = bottle(BottleKind::Potion, "minecraft:swiftness");
         let unchanged = mix_bottle(&potion, "minecraft:dragon_breath");
         assert_eq!(unchanged, potion, "no mix rule applies; bottle must pass through unchanged");
     }
@@ -585,7 +622,7 @@ mod tests {
             }
             let tick = s.tick();
             assert!(tick.brewed, "expected brew {brew_number} to complete at exactly tick {BREW_TIME_TICKS}");
-            assert_eq!(s.bottle(0), Some(&Bottle::new(BottleKind::Potion, "minecraft:awkward")));
+            assert_eq!(s.bottle(0), Some(&bottle(BottleKind::Potion, "minecraft:awkward")));
             // Reset the bottle back to water for the next iteration so each
             // of the 20 brews exercises the same water->awkward transition.
             s.set_bottle(0, Some(water()));
@@ -618,7 +655,7 @@ mod tests {
         }
         let tick = s.tick();
         assert!(tick.brewed, "expected completion at exactly {BREW_TIME_TICKS} ticks after start");
-        assert_eq!(s.bottle(0), Some(&Bottle::new(BottleKind::Potion, "minecraft:awkward")));
+        assert_eq!(s.bottle(0), Some(&bottle(BottleKind::Potion, "minecraft:awkward")));
         assert_eq!(s.ingredient(), Some(("minecraft:nether_wart", 2)));
     }
 
@@ -673,9 +710,9 @@ mod tests {
     /// mis-assume the opposite.
     #[test]
     fn potion_mixes_ignore_container_kind() {
-        let splash_water = Bottle::new(BottleKind::Splash, "minecraft:water");
+        let splash_water = bottle(BottleKind::Splash, "minecraft:water");
         let mixed = mix_bottle(&splash_water, "minecraft:nether_wart");
-        assert_eq!(mixed, Bottle::new(BottleKind::Splash, "minecraft:awkward"));
+        assert_eq!(mixed, bottle(BottleKind::Splash, "minecraft:awkward"));
     }
 
     /// **Control**: an unrecognized ingredient item never starts a brew,
@@ -699,7 +736,7 @@ mod tests {
         // BREW_TIME_TICKS schedule as nether wart.
         let mut s = BrewingStand::new();
         s.set_fuel_item(Some(("minecraft:blaze_powder".into(), 1)));
-        s.set_bottle(0, Some(Bottle::new(BottleKind::Potion, "minecraft:awkward")));
+        s.set_bottle(0, Some(bottle(BottleKind::Potion, "minecraft:awkward")));
         s.set_ingredient(Some(("minecraft:gunpowder".into(), 1)));
 
         assert!(s.tick().started); // start call; see the previous test's
@@ -711,7 +748,7 @@ mod tests {
         assert!(tick.brewed, "expected the splash promotion to complete at exactly {BREW_TIME_TICKS} ticks after start");
         assert_eq!(
             s.bottle(0),
-            Some(&Bottle::new(BottleKind::Splash, "minecraft:awkward")),
+            Some(&bottle(BottleKind::Splash, "minecraft:awkward")),
             "container promoted, potion type untouched"
         );
     }

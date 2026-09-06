@@ -7,10 +7,11 @@ use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
-    AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
+    AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockStateRef, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
     ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityInteraction,
-    EntityMovement, GameMode, Hand, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
+    EntityAttributeModifier, EntityAttributeSnapshot, EntityMovement,
+    GameMode, Hand, LevelEventData, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
     PlayerCommand, PlayerListEntry, ProfileProperty, RecipeBookType, ResourceKey,
     ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, TeamAction, TeamColor,
     TeamParameters, TeleportFlags, Text, Vec3, VersionAdapter, Visibility, WorldSink,
@@ -555,6 +556,29 @@ fn game_mode(value: u8) -> Result<GameMode, AdapterError> {
         3 => Ok(GameMode::Spectator),
         other => Err(AdapterError::Decode(format!("unknown game mode {other}"))),
     }
+}
+
+/// Resolves the textual attribute spelling used by protocols 756 and 758 to
+/// the shared attribute registry. These wire names retain the `generic.` path
+/// segment; the model's canonical keys do not.
+fn attribute_key(wire_key: &str) -> Option<ResourceKey> {
+    let canonical = match wire_key {
+        "minecraft:generic.armor" => "minecraft:armor",
+        "minecraft:generic.armor_toughness" => "minecraft:armor_toughness",
+        "minecraft:generic.attack_damage" => "minecraft:attack_damage",
+        "minecraft:generic.attack_knockback" => "minecraft:attack_knockback",
+        "minecraft:generic.attack_speed" => "minecraft:attack_speed",
+        "minecraft:generic.flying_speed" => "minecraft:flying_speed",
+        "minecraft:generic.follow_range" => "minecraft:follow_range",
+        "minecraft:generic.knockback_resistance" => "minecraft:knockback_resistance",
+        "minecraft:generic.luck" => "minecraft:luck",
+        "minecraft:generic.max_health" => "minecraft:max_health",
+        "minecraft:generic.movement_speed" => "minecraft:movement_speed",
+        "minecraft:horse.jump_strength" => "minecraft:jump_strength",
+        "minecraft:zombie.spawn_reinforcements" => "minecraft:spawn_reinforcements",
+        _ => return None,
+    };
+    canonical.parse().ok()
 }
 
 /// Parses a 1.16 namespaced world name (e.g. `minecraft:overworld`) into a
@@ -1515,6 +1539,208 @@ impl V756Adapter {
                 pos.z.rem_euclid(16) as u8,
             ]],
         })])
+    }
+
+    /// `minecraft:block_break_animation`.
+    fn handle_play_block_break_animation(
+        _adapter: &V756Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let entity_id = reader.var_i32().map_err(dec_err)?;
+        let location = Position::decode(&mut reader, Ctx { version: PROTOCOL }).map_err(dec_err)?;
+        let progress = reader.i8().map_err(dec_err)? as u8;
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::BlockDestruction {
+            entity_id,
+            pos: location.0,
+            progress,
+        })])
+    }
+
+    /// `minecraft:explosion`, including the VarInt-counted block-offset list.
+    fn handle_play_explosion(
+        adapter: &V756Adapter,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let pos = Vec3::new(
+            f64::from(reader.f32().map_err(dec_err)?),
+            f64::from(reader.f32().map_err(dec_err)?),
+            f64::from(reader.f32().map_err(dec_err)?),
+        );
+        let radius = reader.f32().map_err(dec_err)?;
+        let raw_count = reader.var_i32().map_err(dec_err)?;
+        let count = usize::try_from(raw_count).map_err(|_| AdapterError::Decode(format!("negative explosion block count {raw_count}")))?;
+        const MAX_EXPLOSION_BLOCKS: usize = 65_536;
+        if count > MAX_EXPLOSION_BLOCKS || count > reader.remaining() / 3 {
+            return Err(AdapterError::Decode(format!("explosion block count {count} exceeds bounded payload")));
+        }
+        let mut affected_blocks = Vec::with_capacity(count);
+        for _ in 0..count {
+            affected_blocks.push([reader.i8().map_err(dec_err)?, reader.i8().map_err(dec_err)?, reader.i8().map_err(dec_err)?]);
+        }
+        let knockback = Vec3::new(
+            f64::from(reader.f32().map_err(dec_err)?),
+            f64::from(reader.f32().map_err(dec_err)?),
+            f64::from(reader.f32().map_err(dec_err)?),
+        );
+        reader.ensure_empty().map_err(dec_err)?;
+        let base_x = pos.x.floor() as i32;
+        let base_y = pos.y.floor() as i32;
+        let base_z = pos.z.floor() as i32;
+        let air = adapter.current_shape().canonical.air_state_id().raw();
+        for [dx, dy, dz] in &affected_blocks {
+            let x = base_x
+                .checked_add(i32::from(*dx))
+                .ok_or_else(|| AdapterError::Decode("explosion x offset overflow".to_owned()))?;
+            let y = base_y
+                .checked_add(i32::from(*dy))
+                .ok_or_else(|| AdapterError::Decode("explosion y offset overflow".to_owned()))?;
+            let z = base_z
+                .checked_add(i32::from(*dz))
+                .ok_or_else(|| AdapterError::Decode("explosion z offset overflow".to_owned()))?;
+            world.set_block(x, y, z, air);
+            world.sync_block_entity(x, y, z, None);
+        }
+        Ok(vec![Directive::Emit(ClientEvent::Explosion { pos, radius, affected_blocks, knockback: Some(knockback) })])
+    }
+
+    /// `minecraft:game_state_change` world-state codes used by this adapter.
+    fn handle_play_game_state_change(
+        _adapter: &V756Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let reason = reader.u8().map_err(dec_err)?;
+        let value = reader.f32().map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        let event = match reason {
+            1 => Some(ClientEvent::WeatherChanged { raining: Some(true), rain_level: None, thunder_level: None }),
+            2 => Some(ClientEvent::WeatherChanged { raining: Some(false), rain_level: None, thunder_level: None }),
+            3 if value.is_finite() && value.fract() == 0.0 && (0.0..=3.0).contains(&value) => {
+                Some(ClientEvent::GameModeChanged { game_mode: game_mode(value as u8)? })
+            }
+            3 => return Err(AdapterError::Decode(format!("invalid game mode parameter {value}"))),
+            7 => Some(ClientEvent::WeatherChanged { raining: None, rain_level: Some(value), thunder_level: None }),
+            8 => Some(ClientEvent::WeatherChanged { raining: None, rain_level: None, thunder_level: Some(value) }),
+            _ => None,
+        };
+        Ok(event.map_or_else(Vec::new, |event| vec![Directive::Emit(event)]))
+    }
+
+    /// `minecraft:world_event`, preserving event 2001's protocol-local state id.
+    fn handle_play_world_event(
+        _adapter: &V756Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let event = reader.i32().map_err(dec_err)?;
+        let location = Position::decode(&mut reader, Ctx { version: PROTOCOL }).map_err(dec_err)?;
+        let raw_data = reader.i32().map_err(dec_err)?;
+        let global = reader.bool().map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        let data = if event == 2001 { LevelEventData::BlockState(BlockStateRef::protocol_local(raw_data as u32)) } else { LevelEventData::Raw(raw_data) };
+        Ok(vec![Directive::Emit(ClientEvent::LevelEvent { event, pos: location.0, data, global })])
+    }
+
+    /// `minecraft:multi_block_change`. The packed header's section Y is
+    /// unsigned at 756 and signed at 758; records use x<<8 | z<<4 | y.
+    fn handle_play_multi_block_change(
+        adapter: &V756Adapter,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let packed = reader.i64().map_err(dec_err)? as u64;
+        let sign_extend = |value: u64, bits: u32| -> i32 {
+            let shift = 64 - bits;
+            ((value << shift) as i64 >> shift) as i32
+        };
+        let chunk_x = sign_extend(packed >> 42, 22);
+        let chunk_z = sign_extend((packed >> 20) & ((1 << 22) - 1), 22);
+        let raw_section_y = packed & ((1 << 20) - 1);
+        let section_y = if adapter.protocol == PROTOCOL_1_18_2 { sign_extend(raw_section_y, 20) } else { raw_section_y as i32 };
+        let _not_trust_edges = reader.bool().map_err(dec_err)?;
+        let raw_count = reader.var_i32().map_err(dec_err)?;
+        let count = usize::try_from(raw_count).map_err(|_| AdapterError::Decode(format!("negative multi-block count {raw_count}")))?;
+        const MAX_MULTI_BLOCKS: usize = 4096;
+        if count > MAX_MULTI_BLOCKS {
+            return Err(AdapterError::Decode(format!("multi-block count {count} exceeds {MAX_MULTI_BLOCKS}")));
+        }
+        let mut blocks = Vec::with_capacity(count);
+        let mut changed = Vec::with_capacity(count);
+        let mut tally = FallbackTally::default();
+        for _ in 0..count {
+            let record = reader.var_i64().map_err(dec_err)? as u64;
+            let local = (record & 0xFFF) as u16;
+            let wire_state = (record >> 12) as u32;
+            let x = ((local >> 8) & 0xF) as u8;
+            let z = ((local >> 4) & 0xF) as u8;
+            let y = (local & 0xF) as u8;
+            let state = adapter.current_shape().canonical.resolve_or_air(wire_state, &mut tally);
+            blocks.push((x, y, z, state.raw()));
+            changed.push([x, y, z]);
+        }
+        reader.ensure_empty().map_err(dec_err)?;
+        world.set_blocks(chunk_x, section_y, chunk_z, &blocks);
+        for &(x, y, z, state) in &blocks {
+            world.sync_block_entity(
+                (chunk_x << 4) | i32::from(x),
+                (section_y << 4) | i32::from(y),
+                (chunk_z << 4) | i32::from(z),
+                lodestone_data::block_states::StateId::new(state)
+                    .and_then(block_entity_type)
+                    .map(|kind| kind.raw()),
+            );
+        }
+        if changed.is_empty() { return Ok(Vec::new()); }
+        Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
+            section: SectionPos::new(chunk_x, section_y, chunk_z),
+            blocks: changed,
+        })])
+    }
+
+    /// `minecraft:entity_update_attributes` uses textual attribute names.
+    /// Modifier UUIDs are retained as stable namespaced identifiers.
+    fn handle_play_entity_update_attributes(
+        _adapter: &V756Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let entity_id = reader.var_i32().map_err(dec_err)?;
+        let raw_count = reader.var_i32().map_err(dec_err)?;
+        let count = usize::try_from(raw_count).map_err(|_| AdapterError::Decode(format!("negative attribute count {raw_count}")))?;
+        const MAX_ATTRIBUTES: usize = 128;
+        const MAX_MODIFIERS: usize = 1024;
+        if count > MAX_ATTRIBUTES { return Err(AdapterError::Decode(format!("attribute count {count} exceeds {MAX_ATTRIBUTES}"))); }
+        let mut attributes = Vec::with_capacity(count);
+        for _ in 0..count {
+            let name = reader.string(32_767).map_err(dec_err)?;
+            let base = reader.f64().map_err(dec_err)?;
+            let raw_modifier_count = reader.var_i32().map_err(dec_err)?;
+            let modifier_count = usize::try_from(raw_modifier_count).map_err(|_| AdapterError::Decode(format!("negative attribute modifier count {raw_modifier_count}")))?;
+            if modifier_count > MAX_MODIFIERS { return Err(AdapterError::Decode(format!("attribute modifier count {modifier_count} exceeds {MAX_MODIFIERS}"))); }
+            let mut modifiers = Vec::with_capacity(modifier_count);
+            for _ in 0..modifier_count {
+                let uuid = reader.uuid().map_err(dec_err)?;
+                let amount = reader.f64().map_err(dec_err)?;
+                let operation = reader.i8().map_err(dec_err)?;
+                if !(0..=2).contains(&operation) { return Err(AdapterError::Decode(format!("invalid attribute operation {operation}"))); }
+                let id = format!("minecraft:uuid/{uuid}").parse().map_err(|_| AdapterError::Decode("invalid modifier UUID".to_owned()))?;
+                modifiers.push(EntityAttributeModifier { id, amount, operation: operation as u8 });
+            }
+            if let Some(attribute) = attribute_key(&name) {
+                attributes.push(EntityAttributeSnapshot { attribute, base, modifiers });
+            }
+        }
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::EntityAttributesUpdated { entity_id, attributes })])
     }
 
     /// `minecraft:experience`.
@@ -2570,6 +2796,30 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:block_break_animation",
+        lodestone_core::dispatch::Handler::new(lodestone_core::ProtocolRange::ALL, V756Adapter::handle_play_block_break_animation),
+    ),
+    (
+        "minecraft:explosion",
+        lodestone_core::dispatch::Handler::new(lodestone_core::ProtocolRange::ALL, V756Adapter::handle_play_explosion),
+    ),
+    (
+        "minecraft:game_state_change",
+        lodestone_core::dispatch::Handler::new(lodestone_core::ProtocolRange::ALL, V756Adapter::handle_play_game_state_change),
+    ),
+    (
+        "minecraft:world_event",
+        lodestone_core::dispatch::Handler::new(lodestone_core::ProtocolRange::ALL, V756Adapter::handle_play_world_event),
+    ),
+    (
+        "minecraft:multi_block_change",
+        lodestone_core::dispatch::Handler::new(lodestone_core::ProtocolRange::ALL, V756Adapter::handle_play_multi_block_change),
+    ),
+    (
+        "minecraft:entity_update_attributes",
+        lodestone_core::dispatch::Handler::new(lodestone_core::ProtocolRange::ALL, V756Adapter::handle_play_entity_update_attributes),
+    ),
+    (
         "minecraft:experience",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2800,6 +3050,14 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
 /// for the same packet).
 static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
+        "minecraft:block_action",
+        "protocol-local block registry ids have no authoritative 1.17/1.18 map in this family",
+    ),
+    lodestone_core::dispatch::IGNORED::new(
+        "minecraft:entity_equipment",
+        "protocol-local item registry ids have no authoritative 1.17/1.18 map in this family",
+    ),
+    lodestone_core::dispatch::IGNORED::new(
         "minecraft:spawn_entity_painting",
         "v26-2 has this; backport (painting spawns fold into the generic add_entity path there, ADD_ENTITY)",
     ),
@@ -2809,14 +3067,9 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "v26-2 has this; backport (BLOCK_CHANGED_ACK)",
     ),
     lodestone_core::dispatch::IGNORED::new(
-        "minecraft:block_break_animation",
-        "v26-2 has this; backport (BLOCK_DESTRUCTION)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
         "minecraft:tile_entity_data",
         "v26-2 has this; backport (BLOCK_ENTITY_DATA)",
     ),
-    lodestone_core::dispatch::IGNORED::new("minecraft:block_action", "v26-2 has this; backport (BLOCK_EVENT)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:declare_commands", "v26-2 has this; backport (COMMANDS)"),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:ping",
@@ -2834,16 +3087,10 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "minecraft:named_sound_effect",
         "v26-2 has this; backport (SOUND)",
     ),
-    lodestone_core::dispatch::IGNORED::new("minecraft:explosion", "v26-2 has this; backport (EXPLODE)"),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:game_state_change",
-        "v26-2 has this; backport (GAME_EVENT)",
-    ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:open_horse_window",
         "v26-2 has this; backport (MOUNT_SCREEN_OPEN)",
     ),
-    lodestone_core::dispatch::IGNORED::new("minecraft:world_event", "v26-2 has this; backport (LEVEL_EVENT)"),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:world_particles",
         "v26-2 has this; backport (LEVEL_PARTICLES)",
@@ -2866,16 +3113,8 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "v26-2 has this; backport (RESOURCE_PACK_PUSH)",
     ),
     lodestone_core::dispatch::IGNORED::new(
-        "minecraft:multi_block_change",
-        "v26-2 has this; backport (SECTION_BLOCKS_UPDATE)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
         "minecraft:entity_metadata",
         "v26-2 has this; backport (SET_ENTITY_DATA)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_equipment",
-        "v26-2 has this; backport (SET_EQUIPMENT)",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:entity_sound_effect",
@@ -2890,10 +3129,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:advancements",
         "v26-2 has this; backport (UPDATE_ADVANCEMENTS)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_update_attributes",
-        "v26-2 has this; backport (UPDATE_ATTRIBUTES)",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:declare_recipes",

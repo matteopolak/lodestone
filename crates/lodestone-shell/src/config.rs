@@ -1944,6 +1944,12 @@ pub struct Config {
     pub host: String,
     /// Server port.
     pub port: u16,
+    /// Whether argv explicitly named [`Self::port`] with `--port`.
+    ///
+    /// A bare `--host` keeps the default value in `port` for display and
+    /// fallback, but must remain distinguishable from `--port 25565`: the
+    /// former is eligible for a Minecraft SRV lookup and the latter is not.
+    pub port_given: bool,
     /// Protocol *number* to request an adapter for. `776` is vanilla 26.2.
     pub protocol: i32,
     /// Render distance in chunks (drives the camera far plane and worldgen span).
@@ -1995,6 +2001,7 @@ impl Default for Config {
             mode: Mode::Window,
             host: "127.0.0.1".into(),
             port: 25565,
+            port_given: false,
             protocol: 776,
             render_distance: DEFAULT_RENDER_DISTANCE,
             connect_in_window: false,
@@ -2010,6 +2017,17 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The port the player explicitly entered, if any.
+    ///
+    /// Callers pass this to the multiplayer address resolver rather than
+    /// wrapping [`Self::port`] unconditionally. A `None` lets a bare hostname
+    /// select a `_minecraft._tcp` record; the stored default remains useful for
+    /// status text and for resolver fallback.
+    #[must_use]
+    pub fn explicit_port(&self) -> Option<u16> {
+        self.port_given.then_some(self.port)
+    }
+
     /// The outcome of parsing argv: either a runnable [`Config`], a request to
     /// print `--help`, or an error for an unrecognised argument. Help and errors
     /// are resolved by `main` **before** any window, GPU, or world init, so the
@@ -2074,6 +2092,7 @@ impl Config {
                 "--port" => {
                     if let Some(v) = it.next().and_then(|v| v.parse().ok()) {
                         cfg.port = v;
+                        cfg.port_given = true;
                         cfg.address_given = true;
                     }
                 }
@@ -2655,6 +2674,7 @@ mod tests {
         let c = parse(&["--host", "127.0.0.1", "--port", "25565"]);
         assert_eq!(c.host, Config::default().host, "same value as the default");
         assert_eq!(c.port, Config::default().port, "same value as the default");
+        assert!(c.port_given, "--port was explicitly named");
         assert!(
             c.address_given,
             "the flag was seen, which is the question the menu bypass asks"
@@ -2669,9 +2689,24 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_cli_host_leaves_the_port_eligible_for_srv() {
+        let bare = parse(&["--host", "mineplex.com"]);
+        let explicit = parse(&["--host", "mineplex.com", "--port", "25565"]);
+
+        assert_eq!(bare.port, 25565, "the display and fallback port stays conventional");
+        assert_eq!(
+            bare.explicit_port(),
+            None,
+            "a hostname without --port must be eligible for SRV resolution"
+        );
+        assert_eq!(explicit.explicit_port(), Some(25565));
+    }
+
+    #[test]
     fn bad_values_keep_defaults() {
         let c = parse(&["--port", "notanumber"]);
         assert_eq!(c.port, 25565);
+        assert_eq!(c.explicit_port(), None, "an invalid --port is not explicit");
     }
 
     #[test]

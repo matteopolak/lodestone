@@ -162,6 +162,38 @@ functions (`json_reason_text`, `nbt_reason_text`) rather than one that sniffs
 the payload: the connection state decides the form, and a sniff would silently
 accept the wrong one.
 
+### Sparse world changes and bounded explosion decoding
+
+`multi_block_change` updates one section at a time. Its coordinate long has
+signed 22-bit x, 22-bit z, and 20-bit y fields; its records are **VarInt**
+values, with `state << 12 | x << 8 | z << 4 | y`. The decoder translates every
+source state through the same 766-to-canonical table as chunk columns and
+single-block changes, synchronizes block-entity ownership, and emits one
+`ClientEvent::SectionBlocksChanged` for the affected local coordinates.
+`block_break_animation` similarly now delivers its entity id, packed position,
+and untouched progress byte to `ClientEvent::BlockDestruction`.
+
+The explosion handler consumes the whole packet: centre, radius, signed
+affected-block offsets, player motion, block-interaction kind, both particles,
+and the sound holder. Its local protocol schema supplies all 109 particle ids
+and their option shapes, including nested item and vibration options, so the
+decoder can skip visual parameters exactly without inventing an event model for
+them. The sound holder accepts either an inline identifier/range or a registry
+reference. Malformed or unknown framing fails before any world write.
+
+Each affected offset is a canonical-air write at the floored explosion centre,
+with the same block-entity cleanup used for ordinary block updates. It also
+emits `ClientEvent::SectionBlocksChanged` for the touched loaded-world regions
+before the explosion event, allowing the world consumer to rebuild the changed
+sections.
+
+`game_state_change` now maps reasons `1` and `2` to rain start/stop, and `7`
+and `8` to the independent rain and thunder intensity fields. Reason `3`
+updates game mode only for a finite integral ordinal from `0` through `3`, so a
+malformed float cannot silently select a different mode. Each weather event
+changes only the wire aspect that arrived, which lets the consumer retain the
+other weather state.
+
 ### Evidence: what is checked against what
 
 The jar for this version ships **no machine-readable packet report** — its data
@@ -194,14 +226,22 @@ The block-state and entity-type tables are generated from the jar's own reports
 and pinned by an FNV-1a content hash on the committed dump, with a `#[ignore]`d
 drift guard that regenerates under `LODESTONE_REGEN=1`.
 
-`cargo xtask connectedness` reports this family at **61/122 clientbound
-decoded, 60/122 emitting, 0 decoded-but-stranded, 31/58 serverbound encoded**.
-The 61 that decode nothing are enumerated in `adapter::IGNORED` with a reason
+`cargo xtask connectedness` reports this family at **64/122 clientbound
+decoded, 63/122 emitting, 0 decoded-but-stranded, 31/58 serverbound encoded**.
+The 58 that decode nothing are enumerated in `adapter::IGNORED` with a reason
 each, so the dispatch table refuses to build if a packet is dropped by
 omission. The commonest reason is a missing 766 registry table — item ids, sound
 ids and attribute ids all name registry entries this crate cannot yet resolve
 into canonical keys, which is what keeps `window_items`, `set_slot`,
 `open_window`, `entity_equipment` and the sound packets out.
+
+The committed 1.20.6 registry dump does contain the source numeric item,
+attribute, block, and sound registries, but this crate has no generated
+production mapping from those ids to canonical item/attribute/block keys.
+`entity_equipment`, `entity_update_attributes`, and `block_action` therefore
+remain ignored: adding any one requires a checked generated mapping and exact
+wire-byte tests, rather than consulting the test-only dump at runtime or
+guessing an id from a newer registry.
 
 ## How to change it
 

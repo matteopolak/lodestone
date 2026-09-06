@@ -16,6 +16,8 @@
 //! exercised by an `#[ignore]`d live test.
 
 use std::net::IpAddr;
+#[cfg(not(target_arch = "wasm32"))]
+use std::future::Future;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::error::{NetError, Result};
@@ -98,10 +100,37 @@ pub fn choose_address(
 /// from the system configuration.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn resolve_server_address(host: &str, port: Option<u16>) -> Result<ResolvedAddress> {
+    resolve_server_address_with_lookup(host, port, |host| async move {
+        lookup_minecraft_srv(&host).await
+    })
+    .await
+}
+
+/// Resolves a server address with a supplied SRV lookup operation.
+///
+/// This is the resolver-I/O seam: production supplies
+/// [`lookup_minecraft_srv`], while callers that need deterministic behavior can
+/// provide a lookup result without relying on public DNS. The supplied lookup
+/// is called only for a hostname with no explicit port.
+///
+/// # Errors
+///
+/// Propagates an error returned by `lookup` when the address is eligible for an
+/// SRV query.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn resolve_server_address_with_lookup<F, Fut>(
+    host: &str,
+    port: Option<u16>,
+    lookup: F,
+) -> Result<ResolvedAddress>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<Option<(String, u16)>>>,
+{
     if !should_query_srv(host, port) {
         return Ok(choose_address(host, port, None));
     }
-    let srv = lookup_minecraft_srv(host).await?;
+    let srv = lookup(host.to_owned()).await?;
     Ok(choose_address(host, port, srv))
 }
 
@@ -202,5 +231,38 @@ mod tests {
     fn socket_addr_renders_host_and_port() {
         let a = choose_address("h", Some(25), None);
         assert_eq!(a.socket_addr(), "h:25");
+    }
+
+    #[tokio::test]
+    async fn injected_srv_lookup_routes_a_bare_hostname_to_its_target() {
+        let address = resolve_server_address_with_lookup("mineplex.com", None, |queried| {
+            assert_eq!(queried, "mineplex.com");
+            std::future::ready(Ok(Some(("java.mineplex.com".to_owned(), 25565))))
+        })
+        .await
+        .expect("the injected DNS result must resolve");
+
+        assert_eq!(
+            address,
+            ResolvedAddress {
+                host: "java.mineplex.com".to_owned(),
+                port: 25565,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_port_does_not_invoke_the_injected_srv_lookup() {
+        let called = std::cell::Cell::new(false);
+        let address = resolve_server_address_with_lookup("mineplex.com", Some(25570), |_| {
+            called.set(true);
+            std::future::ready(Ok(Some(("java.mineplex.com".to_owned(), 25565))))
+        })
+        .await
+        .expect("the explicit address must resolve without DNS");
+
+        assert!(!called.get(), "an entered port must suppress SRV lookup");
+        assert_eq!(address.host, "mineplex.com");
+        assert_eq!(address.port, 25570);
     }
 }

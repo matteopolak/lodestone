@@ -284,6 +284,18 @@ pub struct KickDisconnect {
     pub reason: String,
 }
 
+/// Clientbound `game_state_change` — one reason byte and a reason-dependent
+/// floating-point value. The adapter recognizes the weather and game-mode
+/// reasons whose semantics have a shared-model event.
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:game_state_change", state = Play, bound = Client)]
+pub struct GameStateChange {
+    /// Numeric event reason.
+    pub reason: u8,
+    /// Reason-dependent value (game-mode ordinal or weather intensity).
+    pub value: f32,
+}
+
 // ServerboundPosition/ServerboundLook/ServerboundPositionLook are
 // byte-identical across v1-8/v1-9/v1-14 (measured; raw f64/f32 fields, no
 // embedded Position), shared via `lodestone-protocol-common` -- see

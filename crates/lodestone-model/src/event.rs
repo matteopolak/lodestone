@@ -2354,16 +2354,11 @@ pub enum ClientEvent {
     },
     /// An explosion occurred.
     ///
-    /// One variant carrying two different wire shapes, deliberately: every
-    /// client protocol family from v1-8 (1.8.9) through v1-14 (1.16.5) sends
-    /// `packet_explosion`'s own list of removed-block offsets on this same
-    /// packet, while 26.2's explosion packet dropped that list in
-    /// favour of a bare block **count** used only to scale cosmetic particle
-    /// spawning — the real removals now arrive as
-    /// ordinary block-update events instead. See [`Self::affected_blocks`]'s
-    /// own doc for what an empty list means on each family, rather than
-    /// giving 26.2 a second variant for what is, model-side, the same event:
-    /// a blast at a position with a radius, optionally pushing this client.
+    /// One variant carries two wire shapes deliberately. Protocols 5 through
+    /// 766 send the removed-block offsets on the explosion packet. Protocols
+    /// 774 and 776 send only a block count for cosmetic scaling; their actual
+    /// removals arrive as ordinary block updates. See
+    /// [`Self::affected_blocks`] for how consumers distinguish those shapes.
     Explosion {
         /// World-space explosion centre.
         pos: Vec3,
@@ -2371,15 +2366,11 @@ pub enum ClientEvent {
         radius: f32,
         /// Blocks the explosion removed, as integer offsets from `pos`
         /// (`pos.floor() + offset` is the removed block's position) —
-        /// `packet_explosion`'s own `affected_block_offsets` on every
-        /// pre-26.2 family (v1-8/v1-9/v1-14), each of which puts the list
-        /// directly on this packet.
+        /// carried directly by protocols 5 through 766.
         ///
-        /// **Always empty on a 26.2 (`v26-2`) connection.**
-        /// The explosion packet on that version carries only a block count
-        /// there —
-        /// no positions at all — because the real removals now arrive as
-        /// separate block-update events. A fold reading this field for
+        /// **Always empty on protocol 774 or 776.** Their explosion packets
+        /// carry only a count, with no positions, because the removals arrive
+        /// as separate block-update events. A fold reading this field for
         /// "which blocks did this explosion remove" must treat an empty list
         /// as "not given by this packet", not as "the explosion removed
         /// nothing" — the two are indistinguishable from this field alone,
@@ -2388,11 +2379,9 @@ pub enum ClientEvent {
         affected_blocks: Vec<[i8; 3]>,
         /// This client's own knockback impulse from the blast, if any — an
         /// additive velocity delta, not an absolute velocity.
-        /// `player_motion_x/y/z` on the legacy wire (present unconditionally,
-        /// `[0.0; 3]` when this player is outside the blast — map that to
-        /// `Some([0.0; 3])` there, since the field genuinely is on the wire);
-        /// vanilla's own player-knockback field on 26.2, which is a real `Optional<Vec3>` on the
-        /// wire and should map to `None` one-for-one.
+        /// Protocols 5 through 766 carry the three components unconditionally,
+        /// using zeroes outside the blast. Protocols 774 and 776 carry a real
+        /// optional vector, which maps to `None` one-for-one.
         knockback: Option<Vec3>,
     },
     /// Particles should spawn.
@@ -4190,7 +4179,6 @@ pub fn route(event: &ClientEvent) -> Route {
         // ---- per-entity ECS state -------------------------------------------
         ClientEvent::EntityMoved { .. }
         | ClientEvent::EntityTeleported { .. }
-        | ClientEvent::EntityVelocity { .. }
         | ClientEvent::EntityRemoved { .. }
         | ClientEvent::EntityHeadRotation { .. }
         | ClientEvent::EntityMetadataUpdated { .. }
@@ -4222,6 +4210,14 @@ pub fn route(event: &ClientEvent) -> Route {
         // until the fold existed).
         | ClientEvent::EntityLeashed { .. }
         | ClientEvent::EntityAnimation { .. } => INGEST,
+        // Remote velocity is per-entity ECS state. The shell also mirrors this
+        // event so a packet naming the local player reaches its early network
+        // drain before the next physics tick and outbound movement packet.
+        ClientEvent::EntityVelocity { .. } => Route {
+            ingest: true,
+            shell: true,
+            ..Route::NOWHERE
+        },
         // Both halves, and neither supersedes the other: `ingest` turns this into
         // the per-entity `HurtTime` countdown and destructures with `..`,
         // **discarding the yaw**, while the shell's own `forward` reads that yaw to

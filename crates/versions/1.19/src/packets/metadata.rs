@@ -11,25 +11,31 @@
 //! to carry a per-version discriminant map; the project blesses duplicating the
 //! whole codec per version instead, so this table is exactly this era's.
 //!
-//! Measured against `minecraft-data`, the nineteen serializer types below are
-//! **unchanged** across 754, 756 and 758. `minecraft-data` reports the
-//! `entity_metadata` packet's shape as changing at both boundaries, but the
-//! whole of that difference is the particle-id renumbering inside the
-//! embedded particle payload, which this table does not model at all.
+//! The committed real 1.19.4 capture contains an index-9 serializer-3 value
+//! followed by `0x41800000` (`16.0f`), proving that serializer 3 is `Float`.
+//! Protocol 762 inserted `VarLong` at serializer 2, so every older serializer
+//! at 2 and above shifts by one; copying the 1.17 table makes that float look
+//! like a 65-byte string and runs out of input. The complete shifted table was
+//! then cross-checked against `minecraft-data`; the capture remains the
+//! authority for the framing that exposed the previous error.
 //!
 //! * **Header.** `key: u8` then a separate `type: varint`; the list ends with a
 //!   `0xFF` key.
-//! * **Type table.** `0 Byte, 1 VarInt, 2 Float, 3 String, 4 Chat,
-//!   5 OptChat, 6 Slot, 7 Boolean, 8 Rotation, 9 Position, 10 OptPosition,
-//!   11 Direction, 12 OptUUID, 13 OptBlockID, 14 NBT, 15 Particle,
-//!   16 VillagerData, 17 OptVarInt, 18 Pose`.
+//! * **Type table.** `0 Byte, 1 VarInt, 2 VarLong, 3 Float, 4 String,
+//!   5 Chat, 6 OptChat, 7 Slot, 8 Boolean, 9 Rotation, 10 Position,
+//!   11 OptPosition, 12 Direction, 13 OptUUID, 14 BlockState,
+//!   15 OptBlockState, 16 NBT, 17 Particle, 18 VillagerData,
+//!   19 OptVarInt, 20 Pose, 21 CatVariant, 22 FrogVariant,
+//!   23 OptGlobalPos, 24 PaintingVariant, 25 SnifferState, 26 Vector3,
+//!   27 Quaternion`.
 //!
-//! `Particle` (type 15) needs a particle-id registry with per-particle payloads
-//! that no crate carries yet, so it is **not** modeled: decoding a particle
-//! entry fails loudly with [`Error::InvalidEnumVariant`] rather than silently
-//! misparsing. This packet is not currently dispatched by the adapter, so that
-//! gap is unreachable in the live path; it is documented rather than papered
-//! over.
+//! `Particle` (type 17) needs a particle-id registry with per-particle payloads
+//! that no crate carries yet. Type 23's local schema disagrees with the
+//! dimension-qualified position shape used elsewhere, by eight bytes. Neither
+//! is modeled: decoding either fails loudly with [`Error::InvalidEnumVariant`]
+//! rather than silently misparsing. The adapter reports only the type-agnostic
+//! shared-flags entry; an unmodelled entry still rejects the whole incremental
+//! update rather than guessing its variable-sized payload.
 //!
 //! Because these types implement `Encode`/`Decode`, packets that carry metadata
 //! still derive their own codecs and simply hold an [`EntityMetadata`] field.
@@ -57,19 +63,21 @@ pub enum MetadataValue {
     Byte(i8),
     /// Type 1: VarInt-encoded int.
     VarInt(i32),
-    /// Type 2: float.
+    /// Type 2: VarLong-encoded integer, inserted by this protocol era.
+    VarLong(i64),
+    /// Type 3: float.
     Float(f32),
-    /// Type 3: UTF-8 string.
+    /// Type 4: UTF-8 string.
     String(String),
-    /// Type 4: chat component (JSON string).
+    /// Type 5: chat component (JSON string).
     Chat(String),
-    /// Type 5: optional chat component (added 1.13).
+    /// Type 6: optional chat component (added 1.13).
     OptChat(Option<String>),
-    /// Type 6: item slot.
+    /// Type 7: item slot.
     Slot(Slot),
-    /// Type 7: boolean.
+    /// Type 8: boolean.
     Bool(bool),
-    /// Type 8: rotation as three floats `(pitch, yaw, roll)`.
+    /// Type 9: rotation as three floats `(pitch, yaw, roll)`.
     Rotation {
         /// Rotation about X.
         pitch: f32,
@@ -78,19 +86,22 @@ pub enum MetadataValue {
         /// Rotation about Z.
         roll: f32,
     },
-    /// Type 9: packed `i64` block position.
+    /// Type 10: packed `i64` block position.
     Position(Position),
-    /// Type 10: optional packed block position.
+    /// Type 11: optional packed block position.
     OptPosition(Option<Position>),
-    /// Type 11: VarInt facing direction.
+    /// Type 12: VarInt facing direction.
     Direction(i32),
-    /// Type 12: optional UUID.
+    /// Type 13: optional UUID.
     OptUuid(Option<Uuid>),
-    /// Type 13: VarInt block-state id (`0` = absent/air).
+    /// Type 14: VarInt block-state id.
     BlockId(i32),
-    /// Type 14: NBT tag, stored as raw bytes (`None` = the `TAG_End` marker).
+    /// Type 15: optional VarInt block-state id (`0` = absent, otherwise the
+    /// logical id plus one on the wire).
+    OptBlockId(Option<i32>),
+    /// Type 16: NBT tag, stored as raw bytes (`None` = the `TAG_End` marker).
     Nbt(Option<Vec<u8>>),
-    /// Type 16: villager data — three VarInts `(type, profession, level)`.
+    /// Type 18: villager data — three VarInts `(type, profession, level)`.
     VillagerData {
         /// Villager type id.
         kind: i32,
@@ -99,11 +110,23 @@ pub enum MetadataValue {
         /// Villager level.
         level: i32,
     },
-    /// Type 17: optional VarInt (`0` = absent, otherwise `value + 1` on the
+    /// Type 19: optional VarInt (`0` = absent, otherwise `value + 1` on the
     /// wire); modeled as the already-decoded logical value.
     OptVarInt(Option<i32>),
-    /// Type 18: VarInt pose id.
+    /// Type 20: VarInt pose id.
     Pose(i32),
+    /// Type 21: VarInt cat-variant id.
+    CatVariant(i32),
+    /// Type 22: VarInt frog-variant id.
+    FrogVariant(i32),
+    /// Type 24: VarInt painting-variant id.
+    PaintingVariant(i32),
+    /// Type 25: VarInt sniffer-state id.
+    SnifferState(i32),
+    /// Type 26: three f32 components.
+    Vector3 { x: f32, y: f32, z: f32 },
+    /// Type 27: four f32 components.
+    Quaternion { x: f32, y: f32, z: f32, w: f32 },
 }
 
 impl MetadataValue {
@@ -112,22 +135,30 @@ impl MetadataValue {
         match self {
             MetadataValue::Byte(_) => 0,
             MetadataValue::VarInt(_) => 1,
-            MetadataValue::Float(_) => 2,
-            MetadataValue::String(_) => 3,
-            MetadataValue::Chat(_) => 4,
-            MetadataValue::OptChat(_) => 5,
-            MetadataValue::Slot(_) => 6,
-            MetadataValue::Bool(_) => 7,
-            MetadataValue::Rotation { .. } => 8,
-            MetadataValue::Position(_) => 9,
-            MetadataValue::OptPosition(_) => 10,
-            MetadataValue::Direction(_) => 11,
-            MetadataValue::OptUuid(_) => 12,
-            MetadataValue::BlockId(_) => 13,
-            MetadataValue::Nbt(_) => 14,
-            MetadataValue::VillagerData { .. } => 16,
-            MetadataValue::OptVarInt(_) => 17,
-            MetadataValue::Pose(_) => 18,
+            MetadataValue::VarLong(_) => 2,
+            MetadataValue::Float(_) => 3,
+            MetadataValue::String(_) => 4,
+            MetadataValue::Chat(_) => 5,
+            MetadataValue::OptChat(_) => 6,
+            MetadataValue::Slot(_) => 7,
+            MetadataValue::Bool(_) => 8,
+            MetadataValue::Rotation { .. } => 9,
+            MetadataValue::Position(_) => 10,
+            MetadataValue::OptPosition(_) => 11,
+            MetadataValue::Direction(_) => 12,
+            MetadataValue::OptUuid(_) => 13,
+            MetadataValue::BlockId(_) => 14,
+            MetadataValue::OptBlockId(_) => 15,
+            MetadataValue::Nbt(_) => 16,
+            MetadataValue::VillagerData { .. } => 18,
+            MetadataValue::OptVarInt(_) => 19,
+            MetadataValue::Pose(_) => 20,
+            MetadataValue::CatVariant(_) => 21,
+            MetadataValue::FrogVariant(_) => 22,
+            MetadataValue::PaintingVariant(_) => 24,
+            MetadataValue::SnifferState(_) => 25,
+            MetadataValue::Vector3 { .. } => 26,
+            MetadataValue::Quaternion { .. } => 27,
         }
     }
 
@@ -137,9 +168,14 @@ impl MetadataValue {
             MetadataValue::VarInt(v)
             | MetadataValue::Direction(v)
             | MetadataValue::BlockId(v)
-            | MetadataValue::Pose(v) => {
+            | MetadataValue::Pose(v)
+            | MetadataValue::CatVariant(v)
+            | MetadataValue::FrogVariant(v)
+            | MetadataValue::PaintingVariant(v)
+            | MetadataValue::SnifferState(v) => {
                 w.var_i32(*v);
             }
+            MetadataValue::VarLong(v) => w.var_i64(*v),
             MetadataValue::Float(v) => w.f32(*v),
             MetadataValue::String(v) | MetadataValue::Chat(v) => w.string(v),
             MetadataValue::OptChat(opt) => match opt {
@@ -189,6 +225,21 @@ impl MetadataValue {
                 Some(v) => w.var_i32(v.wrapping_add(1)),
                 None => w.var_i32(0),
             },
+            MetadataValue::OptBlockId(opt) => match opt {
+                Some(v) => w.var_i32(v.wrapping_add(1)),
+                None => w.var_i32(0),
+            },
+            MetadataValue::Vector3 { x, y, z } => {
+                w.f32(*x);
+                w.f32(*y);
+                w.f32(*z);
+            }
+            MetadataValue::Quaternion { x, y, z, w: rotation_w } => {
+                w.f32(*x);
+                w.f32(*y);
+                w.f32(*z);
+                w.f32(*rotation_w);
+            }
         }
         Ok(())
     }
@@ -197,46 +248,67 @@ impl MetadataValue {
         Ok(match type_id {
             0 => MetadataValue::Byte(r.i8()?),
             1 => MetadataValue::VarInt(r.var_i32()?),
-            2 => MetadataValue::Float(r.f32()?),
-            3 => MetadataValue::String(r.string(MAX_STRING)?),
-            4 => MetadataValue::Chat(r.string(MAX_STRING)?),
-            5 => MetadataValue::OptChat(if r.bool()? {
+            2 => MetadataValue::VarLong(r.var_i64()?),
+            3 => MetadataValue::Float(r.f32()?),
+            4 => MetadataValue::String(r.string(MAX_STRING)?),
+            5 => MetadataValue::Chat(r.string(MAX_STRING)?),
+            6 => MetadataValue::OptChat(if r.bool()? {
                 Some(r.string(MAX_STRING)?)
             } else {
                 None
             }),
-            6 => MetadataValue::Slot(Slot::decode(r, ctx)?),
-            7 => MetadataValue::Bool(r.bool()?),
-            8 => MetadataValue::Rotation {
+            7 => MetadataValue::Slot(Slot::decode(r, ctx)?),
+            8 => MetadataValue::Bool(r.bool()?),
+            9 => MetadataValue::Rotation {
                 pitch: r.f32()?,
                 yaw: r.f32()?,
                 roll: r.f32()?,
             },
-            9 => MetadataValue::Position(Position::decode(r, ctx)?),
-            10 => MetadataValue::OptPosition(if r.bool()? {
+            10 => MetadataValue::Position(Position::decode(r, ctx)?),
+            11 => MetadataValue::OptPosition(if r.bool()? {
                 Some(Position::decode(r, ctx)?)
             } else {
                 None
             }),
-            11 => MetadataValue::Direction(r.var_i32()?),
-            12 => MetadataValue::OptUuid(if r.bool()? { Some(r.uuid()?) } else { None }),
-            13 => MetadataValue::BlockId(r.var_i32()?),
-            14 => MetadataValue::Nbt(decode_optional_nbt(r)?),
-            16 => MetadataValue::VillagerData {
+            12 => MetadataValue::Direction(r.var_i32()?),
+            13 => MetadataValue::OptUuid(if r.bool()? { Some(r.uuid()?) } else { None }),
+            14 => MetadataValue::BlockId(r.var_i32()?),
+            15 => {
+                let raw = r.var_i32()?;
+                MetadataValue::OptBlockId(if raw == 0 { None } else { Some(raw - 1) })
+            }
+            16 => MetadataValue::Nbt(decode_optional_nbt(r)?),
+            18 => MetadataValue::VillagerData {
                 kind: r.var_i32()?,
                 profession: r.var_i32()?,
                 level: r.var_i32()?,
             },
-            17 => {
+            19 => {
                 let raw = r.var_i32()?;
                 MetadataValue::OptVarInt(if raw == 0 { None } else { Some(raw - 1) })
             }
-            18 => MetadataValue::Pose(r.var_i32()?),
+            20 => MetadataValue::Pose(r.var_i32()?),
+            21 => MetadataValue::CatVariant(r.var_i32()?),
+            22 => MetadataValue::FrogVariant(r.var_i32()?),
+            24 => MetadataValue::PaintingVariant(r.var_i32()?),
+            25 => MetadataValue::SnifferState(r.var_i32()?),
+            26 => MetadataValue::Vector3 {
+                x: r.f32()?,
+                y: r.f32()?,
+                z: r.f32()?,
+            },
+            27 => MetadataValue::Quaternion {
+                x: r.f32()?,
+                y: r.f32()?,
+                z: r.f32()?,
+                w: r.f32()?,
+            },
             other => {
-                // Type 15 (Particle) and any unknown id fall here: no registry
-                // to model them, so fail loudly rather than misparse.
+                // Type 17 (Particle), type 23 (optional global position), and
+                // any unknown id fall here. Neither known gap has a settled
+                // length, so fail loudly rather than misparse a later entry.
                 return Err(Error::InvalidEnumVariant {
-                    name: "v1-17 metadata type",
+                    name: "v1-19 metadata type",
                     value: other,
                 });
             }

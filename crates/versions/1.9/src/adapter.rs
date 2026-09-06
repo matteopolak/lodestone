@@ -14,7 +14,8 @@ use lodestone_model::{
     EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, Identifier, ItemStack,
     LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType, ParticleOptions, PlayerCommand,
     PlayerListEntry,
-    ProfileProperty, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation, SectionPos,
+    EntityAttributeModifier, EntityAttributeSnapshot, ProfileProperty, RecipeBookType, ResourceKey,
+    ResourcePackResponseKind, Rotation, SectionPos,
     ServerAddress, SoundCategory, TeamAction, TeamColor, TeamParameters, TeleportFlags, Text,
     Vec3, Vec3f, VersionAdapter, Visibility, WorldSink,
 };
@@ -31,12 +32,12 @@ use crate::packets::common::{
 use crate::packets::entity::{
     EntityDestroy, EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
     NamedEntitySpawn, RelEntityMove, SpawnEntityExperienceOrb, SpawnEntityLiving,
-    SpawnEntityLivingByteType, SpawnEntityPainting, SpawnEntityWeather, SpawnObject,
+    SpawnEntityLivingByteType, SpawnEntityPainting, SpawnEntityWeather, SpawnObject, UpdateAttributes,
 };
 use crate::packets::game::{
     Animation, AttachEntity, BlockAction, BlockDig, BlockPlace, BlockPlaceByteCursor,
     ClientCommand, ClientboundChat, ClientboundEntityEquipment, ClientboundPositionLook, Collect,
-    DifficultyPacket, EntityAction, EntityEffect, JoinGame, KickDisconnect, NamedSoundEffect,
+    DifficultyPacket, EntityAction, EntityEffect, Explosion, GameStateChange, JoinGame, KickDisconnect, NamedSoundEffect,
     NamedSoundEffectBytePitch, OpenSignEntity, PlayerlistHeader, RemoveEntityEffect, Respawn,
     ScoreboardDisplayObjective, ServerboundArmAnimation, ServerboundChat, ServerboundFlying,
     ServerboundLook, ServerboundPosition, ServerboundPositionLook, SetPassengers, SoundEffect,
@@ -91,6 +92,17 @@ pub const PROTOCOLS: &[i32] = &[
     PROTOCOL_1_11_2,
     PROTOCOL_1_12_2,
 ];
+
+/// Clientbound game-state reason: rain stops.
+const GAME_STATE_RAIN_STOPS: u8 = 1;
+/// Clientbound game-state reason: rain starts.
+const GAME_STATE_RAIN_STARTS: u8 = 2;
+/// Clientbound game-state reason: local game mode changed.
+const GAME_STATE_GAME_MODE: u8 = 3;
+/// Clientbound game-state reason: rain intensity changed.
+const GAME_STATE_RAIN_LEVEL: u8 = 7;
+/// Clientbound game-state reason: thunder intensity changed.
+const GAME_STATE_THUNDER_LEVEL: u8 = 8;
 
 
 /// The packet ids one protocol in this era assigns to the packets this
@@ -635,6 +647,44 @@ fn game_mode(value: u8) -> Result<GameMode, AdapterError> {
     }
 }
 
+/// Resolves the textual attribute keys used by this era to canonical keys.
+///
+/// The legacy dotted camel-case names are not valid resource identifiers, so
+/// they must be translated rather than passed through. The table covers the
+/// ten built-in attribute keys this era can publish; extension keys are
+/// deliberately skipped by the handler because a snapshot only replaces the
+/// attributes it names.
+fn legacy_attribute_key(key: &str) -> Option<ResourceKey> {
+    let name = match key {
+        "generic.maxHealth" => "minecraft:max_health",
+        "generic.followRange" => "minecraft:follow_range",
+        "generic.knockbackResistance" => "minecraft:knockback_resistance",
+        "generic.movementSpeed" => "minecraft:movement_speed",
+        "generic.attackDamage" => "minecraft:attack_damage",
+        "generic.armor" => "minecraft:armor",
+        "generic.armorToughness" => "minecraft:armor_toughness",
+        "generic.luck" => "minecraft:luck",
+        "horse.jumpStrength" => "minecraft:jump_strength",
+        "zombie.spawnReinforcements" => "minecraft:spawn_reinforcements",
+        _ => return None,
+    };
+    name.parse().ok()
+}
+
+/// Floors one finite explosion-centre component to a block coordinate.
+///
+/// Validate all three before applying any removal so an invalid float cannot
+/// leave a partially mutated world behind.
+fn explosion_origin(component: f32, axis: &str) -> Result<i32, AdapterError> {
+    let floored = f64::from(component).floor();
+    if !floored.is_finite() || floored < f64::from(i32::MIN) || floored > f64::from(i32::MAX) {
+        return Err(AdapterError::Decode(format!(
+            "explosion {axis} centre {component} is outside block-coordinate range"
+        )));
+    }
+    Ok(floored as i32)
+}
+
 /// Maps a `boss_bar` varint colour ordinal to the canonical [`BossColor`].
 ///
 /// Vanilla's `BossEvent.BossBarColor` enum declaration order (`PINK`,
@@ -923,6 +973,8 @@ static PLAY_CLIENTBOUND_HANDLERS: &[(&str, lodestone_core::dispatch::Handler<Pla
     ("minecraft:map_chunk", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_map_chunk)),
     ("minecraft:unload_chunk", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_unload_chunk)),
     ("minecraft:keep_alive", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_keep_alive)),
+    ("minecraft:explosion", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_explosion)),
+    ("minecraft:game_state_change", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_game_state_change)),
     ("minecraft:chat", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_chat)),
     ("minecraft:position", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_position)),
     ("minecraft:spawn_entity_living", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_spawn_entity_living)),
@@ -953,6 +1005,7 @@ static PLAY_CLIENTBOUND_HANDLERS: &[(&str, lodestone_core::dispatch::Handler<Pla
     ("minecraft:abilities", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_abilities)),
     ("minecraft:block_action", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_block_action)),
     ("minecraft:entity_equipment", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_equipment)),
+    ("minecraft:entity_update_attributes", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_update_attributes)),
     ("minecraft:animation", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_animation)),
     ("minecraft:named_sound_effect", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_named_sound_effect)),
     ("minecraft:sound_effect", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_sound_effect)),
@@ -992,8 +1045,6 @@ static PLAY_CLIENTBOUND_IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new("minecraft:tile_entity_data", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:transaction", "confirm-transaction handshake removed after 1.16; v26-2 has no clientbound equivalent"),
     lodestone_core::dispatch::IGNORED::new("minecraft:custom_payload", "v26-2 has this; backport"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:explosion", "v26-2 has this; backport"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:game_state_change", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:world_event", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:map", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:entity", "bare entity-id packet with no move/look payload (minecraft-data packet_entity is just {entityId}); nothing observable to translate"),
@@ -1022,7 +1073,6 @@ static PLAY_CLIENTBOUND_IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         // such packet, so the exemption is ranged rather than blanket.
         ProtocolRange::new(PROTOCOL_1_12_2, PROTOCOL_1_12_2),
     ),
-    lodestone_core::dispatch::IGNORED::new("minecraft:entity_update_attributes", "v26-2 has this; backport"),
 ];
 
 impl V340Adapter {
@@ -1428,6 +1478,103 @@ impl V340Adapter {
             food: body.food,
             saturation: body.food_saturation,
         })]);
+    }
+
+    fn play_explosion(&self, world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: Explosion = self.decode_body_exact(payload)?;
+        let origin = (
+            explosion_origin(body.x, "x")?,
+            explosion_origin(body.y, "y")?,
+            explosion_origin(body.z, "z")?,
+        );
+        // Validate every offset before the first world write. A packet at the
+        // coordinate boundary must fail atomically rather than clear only its
+        // earlier entries.
+        let removed_positions: Vec<(i32, i32, i32)> = body
+            .affected_blocks
+            .iter()
+            .map(|[x, y, z]| {
+                Ok((
+                    origin.0.checked_add(i32::from(*x)).ok_or_else(|| {
+                        AdapterError::Decode("explosion removed-block x coordinate overflows".to_owned())
+                    })?,
+                    origin.1.checked_add(i32::from(*y)).ok_or_else(|| {
+                        AdapterError::Decode("explosion removed-block y coordinate overflows".to_owned())
+                    })?,
+                    origin.2.checked_add(i32::from(*z)).ok_or_else(|| {
+                        AdapterError::Decode("explosion removed-block z coordinate overflows".to_owned())
+                    })?,
+                ))
+            })
+            .collect::<Result<_, AdapterError>>()?;
+        let air = block_states::air_state_id();
+        for (x, y, z) in removed_positions {
+            world.set_block(x, y, z, air);
+            // Removing a state removes any block-entity record at the same
+            // coordinate. This mirrors the ordinary block-change path, where
+            // the state setter and record cleanup are one logical operation.
+            world.sync_block_entity(x, y, z, None);
+        }
+        // Unlike the current protocol, this era always includes three motion
+        // floats, including a literal zero vector when the local player is
+        // beyond the impulse range. `Some` preserves that wire distinction.
+        return Ok(vec![Directive::Emit(ClientEvent::Explosion {
+            pos: Vec3::new(f64::from(body.x), f64::from(body.y), f64::from(body.z)),
+            radius: body.radius,
+            affected_blocks: body.affected_blocks,
+            knockback: Some(Vec3::new(
+                f64::from(body.player_motion_x),
+                f64::from(body.player_motion_y),
+                f64::from(body.player_motion_z),
+            )),
+        })]);
+    }
+
+    fn play_game_state_change(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: GameStateChange = self.decode_body_exact(payload)?;
+        let directives = match body.reason {
+            GAME_STATE_RAIN_STOPS => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: Some(false),
+                rain_level: None,
+                thunder_level: None,
+            })],
+            GAME_STATE_RAIN_STARTS => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: Some(true),
+                rain_level: None,
+                thunder_level: None,
+            })],
+            GAME_STATE_GAME_MODE => {
+                if !body.value.is_finite() || body.value.fract() != 0.0 {
+                    return Err(AdapterError::Decode(format!(
+                        "game_state_change game-mode value {} is not an integer",
+                        body.value
+                    )));
+                }
+                let value = i32::try_from(body.value as i64).map_err(|_| {
+                    AdapterError::Decode(format!(
+                        "game_state_change game-mode value {} is outside i32 range",
+                        body.value
+                    ))
+                })?;
+                let game_mode_id = u8::try_from(value)
+                    .map_err(|_| AdapterError::Decode(format!("unknown game mode {value}")))?;
+                vec![Directive::Emit(ClientEvent::GameModeChanged {
+                    game_mode: game_mode(game_mode_id)?,
+                })]
+            }
+            GAME_STATE_RAIN_LEVEL => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: Some(body.value),
+                thunder_level: None,
+            })],
+            GAME_STATE_THUNDER_LEVEL => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: None,
+                thunder_level: Some(body.value),
+            })],
+            _ => Vec::new(),
+        };
+        Ok(directives)
     }
 
     fn play_respawn(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
@@ -2024,6 +2171,50 @@ impl V340Adapter {
             entity_id: body.entity_id,
             equipment: vec![EntityEquipment { slot, item }],
         })]);
+    }
+
+    fn play_entity_update_attributes(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let body: UpdateAttributes = self.decode_body_exact(payload)?;
+        let mut attributes = Vec::with_capacity(body.properties.len());
+        for property in body.properties {
+            // A future server extension must not discard independently valid
+            // snapshots: this event replaces only the names it carries, so an
+            // unknown textual key is safely omitted.
+            let Some(attribute) = legacy_attribute_key(&property.key) else {
+                tracing::debug!(
+                    target: "v1-9::attributes",
+                    key = %property.key,
+                    "no canonical attribute for legacy key; skipping entry"
+                );
+                continue;
+            };
+            let modifiers = property
+                .modifiers
+                .into_iter()
+                .map(|modifier| {
+                    // The legacy wire has a UUID but no resource key. A
+                    // deterministic local key gives the model a stable,
+                    // collision-free identity for replacement semantics.
+                    let id = format!("lodestone:legacy_modifier_{}", modifier.uuid.simple())
+                        .parse()
+                        .expect("a hexadecimal UUID is a valid resource path");
+                    EntityAttributeModifier {
+                        id,
+                        amount: modifier.amount,
+                        operation: modifier.operation,
+                    }
+                })
+                .collect();
+            attributes.push(EntityAttributeSnapshot {
+                attribute,
+                base: property.value,
+                modifiers,
+            });
+        }
+        Ok(vec![Directive::Emit(ClientEvent::EntityAttributesUpdated {
+            entity_id: body.entity_id,
+            attributes,
+        })])
     }
 
     fn play_animation(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {

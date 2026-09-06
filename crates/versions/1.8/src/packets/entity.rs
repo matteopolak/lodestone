@@ -380,6 +380,126 @@ pub struct RemoveEntityEffect {
     pub effect_id: i8,
 }
 
+/// Clientbound `update_attributes`.
+///
+/// The outer property count is a fixed-width `i32`, while each property's
+/// modifier count is a VarInt. This differs from protocol 5 in both the
+/// entity-id width and modifier-count encoding, so it has a dedicated codec.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateAttributes {
+    /// Entity whose attributes changed.
+    pub entity_id: i32,
+    /// Complete snapshots for the attributes named by this packet.
+    pub properties: Vec<AttributeProperty>,
+}
+
+/// One textual legacy attribute property.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttributeProperty {
+    /// Legacy dotted attribute key.
+    pub key: String,
+    /// Base value before modifiers.
+    pub value: f64,
+    /// Modifiers applied to this attribute.
+    pub modifiers: Vec<AttributeModifier>,
+}
+
+/// One attribute modifier on the legacy wire.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AttributeModifier {
+    /// Stable modifier identity.
+    pub uuid: uuid::Uuid,
+    /// Modifier amount.
+    pub amount: f64,
+    /// Wire operation (`0` add, `1` multiply base, `2` multiply total).
+    pub operation: i8,
+}
+
+/// Generous cap preventing a malformed fixed-width count from allocating an
+/// arbitrary amount of memory before the packet can be rejected.
+const MAX_ATTRIBUTE_ENTRIES: i32 = 256;
+
+/// The corresponding cap for a single property's VarInt modifier count.
+const MAX_ATTRIBUTE_MODIFIERS: i32 = 256;
+
+impl lodestone_core::Decode for UpdateAttributes {
+    fn decode(
+        reader: &mut lodestone_core::Reader<'_>,
+        ctx: lodestone_core::Ctx,
+    ) -> lodestone_core::Result<Self> {
+        let entity_id = reader.var_i32()?;
+        let count = reader.i32()?;
+        if count < 0 {
+            return Err(lodestone_core::Error::NegativeLength(count));
+        }
+        if count > MAX_ATTRIBUTE_ENTRIES {
+            return Err(lodestone_core::Error::LimitExceeded {
+                limit: MAX_ATTRIBUTE_ENTRIES as usize,
+                actual: count as usize,
+            });
+        }
+
+        let mut properties = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            properties.push(AttributeProperty::decode(reader, ctx)?);
+        }
+        Ok(Self {
+            entity_id,
+            properties,
+        })
+    }
+}
+
+impl lodestone_core::Decode for AttributeProperty {
+    fn decode(
+        reader: &mut lodestone_core::Reader<'_>,
+        _ctx: lodestone_core::Ctx,
+    ) -> lodestone_core::Result<Self> {
+        let key = reader.string(32_767)?;
+        let value = reader.f64()?;
+        let count = reader.var_i32()?;
+        if count < 0 {
+            return Err(lodestone_core::Error::NegativeLength(count));
+        }
+        if count > MAX_ATTRIBUTE_MODIFIERS {
+            return Err(lodestone_core::Error::LimitExceeded {
+                limit: MAX_ATTRIBUTE_MODIFIERS as usize,
+                actual: count as usize,
+            });
+        }
+
+        let mut modifiers = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            modifiers.push(AttributeModifier::decode(reader, _ctx)?);
+        }
+        Ok(Self {
+            key,
+            value,
+            modifiers,
+        })
+    }
+}
+
+impl lodestone_core::Decode for AttributeModifier {
+    fn decode(
+        reader: &mut lodestone_core::Reader<'_>,
+        _ctx: lodestone_core::Ctx,
+    ) -> lodestone_core::Result<Self> {
+        Ok(Self {
+            uuid: reader.uuid()?,
+            amount: reader.f64()?,
+            operation: reader.i8()?,
+        })
+    }
+}
+
+impl lodestone_core::Packet for UpdateAttributes {
+    const NAME: &'static str = "minecraft:update_attributes";
+    const STATE: lodestone_core::State = lodestone_core::State::Play;
+    const BOUND: lodestone_core::Bound = lodestone_core::Bound::Client;
+    const PROTOCOLS: lodestone_core::ProtocolRange = lodestone_core::ProtocolRange::new(47, 47);
+}
+
 // `EntityDestroy` is byte-identical across v1-8/v1-9/v1-14 (measured), shared
 // via `lodestone-protocol-common` -- see `packets::entity`'s module docs.
 pub use lodestone_protocol_common::packets::entity::EntityDestroy;

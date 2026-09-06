@@ -46,6 +46,32 @@ pub struct JoinGame {
 // `packets::chat`'s module docs.
 pub use lodestone_protocol_common::packets::chat::ClientboundChat;
 
+/// Clientbound `update_time`.
+///
+/// Wire layout: two raw big-endian `i64` values: total world age followed by
+/// time of day. A negative time of day freezes the day-night cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:update_time", state = Play, bound = Client)]
+pub struct UpdateTime {
+    /// Total elapsed world age, in ticks.
+    pub age: i64,
+    /// Current time of day, in ticks.
+    pub time: i64,
+}
+
+/// Clientbound `game_state_change`.
+///
+/// The `value` slot is an `f32` for every reason, even for reason codes whose
+/// semantic value is an integer (such as game mode).
+#[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:game_state_change", state = Play, bound = Client)]
+pub struct GameStateChange {
+    /// Reason code selecting the meaning of [`Self::value`].
+    pub reason: u8,
+    /// Reason-dependent payload.
+    pub value: f32,
+}
+
 /// Serverbound `chat` packet.
 ///
 /// Wire layout: a single string (max 100 chars). A message beginning with `/`

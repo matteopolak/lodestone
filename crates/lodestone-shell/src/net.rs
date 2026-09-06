@@ -105,7 +105,7 @@
 //! logs a banner naming the fix rather than silently rendering an empty world.
 
 use std::sync::{
-    Arc, LazyLock, Mutex, OnceLock, PoisonError,
+    Arc, Mutex, OnceLock, PoisonError,
     atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     mpsc::{self, Receiver, Sender, SyncSender},
 };
@@ -114,7 +114,7 @@ use std::time::Duration;
 
 use lodestone_client::{
     BlockPos, ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle,
-    EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, Reported, RespawnPolicy,
+    EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, RespawnPolicy,
     Rotation, SectionLight, ServerAddress, Vec3, WorldDimensions,
 };
 #[cfg(not(target_arch = "wasm32"))]
@@ -135,7 +135,6 @@ use lodestone_render::{SectionLight as _, SkyDefault, WorldSectionLight};
 
 use uuid::Uuid;
 
-use crate::entities::NameTag;
 use crate::offline_identity::OfflineIdentity;
 
 /// The local integrated server's bridge into the client plugin registry.
@@ -769,6 +768,18 @@ pub enum NetUpdate {
         /// Server-assigned entity id for the local player.
         entity_id: i32,
     },
+    /// A server-authoritative entity velocity.
+    ///
+    /// The ECS ingest fold remains the source for remote entities. This mirror
+    /// exists for the local player because the frame thread must observe the
+    /// replacement in its early network drain before running the next physics
+    /// tick and sending the resulting position back to the server.
+    EntityVelocity {
+        /// Server entity id whose velocity changed.
+        entity_id: i32,
+        /// Complete replacement velocity, in blocks per tick.
+        velocity: Vec3,
+    },
     /// A chat/system message as a version-free [`lodestone_model::Text`]
     /// component — **not** pre-flattened, so its colour and formatting survive
     /// for the shell to fold into the canonical [`lodestone_game::chat::ChatFeed`]
@@ -923,8 +934,8 @@ pub enum NetUpdate {
     /// An explosion — forwarded raw, mirroring [`NetUpdate::BlockEvent`]'s
     /// "carries no interpretation" shape: see
     /// `lodestone_model::event::ClientEvent::Explosion`'s own doc for why
-    /// `affected_blocks` below is unconditionally empty on a 26.2 connection
-    /// and what that does and does not mean.
+    /// `affected_blocks` below is unconditionally empty on protocols 774 and
+    /// 776, and what that does and does not mean.
     Explosion {
         /// World-space explosion centre.
         pos: Vec3,
@@ -2277,11 +2288,15 @@ impl NetClient {
     /// idempotent — the second rewrite either writes the same pose or the newer
     /// one, which is the one the server is waiting to hear.
     pub fn send_action(&self, action: ClientAction) {
-        let action = match pending_authorised_pose() {
-            Some(pose) => with_authorised_pose(action, pose),
-            None => action,
-        };
         let _ = self.action_tx.try_send(action);
+    }
+
+    /// Release the driver's deferred correction response after this frame has
+    /// adopted the authoritative local pose.
+    pub(crate) fn acknowledge_teleport_correction(&self, pos: Vec3, rotation: Rotation) {
+        if let Some(handle) = self.handle.get() {
+            let _ = handle.acknowledge_teleport_correction(pos, rotation);
+        }
     }
 
     /// This frame's pending resource-pack prompt, if the server pushed one
@@ -2892,151 +2907,6 @@ fn should_forward_action(action: &ClientAction, in_play: bool) -> bool {
     !matches!(action, ClientAction::Move { .. }) || in_play
 }
 
-/// The pose a server teleport authorised, held between the moment [`forward`]
-/// puts it on the sim's channel and the moment `Sim::poll_net` adopts it.
-///
-/// `rotation` is `None` when the teleport marked either rotation component
-/// relative: the position is what the server validates, so a resolvable
-/// position is worth carrying on its own, and an unresolvable rotation is left
-/// to whatever the simulation last reported.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct AuthorisedPose {
-    pos: Vec3,
-    rotation: Option<Rotation>,
-}
-
-/// The teleport bookkeeping one session keeps: how many teleports the net
-/// thread has handed to the sim's channel, how many the sim has actually
-/// adopted, and the pose the newest one authorises.
-///
-/// A type rather than three loose statics so a test can drive a private
-/// instance and see the real methods, instead of racing the process-wide one
-/// against every other test that runs a `Sim`.
-#[derive(Debug, Default)]
-struct TeleportSync {
-    /// Teleports [`forward`] has put on the sim's channel this session.
-    forwarded: AtomicU64,
-    /// Teleports `Sim::poll_net` has adopted, published by
-    /// [`note_teleport_applied`].
-    applied: AtomicU64,
-    /// The newest fully-absolute teleport target, or `None` where the teleport
-    /// was relative in a positional component and this thread cannot resolve
-    /// it.
-    pose: Mutex<Option<AuthorisedPose>>,
-}
-
-impl TeleportSync {
-    /// Clears the bookkeeping at the start of a session, so a count left over
-    /// from the previous one cannot make the first tick of the next rewrite a
-    /// perfectly good `Move`.
-    fn reset(&self) {
-        self.forwarded.store(0, Ordering::SeqCst);
-        self.applied.store(0, Ordering::SeqCst);
-        *self.pose.lock().unwrap_or_else(PoisonError::into_inner) = None;
-    }
-
-    /// Records a teleport reaching the sim's channel, with the pose it
-    /// authorises.
-    fn note_forwarded(&self, pose: Option<AuthorisedPose>) {
-        *self.pose.lock().unwrap_or_else(PoisonError::into_inner) = pose;
-        self.forwarded.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// Records the sim adopting one.
-    fn note_applied(&self) {
-        self.applied.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// The pose an outbound `Move` must claim right now, or `None` when the
-    /// simulation is level with the server and its own claim stands.
-    ///
-    /// `forwarded` is read first on purpose: read the other way round, an
-    /// increment landing between the two loads reads as "level" and skips a
-    /// rewrite that was due. This way the same interleaving reads as "behind"
-    /// and the rewrite is merely redundant — and a redundant rewrite is inert,
-    /// because the pose it writes is the one the simulation is about to adopt
-    /// anyway.
-    fn pending(&self) -> Option<AuthorisedPose> {
-        let forwarded = self.forwarded.load(Ordering::SeqCst);
-        if self.applied.load(Ordering::SeqCst) >= forwarded {
-            return None;
-        }
-        *self.pose.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-/// The one live session's bookkeeping.
-///
-/// A plain static rather than a [`NetClient`] field, for the same reason
-/// [`PENDING_PACK_POLICY`] is one: the producer is the net thread's own
-/// [`forward`] loop and the consumer is `Sim`, and threading a fourteenth
-/// shared cell through `connect_impl` → `run_thread` → `run_async` would put
-/// eight new lines into the most contended file in the repo to carry two
-/// counters. One session exists at a time, and [`reset_teleport_sync`] clears
-/// it as each one starts.
-static TELEPORT_SYNC: LazyLock<TeleportSync> = LazyLock::new(TeleportSync::default);
-
-/// Records that `Sim::poll_net` has adopted a [`NetUpdate::Teleport`].
-pub(crate) fn note_teleport_applied() {
-    TELEPORT_SYNC.note_applied();
-}
-
-/// See [`TeleportSync::reset`].
-fn reset_teleport_sync() {
-    TELEPORT_SYNC.reset();
-}
-
-/// See [`TeleportSync::note_forwarded`].
-fn note_teleport_forwarded(pose: Option<AuthorisedPose>) {
-    TELEPORT_SYNC.note_forwarded(pose);
-}
-
-/// See [`TeleportSync::pending`].
-fn pending_authorised_pose() -> Option<AuthorisedPose> {
-    TELEPORT_SYNC.pending()
-}
-
-/// Rewrites a `Move` built before `pose` was adopted so it claims `pose`
-/// instead — and leaves every other action exactly as it was.
-///
-/// # Why a rewrite rather than a drop
-///
-/// This is the claim vanilla's client makes in the same instant. Its
-/// own client-side move-player-packet handling applies the pose, sends
-/// its own accept-teleportation packet, and sends
-/// a position-and-rotation move packet at the **new** pose — three statements
-/// on one thread, so a claim built from the pre-teleport pose cannot exist. Here
-/// it can: the driver writes the confirmation the instant the packet decodes,
-/// while the pose only reaches `PhysicsState` a channel hop and a frame later,
-/// and the tick loop keeps queueing a `Move` from whatever pose it holds. A
-/// `Move` written after the confirmation but built before the adoption claims a
-/// position the server has already overruled — which is the one input
-/// vanilla's own server-side move-player-packet handling answers with a corrective
-/// teleport back. See `docs/transfer-tracing.md`.
-///
-/// The flags follow vanilla's own post-teleport send, which passes `false` for
-/// both on-ground and horizontal-collision rather than forwarding what the
-/// client last computed.
-///
-/// Dropping the action instead would be the obvious alternative and is worse
-/// twice over: the dirty-tracking that decides whether a `Move` becomes a
-/// packet at all lives *downstream* (the adapter's `select_move_packet`, which
-/// only advances its 20-tick position reminder when it is invoked), so a
-/// producer-side drop silently starves the periodic resync; and a simulation
-/// that somehow never adopted the teleport would stop being able to move at
-/// all, where a rewrite merely holds it at the pose the server chose.
-fn with_authorised_pose(action: ClientAction, pose: AuthorisedPose) -> ClientAction {
-    match action {
-        ClientAction::Move { rotation, .. } => ClientAction::Move {
-            pos: pose.pos,
-            rotation: pose.rotation.unwrap_or(rotation),
-            on_ground: false,
-            horizontal_collision: false,
-        },
-        other => other,
-    }
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "the driver's shared cells, one per subsystem the render thread reads; \
@@ -3079,11 +2949,6 @@ async fn run_async(
 
         let _ = tx.try_send(NetUpdate::Connecting);
 
-        // Session-scoped, so it starts here rather than at teardown: a count
-        // left behind by the previous session would make this one's first drain
-        // rewrite a perfectly good `Move`. See `note_teleport_applied`.
-        reset_teleport_sync();
-
         // Start the integrated server *before* the client, when this is a
         // singleplayer session. Its serving task goes onto this thread's runtime
         // (we are inside `block_on`, so a runtime is entered), and the handle is
@@ -3096,7 +2961,11 @@ async fn run_async(
         // teardown below writes through, and it is `None` for every other origin.
         #[cfg(not(target_arch = "wasm32"))]
         let mut lan_autosave: Option<lodestone_server::region_source::WorldSaveHandle> = None;
-        let (server, auth, integrated_io, remote_port) = match origin {
+        // `Some(None)` means a remote hostname with no entered port, so it
+        // must still reach SRV resolution. The outer `Option` distinguishes
+        // that remote case from an integrated connection, which has no DNS
+        // endpoint at all.
+        let (server, auth, integrated_io, remote_explicit_port) = match origin {
             Origin::Remote { host, port, auth } => (
                 ServerAddress {
                     host,
@@ -3704,7 +3573,7 @@ async fn run_async(
             .read_timeout(Some(READ_TIMEOUT))
             .respawn_policy(RespawnPolicy::Manual);
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(explicit_port) = remote_port {
+        if let Some(explicit_port) = remote_explicit_port {
             let resolved = match lodestone_net::resolve_server_address(
                 &builder_server_host,
                 explicit_port,
@@ -3908,30 +3777,6 @@ async fn run_async(
                     }
                     continue;
                 }
-                // A `Move` built before a teleport this loop has already
-                // forwarded claims a position the server overruled before it
-                // was written — see `with_authorised_pose`'s own doc for the
-                // window and for why this rewrites rather than drops. Inert
-                // whenever the simulation is level with the server, which is
-                // every drain outside that window.
-                let action = match pending_authorised_pose() {
-                    Some(pose) => {
-                        let rewritten = with_authorised_pose(action, pose);
-                        if let ClientAction::Move { pos, .. } = &rewritten {
-                            tracing::debug!(
-                                target: "transfer",
-                                x = pos.x,
-                                y = pos.y,
-                                z = pos.z,
-                                "xfer: outbound Move rewritten to the pose the server \
-                                 authorised; the simulation has not adopted the \
-                                 teleport yet"
-                            );
-                        }
-                        rewritten
-                    }
-                    None => action,
-                };
                 let _ = handle.send_action(action);
                 handed_actions += 1;
                 if handed_actions == 1 {
@@ -5089,6 +4934,17 @@ fn forward(
 ) -> Result<(), ()> {
     let update = match event {
         ClientEvent::Login { entity_id, .. } => NetUpdate::LoggedIn { entity_id },
+        // ECS ingest has already applied this event before `forward` runs. A
+        // second, ordered mirror lets the frame thread replace the local
+        // physics velocity in `poll_net` immediately before its tick loop;
+        // remote entities continue to use only the ECS fold.
+        ClientEvent::EntityVelocity {
+            entity_id,
+            velocity,
+        } => NetUpdate::EntityVelocity {
+            entity_id,
+            velocity,
+        },
         ClientEvent::Chat {
             text,
             kind,
@@ -5405,15 +5261,6 @@ fn forward(
             // and leaves the simulation's own claim alone, which is the
             // harmless direction: a relative correction is a small delta, and a
             // stale claim against one is inside the server's own tolerance.
-            note_teleport_forwarded(
-                (!flags.relative_x && !flags.relative_y && !flags.relative_z).then(|| {
-                    AuthorisedPose {
-                        pos,
-                        rotation: (!flags.relative_yaw && !flags.relative_pitch)
-                            .then_some(rotation),
-                    }
-                }),
-            );
             NetUpdate::Teleport {
                 pos,
                 rotation,
@@ -6169,6 +6016,37 @@ mod tests {
         match rx.try_recv().expect("WinGame must cross the NetUpdate channel") {
             NetUpdate::WinGame => {}
             other => panic!("expected NetUpdate::WinGame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_preserves_entity_velocity_for_the_pre_physics_mirror() {
+        let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
+        let velocity = Vec3::new(0.125, 0.25, -1.5);
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::EntityVelocity {
+                entity_id: 42,
+                velocity,
+            },
+        )
+        .expect("forward does not stop the loop");
+        match rx
+            .try_recv()
+            .expect("entity velocity must cross the shell channel")
+        {
+            NetUpdate::EntityVelocity {
+                entity_id,
+                velocity: forwarded,
+            } => {
+                assert_eq!(entity_id, 42);
+                assert_eq!(forwarded, velocity);
+            }
+            other => panic!("expected NetUpdate::EntityVelocity, got {other:?}"),
         }
     }
 
@@ -7336,218 +7214,5 @@ mod tests {
         );
 
         drain.abort();
-    }
-    /// The window this whole mechanism exists for, driven at **both**
-    /// orderings rather than at whichever one a scheduler happens to produce.
-    ///
-    /// A `Move` is a snapshot of the pose the tick loop held when it queued it.
-    /// The teleport travels a different route — driver, channel, `poll_net` —
-    /// so the ordering "confirmation written, `Move` drained, teleport adopted"
-    /// is reachable, and in that ordering the claim on the wire is a position
-    /// the server has already overruled. Vanilla's own server-side
-    /// move-player-packet handling answers that with a corrective teleport back, which is
-    /// what a rubberband is; vanilla's own client cannot produce it, because
-    /// its own client-side move-player-packet handling applies the pose, confirms, and
-    /// sends a `PosRot` at the new pose on one thread.
-    ///
-    /// The two arms differ only in whether the teleport has been adopted, and
-    /// they must answer differently — the second arm is the control, and the
-    /// value it must **not** produce is the authorised pose.
-    #[test]
-    fn a_move_drained_before_the_teleport_is_adopted_claims_the_authorised_pose() {
-        let stale = ClientAction::Move {
-            pos: Vec3::new(11.0, 1.0, 4.0),
-            rotation: Rotation::new(90.0, 12.0),
-            on_ground: true,
-            horizontal_collision: true,
-        };
-        let authorised = AuthorisedPose {
-            pos: Vec3::new(-1804.5, 71.0, 933.5),
-            rotation: Some(Rotation::new(-45.0, 0.0)),
-        };
-
-        // Behind: the teleport is forwarded and not yet adopted. A private
-        // instance, so this drives the real methods without racing every other
-        // test in the process that runs a `Sim`.
-        let sync = TeleportSync::default();
-        sync.note_forwarded(Some(authorised));
-        let behind = sync
-            .pending()
-            .expect("a forwarded, unadopted teleport must authorise a pose");
-        let rewritten = with_authorised_pose(stale.clone(), behind);
-        let ClientAction::Move {
-            pos,
-            rotation,
-            on_ground,
-            horizontal_collision,
-        } = rewritten
-        else {
-            panic!("a Move must stay a Move");
-        };
-        assert_eq!(pos, authorised.pos, "the claim must be the server's own target");
-        assert_eq!(rotation, Rotation::new(-45.0, 0.0));
-        // Vanilla's post-teleport send passes `false` for both rather than
-        // forwarding what the client last computed.
-        assert!(!on_ground);
-        assert!(!horizontal_collision);
-
-        // Level: the same `Move`, after the simulation adopted the teleport,
-        // must go out exactly as the tick loop built it.
-        sync.note_applied();
-        assert_eq!(
-            sync.pending(),
-            None,
-            "once the simulation is level, nothing may override its own claim"
-        );
-        let ClientAction::Move { pos, on_ground, .. } = stale.clone() else {
-            unreachable!()
-        };
-        assert_eq!(pos, Vec3::new(11.0, 1.0, 4.0));
-        assert!(on_ground, "the untouched action keeps the pose it was built with");
-    }
-
-    /// The ordering [`NetClient::send_action`]'s own rewrite exists for, stated
-    /// as a property of the bookkeeping rather than of a live session.
-    ///
-    /// [`TeleportSync::pending`] answers about the instant it is called, so one
-    /// unchanged stale `Move` reads **behind** while it is being built and
-    /// **level** one adoption later — and the drain may run either side of that
-    /// adoption, up to a full net-loop iteration after the `Move` was queued.
-    /// From the counters alone the drain therefore cannot tell a claim built
-    /// before the teleport from one built after it, which is exactly how a
-    /// pre-teleport position reached the survival oracle after its own
-    /// confirmation had already gone out. Asking the same question where the
-    /// claim is *built* is what removes the coin flip; this test is the reason
-    /// the rewrite is applied at both ends of the channel rather than one.
-    #[test]
-    fn one_stale_move_reads_behind_while_it_is_built_and_level_one_adoption_later() {
-        let authorised = AuthorisedPose {
-            pos: Vec3::new(-44.5, 220.0, -376.5),
-            rotation: Some(Rotation::new(0.0, 0.0)),
-        };
-        // The pose the simulation still holds while the teleport is in flight —
-        // deliberately the shape the oracle produced, a claim 153 blocks below
-        // the target rather than a nearby one, so a rewrite that silently did
-        // nothing could not pass for a correct one.
-        let stale = ClientAction::Move {
-            pos: Vec3::new(-43.5, 67.0, -376.5),
-            rotation: Rotation::new(0.0, 0.0),
-            on_ground: true,
-            horizontal_collision: false,
-        };
-
-        let sync = TeleportSync::default();
-        sync.note_forwarded(Some(authorised));
-
-        // Build time: behind, so the claim is replaced by the server's target.
-        let at_build = sync
-            .pending()
-            .expect("a forwarded, unadopted teleport must authorise a pose");
-        let ClientAction::Move { pos, .. } = with_authorised_pose(stale.clone(), at_build) else {
-            panic!("a Move must stay a Move");
-        };
-        assert_eq!(pos, authorised.pos);
-
-        // Drain time, one adoption later: the *same* action now reads level and
-        // would go out claiming the pose the server has already replaced.
-        sync.note_applied();
-        assert_eq!(
-            sync.pending(),
-            None,
-            "once the counters are level `pending` reports level, whatever the queued action \
-             was built from — the property that makes a drain-site-only rewrite unsound"
-        );
-    }
-
-    /// A teleport with a relative positional component cannot be resolved on
-    /// the net thread — the shell's pose lives in `PhysicsState`, on the frame
-    /// thread — so it records no pose and the simulation's own claim stands.
-    /// That is the harmless direction: a relative correction is a small delta.
-    #[test]
-    fn a_relative_teleport_authorises_nothing_and_leaves_the_claim_alone() {
-        let sync = TeleportSync::default();
-        sync.note_forwarded(None);
-        assert_eq!(
-            sync.pending(),
-            None,
-            "no resolvable target means no override, even while behind"
-        );
-        let action = ClientAction::Move {
-            pos: Vec3::new(11.0, 1.0, 4.0),
-            rotation: Rotation::new(90.0, 12.0),
-            on_ground: true,
-            horizontal_collision: false,
-        };
-        // And the rewrite itself never touches anything that is not a `Move`:
-        // the drain hands chat, container clicks and keep-alives through it too.
-        let keep_alive = ClientAction::KeepAliveResponse { id: 7 };
-        let pose = AuthorisedPose {
-            pos: Vec3::new(0.0, 0.0, 0.0),
-            rotation: None,
-        };
-        assert!(matches!(
-            with_authorised_pose(keep_alive, pose),
-            ClientAction::KeepAliveResponse { id: 7 }
-        ));
-        // A pose with no rotation keeps the action's own, rather than
-        // inventing one: only the position is what the server validates.
-        let ClientAction::Move { pos, rotation, .. } = with_authorised_pose(action.clone(), pose)
-        else {
-            panic!("a Move must stay a Move");
-        };
-        assert_eq!(rotation, Rotation::new(90.0, 12.0));
-        // The positive control this test would otherwise lack. Everything
-        // above asserts an *absence* — no override, no change — and a
-        // mechanism that had been switched off entirely would satisfy all of
-        // it. The position must move even when the rotation does not, so a
-        // pass-through implementation fails here.
-        assert_eq!(
-            pos,
-            Vec3::new(0.0, 0.0, 0.0),
-            "the position is overridden even when the rotation cannot be"
-        );
-    }
-
-    /// The three publishing calls, in the order a session makes them — the
-    /// wiring the two pure tests above deliberately do not touch.
-    ///
-    /// On its own [`TeleportSync`], not the process-wide one: `Sim`'s own
-    /// teleport tests run in the same process and would move a shared counter
-    /// underneath this, which is exactly the kind of failure that reads as
-    /// flakiness rather than as a defect.
-    #[test]
-    fn the_session_counters_open_and_close_the_window() {
-        let sync = TeleportSync::default();
-        assert_eq!(sync.pending(), None, "a fresh session authorises nothing");
-
-        let pose = AuthorisedPose {
-            pos: Vec3::new(8.5, 64.0, -12.5),
-            rotation: None,
-        };
-        sync.note_forwarded(Some(pose));
-        assert_eq!(
-            sync.pending(),
-            Some(pose),
-            "a forwarded teleport opens the window"
-        );
-
-        sync.note_applied();
-        assert_eq!(
-            sync.pending(),
-            None,
-            "adopting it closes the window again"
-        );
-
-        // And a second session does not inherit the first one's count: without
-        // the reset, a forward with no matching apply would leave every later
-        // drain rewriting a perfectly good `Move`.
-        sync.note_forwarded(Some(pose));
-        assert!(sync.pending().is_some(), "the window is open again");
-        sync.reset();
-        assert_eq!(
-            sync.pending(),
-            None,
-            "a reset closes it, whatever the counts were"
-        );
     }
 }

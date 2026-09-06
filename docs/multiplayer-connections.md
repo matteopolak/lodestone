@@ -12,7 +12,27 @@ each correction adopted by the simulation, every encoded outbound movement
 packet, and any explosion or direct velocity impulse applied to the local
 predicted velocity. Run
 `RUST_LOG=warn,net_join=debug just run` for a short reproduction without enabling
-unrelated renderer or shader diagnostics.
+unrelated renderer or shader diagnostics. Per-entity velocity packets use the
+separate `net_velocity` target because a busy lobby can send hundreds of them
+while only local correction timing is under investigation.
+
+Input transitions have two intentionally low-volume targets. `sim_input`
+records only a changed local intent after its physics tick, including
+shift/jump/sprint and the resulting pose, position, velocity, and ground
+contact. `net_input` records the successfully encoded packet for that intent
+with its packet metadata. For an airborne Sneak investigation, run
+`RUST_LOG=warn,net_join=debug,net_velocity=debug,sim_input=debug,net_input=debug`
+followed by `just run --host java.mineplex.com`.
+The action queue preserves input before that tick's movement action; a missing
+or differently ordered pair therefore localizes the fault to egress, while
+matching samples point to simulation or server reconciliation.
+
+Direct entity velocity is decoded and folded into ECS on the net thread, then
+mirrored to the simulation channel. The simulation filters that mirror by the
+local server entity id and replaces `PhysicsState.velocity` during its early
+network drain, before the next physics tick can send a position derived from
+the previous velocity. The `net_join` trace records that application with both
+the prior and replacement vectors.
 
 Protocol 776 position corrections carry both pose and velocity. The adapter
 preserves all nine relative bits, the shell resolves local-player velocity, and
@@ -21,7 +41,26 @@ teleports. Treating every correction as a stop produces repeated vertical
 disagreement on proxy-authored movement and turns server impulses into visible
 snaps.
 
-A saved server entry retains its port as `Option<u16>`. An explicit port is dialed unchanged. A bare hostname is passed to `lodestone_net::resolve_server_address`, which checks `_minecraft._tcp.<host>` and uses the selected SRV target when present, otherwise falling back to port `25565`.
+For a position correction, the adapter opens a correction transaction and
+surfaces the event before its acknowledgement can reach the wire. The shell
+adopts the authoritative pose, resolves relative velocity, and returns the
+resolved position and rotation to the driver. Only then does the driver write
+the acknowledgement and an unconditional full position-and-look echo with both
+ground-contact flags clear. This is a rendezvous, not a spatial heuristic.
+
+Outbound actions carry a monotonic correction generation. Movement submitted
+before the shell completes the transaction is discarded; movement submitted
+after completion has the next generation and is retained even if it was already
+queued. Keep-alives and other non-movement actions remain live across the
+boundary. This keeps a delayed pre-correction claim off the wire without
+rewriting a valid post-correction position.
+
+An absolute correction snaps both the current and previous camera positions to
+its target. Relative axes apply their delta independently to the previous
+position. Interpolation belongs to predicted movement; treating absolute server
+placements as interpolation samples delays the authoritative camera pose.
+
+A saved server entry retains its port as `Option<u16>`. CLI parsing likewise records whether `--port` appeared instead of treating its display default as entered. An explicit port is dialed unchanged. A bare hostname is passed to `lodestone_net::resolve_server_address`, which checks `_minecraft._tcp.<host>` and uses the selected SRV target when present, otherwise falling back to port `25565`.
 
 The resolved host and port are supplied through `ClientBuilder::connect_target`; the original `ServerAddress` remains untouched for the handshake. This distinction matters for virtual-hosting proxies, which route using the hostname the player entered even when DNS directs the socket elsewhere.
 
@@ -41,8 +80,11 @@ The shell currently fixes TCP connection timeout at 10 seconds and inbound packe
 RUST_LOG=warn,net=info,net_join=info just run
 ```
 
+Add `sim_input=debug,net_input=debug` to trace changed local input intents and
+their encoded packets without enabling per-tick input logs.
+
 An explicitly entered port suppresses SRV lookup. A bare hostname enables it.
 
 ## Dependencies
 
-Address resolution uses `lodestone-net` and the system DNS configuration through `hickory-resolver`. Session startup and timeout errors come from `lodestone-client`; `lodestone-shell` owns the server-list entry, loading screen, and focused tracing targets.
+Address resolution uses `lodestone-net` and the system DNS configuration through `hickory-resolver`. Session startup and timeout errors come from `lodestone-client`; `lodestone-shell` owns the server-list entry and loading screen. The focused tracing targets use `tracing` in the client driver and controller.

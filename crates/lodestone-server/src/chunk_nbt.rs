@@ -107,6 +107,7 @@
 use std::collections::HashMap;
 
 use lodestone_core::{Nbt, NbtTag};
+use lodestone_data::potion::potion_name;
 use lodestone_model::{BlockPos, ItemStack};
 use lodestone_worldgen::overworld::block_entities::GeneratedBlockEntity;
 
@@ -1200,14 +1201,14 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             );
             // The potion *identity* each bottle holds is a data component
             // (`minecraft:potion_contents`) that `items_to_nbt` deliberately
-            // does not write, so it is carried alongside as three strings.
+            // does not write, so it is carried alongside as three NBT strings.
             let potions: Vec<Nbt> = (0..lodestone_model::BrewingBottleSlot::COUNT)
                 .map(|raw| {
                     let index = lodestone_model::BrewingBottleSlot::new(raw)
                         .expect("bounded bottle loop");
                     Nbt::String(
                         b.bottle_at(index)
-                            .map(|bottle| bottle.potion.clone())
+                            .map(|bottle| potion_name(bottle.potion).to_owned())
                             .unwrap_or_default(),
                     )
                 })
@@ -1491,10 +1492,10 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
                 let Some(kind) = bottle_kind_for_item(&stack.item.to_string()) else {
                     continue;
                 };
-                *bottle = Some(Bottle::new(
-                    kind,
-                    potions.get(index).cloned().unwrap_or_default(),
-                ));
+                let Some(potion) = potions.get(index) else {
+                    continue;
+                };
+                *bottle = Bottle::from_potion_name(kind, potion);
             }
             let ingredient = items[3]
                 .as_ref()
@@ -1898,6 +1899,32 @@ mod crafter_nbt_tests {
             .find(|(name, _)| name == "id")
             .map(|(_, value)| value.clone());
         assert_eq!(id, Some(lodestone_core::Nbt::String("minecraft:crafter".to_owned())));
+    }
+}
+
+#[cfg(test)]
+mod brewing_nbt_tests {
+    use lodestone_data::potion::potion_name;
+    use lodestone_model::BlockPos;
+
+    use super::{block_entity_from_nbt, block_entity_to_nbt};
+    use crate::block_entities::BlockEntity;
+    use crate::brewing::{Bottle, BottleKind, BrewingStand};
+
+    #[test]
+    fn brewing_potion_name_is_confined_to_the_nbt_boundary() {
+        let mut stand = BrewingStand::new();
+        let bottle = Bottle::from_potion_name(BottleKind::Splash, "minecraft:swiftness")
+            .expect("generated potion name");
+        stand.set_bottle(0, Some(bottle));
+
+        let nbt = block_entity_to_nbt(BlockPos::new(3, 70, -4), &BlockEntity::BrewingStand(stand));
+        let (_, BlockEntity::BrewingStand(decoded)) = block_entity_from_nbt(&nbt).expect("decode brewing stand") else {
+            panic!("must preserve the brewing-stand variant")
+        };
+        let bottle = decoded.bottle(0).expect("first bottle survives persistence");
+        assert_eq!(bottle.kind, BottleKind::Splash);
+        assert_eq!(potion_name(bottle.potion), "minecraft:swiftness");
     }
 }
 

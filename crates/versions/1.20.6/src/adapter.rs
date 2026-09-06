@@ -21,6 +21,7 @@
 //! frame a column: it does not know how many sections one holds, and a wrong
 //! section count desynchronises the stream rather than erroring.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, LockResult, Mutex, MutexGuard, PoisonError};
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
@@ -54,10 +55,11 @@ use crate::packets::entity::{
     RelEntityMove, SetPassengers, SpawnEntityExperienceOrb, SpawnObject,
 };
 use crate::packets::game::{
-    BlockDig, BlockPlace, ChunkBatchFinished, ChunkBatchReceived, ClientCommand,
-    ClientboundAbilities, ClientboundPositionLook, ConfigurationAcknowledged, DifficultyPacket,
-    EntityAction, EntityEffect, GameStateChange, JoinGame, KickDisconnect, OpenSignEntity,
-    PlayerlistHeader, RecipeBook, RemoveEntityEffect, Respawn, ServerboundArmAnimation,
+    BlockBreakAnimation, BlockDig, BlockPlace, ChunkBatchFinished, ChunkBatchReceived,
+    ClientCommand, ClientboundAbilities, ClientboundPositionLook, ConfigurationAcknowledged,
+    DifficultyPacket, EntityAction, EntityEffect, GameStateChange, JoinGame, KickDisconnect,
+    MultiBlockChange, OpenSignEntity, PlayerlistHeader, RecipeBook, RemoveEntityEffect, Respawn,
+    ServerboundArmAnimation,
     ServerboundFlying, ServerboundLook, ServerboundPosition, ServerboundPositionLook, SpawnPosition,
     Spectate, TeleportConfirm, UpdateHealth, UpdateTime, UseEntity, UseEntityAt, UseEntityInteract,
     UseItem,
@@ -873,6 +875,85 @@ fn dec_err(err: impl std::fmt::Display) -> AdapterError {
     AdapterError::Decode(err.to_string())
 }
 
+/// Consumes one protocol-766 particle value without retaining its visual
+/// parameters. The local protocol schema fixes both the registry's 109 ids and
+/// the option shape selected by each id, so this is sufficient to reach the
+/// following sound holder without guessing its byte boundary.
+fn skip_explosion_particle(reader: &mut Reader<'_>, ctx: Ctx) -> Result<(), AdapterError> {
+    let id = reader.var_i32().map_err(dec_err)?;
+    if !(0..=108).contains(&id) {
+        return Err(AdapterError::Decode(format!(
+            "unknown 766 explosion particle id {id}"
+        )));
+    }
+    match id {
+        1 | 2 | 28 | 105 | 99 => {
+            let _ = reader.var_i32().map_err(dec_err)?;
+        }
+        13 => {
+            for _ in 0..4 {
+                let _ = reader.f32().map_err(dec_err)?;
+            }
+        }
+        14 => {
+            for _ in 0..7 {
+                let _ = reader.f32().map_err(dec_err)?;
+            }
+        }
+        20 => {
+            let _ = reader.i32().map_err(dec_err)?;
+        }
+        35 => {
+            let _ = reader.f32().map_err(dec_err)?;
+        }
+        44 => {
+            let _ = Slot::decode(reader, ctx).map_err(dec_err)?;
+        }
+        45 => {
+            let position_kind = reader.var_i32().map_err(dec_err)?;
+            match position_kind {
+                0 => {
+                    let _ = Position::decode(reader, ctx).map_err(dec_err)?;
+                }
+                1 => {
+                    let _ = reader.var_i32().map_err(dec_err)?;
+                    let _ = reader.f32().map_err(dec_err)?;
+                }
+                _ => {
+                    return Err(AdapterError::Decode(format!(
+                        "invalid 766 vibration position kind {position_kind}"
+                    )));
+                }
+            }
+            let _ = reader.var_i32().map_err(dec_err)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Consumes the mandatory sound holder following an explosion's particle
+/// values. A positive holder is an indexed registry reference; zero instead
+/// introduces the inline identifier and optional fixed range.
+fn skip_explosion_sound_holder(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+    let holder = reader.var_i32().map_err(dec_err)?;
+    match holder {
+        0 => {
+            let _ = reader.string(32_767).map_err(dec_err)?;
+            if reader.bool().map_err(dec_err)? {
+                let _ = reader.f32().map_err(dec_err)?;
+            }
+        }
+        1.. => {}
+        _ => {
+            return Err(AdapterError::Decode(format!(
+                "negative 766 explosion sound holder {holder}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Fn-pointer payload every `play` clientbound handler below shares.
 type PlayHandler =
     fn(&V766Adapter, &mut dyn WorldSink, &[u8]) -> Result<Vec<Directive>, AdapterError>;
@@ -1576,6 +1657,153 @@ impl V766Adapter {
         })])
     }
 
+    /// `minecraft:multi_block_change` — sparse block-state changes inside one
+    /// section. The source state ids use this era's palette and must take the
+    /// same canonical bridge as both a column and `block_change`.
+    fn handle_play_multi_block_change(
+        adapter: &V766Adapter,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: MultiBlockChange = adapter.decode_body_exact(payload)?;
+        let shape = adapter.current_shape();
+        let mut tally = FallbackTally::default();
+        let mut changed = Vec::with_capacity(body.blocks.len());
+        for (local, raw) in &body.blocks {
+            let raw = u32::try_from(*raw).map_err(|_| {
+                AdapterError::Decode(format!("multi_block_change state id {raw} is negative"))
+            })?;
+            let state = shape.canonical.resolve_or_air(raw, &mut tally);
+            let x = body.section_x * 16 + i32::from(local[0]);
+            let y = body.section_y * 16 + i32::from(local[1]);
+            let z = body.section_z * 16 + i32::from(local[2]);
+            world.set_block(x, y, z, state.raw());
+            world.sync_block_entity(
+                x,
+                y,
+                z,
+                block_entity_type(state).map(|kind| kind.raw()),
+            );
+            changed.push(*local);
+        }
+        if changed.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
+            section: SectionPos::new(body.section_x, body.section_y, body.section_z),
+            blocks: changed,
+        })])
+    }
+
+    /// `minecraft:block_break_animation` — a remote break-overlay update.
+    fn handle_play_block_break_animation(
+        adapter: &V766Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: BlockBreakAnimation = adapter.decode_body_exact(payload)?;
+        Ok(vec![Directive::Emit(ClientEvent::BlockDestruction {
+            entity_id: body.entity_id,
+            pos: body.location.0,
+            progress: body.destroy_stage as u8,
+        })])
+    }
+
+    /// `minecraft:explosion`. The affected offsets are authoritative air
+    /// writes, while the two trailing particles and sound holder are consumed
+    /// to prove the complete body remains aligned.
+    fn handle_play_explosion(
+        adapter: &V766Adapter,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let pos = Vec3::new(
+            reader.f64().map_err(dec_err)?,
+            reader.f64().map_err(dec_err)?,
+            reader.f64().map_err(dec_err)?,
+        );
+        let radius = reader.f32().map_err(dec_err)?;
+        let count = reader.var_i32().map_err(dec_err)?;
+        if count < 0 {
+            return Err(AdapterError::Decode(format!(
+                "explosion affected-block count {count} is negative"
+            )));
+        }
+        // Motion, interaction, two particle ids, and a sound holder each have
+        // a mandatory minimum representation after the offset array. Reserve
+        // them before accepting the count so offset bytes cannot consume the
+        // beginning of that tail.
+        const MIN_EXPLOSION_TAIL_BYTES: usize = 3 * size_of::<f32>() + 1 + 2 + 1;
+        let offset_bytes = reader.remaining().checked_sub(MIN_EXPLOSION_TAIL_BYTES).ok_or_else(|| {
+            AdapterError::Decode("explosion lacks its mandatory particle and sound tail".into())
+        })?;
+        let count = usize::try_from(count).expect("negative count rejected above");
+        if count > offset_bytes / 3 {
+            return Err(AdapterError::Decode(format!(
+                "explosion affected-block count {count} leaves no mandatory tail"
+            )));
+        }
+        let mut affected_blocks = Vec::with_capacity(count);
+        for _ in 0..count {
+            affected_blocks.push([
+                reader.i8().map_err(dec_err)?,
+                reader.i8().map_err(dec_err)?,
+                reader.i8().map_err(dec_err)?,
+            ]);
+        }
+        let knockback = Some(Vec3::new(
+            f64::from(reader.f32().map_err(dec_err)?),
+            f64::from(reader.f32().map_err(dec_err)?),
+            f64::from(reader.f32().map_err(dec_err)?),
+        ));
+        let _block_interaction = reader.var_i32().map_err(dec_err)?;
+        skip_explosion_particle(&mut reader, adapter.ctx())?;
+        skip_explosion_particle(&mut reader, adapter.ctx())?;
+        skip_explosion_sound_holder(&mut reader)?;
+        reader.ensure_empty().map_err(dec_err)?;
+
+        let origin_x = pos.x.floor() as i32;
+        let origin_y = pos.y.floor() as i32;
+        let origin_z = pos.z.floor() as i32;
+        let air = adapter.current_shape().air_id;
+        let mut changed_sections: BTreeMap<(i32, i32, i32), Vec<[u8; 3]>> = BTreeMap::new();
+        for offset in &affected_blocks {
+            let x = origin_x.checked_add(i32::from(offset[0])).ok_or_else(|| {
+                AdapterError::Decode("explosion x offset overflows world coordinates".into())
+            })?;
+            let y = origin_y.checked_add(i32::from(offset[1])).ok_or_else(|| {
+                AdapterError::Decode("explosion y offset overflows world coordinates".into())
+            })?;
+            let z = origin_z.checked_add(i32::from(offset[2])).ok_or_else(|| {
+                AdapterError::Decode("explosion z offset overflows world coordinates".into())
+            })?;
+            world.set_block(x, y, z, air);
+            world.sync_block_entity(x, y, z, None);
+            changed_sections
+                .entry((x >> 4, y >> 4, z >> 4))
+                .or_default()
+                .push([(x & 15) as u8, (y & 15) as u8, (z & 15) as u8]);
+        }
+
+        let mut directives = changed_sections
+            .into_iter()
+            .map(|((x, y, z), blocks)| {
+                Directive::Emit(ClientEvent::SectionBlocksChanged {
+                    section: SectionPos::new(x, y, z),
+                    blocks,
+                })
+            })
+            .collect::<Vec<_>>();
+        directives.push(Directive::Emit(ClientEvent::Explosion {
+            pos,
+            radius,
+            affected_blocks,
+            knockback,
+        }));
+        Ok(directives)
+    }
+
     /// `minecraft:kick_disconnect`. Anonymous NBT here, where the
     /// login-state disconnect at this same protocol is still a JSON string.
     fn handle_play_kick_disconnect(
@@ -1635,21 +1863,53 @@ impl V766Adapter {
         })])
     }
 
-    /// `minecraft:game_state_change`. Reason `3` is a game-mode change; the
-    /// float carries the new mode's ordinal.
+    /// `minecraft:game_state_change`. The server changes one aspect at a time:
+    /// rain starts/stops at reasons `1`/`2`, its intensities are reasons `7`/`8`,
+    /// and reason `3` carries a game-mode ordinal.
     fn handle_play_game_state_change(
         adapter: &V766Adapter,
         _world: &mut dyn WorldSink,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
         let body: GameStateChange = adapter.decode_body_exact(payload)?;
-        if body.reason != 3 {
-            return Ok(Vec::new());
-        }
-        let mode = game_mode(body.value as u8)?;
-        Ok(vec![Directive::Emit(ClientEvent::GameModeChanged {
-            game_mode: mode,
-        })])
+        let directives = match body.reason {
+            1 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: Some(true),
+                rain_level: None,
+                thunder_level: None,
+            })],
+            2 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: Some(false),
+                rain_level: None,
+                thunder_level: None,
+            })],
+            3 => {
+                if !body.value.is_finite()
+                    || body.value.fract() != 0.0
+                    || !(0.0..=3.0).contains(&body.value)
+                {
+                    return Err(AdapterError::Decode(format!(
+                        "game_state_change game-mode value {} is not an ordinal in 0..=3",
+                        body.value
+                    )));
+                }
+                vec![Directive::Emit(ClientEvent::GameModeChanged {
+                    game_mode: game_mode(body.value as u8)?,
+                })]
+            }
+            7 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: Some(body.value),
+                thunder_level: None,
+            })],
+            8 => vec![Directive::Emit(ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: None,
+                thunder_level: Some(body.value),
+            })],
+            _ => Vec::new(),
+        };
+        Ok(directives)
     }
 
     /// `minecraft:difficulty`.
@@ -2258,6 +2518,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:explosion",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_explosion,
+        ),
+    ),
+    (
         "minecraft:animation",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2311,6 +2578,20 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
             V766Adapter::handle_play_block_change,
+        ),
+    ),
+    (
+        "minecraft:multi_block_change",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_multi_block_change,
+        ),
+    ),
+    (
+        "minecraft:block_break_animation",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_block_break_animation,
         ),
     ),
     (
@@ -2525,10 +2806,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "block-prediction acknowledgement needs a client-side prediction queue this adapter does not keep",
     ),
     lodestone_core::dispatch::IGNORED::new(
-        "minecraft:block_break_animation",
-        "the progressive break overlay has no draw path wired for this era",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
         "minecraft:tile_entity_data",
         "a block entity's payload is modelled only where a column delivers it; a standalone update needs a per-type NBT model",
     ),
@@ -2583,10 +2860,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:debug_sample",
         "the debug-sample channel has no consumer",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:explosion",
-        "the explosion cue has no particle or knockback path wired for this era",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:open_horse_window",
@@ -2663,10 +2936,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:add_resource_pack",
         "server resource packs are not applied by this client",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:multi_block_change",
-        "the packed section-relative form needs a decoder this era does not yet carry; single block changes are handled",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:select_advancement_tab",
@@ -3406,6 +3675,22 @@ mod mob_effect_tests {
 #[cfg(test)]
 mod dispatch_coverage_tests {
     use super::*;
+    use lodestone_core::Nbt;
+    use lodestone_world::{ChunkColumn, ColumnLight, World};
+
+    fn decode_play_with_world(
+        world: &mut World,
+        packet_id: i32,
+        body: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        V766Adapter::new()
+            .handle_packet(world, ConnectionState::Play, packet_id, body)
+    }
+
+    fn decode_play(packet_id: i32, body: &[u8]) -> Vec<Directive> {
+        decode_play_with_world(&mut World::new(), packet_id, body)
+            .expect("the independent packet bytes decode")
+    }
 
     /// The real table, built from the real `ENTRIES`/`CLIENTBOUND`/`IGNORED`
     /// for every protocol in this era, must construct — meaningful because
@@ -3528,5 +3813,287 @@ mod dispatch_coverage_tests {
         assert!(!join.world_state.has_death_location);
         assert_eq!(join.world_state.portal_cooldown, 0);
         assert!(!join.enforces_secure_chat);
+    }
+
+    /// The record values below are manually assembled from protocol 766's
+    /// `state << 12 | x << 8 | z << 4 | y` layout. In particular, the first
+    /// record is `0x1234`, encoded as the two-byte **VarInt** `b4 24`. The
+    /// protocol definition names this record type `varint`; the test keeps the
+    /// count and both record bytes literal rather than calling our encoder.
+    #[test]
+    fn multi_block_change_reads_signed_section_bits_and_varint_records() {
+        // section (-2, -4, 3), two records: state 1 at (2, 4, 3), then state 2
+        // at (15, 1, 0). The first eight bytes are the independently packed
+        // 22/22/20-bit coordinate long, in x/z/y field order.
+        let body = [
+            0xff, 0xff, 0xf8, 0x00, 0x00, 0x3f, 0xff, 0xfc, 0x02, 0xb4, 0x24, 0x81, 0x5e,
+        ];
+        assert_eq!(
+            decode_play(73, &body),
+            vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
+                section: SectionPos::new(-2, -4, 3),
+                blocks: vec![[2, 4, 3], [15, 1, 0]],
+            })]
+        );
+    }
+
+    #[test]
+    fn block_break_animation_preserves_the_raw_clear_stage() {
+        // entity 300 (`ac 02`), then packed position (1, 64, -2), then -1.
+        let body = [
+            0xac, 0x02, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xe0, 0x40, 0xff,
+        ];
+        assert_eq!(
+            decode_play(6, &body),
+            vec![Directive::Emit(ClientEvent::BlockDestruction {
+                entity_id: 300,
+                pos: lodestone_model::BlockPos::new(1, 64, -2),
+                progress: 255,
+            })]
+        );
+    }
+
+    #[test]
+    fn game_state_weather_reasons_update_only_the_changed_aspect() {
+        let cases: [(u8, f32, ClientEvent); 4] = [
+            (
+                1,
+                0.0,
+                ClientEvent::WeatherChanged {
+                    raining: Some(true),
+                    rain_level: None,
+                    thunder_level: None,
+                },
+            ),
+            (
+                2,
+                0.0,
+                ClientEvent::WeatherChanged {
+                    raining: Some(false),
+                    rain_level: None,
+                    thunder_level: None,
+                },
+            ),
+            (
+                7,
+                0.625,
+                ClientEvent::WeatherChanged {
+                    raining: None,
+                    rain_level: Some(0.625),
+                    thunder_level: None,
+                },
+            ),
+            (
+                8,
+                0.375,
+                ClientEvent::WeatherChanged {
+                    raining: None,
+                    rain_level: None,
+                    thunder_level: Some(0.375),
+                },
+            ),
+        ];
+        for (reason, value, expected) in cases {
+            let mut body = vec![reason];
+            body.extend(value.to_be_bytes());
+            assert_eq!(decode_play(34, &body), vec![Directive::Emit(expected)]);
+        }
+    }
+
+    #[test]
+    fn game_state_game_mode_requires_a_finite_integral_ordinal() {
+        assert_eq!(
+            decode_play(34, &[0x03, 0x40, 0x40, 0x00, 0x00]),
+            vec![Directive::Emit(ClientEvent::GameModeChanged {
+                game_mode: GameMode::Spectator,
+            })]
+        );
+
+        // -1, 1.5, 4, and a quiet NaN are all distinct invalid f32 shapes.
+        for body in [
+            [0x03, 0xbf, 0x80, 0x00, 0x00],
+            [0x03, 0x3f, 0xc0, 0x00, 0x00],
+            [0x03, 0x40, 0x80, 0x00, 0x00],
+            [0x03, 0x7f, 0xc0, 0x00, 0x00],
+        ] {
+            assert!(
+                decode_play_with_world(&mut World::new(), 34, &body).is_err(),
+                "malformed game-mode body {body:02x?} must not coerce into a mode"
+            );
+        }
+    }
+
+    #[test]
+    fn explosion_consumes_particle_and_sound_holder_tail() {
+        // Centre (1.5, -2.25, 3.75), radius 4, two signed offsets, motion
+        // (1, -0.5, 2), interaction 2. The last three bytes are two simple
+        // particle ids and a registry sound holder reference.
+        let body = [
+            0x3f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x02, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x40, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x80, 0x00, 0x00,
+            0x02, 0xfe, 0x03, 0xf8, 0x04, 0xfb, 0x06, 0x3f, 0x80, 0x00, 0x00, 0xbf, 0x00, 0x00,
+            0x00, 0x40, 0x00, 0x00, 0x00, 0x02, 0x15, 0x16, 0x01,
+        ];
+        assert_eq!(
+            decode_play(32, &body),
+            vec![
+                Directive::Emit(ClientEvent::SectionBlocksChanged {
+                    section: SectionPos::new(-1, 0, -1),
+                    blocks: vec![[15, 0, 11]],
+                }),
+                Directive::Emit(ClientEvent::SectionBlocksChanged {
+                    section: SectionPos::new(0, -1, 0),
+                    blocks: vec![[5, 8, 9]],
+                }),
+                Directive::Emit(ClientEvent::Explosion {
+                    pos: Vec3::new(1.5, -2.25, 3.75),
+                    radius: 4.0,
+                    affected_blocks: vec![[-2, 3, -8], [4, -5, 6]],
+                    knockback: Some(Vec3::new(1.0, -0.5, 2.0)),
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn explosion_rejects_a_missing_or_overrun_mandatory_tail() {
+        // These bytes are the complete fixed prefix and two offsets from the
+        // preceding test, without either particle head or sound-holder head.
+        let missing_tail = [
+            0x3f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x02, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x40, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x80, 0x00, 0x00,
+            0x02, 0xfe, 0x03, 0xf8, 0x04, 0xfb, 0x06, 0x3f, 0x80, 0x00, 0x00, 0xbf, 0x00, 0x00,
+            0x00, 0x40, 0x00, 0x00, 0x00, 0x02,
+        ];
+        assert!(
+            decode_play_with_world(&mut World::new(), 32, &missing_tail).is_err(),
+            "an explosion must carry both particle heads and its sound holder"
+        );
+
+        // Identical complete packet except that count says there are three
+        // offsets. A prefix-only decoder would consume the first three motion
+        // bytes as the final offset and accept the false boundary.
+        let mut count_eats_prefix = missing_tail.to_vec();
+        count_eats_prefix.extend([0x15, 0x16, 0x01]);
+        count_eats_prefix[28] = 0x03;
+        assert!(
+            decode_play_with_world(&mut World::new(), 32, &count_eats_prefix).is_err(),
+            "the offset count must reserve the mandatory tail"
+        );
+    }
+
+    #[test]
+    fn explosion_skips_parameterised_particle_options_exactly() {
+        // First particle is id 1 (block) with state id 0; the next is simple
+        // id 22, followed by sound-holder reference 0. If the block option is
+        // not consumed exactly, that option becomes the second particle head.
+        let body = [
+            &[0x00_u8; 24][..],
+            &[0x3f, 0x80, 0x00, 0x00], // radius 1
+            &[0x00],                   // no affected offsets
+            &[0x00; 12],               // zero motion
+            &[0x00],                   // block interaction
+            &[0x01, 0x00, 0x16, 0x01], // block(state 0), explosion, sound 0
+        ]
+        .concat();
+        assert_eq!(
+            decode_play(32, &body),
+            vec![Directive::Emit(ClientEvent::Explosion {
+                pos: Vec3::new(0.0, 0.0, 0.0),
+                radius: 1.0,
+                affected_blocks: Vec::new(),
+                knockback: Some(Vec3::new(0.0, 0.0, 0.0)),
+            })]
+        );
+    }
+
+    #[test]
+    fn explosion_skips_effect_flash_and_instant_effect_without_options() {
+        // The local 766 schema gives particle ids 15, 39, and 43 no option
+        // payload. Each tail combines two of those ids with sound holder 1.
+        for tail in [[0x0f, 0x27, 0x01], [0x2b, 0x0f, 0x01]] {
+            let body = [
+                &[0x00_u8; 24][..],
+                &[0x3f, 0x80, 0x00, 0x00], // radius 1
+                &[0x00],                   // no affected offsets
+                &[0x00; 12],               // zero motion
+                &[0x00],                   // block interaction
+                &tail,
+            ]
+            .concat();
+            assert_eq!(
+                decode_play(32, &body),
+                vec![Directive::Emit(ClientEvent::Explosion {
+                    pos: Vec3::new(0.0, 0.0, 0.0),
+                    radius: 1.0,
+                    affected_blocks: Vec::new(),
+                    knockback: Some(Vec3::new(0.0, 0.0, 0.0)),
+                })]
+            );
+        }
+    }
+
+    #[test]
+    fn explosion_removes_loaded_blocks_and_their_block_entities() {
+        // Centre zero, one offset (1, 2, 3), zero motion and interaction,
+        // followed by two simple particles and a registry sound holder.
+        let body = [
+            &[0x00_u8; 24][..],
+            &[0x3f, 0x80, 0x00, 0x00], // radius 1
+            &[0x01, 0x01, 0x02, 0x03], // one offset at (1, 2, 3)
+            &[0x00; 12],               // zero motion
+            &[0x00],                   // block interaction
+            &[0x15, 0x16, 0x01],       // two simple particles, sound 0
+        ]
+        .concat();
+        let adapter = V766Adapter::new();
+        let shape = adapter.current_shape();
+        let mut column = ChunkColumn::new(
+            shape.min_y,
+            shape.section_count,
+            shape.block_kind,
+            shape.biome_kind,
+            shape.air_id,
+            shape.biome_id,
+        );
+        column.set_block(1, 2, 3, 777);
+        let mut world = World::new();
+        world.load(
+            WorldChunkPos::new(0, 0),
+            LoadedChunk::new(
+                column,
+                ColumnLight::new(shape.section_count),
+                Heightmaps::new(),
+                Vec::new(),
+            ),
+        );
+        world.set_block_entity(1, 2, 3, 42, Nbt::End);
+
+        let directives = adapter
+            .handle_packet(&mut world, ConnectionState::Play, 32, &body)
+            .expect("complete explosion decodes and applies");
+        assert_eq!(world.block_state_at(1, 2, 3), Some(shape.air_id));
+        let loaded = world
+            .unload(WorldChunkPos::new(0, 0))
+            .expect("fixture chunk stays loaded");
+        assert!(
+            loaded.block_entities.is_empty(),
+            "the air write must clear the removed block's block entity"
+        );
+        assert_eq!(
+            directives,
+            vec![
+                Directive::Emit(ClientEvent::SectionBlocksChanged {
+                    section: SectionPos::new(0, 0, 0),
+                    blocks: vec![[1, 2, 3]],
+                }),
+                Directive::Emit(ClientEvent::Explosion {
+                    pos: Vec3::new(0.0, 0.0, 0.0),
+                    radius: 1.0,
+                    affected_blocks: vec![[1, 2, 3]],
+                    knockback: Some(Vec3::new(0.0, 0.0, 0.0)),
+                }),
+            ]
+        );
     }
 }

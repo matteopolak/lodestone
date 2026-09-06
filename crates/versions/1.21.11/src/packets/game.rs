@@ -749,6 +749,23 @@ pub struct BlockUpdate {
     pub state_id: i32,
 }
 
+/// Clientbound `minecraft:block_destruction` — another entity's mining crack.
+///
+/// The position uses the protocol's packed `Position` type, while the entity
+/// id is a VarInt and the stage is an unscaled byte. Stages outside the visible
+/// range are retained so the client-side overlay can clear an existing entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:block_destruction", state = Play, bound = Client, protocols = "774..=774")]
+pub struct BlockDestruction {
+    /// Entity id of the player or mob breaking the block.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Block whose crack overlay changed.
+    pub location: Position,
+    /// Raw break stage byte.
+    pub progress: u8,
+}
+
 /// Clientbound `minecraft:move_vehicle` — the server correcting the position
 /// of the vehicle the player is riding.
 #[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]

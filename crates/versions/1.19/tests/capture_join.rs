@@ -676,7 +676,7 @@ include!("captures/neighbour_names.rs");
 /// tick becomes a vehicle with no passengers. The others are wrong in a way
 /// something might: a mob spawn read as an experience orb lands at
 /// coordinates on the order of `1e222`.
-const MISROUTE_FROM_758: (usize, usize, usize, usize) = (35, 19, 10, 0);
+const MISROUTE_FROM_758: (usize, usize, usize, usize) = (36, 18, 10, 0);
 
 /// The same, for the 1.20.6 capture — and it carries the sharpest single
 /// result in this file.

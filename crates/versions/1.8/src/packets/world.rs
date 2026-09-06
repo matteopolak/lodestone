@@ -98,3 +98,77 @@ pub struct OpenSignEntity {
     /// Block position of the sign.
     pub location: Position,
 }
+
+/// Clientbound `explosion`.
+///
+/// The affected-block list is counted with a fixed-width `i32`, so this packet
+/// cannot use the derive's length annotations. The trailing player-motion
+/// vector is always present on this wire, including when all three components
+/// are zero.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Explosion {
+    /// Explosion centre.
+    pub x: f32,
+    /// Explosion centre.
+    pub y: f32,
+    /// Explosion centre.
+    pub z: f32,
+    /// Blast radius.
+    pub radius: f32,
+    /// Removed-block offsets relative to the floored explosion position.
+    pub affected_block_offsets: Vec<[i8; 3]>,
+    /// Local player's additive X velocity impulse.
+    pub player_motion_x: f32,
+    /// Local player's additive Y velocity impulse.
+    pub player_motion_y: f32,
+    /// Local player's additive Z velocity impulse.
+    pub player_motion_z: f32,
+}
+
+/// Generous bound for an explosion's removed-block list.
+const MAX_EXPLOSION_BLOCKS: i32 = 1_000_000;
+
+impl lodestone_core::Decode for Explosion {
+    fn decode(
+        reader: &mut lodestone_core::Reader<'_>,
+        _ctx: lodestone_core::Ctx,
+    ) -> lodestone_core::Result<Self> {
+        let x = reader.f32()?;
+        let y = reader.f32()?;
+        let z = reader.f32()?;
+        let radius = reader.f32()?;
+        let count = reader.i32()?;
+        if count < 0 {
+            return Err(lodestone_core::Error::NegativeLength(count));
+        }
+        if count > MAX_EXPLOSION_BLOCKS {
+            return Err(lodestone_core::Error::LimitExceeded {
+                limit: MAX_EXPLOSION_BLOCKS as usize,
+                actual: count as usize,
+            });
+        }
+
+        let mut affected_block_offsets = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            affected_block_offsets.push([reader.i8()?, reader.i8()?, reader.i8()?]);
+        }
+
+        Ok(Self {
+            x,
+            y,
+            z,
+            radius,
+            affected_block_offsets,
+            player_motion_x: reader.f32()?,
+            player_motion_y: reader.f32()?,
+            player_motion_z: reader.f32()?,
+        })
+    }
+}
+
+impl lodestone_core::Packet for Explosion {
+    const NAME: &'static str = "minecraft:explosion";
+    const STATE: lodestone_core::State = lodestone_core::State::Play;
+    const BOUND: lodestone_core::Bound = lodestone_core::Bound::Client;
+    const PROTOCOLS: lodestone_core::ProtocolRange = lodestone_core::ProtocolRange::new(47, 47);
+}

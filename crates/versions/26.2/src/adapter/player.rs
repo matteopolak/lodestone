@@ -381,7 +381,7 @@ fn teleport_flags(value: i32) -> TeleportFlags {
 /// look-angle change before applying those components. Zero trailing bytes is
 /// the misparse detector.
 fn handle_player_position(
-    adapter: &V770Adapter,
+    _adapter: &V770Adapter,
     payload: &[u8],
 ) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
@@ -397,37 +397,23 @@ fn handle_player_position(
     let relatives = reader.i32().map_err(dec_err)?;
     reader.ensure_empty().map_err(dec_err)?;
 
-    // This echo is unconditional and per-packet — there is no pending/latched
-    // teleport-id state to get stuck here (see this crate's own doc on
-    // `encode_teleport` for why the server side tracks no id either). If the
-    // real server keeps rejecting movement after a transfer/reconfigure, this
-    // line having fired with the same `id` the server just sent rules the
-    // client's half of teleport confirmation out — look at whether the write
-    // actually reached the wire (a `Directive::Send` failure stops the
-    // session; see `Driver::execute`) or at the server's own bookkeeping.
+    // Each correction has one confirmation, but the connection layer holds it
+    // until the simulation adopts this event. That establishes the wire order
+    // the server expects: authoritative pose, confirmation, then full pose
+    // echo. The adapter deliberately keeps no correction-id latch.
     tracing::info!(
         target: "net",
         id,
         x, y, z,
         yaw, pitch,
         relatives,
-        "PLAYER_POSITION received; echoing ACCEPT_TELEPORTATION with the same id"
+        "PLAYER_POSITION received; deferring correction response until the local pose is adopted"
     );
 
-    // The `transfer` target's inbound half. A teleport whose position is fully
-    // absolute becomes the yardstick every subsequent outbound movement packet
-    // is measured against; a relative one is logged and leaves the previous
-    // yardstick alone. See the `xfer` module's doc.
     let flags = teleport_flags(relatives);
-    let absolute_target = (!flags.relative_x && !flags.relative_y && !flags.relative_z)
-        .then(|| Vec3::new(x, y, z));
-    adapter.note_accepted_teleport(id, absolute_target, Rotation::new(yaw, pitch), relatives);
 
     Ok(vec![
-        send(
-            play::serverbound::ACCEPT_TELEPORTATION,
-            &AcceptTeleportation { id },
-        )?,
+        Directive::AwaitTeleportCorrection,
         Directive::Emit(ClientEvent::TeleportPlayer {
             pos: Vec3::new(x, y, z),
             rotation: Rotation::new(yaw, pitch),
@@ -440,6 +426,10 @@ fn handle_player_position(
                 rotate_delta: relatives & (1 << 8) != 0,
             }),
         }),
+        send(
+            play::serverbound::ACCEPT_TELEPORTATION,
+            &AcceptTeleportation { id },
+        )?,
     ])
 }
 
