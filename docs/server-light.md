@@ -30,9 +30,10 @@ The served sky payload keeps the first uniformly full-sky section above the high
 section, then leaves higher sections absent. This is a wire-shape rule, not a lighting-value change:
 the omitted sections still resolve to full daylight, while retaining them would allocate redundant
 full arrays and fail byte parity. The engine leaves the result alone when that premise is not true,
-so a non-full section is never silently converted into an omission. Block-light arrays are not
-trimmed by this rule; a non-zero border value can be a legitimate contribution from a loaded
-neighbour.
+so a non-full section is never silently converted into an omission. Initial chunk packets also omit
+uniformly zero block-light sections; non-zero values, including a border contribution from a loaded
+neighbour, remain present. Light-update packets retain explicit zero sections because those clear
+the client's existing value rather than describing a new chunk.
 
 ### Keeping light current after an edit
 

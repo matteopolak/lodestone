@@ -33,7 +33,9 @@ than one 16-block chunk boundary at its maximum range. A missing neighbour is
 an opaque seam, never a request to generate it. The worker-facing
 `ChunkEncoder` remains a one-column contract, so this family deliberately uses
 the synchronous neighbourhood path instead of silently emitting isolated light
-from a worker.
+from a worker. Initial chunk encoding elides uniformly zero block-light sections;
+non-zero arrays remain present, while explicit zero sections remain available to
+light-update packets that clear an existing value.
 
 The decoder in `packets::chunk::LevelChunkWithLight` consumes both section
 counters for alignment, bounds the length-prefixed section blob, and applies

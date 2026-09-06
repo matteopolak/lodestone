@@ -445,11 +445,18 @@ fn wire_light_is_the_engine_output_for_the_same_column() {
             expected.sky(s),
             "sky light section {s} on the wire differs from the engine's own output"
         );
-        assert_eq!(
-            served.block(s),
-            expected.block(s),
-            "block light section {s} on the wire differs from the engine's own output"
-        );
+        if matches!(expected.block(s), LightData::Uniform(0)) {
+            assert!(
+                matches!(served.block(s), LightData::Missing),
+                "uniformly dark initial block-light section {s} must be elided"
+            );
+        } else {
+            assert_eq!(
+                served.block(s),
+                expected.block(s),
+                "non-zero block light section {s} on the wire differs from the engine's output"
+            );
+        }
         if matches!(served.sky(s), LightData::Values(_)) {
             varied += 1;
         }
