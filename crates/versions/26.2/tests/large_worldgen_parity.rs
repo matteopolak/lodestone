@@ -3,8 +3,10 @@
 mod support { pub mod large_parity_manifest; }
 
 use std::{fs::File, io::{BufReader, Read, Seek, SeekFrom}};
+use lodestone_core::Reader;
 use lodestone_server::{ChunkSource, ServerDirective, ServerProtocol, overworld_chunk_source};
 use lodestone_v26_2::V770ServerProtocol;
+use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use support::large_parity_manifest::{HEADER_BYTES, read_header, payload_digest_from_header, verify_payload};
 
 #[test]
@@ -27,15 +29,15 @@ fn bounded_shard_header_control_is_accepted() {
     raw[14..16].copy_from_slice(&2u16.to_be_bytes());
     raw[16..20].copy_from_slice(&776u32.to_be_bytes());
     raw[20..28].copy_from_slice(&42i64.to_be_bytes());
-    for (offset, value) in [(28, -500), (32, 500), (36, -500), (40, 500), (44, -2), (48, 1), (52, 7), (56, 8)] {
+    for (offset, value) in [(28, -500i32), (32, 500), (36, -500), (40, 500), (44, -2), (48, 1), (52, 7), (56, 8)] {
         raw[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
     }
-    raw[60..68].copy_from_slice(&4u64.to_be_bytes());
+    raw[60..68].copy_from_slice(&8u64.to_be_bytes());
     raw[68..100].copy_from_slice(&support::large_parity_manifest::sha256(
         b"lodestone.worldgen.large-parity.manifest/v2",
     ));
     let h = read_header(&raw[..]).expect("valid bounded shard header");
-    assert_eq!((h.cx0, h.cx1, h.cz0, h.cz1, h.count), (-2, 1, 7, 8, 4));
+    assert_eq!((h.cx0, h.cx1, h.cz0, h.cz1, h.count), (-2, 1, 7, 8, 8));
 }
 
 /// Reads any authenticated shard strictly sequentially and uses only one 2-byte
@@ -74,11 +76,18 @@ fn parity_manifest_streams_before_rust_comparison() {
             }
             other => panic!("production chunk encoder returned {other:?} at ({cx},{cz})"),
         };
+        if index == 0 {
+            if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_PACKET_OUT") {
+                std::fs::write(&path, &payload).expect("write requested Lodestone packet capture");
+            }
+        }
         let full = support::large_parity_manifest::sha256(&payload);
         if full[..2] != fingerprint {
+            let packet_summary = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET")
+                .map(|path| packet_difference_summary(&std::fs::read(path).expect("read authoritative packet capture"), &payload));
             panic!(
-                "large packet parity mismatch at ({cx},{cz}) after {index} matching chunks: reference fingerprint {:02x}{:02x}, Lodestone SHA-256 {}",
-                fingerprint[0], fingerprint[1], hex(&full),
+                "large packet parity mismatch at ({cx},{cz}) after {index} matching chunks: reference fingerprint {:02x}{:02x}, Lodestone SHA-256 {}{}",
+                fingerprint[0], fingerprint[1], hex(&full), packet_summary.as_deref().unwrap_or(""),
             );
         }
         if (index + 1) % 256 == 0 || index + 1 == limit {
@@ -88,5 +97,46 @@ fn parity_manifest_streams_before_rust_comparison() {
     if limit < h.count {
         eprintln!("large packet parity: bounded pilot completed successfully at {} chunks; full grid remains pending", limit);
     }
+}
+
+/// Reads two independently emitted packet bodies through the production client
+/// decoder and makes the first oracle mismatch actionable without retaining a
+/// full corpus of reference packets.
+fn packet_difference_summary(reference: &[u8], actual: &[u8]) -> String {
+    let reference_len = reference.len();
+    let actual_len = actual.len();
+    fn decode(bytes: &[u8]) -> LevelChunkWithLight {
+        let mut r = Reader::new(bytes);
+        let decoded = LevelChunkWithLight::decode(&mut r, &ChunkShape::overworld_1_21())
+            .expect("packet capture must decode with the production client codec");
+        r.ensure_empty().expect("packet capture must have no trailing bytes");
+        decoded
+    }
+    let reference = decode(reference);
+    let actual = decode(actual);
+    let mut differing_blocks = 0usize;
+    let mut differing_biomes = 0usize;
+    let mut non_air_reference = 0usize;
+    let mut non_air_actual = 0usize;
+    for section in 0..24 {
+        let reference_section = reference.column.section(section);
+        let actual_section = actual.column.section(section);
+        for cell in 0..4096 {
+            let reference_block = reference_section.map_or(0, |s| s.block_states().get(cell));
+            let actual_block = actual_section.map_or(0, |s| s.block_states().get(cell));
+            non_air_reference += usize::from(reference_block != 0);
+            non_air_actual += usize::from(actual_block != 0);
+            differing_blocks += usize::from(reference_block != actual_block);
+        }
+        for cell in 0..64 {
+            let reference_biome = reference_section.map_or(0, |s| s.biomes().get(cell));
+            let actual_biome = actual_section.map_or(0, |s| s.biomes().get(cell));
+            differing_biomes += usize::from(reference_biome != actual_biome);
+        }
+    }
+    format!(
+        "; captured-packet diagnosis: reference={} bytes, Lodestone={} bytes, block cells differ={differing_blocks}, biome cells differ={differing_biomes}, non-air reference={non_air_reference}, Lodestone={non_air_actual}",
+        reference_len, actual_len,
+    )
 }
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }

@@ -566,104 +566,20 @@ fn simple_particle_registry_id(
         .copied()
 }
 
-/// This port's own biome registry id space — index in this
-/// **sorted** array is the wire id [`resolve_biome_id`] uses. Regenerable
-/// with `awk '/^row\./{print $2}' scripts/worldgen-oracle/biome_java.txt |
-/// sort -u`, the exact set `lodestone-worldgen`'s embedded overworld
-/// parameter table can ever resolve a column to.
-///
-/// # Why "sorted by name" and not vanilla's own biome registry order
-///
-/// Real vanilla assigns biome wire ids by **registration order** in a
-/// `minecraft:worldgen/biome` dynamic-registry sync sent during the
-/// configuration phase. This server sends that sync too, now
-/// (relayed as captured vanilla bytes — see `registry_data_fixtures`'s module
-/// docs), but it is still relayed **opaquely**: nothing in this crate parses
-/// entries back out of it, and nothing on the client reads a biome by wire id
-/// today — `lodestone-shell` still has no `impl BiomeTint`; checked directly,
-/// zero implementors in `crates/lodestone-shell/src`. So there is still no
-/// *biome* id space this table needs to agree with, and no consumer on the
-/// client side to agree with it either: the `ChunkSection::biomes()`
-/// container this now populates reaches the wire and nothing downstream
-/// reads it back into a name. Any
-/// stable, reproducible convention is therefore safe **for now**; alphabetical
-/// is the simplest one that needs no extra bookkeeping. **This is provisional**
-/// — once a real `worldgen/biome` sync exists (or a render-layers agent needs
-/// a name for a wire id), replace this table with that sync's actual order,
-/// do not assume this one is a substitute for it.
-const BIOME_NAMES: &[&str] = &[
-    "minecraft:badlands",
-    "minecraft:bamboo_jungle",
-    "minecraft:beach",
-    "minecraft:birch_forest",
-    "minecraft:cherry_grove",
-    "minecraft:cold_ocean",
-    "minecraft:dark_forest",
-    "minecraft:deep_cold_ocean",
-    "minecraft:deep_dark",
-    "minecraft:deep_frozen_ocean",
-    "minecraft:deep_lukewarm_ocean",
-    "minecraft:deep_ocean",
-    "minecraft:desert",
-    "minecraft:dripstone_caves",
-    "minecraft:eroded_badlands",
-    "minecraft:flower_forest",
-    "minecraft:forest",
-    "minecraft:frozen_ocean",
-    "minecraft:frozen_peaks",
-    "minecraft:frozen_river",
-    "minecraft:grove",
-    "minecraft:ice_spikes",
-    "minecraft:jagged_peaks",
-    "minecraft:jungle",
-    "minecraft:lukewarm_ocean",
-    "minecraft:lush_caves",
-    "minecraft:mangrove_swamp",
-    "minecraft:meadow",
-    "minecraft:mushroom_fields",
-    "minecraft:ocean",
-    "minecraft:old_growth_birch_forest",
-    "minecraft:old_growth_pine_taiga",
-    "minecraft:old_growth_spruce_taiga",
-    "minecraft:pale_garden",
-    "minecraft:plains",
-    "minecraft:river",
-    "minecraft:savanna",
-    "minecraft:savanna_plateau",
-    "minecraft:snowy_beach",
-    "minecraft:snowy_plains",
-    "minecraft:snowy_slopes",
-    "minecraft:snowy_taiga",
-    "minecraft:sparse_jungle",
-    "minecraft:stony_peaks",
-    "minecraft:stony_shore",
-    "minecraft:sulfur_caves",
-    "minecraft:sunflower_plains",
-    "minecraft:swamp",
-    "minecraft:taiga",
-    "minecraft:warm_ocean",
-    "minecraft:windswept_forest",
-    "minecraft:windswept_gravelly_hills",
-    "minecraft:windswept_hills",
-    "minecraft:windswept_savanna",
-    "minecraft:wooded_badlands",
-];
-
 /// Resolves a biome id string ([`ServerChunkColumn::biome_state`]'s
-/// vocabulary) to this port's [`BIOME_NAMES`] index — see that constant's
-/// doc comment for the id-space caveat. Falls back to `minecraft:plains`'s
-/// index for any name outside the known set (never panics on unexpected
-/// data, mirroring [`resolve_state_id`]'s tiered-fallback posture).
+/// vocabulary) to the holder id in the registry fixture sent to the client.
+/// Falls back to `minecraft:plains` for any name outside that registry.
 ///
 /// # Panics
-/// Panics if `BIOME_NAMES` has no `"minecraft:plains"` entry (a corrupt
-/// table, not a runtime condition).
+/// Panics if the captured registry has no `"minecraft:plains"` entry.
 fn resolve_biome_id(name: &str) -> u32 {
-    BIOME_NAMES.iter().position(|&n| n == name).unwrap_or_else(|| {
-        BIOME_NAMES
+    static BIOME_REGISTRY_NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let names = BIOME_REGISTRY_NAMES.get_or_init(crate::registry_data_fixtures::biome_registry_names);
+    names.iter().position(|n| n == name).unwrap_or_else(|| {
+        names
             .iter()
-            .position(|&n| n == "minecraft:plains")
-            .expect("BIOME_NAMES missing minecraft:plains")
+            .position(|n| n == "minecraft:plains")
+            .expect("biome registry missing minecraft:plains")
     }) as u32
 }
 

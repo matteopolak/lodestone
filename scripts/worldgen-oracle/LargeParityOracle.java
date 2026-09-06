@@ -14,6 +14,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.ArrayList;
@@ -60,6 +61,7 @@ public final class LargeParityOracle {
         String out;
         int loX = -500, hiX = 500, loZ = -500, hiZ = 500;
         boolean resume, help;
+        String packetOut;
     }
 
     static Args args() {
@@ -73,16 +75,19 @@ public final class LargeParityOracle {
                 case "--cx" -> { out.loX = Integer.parseInt(a[++i]); out.hiX = Integer.parseInt(a[++i]); }
                 case "--cz" -> { out.loZ = Integer.parseInt(a[++i]); out.hiZ = Integer.parseInt(a[++i]); }
                 case "--resume" -> out.resume = true;
+                case "--packet-out" -> out.packetOut = a[++i];
                 default -> throw new IllegalArgumentException("unknown argument " + a[i]);
             }
         }
         if (!out.help && (out.out == null || out.loX > out.hiX || out.loZ > out.hiZ || out.loX < -500 || out.hiX > 500 || out.loZ < -500 || out.hiZ > 500))
             throw new IllegalArgumentException("ranges must lie in -500..=500; pass --help for usage");
+        if (out.packetOut != null && (out.loX != out.hiX || out.loZ != out.hiZ))
+            throw new IllegalArgumentException("--packet-out requires exactly one chunk");
         return out;
     }
 
     static void usage() {
-        System.out.println("usage: LargeParityOracle --out /out/shard.lwp --cx LO HI --cz LO HI [--resume]");
+        System.out.println("usage: LargeParityOracle --out /out/shard.lwp --cx LO HI --cz LO HI [--resume] [--packet-out /oracle/chunk.bin]");
         System.out.println("each record is the first 16 bits of SHA-256(level_chunk_with_light body)");
     }
 
@@ -231,7 +236,15 @@ public final class LargeParityOracle {
                         LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
                         if (chunk == null) throw new IllegalStateException("region future did not retain FULL chunk at " + pos);
                         chunk.postProcessGeneration(level);
-                        result.add(digest(packetBody(server, level, chunk)));
+                        byte[] body = packetBody(server, level, chunk);
+                        if (a.packetOut != null) {
+                            try {
+                                Files.write(Path.of(a.packetOut), body);
+                            } catch (java.io.IOException e) {
+                                throw new IllegalStateException("writing requested packet capture failed", e);
+                            }
+                        }
+                        result.add(digest(body));
                     }
                     return result;
                 }).join();
