@@ -26,7 +26,7 @@ surface_water_depth_filter, noise_threshold_count, random_offset, block_predicat
 height_range, and the list fan-out `Positions::List`/`count_on_every_layer`/`fixed_placement` need)
 compose as a depth-first flat-map, exactly reproducing vanilla's `Stream` pipeline's draw order.
 Configured-feature bodies (`simple_block`, `tree`, `random_selector`/`simple_random_selector`,
-`speleothem`, and the vegetation-specific ones below) each reproduce their vanilla `place()` body's exact draw
+`speleothem`, `speleothem_cluster`, and the vegetation-specific ones below) each reproduce their vanilla `place()` body's exact draw
 sequence. An unmodelled feature type or placement modifier degrades to a silent, RNG-free no-op
 (`ConfiguredFeature::Unsupported`) rather than a panic — the census resolves every bundled biome's
 step list at generator construction time, including biomes nobody has tested yet, so a hard failure
@@ -52,6 +52,12 @@ It runs through the same 3×3 per-source decoration driver as every other config
 anchor patch from a source at a chunk edge may legitimately write into its neighbouring chunk. The
 external `speleothem_feature_jvm.txt` fixture places at the east edge and asserts the western spill,
 the tag-backed cinnabar-to-sulfur replacement, and the generated pointed-state properties together.
+
+The cave-wide cluster form samples its height, wetness, density, and two radii before scanning each
+column in rectangular order. Every accepted air-or-water column consumes its water, ceiling, floor,
+collision, and merge draws in that order before it writes base layers and upward or downward pointed
+segments. `speleothem_cluster_jvm.txt` keeps an external compact cave fixture whose mixed base,
+frustum, tip, and paired-direction results catch a plausible single-column or non-Gaussian port.
 
 **One stated ordering deviation from vanilla**: because ore runs as its own earlier stage here,
 decoration steps 0–4 run after ores in this engine and before them in vanilla. Nothing in those
