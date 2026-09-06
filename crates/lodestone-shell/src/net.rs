@@ -1829,6 +1829,14 @@ async fn launch_browser_worker(
             let kind = js_sys::Reflect::get(&value, &JsValue::from_str("kind"))
                 .ok()
                 .and_then(|v| v.as_string());
+            if kind.as_deref() == Some("progress") {
+                let stage = js_sys::Reflect::get(&value, &JsValue::from_str("stage"))
+                    .ok()
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                tracing::debug!(%stage, "browser server worker startup progress");
+                return;
+            }
             let result = match kind.as_deref() {
                 Some("ready") => Ok(()),
                 Some("error") => Err(js_sys::Reflect::get(&value, &JsValue::from_str("message"))

@@ -42,6 +42,11 @@ renderer, input, and page ECS. `web/worker/` builds the server module, and
 page bundle. On Play, `net::launch_browser_worker` creates a `Worker` and a
 `MessageChannel`; the Worker receives one port together with launch settings,
 constructs the one world source and integrated server, then replies `ready`.
+The control channel also reports the two observed startup milestones
+(`loading-module` and `starting-server`) to the page. These are not a made-up
+percentage: terrain progress remains the client-observed count of chunk packets
+already applied to its world, so the existing loading grid and bar continue to
+paint while the Worker prepares and streams the initial view.
 
 `lodestone_net::MessagePortTransport` turns the two ports into an async byte
 stream. It intentionally transports raw framed bytes only: message boundaries
@@ -52,6 +57,14 @@ the session; a post-ready worker failure closes the port and reaches the normal
 client disconnect path. It must not fall back then, because that would create a
 second authoritative mutable world. A failure before `ready` is the one safe
 fallback point and uses the existing in-page duplex server.
+
+`web/worker/worker_bootstrap.test.mjs` drives the control module with synthetic
+Worker events. It proves malformed launch envelopes do not import wasm, valid
+launches transfer exactly one port and report milestones in order, and a failing
+server bootstrap cannot claim readiness. `cargo xtask wasm-check` runs that
+Node test before building the browser bundle; it complements the real browser
+smoke test, rather than pretending a host-side control-plane test can prove
+painting or browser scheduling.
 
 The page's synchronous ECS command dispatch cannot cross this boundary. The
 worker installs a command sink that visibly refuses page-plugin commands rather
