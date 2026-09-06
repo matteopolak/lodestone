@@ -2,51 +2,79 @@
 
 ## What it is
 
-`scripts/worldgen-oracle/LargeParityOracle.java` is the scaffold for resumable compiled-26.2 oracle shards over exactly the 1001 by 1001 overworld chunk grid centred at `(0, 0)`: `cx, cz = -500..=500`. Version 2 stores the first 16 bits of SHA-256 for each packet payload. A complete manifest is 2,004,002 bytes of fingerprints plus a 160-byte header (about 1.91 MiB), not a million retained chunk snapshots.
+`scripts/worldgen-oracle/LargeParityOracle.java` is the resumable, million-chunk parity oracle for the 1001 by 1001 overworld grid centred at `(0, 0)`. Version 3 freezes one generated reference world first, then records a full SHA-256 digest of each chunk's canonical semantic record; the old v2 raw 16-bit packet fingerprints are explicitly rejected.
 
 ## How it works
 
-The recorded seed is `42`, matching the existing composed 26.2 fixture. The exporter writes row-major `(cz, cx)` shard payloads. Header v2 fixes protocol `776`, the full grid, shard rectangle, count, fingerprint algorithm and a SHA-256 schema-domain digest. It also carries SHA-256 of the entire payload, so validation detects a one-bit change to any fingerprint before merge or comparison.
+The reference seed is `42` and the target coordinates are `cx, cz = -500..=500`. A v3 record has a fixed semantic schema: chunk coordinates; heightmaps sorted by numeric type with 256 decoded heights each; 24 sections of resolved global block-state ids and biome ids; block entities sorted by relative position and type with recursively key-sorted NBT; and all 26 sky then block light sections, distinguishing missing, empty, and present 2048-byte arrays. Packet palettes, packet map traversal order, and packet framing do not enter the record.
 
-Per-chunk SHA-256 v2 is defined over the exact uncompressed `level_chunk_with_light` packet payload bytes. This includes the packet body's chunk coordinates, heightmaps, section data, block entities, and light data. Packet id, VarInt packet-length framing, compression framing, encryption, and transport are excluded. The row-major manifest position identifies which coordinate each fingerprint belongs to. The finished exporter must obtain the payload only after the real server bulk chunk-status pipeline has produced the final chunk, including decoration, structure state, block entities, spawns and light.
+The workflow has two mandatory phases. `--mode materialize` generates the requested rectangle **plus its one-chunk halo**, completes the real chunk-status work, post-processes it, saves it, and writes a tree-digest seal. It accepts an empty directory only: an interrupted or previously frozen root is never resumed. For the complete baseline, omit the range flags so this covers `-501..=501` in both axes. `--mode export` accepts only that sealed world through a read-only mount, copies it into the container's ephemeral server-access directory, and exports semantic digests from the restarted persisted content. The manifest carries the frozen-world digest, schema digest, geometry, full digest width, and SHA-256 payload checksum; merge refuses a shard from a different frozen world.
 
-`LargeParityOracle` now boots the bundled compiled server in-process, obtains each chunk through the real scheduled `FULL` status pipeline, runs the final post-processing step, and invokes the compiled chunk-with-light packet stream codec with the server's registry access. It therefore hashes the same uncompressed packet body a network connection would carry, without packet framing, compression, encryption, or transport. The exporter is deliberately separate from `lodestone-worldgen`: recreating packet serialization in the generator would compare two independently-maintained encoders rather than the delivered protocol.
+This split prevents two independent failure modes. A generated chunk can receive a later neighbour feature write, so the old batch-immediate capture could observe transient state. Separately, semantically identical packets can have different heightmap map order or palette/container framing. Freezing before capture removes the first; canonical records remove the second.
+
+`--packet-out` remains a one-chunk raw packet diagnostic. It is never used for the baseline, but is useful when the Rust comparison identifies a semantic mismatch and needs its existing detailed packet diff.
 
 ## How to change it
 
-First replace the fail-closed placeholder with a real scheduled-chunk packet source and connect the ignored Rust test to `lodestone-v26-2`'s production encoder. The current script deliberately fails instead of emitting a reduced dataset. Once those two consumers exist, run a bounded pilot first:
+The Java exporter and Rust comparator must change together whenever a semantic field changes. Bump the schema/domain strings and manifest version rather than reinterpreting existing data. Keep decoded ids in their existing packet-cell order, sort only collections without semantic order (heightmaps, block entities, compound keys), and keep NBT lists in order.
+
+The Rust gate in `crates/versions/26.2/tests/large_worldgen_parity.rs` decodes Lodestone's production chunk packet and applies the same canonical record before comparing the full digest. The test support reader authenticates the entire manifest before generating a local chunk. Its v2 refusal is intentional: a short raw hash cannot be converted into a semantic hash.
+
+Run a small persisted control before any broad job. This proves both the frozen-world seal and duplicate read-only export:
 
 ```text
-bash scripts/worldgen-oracle/large-parity.sh --out /oracle/pilot.lwp --cx -1 0 --cz -1 0
-python3 scripts/worldgen-oracle/large-parity-manifest.py validate scripts/worldgen-oracle/pilot.lwp
+mkdir -p /absolute/path/parity-world
+LODESTONE_ORACLE_WORLD_ROOT=/absolute/path/parity-world \
+  bash scripts/worldgen-oracle/large-parity.sh --mode materialize --cx -8 7 --cz -8 7
+LODESTONE_ORACLE_FROZEN_WORLD_ROOT=/absolute/path/parity-world \
+  bash scripts/worldgen-oracle/large-parity.sh --mode export --out /oracle/pilot-a.lwp --cx -8 7 --cz -8 7
+LODESTONE_ORACLE_FROZEN_WORLD_ROOT=/absolute/path/parity-world \
+  bash scripts/worldgen-oracle/large-parity.sh --mode export --out /oracle/pilot-b.lwp --cx -8 7 --cz -8 7
+cmp scripts/worldgen-oracle/pilot-a.lwp scripts/worldgen-oracle/pilot-b.lwp
+python3 scripts/worldgen-oracle/large-parity-manifest.py validate scripts/worldgen-oracle/pilot-a.lwp scripts/worldgen-oracle/pilot-b.lwp
 ```
 
-Use disjoint rectangles for parallel shards. The exporter schedules 256 chunks at a time by default, retaining a non-expiring loading ticket for every target until the server-thread post-processing and packet encoding complete, then releasing those tickets before the next batch. `LODESTONE_ORACLE_BATCH` can raise or lower the bounded future set, but keep it bounded because the server-thread encode step retains each loaded chunk. The earlier one-tick ticket path could unload chunks between batches; the loading-ticket lifetime is now explicit. A local 4,096-chunk pilot (16 batches, `cx=-244..=-229`, `cz=-244..=11`) sustained 78.1 chunks/s after startup, projecting about 3.56 hours for 1,002,001 chunks in one JVM; measure again when the host or batch size changes. Run disjoint shards in parallel to use more cores, and retain each completed shard. `--resume` authenticates a completed shard, or continues an interrupted file whose payload ends on a 2-byte record boundary and whose final checksum is still zero (the durable in-progress marker). It re-hashes the existing prefix before appending; a partial file carrying a final checksum is rejected rather than guessed at.
-
-For the full run, start several `full-parity-worker.sh` processes with distinct zero-based worker indices and the same worker count. The script partitions `cx=-500..=500` into 16-wide vertical shards. Each row-major 256-record batch is then a compact 16 by 16 tile instead of a 256 by 1 strip, avoiding repeated dependency-boundary generation. Every output shard remains independently resumable and mergeable.
+When changing the semantic schema, also run the cross-language control. It makes Java emit one packet body and its un-hashed canonical record, then requires Rust to decode that same packet into byte-identical record bytes and the manifest digest.
 
 ```text
-bash scripts/worldgen-oracle/full-parity-worker.sh 0 4
-bash scripts/worldgen-oracle/full-parity-worker.sh 1 4
-bash scripts/worldgen-oracle/full-parity-worker.sh 2 4
-bash scripts/worldgen-oracle/full-parity-worker.sh 3 4
+LODESTONE_ORACLE_FROZEN_WORLD_ROOT=/absolute/path/parity-world \
+  bash scripts/worldgen-oracle/large-parity.sh --mode export --out /oracle/cross.lwp \
+  --packet-out /oracle/cross.packet --record-out /oracle/cross.record --cx 0 0 --cz 0 0
+LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_PACKET=/absolute/path/to/cross.packet \
+LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_RECORD=/absolute/path/to/cross.record \
+LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_MANIFEST=/absolute/path/to/cross.lwp \
+  cargo test -p lodestone-v26-2 --test large_worldgen_parity \
+  java_and_rust_canonical_records_agree -- --ignored
 ```
 
-Merge only complete coverage:
+Only after this control passes, materialize the full grid once. Export can then use disjoint resumable shards; every export worker points at the same read-only sealed world. Run the first and second full reads into distinct shard directories, merge each, then use `accept` to make the final baseline. `accept` refuses anything except two byte-identical complete manifests from the same frozen-world identity. `full-parity-worker.sh` divides work into 16-chunk-wide shards, refuses to start without `LODESTONE_ORACLE_FROZEN_WORLD_ROOT`, and uses `LODESTONE_ORACLE_SHARD_DIR` to choose its relative output directory. Sequential workers avoid multiplying the ephemeral frozen-world copy; parallel workers are appropriate only when the host has measured enough space for those independent copies.
 
 ```text
-python3 scripts/worldgen-oracle/large-parity-manifest.py merge --out /absolute/path/full.lwp shard-*.lwp
-LODESTONE_LARGE_PARITY_MANIFEST=/absolute/path/full.lwp cargo test -p lodestone-v26-2 --test large_worldgen_parity -- --ignored
+LODESTONE_ORACLE_WORLD_ROOT=/absolute/path/parity-world \
+  bash scripts/worldgen-oracle/large-parity.sh --mode materialize
+for read in baseline-read-a baseline-read-b; do
+  for worker in 0 1 2 3; do
+    LODESTONE_ORACLE_FROZEN_WORLD_ROOT=/absolute/path/parity-world \
+      LODESTONE_ORACLE_SHARD_DIR="$read" \
+      bash scripts/worldgen-oracle/full-parity-worker.sh "$worker" 4
+  done
+done
+python3 scripts/worldgen-oracle/large-parity-manifest.py merge --out /absolute/path/full-read-a.lwp /absolute/path/baseline-read-a/shard-*.lwp
+python3 scripts/worldgen-oracle/large-parity-manifest.py merge --out /absolute/path/full-read-b.lwp /absolute/path/baseline-read-b/shard-*.lwp
+python3 scripts/worldgen-oracle/large-parity-manifest.py accept --out /absolute/path/full-v3.lwp /absolute/path/full-read-a.lwp /absolute/path/full-read-b.lwp
+LODESTONE_LARGE_PARITY_MANIFEST=/absolute/path/full-v3.lwp \
+  LODESTONE_LARGE_PARITY_REQUIRE_FULL_GRID=1 \
+  cargo test -p lodestone-v26-2 --test large_worldgen_parity -- --ignored
 ```
 
-The merger rejects overlaps, holes, wrong bounds, malformed headers and a changed payload bit. The ignored Rust comparator accepts any authenticated in-bounds shard, so a 2,000–5,000 chunk pilot can be compared immediately; set `LODESTONE_LARGE_PARITY_REQUIRE_FULL_GRID=1` when a comparison must prove the merged 1001² coverage. A new packet layout or hash input requires a new schema version/domain string and matching Java exporter, Python validator and Rust reader; never reinterpret a v2 fingerprint.
-
-When a short fingerprint first differs, run the oracle for that one coordinate with `--packet-out /oracle/name.bin` and set `LODESTONE_LARGE_PARITY_REFERENCE_PACKET` to the resulting host path on the bounded Rust comparison. The comparison decodes both packet bodies through the production client codec and reports block-cell, biome-cell and byte-length differences. `LODESTONE_LARGE_PARITY_PACKET_OUT` can likewise retain Lodestone's first encoded body. These captures are diagnosis artifacts, not committed baseline data.
+`LODESTONE_LARGE_PARITY_MAX_CHUNKS` makes the Rust gate compare a bounded prefix. `LODESTONE_LARGE_PARITY_REFERENCE_PACKET` and `LODESTONE_LARGE_PARITY_PACKET_OUT` retain the first raw packet pair only for mismatch diagnosis.
 
 ## Configuration
 
-The exporter accepts `--out`, `--cx LO HI`, `--cz LO HI`, `--resume`, and `--packet-out /oracle/name.bin`. Packet capture requires an exactly one-chunk rectangle. Ranges must remain inside `-500..=500`; the only full valid merge is the complete target grid. It runs using `scripts/worldgen-oracle/run.sh`, which mounts the local compiled 26.2 jar cache into the Apple container runtime. The Rust comparison also accepts `LODESTONE_LARGE_PARITY_MAX_CHUNKS`, `LODESTONE_LARGE_PARITY_REFERENCE_PACKET`, and `LODESTONE_LARGE_PARITY_PACKET_OUT` for bounded diagnostics.
+`LODESTONE_ORACLE_BATCH` controls the bounded loading batch in both phases; it does not change the frozen-world contract. `LODESTONE_ORACLE_WORLD_ROOT` is a writable host directory mounted at `/world` only for materialization. `LODESTONE_ORACLE_FROZEN_WORLD_ROOT` is mounted read-only at `/frozen` for export. The source seal is checked before it is copied into the ephemeral server-access directory.
+
+The manifest tools accept `validate`, `merge`, `accept`, and `selftest`. `accept` is the final baseline gate: it requires two complete byte-identical read-only exports. `selftest` covers full-grid merge ordering, duplicate-read acceptance, payload tampering, different-world merge refusal, and v2 rejection.
 
 ## Dependencies
 
-The oracle uses the locally cached compiled 26.2 server jar and assets under `.cache/mc/26.2`, the existing container-based Java runtime wrapper, and no decompiled implementation as an input. The verifier is Python standard library only; the Rust fixture reader has a small self-contained SHA-256 implementation so the test does not add a production dependency.
+The exporter uses the locally cached compiled 26.2 server and assets under `.cache/mc/26.2`, through the container runtime wrapper. The Python validator uses only the standard library. The Rust comparator uses the production protocol decoder and a small test-only SHA-256 implementation.

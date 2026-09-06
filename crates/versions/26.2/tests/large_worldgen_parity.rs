@@ -7,13 +7,13 @@ use lodestone_core::Reader;
 use lodestone_server::{ChunkSource, ServerDirective, ServerProtocol, overworld_chunk_source};
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
-use support::large_parity_manifest::{HEADER_BYTES, read_header, payload_digest_from_header, verify_payload};
+use support::large_parity_manifest::{HEADER_BYTES, read_header, payload_digest_from_header, semantic_digest, semantic_record, verify_payload};
 
 #[test]
 fn sha256_control_and_bit_flip_are_detected() {
     use support::large_parity_manifest::sha256;
     assert_eq!(hex(&sha256(b"abc")), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "known external SHA-256 control");
-    let payload = [1u8,2]; let good = sha256(&payload);
+    let payload = [1u8; 32]; let good = sha256(&payload);
     verify_payload(&payload[..], 1, good).expect("control payload must authenticate");
     let mut corrupt = payload; corrupt[1] ^= 1;
     assert!(verify_payload(&corrupt[..], 1, good).is_err(), "one changed fingerprint bit must be detected");
@@ -22,28 +22,66 @@ fn sha256_control_and_bit_flip_are_detected() {
 #[test]
 fn bounded_shard_header_control_is_accepted() {
     let mut raw = [0u8; HEADER_BYTES];
-    raw[..8].copy_from_slice(b"LWP26P02");
-    raw[8..10].copy_from_slice(&2u16.to_be_bytes());
+    raw[..8].copy_from_slice(b"LWP26P03");
+    raw[8..10].copy_from_slice(&3u16.to_be_bytes());
     raw[10..12].copy_from_slice(&(HEADER_BYTES as u16).to_be_bytes());
-    raw[12..14].copy_from_slice(&1u16.to_be_bytes());
-    raw[14..16].copy_from_slice(&2u16.to_be_bytes());
+    raw[12..14].copy_from_slice(&2u16.to_be_bytes());
+    raw[14..16].copy_from_slice(&3u16.to_be_bytes());
     raw[16..20].copy_from_slice(&776u32.to_be_bytes());
     raw[20..28].copy_from_slice(&42i64.to_be_bytes());
     for (offset, value) in [(28, -500i32), (32, 500), (36, -500), (40, 500), (44, -2), (48, 1), (52, 7), (56, 8)] {
         raw[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
     }
     raw[60..68].copy_from_slice(&8u64.to_be_bytes());
-    raw[68..100].copy_from_slice(&support::large_parity_manifest::sha256(
-        b"lodestone.worldgen.large-parity.manifest/v2",
+    raw[68..70].copy_from_slice(&32u16.to_be_bytes());
+    raw[72..104].copy_from_slice(&support::large_parity_manifest::sha256(
+        b"lodestone.worldgen.large-parity.manifest/v3/semantic",
     ));
+    raw[104..136].copy_from_slice(&[7; 32]);
     let h = read_header(&raw[..]).expect("valid bounded shard header");
     assert_eq!((h.cx0, h.cx1, h.cz0, h.cz1, h.count), (-2, 1, 7, 8, 8));
+    assert_eq!(h.frozen_world, [7; 32], "the validated frozen-world identity remains available to the gate");
 }
 
-/// Reads any authenticated shard strictly sequentially and uses only one 2-byte
-/// expected fingerprint at a time. Set `LODESTONE_LARGE_PARITY_MANIFEST` to a
-/// shard or merged 1001² manifest after the production packet encoder has a
-/// comparison seam.
+#[test]
+fn v2_raw_packet_manifest_is_rejected_not_reinterpreted() {
+    let mut raw = [0u8; HEADER_BYTES];
+    raw[..8].copy_from_slice(b"LWP26P02");
+    let error = read_header(&raw[..]).expect_err("raw v2 fingerprints must not enter the semantic gate");
+    assert!(error.to_string().contains("v2"), "the migration failure must name the rejected format: {error}");
+}
+
+/// Cross-language control: Java emits both the authoritative packet body and
+/// its canonical semantic bytes for one frozen chunk. Rust must decode that
+/// same body into byte-identical canonical bytes before their SHA-256 can be
+/// admitted to a v3 manifest.
+#[test]
+#[ignore = "requires a one-chunk Java frozen-world export; see docs/worldgen-large-parity.md"]
+fn java_and_rust_canonical_records_agree() {
+    let packet_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_PACKET")
+        .expect("set LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_PACKET to Java's one-chunk packet body");
+    let record_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_RECORD")
+        .expect("set LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_RECORD to Java's canonical record");
+    let manifest_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_MANIFEST")
+        .expect("set LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_MANIFEST to Java's one-chunk v3 manifest");
+    let java_record = std::fs::read(record_path).expect("read Java canonical record");
+    let decoded = packet_decode(&std::fs::read(packet_path).expect("read Java packet body"));
+    let rust_record = semantic_record(&decoded);
+    if rust_record != java_record {
+        let first = rust_record.iter().zip(&java_record).position(|(left, right)| left != right).unwrap_or(rust_record.len().min(java_record.len()));
+        panic!("canonical semantic bytes differ at offset {first}: Java length {}, Rust length {}, Java byte {:?}, Rust byte {:?}", java_record.len(), rust_record.len(), java_record.get(first), rust_record.get(first));
+    }
+    let mut manifest = File::open(manifest_path).expect("open Java v3 manifest");
+    let mut raw_header = [0; HEADER_BYTES]; manifest.read_exact(&mut raw_header).expect("read Java manifest header");
+    let header = read_header(&raw_header[..]).expect("validate Java manifest header");
+    assert_eq!(header.count, 1, "cross-language control must use exactly one chunk");
+    let mut java_digest = [0; 32]; manifest.read_exact(&mut java_digest).expect("read Java semantic digest");
+    assert_eq!(support::large_parity_manifest::sha256(&java_record), java_digest, "Java manifest digest must authenticate Java canonical bytes");
+    assert_eq!(semantic_digest(&decoded), java_digest, "Rust digest must authenticate the same canonical bytes");
+}
+
+/// Reads any authenticated frozen-world shard strictly sequentially and uses
+/// only one full semantic digest at a time.
 #[test]
 #[ignore = "manual external oracle comparison; see docs/worldgen-large-parity.md"]
 fn parity_manifest_streams_before_rust_comparison() {
@@ -63,9 +101,9 @@ fn parity_manifest_streams_before_rust_comparison() {
         .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(h.count);
     let limit = max_chunks.min(h.count);
     let width = (h.cx1 - h.cx0 + 1) as u64;
-    let mut fingerprint = [0u8; 2];
+    let mut expected_digest = [0u8; 32];
     for index in 0..limit {
-        expected.read_exact(&mut fingerprint).expect("manifest fingerprint");
+        expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
         let cx = h.cx0 + (index % width) as i32;
         let cz = h.cz0 + (index / width) as i32;
         let directive = V770ServerProtocol.encode_chunk(cx, cz, &source.column(cx, cz));
@@ -81,22 +119,31 @@ fn parity_manifest_streams_before_rust_comparison() {
                 std::fs::write(&path, &payload).expect("write requested Lodestone packet capture");
             }
         }
-        let full = support::large_parity_manifest::sha256(&payload);
-        if full[..2] != fingerprint {
+        let decoded = packet_decode(&payload);
+        let full = semantic_digest(&decoded);
+        if full != expected_digest {
             let packet_summary = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET")
                 .map(|path| packet_difference_summary(&std::fs::read(path).expect("read authoritative packet capture"), &payload));
             panic!(
-                "large packet parity mismatch at ({cx},{cz}) after {index} matching chunks: reference fingerprint {:02x}{:02x}, Lodestone SHA-256 {}{}",
-                fingerprint[0], fingerprint[1], hex(&full), packet_summary.as_deref().unwrap_or(""),
+                "large semantic parity mismatch at ({cx},{cz}) after {index} matching chunks: reference SHA-256 {}, Lodestone SHA-256 {}{}",
+                hex(&expected_digest), hex(&full), packet_summary.as_deref().unwrap_or(""),
             );
         }
         if (index + 1) % 256 == 0 || index + 1 == limit {
-            eprintln!("large packet parity: compared {}/{} chunks (batch boundary at ({cx},{cz}))", index + 1, limit);
+            eprintln!("large semantic parity: compared {}/{} chunks (batch boundary at ({cx},{cz}))", index + 1, limit);
         }
     }
     if limit < h.count {
-        eprintln!("large packet parity: bounded pilot completed successfully at {} chunks; full grid remains pending", limit);
+        eprintln!("large semantic parity: bounded pilot completed successfully at {} chunks; full grid remains pending", limit);
     }
+}
+
+fn packet_decode(bytes: &[u8]) -> LevelChunkWithLight {
+    let mut reader = Reader::new(bytes);
+    let decoded = LevelChunkWithLight::decode(&mut reader, &ChunkShape::overworld_1_21())
+        .expect("packet capture must decode with the production client codec");
+    reader.ensure_empty().expect("packet capture must have no trailing bytes");
+    decoded
 }
 
 /// Reads two independently emitted packet bodies through the production client
@@ -105,15 +152,8 @@ fn parity_manifest_streams_before_rust_comparison() {
 fn packet_difference_summary(reference: &[u8], actual: &[u8]) -> String {
     let reference_len = reference.len();
     let actual_len = actual.len();
-    fn decode(bytes: &[u8]) -> LevelChunkWithLight {
-        let mut r = Reader::new(bytes);
-        let decoded = LevelChunkWithLight::decode(&mut r, &ChunkShape::overworld_1_21())
-            .expect("packet capture must decode with the production client codec");
-        r.ensure_empty().expect("packet capture must have no trailing bytes");
-        decoded
-    }
-    let reference = decode(reference);
-    let actual = decode(actual);
+    let reference = packet_decode(reference);
+    let actual = packet_decode(actual);
     let mut differing_blocks = 0usize;
     let mut differing_biomes = 0usize;
     let mut non_air_reference = 0usize;

@@ -1,49 +1,116 @@
-//! Reader for the fixed-size large-parity fingerprint manifest. Kept in test
-//! support because it is an oracle interchange format, not a game protocol.
+//! Reader and semantic-record encoder for the frozen-world v3 large-parity
+//! interchange format. This is test support rather than a game protocol.
 
 use std::io::{self, Read};
 
-pub const HEADER_BYTES: usize = 160;
-const MAGIC: &[u8; 8] = b"LWP26P02";
-const DOMAIN: &[u8] = b"lodestone.worldgen.large-parity.manifest/v2";
-const FINGERPRINT_BYTES: u64 = 2;
+use lodestone_core::{Nbt, Writer};
+use lodestone_v26_2::packets::chunk::LevelChunkWithLight;
+use lodestone_world::LightData;
+
+pub const HEADER_BYTES: usize = 256;
+const MAGIC: &[u8; 8] = b"LWP26P03";
+const DOMAIN: &[u8] = b"lodestone.worldgen.large-parity.manifest/v3/semantic";
+const RECORD_DOMAIN: &[u8] = b"lodestone.worldgen.large-parity.chunk/v3/semantic";
+const DIGEST_BYTES: u64 = 32;
 
 #[derive(Debug, Clone, Copy)]
-pub struct Header { pub cx0: i32, pub cx1: i32, pub cz0: i32, pub cz1: i32, pub count: u64 }
+pub struct Header {
+    pub cx0: i32,
+    pub cx1: i32,
+    pub cz0: i32,
+    pub cz1: i32,
+    pub count: u64,
+    pub frozen_world: [u8; 32],
+}
 
-fn be_i32(b: &[u8]) -> i32 { i32::from_be_bytes(b.try_into().unwrap()) }
-fn be_u64(b: &[u8]) -> u64 { u64::from_be_bytes(b.try_into().unwrap()) }
+fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
+fn be_i32(b: &[u8]) -> i32 { i32::from_be_bytes(b.try_into().expect("fixed-width header field")) }
+fn be_u64(b: &[u8]) -> u64 { u64::from_be_bytes(b.try_into().expect("fixed-width header field")) }
 
-/// Reads and authenticates the header. Payload authentication is deliberately
-/// separate so the manual test can keep only one 16-bit fingerprint in memory.
+/// Reads a v3 header. A v2 file is rejected explicitly: its hashes describe
+/// non-canonical packet bytes and cannot be upgraded without re-exporting.
 pub fn read_header(mut r: impl Read) -> io::Result<Header> {
     let mut b = [0; HEADER_BYTES]; r.read_exact(&mut b)?;
-    if &b[..8] != MAGIC || u16::from_be_bytes(b[8..10].try_into().unwrap()) != 2 || u16::from_be_bytes(b[10..12].try_into().unwrap()) != HEADER_BYTES as u16 || u16::from_be_bytes(b[12..14].try_into().unwrap()) != 1 || u16::from_be_bytes(b[14..16].try_into().unwrap()) != 2 || u32::from_be_bytes(b[16..20].try_into().unwrap()) != 776 || i64::from_be_bytes(b[20..28].try_into().unwrap()) != 42 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported large-parity manifest header"));
+    if &b[..8] == b"LWP26P02" { return Err(invalid("v2 raw-packet manifest is rejected; regenerate frozen-world semantic v3")); }
+    if &b[..8] != MAGIC || u16::from_be_bytes(b[8..10].try_into().unwrap()) != 3 || u16::from_be_bytes(b[10..12].try_into().unwrap()) != HEADER_BYTES as u16 || u16::from_be_bytes(b[12..14].try_into().unwrap()) != 2 || u16::from_be_bytes(b[14..16].try_into().unwrap()) != 3 || u32::from_be_bytes(b[16..20].try_into().unwrap()) != 776 || i64::from_be_bytes(b[20..28].try_into().unwrap()) != 42 || u16::from_be_bytes(b[68..70].try_into().unwrap()) != DIGEST_BYTES as u16 || u16::from_be_bytes(b[70..72].try_into().unwrap()) != 0 {
+        return Err(invalid("unsupported large-parity v3 header"));
     }
-    if b[68..100] != sha256(DOMAIN) { return Err(io::Error::new(io::ErrorKind::InvalidData, "large-parity schema digest differs")); }
-    if (be_i32(&b[28..32]), be_i32(&b[32..36]), be_i32(&b[36..40]), be_i32(&b[40..44])) != (-500, 500, -500, 500) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest global bounds differ"));
-    }
-    let h = Header { cx0: be_i32(&b[44..48]), cx1: be_i32(&b[48..52]), cz0: be_i32(&b[52..56]), cz1: be_i32(&b[56..60]), count: be_u64(&b[60..68]) };
+    if b[72..104] != sha256(DOMAIN) { return Err(invalid("large-parity semantic schema digest differs")); }
+    let frozen_world: [u8; 32] = b[104..136].try_into().unwrap();
+    if frozen_world == [0; 32] { return Err(invalid("large-parity v3 manifest has no frozen-world identity")); }
+    if (be_i32(&b[28..32]), be_i32(&b[32..36]), be_i32(&b[36..40]), be_i32(&b[40..44])) != (-500, 500, -500, 500) { return Err(invalid("manifest global bounds differ")); }
+    let h = Header { cx0: be_i32(&b[44..48]), cx1: be_i32(&b[48..52]), cz0: be_i32(&b[52..56]), cz1: be_i32(&b[56..60]), count: be_u64(&b[60..68]), frozen_world };
     let expected = (i64::from(h.cx1 - h.cx0 + 1) * i64::from(h.cz1 - h.cz0 + 1)) as u64;
-    if !(h.cx0 >= -500 && h.cx1 <= 500 && h.cz0 >= -500 && h.cz1 <= 500 && h.cx0 <= h.cx1 && h.cz0 <= h.cz1 && h.count == expected) { return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid large-parity shard bounds")); }
+    if !(h.cx0 >= -500 && h.cx1 <= 500 && h.cz0 >= -500 && h.cz1 <= 500 && h.cx0 <= h.cx1 && h.cz0 <= h.cz1 && h.count == expected) { return Err(invalid("invalid large-parity shard bounds")); }
     Ok(h)
 }
 
-/// Streams every payload byte through SHA-256; a flipped fingerprint bit is a
-/// hard error before a comparison can falsely claim equality.
+/// Streams full 32-byte semantic digests through SHA-256 before comparison.
 pub fn verify_payload(mut r: impl Read, count: u64, expected: [u8; 32]) -> io::Result<()> {
-    let mut sha = Sha256::new(); let mut left = count.checked_mul(FINGERPRINT_BYTES).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "payload count overflow"))?;
-    let mut buf = [0u8; 8192];
+    let mut sha = Sha256::new(); let mut left = count.checked_mul(DIGEST_BYTES).ok_or_else(|| invalid("payload count overflow"))?; let mut buf = [0u8; 8192];
     while left != 0 { let n = usize::try_from(left.min(buf.len() as u64)).unwrap(); r.read_exact(&mut buf[..n])?; sha.update(&buf[..n]); left -= n as u64; }
-    let mut trailing = [0u8; 1];
-    if r.read(&mut trailing)? != 0 { return Err(io::Error::new(io::ErrorKind::InvalidData, "large-parity payload has trailing bytes")); }
-    if sha.finish() != expected { return Err(io::Error::new(io::ErrorKind::InvalidData, "large-parity payload checksum differs")); }
+    let mut trailing = [0u8; 1]; if r.read(&mut trailing)? != 0 { return Err(invalid("large-parity payload has trailing bytes")); }
+    if sha.finish() != expected { return Err(invalid("large-parity payload checksum differs")); }
     Ok(())
 }
 
-pub fn payload_digest_from_header(b: &[u8; HEADER_BYTES]) -> [u8; 32] { b[100..132].try_into().unwrap() }
+pub fn payload_digest_from_header(b: &[u8; HEADER_BYTES]) -> [u8; 32] { b[136..168].try_into().unwrap() }
+
+/// Produces the v3 record whose SHA-256 is stored in the external manifest.
+/// It intentionally decodes palette containers and represents their resolved
+/// ids, not their packet-specific palettes or map traversal order.
+pub fn semantic_record(packet: &LevelChunkWithLight) -> Vec<u8> {
+    let mut w = Writer::default(); w.bytes(RECORD_DOMAIN); w.i32(packet.x); w.i32(packet.z);
+    let mut maps = packet.heightmaps.iter().collect::<Vec<_>>(); maps.sort_unstable_by_key(|(id, _)| *id);
+    w.i32(maps.len() as i32);
+    // Packet storage is offset from the overworld's -64 minimum; the semantic
+    // record uses the decoded first-available Y value.
+    for (id, map) in maps { w.i32(id as i32); for z in 0..16 { for x in 0..16 { w.i32(map.get(x, z) as i32 - 64); } } }
+    for section_index in 0..24 {
+        let section = packet.column.section(section_index);
+        for cell in 0..4096 { w.u32(section.map_or(0, |section| section.block_states().get(cell))); }
+        for cell in 0..64 { w.u32(section.map_or(0, |section| section.biomes().get(cell))); }
+    }
+    let mut entities = packet.block_entities.clone(); entities.sort_unstable_by_key(|entity| (entity.rel_x, entity.y, entity.rel_z, entity.type_id));
+    w.i32(entities.len() as i32);
+    for entity in &entities { w.u8(entity.rel_x); w.i16(entity.y); w.u8(entity.rel_z); w.u32(entity.type_id); canonical_nbt(&mut w, &entity.nbt); }
+    canonical_light(&mut w, &packet.light, true); canonical_light(&mut w, &packet.light, false);
+    w.as_slice().to_vec()
+}
+
+pub fn semantic_digest(packet: &LevelChunkWithLight) -> [u8; 32] { sha256(&semantic_record(packet)) }
+
+fn canonical_light(w: &mut Writer, light: &lodestone_world::ColumnLight, sky: bool) {
+    for section in 0..26 {
+        let value = if sky { light.sky(section) } else { light.block(section) };
+        match value {
+            LightData::Missing => w.u8(0),
+            LightData::Uniform(0) => w.u8(1),
+            LightData::Uniform(value) => { w.u8(2); w.bytes(&[*value | (*value << 4); 2048]); }
+            LightData::Values(values) => { w.u8(2); w.bytes(values.as_bytes()); }
+        }
+    }
+}
+
+fn canonical_nbt(w: &mut Writer, value: &Nbt) {
+    match value {
+        Nbt::End => w.u8(0),
+        Nbt::Byte(value) => { w.u8(1); w.i8(*value); }
+        Nbt::Short(value) => { w.u8(2); w.i16(*value); }
+        Nbt::Int(value) => { w.u8(3); w.i32(*value); }
+        Nbt::Long(value) => { w.u8(4); w.i64(*value); }
+        Nbt::Float(value) => { w.u8(5); w.u32(value.to_bits()); }
+        Nbt::Double(value) => { w.u8(6); w.u64(value.to_bits()); }
+        Nbt::ByteArray(values) => { w.u8(7); w.i32(values.len() as i32); for value in values { w.i8(*value); } }
+        Nbt::String(value) => { w.u8(8); canonical_utf8(w, value); }
+        Nbt::List { elements, .. } => { w.u8(9); w.i32(elements.len() as i32); for value in elements { canonical_nbt(w, value); } }
+        Nbt::Compound(fields) => { w.u8(10); let mut fields = fields.iter().collect::<Vec<_>>(); fields.sort_unstable_by(|a, b| a.0.cmp(&b.0)); w.i32(fields.len() as i32); for (name, value) in fields { canonical_utf8(w, name); canonical_nbt(w, value); } }
+        Nbt::IntArray(values) => { w.u8(11); w.i32(values.len() as i32); for value in values { w.i32(*value); } }
+        Nbt::LongArray(values) => { w.u8(12); w.i32(values.len() as i32); for value in values { w.i64(*value); } }
+    }
+}
+
+fn canonical_utf8(w: &mut Writer, value: &str) { w.i32(value.len() as i32); w.bytes(value.as_bytes()); }
 
 pub fn sha256(input: &[u8]) -> [u8; 32] { let mut s = Sha256::new(); s.update(input); s.finish() }
 struct Sha256 { state: [u32; 8], len: u64, buf: [u8; 64], used: usize }
