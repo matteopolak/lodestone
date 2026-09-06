@@ -6,6 +6,10 @@ MAGIC = b"LWP26P03"
 HEADER = 256
 WIDTH = 32
 DOMAIN = b"lodestone.worldgen.large-parity.manifest/v3/semantic"
+GRID_MIN = -250
+GRID_MAX = 250
+GRID_SIDE = GRID_MAX - GRID_MIN + 1
+GRID_COUNT = GRID_SIDE * GRID_SIDE
 # magic, version, header, digest algorithm, schema, protocol, seed, global/shard
 # bounds, record count, per-record digest width, reserved, schema/world/payload SHA-256
 FMT = ">8sHHHHIqiiiiiiiiQHH32s32s32s88x"
@@ -25,8 +29,8 @@ def read(path):
         raise ValueError(f"{path}: unsupported manifest magic {magic!r}")
     if (version, size, algorithm, schema, protocol, seed, width, reserved) != (3, HEADER, 2, 3, 776, 42, WIDTH, 0):
         raise ValueError(f"{path}: unsupported v3 header")
-    if (gx0, gx1, gz0, gz1) != (-500, 500, -500, 500):
-        raise ValueError(f"{path}: not the required 1001x1001 grid")
+    if (gx0, gx1, gz0, gz1) != (GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX):
+        raise ValueError(f"{path}: not the required {GRID_SIDE}x{GRID_SIDE} grid")
     expected = (sx1-sx0+1)*(sz1-sz0+1)
     if sx0 < gx0 or sx1 > gx1 or sz0 < gz0 or sz1 > gz1 or count != expected:
         raise ValueError(f"{path}: invalid shard bounds/count")
@@ -65,15 +69,15 @@ def merge(out, paths):
                     raise ValueError(f"overlap at {key}: {path}")
                 slots[key] = payload[record*WIDTH:(record+1)*WIDTH]
                 record += 1
-    required = 1001*1001
+    required = GRID_COUNT
     if len(slots) != required:
         raise ValueError(f"incomplete merge: {len(slots)}/{required}; missing shards are not silently zero-filled")
     payload = bytearray()
-    for cz in range(-500, 501):
-        for cx in range(-500, 501):
+    for cz in range(GRID_MIN, GRID_MAX + 1):
+        for cx in range(GRID_MIN, GRID_MAX + 1):
             payload.extend(slots[(cx, cz)])
     header = struct.pack(FMT, MAGIC, 3, HEADER, 2, 3, 776, 42,
-                         -500, 500, -500, 500, -500, 500, -500, 500,
+                         GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX,
                          required, WIDTH, 0, hashlib.sha256(DOMAIN).digest(),
                          frozen, hashlib.sha256(payload).digest())
     pathlib.Path(out).write_bytes(header + payload)
@@ -84,8 +88,8 @@ def accept(out, first, second):
     """Freeze a baseline only after two independent read-only exports agree."""
     first_header, first_payload = read(first)
     second_header, second_payload = read(second)
-    if first_header[11:16] != (-500, 500, -500, 500, 1_002_001):
-        raise ValueError(f"{first}: duplicate-read acceptance requires the complete 1001x1001 manifest")
+    if first_header[11:16] != (GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX, GRID_COUNT):
+        raise ValueError(f"{first}: duplicate-read acceptance requires the complete {GRID_SIDE}x{GRID_SIDE} manifest")
     if second_header[11:16] != first_header[11:16]:
         raise ValueError("duplicate frozen-world reads cover different bounds")
     if second_header[18:20] != first_header[18:20]:
@@ -99,10 +103,10 @@ def accept(out, first, second):
 def selftest():
     """Exercise a full merge, payload tampering, incompatible worlds, and v2 refusal."""
     def make(path, sx0, sx1, byte, frozen):
-        count = (sx1-sx0+1)*1001
+        count = (sx1-sx0+1)*GRID_SIDE
         payload = bytes([byte])*WIDTH*count
         header = struct.pack(FMT, MAGIC, 3, HEADER, 2, 3, 776, 42,
-                             -500, 500, -500, 500, sx0, sx1, -500, 500,
+                             GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX, sx0, sx1, GRID_MIN, GRID_MAX,
                              count, WIDTH, 0, hashlib.sha256(DOMAIN).digest(),
                              frozen, hashlib.sha256(payload).digest())
         pathlib.Path(path).write_bytes(header + payload)
@@ -110,9 +114,10 @@ def selftest():
         directory = pathlib.Path(directory)
         left, right, out = directory/"left.lwp", directory/"right.lwp", directory/"full.lwp"
         frozen = hashlib.sha256(b"frozen world control").digest()
-        make(left, -500, 0, 0x11, frozen); make(right, 1, 500, 0x22, frozen)
+        make(left, GRID_MIN, 0, 0x11, frozen); make(right, 1, GRID_MAX, 0x22, frozen)
         merge(out, [left, right]); h, payload = read(out)
-        assert h[15] == 1_002_001 and payload[:WIDTH] == bytes([0x11])*WIDTH and payload[501*WIDTH:502*WIDTH] == bytes([0x22])*WIDTH
+        left_width = 0 - GRID_MIN + 1
+        assert h[15] == GRID_COUNT and payload[:WIDTH] == bytes([0x11])*WIDTH and payload[left_width*WIDTH:(left_width+1)*WIDTH] == bytes([0x22])*WIDTH
         duplicate = directory/"duplicate.lwp"; accepted = directory/"accepted.lwp"; duplicate.write_bytes(out.read_bytes()); accept(accepted, out, duplicate); assert accepted.read_bytes() == out.read_bytes()
         raw = bytearray(duplicate.read_bytes()); raw[HEADER+3] ^= 1; duplicate.write_bytes(raw)
         try: accept(accepted, out, duplicate)
@@ -122,7 +127,7 @@ def selftest():
         try: read(left)
         except ValueError: pass
         else: raise AssertionError("one-bit payload corruption was accepted")
-        make(left, -500, 0, 0x11, frozen); make(right, 1, 500, 0x22, hashlib.sha256(b"other frozen world").digest())
+        make(left, GRID_MIN, 0, 0x11, frozen); make(right, 1, GRID_MAX, 0x22, hashlib.sha256(b"other frozen world").digest())
         try: merge(out, [left, right])
         except ValueError: pass
         else: raise AssertionError("different frozen worlds were merged")

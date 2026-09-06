@@ -8,6 +8,10 @@ use lodestone_v26_2::packets::chunk::LevelChunkWithLight;
 use lodestone_world::LightData;
 
 pub const HEADER_BYTES: usize = 256;
+pub const GRID_MIN: i32 = -250;
+pub const GRID_MAX: i32 = 250;
+pub const GRID_SIDE: i32 = GRID_MAX - GRID_MIN + 1;
+pub const GRID_COUNT: u64 = (GRID_SIDE as u64) * (GRID_SIDE as u64);
 const MAGIC: &[u8; 8] = b"LWP26P03";
 const DOMAIN: &[u8] = b"lodestone.worldgen.large-parity.manifest/v3/semantic";
 const RECORD_DOMAIN: &[u8] = b"lodestone.worldgen.large-parity.chunk/v3/semantic";
@@ -38,10 +42,10 @@ pub fn read_header(mut r: impl Read) -> io::Result<Header> {
     if b[72..104] != sha256(DOMAIN) { return Err(invalid("large-parity semantic schema digest differs")); }
     let frozen_world: [u8; 32] = b[104..136].try_into().unwrap();
     if frozen_world == [0; 32] { return Err(invalid("large-parity v3 manifest has no frozen-world identity")); }
-    if (be_i32(&b[28..32]), be_i32(&b[32..36]), be_i32(&b[36..40]), be_i32(&b[40..44])) != (-500, 500, -500, 500) { return Err(invalid("manifest global bounds differ")); }
+    if (be_i32(&b[28..32]), be_i32(&b[32..36]), be_i32(&b[36..40]), be_i32(&b[40..44])) != (GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX) { return Err(invalid("manifest global bounds differ")); }
     let h = Header { cx0: be_i32(&b[44..48]), cx1: be_i32(&b[48..52]), cz0: be_i32(&b[52..56]), cz1: be_i32(&b[56..60]), count: be_u64(&b[60..68]), frozen_world };
     let expected = (i64::from(h.cx1 - h.cx0 + 1) * i64::from(h.cz1 - h.cz0 + 1)) as u64;
-    if !(h.cx0 >= -500 && h.cx1 <= 500 && h.cz0 >= -500 && h.cz1 <= 500 && h.cx0 <= h.cx1 && h.cz0 <= h.cz1 && h.count == expected) { return Err(invalid("invalid large-parity shard bounds")); }
+    if !(h.cx0 >= GRID_MIN && h.cx1 <= GRID_MAX && h.cz0 >= GRID_MIN && h.cz1 <= GRID_MAX && h.cx0 <= h.cx1 && h.cz0 <= h.cz1 && h.count == expected) { return Err(invalid("invalid large-parity shard bounds")); }
     Ok(h)
 }
 
