@@ -165,6 +165,21 @@ the new files. That is the single biggest difference from `server.rs`.
 
 ### 3. `crates/lodestone-shell` — 129,846 code lines — **SPLIT THE CRATE. The seam is real.**
 
+#### First navigation extraction wave
+
+The first file-level extraction keeps `menu::nav` as the public API while moving its dependency-free
+clusters into sibling modules. `nav/mod.rs` retains `MenuNav` and the input/routing implementation;
+`nav/model.rs` owns `MenuKey`, `MenuAction`, and singleplayer launch authorization; `nav/form.rs`
+owns the server-edit form and its focus state; and `nav/buttons.rs` owns the title, pause, server-list,
+ownership, and death button tables. The parent module re-exports all three modules, so callers keep
+using `crate::menu::nav::*` without an API change.
+
+The move is intentionally mechanical: the extracted definitions retain their existing visibility and
+tests, while the few parent tests that inspect form internals use `pub(super)` rather than widening the
+crate API. Relative `include_str!` paths in the parent test module are adjusted for the new directory.
+Future waves can extract additional pure state, but should leave the `MenuNav` routing loop together
+until a separate behavior-preserving control proves its boundaries.
+
 This is the finding the plan exists to report, and it is the opposite of what the module list suggests
 at a glance.
 

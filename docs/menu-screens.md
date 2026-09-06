@@ -49,7 +49,9 @@ Several screens share infrastructure worth knowing about up front:
 Friends (disabled — 26.2 ships a Friends service, but Lodestone's integration is not implemented), Language, Accessibility, and a
 Minecraft Realms row (disabled). Its layout is vanilla's `TitleScreen` reproduced exactly, drawn with
 the resource pack's own button art. Lives under `crates/lodestone-shell/src/menu/`: `menu.rs` for the
-`Screen`/`UiState` state machine, `menu/nav.rs` for input, `menu/render.rs` for layout and draw,
+`Screen`/`UiState` state machine, `menu/nav/mod.rs` for input, with the pure action model, form state,
+and button tables split into `menu/nav/model.rs`, `menu/nav/form.rs`, and `menu/nav/buttons.rs`;
+`menu/render.rs` owns layout and draw,
 `menu/servers.rs` for the persisted server list, `menu/status.rs` for background server status pings,
 `menu/accounts.rs` for the account list and sign-in flow.
 
