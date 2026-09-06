@@ -121,6 +121,13 @@ pub enum TrunkPlacerCfg {
         /// The extra branch length.
         extra_branch_length: IntProvider,
     },
+    Bending {
+        base_height: i32,
+        height_rand_a: i32,
+        height_rand_b: i32,
+        min_height_for_leaves: i32,
+        bend_length: IntProvider,
+    },
 }
 
 impl TrunkPlacerCfg {
@@ -160,6 +167,13 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                 place_branch_per_log_probability: v["place_branch_per_log_probability"].as_f64()? as f32,
                 extra_branch_length: try_parse_int_provider(&v["extra_branch_length"])?,
             }),
+            "bending_trunk_placer" => Some(Self::Bending {
+                base_height,
+                height_rand_a,
+                height_rand_b,
+                min_height_for_leaves: v["min_height_for_leaves"].as_i64().unwrap_or(1) as i32,
+                bend_length: try_parse_int_provider(&v["bend_length"] )?,
+            }),
             _ => None,
         }
     }
@@ -173,7 +187,8 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
             | Self::MegaJungle { base_height, height_rand_a, height_rand_b }
             | Self::Fancy { base_height, height_rand_a, height_rand_b }
             | Self::Cherry { base_height, height_rand_a, height_rand_b, .. }
-            | Self::UpwardsBranching { base_height, height_rand_a, height_rand_b, .. } => {
+            | Self::UpwardsBranching { base_height, height_rand_a, height_rand_b, .. }
+            | Self::Bending { base_height, height_rand_a, height_rand_b, .. } => {
                 (*base_height, *height_rand_a, *height_rand_b)
             }
         }
@@ -331,6 +346,67 @@ pub(super) fn valid_tree_pos(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: 
     let id = grid.get_id(x, y, z);
     let interner = grid.interner();
     tags.has(interner, Tag::Air, id) || tags.has(interner, Tag::ReplaceableByTrees, id)
+}
+
+/// A narrow trunk which takes its horizontal turn only in the final two
+/// column positions, then continues sideways at the canopy level.  Every
+/// accepted log becomes a foliage attachment, so the irregular azalea canopy
+/// follows the actual bent trunk rather than the original vertical column.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn place_bending_trunk<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    tree_height: i32,
+    min_height_for_leaves: i32,
+    bend_length: &IntProvider,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    trunk_provider: &BlockStateProvider,
+    below_trunk_provider: &Option<BlockStateProvider>,
+    attachments: &mut Vec<Attachment>,
+    trunk_positions: &mut Vec<BlockPos>,
+) -> bool {
+    if let Some(provider) = below_trunk_provider {
+        let below = BlockPos { x: origin.x, y: origin.y - 1, z: origin.z };
+        if let Some(state) = provider.get_state_id(grid, tags, random, below) {
+            grid.set_id_if_in_bounds(below.x, below.y, below.z, state);
+            trunk_positions.push(below);
+        }
+    }
+    const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+    let (dx, dz) = STEP[random.next_int_bounded(4) as usize];
+    let log_height = tree_height - 1;
+    let mut x = origin.x;
+    let mut z = origin.z;
+    let mut placed = false;
+    for i in 0..=log_height {
+        if i + 1 >= log_height + random.next_int_bounded(2) { x += dx; z += dz; }
+        let at = BlockPos { x, y: origin.y + i, z };
+        if valid_tree_pos(grid, tags, at.x, at.y, at.z) {
+            if let Some(state) = trunk_provider.get_state_id(grid, tags, random, at) {
+                grid.set_id_if_in_bounds(at.x, at.y, at.z, state);
+                trunk_positions.push(at);
+                placed = true;
+            }
+        }
+        if i >= min_height_for_leaves { attachments.push(Attachment { pos: at, radius_offset: 0, double_trunk: false }); }
+    }
+    let y = origin.y + tree_height;
+    let length = bend_length.sample(random);
+    for _ in 0..=length {
+        let at = BlockPos { x, y, z };
+        if valid_tree_pos(grid, tags, at.x, at.y, at.z) {
+            if let Some(state) = trunk_provider.get_state_id(grid, tags, random, at) {
+                grid.set_id_if_in_bounds(at.x, at.y, at.z, state);
+                trunk_positions.push(at);
+                placed = true;
+            }
+        }
+        attachments.push(Attachment { pos: at, radius_offset: 0, double_trunk: false });
+        x += dx;
+        z += dz;
+    }
+    placed
 }
 
 /// The dark oak trunk placer's own trunk placement — dark oak's real trunk,
@@ -956,7 +1032,7 @@ fn generate_cherry_branch<R: RandomSource>(
     );
     let steps_horizontally = if extend_branch_away_from_trunk { 2 } else { 1 };
 
-    let mut place_sideways = |random: &mut R, pos: (i32, i32, i32), grid: &mut VegGrid, placed_any: &mut bool, trunk_positions: &mut Vec<BlockPos>| {
+    let place_sideways = |random: &mut R, pos: (i32, i32, i32), grid: &mut VegGrid, placed_any: &mut bool, trunk_positions: &mut Vec<BlockPos>| {
         let bp = BlockPos { x: pos.0, y: pos.1, z: pos.2 };
         if valid_tree_pos(grid, tags, bp.x, bp.y, bp.z) {
             if let Some(state) = trunk_provider.get_state_id(grid, tags, random, bp) {

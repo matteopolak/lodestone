@@ -132,12 +132,18 @@ pub(super) enum Tag {
     /// `#minecraft:mangrove_roots_can_grow_through` — `MangroveRootPlacer
     /// .canPlaceRoot`'s extra OR-arm.
     MangroveRootsCanGrowThrough,
+    /// The ground tag used by the bundled huge-brown-mushroom feature.
+    HugeBrownMushroomCanPlaceOn,
+    /// The ground tag used by the bundled huge-red-mushroom feature.
+    HugeRedMushroomCanPlaceOn,
+    /// `#minecraft:supports_bamboo` — bamboo's own floor survival rule.
+    SupportsBamboo,
 }
 
 impl Tag {
     /// Every variant, in declaration order. `TAG_COUNT` and the mask layout are
     /// both derived from this, so it is the single place a new tag registers.
-    pub(super) const ALL: [Tag; 15] = [
+    pub(super) const ALL: [Tag; 18] = [
         Tag::CannotReplaceBelowTreeTrunk,
         Tag::SupportsVegetation,
         Tag::ReplaceableByTrees,
@@ -153,6 +159,9 @@ impl Tag {
         Tag::SugarCane,
         Tag::MangroveLogsCanGrowThrough,
         Tag::MangroveRootsCanGrowThrough,
+        Tag::HugeBrownMushroomCanPlaceOn,
+        Tag::HugeRedMushroomCanPlaceOn,
+        Tag::SupportsBamboo,
     ];
 
     const fn slot(self) -> usize {
@@ -372,6 +381,9 @@ impl VegTags {
             Tag::SugarCane => base == "minecraft:sugar_cane",
             Tag::MangroveLogsCanGrowThrough => self.mangrove_logs_can_grow_through.contains(base),
             Tag::MangroveRootsCanGrowThrough => self.mangrove_roots_can_grow_through.contains(base),
+            Tag::HugeBrownMushroomCanPlaceOn => self.huge_brown_mushroom_can_place_on.contains(base),
+            Tag::HugeRedMushroomCanPlaceOn => self.huge_red_mushroom_can_place_on.contains(base),
+            Tag::SupportsBamboo => self.supports_bamboo.contains(base),
         }
     }
 

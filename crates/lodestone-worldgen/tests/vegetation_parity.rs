@@ -175,6 +175,7 @@ struct Fixture {
     /// the original plains-only ones, so the biome can no longer be a
     /// hardcoded literal at the call site.
     biome: String,
+    proxy_fallbacks: Vec<String>,
 }
 
 fn parse_xyz(s: &str) -> (i32, i32, i32) {
@@ -197,6 +198,7 @@ fn parse_fixture(text: &str) -> Fixture {
         chunk_z: 0,
         seed: 0,
         biome: String::new(),
+        proxy_fallbacks: Vec::new(),
     };
     for line in text.lines() {
         let line = line.trim();
@@ -234,6 +236,7 @@ fn parse_fixture(text: &str) -> Fixture {
                 "meta.chunkZ" => f.chunk_z = rest.parse().unwrap(),
                 "meta.seed" => f.seed = rest.parse().unwrap(),
                 "meta.biome" => f.biome = rest.to_string(),
+                "meta.proxyFallback" => f.proxy_fallbacks.push(rest.to_string()),
                 "meta.postOreReplayMismatches" => {
                     let n: usize = rest.parse().unwrap();
                     assert_eq!(n, 0, "the oracle's own post-ore baseline must replay identically between its two passes");
@@ -253,6 +256,7 @@ fn load(name: &str) -> Fixture {
     });
     let f = parse_fixture(&text);
     assert!(!f.biome.is_empty(), "{name}: fixture carries no meta.biome — regenerate with the current oracle");
+    assert!(f.proxy_fallbacks.is_empty(), "{name}: oracle proxy fell through on {:?}; fixture is not valid parity evidence", f.proxy_fallbacks);
     f
 }
 
@@ -266,6 +270,15 @@ const FIXTURES: &[&str] = &[
     "vegetation_plains_chunk5_5_jvm.txt",
     "vegetation_savanna_chunk20_neg5_jvm.txt",
     "vegetation_savanna_neg30_15_jvm.txt",
+];
+
+/// These compiled-server captures exercise the production biome feature lists,
+/// but are deliberately outside the green parity suite until their exact-map
+/// comparisons pass. Their feature types remain in the production gap census;
+/// removing that census entry without moving this gate into [`FIXTURES`] would
+/// turn an observed composition failure into an untested claim of closure.
+const COMPOSED_PARITY_EVIDENCE: &[&str] = &[
+    "vegetation_warm_ocean_0_0_jvm.txt",
 ];
 
 // ---------------------------------------------------------------------------
@@ -345,17 +358,12 @@ fn assert_matches_single(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32)
     // set_if_in_bounds` drops them), so they're excluded here — this is the
     // engine's known, named single-chunk scope, not a discrepancy this gate
     // is checking.
-    // `glow_lichen` (`multiface_growth`) is a named, accepted gap — see
-    // `crate::feature::vegetation`'s module doc: nothing in this engine's
-    // scope models vanilla's own multiface-growth feature (it isn't a tree/grass/flower),
-    // so it's excluded here rather than treated as a correctness failure.
-    // Every OTHER cell in `single_diff` (grass/flowers/trees) is real,
-    // implemented scope and must match exactly.
+    // Every in-window cell in `single_diff` is implemented scope and must
+    // match exactly, including multiface state layout.
     let expected: HashMap<(i32, i32, i32), &String> = f
         .single_diff
         .iter()
         .filter(|&(&(x, _, z), _)| (0..16).contains(&x) && (0..16).contains(&z))
-        .filter(|(_, state)| !state.starts_with("minecraft:glow_lichen"))
         .map(|(k, v)| (*k, v))
         .collect();
 
@@ -388,22 +396,29 @@ fn our_engine_matches_jvm_single_chunk_pass() {
         let f = load(name);
         let ours = run_our_engine(&f, &resolver);
         assert_matches_single(name, &f, &ours);
-        // Cross-check: the oracle's own `single.meta.centreChanged` minus
-        // the known glow_lichen gap (see `assert_matches_single`'s own
-        // filter) must equal our engine's write count exactly — so a bug in
-        // this test's own filtering logic can't silently pass by both sides
-        // being wrong the same way.
-        let glow_lichen_cells = f
-            .single_diff
-            .iter()
-            .filter(|&(&(x, _, z), _)| (0..16).contains(&x) && (0..16).contains(&z))
-            .filter(|(_, state)| state.starts_with("minecraft:glow_lichen"))
-            .count();
+        // Cross-check the complete in-window write count against the oracle's
+        // independently reported total.
         assert_eq!(
             ours.len(),
-            f.single_centre_changed - glow_lichen_cells,
-            "{name}: our engine's own write count must match the oracle's single.meta.centreChanged, minus the named glow_lichen gap"
+            f.single_centre_changed,
+            "{name}: our engine's own write count must match the oracle's single.meta.centreChanged"
         );
+    }
+}
+
+/// Manual closure gate for the two biome-specific captures. This is ignored
+/// because the warm-ocean production list currently produces zero Rust writes
+/// where the compiled-server capture records 29, and the cave case is not
+/// allowed to make the RootSystem ledger entry disappear before the same exact
+/// comparison is green. Run with `--ignored` while closing either entry.
+#[test]
+#[ignore = "composed warm-ocean parity is a named production gap; lush-caves evidence needs recapture"]
+fn composed_biome_evidence_must_match_before_closing_coral_or_root_system() {
+    let resolver = FsResolver { root: data_dir() };
+    for &name in COMPOSED_PARITY_EVIDENCE {
+        let f = load(name);
+        let ours = run_our_engine(&f, &resolver);
+        assert_matches_single(name, &f, &ours);
     }
 }
 
@@ -515,7 +530,6 @@ fn assert_matches_full3x3(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32
         .full_diff
         .iter()
         .filter(|&(&(x, _, z), _)| (0..16).contains(&x) && (0..16).contains(&z))
-        .filter(|(_, state)| !state.starts_with("minecraft:glow_lichen"))
         .map(|(k, v)| (*k, v))
         .collect();
 
@@ -596,8 +610,7 @@ fn assert_matches_full3x3(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32
 
 /// The headline result: driving `crate::feature::vegetation`'s
 /// real 3×3 driver against the JVM's own `FULL3X3` pass, centre window, must
-/// match **exactly on block identity** (modulo the same named `glow_lichen`
-/// gap [`assert_matches_single`] already excludes) — not merely move the
+/// match **exactly on block identity** — not merely move the
 /// ratio [`single_chunk_only_undercounts_real_vanilla_centre_content`]
 /// measured (0.781, 0.787) closer to 1.0, but reach it: this is "drive the
 /// mismatch toward zero", made concrete as an assertion rather than a
@@ -616,7 +629,7 @@ fn our_engine_matches_jvm_full3x3_pass() {
         // Cross-check, mirroring `our_engine_matches_jvm_single_chunk_pass`'s
         // own count assertion: our engine's centre-window write count must
         // equal the oracle's own `full3x3.meta.centreChanged`, minus the
-        // named glow_lichen gap, minus the (small, bounded) named residual
+        // (small, bounded) named residual
         // `assert_matches_full3x3` just measured — a `distance`-only
         // mismatch still counts as "we wrote something here" (so it does
         // NOT reduce this count), but a missing write does, which is why
@@ -625,17 +638,11 @@ fn our_engine_matches_jvm_full3x3_pass() {
         // still can't silently pass by both sides being wrong the same way,
         // it just has a named, measured slack instead of an exact `==`.
         let ours_in_centre = ours.iter().filter(|&(&(x, _, z), _)| (0..16).contains(&x) && (0..16).contains(&z)).count();
-        let glow_lichen_cells = f
-            .full_diff
-            .iter()
-            .filter(|&(&(x, _, z), _)| (0..16).contains(&x) && (0..16).contains(&z))
-            .filter(|(_, state)| state.starts_with("minecraft:glow_lichen"))
-            .count();
         assert_eq!(
             expected_len,
-            f.full_centre_changed - glow_lichen_cells,
+            f.full_centre_changed,
             "{name}: assert_matches_full3x3's own `expected` set size must match full3x3.meta.centreChanged \
-             minus glow_lichen — a mismatch here means the two functions' filters disagree, independent of \
+             — a mismatch here means the two functions' filters disagree, independent of \
              any named residual"
         );
         let count_delta = (ours_in_centre as i64 - expected_len as i64).unsigned_abs() as usize;

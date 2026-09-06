@@ -71,7 +71,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.packs.PackLocationInfo;
 import net.minecraft.server.packs.PackResources;
@@ -148,6 +150,11 @@ public final class VegetationOracle {
     static String biomeName;
 
     static Map<Long, ProtoChunk> chunkCache = new HashMap<>();
+    // The set is emitted with each fixture.  A production oracle must make its
+    // level surface auditable: a missing method cannot be mistaken for a real
+    // negative predicate result.
+    static final Set<String> proxyCalls = java.util.Collections.synchronizedSet(new TreeSet<String>());
+    static final Set<String> proxyFallbacks = java.util.Collections.synchronizedSet(new TreeSet<String>());
 
     static <T extends Comparable<T>> String propVal(BlockState s, Property<T> p) {
         return p.getName(s.getValue(p));
@@ -400,6 +407,12 @@ public final class VegetationOracle {
         sb.append("meta.minY ").append(minY).append('\n');
         sb.append("meta.height ").append(height).append('\n');
         sb.append("meta.seed ").append(seed).append('\n');
+        synchronized (proxyCalls) {
+            for (String name : proxyCalls) sb.append("meta.proxyCall ").append(name).append('\n');
+        }
+        synchronized (proxyFallbacks) {
+            for (String name : proxyFallbacks) sb.append("meta.proxyFallback ").append(name).append('\n');
+        }
 
         System.out.print(sb);
     }
@@ -496,6 +509,7 @@ public final class VegetationOracle {
         WorldGenLevel[] self = new WorldGenLevel[1];
         InvocationHandler handler = (proxy, method, methodArgs) -> {
             String name = method.getName();
+            proxyCalls.add(name);
             Object[] a = methodArgs;
             switch (name) {
                 case "getHeight":
@@ -546,6 +560,16 @@ public final class VegetationOracle {
                     BlockPos bp = (BlockPos) a[0];
                     int cx = bp.getX() >> 4, cz = bp.getZ() >> 4;
                     return chunkAt(cx, cz).getFluidState(bp);
+                }
+                case "isEmptyBlock": {
+                    BlockPos bp = (BlockPos) a[0];
+                    int cx = bp.getX() >> 4, cz = bp.getZ() >> 4;
+                    return chunkAt(cx, cz).getBlockState(bp).isAir();
+                }
+                case "isWaterAt": {
+                    BlockPos bp = (BlockPos) a[0];
+                    int cx = bp.getX() >> 4, cz = bp.getZ() >> 4;
+                    return chunkAt(cx, cz).getFluidState(bp).is(net.minecraft.tags.FluidTags.WATER);
                 }
                 // `LevelSimulatedReader.isStateAtPosition`/`isFluidAtPosition`
                 // are ABSTRACT on that interface (`Level`'s own
@@ -623,6 +647,10 @@ public final class VegetationOracle {
                     return seed;
                 case "getLevel":
                     return self[0];
+                case "getRandom":
+                    return new LegacyRandomSource(seed);
+                case "scheduleTick":
+                    return null;
                 case "registryAccess":
                     return null;
                 case "getMinBuildHeight":
@@ -636,6 +664,7 @@ public final class VegetationOracle {
                 case "toString":
                     return "VegetationOracleLevel";
                 default: {
+                    proxyFallbacks.add(name + "/" + (a == null ? 0 : a.length));
                     Class<?> rt = method.getReturnType();
                     if (rt == boolean.class) return Boolean.FALSE;
                     if (rt == int.class) return 0;
