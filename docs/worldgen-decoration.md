@@ -124,6 +124,13 @@ after that nested placement succeeds, then independently scatter hanging roots f
 Coral tree, claw and mushroom forms share the tagged coral state choice and water gate but retain
 their distinct trunk, branched and hollow-shell geometries.
 
+Tree `place_on_ground` decorators use the lowest trunk/root positions as their horizontal bounds,
+expand that box by the configured radius and vertical height, and try the configured state provider
+above solid, motion-blocking ground. Each try consumes one inclusive x, y and z draw before any
+candidate checks, including rejected candidates; this is important for the paired 96-try and 150-try
+leaf-litter decorators used by mixed oak trees. The provider is evaluated only after the air, ground
+and no-leaves heightmap checks pass, so a rejected candidate consumes no provider-specific draws.
+
 The direct compiled-server maps for root systems and all three coral forms are exact, including
 their blocked-origin and dry-water controls. Their real-biome composition captures remain an
 explicit production gap: `warm_ocean` currently diverges on seagrass and multiface writes, and

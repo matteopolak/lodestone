@@ -294,6 +294,7 @@ pub(super) fn place_tree<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
+    ROOT_POSITIONS.with(|roots| roots.borrow_mut().clear());
     let tree_height = cfg.trunk_placer.get_tree_height(random);
     let foliage_height = cfg.foliage_placer.foliage_height(random, tree_height);
     let trunk_len = tree_height - foliage_height;
@@ -609,6 +610,21 @@ pub(super) fn place_tree<R: RandomSource>(
             Decorator::Beehive { probability } => {
                 place_beehive_decorator(random, *probability, trunk_origin, tree_height, grid, tags);
             }
+            Decorator::PlaceOnGround { block_provider, height, radius, tries } => {
+                ROOT_POSITIONS.with(|roots| {
+                    place_on_ground_decorator(
+                        random,
+                        &trunk_positions,
+                        &roots.borrow(),
+                        block_provider,
+                        *height,
+                        *radius,
+                        *tries,
+                        grid,
+                        tags,
+                    );
+                });
+            }
             Decorator::TrunkVine => {
                 place_trunk_vine_decorator(random, &trunk_positions, grid, tags);
             }
@@ -665,6 +681,133 @@ pub(super) fn place_tree<R: RandomSource>(
     }
     TRUNKS.set(trunk_positions);
     ATTACHMENTS.set(attachments);
+}
+
+/// Places a tree decorator's state provider above solid ground in the tree's
+/// lowest trunk/root bounding box. Every attempt consumes three inclusive
+/// coordinate draws before checking the candidate, including rejected ones.
+fn place_on_ground_decorator<R: RandomSource>(
+    random: &mut R,
+    logs: &[BlockPos],
+    roots: &[BlockPos],
+    block_provider: &BlockStateProvider,
+    height: i32,
+    radius: i32,
+    tries: i32,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    let Some(first) = logs.first().or_else(|| roots.first()) else {
+        return;
+    };
+    let lowest_y = logs
+        .iter()
+        .chain(roots)
+        .map(|pos| pos.y)
+        .min()
+        .unwrap_or(first.y);
+    let mut min_x = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut min_z = i32::MAX;
+    let mut max_z = i32::MIN;
+    for pos in logs.iter().chain(roots).filter(|pos| pos.y == lowest_y) {
+        min_x = min_x.min(pos.x);
+        max_x = max_x.max(pos.x);
+        min_z = min_z.min(pos.z);
+        max_z = max_z.max(pos.z);
+    }
+
+    let min_x = min_x - radius;
+    let max_x = max_x + radius;
+    let min_y = lowest_y - height;
+    let max_y = lowest_y + height;
+    let min_z = min_z - radius;
+    let max_z = max_z + radius;
+    for _ in 0..tries {
+        let pos = BlockPos {
+            x: random.next_int_bounded(max_x - min_x + 1) + min_x,
+            y: random.next_int_bounded(max_y - min_y + 1) + min_y,
+            z: random.next_int_bounded(max_z - min_z + 1) + min_z,
+        };
+        let above = BlockPos { y: pos.y + 1, ..pos };
+        let above_id = grid.get_id(above.x, above.y, above.z);
+        let above_name = super::base_id(grid.interner().name_of(above_id));
+        if !(tags.has(grid.interner(), Tag::Air, above_id) || above_name == "minecraft:vine") {
+            continue;
+        }
+        let below_id = grid.get_id(pos.x, pos.y, pos.z);
+        let below_name = super::base_id(grid.interner().name_of(below_id));
+        if tags.has(grid.interner(), Tag::Fluid, below_id)
+            || !super::config::blocks_motion(below_name)
+            || tags.has(grid.interner(), Tag::Leaves, below_id)
+        {
+            continue;
+        }
+        if height_motion_blocking_no_leaves(grid, tags, pos.x, pos.z) > above.y {
+            continue;
+        }
+        if let Some(state) = block_provider.get_state_id(grid, tags, random, above) {
+            grid.set_id_if_in_bounds(above.x, above.y, above.z, state);
+        }
+    }
+}
+
+fn height_motion_blocking_no_leaves(grid: &VegGrid, tags: &VegTags, x: i32, z: i32) -> i32 {
+    for y in (grid.min_y..grid.min_y + grid.height).rev() {
+        let id = grid.get_id(x, y, z);
+        if tags.has(grid.interner(), Tag::Air, id)
+            || tags.has(grid.interner(), Tag::Fluid, id)
+            || tags.has(grid.interner(), Tag::Leaves, id)
+        {
+            continue;
+        }
+        if super::config::blocks_motion(super::base_id(grid.interner().name_of(id))) {
+            return y + 1;
+        }
+    }
+    grid.min_y
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
+
+    #[test]
+    fn place_on_ground_mixed_oak_try_counts_and_output_are_stable() {
+        let mut grid = VegGrid::new(-4, 9, 0, 0);
+        grid.seed(0, 0, 0, "minecraft:grass_block".to_string());
+        let tags = VegTags::default();
+        let provider = BlockStateProvider::Simple("minecraft:short_grass".to_string());
+        let logs = [BlockPos { x: 0, y: 0, z: 0 }];
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+
+        place_on_ground_decorator(
+            &mut random,
+            &logs,
+            &[],
+            &provider,
+            0,
+            0,
+            96,
+            &mut grid,
+            &tags,
+        );
+        place_on_ground_decorator(
+            &mut random,
+            &logs,
+            &[],
+            &provider,
+            0,
+            0,
+            150,
+            &mut grid,
+            &tags,
+        );
+
+        assert_eq!(random.count(), (96 + 150) * 3);
+        assert_eq!(grid.get(0, 1, 0), "minecraft:short_grass");
+    }
 }
 
 /// Vanilla's own beehive tree-decorator,

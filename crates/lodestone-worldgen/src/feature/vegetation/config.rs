@@ -1365,6 +1365,15 @@ impl Positions {
 #[derive(Clone, Debug)]
 pub enum Decorator {
     Beehive { probability: f32 },
+    /// Places a state provider on solid ground around the tree. The three
+    /// inclusive random coordinates are consumed for every try, even when
+    /// the candidate is rejected.
+    PlaceOnGround {
+        block_provider: BlockStateProvider,
+        height: i32,
+        radius: i32,
+        tries: i32,
+    },
     /// The trunk-vine decorator — a hanging vine on each of a log's four
     /// horizontal neighbours, one independent coin flip per side (the
     /// savanna/acacia increment: reached from `mega_jungle_tree`/`jungle_tree`'s own
@@ -1405,6 +1414,17 @@ impl Decorator {
             "beehive" => Decorator::Beehive {
                 probability: v["probability"].as_f64().unwrap_or(0.0) as f32,
             },
+            "place_on_ground" => {
+                match BlockStateProvider::try_parse(&v["block_state_provider"]) {
+                    Some(block_provider) => Decorator::PlaceOnGround {
+                        block_provider,
+                        height: v["height"].as_i64().unwrap_or(1).max(0) as i32,
+                        radius: v["radius"].as_i64().unwrap_or(2).max(0) as i32,
+                        tries: v["tries"].as_i64().unwrap_or(128).max(1) as i32,
+                    },
+                    None => Decorator::Unsupported,
+                }
+            }
             "trunk_vine" => Decorator::TrunkVine,
             "attached_to_logs" => {
                 let block_provider = BlockStateProvider::try_parse(&v["block_provider"]);
