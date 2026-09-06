@@ -106,15 +106,18 @@ were placed.
 The integrated server's `DimensionalSource` builds the Nether and End sources lazily behind the
 same chunk lifecycle used by the primary dimension. A generated Nether column therefore passes
 through the shared cache, the dimension-specific Anvil region path when persistence is enabled,
-lighting, and the selected protocol's chunk encoder. The in-memory packet gate in
+and the lazy dimension save registry flushes that region source on autosave and shutdown. It then
+passes through lighting and the selected protocol's chunk encoder. The in-memory packet gate in
 `crates/lodestone-server/tests/integrated_memory.rs` drives that connection path and checks the
 Nether's 256-row wire window plus a bedrock floor marker against the external full-region oracle
 at `crates/lodestone-worldgen/tests/support/nether_vanilla_oracle.txt`. End portal entry lands on
 the generated fixed platform, and generated outer-island return gateways carry an exact destination
-sidecar that the server consumes on contact. Portal travel still needs an external-client round trip
-and restart fixture; the remaining worldgen-side gap is that `EmbeddedResolver` hardcodes the
-Overworld's documents for the default singleplayer path, so a future resolver split must preserve
-each dimension's own data source.
+sidecar that the server consumes on contact. The integrated-server restart gate in
+`integrated::tests::persistent_generated_nether_sibling_survives_portal_restart` also verifies
+generated Nether edits and both dimension portal indexes survive and remain findable after reopening.
+A full external-client movement replay remains outside this hermetic fixture. The remaining
+worldgen-side gap is that `EmbeddedResolver` hardcodes the Overworld's documents for the default
+singleplayer path, so a future resolver split must preserve each dimension's own data source.
 
 ## How to change it
 
