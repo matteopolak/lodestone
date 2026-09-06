@@ -317,8 +317,9 @@ pub struct GeneratedColumn {
     blocks: Vec<u16>,
     /// Biome id per horizontal quart, row-major `qz * 4 + qx` —
     /// see [`OverworldGenerator::biome_stage`]. **The surface answer**: this is
-    /// the biome a player standing on the column sees, and it is what surface
-    /// material, carve and decorate consume.
+    /// the direct surface-height quart answer used by output consumers such as
+    /// decoration. Surface material has a separate zoomed nearby-cell context
+    /// because its per-block lookup does not use the wire cell directly.
     ///
     /// It is *not* the biome of the column: broadcasting
     /// it vertically is what made `lush_caves`/`dripstone_caves`/`deep_dark`

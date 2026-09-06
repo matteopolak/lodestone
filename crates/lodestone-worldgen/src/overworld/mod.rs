@@ -1220,7 +1220,7 @@ impl OverworldGenerator {
         let biome_cells = self.biome_cells_stage(base_x, base_z);
         let biome_quarts = self.biome_stage(&biome_cells, &heights);
         let t_surface_start = lodestone_time::Instant::now();
-        let surface_diff = self.surface_stage(&field, &heights, &biome_cells, base_x, base_z);
+        let surface_diff = self.surface_stage(&field, &heights, base_x, base_z);
         let t_materialize_start = lodestone_time::Instant::now();
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         let t_carve_start = lodestone_time::Instant::now();

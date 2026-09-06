@@ -49,6 +49,7 @@ gen-counters = ["lodestone-worldgen-core/gen-counters"]
 # goes through it instead of an improvised copy. See `docs/browser-shell-port.md`.
 lodestone-time = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 # The numeric core (hash, math, rng, noise, density, counters) — Unit 16's leaf
 # extraction. Re-exported wholesale from `src/lib.rs` under the original module
 # paths, so this dependency is invisible to every caller. A path dependency

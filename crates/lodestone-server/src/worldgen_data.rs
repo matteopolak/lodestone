@@ -3901,6 +3901,33 @@ mod single_biome_and_debug_world_selection {
         assert_eq!(super::world_preset_single_biome_default_biome(), "minecraft:plains");
     }
 
+    #[test]
+    fn sulfur_cave_surface_rule_uses_the_underground_biome_cell() {
+        let source = super::single_biome_chunk_source(42, "minecraft:sulfur_caves");
+        let column = source.column(-500, -500);
+        assert_eq!(
+            column.block_state(10, -21, 12),
+            "minecraft:sulfur",
+            "the external surface oracle reports sulfur at this fixed-biome point"
+        );
+    }
+
+    #[test]
+    fn surface_rules_choose_the_zoomed_biome_not_the_raw_packet_cell() {
+        let source = super::overworld_chunk_source(42);
+        let column = source.column(-500, -500);
+        assert_eq!(
+            column.biome_state_at(10, -21, 12),
+            "minecraft:plains",
+            "the captured reference packet has plains in this raw quart cell"
+        );
+        assert_eq!(
+            column.block_state(10, -21, 12),
+            "minecraft:sulfur",
+            "the independently captured surface result selects sulfur from a nearby cave-biome cell"
+        );
+    }
+
     /// The discriminating assertion for `single_biome_surface`: at the same
     /// seed, [`super::single_biome_chunk_source`]`(seed, "minecraft:desert")`
     /// must report `minecraft:desert` as its biome at *every* sampled column

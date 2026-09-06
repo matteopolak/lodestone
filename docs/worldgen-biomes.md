@@ -49,10 +49,11 @@ right order or the surface pass silently erases it.
 
 ### Surface rules
 
-`SurfaceSystem` interprets vanilla's `surface_rule` tree per block, reading that block's quart cell
-from `BiomeCells` for its biome and temperature. This matters for underground biome conditions:
-the sulfur-cave branch can replace default stone with cinnabar or sulfur far below a column whose
-surface biome is unrelated. Vanilla's Badlands surface rule (its own terracotta-banding
+`SurfaceSystem` interprets the bundled `surface_rule` tree per block. Its biome context is a
+seed-derived, jittered choice among the eight raw quart cells surrounding that block, rather than
+the direct quart cell stored in `BiomeCells` on the wire. This matters for underground biome
+conditions: the sulfur-cave branch can replace default stone with cinnabar or sulfur far below a
+column whose surface biome is unrelated. The Badlands surface rule (its terracotta-banding
 lookup) is ported — `Rule::Bandlands`/`BandBlocks`, a 192-entry table built once per
 world seed and now interned to `StateId`s rather than re-derived per probe, with `math::round`
 providing Java's half-up rounding semantics `f64::round`'s half-away-from-zero does not match.
@@ -87,9 +88,10 @@ and need no repeated range fallback.
 
 - **Do not unify the y=0 and surface-height biome sampling conventions.** They answer genuinely
   different questions for genuinely different consumers.
-- **Surface-rule biome conditions use the block's own quart Y.** Do not pass the 16-entry surface
-  biome array to `SurfaceSystem::build_surface`; it is only for surface consumers such as vegetation
-  and would erase cave-biome material rules.
+- **Surface-rule biome conditions use the zoomed nearby-cell context at the block's own Y.** Do not
+  pass either the 16-entry surface biome array or the direct wire `BiomeCells` lookup to
+  `SurfaceSystem::build_surface`; use `OverworldGenerator::surface_biome_context`. Either shortcut
+  erases valid cave-biome material rules at boundary cells.
 - **Never seed the biome search.** A "pruning hint" reproducing vanilla's `lastResult` carry-over
   makes output depend on search history, which is incompatible with a generator whose columns can be
   requested in any order on any thread.
@@ -116,7 +118,8 @@ changes. `gen-counters` (default off) is required for the biome-search and cache
 
 ## Dependencies
 
-`lodestone-worldgen-core`'s `density`/`counters`; `lodestone-worldgen`'s `biome`, `surface`,
+`lodestone-worldgen-core`'s `density`/`counters`; `sha2` for the stable surface-biome jitter seed;
+`lodestone-worldgen`'s `biome`, `surface`,
 `overworld::{biome_cells, veins}`, `feature::top_layer`; `lodestone_data::{snow_support,
 block_solidity}` for the freeze-layer per-block facts; `lodestone-server`'s `EmbeddedResolver` for the
 bundled 26.2 data and the served biome quart grid (`ChunkColumn::biome_state`); `protocol/v26-2`'s
