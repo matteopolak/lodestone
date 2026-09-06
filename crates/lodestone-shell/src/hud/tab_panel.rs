@@ -8,41 +8,38 @@ use super::TAB_LINE_H;
 /// Maximum rows allowed in one column before the list grows another column.
 pub(super) const TAB_MAX_ROWS_PER_COL: usize = 20;
 
-/// Horizontal gap between two columns — the literal `5` in
-/// `xo = xxo + col * slotWidth + col * 5`.
+/// Horizontal gap between two columns — a literal 5-pixel separation.
 pub(super) const TAB_COL_GAP: f32 = 5.0;
 
-/// The 9 px a row reserves for its 8×8 player face, plus the 1 px vanilla leaves
-/// between the face and the name (`xo += 9` after the face blit).
+/// The 9 px a row reserves for its 8×8 player face, plus the 1 px left between
+/// the face and the name.
 pub(super) const TAB_HEAD_W: f32 = 9.0;
 
-/// The per-row slack in vanilla's slot-width estimate — the literal `13` in
-/// `cols * ((showHead ? 9 : 0) + maxNameWidth + widthForScore + 13)`. It is what
-/// leaves room for the 10 px ping icon plus a pixel either side.
+/// The per-row slack in the slot-width estimate — a literal 13. It leaves room
+/// for the 10 px ping icon plus a pixel either side.
 pub(super) const TAB_ROW_SLACK: f32 = 13.0;
 
-/// The margin vanilla keeps clear either side — the `screenWidth - 50` cap on
-/// both the slot-width estimate and the header/footer wrap width.
+/// The margin kept clear at either side — a 50-pixel cap on the available width
+/// for the slot estimate and header/footer text.
 pub(super) const TAB_SCREEN_INSET: f32 = 50.0;
 
-/// The overlay's top edge — `yyo = 10`.
+/// The overlay's top edge is 10 pixels from the top.
 pub(super) const TAB_TOP: f32 = 10.0;
 
-/// The ping icon's drawn size and its offset from the slot's right edge —
-/// `blitSprite(sprite, xo + slotWidth - 11, yo, 10, 8)`.
+/// The ping icon's drawn size and its offset from the slot's right edge: 10×8
+/// pixels, with an 11-pixel right inset.
 pub(super) const TAB_PING_W: f32 = 10.0;
 /// See [`TAB_PING_W`].
 pub(super) const TAB_PING_H: f32 = 8.0;
 /// See [`TAB_PING_W`].
 pub(super) const TAB_PING_INSET: f32 = 11.0;
 
-/// The plate behind the header, the rows and the footer — vanilla's
-/// `Integer.MIN_VALUE`, i.e. `0x80000000`: black at alpha `128`.
+/// The plate behind the header, rows, and footer: black at alpha `128`.
 pub(super) const TAB_PLATE: [f32; 4] = [0.0, 0.0, 0.0, 0x80 as f32 / 255.0];
 
-/// The per-row fill — `options.getBackgroundColor(553648127)`, i.e. `0x20FFFFFF`:
-/// **white** at alpha `32`, not another black wash. Getting this wrong is what
-/// makes the rows read as one flat block instead of a striped list.
+/// The per-row fill is `0x20FFFFFF`: **white** at alpha `32`, not another black
+/// wash. Getting this wrong makes the rows read as one flat block instead of a
+/// striped list.
 pub(super) const TAB_ROW_FILL: [f32; 4] = [1.0, 1.0, 1.0, 0x20 as f32 / 255.0];
 
 /// A row's ink. Opaque white, or `0x90FFFFFF` for a spectator
