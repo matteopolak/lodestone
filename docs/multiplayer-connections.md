@@ -21,6 +21,10 @@ The browser package forwards the same feature. Its paired native page server
 also has `multiplayer` on by default; disabling it removes the `/relay`
 WebSocket-to-TCP route and does not link `lodestone-relay`, so serving a
 singleplayer-only page cannot turn that page host into an arbitrary TCP proxy.
+The same feature boundary removes the online account gate: a confined browser
+build starts its bundled in-memory server with the stable offline identity, so
+the public singleplayer page does not require a Microsoft sign-in. Builds that
+include `multiplayer` retain the ownership gate for both local and remote play.
 
 Movement reconciliation has a dedicated `net_join` tracing target. It records
 each decoded server correction with its raw relative flags and resolved pose,
