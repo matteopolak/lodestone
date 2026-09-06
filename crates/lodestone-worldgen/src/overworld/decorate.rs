@@ -156,12 +156,11 @@ impl OverworldGenerator {
                 .is_some_and(|members| members.contains(block))
         };
         let feature_biomes = self.decoration_catalog.feature_biomes();
-        let biome_allows = |pos: crate::feature::BlockPos, feature_id: &str| {
-            let source_x = pos.x.div_euclid(16);
-            let source_z = pos.z.div_euclid(16);
+        let biome_zoom_seed = super::biome::biome_zoom_seed(self.seed);
+        let biome_sources = |source_x: i32, source_z: i32| {
             let dx = source_x - cx;
             let dz = source_z - cz;
-            let cells = if dx == 0 && dz == 0 {
+            if dx == 0 && dz == 0 {
                 Some(&*centre_biomes)
             } else if (-crate::feature::region_view::WIDE_RADIUS
                 ..=crate::feature::region_view::WIDE_RADIUS)
@@ -175,17 +174,21 @@ impl OverworldGenerator {
                     .map(|pre| &*pre.3)
             } else {
                 None
-            };
-            let Some(cells) = cells else { return false };
-            let qy = (pos.y - cells.min_y()).div_euclid(4);
-            if qy < 0 || qy >= cells.y_quarts() as i32 {
-                return false;
             }
-            let qx = pos.x.rem_euclid(16).div_euclid(4) as usize;
-            let qz = pos.z.rem_euclid(16).div_euclid(4) as usize;
+        };
+        let biome_allows = |pos: crate::feature::BlockPos, feature_id: &str| {
+            let Some(biome) = super::biome::zoomed_biome(
+                biome_zoom_seed,
+                pos.x,
+                pos.y,
+                pos.z,
+                biome_sources,
+            ) else {
+                return false;
+            };
             feature_biomes
                 .get(feature_id)
-                .is_some_and(|eligible| eligible.contains(cells.at_quart(qx, qy as usize, qz)))
+                .is_some_and(|eligible| eligible.contains(biome))
         };
 
         // Borrowed once, outside the closure, so the view's lifetime is plainly
