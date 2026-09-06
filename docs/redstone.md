@@ -125,7 +125,12 @@ vs. block-entity tick ordering) — four cells animate on a three-block push,
 not three, because the piston's own arm cell is a travelling block too, and
 it carries the head. The moving-block record travels as a scheduled tick's
 own encoded **kind string** (there is no block-entity map on the reaction
-surface), so match that kind by prefix, never equality.
+surface), so match that kind by prefix, never equality. Its carried state keeps
+the exact runtime spelling for the final world write, including server-only
+companion properties such as a comparator's `output=N`; a separate optional,
+validated `lodestone_data::block_states::StateId` projects the built-in portion
+for moving-block NBT. Data-pack states without that projection still schedule,
+animate, and commit verbatim.
 
 Reaching a client needs two packets per animating cell in order —
 `block_update` writing `minecraft:moving_piston[...]` (which makes the client

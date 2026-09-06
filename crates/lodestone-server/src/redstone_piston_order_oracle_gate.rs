@@ -267,7 +267,7 @@ fn retracting_after_the_extend_already_committed_finds_nothing_to_interrupt() {
     for tick in &due {
         if let Some(entity) = piston::parse_finish_kind(&tick.kind) {
             let (x, y, z) = tick.pos;
-            column.set_block(x, y, z, &entity.moved_state);
+            column.set_block(x, y, z, entity.committed_state());
         }
     }
     assert!(

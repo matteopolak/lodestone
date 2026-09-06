@@ -13,7 +13,7 @@ numeric: public functions with state_id, block_state, effect_id, item_id, entity
 text: public String fields whose names end in url, dimension, potion, effect, state, kind, mode, key, or id
 ```
 
-The snapshot contains **88 numeric APIs** and **64 text fields**, **152 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
+The snapshot contains **88 numeric APIs** and **62 text fields**, **150 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
 
 | disposition | sites |
 |---|---:|
@@ -27,7 +27,7 @@ The snapshot contains **88 numeric APIs** and **64 text fields**, **152 sites to
 | `intentional-user-or-format-text` | 2 |
 | `intentional-wire-boundary` | 36 |
 | `inventory-menu-slot` | 32 |
-| `potion-and-state-value` | 13 |
+| `potion-and-state-value` | 11 |
 | `prediction-sequence` | 2 |
 | `recipe-item-id` | 2 |
 | `typed-discriminator` | 5 |
@@ -143,7 +143,6 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-server/src/heavy_scene.rs:     pub executable_kind: String,` | `intentional-observability-label` |
 | `crates/lodestone-server/src/block_placement.rs:     pub state: String,` | `potion-and-state-value` |
 | `crates/lodestone-server/src/random_tick.rs:     pub state: String,` | `potion-and-state-value` |
-| `crates/lodestone-server/src/piston.rs:     pub moved_state: String,` | `potion-and-state-value` |
 | `crates/lodestone-server/src/redstone_note_block.rs:     pub new_state: String,` | `potion-and-state-value` |
 | `crates/lodestone-assets/src/meta.rs:     pub id: String,` | `dimension-resource-url` |
 | `crates/lodestone-server/src/redstone_dispenser.rs:     pub new_state: String,` | `potion-and-state-value` |

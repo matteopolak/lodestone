@@ -1637,7 +1637,7 @@ impl BlockEntityHandle {
 
 /// # Block-state NBT representation
 ///
-/// Renders a canonical block-state string as the `{Name, Properties}` compound
+/// Renders a serialized runtime state as the `{Name, Properties}` compound
 /// used by NBT fields that hold a block state.
 ///
 /// `Properties` is omitted entirely for a state with none, matching vanilla's own
@@ -1665,6 +1665,21 @@ pub fn block_state_nbt(state: &str) -> Nbt {
     Nbt::Compound(fields)
 }
 
+/// Renders a validated census state without reparsing serialized text.
+#[must_use]
+pub fn block_state_id_nbt(state: lodestone_data::block_states::StateId) -> Nbt {
+    let mut fields = vec![("Name".to_string(), Nbt::String(state.name().to_string()))];
+    let properties: Vec<(String, Nbt)> = state
+        .properties()
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), Nbt::String((*value).to_string())))
+        .collect();
+    if !properties.is_empty() {
+        fields.push(("Properties".to_string(), Nbt::Compound(properties)));
+    }
+    Nbt::Compound(fields)
+}
+
 /// One in-flight moving piston's network NBT — `PistonMovingBlockEntity`'s
 /// `getUpdateTag`, which is `saveCustomOnly`, i.e. exactly `saveAdditional`'s five
 /// fields with no `id`/`x`/`y`/`z`.
@@ -1685,7 +1700,10 @@ pub fn moving_piston_nbt(entity: &crate::piston::MovingBlockEntity) -> Nbt {
     Nbt::Compound(vec![
         (
             "blockState".to_string(),
-            block_state_nbt(&entity.moved_state),
+            entity.moved_state.map_or_else(
+                || block_state_nbt(entity.committed_state()),
+                block_state_id_nbt,
+            ),
         ),
         ("facing".to_string(), Nbt::Byte(entity.facing_3d_value())),
         (
@@ -2463,14 +2481,14 @@ mod tests {
     /// this repo already paid for.
     #[test]
     fn moving_piston_nbt_matches_the_vanilla_update_tag() {
-        let entity = crate::piston::MovingBlockEntity {
-            moved_state: "minecraft:piston_head[facing=east,short=false,type=sticky]".to_string(),
-            direction: crate::neighbor_update::Direction::East,
+        let entity = crate::piston::MovingBlockEntity::new(
+            "minecraft:piston_head[facing=east,short=false,type=sticky]".to_string(),
+            crate::neighbor_update::Direction::East,
             // Distinct on purpose: equal flags would let a transposition of the two
             // adjacent booleans through unnoticed.
-            extending: true,
-            source: false,
-        };
+            true,
+            false,
+        );
         let Nbt::Compound(fields) = moving_piston_nbt(&entity) else {
             panic!("the update tag must be a compound");
         };
@@ -2516,7 +2534,10 @@ mod tests {
         // A state with no properties omits `Properties` entirely, as vanilla's
         // codec does.
         assert_eq!(
-            block_state_nbt("minecraft:stone"),
+            block_state_id_nbt(
+                lodestone_data::block_states::StateId::from_state_str("minecraft:stone")
+                    .expect("stone is in the generated census"),
+            ),
             Nbt::Compound(vec![(
                 "Name".to_string(),
                 Nbt::String("minecraft:stone".to_string())

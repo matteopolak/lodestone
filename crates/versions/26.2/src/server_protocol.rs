@@ -7204,12 +7204,12 @@ mod block_edit_tests {
         use lodestone_server::piston::{Direction, MovingBlockEntity, moving_piston_state};
 
         let proto = V770ServerProtocol;
-        let entity = MovingBlockEntity {
-            moved_state: "minecraft:piston_head[facing=east,short=false,type=sticky]".to_string(),
-            direction: Direction::East,
-            extending: true,
-            source: true,
-        };
+        let entity = MovingBlockEntity::new(
+            "minecraft:piston_head[facing=east,short=false,type=sticky]".to_string(),
+            Direction::East,
+            true,
+            true,
+        );
         let pos = lodestone_model::BlockPos::new(11, 64, -4);
 
         // 1. The state. A `moving_piston` must resolve to a real 26.2 state id —
@@ -7290,7 +7290,7 @@ mod block_edit_tests {
         // own `blockState` must be a real state id, or `PistonHeadRenderer`'s first
         // arm never fires and nothing is drawn at all.
         assert!(
-            lodestone_data::block_states::state_id(&entity.moved_state).is_some(),
+            entity.moved_state.is_some(),
             "the travelling head state must resolve in the 26.2 table"
         );
 
