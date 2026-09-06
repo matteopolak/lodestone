@@ -363,6 +363,7 @@ pub fn apply_decoration_steps_3x3_per_source<'a, R: RandomSource>(
             let source_x = center_x + dx;
             let source_z = center_z + dz;
             let features = features_for_source(source_x, source_z);
+            random.begin_decoration_source();
             apply_decoration_steps(random, seed, source_x, source_z, grid, tags, features);
         }
     }
@@ -438,6 +439,7 @@ pub fn apply_vegetal_decoration_step_3x3_per_source<'a, R: RandomSource>(
             let source_x = center_x + dx;
             let source_z = center_z + dz;
             let features = features_for_source(source_x, source_z);
+            random.begin_decoration_source();
             apply_vegetal_decoration_step(random, seed, source_x, source_z, grid, tags, features);
         }
     }
@@ -735,6 +737,55 @@ mod tests {
             }
         }
         grid
+    }
+
+    #[test]
+    fn source_passes_clear_a_cached_wrapper_gaussian_before_reseeding() {
+        let seed = 42;
+        let mut expected = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        expected.set_decoration_seed(seed, 16, 16);
+        let expected_gaussian = expected.next_gaussian();
+        let expected_next_double = expected.next_double();
+
+        let mut contaminated = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let _ = contaminated.next_gaussian();
+        contaminated.set_decoration_seed(seed, 16, 16);
+        assert_ne!(
+            contaminated.next_gaussian(),
+            expected_gaussian,
+            "control: a forwarded reseed alone must expose the inherited cached Gaussian mate"
+        );
+        assert_ne!(
+            contaminated.next_double(),
+            expected_next_double,
+            "control: returning that mate must leave the newly seeded backend unadvanced"
+        );
+
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let _ = random.next_gaussian();
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        let tags = VegTags::default();
+        let features: Vec<(i32, usize, PlacedRef)> = Vec::new();
+        apply_decoration_steps_3x3_per_source(
+            &mut random,
+            seed,
+            0,
+            0,
+            &mut grid,
+            &tags,
+            &|_source_x, _source_z| features.as_slice(),
+        );
+
+        assert_eq!(
+            random.next_gaussian(),
+            expected_gaussian,
+            "the final source pass must have a fresh wrapper cache after its decoration seed"
+        );
+        assert_eq!(
+            random.next_double(),
+            expected_next_double,
+            "the final source pass must have a fresh wrapper cache after its decoration seed"
+        );
     }
 
     /// The captured large-parity first mismatch has a sulfur feature candidate

@@ -161,6 +161,16 @@ impl<R: RandomSource> WorldgenRandom<R> {
         self.set_seed(result);
     }
 
+    /// Starts an independent decoration source pass.
+    ///
+    /// The caller must install that source's decoration seed before drawing.
+    /// Source passes use distinct wrapper objects, so their inherited Gaussian
+    /// caches and diagnostic cursors cannot cross a source boundary.
+    pub fn begin_decoration_source(&mut self) {
+        self.gaussian.reset();
+        self.count = 0;
+    }
+
     /// `setLargeFeatureSeed(seed, chunkX, chunkZ)`.
     pub fn set_large_feature_seed(&mut self, seed: i64, chunk_x: i32, chunk_z: i32) {
         self.set_seed(seed);
