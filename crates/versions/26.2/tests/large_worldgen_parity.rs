@@ -45,7 +45,7 @@ fn full_grid_manifest_streams_before_rust_comparison() {
         let directive = V770ServerProtocol.encode_chunk(cx, cz, &source.column(cx, cz));
         let payload = match directive {
             ServerDirective::Send { packet_id, payload } => {
-                assert_eq!(packet_id, lodestone_v26_2::packets::play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
+                assert_eq!(packet_id, lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
                 payload
             }
             other => panic!("production chunk encoder returned {other:?} at ({cx},{cz})"),
