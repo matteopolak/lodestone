@@ -2646,7 +2646,7 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
 
 /// Encodes one [`WorldChunkColumn`] into the `level_chunk_with_light` body,
 /// mirroring `LevelChunkWithLight`'s decode in `packets::chunk` exactly:
-/// `x`, `z`, the four client heightmaps, the length-prefixed section blob (per
+/// `x`, `z`, the three client heightmaps, the length-prefixed section blob (per
 /// section two leading shorts — non-air count then fluid count — then the
 /// block-state container then the biome container), the block-entity list
 /// ([`encode_block_entities`]), then the trailing light payload.
@@ -2714,12 +2714,11 @@ fn encode_column_body(
     w.into_vec()
 }
 
-/// The four client-visible heightmap type ids in the protocol-776 registry.
+/// The three client-visible heightmap type ids in the protocol-776 registry.
 /// They are explicit ids, not declaration positions: the source registry gives
-/// the two world-generation-only forms ids 0 and 2, leaving the client forms
-/// at 1, 3, 4, and 5.
+/// the world-generation-only forms ids 0, 2, and 3, leaving the client forms
+/// at 1, 4, and 5.
 const WORLD_SURFACE_HEIGHTMAP_TYPE_ID: u32 = 1;
-const OCEAN_FLOOR_HEIGHTMAP_TYPE_ID: u32 = 3;
 const MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID: u32 = 5;
 
 /// Builds every heightmap a completed chunk sends from its current state ids.
@@ -2732,9 +2731,8 @@ type HeightmapPredicate = fn(lodestone_data::block_states::StateId) -> bool;
 
 fn served_heightmaps(shape: &ChunkShape, source: &ServerChunkColumn) -> Heightmaps {
     let mut maps = Heightmaps::new();
-    let predicates: [(u32, HeightmapPredicate); 4] = [
+    let predicates: [(u32, HeightmapPredicate); 3] = [
         (WORLD_SURFACE_HEIGHTMAP_TYPE_ID, heightmap_world_surface),
-        (OCEAN_FLOOR_HEIGHTMAP_TYPE_ID, heightmap_ocean_floor),
         (MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, heightmap_motion_blocking),
         (
             MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
@@ -2761,12 +2759,9 @@ fn heightmap_world_surface(state: lodestone_data::block_states::StateId) -> bool
     state != lodestone_data::block_states::air_state()
 }
 
-fn heightmap_ocean_floor(state: lodestone_data::block_states::StateId) -> bool {
-    lodestone_data::block_solidity::blocks_motion(state)
-}
-
 fn heightmap_motion_blocking(state: lodestone_data::block_states::StateId) -> bool {
-    heightmap_ocean_floor(state) || lodestone_data::snow_support::has_fluid_state(state)
+    lodestone_data::block_solidity::blocks_motion(state)
+        || lodestone_data::snow_support::has_fluid_state(state)
 }
 
 fn heightmap_motion_blocking_no_leaves(state: lodestone_data::block_states::StateId) -> bool {
@@ -7124,7 +7119,7 @@ mod block_edit_tests {
         // variance assertion here would be false, not stronger.)
         assert!(expected.iter().all(|&h| h > 0), "{expected:?}");
 
-        // An all-air column still carries all four client maps, each at its
+        // An all-air column still carries all three client maps, each at its
         // documented zero (the first available Y is the build minimum).
         let empty = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
         let directive = ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &empty);
@@ -7135,7 +7130,10 @@ mod block_edit_tests {
         let mut r = Reader::new(&payload);
         let decoded = LevelChunkWithLight::decode(&mut r, &shape).expect("decode empty column");
         r.ensure_empty().expect("no trailing bytes");
-        assert_eq!(decoded.heightmaps.len(), 4);
+        assert_eq!(decoded.heightmaps.len(), 3);
+        let mut ids: Vec<_> = decoded.heightmaps.iter().map(|(id, _)| id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 4, 5]);
         for (_, map) in decoded.heightmaps.iter() {
             assert!(
                 (0..16).all(|z| (0..16).all(|x| map.get(x, z) == 0)),
@@ -7190,9 +7188,10 @@ mod block_edit_tests {
         }
     }
 
-    /// The four heightmaps do not share one predicate: a top leaf and water
-    /// distinguish the visible surface, material floor, and no-leaves maps.
-    /// The expected stored heights use the external registry's four predicates
+    /// The three sent heightmaps do not share one predicate: a top leaf and
+    /// water distinguish the visible surface, motion-blocking, and no-leaves
+    /// maps.
+    /// The expected stored heights use the external registry's three predicates
     /// and the `first free Y - min Y` representation, not this encoder's scan.
     #[test]
     fn encode_chunk_carries_each_client_heightmap() {
@@ -7213,20 +7212,12 @@ mod block_edit_tests {
         let decoded = LevelChunkWithLight::decode(&mut r, &shape).expect("decode chunk");
         r.ensure_empty().expect("no trailing bytes");
 
-        assert_eq!(decoded.heightmaps.len(), 4);
+        assert_eq!(decoded.heightmaps.len(), 3);
         assert_eq!(
             decoded
                 .heightmaps
                 .get(WORLD_SURFACE_HEIGHTMAP_TYPE_ID)
                 .expect("WORLD_SURFACE")
-                .get(0, 0),
-            13
-        );
-        assert_eq!(
-            decoded
-                .heightmaps
-                .get(OCEAN_FLOOR_HEIGHTMAP_TYPE_ID)
-                .expect("OCEAN_FLOOR")
                 .get(0, 0),
             13
         );

@@ -127,7 +127,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Server-side chunk column storage and wire encoding](./chunk-storage.md) — How a
   server-side `ChunkColumn` holds its block-state data in memory, how those states
   reach a real client on the wire as the `level_chunk_with_light` packet body,
-  including the four typed heightmaps, per-section fluid counters, and
+  including the three typed heightmaps, per-section fluid counters, and
   resident-neighbour lighting sent alongside them.
 - [Continuous integration](./ci.md) — `.github/workflows/ci.yml` runs on every push
   to `main` and every pull request, so an agent can push and let a GitHub-hosted

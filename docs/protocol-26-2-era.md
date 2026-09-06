@@ -9,10 +9,10 @@ client heightmaps, block entities, and light.
 
 ## How it works
 
-The packet starts with chunk coordinates, then a typed list of the four
-client-visible heightmaps: world surface, ocean floor, motion blocking, and
-motion blocking without leaves. Each value is the first free Y relative to the
-dimension minimum. `served_heightmaps` scans the same resolved state ids that
+The packet starts with chunk coordinates, then a typed list of the three
+client-visible heightmaps: world surface, motion blocking, and motion blocking
+without leaves. Their registry ids are 1, 4, and 5. Each value is the first
+free Y relative to the dimension minimum. `served_heightmaps` scans the same resolved state ids that
 `build_world_column` writes, so generated terrain,
 imported terrain, and later block edits have one source of truth. The all-air
 answer is zero for every map.
