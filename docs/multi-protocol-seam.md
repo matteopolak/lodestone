@@ -15,21 +15,29 @@ share underneath `lodestone-net`.
 
 Each `vNNN` crate implements `lodestone_model::VersionAdapter` — the **client-direction** seam
 (joining an external server of that version: `begin_login`, inbound decode into
-`ClientEvent`/`Directive`, `ClientAction` encoding outbound). Only `v26-2` also implements
-`ServerProtocol` (`lodestone-server`'s **server-direction** seam), so it is the only family we
-can host; `v1-8`, `v1-9`, and `v1-14` are client-only today.
+`ClientEvent`/`Directive`, `ClientAction` encoding outbound). The hosted rows additionally
+implement `ServerProtocol` (`lodestone-server`'s **server-direction** seam), with the registry
+retaining a separate host-protocol list because joining and hosting coverage are not the same.
+The current registry hosts protocol 5, 47, 110/210/316/340, 404, 498/578/754, 756/758, 762,
+766, 774 and 776; a family can remain join-only for any other protocol it understands.
 
 `lodestone-registry`'s `FAMILIES` table holds, per family, a `label`, a `protocols: &'static
-[i32]` slice, and a `make: fn(i32) -> Box<dyn VersionAdapter>` constructor. `protocols` points
+[i32]` slice, and a `make: fn(i32) -> Box<dyn VersionAdapter>` constructor. The separate
+`SERVER_FAMILIES` table holds host coverage and an explicit worldgen scope alongside its server
+constructor. `protocols` points
 at the family crate's own `PROTOCOLS` const rather than restating the numbers, so the registry's
 view of a family's coverage cannot drift from what `VersionAdapter::supports` actually resolves
 to. Resolution matches `protocols` with no allocation, then constructs exactly one adapter for
 the negotiated protocol — replacing an older scheme that built every family's adapter in turn
 and asked each `supports`. `v26-2` is the one asymmetric entry: it has no `PROTOCOLS`/
 `adapter_for`, its registry entry spells coverage as `&[lodestone_v26_2::PROTOCOL]`, and it
-discards the protocol argument, because it is genuinely single-protocol (776) and also the only
-family implementing `ServerProtocol` — leaving its hosting seam single-valued is the
-simplification, not deferred work.
+discards the protocol argument, because it is genuinely single-protocol (776). Its server
+adapter reports `WorldgenScope::V26_2`, matching the only terrain bundle embedded by
+`lodestone-server`. Every other hosted family reports `WorldgenScope::None` until a
+version-appropriate generator exists; the checked chunk-source construction path turns that
+into a user-visible refusal, so an older protocol can never receive 26.2 terrain silently.
+`lodestone_registry::worldgen_scope_for_protocol` exposes the same capability at the
+protocol-number seam for diagnostics and launch checks.
 
 A small set of codec helpers (`encode_body`, `decode_body`, `decode_body_exact`,
 `unpack_degrees`) is shared in `lodestone-core` rather than hand-copied per family, because they
