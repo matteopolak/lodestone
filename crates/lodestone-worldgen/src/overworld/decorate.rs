@@ -53,7 +53,7 @@ impl OverworldGenerator {
     /// vanilla's real spill).
     ///
     /// No-op (returns `center_world` unchanged) when the resolver supplied no
-    /// biome carries any ore data (`ores_by_biome` all-empty) — the same
+    /// ore-capable feature exists in the global catalog — the same
     /// "no data supplied" convention every other resolver method
     /// follows, and the one every existing `Resolver` that predates this
     /// increment (most of this crate's own test fixtures) still gets.
@@ -64,7 +64,7 @@ impl OverworldGenerator {
         center_world: crate::dense_grid::DenseBlockGrid,
         center_heights: &[i32; 256],
     ) -> crate::dense_grid::DenseBlockGrid {
-        if self.ores_by_biome.values().all(Vec::is_empty) {
+        if self.ore_definitions.is_empty() {
             return center_world;
         }
         // Entered AFTER the no-data early return, deliberately: `stage_entered`
@@ -85,45 +85,67 @@ impl OverworldGenerator {
         // whichever chunk owns the column, with the ore writes held in the view's
         // own sparse overlay. See `crate::feature::region_view`.
         //
-        // The eight neighbours' pre-ore products are pulled out of the staged
-        // store first and held in `pre` for the whole lifetime of the view below,
+        // The 24 read-context neighbours' pre-ore products are pulled out of the
+        // staged store first and held for the whole lifetime of the view below,
         // because the view borrows into them. `Arc`s, so nothing is copied and
         // nothing is written — a neighbour's product is shared read-only with
         // every other in-flight column that has the same neighbour, which is what
         // keeps "one writer per chunk grid" true.
-        let mut pre: [Option<Arc<super::PreOreResult>>; 9] = std::array::from_fn(|_| None);
-        for dx in -1..=1i32 {
-            for dz in -1..=1i32 {
+        let mut wide_pre: [Option<Arc<super::PreOreResult>>; crate::feature::region_view::WIDE_SLOTS] =
+            std::array::from_fn(|_| None);
+        for dx in -crate::feature::region_view::WIDE_RADIUS..=crate::feature::region_view::WIDE_RADIUS {
+            for dz in -crate::feature::region_view::WIDE_RADIUS..=crate::feature::region_view::WIDE_RADIUS {
                 if dx == 0 && dz == 0 {
                     continue;
                 }
-                pre[Self::region_slot(dx, dz)] = Some(self.pre_ore_stage(cx + dx, cz + dz));
+                wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)] =
+                    Some(self.pre_ore_stage(cx + dx, cz + dz));
             }
         }
 
         // The `OCEAN_FLOOR_WG` heightmap is still gathered into a small map,
-        // deliberately: at most 48 × 48 = 2,304 entries across the whole region,
+        // deliberately: at most 80 × 80 = 6,400 entries across the whole read context,
         // three orders of magnitude below the block field this pass stopped
         // copying, and `OreInput` reads it by clamped region-local key rather than
         // by chunk. It was never the cost D2 named.
         let mut ocean_floor_wg = crate::feature::RegionHeights::unset();
         Self::stitch_heights(&mut ocean_floor_wg, 0, 0, center_heights);
-        for dx in -1..=1i32 {
-            for dz in -1..=1i32 {
+        for dx in -crate::feature::region_view::WIDE_RADIUS..=crate::feature::region_view::WIDE_RADIUS {
+            for dz in -crate::feature::region_view::WIDE_RADIUS..=crate::feature::region_view::WIDE_RADIUS {
                 if dx == 0 && dz == 0 {
                     continue;
                 }
-                let neighbour = pre[Self::region_slot(dx, dz)]
+                let neighbour = wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
                     .as_ref()
                     .expect("every non-centre offset was filled above");
                 Self::stitch_heights(&mut ocean_floor_wg, dx * 16, dz * 16, &neighbour.1);
             }
         }
 
+        // Ores use a source chunk's complete 3x3 section-biome neighbourhood,
+        // not the one y=0 biome that carvers use. The global catalog keeps the
+        // feature index stable across those biome combinations, which is the
+        // index `set_feature_seed` consumes.
+        let mut source_ores = BTreeMap::new();
+        for source_x in cx - 1..=cx + 1 {
+            for source_z in cz - 1..=cz + 1 {
+                let mut biomes = BTreeSet::new();
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        let pre = self.pre_ore_stage(source_x + dx, source_z + dz);
+                        biomes.extend(pre.3.palette().iter().cloned());
+                    }
+                }
+                source_ores.insert(
+                    (source_x, source_z),
+                    self.decoration_catalog
+                        .select_ores(biomes.iter().map(String::as_str), &self.ore_definitions),
+                );
+            }
+        }
         let ores_for_source = |source_x: i32, source_z: i32| -> &[PlacedOre] {
-            let biome = self.biome_for_carver_source(source_x, source_z);
-            self.ores_by_biome
-                .get(biome)
+            source_ores
+                .get(&(source_x, source_z))
                 .map(Vec::as_slice)
                 .unwrap_or(&[])
         };
@@ -136,8 +158,8 @@ impl OverworldGenerator {
         // Borrowed once, outside the closure, so the view's lifetime is plainly
         // tied to two locals rather than to whatever the closure captured.
         let centre_source: &crate::dense_grid::DenseBlockGrid = &center_world;
-        let pre_sources = &pre;
-        let mut view = crate::feature::region_view::RegionView::over_sources(
+        let wide_sources = &wide_pre;
+        let mut view = crate::feature::region_view::RegionView::over_wide_sources(
             Arc::clone(&self.interner),
             cx,
             cz,
@@ -147,7 +169,7 @@ impl OverworldGenerator {
                 if dx == 0 && dz == 0 {
                     Some(centre_source)
                 } else {
-                    pre_sources[Self::region_slot(dx, dz)]
+                    wide_sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
                         .as_ref()
                         // `&*` because `PreOreResult`'s world is now an `Arc` — see
                         // that alias's own doc. Still a borrow, still no copy.
@@ -176,6 +198,8 @@ impl OverworldGenerator {
                 height: self.height,
                 min_gen_y: self.min_y,
                 gen_depth: self.height,
+                read_min: crate::feature::ORE_READ_MIN,
+                read_max: crate::feature::ORE_READ_MAX,
                 ocean_floor_wg: &ocean_floor_wg,
                 in_tag: &in_tag,
             };
@@ -190,6 +214,8 @@ impl OverworldGenerator {
                 self.height,
                 self.min_y,
                 self.height,
+                crate::feature::ORE_READ_MIN,
+                crate::feature::ORE_READ_MAX,
                 &ocean_floor_wg,
                 &in_tag,
                 &mut view,
@@ -210,25 +236,13 @@ impl OverworldGenerator {
         // sequence is unchanged as long as the written cells are visited in the
         // same order. See `RegionView::centre_writes_in_scan_order`.
         let writes = view.centre_writes_in_scan_order();
-        // Releases the view's borrow of `center_world` and of `pre`.
+        // Releases the view's borrow of `center_world` and of `wide_pre`.
         drop(view);
         let mut center_world = center_world;
         for (lx, y, lz, state) in writes {
             center_world.set_id(cx * 16 + lx, y, cz * 16 + lz, state);
         }
         center_world
-    }
-
-    /// The [`crate::feature::region_view`] slot index for chunk offset
-    /// `(dx, dz)` ∈ `[-1, 1]²`.
-    ///
-    /// Derived by asking `source_slot` about that offset's **own origin column**,
-    /// so this file and the view agree on the slot convention by construction
-    /// rather than by two copies of the same arithmetic staying in step. That is
-    /// the class of mistake `region_view`'s module doc records.
-    fn region_slot(dx: i32, dz: i32) -> usize {
-        crate::feature::region_view::source_slot(dx * 16, dz * 16)
-            .expect("a 3x3 chunk offset's own origin column is inside the driven region")
     }
 
     /// Copies one source chunk's own `OCEAN_FLOOR_WG` heightmap into the shared

@@ -130,8 +130,12 @@ lookups rather than re-derived per call.
 ### Ore allocation
 
 `feature/mod.rs`'s ore engine (`UNDERGROUND_ORES`) is the same placement-modifier/positions shape as
-vegetation, composed into `column()` over the real vanilla 3×3 `blockStateWriteRadius(1)` driver, per
--source biome resolution included. `OrePositions::{None, One, Repeat}` replaces a
+vegetation, composed into `column()` over the real vanilla 3×3 `blockStateWriteRadius(1)` driver. Each
+source selects ore-capable entries from the global decoration catalog using the union of section biomes
+in its own 3×3 neighbourhood; the retained global step index, not a biome document's local array offset,
+seeds that ore. The same nine sources write the result, but their terrain and
+heightmap probes use a 5×5 read context: a blob at an outer source edge can
+inspect the real neighbour column rather than a clamped substitute. `OrePositions::{None, One, Repeat}` replaces a
 per-attempt-allocated `Vec<BlockPos>`, matching vegetation's `Positions` shape; per-blob scratch (the
 sphere-fill table and its visited-bitset) is taken from and returned to thread-local free lists rather
 than allocated fresh per ore blob. **A recycled visited-bitset must be cleared before resize, not

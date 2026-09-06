@@ -642,6 +642,8 @@ impl NetherGenerator {
             self.height,
             self.min_y,
             self.height,
+            crate::feature::REGION_MIN,
+            crate::feature::REGION_MAX,
             &heights,
             &in_tag,
             &mut view,

@@ -437,10 +437,10 @@ pub const WIDE_RADIUS: i32 = 2;
 /// [`source_slot`] uses it: local coordinates are negative across the west and
 /// north thirds and truncating division folds `-1` onto offset `0`.
 ///
-/// Ore still routes through [`source_slot`]'s 3×3 — deliberately. Ore's own read
-/// region is the 48×48 `[`[`REGION_MIN`]`, `[`REGION_MAX`]`)` box its heightmap
-/// table and `OreInput::region_local` clamp are sized to, and widening it is a
-/// separate change with its own parity surface. See `DESIGN.md` §12.118.
+/// Ore's writer set remains 3×3, while its boundary-probe reads may opt into
+/// this same 5×5 source table. Its heightmap uses the matching read bounds, so
+/// terrain and height queries widen together rather than disagreeing at the
+/// outer source edge.
 #[must_use]
 pub fn wide_source_slot(lx: i32, lz: i32) -> Option<usize> {
     let dx = lx.div_euclid(16);
@@ -511,10 +511,13 @@ pub fn reset_scratch_misses() {
 /// (`lx, lz ∈ [REGION_MIN, REGION_MAX)`, `y` absolute) — see the module doc.
 #[allow(missing_debug_implementations)]
 pub struct RegionView<'a> {
-    /// The nine sources, indexed by [`slot_of_offset`]. `None` means "this
+    /// The nine write-neighbourhood sources, indexed by [`slot_of_offset`]. `None` means "this
     /// offset was not supplied", which reads as air — the single-source debug
     /// paths in [`crate::overworld`] use exactly that.
     sources: [Option<&'a DenseBlockGrid>; 9],
+    /// Optional five-by-five read context. When present, reads use it while
+    /// writes remain bounded by [`Self::in_region`]'s 3×3 footprint.
+    wide_sources: Option<[Option<&'a DenseBlockGrid>; WIDE_SLOTS]>,
     /// Absolute block coordinate that local `(0, 0)` maps to. The centre
     /// chunk's own origin in production; `(0, 0)` for a fixture whose single
     /// backing grid is *already* addressed in region-local coordinates.
@@ -573,6 +576,40 @@ impl<'a> RegionView<'a> {
         }
         Self {
             sources,
+            wide_sources: None,
+            origin_x: centre_cx * 16,
+            origin_z: centre_cz * 16,
+            min_y,
+            height,
+            overlay: Overlay::default(),
+            interner,
+        }
+    }
+
+    /// A view whose reads route through `centre ± 2`, while writes remain in
+    /// the inner 3×3 region. Ore uses this for probes made by sources at the
+    /// edge of its writer neighbourhood.
+    #[must_use]
+    pub fn over_wide_sources(
+        interner: Arc<StateInterner>,
+        centre_cx: i32,
+        centre_cz: i32,
+        min_y: i32,
+        height: i32,
+        source_at: impl Fn(i32, i32) -> Option<&'a DenseBlockGrid>,
+    ) -> Self {
+        let mut wide_sources: [Option<&'a DenseBlockGrid>; WIDE_SLOTS] = [None; WIDE_SLOTS];
+        for dx in -WIDE_RADIUS..=WIDE_RADIUS {
+            for dz in -WIDE_RADIUS..=WIDE_RADIUS {
+                let slot = wide_source_slot(dx * 16, dz * 16)
+                    .expect("a 5x5 offset's own origin column is inside the read context");
+                debug_assert_eq!(slot, wide_slot_of_offset(dx, dz));
+                wide_sources[slot] = source_at(dx, dz);
+            }
+        }
+        Self {
+            sources: [None; 9],
+            wide_sources: Some(wide_sources),
             origin_x: centre_cx * 16,
             origin_z: centre_cz * 16,
             min_y,
@@ -597,6 +634,7 @@ impl<'a> RegionView<'a> {
     pub fn over_region_grid(grid: &'a DenseBlockGrid, min_y: i32, height: i32) -> Self {
         Self {
             sources: [Some(grid); 9],
+            wide_sources: None,
             origin_x: 0,
             origin_z: 0,
             min_y,
@@ -613,10 +651,22 @@ impl<'a> RegionView<'a> {
         &self.interner
     }
 
-    /// Whether local `(lx, y, lz)` is inside the driven region — i.e. inside the
-    /// box the stitched `RegionGrid` this view replaced was constructed over.
-    /// Outside it, reads answer air and writes are dropped, exactly as
-    /// `DenseBlockGrid`'s own out-of-box contract did.
+    /// Whether a local coordinate can be read from this view. A wide source
+    /// table extends only this boundary; writes remain in the driven 3×3 box.
+    fn in_read_region(&self, lx: i32, y: i32, lz: i32) -> bool {
+        let (min, max) = if self.wide_sources.is_some() {
+            (super::ORE_READ_MIN, super::ORE_READ_MAX)
+        } else {
+            (REGION_MIN, REGION_MAX)
+        };
+        (min..max).contains(&lx)
+            && (min..max).contains(&lz)
+            && y >= self.min_y
+            && y < self.min_y + self.height
+    }
+
+    /// Whether local `(lx, y, lz)` is inside the 3×3 writer region. Outside it,
+    /// writes are dropped even when a wide read context can supply terrain.
     fn in_region(&self, lx: i32, y: i32, lz: i32) -> bool {
         (REGION_MIN..REGION_MAX).contains(&lx)
             && (REGION_MIN..REGION_MAX).contains(&lz)
@@ -624,11 +674,18 @@ impl<'a> RegionView<'a> {
             && y < self.min_y + self.height
     }
 
+    fn source_at(&self, lx: i32, lz: i32) -> Option<&'a DenseBlockGrid> {
+        match &self.wide_sources {
+            Some(sources) => wide_source_slot(lx, lz).and_then(|slot| sources[slot]),
+            None => source_slot(lx, lz).and_then(|slot| self.sources[slot]),
+        }
+    }
+
     /// Interned state at local `(lx, y, lz)`: this pass's own write if there is
     /// one, else the owning source chunk's, else [`StateId::AIR`].
     #[must_use]
     pub fn get_id(&self, lx: i32, y: i32, lz: i32) -> StateId {
-        if !self.in_region(lx, y, lz) {
+        if !self.in_read_region(lx, y, lz) {
             return StateId::AIR;
         }
         if let Some(id) = self.overlay.get(&(lx, y, lz)) {
@@ -641,7 +698,7 @@ impl<'a> RegionView<'a> {
             super::ore_probe::bump_region_read_overlay(1);
             return id;
         }
-        match source_slot(lx, lz).and_then(|slot| self.sources[slot]) {
+        match self.source_at(lx, lz) {
             Some(grid) => grid.get_id(self.origin_x + lx, y, self.origin_z + lz),
             None => StateId::AIR,
         }
@@ -656,14 +713,14 @@ impl<'a> RegionView<'a> {
     /// decoration pass has already written.
     #[must_use]
     pub fn get(&self, lx: i32, y: i32, lz: i32) -> &str {
-        if !self.in_region(lx, y, lz) {
+        if !self.in_read_region(lx, y, lz) {
             return "minecraft:air";
         }
         if let Some(id) = self.overlay.get(&(lx, y, lz)) {
             super::ore_probe::bump_region_read_overlay(1);
             return self.interner.name_of(id);
         }
-        match source_slot(lx, lz).and_then(|slot| self.sources[slot]) {
+        match self.source_at(lx, lz) {
             Some(grid) => grid.get(self.origin_x + lx, y, self.origin_z + lz),
             None => "minecraft:air",
         }
@@ -983,6 +1040,37 @@ mod tests {
             }
         }
         grid
+    }
+
+    #[test]
+    fn wide_read_context_reaches_outer_sources_without_accepting_outer_writes() {
+        let interner = Arc::new(StateInterner::new());
+        let grids = (-WIDE_RADIUS..=WIDE_RADIUS)
+            .flat_map(|dx| {
+                (-WIDE_RADIUS..=WIDE_RADIUS).map(move |dz| {
+                    let state = if dx == -WIDE_RADIUS && dz == 0 {
+                        "minecraft:granite"
+                    } else {
+                        "minecraft:stone"
+                    };
+                    (dx, dz, state)
+                })
+            })
+            .map(|(dx, dz, state)| chunk_grid(&interner, 10 + dx, -20 + dz, state))
+            .collect::<Vec<_>>();
+        let mut view = RegionView::over_wide_sources(
+            Arc::clone(&interner),
+            10,
+            -20,
+            0,
+            8,
+            |dx, dz| grids.get(wide_slot_of_offset(dx, dz)),
+        );
+        assert_eq!(view.get(-17, 4, 0), "minecraft:granite");
+        assert!(!view.set(-17, 4, 0, "minecraft:diorite"));
+        assert_eq!(view.get(-17, 4, 0), "minecraft:granite");
+        assert!(view.set(0, 4, 0, "minecraft:diorite"));
+        assert_eq!(view.get(0, 4, 0), "minecraft:diorite");
     }
 
     /// Each of the nine chunks must be read back through its own grid. The
