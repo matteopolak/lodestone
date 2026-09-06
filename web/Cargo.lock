@@ -3287,6 +3287,7 @@ dependencies = [
  "lodestone-time",
  "lodestone-worldgen-core",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
