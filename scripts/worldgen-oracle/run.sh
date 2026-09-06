@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compile & run a worldgen JVM oracle against the real 26.2 server classes,
 # in an ephemeral temurin:25-jdk container. Prints the oracle's stdout.
-#   usage: run.sh <OracleClassName>
+#   usage: run.sh <OracleClassName> [args...]
 #
 # Runtime: Apple `container` — see docs/oracle-runtimes.md. The `:ro`
 # mount-suffix syntax this script depends on was unverified under `container`
@@ -36,6 +36,9 @@ fi
 if [ -n "${LODESTONE_ORACLE_EPOCH_TILES:-}" ]; then
   WORLD_ENV+=( -e "ORACLE_MATERIALIZE_EPOCH_TILES=$LODESTONE_ORACLE_EPOCH_TILES" )
 fi
+if [ -n "${LODESTONE_ORACLE_DIMENSION:-}" ]; then
+  WORLD_ENV+=( -e "ORACLE_DIMENSION=$LODESTONE_ORACLE_DIMENSION" )
+fi
 if [ -n "${LODESTONE_ORACLE_FROZEN_WORLD_ROOT:-}" ]; then
   if [ ! -d "$LODESTONE_ORACLE_FROZEN_WORLD_ROOT" ]; then
     echo "LODESTONE_ORACLE_FROZEN_WORLD_ROOT must name an existing frozen-world directory" >&2
@@ -43,6 +46,14 @@ if [ -n "${LODESTONE_ORACLE_FROZEN_WORLD_ROOT:-}" ]; then
   fi
   WORLD_MOUNTS+=( -v "$LODESTONE_ORACLE_FROZEN_WORLD_ROOT:/frozen:ro" )
   WORLD_ENV+=( -e ORACLE_FROZEN_WORLD_ROOT=/frozen )
+fi
+if [ -n "${LODESTONE_ORACLE_OUTPUT_ROOT:-}" ]; then
+  if [ ! -d "$LODESTONE_ORACLE_OUTPUT_ROOT" ]; then
+    echo "LODESTONE_ORACLE_OUTPUT_ROOT must name an existing writable directory" >&2
+    exit 2
+  fi
+  WORLD_MOUNTS+=( -v "$LODESTONE_ORACLE_OUTPUT_ROOT:/oracle-out" )
+  WORLD_ENV+=( -e ORACLE_OUTPUT_ROOT=/oracle-out )
 fi
 CONTAINER_ARGS=(
   --rm
