@@ -7,7 +7,6 @@ use lodestone_client::{
     BlockPos, ChunkPos, ClientBuilder, ClientEvent, ConnectionState, Directive, EventStream,
     LoginProfile, ServerAddress, VersionAdapter,
 };
-#[cfg(feature = "rcon-oracle")]
 use lodestone_core::Reader;
 use lodestone_data::block_states::state_id;
 use lodestone_model::{AdapterError, ClientAction, WorldSink};
@@ -215,6 +214,19 @@ fn captured_fixture() -> Capture {
     .expect("parse captured chunk lifecycle fixture")
 }
 
+/// Reads the two fixed-width coordinates at the start of a level-chunk body.
+///
+/// The packet's length-prefixed fields begin after these eight bytes, so using
+/// a VarInt here can select a different column while still leaving a payload
+/// that looks structurally valid to the rest of the capture loop.
+fn chunk_pos_from_level_chunk(payload: &[u8]) -> (i32, i32) {
+    let mut reader = Reader::new(payload);
+    (
+        reader.i32().expect("level chunk x"),
+        reader.i32().expect("level chunk z"),
+    )
+}
+
 fn is_chunk_loaded_event(event: &ClientEvent) -> bool {
     matches!(
         event,
@@ -235,6 +247,26 @@ fn is_chunk_unloaded_event(event: &ClientEvent) -> bool {
         event,
         ClientEvent::ChunkUnloaded { pos } if (pos.x, pos.z) == (CHUNK[0], CHUNK[1])
     )
+}
+
+#[test]
+fn level_chunk_coordinate_probe_uses_fixed_width_integers() {
+    let payload = [
+        0x12, 0x34, 0x56, 0x78, // x = 0x12345678
+        0x89, 0xab, 0xcd, 0xef, // z = 0x89abcdef
+    ];
+    let expected = (0x1234_5678_i32, i32::from_be_bytes([0x89, 0xab, 0xcd, 0xef]));
+    assert_eq!(chunk_pos_from_level_chunk(&payload), expected);
+
+    // This is the negative control for the old capture selector: a VarInt
+    // reader consumes only the first byte of each coordinate and therefore
+    // cannot identify this same packet as `expected`.
+    let mut varint_reader = Reader::new(&payload);
+    let varint_pair = (
+        varint_reader.var_i32().expect("varint x"),
+        varint_reader.var_i32().expect("varint z"),
+    );
+    assert_ne!(varint_pair, expected);
 }
 
 #[test]
@@ -323,14 +355,6 @@ async fn acquire_chunk_lifecycle_from_external_server() {
             Directive::Disconnect(reason) => panic!("capture disconnected: {}", reason.to_plain_string()),
             _ => {}
         }
-    }
-
-    fn chunk_pos_from_level_chunk(payload: &[u8]) -> (i32, i32) {
-        let mut reader = Reader::new(payload);
-        (
-            reader.var_i32().expect("level chunk x"),
-            reader.var_i32().expect("level chunk z"),
-        )
     }
 
     fn chunk_pos_from_forget(payload: &[u8]) -> (i32, i32) {
