@@ -1401,6 +1401,16 @@ pub trait ChunkSource: Send + Sync {
         None
     }
 
+    /// Persists a complete column that an outer cache has already mutated.
+    ///
+    /// Returning `true` says the source retained this exact snapshot, so the
+    /// caller must not also invoke [`set_block`](Self::set_block). Sources that
+    /// cannot retain a full column keep the default and receive the ordinary
+    /// coordinate-level mutation instead.
+    fn store_resident_column(&self, _cx: i32, _cz: i32, _column: &ChunkColumn) -> bool {
+        false
+    }
+
     /// Reads the biome id at world coordinates `(x, y, z)` — `/execute if
     /// biome`'s own read, through the same data
     /// [`column`](Self::column) would return.
@@ -1660,6 +1670,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).resident_column(cx, cz)
     }
 
+    fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        (**self).store_resident_column(cx, cz, column)
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         (**self).column(cx, cz)
     }
@@ -1744,6 +1758,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
         (**self).resident_column(cx, cz)
+    }
+
+    fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        (**self).store_resident_column(cx, cz, column)
     }
 
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
@@ -2421,6 +2439,14 @@ impl ChunkSource for OverworldChunkSource {
             column
         });
         column.set_block(lx, y, lz, name);
+    }
+
+    fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        self.edits
+            .lock()
+            .expect("chunk edit cache lock poisoned")
+            .insert((cx, cz), column.clone());
+        true
     }
 }
 

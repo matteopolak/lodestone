@@ -624,6 +624,24 @@ where
     })
 }
 
+/// Like [`spawn_tick_task`], but native world simulation has a dedicated Tokio
+/// runtime. It runs the same `run_primary_tick_loop_with_weather` future as the
+/// browser; only the native executor differs so synchronous terrain or random
+/// tick work cannot starve this host's connection runtime.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn spawn_world_tick_task<F>(shutdown: &Arc<ShutdownSignal>, fut: F) -> Task
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let signal = shutdown.clone();
+    crate::spawn::spawn_isolated_runtime(async move {
+        tokio::select! {
+            _ = signal.notified() => {}
+            _ = fut => {}
+        }
+    })
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn spawn_tick_task<F>(shutdown: &Arc<ShutdownSignal>, fut: F) -> Task
 where
@@ -636,6 +654,17 @@ where
             _ = fut => {}
         }
     })
+}
+
+/// Browser world simulation shares the browser event loop because wasm cannot
+/// create a blocking worker runtime. The tick future remains identical to the
+/// native one.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn spawn_world_tick_task<F>(shutdown: &Arc<ShutdownSignal>, fut: F) -> Task
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    spawn_tick_task(shutdown, fut)
 }
 
 /// The shutdown signal is **sticky** — a bare [`Notify`] cannot preserve a
@@ -1535,7 +1564,7 @@ impl IntegratedServer {
             anchors: world_state.tick_anchors().clone(),
         };
         #[cfg(target_arch = "wasm32")]
-        let tick_task = spawn_tick_task(&shutdown, async move {
+        let tick_task = spawn_world_tick_task(&shutdown, async move {
             run_primary_tick_loop_with_weather(
                 server_world,
                 tick_mobs,
@@ -2196,11 +2225,14 @@ impl IntegratedServer {
         // republishes it). See `MobHandle`'s own doc comment for why this is
         // `'static`-safe.
         let (cx_range, cz_range) = mob_area;
-        // the same small fixed region named by `mob_area`, reused rather than
-        // adding a second range parameter — see
-        // `tick::run_tick_loop`'s own doc comment for why this crate has no
-        // general "loaded chunks" registry to draw a wider one from yet.
-        let tick_area = (cx_range.clone(), cz_range.clone());
+        // A primary world has no player ticket before the connection finishes
+        // joining. Its fallback must therefore be empty: generating the old
+        // 49-column origin square in that window competes with the first join
+        // column on the blocking pool. Once the connection publishes its first
+        // position, `TickFollow` replaces this empty fallback with the normal
+        // player-centred area. The seed task below still owns the explicit
+        // `mob_area` pre-generation work.
+        let tick_area = (0..=-1, 0..=-1);
         let (center_x, center_z) = mob_center;
 
         // `source` is shared between the connection
@@ -2607,7 +2639,7 @@ impl IntegratedServer {
             radius: crate::chunk_store::CONCURRENT_TICK_RADIUS,
             anchors: world_state.tick_anchors().clone(),
         };
-        let tick_task = spawn_tick_task(&shutdown, async move {
+        let tick_task = spawn_world_tick_task(&shutdown, async move {
             // Owned by the tick task, with no lock, per `docs/server-ecs.md`.
             // the `_with_weather` variant so the real sleep vote
             // and feed reach the loop (the plain `run_tick_loop` wrapper only
@@ -4053,7 +4085,7 @@ impl IntegratedServer {
             radius: LAN_TICK_RADIUS,
             anchors: lan_world_state.tick_anchors().clone(),
         };
-        let tick_task = spawn_tick_task(&shutdown, async move {
+        let tick_task = spawn_world_tick_task(&shutdown, async move {
             // Owned by the tick task, with no lock, per `docs/server-ecs.md`.
             run_primary_tick_loop_with_weather(
                 server_world,

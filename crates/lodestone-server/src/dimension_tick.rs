@@ -78,7 +78,7 @@
 //! [`crate::tick::run_tick_loop_with_weather`] for the loop body,
 //! [`crate::tick_area::TickFollow`]/[`crate::tick_area::TickAnchors`] for the
 //! per-dimension follow area, and [`crate::integrated`]'s `pub(crate)`
-//! [`crate::integrated::spawn_tick_task`]/`ShutdownSignal` for the same
+//! [`crate::integrated::spawn_world_tick_task`]/`ShutdownSignal` for the same
 //! shutdown-race shape every other background task in that module uses.
 
 use std::sync::Arc;
@@ -188,15 +188,15 @@ pub(crate) fn spawn_for_dimension(
         anchors: world_state.tick_anchors().clone(),
     };
 
-    // `spawn_tick_task` already calls `crate::spawn::spawn` (`tokio::spawn`)
-    // internally and races the future against `shutdown` — the `Handle`
-    // check above is what makes that safe to call unconditionally from here,
+    // `spawn_world_tick_task` races the future against `shutdown` on the same
+    // isolated native runtime the primary loop uses. The `Handle` check above
+    // is what makes its task hand-off safe to call unconditionally from here,
     // matching every other background task `crate::integrated` starts. The
     // returned `Task` is intentionally dropped: nothing outside
     // `crate::integrated`'s own fields is joined today (see this function's
     // own doc comment on the shutdown race being the only thing bounding
     // this loop's lifetime), which is a disclosed gap, not an oversight.
-    let _ = crate::integrated::spawn_tick_task(&shutdown, async move {
+    let _ = crate::integrated::spawn_world_tick_task(&shutdown, async move {
         // Fresh, disposable sleep machinery: sleeping only skips the night in
         // the dimension a bed vote is counted in today (the overworld — see
         // `crate::sleep`'s own module doc), so a second, unconnected vote here

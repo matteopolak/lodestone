@@ -397,6 +397,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_empty_fallback_waits_for_the_first_player_anchor() {
+        let anchors = TickAnchors::default();
+        let mut area = FollowArea::new(follow(anchors.clone(), Dimension::Overworld, 1), 0..=-1, 0..=-1);
+
+        assert!(area.chunks().is_empty(), "the primary join window must tick no cold columns");
+        assert!(
+            !area.recompute(),
+            "an empty fallback remains empty until a player position arrives"
+        );
+
+        anchors.publish(vec![TickAnchor {
+            dimension: Dimension::Overworld,
+            cx: 100,
+            cz: -37,
+        }]);
+        assert!(area.recompute(), "the first anchor must activate the tick area");
+        assert_eq!(area.chunks().len(), 9);
+        assert!(area.chunks().contains(&(100, -37)));
+    }
+
     /// One chunk of movement adds a strip, not a new square, which is the property
     /// that makes the terrain rebuild affordable.
     ///
