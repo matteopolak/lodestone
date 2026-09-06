@@ -207,12 +207,6 @@ fn the_unsupported_ledger_names_what_is_not_implemented() {
     let ledger = generator.structure_ledger();
     assert!(!ledger.is_empty(), "structure data loaded but nothing is named unsupported");
     for expected in [
-        // `ruined_portal_nether` shares its `type` id with the six overworld
-        // ids `CLOSED_SET_STRUCTURES` gates below, but its own `structure_id`
-        // (the ledger's key) is `ruined_portal_nether` — it is refused
-        // wholesale by `StructureKind::parse` because its one setup is
-        // `placement: in_nether`.
-        "minecraft:ruined_portal_nether",
         "minecraft:village_plains",
         "minecraft:trial_chambers",
     ] {

@@ -1,16 +1,14 @@
-//! End terrain, gated against everything except itself.
+//! End terrain, including a block-level gate against a separately-run server oracle.
 //!
 //! # The evidence constraint, stated first because it shapes every test here
 //!
-//! **There is no End block oracle anywhere.**
-//! `.cache/mc/survival/world/dimensions/minecraft/the_end/` contains a `data/`
-//! directory and **no `region/` directory at all** — the oracle world's End was never
-//! visited, so not one vanilla-generated End chunk exists on this machine, and no
-//! `container` run can produce one without generating a new world. Comparing this
-//! generator's output against this generator's output is the closed loop the whole
-//! evidence section of `CLAUDE.md` exists to forbid, so it is not done here.
+//! The committed `support/end_chunk_jvm.txt` fixture is emitted by
+//! `scripts/worldgen-oracle/EndChunkOracle.java`, which drives the bundled 26.2
+//! server classes directly. It covers the main island, an outer-ring transition,
+//! and a distant small-islands biome across two seeds. The test below compares every block
+//! and every quart biome from that independent output.
 //!
-//! Every expectation below therefore comes from one of three places:
+//! The remaining focused expectations come from three complementary places:
 //!
 //! | source | used by |
 //! |---|---|
@@ -18,11 +16,8 @@
 //! | **arithmetic** — vanilla's own fluid-status accessor against `sea_level 0` / `min_y 0`, and `cell_geometry`'s `size * 4` | the no-fluid gate and the cell-geometry gate |
 //! | **a cross-arm invariant / cross-dimension control** — the Nether generator over the same engine | the proof that the no-fluid detector fires at all |
 //!
-//! And what is **not** gated is named rather than papered over: see
-//! `docs/worldgen-end.md`'s "Evidence, and its honest limit". The short version is
-//! `consumeCount(17292)` — a wrong RNG draw count inside `EndIslandNoise` leaves
-//! every prediction in this file intact, because none of them depends on the island
-//! field's *value*.
+//! The fixture is the guard for the island field and its RNG stream; the focused
+//! tests retain structural checks that make a mismatch easier to localize.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -90,6 +85,31 @@ impl Resolver for EndAssets {
     fn block_tag(&self, id: &str) -> Value {
         self.try_read("tags/block", id)
     }
+    fn biome_document(&self, id: &str) -> Value {
+        self.try_read("biome", id)
+    }
+    fn configured_feature(&self, id: &str) -> Value {
+        self.try_read("configured_feature", id)
+    }
+    fn placed_feature(&self, id: &str) -> Value {
+        self.try_read("placed_feature", id)
+    }
+    fn structure_set_ids(&self) -> Vec<String> {
+        vec!["minecraft:end_cities".to_owned()]
+    }
+    fn structure_set(&self, id: &str) -> Value {
+        self.read("structure_set", id)
+    }
+    fn structure(&self, id: &str) -> Value {
+        self.read("structure", id)
+    }
+    fn biome_tag(&self, id: &str) -> Value {
+        self.try_read("tags/worldgen/biome", id)
+    }
+    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        std::fs::read(self.root.parent()?.join("structure").join(format!("{name}.nbt"))).ok()
+    }
 }
 
 /// The Nether's rows of the same bundle — the control arm for the no-fluid gate.
@@ -124,6 +144,167 @@ fn generator(seed: i64) -> EndGenerator {
     EndGenerator::new(seed, &settings("end"), &EndAssets::new())
 }
 
+/// The fixed End platform comes from the End biome's placed-feature document,
+/// not from portal arrival.  It has to appear even when the serving path asks
+/// for its chunk before any player crosses a portal.
+#[test]
+fn fixed_end_platform_is_composed_from_the_biome_feature() {
+    let generator = generator(SEED);
+    let mut columns = std::collections::BTreeMap::new();
+    let mut writes = 0usize;
+    for line in include_str!("support/end_platform_jvm.txt").lines() {
+        let mut words = line.split_whitespace();
+        assert_eq!(words.next(), Some("block"), "malformed platform fixture: {line}");
+        let coordinates = words.next().expect("platform coordinates");
+        let state = words.next().expect("platform state");
+        assert!(words.next().is_none(), "trailing platform fixture data: {line}");
+        let mut coordinates = coordinates.split(',');
+        let x: i32 = coordinates.next().expect("x").parse().expect("integer x");
+        let y: i32 = coordinates.next().expect("y").parse().expect("integer y");
+        let z: i32 = coordinates.next().expect("z").parse().expect("integer z");
+        assert!(coordinates.next().is_none(), "extra coordinate: {line}");
+        let chunk = (x.div_euclid(16), z.div_euclid(16));
+        if !columns.contains_key(&chunk) {
+            columns.insert(chunk, generator.column(chunk.0, chunk.1));
+        }
+        let column = columns.get(&chunk).expect("generated platform chunk");
+        assert_eq!(
+            column.block_state(x.rem_euclid(16) as usize, y, z.rem_euclid(16) as usize),
+            state,
+            "platform write ({x},{y},{z})"
+        );
+        writes += 1;
+    }
+    assert_eq!(writes, 100, "fixture must contain the complete 5x5x4 platform");
+}
+
+/// The city fixture is a positive capture from an independently generated End
+/// region. It gates the start location, all emitted piece templates, and two
+/// post-placement controls through the production [`EndGenerator::column`] path.
+#[test]
+fn end_city_pieces_are_composed_into_end_columns() {
+    let generator = generator(SEED);
+    let mut lines = include_str!("support/end_city_jvm.txt").lines().filter(|line| !line.starts_with('#') && !line.is_empty());
+    let start = lines.next().expect("city start fixture").split_whitespace().collect::<Vec<_>>();
+    assert_eq!(start[0], "start");
+    let cx: i32 = start[1].parse().expect("city chunk x");
+    let cz: i32 = start[2].parse().expect("city chunk z");
+    let origin = [
+        start[3].parse::<i32>().expect("city origin x"),
+        start[4].parse::<i32>().expect("city origin y"),
+        start[5].parse::<i32>().expect("city origin z"),
+    ];
+    assert_eq!(start[6], "cw90");
+    let expected_pieces = &start[7..];
+
+    let starts = generator.structure_starts(cx, cz);
+    assert_eq!(starts.len(), 1, "fixture must name one city start");
+    let city = &starts[0];
+    assert_eq!(city.structure, "minecraft:end_city");
+    assert!(city.pieces_complete, "city producer must return real pieces");
+    assert_eq!(
+        city.pieces
+            .first()
+            .and_then(|piece| piece.placement.as_ref())
+            .map(|placement| placement.position),
+        Some(origin),
+        "fixture origin is the first template placement position, not its rotated bounding-box minimum",
+    );
+    let piece_names: Vec<_> = city
+        .pieces
+        .iter()
+        .map(|piece| piece.template.as_deref().expect("city template").rsplit('/').next().expect("template name"))
+        .collect();
+    assert_eq!(piece_names, expected_pieces, "fixture piece order");
+
+    let column = generator.column(cx, cz);
+    for line in lines {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(fields.len(), 5, "malformed city block fixture: {line}");
+        assert_eq!(fields[0], "block");
+        let x: i32 = fields[1].parse().expect("integer x");
+        let y: i32 = fields[2].parse().expect("integer y");
+        let z: i32 = fields[3].parse().expect("integer z");
+        assert_eq!(x.div_euclid(16), cx, "fixture control must lie in served city chunk");
+        assert_eq!(z.div_euclid(16), cz, "fixture control must lie in served city chunk");
+        assert_eq!(column.block_state(x.rem_euclid(16) as usize, y, z.rem_euclid(16) as usize), fields[4], "city control ({x}, {y}, {z})");
+    }
+}
+
+#[derive(Debug)]
+struct OracleRun<'a> {
+    x: usize,
+    z: usize,
+    y: i32,
+    count: i32,
+    state: &'a str,
+}
+
+#[derive(Debug)]
+struct OracleCase<'a> {
+    seed: i64,
+    chunk_x: i32,
+    chunk_z: i32,
+    min_y: i32,
+    height: i32,
+    runs: Vec<OracleRun<'a>>,
+    biomes: [&'a str; 16],
+}
+
+fn parse_oracle() -> Vec<OracleCase<'static>> {
+    let mut lines = include_str!("support/end_chunk_jvm.txt").lines().peekable();
+    let mut cases = Vec::new();
+    while let Some(line) = lines.next() {
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<_> = line.split_whitespace().collect();
+        assert_eq!(fields.first(), Some(&"case"), "unexpected fixture row: {line}");
+        assert_eq!(fields.len(), 6, "malformed case row: {line}");
+        let (seed, chunk_x, chunk_z, min_y, height) = (
+            fields[1].parse().unwrap_or_else(|e| panic!("invalid fixture seed {}: {e}", fields[1])),
+            fields[2].parse().unwrap_or_else(|e| panic!("invalid fixture chunk x {}: {e}", fields[2])),
+            fields[3].parse().unwrap_or_else(|e| panic!("invalid fixture chunk z {}: {e}", fields[3])),
+            fields[4].parse().unwrap_or_else(|e| panic!("invalid fixture min y {}: {e}", fields[4])),
+            fields[5].parse().unwrap_or_else(|e| panic!("invalid fixture height {}: {e}", fields[5])),
+        );
+        let mut runs = Vec::with_capacity(256);
+        while lines.peek().is_some_and(|row| row.starts_with("run ")) {
+            let row = lines.next().unwrap();
+            let fields: Vec<_> = row.split_whitespace().collect();
+            assert_eq!(fields.len(), 6, "malformed run row: {row}");
+            runs.push(OracleRun {
+                x: fields[1].parse().unwrap_or_else(|e| panic!("invalid fixture x {}: {e}", fields[1])),
+                z: fields[2].parse().unwrap_or_else(|e| panic!("invalid fixture z {}: {e}", fields[2])),
+                y: fields[3].parse().unwrap_or_else(|e| panic!("invalid fixture y {}: {e}", fields[3])),
+                count: fields[4].parse().unwrap_or_else(|e| panic!("invalid fixture run length {}: {e}", fields[4])),
+                state: fields[5],
+            });
+        }
+        let mut covered = [0i32; 256];
+        for run in &runs {
+            assert!(run.x < 16 && run.z < 16, "out-of-range fixture column: {run:?}");
+            assert!(run.count > 0, "empty fixture run: {run:?}");
+            assert!(run.y >= min_y && run.y + run.count <= min_y + height, "out-of-range fixture run: {run:?}");
+            covered[run.z * 16 + run.x] += run.count;
+        }
+        assert!(covered.iter().all(|&count| count == height), "fixture case ({chunk_x},{chunk_z}) does not cover every column exactly once");
+        let mut biomes = [""; 16];
+        for _ in 0..16 {
+            let row = lines.next().expect("fixture ended before the quart biome grid");
+            let fields: Vec<_> = row.split_whitespace().collect();
+            assert_eq!(fields.len(), 4, "malformed biome row: {row}");
+            let qx: usize = fields[1].parse().unwrap_or_else(|e| panic!("invalid fixture quart x {}: {e}", fields[1]));
+            let qz: usize = fields[2].parse().unwrap_or_else(|e| panic!("invalid fixture quart z {}: {e}", fields[2]));
+            assert!(qx < 4 && qz < 4, "out-of-range fixture quart: {row}");
+            biomes[qz * 4 + qx] = fields[3];
+        }
+        assert!(biomes.iter().all(|biome| !biome.is_empty()), "incomplete biome grid at ({chunk_x},{chunk_z})");
+        cases.push(OracleCase { seed, chunk_x, chunk_z, min_y, height, runs, biomes });
+    }
+    cases
+}
+
 /// A spread of chunks covering the three regions the End's own biome ladder
 /// distinguishes: inside the main island's radius-64 hole, in the ring just outside
 /// it, and far out among the small islands. Not a random sample — the point is that
@@ -141,6 +322,54 @@ const SCENE: &[(i32, i32)] = &[
     (400, 400),
     (-1500, 2300),
 ];
+
+/// A whole-column, independent comparison. `EndChunkOracle` constructs the
+/// dimension's native biome source and generator from the bundled server
+/// registries, then captures the fill-and-surface output before any gameplay
+/// furniture. This catches density routing, interpolation, the island RNG stream,
+/// materialization, and quart-biome propagation together.
+#[test]
+fn end_columns_match_the_independent_server_fixture() {
+    let cases = parse_oracle();
+    assert_eq!(cases.len(), 3, "the fixture lost a scene");
+    assert!(cases.iter().any(|case| case.seed == SEED));
+    assert!(cases.iter().any(|case| case.seed == SEED_B));
+    assert!(cases.iter().any(|case| case.chunk_x == 0 && case.chunk_z == 0));
+    assert!(cases.iter().any(|case| case.chunk_x.abs() > 64 || case.chunk_z.abs() > 64));
+
+    for case in cases {
+        let column = generator(case.seed).column(case.chunk_x, case.chunk_z);
+        assert_eq!(column.min_y(), case.min_y, "seed {} chunk ({},{})", case.seed, case.chunk_x, case.chunk_z);
+        assert_eq!(column.height(), case.height, "seed {} chunk ({},{})", case.seed, case.chunk_x, case.chunk_z);
+        for run in case.runs {
+            for y in run.y..run.y + run.count {
+                assert_eq!(
+                    column.block_state(run.x, y, run.z),
+                    run.state,
+                    "seed {} chunk ({},{}) local ({},{},{})",
+                    case.seed,
+                    case.chunk_x,
+                    case.chunk_z,
+                    run.x,
+                    y,
+                    run.z,
+                );
+            }
+        }
+        for qz in 0..4 {
+            for qx in 0..4 {
+                assert_eq!(
+                    column.biome_at_quart(qx, qz),
+                    case.biomes[qz * 4 + qx],
+                    "seed {} chunk ({},{}) quart ({qx},{qz})",
+                    case.seed,
+                    case.chunk_x,
+                    case.chunk_z,
+                );
+            }
+        }
+    }
+}
 
 /// **The strongest gate here, and it is a closed-form prediction from the record
 /// definition rather than a comparison.**

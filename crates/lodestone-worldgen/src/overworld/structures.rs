@@ -49,8 +49,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, get_seed};
+
 use crate::aquifer::{AquiferSystem, BlockKind};
-use crate::structure::{HeightmapKind, StartContext, StructureStart};
+use crate::structure::{HeightmapKind, PieceRefinement, StartContext, StructureStart, VerticalPlacement};
 
 use super::OverworldGenerator;
 
@@ -123,6 +125,12 @@ pub const REFS_RADIUS: i32 = 8;
 /// `Structure.adjustBoundingBox` inflates an adaptation-bearing box by. Same
 /// number twice in vanilla, and it is the same number for the same reason.
 pub const BEARD_REACH: i32 = 12;
+
+/// How far a ruined portal's post-template terrain pass can write beyond its
+/// frame. Structure references normally need only the piece box (plus the
+/// beardifier halo), but this pass must also reach neighbouring grids so each
+/// can regenerate and clip its portion of the skirt.
+const PORTAL_TERRAIN_REACH: i32 = 14;
 
 /// [`StartContext`] over freshly sampled noise columns.
 ///
@@ -333,6 +341,198 @@ fn is_stone_family(name: &str) -> bool {
     )
 }
 
+/// The ruined-portal post-template pass: terrain growth, downward columns and
+/// optional overgrowth. It runs against a fully surfaced chunk, after the
+/// template itself wrote its frame.
+///
+/// The reference uses one mutable decoration stream per decorating chunk. This
+/// engine cannot make a structure's neighbouring chunks depend on whichever
+/// chunk happened to generate first, so every local choice is instead forked
+/// from the world seed and its block position. Each chunk can then regenerate
+/// the whole portal pass and clip writes to itself without a seam at a border.
+/// The registry keeps that intentional random-stream deviation visible.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_ruined_portal_terrain(
+    world: &mut crate::dense_grid::DenseBlockGrid,
+    box_: crate::structure::BoundingBox,
+    seed: i64,
+    placement: VerticalPlacement,
+    cold: bool,
+    overgrown: bool,
+    vines: bool,
+    features_cannot_replace: &std::collections::HashSet<String>,
+) {
+    let centre = [
+        box_.min[0] + (box_.max[0] - box_.min[0] + 1) / 2,
+        box_.min[1] + (box_.max[1] - box_.min[1] + 1) / 2,
+        box_.min[2] + (box_.max[2] - box_.min[2] + 1) / 2,
+    ];
+    let average_width = (box_.max[0] - box_.min[0] + 1 + box_.max[2] - box_.min[2] + 1) / 2;
+    let mut radius_random = portal_random(seed, centre, 0);
+    let distance_adjustment = radius_random.next_int_bounded((8 - average_width / 2).max(1));
+    const CHANCE_BY_DISTANCE: [f32; 14] = [
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.9, 0.9, 0.8, 0.7, 0.6, 0.4, 0.2,
+    ];
+    let follows_surface = matches!(placement, VerticalPlacement::OnLandSurface | VerticalPlacement::OnOceanFloor);
+    for x in (centre[0] - CHANCE_BY_DISTANCE.len() as i32)..=(centre[0] + CHANCE_BY_DISTANCE.len() as i32) {
+        for z in (centre[2] - CHANCE_BY_DISTANCE.len() as i32)..=(centre[2] + CHANCE_BY_DISTANCE.len() as i32) {
+            let distance = (x - centre[0]).abs() + (z - centre[2]).abs();
+            let adjusted = (distance + distance_adjustment).max(0) as usize;
+            let Some(&chance) = CHANCE_BY_DISTANCE.get(adjusted) else {
+                continue;
+            };
+            if portal_float(seed, [x, box_.min[1], z], 1) >= chance {
+                continue;
+            }
+            let Some(surface) = portal_surface_y(world, x, z, placement) else {
+                continue;
+            };
+            let y = if follows_surface { surface } else { box_.min[1].min(surface) };
+            if (y - box_.min[1]).abs() > 3
+                || !portal_replaceable(world.get(x, y, z), placement, features_cannot_replace)
+            {
+                continue;
+            }
+            place_portal_netherrack_or_magma(world, seed, [x, y, z], cold, 2);
+            if overgrown {
+                maybe_add_portal_leaves(world, seed, [x, y, z], 3);
+            }
+            add_portal_drip_column(world, seed, [x, y - 1, z], cold, 4);
+        }
+    }
+    for x in (box_.min[0] + 1)..box_.max[0] {
+        for z in (box_.min[2] + 1)..box_.max[2] {
+            if base_name(world.get(x, box_.min[1], z)) == "minecraft:netherrack" {
+                add_portal_drip_column(world, seed, [x, box_.min[1] - 1, z], cold, 5);
+            }
+        }
+    }
+    if vines || overgrown {
+        for x in box_.min[0]..=box_.max[0] {
+            for y in box_.min[1]..=box_.max[1] {
+                for z in box_.min[2]..=box_.max[2] {
+                    if vines {
+                        maybe_add_portal_vine(world, seed, [x, y, z], 6);
+                    }
+                    if overgrown {
+                        maybe_add_portal_leaves(world, seed, [x, y, z], 7);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn portal_random(seed: i64, pos: [i32; 3], salt: i64) -> LegacyRandomSource {
+    LegacyRandomSource::new(seed ^ get_seed(pos[0], pos[1], pos[2]) ^ salt)
+}
+
+fn portal_float(seed: i64, pos: [i32; 3], salt: i64) -> f32 {
+    portal_random(seed, pos, salt).next_float()
+}
+
+fn portal_surface_y(
+    world: &crate::dense_grid::DenseBlockGrid,
+    x: i32,
+    z: i32,
+    placement: VerticalPlacement,
+) -> Option<i32> {
+    let (_, min_y, _, _, size_y, _) = world.bounds();
+    let ocean_floor = placement == VerticalPlacement::OnOceanFloor;
+    (min_y..(min_y + size_y)).rev().find(|&y| {
+        if ocean_floor {
+            !is_air_or_liquid(world.get(x, y, z))
+        } else {
+            base_name(world.get(x, y, z)) != "minecraft:air"
+        }
+    })
+}
+
+fn portal_replaceable(
+    state: &str,
+    placement: VerticalPlacement,
+    features_cannot_replace: &std::collections::HashSet<String>,
+) -> bool {
+    let name = base_name(state);
+    name != "minecraft:air"
+        && name != "minecraft:obsidian"
+        && !features_cannot_replace.contains(name)
+        && (placement == VerticalPlacement::InNether || name != "minecraft:lava")
+}
+
+fn place_portal_netherrack_or_magma(
+    world: &mut crate::dense_grid::DenseBlockGrid,
+    seed: i64,
+    pos: [i32; 3],
+    cold: bool,
+    salt: i64,
+) {
+    let state = if !cold && portal_float(seed, pos, salt) < 0.07 {
+        "minecraft:magma_block"
+    } else {
+        "minecraft:netherrack"
+    };
+    world.set(pos[0], pos[1], pos[2], state);
+}
+
+fn add_portal_drip_column(
+    world: &mut crate::dense_grid::DenseBlockGrid,
+    seed: i64,
+    mut pos: [i32; 3],
+    cold: bool,
+    salt: i64,
+) {
+    place_portal_netherrack_or_magma(world, seed, pos, cold, salt);
+    for remaining in 0..8 {
+        if portal_float(seed, pos, salt + 1 + i64::from(remaining)) >= 0.5 {
+            break;
+        }
+        pos[1] -= 1;
+        place_portal_netherrack_or_magma(world, seed, pos, cold, salt + 10 + i64::from(remaining));
+    }
+}
+
+fn maybe_add_portal_leaves(
+    world: &mut crate::dense_grid::DenseBlockGrid,
+    seed: i64,
+    pos: [i32; 3],
+    salt: i64,
+) {
+    if portal_float(seed, pos, salt) < 0.5
+        && base_name(world.get(pos[0], pos[1], pos[2])) == "minecraft:netherrack"
+        && base_name(world.get(pos[0], pos[1] + 1, pos[2])) == "minecraft:air"
+    {
+        world.set(
+            pos[0],
+            pos[1] + 1,
+            pos[2],
+            "minecraft:jungle_leaves[distance=7,persistent=true,waterlogged=false]",
+        );
+    }
+}
+
+fn maybe_add_portal_vine(
+    world: &mut crate::dense_grid::DenseBlockGrid,
+    seed: i64,
+    pos: [i32; 3],
+    salt: i64,
+) {
+    let state = base_name(world.get(pos[0], pos[1], pos[2]));
+    if matches!(state, "minecraft:air" | "minecraft:water" | "minecraft:lava" | "minecraft:vine") {
+        return;
+    }
+    let mut random = portal_random(seed, pos, salt);
+    let (dx, dz, vine) = match random.next_int_bounded(4) {
+        0 => (0, -1, "minecraft:vine[east=false,north=false,south=true,up=false,west=false]"),
+        1 => (1, 0, "minecraft:vine[east=false,north=false,south=false,up=false,west=true]"),
+        2 => (0, 1, "minecraft:vine[east=false,north=true,south=false,up=false,west=false]"),
+        _ => (-1, 0, "minecraft:vine[east=true,north=false,south=false,up=false,west=false]"),
+    };
+    if base_name(world.get(pos[0] + dx, pos[1], pos[2] + dz)) == "minecraft:air" {
+        world.set(pos[0] + dx, pos[1], pos[2] + dz, vine);
+    }
+}
+
 impl OverworldGenerator {
     /// Stage 0a: this chunk's structure starts, memoised.
     ///
@@ -386,9 +586,11 @@ impl OverworldGenerator {
             for sx in (cx - REFS_RADIUS)..=(cx + REFS_RADIUS) {
                 for sz in (cz - REFS_RADIUS)..=(cz + REFS_RADIUS) {
                     for start in self.structure_starts_stage(sx, sz).iter() {
-                        if start
-                            .adjusted_bounding_box()
-                            .is_close_to_chunk(cx, cz, BEARD_REACH)
+                        if start.adjusted_bounding_box().is_close_to_chunk(cx, cz, BEARD_REACH)
+                            || start.pieces.iter().any(|piece| {
+                                matches!(piece.refine.as_ref(), Some(PieceRefinement::RuinedPortalTerrain { .. }))
+                                    && piece.bounding_box.is_close_to_chunk(cx, cz, PORTAL_TERRAIN_REACH)
+                            })
                         {
                             entries.push((sx, sz, Arc::clone(start)));
                         }
@@ -529,7 +731,13 @@ impl OverworldGenerator {
             // `axis_aligned_linear_pos` rule measures from here.
             let reference = crate::structure::jigsaw::reference_position(&start.pieces);
             for piece in &start.pieces {
-                if !piece.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) {
+                let portal_terrain_reaches = matches!(
+                    piece.refine.as_ref(),
+                    Some(PieceRefinement::RuinedPortalTerrain { .. })
+                ) && piece
+                    .bounding_box
+                    .is_close_to_chunk(cx, cz, PORTAL_TERRAIN_REACH);
+                if !piece.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) && !portal_terrain_reaches {
                     continue;
                 }
                 // A coded piece writes a pre-resolved block list; a template piece
@@ -539,34 +747,50 @@ impl OverworldGenerator {
                         world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
                     }
                 }
-                // A placement-time refinement reads and writes the *real* grid —
-                // the one point in this pipeline a structure sees post-surface,
-                // post-carve material. Runs before the `placement`/`extra_placements`
-                // early-continue below, because a refined piece (buried treasure)
-                // carries neither.
-                if piece.refine == Some(crate::structure::PieceRefinement::BuriedTreasureChest) {
-                    place_buried_treasure_chest(&mut world, piece.bounding_box.min);
-                }
-                let Some(placement) = &piece.placement else {
-                    continue;
-                };
-                let origin = crate::structure::template::PlaceOrigin {
-                    position: placement.position,
-                    reference,
-                    seed,
-                };
-                placement
-                    .template
-                    .place(origin, &placement.settings, &mut world);
-                // A `list_pool_element` writes several templates at one position,
-                // in document order — `ListPoolElement.place`'s own loop.
-                for extra in &piece.extra_placements {
+                if let Some(placement) = &piece.placement {
                     let origin = crate::structure::template::PlaceOrigin {
-                        position: extra.position,
+                        position: placement.position,
                         reference,
                         seed,
                     };
-                    extra.template.place(origin, &extra.settings, &mut world);
+                    placement
+                        .template
+                        .place(origin, &placement.settings, &mut world);
+                    // A `list_pool_element` writes several templates at one position,
+                    // in document order — `ListPoolElement.place`'s own loop.
+                    for extra in &piece.extra_placements {
+                        let origin = crate::structure::template::PlaceOrigin {
+                            position: extra.position,
+                            reference,
+                            seed,
+                        };
+                        extra.template.place(origin, &extra.settings, &mut world);
+                    }
+                }
+                // Refinements read and write the real post-surface, post-carve grid.
+                // Portal terrain runs after the frame, while buried treasure has no
+                // template and simply takes this same post-placement hook.
+                match piece.refine.as_ref() {
+                    Some(PieceRefinement::BuriedTreasureChest) => {
+                        place_buried_treasure_chest(&mut world, piece.bounding_box.min);
+                    }
+                    Some(PieceRefinement::RuinedPortalTerrain {
+                        placement,
+                        cold,
+                        overgrown,
+                        vines,
+                        features_cannot_replace,
+                    }) => place_ruined_portal_terrain(
+                        &mut world,
+                        piece.bounding_box,
+                        seed,
+                        *placement,
+                        *cold,
+                        *overgrown,
+                        *vines,
+                        features_cannot_replace,
+                    ),
+                    None => {}
                 }
             }
         }
@@ -743,5 +967,55 @@ mod tests {
         for name in ["minecraft:dirt", "minecraft:gravel", "minecraft:sand", "minecraft:deepslate"] {
             assert!(!is_stone_family(name), "{name} should not be stone-family");
         }
+    }
+
+    /// The portal refinement grows a real skirt beyond the frame, creates a
+    /// downward column from the frame's netherrack, and leaves protected blocks
+    /// alone. A bare template-placement test cannot observe any of those three
+    /// post-template effects.
+    #[test]
+    fn ruined_portal_refinement_grows_skirt_and_preserves_protected_blocks() {
+        let mut map = HashMap::new();
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in -4..=59 {
+                    map.insert((x, y, z), "minecraft:stone".to_string());
+                }
+            }
+        }
+        let box_ = crate::structure::BoundingBox {
+            min: [5, 60, 5],
+            max: [8, 63, 8],
+        };
+        map.insert((6, 60, 6), "minecraft:netherrack".to_string());
+        map.insert((5, 59, 5), "minecraft:obsidian".to_string());
+        let mut world = crate::dense_grid::DenseBlockGrid::from_hashmap(0, -4, 0, 16, 96, 16, &map);
+        let protected = std::collections::HashSet::new();
+        place_ruined_portal_terrain(
+            &mut world,
+            box_,
+            41,
+            VerticalPlacement::OnLandSurface,
+            true,
+            false,
+            false,
+            &protected,
+        );
+        let skirt_cells = (0..16)
+            .flat_map(|x| (0..16).map(move |z| (x, z)))
+            .filter(|&(x, z)| x < box_.min[0] || x > box_.max[0] || z < box_.min[2] || z > box_.max[2])
+            .filter(|&(x, z)| base_name(world.get(x, 59, z)) == "minecraft:netherrack")
+            .count();
+        assert!(skirt_cells > 0, "the portal produced no netherrack outside its frame");
+        assert_eq!(
+            base_name(world.get(6, 59, 6)),
+            "minecraft:netherrack",
+            "the frame's netherrack did not grow a drip column"
+        );
+        assert_eq!(
+            base_name(world.get(5, 59, 5)),
+            "minecraft:obsidian",
+            "terrain growth replaced a protected block"
+        );
     }
 }

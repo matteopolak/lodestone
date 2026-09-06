@@ -51,10 +51,11 @@
 //!   them — `blocks[i].state` indexes whichever palette
 //!   [`StructureTemplate::palette_for`] picked. A reader that assumed a single
 //!   `palette` key would silently place nothing for every shipwreck.
-//! * Entities and block entities are parsed but **not** placed. Loot chests and
-//!   the `structure_block` data markers that create them need block entities plus
-//!   loot tables, which no worldgen stage has yet; the markers themselves are
-//!   dropped by the same block-ignore processor vanilla drops them with.
+//! * Entities are parsed but not placed. Container blocks and their NBT are
+//!   retained: the server's structure-loot consumer reads both data markers and
+//!   a container's own `LootTable`/`LootTableSeed` fields to attach contents after
+//!   the structure stage. The marker blocks themselves are dropped by the same
+//!   block-ignore processor as ordinary template placement.
 //! * **A block's `nbt` compound is retained** ([`TemplateBlock::nbt`]), which S2
 //!   deliberately dropped. It is not decoration: a jigsaw block's *entire*
 //!   configuration — `name`, `target`, `pool`, `final_state`, `joint`,

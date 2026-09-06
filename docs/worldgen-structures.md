@@ -30,6 +30,12 @@ against a `StartContext` (every coded piece — pyramids, mineshafts), a **templ
 (`buried_treasure`'s chest, whose termination condition needs a material distinction that does not
 exist yet at start time).
 
+A ruined portal combines the latter two forms: the template first writes the frame, then its
+placement-time refinement grows the netherrack skirt and downward columns and adds optional vines or
+leaves. The refinement is position-forked so every touched chunk can independently regenerate and clip
+its part of that halo; its random pattern is therefore deterministic but not byte-for-byte identical to
+a shared decoration stream, which is recorded as a deviation in the ledger.
+
 **Per-chunk independence forces every random draw to be position-seeded, never chunk-order
 dependent.** Vanilla resolves a lot of structure state lazily, the first time any chunk touches it,
 and mutates a shared object other chunks then read back — a template piece's final Y, a coded
@@ -61,17 +67,15 @@ filter can even run, carrying the half-consumed RNG stream across it in a `Stub`
 `StructureRegistry::unsupported()` names every structure, structure-set entry or placement type the
 registry parsed but cannot fully generate, with a reason — read it rather than assuming coverage.
 A structure on the ledger still gets a start when placement and biome say so, but with no children
-and is filtered out of what actually reaches a chunk (vanilla itself treats a start with no children
-as invalid). As of this writing the remaining gaps are: `monument` and `stronghold` (coded pieces not
-yet ported — 2,000 and 1,766 lines of Java respectively), a Nether-only `ruined_portal_nether`
-variant (parses but is refused — its `in_nether` placement branch is unverified here), a handful of
-narrow per-structure deviations each documented at its own ledger key (loot living in a block's own
-NBT rather than a structure-block marker, a coded chest's facing always reading `north`, a decoration
-step whose RNG is position- rather than chunk-order-seeded), and `end_city` (template-piece, not
-jigsaw — see `worldgen-dimensions.md`). Two ledger rows have previously named the *wrong* gap
-(claiming worldgen lacked block entities/loot tables when it had gained both) — a stale ledger row is
-worse than none, because it hides the real gap from the reader who came looking; keep ledger text
-current when you close or narrow a gap.
+and is filtered out of what actually reaches a chunk (a start with no children is invalid). The remaining
+family gaps are the Nether `fortress` and the Overworld `mansion`, which lack a piece generator. `end_city` has its
+piece generator and is consumed by the End dimension's structure stage. Both ruined-portal variants build a template
+piece and run their post-template terrain refinement in their dimension's placement stage. Narrow per-structure deviations have their own ledger keys (for example,
+a coded chest's facing always reading `north`, or a decoration step whose RNG is position- rather than
+chunk-order-seeded). Template containers whose loot table lives in their own NBT, coded containers, and
+buried-treasure chests are server- and placement-stage connected; they must stay off the ledger. A stale
+ledger row is worse than none, because it hides the real gap from the reader who came looking; keep ledger
+text current when you close or narrow a gap.
 
 ## How to change it
 

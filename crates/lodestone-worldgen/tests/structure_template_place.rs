@@ -142,7 +142,7 @@ fn settings() -> Value {
 fn the_supported_kinds_load_their_templates() {
     let registry =
         lodestone_worldgen::structure::StructureRegistry::new(SEED, &ServerAssets::new());
-    assert!(registry.unsupported().contains_key("minecraft:ruined_portal_nether"));
+    assert!(!registry.unsupported().contains_key("minecraft:ruined_portal_nether"));
     assert!(!registry.unsupported().contains_key("minecraft:ruined_portal"));
     let templates = registry.templates();
     // 20 ocean + 11 beached shipwreck (9 shared), 4 warm + 4 big-warm, cold

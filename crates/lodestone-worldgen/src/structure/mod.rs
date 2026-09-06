@@ -90,11 +90,13 @@
 //! of room-interior decorations are deliberately left out — see `monument`'s
 //! own deviations list for exactly which and why.
 //!
-//! **What genuinely remains**: `ruined_portal_nether` (the Nether-side setup
-//! of the *same* `type` id `ruined_portals` overworld already covers —
-//! refused wholesale, see [`StructureKind::parse`]). `ruined_portal`'s own
-//! frame is real but the netherrack skirt it grows around a portal's base is not —
-//! `coded:ruined_portal_terrain_skirt` on the ledger.
+//! **What genuinely remains**: `fortress` and `mansion` have no piece generators.
+//! `end_city` has a template-piece generator consumed by the End dimension's
+//! placement stage. Both portal variants have a complete setup parser,
+//! suitable-Y rule and post-template terrain refinement. `ruined_portal`'s own frame,
+//! terrain skirt, drip columns and optional overgrowth are real. The latter's
+//! chunk-independent random forks are named by `coded:ruined_portal_terrain_skirt`
+//! on the ledger.
 //!
 //! **S2 landed the template engine** ([`template`], [`processor`]): shipwreck,
 //! ocean ruin, igloo and (S8) ruined_portal build real piece lists out of the
@@ -146,6 +148,7 @@
 
 pub mod beardifier;
 pub mod coded;
+pub mod end_city;
 pub mod jigsaw;
 pub mod mineshaft;
 pub mod monument;
@@ -412,10 +415,10 @@ pub trait StartContext {
     /// [`BlockKind::Stone`]**. Surface rules (sand, grass, snow), ore blobs
     /// (granite/diorite/andesite) and carvers all run *after* the eager start pass,
     /// so a walk that terminates on "the first block that is not sand" would
-    /// terminate on its first iteration. That is not a hypothetical: it is why
-    /// `buried_treasure`'s chest is still ledgered rather than placed, and a caller
-    /// that needs a *material* rather than a shape has to say so instead of reaching
-    /// for this.
+    /// terminate on its first iteration. That is why `buried_treasure` defers
+    /// its material-sensitive chest walk to placement time, and why a caller
+    /// that needs a *material* rather than a shape must do the same instead of
+    /// reaching for this.
     ///
     /// Defaulted to [`BlockKind::Stone`] so no existing implementor had to change.
     fn block_kind_at(&self, _x: i32, _y: i32, _z: i32) -> BlockKind {
@@ -534,9 +537,9 @@ pub struct StructurePiece {
     /// [`DenseBlockGrid`](crate::dense_grid::DenseBlockGrid) as
     /// [`crate::overworld::OverworldGenerator::structure_place_stage`] writes it,
     /// rather than [`Self::blocks`]'s eager start-time list. `None` for every
-    /// piece above; [`PieceRefinement::BuriedTreasureChest`] is the first and
-    /// only user — see its own doc for why buried treasure's chest needs this
-    /// and no other coded piece does.
+    /// piece above; [`PieceRefinement::BuriedTreasureChest`] and
+    /// [`PieceRefinement::RuinedPortalTerrain`] are its users — see their own
+    /// docs for why those material-sensitive passes cannot run at start time.
     pub refine: Option<PieceRefinement>,
 }
 
@@ -544,7 +547,7 @@ pub struct StructurePiece {
 /// resolved when [`crate::overworld::OverworldGenerator::structure_place_stage`]
 /// places the piece — the one point in this engine's pipeline where a
 /// structure's own chunk has already been through surface rules and carvers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PieceRefinement {
     /// Buried treasure's walk-down-to-stone-then-place-chest.
     ///
@@ -564,6 +567,25 @@ pub enum PieceRefinement {
     /// deferred-placement walk runs) — only the chest's *placement* is
     /// deferred, not its start.
     BuriedTreasureChest,
+    /// The post-template terrain growth around a ruined portal.
+    ///
+    /// Template processors build the frame first. This refinement then reads
+    /// those placed cells and the post-surface grid to add the surrounding
+    /// netherrack, drip columns, vines and leaves. It is intentionally carried
+    /// on the piece rather than reconstructed from its id: the chosen vertical
+    /// placement and setup properties decide the shape.
+    RuinedPortalTerrain {
+        /// The setup's vertical-placement mode.
+        placement: VerticalPlacement,
+        /// Whether the setup uses netherrack only rather than its magma chance.
+        cold: bool,
+        /// Whether netherrack can gain persistent jungle leaves above it.
+        overgrown: bool,
+        /// Whether portal blocks can gain adjacent vines.
+        vines: bool,
+        /// The resolved set of blocks terrain growth must not replace.
+        features_cannot_replace: Arc<HashSet<String>>,
+    },
 }
 
 /// The decoded templates one registry can place, keyed by template id
@@ -843,6 +865,16 @@ const RUINED_PORTAL_GIANT_TEMPLATES: [&str; 3] = [
     "minecraft:ruined_portal/giant_portal_3",
 ];
 
+const END_CITY_TEMPLATES: [&str; 20] = [
+    "minecraft:end_city/base_floor", "minecraft:end_city/base_roof", "minecraft:end_city/bridge_end",
+    "minecraft:end_city/bridge_gentle_stairs", "minecraft:end_city/bridge_piece", "minecraft:end_city/bridge_steep_stairs",
+    "minecraft:end_city/fat_tower_base", "minecraft:end_city/fat_tower_middle", "minecraft:end_city/fat_tower_top",
+    "minecraft:end_city/second_floor_1", "minecraft:end_city/second_floor_2", "minecraft:end_city/second_roof",
+    "minecraft:end_city/ship", "minecraft:end_city/third_floor_1", "minecraft:end_city/third_floor_2",
+    "minecraft:end_city/third_roof", "minecraft:end_city/tower_base", "minecraft:end_city/tower_floor",
+    "minecraft:end_city/tower_piece", "minecraft:end_city/tower_top",
+];
+
 /// The igloo's three templates, with their pivot and offset from the top piece.
 const IGLOO_PARTS: [(&str, [i32; 3], [i32; 3]); 3] = [
     ("minecraft:igloo/top", [3, 5, 5], [0, 0, 0]),
@@ -942,8 +974,8 @@ pub enum StructureKind {
     /// `minecraft:ruined_portal` — the six overworld ids (`ruined_portal` and its
     /// `_desert`/`_jungle`/`_mountain`/`_ocean`/`_swamp` siblings), one weighted
     /// list of [`RuinedPortalSetup`]s each. `ruined_portal_nether` carries this
-    /// same `type` id but is refused at parse time (see
-    /// [`StructureKind::parse`]) — nothing here can place a Nether-side portal.
+    /// same type id with its `in_nether` setup; the dimension-specific placement
+    /// stages use the same resulting piece record.
     RuinedPortal {
         /// The document's `setups`, in file order — `Setup::weight` is read
         /// relative to their sum, not normalised at parse time, exactly as
@@ -954,6 +986,8 @@ pub enum StructureKind {
         /// setup's protected-block processor reads the same fixed tag.
         features_cannot_replace: Arc<HashSet<String>>,
     },
+    /// `minecraft:end_city` — a recursively assembled set of template pieces.
+    EndCity,
     /// `minecraft:stronghold` — the recursive piece tree. No
     /// fields: unlike every other kind here its start predicate reads no
     /// biome and no column height, so the document holds nothing this
@@ -977,11 +1011,7 @@ pub enum VerticalPlacement {
     InMountain,
     /// `underground`.
     Underground,
-    /// `in_nether` — parsed for completeness (so an unrecognised placement
-    /// string is a real parse failure and not this one by accident), but no
-    /// bundled overworld setup ever names it; the one document that does
-    /// (`ruined_portal_nether`) is refused wholesale before a
-    /// [`RuinedPortalSetup`] carrying this variant is ever built.
+    /// `in_nether`.
     InNether,
 }
 
@@ -1074,6 +1104,8 @@ enum Stub {
     /// Y and every property before returning), so there is no live random
     /// stream left to carry.
     RuinedPortal(Box<RuinedPortalStub>),
+    /// The End city's pre-biome rotation, ground sample and continuing stream.
+    EndCity([i32; 3], Rotation, Box<StructureRandom>),
 }
 
 impl Stub {
@@ -1085,6 +1117,7 @@ impl Stub {
             | Self::Continued(position, _) => *position,
             Self::Jigsaw(stub) => stub.position,
             Self::RuinedPortal(stub) => stub.position,
+            Self::EndCity(position, _, _) => *position,
         }
     }
 }
@@ -1126,6 +1159,7 @@ impl StructureKind {
                 ),
             },
             "minecraft:stronghold" => Self::Stronghold,
+            "minecraft:end_city" => Self::EndCity,
             "minecraft:buried_treasure" => Self::BuriedTreasure,
             "minecraft:ocean_monument" => Self::OceanMonument {
                 surrounding: resolve_biome_set(
@@ -1144,18 +1178,8 @@ impl StructureKind {
             },
             "minecraft:ruined_portal" => {
                 let setups = parse_ruined_portal_setups(value);
-                // `ruined_portal_nether` carries this exact `type` id and its one
-                // setup is `placement: in_nether` — refused wholesale rather than
-                // silently mis-Y'd, because the in-Nether suitable-Y search
-                // branch, the Nether's own sea level and its beard/step wiring
-                // are all unverified here (see the module doc's "out of scope"
-                // note).
-                if setups.is_empty()
-                    || setups.iter().any(|s| s.placement == VerticalPlacement::InNether)
-                {
-                    Self::Unsupported(
-                        "minecraft:ruined_portal — in_nether placement is out of scope".to_string(),
-                    )
+                if setups.is_empty() {
+                    Self::Unsupported("minecraft:ruined_portal — no usable setup".to_string())
                 } else {
                     let mut features_cannot_replace = HashSet::new();
                     let mut seen = HashSet::new();
@@ -1209,6 +1233,7 @@ impl StructureKind {
                 .chain(RUINED_PORTAL_GIANT_TEMPLATES.iter())
                 .copied()
                 .collect(),
+            Self::EndCity => END_CITY_TEMPLATES.to_vec(),
             // A jigsaw structure's templates are named by its *pools*, and there
             // are hundreds of them — `PoolStore::load` pulls each one in as it
             // parses the element that names it, so there is no static list here.
@@ -1368,6 +1393,24 @@ impl StructureKind {
                 mineshaft::generate(cx, cz, ctx, *wood, blocking, &mut random);
             return Some(Stub::Eager(position, pieces));
         }
+        if matches!(self, Self::EndCity) {
+            let mut random = structure_random(seed, cx, cz);
+            let rotation = Rotation::random(&mut random);
+            let (mut offset_x, mut offset_z) = (5, 5);
+            match rotation {
+                Rotation::Cw90 => offset_x = -5,
+                Rotation::Cw180 => { offset_x = -5; offset_z = -5; }
+                Rotation::Ccw90 => offset_z = -5,
+                Rotation::None => {}
+            }
+            let (x, z) = (cx * 16 + 7, cz * 16 + 7);
+            let y = [(x, z), (x, z + offset_z), (x + offset_x, z), (x + offset_x, z + offset_z)]
+                .into_iter()
+                .map(|(x, z)| ctx.first_occupied_height(x, z, HeightmapKind::WorldSurfaceWg))
+                .min()
+                .unwrap_or(i32::MIN);
+            return (y >= 60).then(|| Stub::EndCity([x, y, z], rotation, Box::new(random)));
+        }
         self.find_generation_point(cx, cz, ctx).map(Stub::Plain)
     }
 
@@ -1453,7 +1496,8 @@ impl StructureKind {
             Self::Jigsaw(_)
             | Self::Mineshaft { .. }
             | Self::NetherFossil { .. }
-            | Self::RuinedPortal { .. } => None,
+            | Self::RuinedPortal { .. }
+            | Self::EndCity => None,
             Self::Unsupported(_) => {
                 // No generator, so no honest generation point — and therefore no
                 // honest biome-check Y either. Sea level is used deliberately
@@ -1540,6 +1584,10 @@ impl StructureKind {
             };
             return Some(ruined_portal_piece(*stub, templates));
         }
+        if matches!(self, Self::EndCity) {
+            let Stub::EndCity(position, rotation, mut random) = stub else { return None; };
+            return Some(end_city::generate(position, rotation, templates, &mut *random));
+        }
         match self {
             Self::Shipwreck { beached } => {
                 let mut random = structure_random(seed, cx, cz);
@@ -1615,7 +1663,8 @@ impl StructureKind {
             Self::Jigsaw(_)
             | Self::Mineshaft { .. }
             | Self::NetherFossil { .. }
-            | Self::RuinedPortal { .. } => None,
+            | Self::RuinedPortal { .. }
+            | Self::EndCity => None,
         }
     }
 
@@ -1638,7 +1687,8 @@ impl StructureKind {
             | Self::OceanRuin { .. }
             | Self::Igloo
             | Self::NetherFossil { .. }
-            | Self::RuinedPortal { .. } => match pieces {
+            | Self::RuinedPortal { .. }
+            | Self::EndCity => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Unknown,
             },
@@ -1792,9 +1842,6 @@ fn ruined_portal_find_suitable_y(
     let min_y = ctx.min_y() + 15;
     let mut y = match placement {
         VerticalPlacement::InNether => {
-            // Unreachable through this engine's registry — `StructureKind::parse`
-            // refuses every `in_nether` setup — but implemented so the match is
-            // total.
             if air_pocket {
                 next_int_between(random, 32, 100)
             } else if random.next_float() < 0.5 {
@@ -2005,17 +2052,9 @@ fn nether_fossil_pieces<R: RandomSource>(
 /// [`Processor::BlackstoneReplace`] all run, in the order the piece assembles
 /// its settings.
 ///
-/// **The block-writing walk's *second* half is not ported**: the netherrack
-/// skirt a portal sits in, the netherrack drip columns below the portal,
-/// and the vine/leaf overgrowth pass. Those read the world *as the template just
-/// wrote it* at positions well outside the piece's own box — this engine's other
-/// coded-piece deviations (see `coded:decoration_random` on the ledger) already
-/// establish the pattern for porting a post-placement pass onto an eager start-time
-/// builder, but doing it faithfully needs the template's own placed cells
-/// available for a box-interior overlap test, which no piece here computes until
-/// placement time. Ledgered as `coded:ruined_portal_terrain_skirt` rather than
-/// guessed at. The frame's position, orientation, materials and decay are real;
-/// only the environmental blending around it is missing.
+/// The template frame is followed by [`PieceRefinement::RuinedPortalTerrain`]
+/// at placement time. That pass needs the template's placed cells and the
+/// post-surface grid, neither of which exists during start generation.
 fn ruined_portal_piece(stub: RuinedPortalStub, templates: &TemplateStore) -> Vec<StructurePiece> {
     let Some(template) = templates.get(stub.template_id) else {
         return Vec::new();
@@ -2049,13 +2088,21 @@ fn ruined_portal_piece(stub: RuinedPortalStub, templates: &TemplateStore) -> Vec
         processors,
         waterlogging: true,
     };
-    vec![template_piece(
+    let mut piece = template_piece(
         "minecraft:ruined_portal",
         stub.template_id,
         template,
         stub.position,
         settings,
-    )]
+    );
+    piece.refine = Some(PieceRefinement::RuinedPortalTerrain {
+        placement: stub.placement,
+        cold: stub.properties.cold,
+        overgrown: stub.properties.overgrown,
+        vines: stub.properties.vines,
+        features_cannot_replace: Arc::clone(&stub.features_cannot_replace),
+    });
+    vec![piece]
 }
 
 /// A block-replace rule that only fires with probability `probability`,
@@ -2414,7 +2461,7 @@ fn igloo_pieces<R: RandomSource>(
 /// `orientation` is `Some(2)` because a template-driven piece's own
 /// orientation is fixed to north, whose 2D data value is 2 —
 /// the piece's *rotation* lives in its place settings, not in `O`.
-fn template_piece(
+pub(crate) fn template_piece(
     id: &str,
     name: &str,
     template: &Arc<StructureTemplate>,
@@ -2723,16 +2770,9 @@ impl StructureRegistry {
         // structure id (the placement oracle asserts implemented structures are
         // *absent* from this map).
         if !templates.is_empty() {
-            // **These two rows overstated the gap for five phases and were corrected
-            // in S6 by measurement.** Both said "needs block entities and loot tables
-            // in worldgen"; both machineries already exist. `lodestone-worldgen` has a
-            // block-entity layer (`overworld::block_entities`) and
-            // `lodestone-server` has a loot roller plus `structure_loot`, which
-            // re-reads a template piece's raw bytes, finds its DATA markers, rolls and
-            // attaches a filled container. So the *marker* path is closed and the real
-            // gaps are narrower and different. Recording the correction here rather
-            // than deleting the rows, because a row that describes the wrong gap is
-            // worse than no row: it makes the right one invisible.
+            // Archaeology's state change is real, but using it still needs gameplay
+            // support. The container-loot paths below are deliberately absent from
+            // this ledger: their server-side consumers now attach filled containers.
             unsupported.insert(
                 "block_entity:append_loot".into(),
                 "a `capped` archaeology rule places its `suspicious_sand`/\
@@ -2741,18 +2781,6 @@ impl StructureRegistry {
                  (`assets/loot_table/archaeology/`), but **nothing in the game brushes**: \
                  there is no `brushable_block` block entity and no brush interaction, so \
                  the blocker is gameplay-side and not in worldgen at all"
-                    .into(),
-            );
-            unsupported.insert(
-                "template:block_entity_nbt".into(),
-                "**132 bundled templates** carry a chest/barrel/dispenser/decorated pot \
-                 whose `LootTable` lives in that *block's own* `nbt` compound (village \
-                 62, bastion 26, trial_chambers 19, ruined_portal 13, ancient_city 10, \
-                 pillager_outpost 2) — a different mechanism from a `structure_block` \
-                 DATA marker, and the one `lodestone_server::structure_loot` does not \
-                 read. The blocks are placed; the containers are empty. Replaced \
-                 `template:data_markers`, which named the three structures \
-                 (shipwreck, igloo, ocean ruin) whose markers **do** get rolled"
                     .into(),
             );
             // `template:mirrored_shape` is **gone**, and its absence is the record:
@@ -2850,20 +2878,6 @@ impl StructureRegistry {
                  model"
                     .into(),
             );
-            // S6's corrected form of the S5 row. The chest **blocks** are placed now
-            // and their tables travel on [`StructurePiece::loot`] with vanilla's own
-            // `nextLong()` seed; what is missing is a *consumer*, on the server side of
-            // the seam, next to `structure_loot`'s existing DATA-marker pass.
-            unsupported.insert(
-                "coded:chests".into(),
-                "a coded piece's containers (`desert_pyramid` ×4, `jungle_temple` \
-                 2 chests + 2 dispensers) place their **block** and carry their loot \
-                 table and roll seed on `StructurePiece::loot`, but nothing reads that \
-                 list yet: `lodestone_server::structure_loot` resolves loot from a \
-                 template's raw bytes and a coded piece has no template. So a coded \
-                 chest opens empty"
-                    .into(),
-            );
             unsupported.insert(
                 "coded:chest_reorient".into(),
                 "a coded chest's own reorient step picks its `facing` from the \
@@ -2886,31 +2900,13 @@ impl StructureRegistry {
             );
             unsupported.insert(
                 "coded:ruined_portal_terrain_skirt".into(),
-                "a ruined portal's block-writing walk's *second* half is not ported: \
-                 the netherrack skirt growth, the netherrack drip columns below the portal, and the \
-                 vine/leaf overgrowth pass. The template placement itself (frame \
-                 position, orientation, decay, mossiness, the blackstone swap) is \
-                 real; what is missing is the netherrack the portal would otherwise \
-                 sit in and spill down from, plus vine/leaf growth on its own \
-                 blocks. A faithful port needs the template's own placed cells \
-                 available for a netherrack/magma-replaceability \
-                 box-interior overlap test, which no piece here computes before \
-                 placement time — see `ruined_portal_piece`'s own doc"
-                    .into(),
-            );
-            unsupported.insert(
-                "coded:buried_treasure_chest".into(),
-                "`buried_treasure` places a start and a bounding box but **zero blocks**. \
-                 Its block-writing walk walks a cursor down from the ocean \
-                 floor until the block *below* it is \
-                 sandstone/stone/andesite/granite/diorite, then writes five neighbours \
-                 and one chest. Not merely a missing `BlockKind` read: the sand it \
-                 burrows through is a **surface-rule** product and the granite/diorite/\
-                 andesite are **ore-blob** products, so the answer only exists at a stage \
-                 the eager start pass sits above. In the pre-surface `_WG` column every \
-                 solid block is `BlockKind::Stone`, so the walk would stop on its first \
-                 iteration and put the chest on top of the beach instead of under it — \
-                 which is why it places nothing rather than something wrong"
+                "the post-template netherrack skirt, drip columns and optional \
+                 vine/leaf growth are placed against the real grid. Their random \
+                 choices are forked from `(world seed, block position)` so every \
+                 intersecting chunk independently reproduces the same clipped pass; \
+                 the reference uses one mutable decoration stream per decorating \
+                 chunk. This keeps border generation deterministic but does not \
+                 reproduce that stream's exact sequence"
                     .into(),
             );
         }
@@ -2931,9 +2927,9 @@ impl StructureRegistry {
                  `bastion_remnant` assembles **and places blocks** in a generated \
                  Nether column, and so does `nether_fossil` — the only structure \
                  whose `beard_thin` terrain flattening is now observable outside a \
-                 jigsaw. Two gaps remain. (1) `fortress` and `ruined_portal_nether` \
-                 have no piece generator — each has its own row here — so at their \
-                 placement cells the Nether gets an advisory start with \
+                 jigsaw. Two gaps remain. (1) `fortress` has no piece generator \
+                 and keeps its own row here, so at its placement cells the Nether \
+                 gets an advisory start with \
                  `pieces_complete: false` and zero blocks, which is also what \
                  stops the weighted `nether_complexes` walk from handing every \
                  fortress cell to a bastion. (2) Nothing *serves* the dimension: \
@@ -2961,16 +2957,6 @@ impl StructureRegistry {
                  as an invalid start in a real client"
                     .into(),
             );
-            for dangling in pools.dangling_templates() {
-                unsupported.insert(
-                    format!("dangling:{dangling}"),
-                    "referenced by a loaded template pool but not resolvable, and not \
-                     shipped in the bundle either: replaced with an empty template, which \
-                     is the standard fallback for a missing template — the element \
-                     stays in its pool and places nothing"
-                        .into(),
-                );
-            }
             unsupported.insert(
                 "jigsaw:step_order".into(),
                 "every structure this engine places is written at the end of `pre_ore`, \

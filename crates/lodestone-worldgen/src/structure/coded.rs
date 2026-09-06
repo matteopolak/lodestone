@@ -609,9 +609,10 @@ pub fn swamp_hut_pieces<R: RandomSource>(
 ///   own answer depends on which chunk placed the piece. Both are position-seeded
 ///   here, exactly as [`super::processor::Processor::BlockRot`] is, so two chunks
 ///   placing two halves of one pyramid agree.
-/// * The chests (own chest placement ×4) need block entities and loot tables; the
-///   suspicious sand's own loot table likewise. The **blocks** are placed and the
-///   contents are on the ledger.
+/// * The chests (own chest placement ×4) attach their table and roll seed to the
+///   resulting [`StructurePiece`]; the server consumes that side list when it
+///   builds container block entities. Suspicious sand remains gameplay-inert:
+///   brushing is outside this structure generator.
 #[must_use]
 pub fn desert_pyramid_pieces<R: RandomSource>(
     cx: i32,

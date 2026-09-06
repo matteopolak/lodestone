@@ -166,8 +166,8 @@ fn the_jigsaw_structures_s4_models_are_not_on_the_ledger() {
         "minecraft:village_snowy",
         "minecraft:village_taiga",
         "minecraft:pillager_outpost",
-        // Supported despite vanilla's own dangling wall reference — see the
-        // `dangling:` ledger row asserted below.
+        // Supported despite the pool graph's deliberately dangling wall reference:
+        // its empty-template fallback preserves the shuffle position.
         "minecraft:ancient_city",
         // The three S5 Part A closed, each by one named blocker.
         "minecraft:trial_chambers",
@@ -184,18 +184,6 @@ fn the_jigsaw_structures_s4_models_are_not_on_the_ledger() {
         // The block-entity half of a `capped` archaeology rule: the suspicious
         // block is placed, its loot table is not.
         ("block_entity:append_loot", "append_loot"),
-        // Vanilla's own data references
-        // `ancient_city/walls/intact_horizontal_wall_stairs_5`
-        // (vanilla's own ancient-city structure-pool data), of which only `_1`..`_4` ship in
-        // `.cache/mc/26.2/src/data/minecraft/structure/`. Vanilla tolerates it
-        // because its own template-manager get-or-create call invents an *empty*
-        // template; so does this engine, and it says so here rather than deleting
-        // the structure. The row exists **and** `ancient_city` is supported — both
-        // halves matter.
-        (
-            "dangling:minecraft:ancient_city/walls/intact_horizontal_wall_stairs_5",
-            "empty template",
-        ),
     ] {
         let why = ledger
             .get(unsupported)
@@ -205,6 +193,10 @@ fn the_jigsaw_structures_s4_models_are_not_on_the_ledger() {
             "{unsupported} is ledgered for the wrong reason: {why}"
         );
     }
+    assert!(
+        !ledger.contains_key("dangling:minecraft:ancient_city/walls/intact_horizontal_wall_stairs_5"),
+        "the empty-template fallback is faithful pool behavior, not an unsupported gap"
+    );
     // The weight expansion really happened, against a count derived from the
     // pool document rather than from this engine: `village/plains/town_centers`
     // has four elements at weight 50 and four at weight 1.
