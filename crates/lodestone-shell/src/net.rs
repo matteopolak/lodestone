@@ -1804,6 +1804,72 @@ fn world_preset_from_wire_id(id: u8) -> Option<crate::menu::create_world::WorldT
 /// channel carries this launch object and its ready/error response, which gives
 /// us a precise point at which falling back to the legacy page-owned server is
 /// still safe: no worker world exists before `ready`.
+#[derive(Debug, PartialEq, Eq)]
+enum BrowserWorkerStartupAction {
+    Progress(String),
+    Ready,
+    Failed(String),
+    Ignored,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BrowserWorkerStartupState {
+    Waiting,
+    Ready,
+    Failed,
+}
+
+impl BrowserWorkerStartupState {
+    fn new() -> Self {
+        Self::Waiting
+    }
+
+    /// Classify one control-plane message without letting a progress update
+    /// consume the one-shot startup result. The browser worker emits several
+    /// progress messages while it loads the module, starts the compute pool,
+    /// and constructs the spawn column; only `ready` completes startup.
+    fn receive(
+        &mut self,
+        kind: Option<&str>,
+        stage: Option<String>,
+        message: Option<String>,
+    ) -> BrowserWorkerStartupAction {
+        if !matches!(self, Self::Waiting) {
+            return BrowserWorkerStartupAction::Ignored;
+        }
+
+        match kind {
+            Some("progress") => match stage.filter(|stage| !stage.is_empty()) {
+                Some(stage) => BrowserWorkerStartupAction::Progress(stage),
+                None => {
+                    *self = Self::Failed;
+                    BrowserWorkerStartupAction::Failed(
+                        "server worker sent malformed startup progress".to_string(),
+                    )
+                }
+            },
+            Some("ready") => {
+                *self = Self::Ready;
+                BrowserWorkerStartupAction::Ready
+            }
+            Some("error") => {
+                *self = Self::Failed;
+                BrowserWorkerStartupAction::Failed(
+                    message
+                        .filter(|message| !message.is_empty())
+                        .unwrap_or_else(|| "server worker failed during startup".to_string()),
+                )
+            }
+            _ => {
+                *self = Self::Failed;
+                BrowserWorkerStartupAction::Failed(
+                    "server worker sent an invalid startup response".to_string(),
+                )
+            }
+        }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 async fn launch_browser_worker(
     protocol: i32,
@@ -1824,29 +1890,33 @@ async fn launch_browser_worker(
     let ready_tx = std::rc::Rc::new(std::cell::RefCell::new(Some(ready_tx)));
     let on_message = {
         let ready_tx = std::rc::Rc::clone(&ready_tx);
+        let mut startup_state = BrowserWorkerStartupState::new();
         Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
             let value = event.data();
             let kind = js_sys::Reflect::get(&value, &JsValue::from_str("kind"))
                 .ok()
                 .and_then(|v| v.as_string());
-            if kind.as_deref() == Some("progress") {
-                let stage = js_sys::Reflect::get(&value, &JsValue::from_str("stage"))
-                    .ok()
-                    .and_then(|v| v.as_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                tracing::debug!(%stage, "browser server worker startup progress");
-                return;
-            }
-            let result = match kind.as_deref() {
-                Some("ready") => Ok(()),
-                Some("error") => Err(js_sys::Reflect::get(&value, &JsValue::from_str("message"))
-                    .ok()
-                    .and_then(|v| v.as_string())
-                    .unwrap_or_else(|| "server worker failed during startup".to_string())),
-                _ => Err("server worker sent an invalid startup response".to_string()),
-            };
-            if let Some(tx) = ready_tx.borrow_mut().take() {
-                let _ = tx.send(result);
+            let stage = js_sys::Reflect::get(&value, &JsValue::from_str("stage"))
+                .ok()
+                .and_then(|v| v.as_string());
+            let message = js_sys::Reflect::get(&value, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|v| v.as_string());
+            match startup_state.receive(kind.as_deref(), stage, message) {
+                BrowserWorkerStartupAction::Progress(stage) => {
+                    tracing::debug!(%stage, "browser server worker startup progress");
+                }
+                BrowserWorkerStartupAction::Ready => {
+                    if let Some(tx) = ready_tx.borrow_mut().take() {
+                        let _ = tx.send(Ok(()));
+                    }
+                }
+                BrowserWorkerStartupAction::Failed(error) => {
+                    if let Some(tx) = ready_tx.borrow_mut().take() {
+                        let _ = tx.send(Err(error));
+                    }
+                }
+                BrowserWorkerStartupAction::Ignored => {}
             }
         })
     };
@@ -5702,6 +5772,67 @@ mod tests {
     // `crate::offline_identity`'s module docs and
     // `tests/no_production_source_names_testsupport.rs`.
     use lodestone_testsupport::unique_username;
+
+    #[test]
+    fn browser_worker_startup_accepts_progress_until_ready() {
+        let mut startup = BrowserWorkerStartupState::new();
+        for stage in ["loading-module", "starting-compute-pool", "generating-spawn"] {
+            assert_eq!(
+                startup.receive(Some("progress"), Some(stage.to_string()), None),
+                BrowserWorkerStartupAction::Progress(stage.to_string())
+            );
+        }
+        assert_eq!(
+            startup.receive(Some("ready"), None, None),
+            BrowserWorkerStartupAction::Ready
+        );
+        assert_eq!(startup, BrowserWorkerStartupState::Ready);
+        assert_eq!(
+            startup.receive(Some("progress"), Some("late".to_string()), None),
+            BrowserWorkerStartupAction::Ignored,
+            "messages after ready must not complete startup a second time"
+        );
+    }
+
+    #[test]
+    fn browser_worker_startup_rejects_malformed_and_failed_messages() {
+        let mut malformed = BrowserWorkerStartupState::new();
+        assert_eq!(
+            malformed.receive(Some("progress"), None, None),
+            BrowserWorkerStartupAction::Failed(
+                "server worker sent malformed startup progress".to_string()
+            )
+        );
+        assert_eq!(
+            malformed.receive(Some("ready"), None, None),
+            BrowserWorkerStartupAction::Ignored
+        );
+
+        let mut failed = BrowserWorkerStartupState::new();
+        assert_eq!(
+            failed.receive(Some("error"), None, Some("compute pool stopped".to_string())),
+            BrowserWorkerStartupAction::Failed("compute pool stopped".to_string())
+        );
+        assert_eq!(failed, BrowserWorkerStartupState::Failed);
+
+        let mut unknown = BrowserWorkerStartupState::new();
+        assert_eq!(
+            unknown.receive(Some("unexpected"), None, None),
+            BrowserWorkerStartupAction::Failed(
+                "server worker sent an invalid startup response".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn browser_worker_startup_ready_is_still_immediate_without_progress() {
+        let mut startup = BrowserWorkerStartupState::new();
+        assert_eq!(
+            startup.receive(Some("ready"), None, None),
+            BrowserWorkerStartupAction::Ready
+        );
+        assert_eq!(startup, BrowserWorkerStartupState::Ready);
+    }
 
     #[test]
     fn integrated_plugin_commands_use_the_server_callers_permission_level() {
