@@ -78,7 +78,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use lodestone_model::BlockPos;
+use lodestone_model::{BlockPos, Vec3};
 
 use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
@@ -1426,6 +1426,10 @@ pub fn resolve_destination<S: ChunkSource + ?Sized>(
 /// End (the real end-portal entity-inside rule).
 pub const END_PORTAL_BLOCK: &str = "minecraft:end_portal";
 
+/// `minecraft:end_gateway`, the contact block for a generated outer-island
+/// return gateway.
+pub const END_GATEWAY_BLOCK: &str = "minecraft:end_gateway";
+
 /// `minecraft:end_portal_frame` — the block the stronghold portal room's 5×5 ring
 /// is built from. Its `eye` property is what
 /// the real eye-of-ender use-on rule flips true; this crate has no code that flips
@@ -1437,6 +1441,27 @@ pub const END_PORTAL_FRAME_BLOCK: &str = "minecraft:end_portal_frame";
 #[must_use]
 pub fn is_end_portal(state: &str) -> bool {
     state == END_PORTAL_BLOCK
+}
+
+/// Whether `state` is an End gateway block.
+#[must_use]
+pub fn is_end_gateway(state: &str) -> bool {
+    state == END_GATEWAY_BLOCK
+}
+
+/// Resolves a gateway block entity's configured exit into the player's arrival
+/// point. Generated return gateways carry `exact=true`, so their destination is
+/// the block centre on X/Z and the configured block Y. An inexact destination
+/// deliberately returns `None` until the destination-search path exists; this
+/// keeps a generated exact gateway functional without pretending that a direct
+/// block-centre teleport is the safe-location search used for other gateways.
+#[must_use]
+pub fn end_gateway_arrival(exit: BlockPos, exact: bool) -> Option<Vec3> {
+    exact.then_some(Vec3::new(
+        f64::from(exit.x) + 0.5,
+        f64::from(exit.y),
+        f64::from(exit.z) + 0.5,
+    ))
 }
 
 /// The blocks [`ensure_end_platform`] writes for the fixed 5×5×4 obsidian
@@ -2337,6 +2362,19 @@ mod tests {
         assert!(!is_end_portal("minecraft:end_portal_frame"));
         assert!(!is_end_portal("minecraft:end_portal_frame[eye=true,facing=north]"));
         assert!(!is_end_portal("minecraft:air"));
+    }
+
+    #[test]
+    fn generated_end_gateway_exact_exit_centres_the_arriving_player() {
+        assert_eq!(
+            end_gateway_arrival(BlockPos::new(100, 50, 0), true),
+            Some(lodestone_model::Vec3::new(100.5, 50.0, 0.5))
+        );
+    }
+
+    #[test]
+    fn inexact_end_gateway_exit_waits_for_safe_destination_search() {
+        assert_eq!(end_gateway_arrival(BlockPos::new(100, 50, 0), false), None);
     }
 
     /// `is_end_portal_frame` matches any facing/eye combination, unlike

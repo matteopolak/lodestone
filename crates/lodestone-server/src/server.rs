@@ -737,6 +737,25 @@ struct PortalTrip {
     position: Vec3,
 }
 
+/// Resolves the generated End-gateway block entity at the player's contact
+/// cell. The live registry is authoritative for loaded chunks; the source
+/// fallback is required for generator-backed sources whose column has not yet
+/// been hydrated into a registry. Checking the block state first prevents a
+/// stale sidecar from teleporting through a gateway block that was removed.
+fn end_gateway_destination<S: ChunkSource + ?Sized>(
+    source: &S,
+    block_entities: &BlockEntityHandle,
+    pos: BlockPos,
+) -> Option<Vec3> {
+    if !crate::portal::is_end_gateway(&source.block_state(pos.x, pos.y, pos.z)) {
+        return None;
+    }
+    let configured = block_entities
+        .with(|registry| registry.get(pos).and_then(BlockEntity::gateway_destination))
+        .or_else(|| source.block_entity(pos.x, pos.y, pos.z).and_then(|entity| entity.gateway_destination()));
+    configured.and_then(|(exit, exact)| crate::portal::end_gateway_arrival(exit, exact))
+}
+
 /// Which block-entity registry and tick-scheduling feed a connection should
 /// route a live placement or a delayed redstone/fluid request through, given
 /// `travelled` — this connection's current sibling-dimension source, `None`
@@ -13344,6 +13363,12 @@ where
 
     // Portal travel state is per-connection and advances once per loop.
     let mut portal = crate::portal::PortalTracker::new();
+    // Generated End gateways carry an exact destination in their block entity.
+    // Keep the contact cooldown on this connection so arrival at a gateway
+    // cannot immediately retrigger it while the client is still overlapping
+    // the source block; the generated return target is not itself a gateway,
+    // but the guard also covers custom worlds that place gateways at both ends.
+    let mut end_gateway_cooldown = 0u8;
     // The dimension the player has travelled to, if any. **Two variables, and that
     // is not redundancy**: `travelled` is borrowed by the shadowed `source` below for
     // the whole of one `select!`, so an arm that discovered a trip cannot write it.
@@ -14767,8 +14792,68 @@ where
                     }
                 }
 
-                // Portal travel runs last, after this tick's damage and hunger
-                // updates have been applied.
+                // Gateway contact runs after this tick's damage and hunger
+                // updates, before ordinary portal travel. Generated End
+                // gateways are same-dimension teleports: their block entity
+                // carries the exact exit, so no dimension-change frame is
+                // needed, but the player's tracked view still has to follow
+                // the destination.
+                if end_gateway_cooldown > 0 {
+                    end_gateway_cooldown -= 1;
+                }
+                if end_gateway_cooldown == 0
+                    && source.dimension() == crate::dimension::Dimension::End
+                    && let Some((x, y, z)) = player_pos
+                {
+                    let contact = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
+                    if let Some(destination) = end_gateway_destination(source.get(), block_entities, contact) {
+                        let rotation = player_rot.unwrap_or_default();
+                        player_pos = Some((destination.x, destination.y, destination.z));
+                        end_gateway_cooldown = 40;
+                        apply(
+                            conn,
+                            &mut state,
+                            proto.encode_teleport_with_id(
+                                issue_teleport_id(&mut teleport_acknowledgements),
+                                destination.x,
+                                destination.y,
+                                destination.z,
+                                rotation.yaw,
+                                rotation.pitch,
+                            ),
+                        )
+                        .await?;
+
+                        let destination_chunk = (
+                            destination.x.floor() as i32,
+                            destination.z.floor() as i32,
+                        );
+                        let center_before_recenter = view.center;
+                        let update = view.recenter(
+                            proto,
+                            destination_chunk.0.div_euclid(16),
+                            destination_chunk.1.div_euclid(16),
+                            player_rot.map(|rotation| rotation.yaw),
+                        );
+                        if view.center != center_before_recenter {
+                            player_ticket_guard.move_to(view.center, view.radius);
+                        }
+                        send_view_update(
+                            conn,
+                            proto,
+                            source,
+                            Some(&mut join_stream),
+                            &mut state,
+                            update,
+                            &mut awaiting_chunk_batch_ack,
+                            &mut pending_chunk_batches,
+                        )
+                        .await?;
+                    }
+                }
+
+                // Portal travel runs last, after gateway contact and the other
+                // tick's damage/hunger updates have been applied.
                 //
                 // Feed the portal counter with the block at the player's feet.
                 // A standing player occupies that cell even when the portal is
@@ -16230,6 +16315,80 @@ mod tests {
         }
 
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
+    struct EndGatewaySource {
+        state: String,
+        generated: Option<(BlockPos, BlockEntity)>,
+    }
+
+    impl ChunkSource for EndGatewaySource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 256)
+        }
+
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            self.state.clone()
+        }
+
+        fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<BlockEntity> {
+            self.generated.as_ref().and_then(|(pos, entity)| {
+                (*pos == BlockPos::new(x, y, z)).then_some(entity.clone())
+            })
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
+    #[test]
+    fn gateway_contact_reads_generated_metadata_and_prefers_live_registry() {
+        let gateway = BlockPos::new(12, 70, -4);
+        let source = EndGatewaySource {
+            state: crate::portal::END_GATEWAY_BLOCK.to_owned(),
+            generated: Some((
+                gateway,
+                BlockEntity::EndGateway {
+                    exit: BlockPos::new(100, 50, 0),
+                    exact: true,
+                },
+            )),
+        };
+        let registry = BlockEntityHandle::new();
+
+        assert_eq!(
+            end_gateway_destination(&source, &registry, gateway),
+            Some(Vec3::new(100.5, 50.0, 0.5)),
+            "a generated gateway must consume its exact exit metadata"
+        );
+
+        registry.with(|entries| {
+            entries.insert(
+                gateway,
+                BlockEntity::EndGateway {
+                    exit: BlockPos::new(-20, 80, 30),
+                    exact: true,
+                },
+            );
+        });
+        assert_eq!(
+            end_gateway_destination(&source, &registry, gateway),
+            Some(Vec3::new(-19.5, 80.0, 30.5)),
+            "a live edited sidecar must outrank the generated snapshot"
+        );
+
+        let removed = EndGatewaySource {
+            state: "minecraft:air".to_owned(),
+            generated: source.generated.clone(),
+        };
+        assert_eq!(
+            end_gateway_destination(&removed, &registry, gateway),
+            None,
+            "a stale sidecar must not teleport through a removed gateway block"
+        );
     }
 
     #[tokio::test]
