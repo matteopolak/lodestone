@@ -36,6 +36,7 @@
 //! [`serve_connection`]: crate::serve_connection
 //! [`memory_pair`]: lodestone_net::memory_pair
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -85,11 +86,13 @@ use crate::weather::{WeatherFeed, WeatherState};
 /// world opens. The primary save path owns its handle directly; siblings need a
 /// shared registry because their `RegionChunkSource` only exists after the
 /// first portal trip.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, Default)]
 struct DimensionSaveHandles(
     Arc<std::sync::Mutex<HashMap<Dimension, crate::region_source::WorldSaveHandle>>>,
 );
 
+#[cfg(not(target_arch = "wasm32"))]
 impl DimensionSaveHandles {
     fn register(&self, dimension: Dimension, handle: crate::region_source::WorldSaveHandle) {
         self.0
@@ -107,6 +110,13 @@ impl DimensionSaveHandles {
             .collect()
     }
 }
+
+// Browser worlds cannot have persistent sibling dimensions, but the shared
+// sibling-construction signature remains available so native and wasm keep the
+// same world/tick implementation. The native-only persistence branch is gated
+// inside `sibling_chunk_source`; this marker makes that shared signature valid.
+#[cfg(target_arch = "wasm32")]
+type DimensionSaveHandles = ();
 
 /// Chebyshev radius, in chunks, of the region [`IntegratedServer::bind`]'s
 /// world tick loop random-ticks around the origin.

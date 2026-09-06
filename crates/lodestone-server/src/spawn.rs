@@ -75,6 +75,7 @@ where
 /// its blocking pool: generation also uses that pool, so occupying a worker for
 /// the lifetime of the world would prevent the join stream from producing
 /// terrain.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn spawn_isolated_runtime<F>(fut: F) -> Task
 where
     F: Future<Output = ()> + Send + 'static,
