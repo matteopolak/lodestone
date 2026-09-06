@@ -21,6 +21,16 @@ triples in step order. `UNDERGROUND_ORES` and `TOP_LAYER_MODIFICATION` are separ
 their own docs (ore allocation below; freeze/snow in `worldgen-biomes.md`); `STRONGHOLDS` has zero
 entries across every bundled biome and is not driven.
 
+`compose::build_decoration_catalog` builds the globally ordered feature graph once from the biome
+source's first-occurrence order. For each decorating source, `vegetation_stage` unions section
+biomes from the source's 3×3 chunk neighbourhood, selects those graph entries, and retains their
+global indices even when earlier entries are not selected. This matters for underground biomes:
+their features can run in a chunk whose surface biome is different. The compiled-server
+selection fixture records the sulfur-cave control: the `{plains, sulfur_caves}`
+union selects `sulfur_spike_cluster` and `sulfur_spike` at step-7 indices 2 and 3, not local
+indices 0 and 1. `decoration_selection_jvm.txt` preserves that external control
+alongside the server-worldgen test.
+
 Placement modifiers (count, in_square, heightmap, biome, rarity_filter,
 surface_water_depth_filter, noise_threshold_count, random_offset, block_predicate_filter,
 height_range, and the list fan-out `Positions::List`/`count_on_every_layer`/`fixed_placement` need)
