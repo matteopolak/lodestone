@@ -26,6 +26,14 @@ default (maximum, for the overworld) rather than treated as zero — which is ex
 computed light at all (the state before this subsystem existed) produced a uniformly *bright* world:
 lit caves, lit sealed rooms, no real night, rather than the reverse.
 
+The served sky payload keeps the first uniformly full-sky section above the highest non-air terrain
+section, then leaves higher sections absent. This is a wire-shape rule, not a lighting-value change:
+the omitted sections still resolve to full daylight, while retaining them would allocate redundant
+full arrays and fail byte parity. The engine leaves the result alone when that premise is not true,
+so a non-full section is never silently converted into an omission. Block-light arrays are not
+trimmed by this rule; a non-zero border value can be a legitimate contribution from a loaded
+neighbour.
+
 ### Keeping light current after an edit
 
 A block edit that changes what a cell emits (placing or breaking a torch, a lit furnace, glowstone)
