@@ -2436,7 +2436,7 @@ fn apply_fallen_tree_decorators<R: RandomSource>(
                     tags,
                 );
             }
-            Decorator::Beehive { .. } | Decorator::Unsupported => {}
+            Decorator::Beehive { .. } | Decorator::PlaceOnGround { .. } | Decorator::Unsupported => {}
         }
     }
 }
