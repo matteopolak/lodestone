@@ -256,7 +256,7 @@ fn build_world_column_is_byte_identical_to_the_string_path() {
             cz,
             &shape,
             &integer_path,
-            &compute_served_light(&integer_path),
+            &compute_served_light(&integer_path, Dimension::Overworld),
             column,
         );
         let string_payload = encode_column_body(
@@ -264,7 +264,7 @@ fn build_world_column_is_byte_identical_to_the_string_path() {
             cz,
             &shape,
             &string_path,
-            &compute_served_light(&string_path),
+            &compute_served_light(&string_path, Dimension::Overworld),
             column,
         );
         assert_eq!(

@@ -35,6 +35,15 @@ uniformly zero block-light sections; non-zero values, including a border contrib
 neighbour, remain present. Light-update packets retain explicit zero sections because those clear
 the client's existing value rather than describing a new chunk.
 
+### Dimension sky rules
+
+Sky seeding is a dimension property, not a consequence of a column's vertical shape. The Nether and
+the End both use a 0..256 served window, but only the Nether lacks skylight; every one of its 18
+light sections therefore carries an explicit zero sky value in both an initial chunk and a later
+light update. The End and Overworld retain the ordinary sky flood. `ChunkSource::dimension` carries
+that choice to the protocol's dimension-aware initial-encoding and light-computation hooks. An unlabelled source
+uses the Overworld as the compatibility default; a dimension wrapper must always forward its label.
+
 ### Keeping light current after an edit
 
 A block edit that changes what a cell emits (placing or breaking a torch, a lit furnace, glowstone)
@@ -120,6 +129,10 @@ fail in.
   open east column, east-only and full-3×3 results are both sky light 14 at the east border, while
   the seven-neighbour control without east is 7 through the longer north/south paths. This catches a
   supplied-neighbour assembly that works only when its list happens to contain one entry.
+- **Adding a dimension or changing its sky rule**: route the dimension through the protocol's
+  `*_in_dimension` chunk and light hooks, then decode-test both its initial chunk and a light update.
+  Do not infer skylight from `min_y`, height, or section count: the Nether and End share the same
+  served window while differing from one another's sky rule.
 - **Extending an off-task chunk encoder to cross-column light**: carry the same 3×3 neighborhood into
   its worker-facing contract before enabling it for a family that opts into cross-column light. Do not
   fall back to the isolated encoder: the initial and live packet paths must agree at a border.

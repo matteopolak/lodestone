@@ -74,6 +74,7 @@ use lodestone_server::{
     MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MerchantOfferOut, MetadataField, PlayerListing,
     ResourcePackPush, ServerBound, ServerDirective, ServerProtocol, WorldBorder, WorldgenScope,
 };
+use lodestone_server::dimension::Dimension;
 // Test-only: `encode_initialize_border_wire_layout` asserts the wire byte
 // against this constant. Not imported above because the lib-only build (no
 // `#[cfg(test)]`) never references it, and `cargo clippy -- -D warnings`
@@ -2853,9 +2854,15 @@ fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) {
 /// per-column setup cost and nothing to cache. See
 /// [`lodestone_data::light_props`] for the provenance argument — in particular
 /// that every gap in it darkens rather than brightens.
-struct V770LightProps;
+struct V770LightProps {
+    has_skylight: bool,
+}
 
 impl LightProperties for V770LightProps {
+    fn has_skylight(&self) -> bool {
+        self.has_skylight
+    }
+
     fn opacity(&self, state: u32) -> u8 {
         lodestone_data::block_states::StateId::new(state)
             .map_or(0, lodestone_data::light_props::dampening)
@@ -2912,8 +2919,13 @@ impl LightProperties for V770LightProps {
 /// resident neighbour. A missing neighbour is an opaque seam rather than an
 /// implicit generation request, so join order never changes terrain or blocks
 /// input handling. The same 3×3 computation serves light updates.
-fn compute_served_light(column: &WorldChunkColumn) -> ColumnLight {
-    compute_column_light(column, &V770LightProps)
+fn compute_served_light(column: &WorldChunkColumn, dimension: Dimension) -> ColumnLight {
+    compute_column_light(
+        column,
+        &V770LightProps {
+            has_skylight: dimension.has_skylight(),
+        },
+    )
 }
 
 /// Initial chunk packets omit block-light sections whose computed values are
@@ -2937,6 +2949,7 @@ fn elide_zero_block_light_for_chunk(light: &mut ColumnLight) {
 fn compute_served_light_with_neighbours(
     column: &ServerChunkColumn,
     neighbours: &[(i32, i32, ServerChunkColumn)],
+    dimension: Dimension,
 ) -> ColumnLight {
     let shape = shape_for_column(column);
     let center = build_world_column(&shape, column);
@@ -2953,7 +2966,12 @@ fn compute_served_light_with_neighbours(
         }
         neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
     }
-    compute_column_light_with_neighbours(&neighbourhood, &V770LightProps)
+    compute_column_light_with_neighbours(
+        &neighbourhood,
+        &V770LightProps {
+            has_skylight: dimension.has_skylight(),
+        },
+    )
 }
 
 /// Server-side implementation of the protocol-776 (Minecraft 26.2) wire
@@ -3339,6 +3357,23 @@ fn shape_for_column(column: &ServerChunkColumn) -> ChunkShape {
     ChunkShape::overworld_1_21()
 }
 
+fn encode_chunk_in_dimension(
+    cx: i32,
+    cz: i32,
+    column: &ServerChunkColumn,
+    dimension: Dimension,
+) -> ServerDirective {
+    let shape = shape_for_column(column);
+    let world_column = build_world_column(&shape, column);
+    let mut light = compute_served_light(&world_column, dimension);
+    elide_zero_block_light_for_chunk(&mut light);
+    let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
+    ServerDirective::Send {
+        packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
+        payload,
+    }
+}
+
 /// The single column-encode body in this crate.
 ///
 /// It lives on the [`ChunkEncoder`] impl rather than on
@@ -3351,15 +3386,17 @@ fn shape_for_column(column: &ServerChunkColumn) -> ChunkShape {
 /// neighbour-bearing encode hook when resident adjacent columns exist.
 impl ChunkEncoder for V770ServerProtocol {
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ServerChunkColumn) -> ServerDirective {
-        let shape = shape_for_column(column);
-        let world_column = build_world_column(&shape, column);
-        let mut light = compute_served_light(&world_column);
-        elide_zero_block_light_for_chunk(&mut light);
-        let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
-        ServerDirective::Send {
-            packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
-            payload,
-        }
+        encode_chunk_in_dimension(cx, cz, column, Dimension::Overworld)
+    }
+
+    fn try_encode_chunk_in_dimension(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ServerChunkColumn,
+        dimension: Dimension,
+    ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
+        Ok(encode_chunk_in_dimension(cx, cz, column, dimension))
     }
 }
 
@@ -4869,6 +4906,16 @@ impl ServerProtocol for V770ServerProtocol {
         ChunkEncoder::encode_chunk(self, cx, cz, column)
     }
 
+    fn try_encode_chunk_in_dimension(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ServerChunkColumn,
+        dimension: Dimension,
+    ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
+        ChunkEncoder::try_encode_chunk_in_dimension(self, cx, cz, column, dimension)
+    }
+
     /// `Self`, because this protocol is a stateless unit struct — so the "encoder
     /// detached from `&self`" this seam asks for costs one `Arc` allocation per
     /// join and carries nothing. See [`ChunkEncoder`] for why the connection task
@@ -4919,7 +4966,19 @@ impl ServerProtocol for V770ServerProtocol {
         // preceded it, which is the one thing this method's own doc promises cannot
         // happen.
         let shape = shape_for_column(column);
-        Some(compute_served_light(&build_world_column(&shape, column)))
+        Some(compute_served_light(
+            &build_world_column(&shape, column),
+            Dimension::Overworld,
+        ))
+    }
+
+    fn compute_column_light_in_dimension(
+        &self,
+        column: &ServerChunkColumn,
+        dimension: Dimension,
+    ) -> Option<ColumnLight> {
+        let shape = shape_for_column(column);
+        Some(compute_served_light(&build_world_column(&shape, column), dimension))
     }
 
     fn uses_cross_column_light(&self) -> bool {
@@ -4933,9 +4992,26 @@ impl ServerProtocol for V770ServerProtocol {
         column: &ServerChunkColumn,
         neighbours: &[(i32, i32, ServerChunkColumn)],
     ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
+        self.try_encode_chunk_with_neighbours_in_dimension(
+            cx,
+            cz,
+            column,
+            neighbours,
+            Dimension::Overworld,
+        )
+    }
+
+    fn try_encode_chunk_with_neighbours_in_dimension(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ServerChunkColumn,
+        neighbours: &[(i32, i32, ServerChunkColumn)],
+        dimension: Dimension,
+    ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
         let shape = shape_for_column(column);
         let world_column = build_world_column(&shape, column);
-        let mut light = compute_served_light_with_neighbours(column, neighbours);
+        let mut light = compute_served_light_with_neighbours(column, neighbours, dimension);
         elide_zero_block_light_for_chunk(&mut light);
         let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
         Ok(ServerDirective::Send {
@@ -4949,7 +5025,20 @@ impl ServerProtocol for V770ServerProtocol {
         column: &ServerChunkColumn,
         neighbours: &[(i32, i32, ServerChunkColumn)],
     ) -> Option<ColumnLight> {
-        Some(compute_served_light_with_neighbours(column, neighbours))
+        self.compute_column_light_with_neighbours_in_dimension(
+            column,
+            neighbours,
+            Dimension::Overworld,
+        )
+    }
+
+    fn compute_column_light_with_neighbours_in_dimension(
+        &self,
+        column: &ServerChunkColumn,
+        neighbours: &[(i32, i32, ServerChunkColumn)],
+        dimension: Dimension,
+    ) -> Option<ColumnLight> {
+        Some(compute_served_light_with_neighbours(column, neighbours, dimension))
     }
 
     fn welcome_message(&self) -> Vec<ServerDirective> {
@@ -7288,6 +7377,131 @@ mod block_edit_tests {
 
         assert_eq!(isolated, 0, "control: no local source reaches this cell");
         assert_eq!(with_east, 14, "east-neighbour source crosses one air cell");
+    }
+
+    /// Initial chunks and later light updates must use the dimension carried by
+    /// the source, not infer skylight from the column's shared 0..256 window.
+    #[test]
+    fn dimension_aware_initial_chunks_and_light_updates_preserve_sky_rules() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let proto = V770ServerProtocol;
+        let nether_source = lodestone_server::nether_chunk_source(42);
+        let nether = lodestone_server::ChunkSource::column(&nether_source, 0, 0);
+        {
+            let shape = ChunkShape::nether_or_end_1_21();
+            let ServerDirective::Send { payload, .. } = proto
+                .try_encode_chunk_with_neighbours_in_dimension(
+                    0,
+                    0,
+                    &nether,
+                    &[],
+                    Dimension::Nether,
+                )
+                .expect("initial chunk")
+            else {
+                panic!("nether initial chunk must send a packet");
+            };
+            let mut chunk_reader = Reader::new(&payload);
+            let initial =
+                LevelChunkWithLight::decode(&mut chunk_reader, &shape).expect("decode initial chunk");
+            chunk_reader.ensure_empty().expect("no initial trailing bytes");
+            assert_eq!(initial.light.light_section_count(), 18, "nether light window");
+            for section in 0..18 {
+                assert_eq!(
+                    *initial.light.sky(section),
+                    LightData::Uniform(0),
+                    "nether initial chunk sky section {section}"
+                );
+            }
+
+            let light = proto
+                .compute_column_light_with_neighbours_in_dimension(
+                    &nether,
+                    &[],
+                    Dimension::Nether,
+                )
+                .expect("light update computation");
+            let ServerDirective::Send { payload, .. } = proto.encode_light_update(0, 0, &light) else {
+                panic!("nether light update must send a packet");
+            };
+            let mut update_reader = Reader::new(&payload);
+            assert_eq!(update_reader.var_i32().expect("update chunk x"), 0);
+            assert_eq!(update_reader.var_i32().expect("update chunk z"), 0);
+            let update = ColumnLight::decode(16, &mut update_reader).expect("decode light update");
+            update_reader.ensure_empty().expect("no update trailing bytes");
+            for section in 0..18 {
+                assert_eq!(
+                    *update.sky(section),
+                    LightData::Uniform(0),
+                    "nether light update sky section {section}"
+                );
+            }
+        }
+
+        let end_shape = ChunkShape::nether_or_end_1_21();
+        let end = ServerChunkColumn::new(0, 256);
+        let ServerDirective::Send { payload, .. } = proto
+            .try_encode_chunk_with_neighbours_in_dimension(0, 0, &end, &[], Dimension::End)
+            .expect("end initial chunk")
+        else {
+            panic!("end initial chunk must send a packet");
+        };
+        let mut reader = Reader::new(&payload);
+        let initial =
+            LevelChunkWithLight::decode(&mut reader, &end_shape).expect("decode end initial");
+        reader.ensure_empty().expect("no end initial trailing bytes");
+        assert_eq!(
+            initial.light.section_light(1).sky_at(0, 0, 0),
+            15,
+            "End initial chunks retain sky light"
+        );
+        let update = proto
+            .compute_column_light_with_neighbours_in_dimension(&end, &[], Dimension::End)
+            .expect("end light update computation");
+        assert_eq!(
+            update.section_light(1).sky_at(0, 0, 0),
+            15,
+            "End light updates retain sky light"
+        );
+
+        let overworld_shape = ChunkShape::overworld_1_21();
+        let overworld = ServerChunkColumn::new(
+            overworld_shape.min_y,
+            overworld_shape.world_height as i32,
+        );
+        let ServerDirective::Send { payload, .. } =
+            ServerProtocol::try_encode_chunk_in_dimension(
+                &proto,
+                0,
+                0,
+                &overworld,
+                Dimension::Overworld,
+            )
+            .expect("overworld initial chunk")
+        else {
+            panic!("overworld initial chunk must send a packet");
+        };
+        let mut overworld_reader = Reader::new(&payload);
+        let initial =
+            LevelChunkWithLight::decode(&mut overworld_reader, &overworld_shape)
+                .expect("decode overworld initial");
+        overworld_reader
+            .ensure_empty()
+            .expect("no overworld initial trailing bytes");
+        assert_eq!(
+            initial.light.section_light(1).sky_at(0, 0, 0),
+            15,
+            "overworld initial chunks retain sky light"
+        );
+        let update = proto
+            .compute_column_light_in_dimension(&overworld, Dimension::Overworld)
+            .expect("overworld light update computation");
+        assert_eq!(
+            update.section_light(1).sky_at(0, 0, 0),
+            15,
+            "overworld light updates retain sky light"
+        );
     }
 
     /// Initial chunk packets omit uniformly dark block-light sections, while a

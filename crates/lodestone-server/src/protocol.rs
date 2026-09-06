@@ -18,6 +18,7 @@ use lodestone_model::{
 use uuid::Uuid;
 
 use crate::chunk::ChunkColumn;
+use crate::dimension::Dimension;
 
 /// The `EntityEvent` constants this crate sends through
 /// [`ServerProtocol::encode_entity_event`], transcribed from
@@ -1945,6 +1946,18 @@ pub trait ChunkEncoder: Send + Sync + 'static {
         Ok(self.encode_chunk(cx, cz, column))
     }
 
+    /// Dimension-aware chunk encoding. The default retains the historical
+    /// overworld-only contract for encoders that do not derive light.
+    fn try_encode_chunk_in_dimension(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+        _dimension: Dimension,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        self.try_encode_chunk(cx, cz, column)
+    }
+
 }
 
 impl<E: ChunkEncoder + ?Sized> ChunkEncoder for Box<E> {
@@ -1959,6 +1972,16 @@ impl<E: ChunkEncoder + ?Sized> ChunkEncoder for Box<E> {
         column: &ChunkColumn,
     ) -> Result<ServerDirective, ChunkEncodeError> {
         (**self).try_encode_chunk(cx, cz, column)
+    }
+
+    fn try_encode_chunk_in_dimension(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+        dimension: Dimension,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        (**self).try_encode_chunk_in_dimension(cx, cz, column, dimension)
     }
 
 }
@@ -2250,6 +2273,17 @@ pub trait ServerProtocol: Send + Sync {
         Ok(self.encode_chunk(cx, cz, column))
     }
 
+    /// Dimension-aware one-column initial encoding and full-column fallback.
+    fn try_encode_chunk_in_dimension(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+        _dimension: Dimension,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        self.try_encode_chunk(cx, cz, column)
+    }
+
     /// Encodes one terrain column with its eight adjacent columns available.
     ///
     /// Initial chunk batches use this when a protocol includes light derived
@@ -2263,6 +2297,18 @@ pub trait ServerProtocol: Send + Sync {
         _neighbours: &[(i32, i32, ChunkColumn)],
     ) -> Result<ServerDirective, ChunkEncodeError> {
         self.try_encode_chunk(cx, cz, column)
+    }
+
+    /// Dimension-aware neighbour-bearing initial chunk encoding.
+    fn try_encode_chunk_with_neighbours_in_dimension(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+        _dimension: Dimension,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        self.try_encode_chunk_with_neighbours(cx, cz, column, neighbours)
     }
 
     /// The same encoder as [`encode_chunk`](Self::encode_chunk), detached from
@@ -2348,6 +2394,15 @@ pub trait ServerProtocol: Send + Sync {
         None
     }
 
+    /// Dimension-aware isolated light computation for a later light update.
+    fn compute_column_light_in_dimension(
+        &self,
+        column: &ChunkColumn,
+        _dimension: Dimension,
+    ) -> Option<lodestone_world::ColumnLight> {
+        self.compute_column_light(column)
+    }
+
     /// Whether this family uses the loaded 3×3 chunk neighbourhood when it
     /// computes light. The default preserves the isolated light compute for
     /// families that have not adopted cross-column propagation.
@@ -2366,6 +2421,16 @@ pub trait ServerProtocol: Send + Sync {
         _neighbours: &[(i32, i32, ChunkColumn)],
     ) -> Option<lodestone_world::ColumnLight> {
         self.compute_column_light(column)
+    }
+
+    /// Dimension-aware neighbour-bearing light computation for a later update.
+    fn compute_column_light_with_neighbours_in_dimension(
+        &self,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+        _dimension: Dimension,
+    ) -> Option<lodestone_world::ColumnLight> {
+        self.compute_column_light_with_neighbours(column, neighbours)
     }
 
     /// Emits any directives to send right after the initial chunk batch has
@@ -3679,6 +3744,16 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).try_encode_chunk(cx, cz, column)
     }
 
+    fn try_encode_chunk_in_dimension(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+        dimension: Dimension,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        (**self).try_encode_chunk_in_dimension(cx, cz, column, dimension)
+    }
+
     fn try_encode_chunk_with_neighbours(
         &self,
         cx: i32,
@@ -3687,6 +3762,19 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         neighbours: &[(i32, i32, ChunkColumn)],
     ) -> Result<ServerDirective, ChunkEncodeError> {
         (**self).try_encode_chunk_with_neighbours(cx, cz, column, neighbours)
+    }
+
+    fn try_encode_chunk_with_neighbours_in_dimension(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+        dimension: Dimension,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        (**self).try_encode_chunk_with_neighbours_in_dimension(
+            cx, cz, column, neighbours, dimension,
+        )
     }
 
     fn chunk_encoder(&self) -> Option<std::sync::Arc<dyn ChunkEncoder>> {
@@ -3710,6 +3798,14 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).compute_column_light(column)
     }
 
+    fn compute_column_light_in_dimension(
+        &self,
+        column: &ChunkColumn,
+        dimension: Dimension,
+    ) -> Option<lodestone_world::ColumnLight> {
+        (**self).compute_column_light_in_dimension(column, dimension)
+    }
+
     fn uses_cross_column_light(&self) -> bool {
         (**self).uses_cross_column_light()
     }
@@ -3720,6 +3816,15 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         neighbours: &[(i32, i32, ChunkColumn)],
     ) -> Option<lodestone_world::ColumnLight> {
         (**self).compute_column_light_with_neighbours(column, neighbours)
+    }
+
+    fn compute_column_light_with_neighbours_in_dimension(
+        &self,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+        dimension: Dimension,
+    ) -> Option<lodestone_world::ColumnLight> {
+        (**self).compute_column_light_with_neighbours_in_dimension(column, neighbours, dimension)
     }
 
     fn welcome_message(&self) -> Vec<ServerDirective> {

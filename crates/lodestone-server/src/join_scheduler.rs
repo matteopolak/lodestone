@@ -836,6 +836,9 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
                 break;
             };
             let source = Arc::clone(&self.source);
+            let dimension = source
+                .dimension()
+                .unwrap_or(crate::dimension::Dimension::Overworld);
             let stage = self.generation_stage_for((cx, cz));
             // **Protocol encode happens here, on the worker, not on the caller's
             // task** — that is the whole point of `encoder`. The column is dropped
@@ -849,7 +852,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
                     let column = source.column_at(cx, cz, stage);
                     match encoder {
                         Some(encoder) => encoder
-                            .try_encode_chunk(cx, cz, &column)
+                            .try_encode_chunk_in_dimension(cx, cz, &column, dimension)
                             .map(ColumnPayload::Encoded),
                         None => Ok(ColumnPayload::Column(column)),
                     }

@@ -2172,6 +2172,9 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     encoder: Option<Arc<dyn crate::protocol::ChunkEncoder>>,
 ) -> Option<Result<Vec<crate::protocol::ServerDirective>, crate::protocol::ChunkEncodeError>> {
     let encoder = encoder?;
+    let dimension = source
+        .dimension()
+        .unwrap_or(crate::dimension::Dimension::Overworld);
     // wasm32: `map_columns_yielding`, one column generated-and-encoded at a
     // time with a real browser yield between each — see
     // `generate_columns_offloaded`'s wasm32 doc for why this is not merely a
@@ -2185,7 +2188,9 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
             map_columns_yielding(
                 &*source,
                 &coords,
-                |(cx, cz), column| encoder.try_encode_chunk(cx, cz, &column),
+                |(cx, cz), column| {
+                    encoder.try_encode_chunk_in_dimension(cx, cz, &column, dimension)
+                },
                 yield_to_browser,
             )
             .await
@@ -2202,7 +2207,7 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     {
         let encode = move || {
             map_columns_parallel(&*source, &coords, |(cx, cz), column| {
-                encoder.try_encode_chunk(cx, cz, &column)
+                encoder.try_encode_chunk_in_dimension(cx, cz, &column, dimension)
             })
         };
         Some(
