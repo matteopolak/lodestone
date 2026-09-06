@@ -202,7 +202,7 @@ public final class LargeParityOracle {
                 file.seek(HEADER_BYTES + done * FINGERPRINT_BYTES);
             }
             long start = System.nanoTime();
-            final int batchSize = 256;
+            final int batchSize = Math.max(1, Integer.parseInt(System.getenv().getOrDefault("LODESTONE_ORACLE_BATCH", "256")));
             for (long batchStart = done; batchStart < count; batchStart += batchSize) {
                 long batchEnd = Math.min(count, batchStart + batchSize);
                 int width = a.hiX - a.loX + 1;
@@ -215,7 +215,9 @@ public final class LargeParityOracle {
                 for (int offset = 0; offset < futures.size(); offset++) {
                     long index = batchStart + offset;
                     int cx = a.loX + (int)(index % width), cz = a.loZ + (int)(index / width);
-                    ChunkAccess raw = futures.get(offset).join().orElseThrow(() -> new IllegalStateException("chunk generation failed at " + cx + "," + cz));
+                    net.minecraft.server.level.ChunkResult<ChunkAccess> result = futures.get(offset).join();
+                    if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + cx + "," + cz + ": " + result.getError());
+                    ChunkAccess raw = result.orElseThrow(() -> new IllegalStateException("chunk generation returned no value at " + cx + "," + cz));
                     if (!(raw instanceof LevelChunk chunk)) throw new IllegalStateException("full status did not yield LevelChunk at " + cx + "," + cz);
                     chunks.add(chunk);
                 }
