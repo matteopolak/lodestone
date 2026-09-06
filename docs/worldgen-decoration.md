@@ -149,7 +149,9 @@ source selects ore-capable entries from the global decoration catalog using the 
 in its own 3×3 neighbourhood; the retained global step index, not a biome document's local array offset,
 seeds that ore. The same nine sources write the result, but their terrain and
 heightmap probes use a 5×5 read context: a blob at an outer source edge can
-inspect the real neighbour column rather than a clamped substitute. `OrePositions::{None, One, Repeat}` replaces a
+inspect the real neighbour column rather than a clamped substitute. Those probes
+read `OCEAN_FLOOR_WG` from the completed pre-ore grid, after carving and structure
+placement; the earlier fill height is only for biome and surface selection. `OrePositions::{None, One, Repeat}` replaces a
 per-attempt-allocated `Vec<BlockPos>`, matching vegetation's `Positions` shape; per-blob scratch (the
 sphere-fill table and its visited-bitset) is taken from and returned to thread-local free lists rather
 than allocated fresh per ore blob. **A recycled visited-bitset must be cleared before resize, not

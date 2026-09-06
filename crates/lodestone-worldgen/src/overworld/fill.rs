@@ -73,11 +73,16 @@ impl OverworldGenerator {
         // Structure placement's S2. A no-op (and free) for a generator with no structure
         // data, which is every fixture resolver in this workspace.
         let world = self.structure_place_stage(cx, cz, world);
+        // Ores consult the live `OCEAN_FLOOR_WG` map while deciding whether a
+        // blob is buried. Unlike the surface and biome heights above, this map
+        // must see the completed pre-ore terrain: a carver can lower a column
+        // enough to cull a feature before it draws its blob radii.
+        let ore_heights = self.ore_heights_from_world(&world);
 
         // `Arc` because `PreOreResult` hands this world out to
         // `vegetation_stage`'s rim sources rather than only into a mutating
         // consumer — see that alias's own doc.
-        (Arc::new(world), heights, biome_quarts, Arc::new(biome_cells))
+        (Arc::new(world), ore_heights, biome_quarts, Arc::new(biome_cells))
     }
 
     /// Builds a fresh, chunk-bound [`AquiferSystem`] from this generator's
@@ -187,6 +192,47 @@ impl OverworldGenerator {
                     }
                 }
                 heights[(lz * 16 + lx) as usize] = top.max(self.sea_level - 1);
+            }
+        }
+        heights
+    }
+
+    /// The live `OCEAN_FLOOR_WG` heightmap ores probe after surface, carving,
+    /// and structure placement. The result is one above the topmost
+    /// motion-blocking block, or `min_y` for an empty column.
+    ///
+    /// This is intentionally separate from [`Self::heights_from_field`]: that
+    /// earlier field-derived value is the surface-rule input and must remain
+    /// stable while carving mutates the materialised grid.
+    pub(super) fn ore_heights_from_world(&self, world: &crate::dense_grid::DenseBlockGrid) -> [i32; 256] {
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
+        assert_eq!(min_y, self.min_y, "pre-ore world min_y drifted from its generator");
+        assert_eq!(size_y, self.height, "pre-ore world height drifted from its generator");
+        assert_eq!(size_x, 16, "pre-ore world must cover one chunk in x");
+        assert_eq!(size_z, 16, "pre-ore world must cover one chunk in z");
+        Self::ocean_floor_wg_heights(world, min_x, min_y, min_z, size_y)
+    }
+
+    fn ocean_floor_wg_heights(
+        world: &crate::dense_grid::DenseBlockGrid,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        height: i32,
+    ) -> [i32; 256] {
+        use crate::feature::vegetation::{blocks_motion, is_air, is_fluid};
+
+        let mut heights = [min_y; 256];
+        for lz in 0..16i32 {
+            for lx in 0..16i32 {
+                for y in (min_y..min_y + height).rev() {
+                    let state = world.get(min_x + lx, y, min_z + lz);
+                    let base = state.split('[').next().unwrap_or(state);
+                    if !is_air(base) && !is_fluid(base) && blocks_motion(base) {
+                        heights[(lz * 16 + lx) as usize] = y + 1;
+                        break;
+                    }
+                }
             }
         }
         heights
@@ -474,5 +520,101 @@ impl OverworldGenerator {
         debug_assert!((0..16).contains(&lx) && (0..16).contains(&lz));
         debug_assert!((0..height).contains(&ly));
         ((ly * 16 + lz) * 16 + lx) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OverworldGenerator;
+    use crate::dense_grid::DenseBlockGrid;
+    use crate::feature::{
+        BlockPos, ORE_READ_MAX, ORE_READ_MIN, OreConfig, OreInput, RegionHeights, place_ore_feature,
+        region_view::RegionView,
+    };
+    use crate::rng::{RandomSource, WorldgenRandom, XoroshiroRandomSource};
+
+    fn heightmap_with(value: i32) -> RegionHeights {
+        let mut heights = RegionHeights::unset();
+        for lz in ORE_READ_MIN..ORE_READ_MAX {
+            for lx in ORE_READ_MIN..ORE_READ_MAX {
+                heights.set(lx, lz, value);
+            }
+        }
+        heights
+    }
+
+    fn next_long_after_ore_probe(heights: &RegionHeights) -> i64 {
+        let grid = DenseBlockGrid::new(-16, 0, -16, 48, 16, 48, "minecraft:air");
+        let mut view = RegionView::over_region_grid(&grid, 0, 16);
+        let input = OreInput {
+            chunk_x: 0,
+            chunk_z: 0,
+            center_x: 0,
+            center_z: 0,
+            min_y: 0,
+            height: 16,
+            min_gen_y: 0,
+            gen_depth: 16,
+            read_min: ORE_READ_MIN,
+            read_max: ORE_READ_MAX,
+            ocean_floor_wg: heights,
+            in_tag: &|_, _| false,
+        };
+        let config = OreConfig {
+            size: 1,
+            discard_chance_on_air_exposure: 0.0,
+            targets: Vec::new(),
+        };
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(42));
+        // `y_start` is 11 for this size-one blob. A heightmap value of 11
+        // reaches `do_place`, while 10 returns immediately after its three
+        // setup draws.
+        place_ore_feature(&mut random, BlockPos { x: 2, y: 14, z: 2 }, &config, &input, &mut view);
+        random.next_long()
+    }
+
+    #[test]
+    fn carved_ocean_floor_height_culls_the_ore_probe() {
+        let mut pre_carve = DenseBlockGrid::new(0, 0, 0, 16, 16, 16, "minecraft:air");
+        for z in 0..16 {
+            for x in 0..16 {
+                for y in 0..=10 {
+                    pre_carve.set(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        let mut post_carve = pre_carve.clone();
+        // This is the relevant 5x5 probe floor for the selected blob, carved
+        // down one block. The unchanged pre-carve field would report 11 here.
+        for z in 0..=4 {
+            for x in 0..=4 {
+                post_carve.set(x, 10, z, "minecraft:cave_air");
+            }
+        }
+
+        let pre_heights = OverworldGenerator::ocean_floor_wg_heights(&pre_carve, 0, 0, 0, 16);
+        let post_heights = OverworldGenerator::ocean_floor_wg_heights(&post_carve, 0, 0, 0, 16);
+        for z in 0..=4 {
+            for x in 0..=4 {
+                let i = (z * 16 + x) as usize;
+                assert_eq!(pre_heights[i], 11, "pre-carve OCEAN_FLOOR_WG at ({x}, {z})");
+                assert_eq!(post_heights[i], 10, "carve must lower OCEAN_FLOOR_WG at ({x}, {z})");
+            }
+        }
+
+        let before = next_long_after_ore_probe(&heightmap_with(11));
+        let after = next_long_after_ore_probe(&heightmap_with(10));
+        let mut reaches_blob = WorldgenRandom::new(XoroshiroRandomSource::new(42));
+        let _ = reaches_blob.next_float();
+        let _ = reaches_blob.next_int_bounded(3);
+        let _ = reaches_blob.next_int_bounded(3);
+        let _ = reaches_blob.next_double();
+        assert_eq!(before, reaches_blob.next_long(), "height 11 must reach the blob draw");
+        let mut culled = WorldgenRandom::new(XoroshiroRandomSource::new(42));
+        let _ = culled.next_float();
+        let _ = culled.next_int_bounded(3);
+        let _ = culled.next_int_bounded(3);
+        assert_eq!(after, culled.next_long(), "carved height 10 must cull before the blob draw");
+        assert_ne!(before, after, "the control must distinguish proceed from cull");
     }
 }
