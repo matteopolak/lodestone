@@ -33,6 +33,9 @@ if [ -n "${LODESTONE_ORACLE_WORLD_ROOT:-}" ]; then
   WORLD_MOUNTS+=( -v "$LODESTONE_ORACLE_WORLD_ROOT:/world" )
   WORLD_ENV+=( -e ORACLE_WORLD_ROOT=/world )
 fi
+if [ -n "${LODESTONE_ORACLE_EPOCH_TILES:-}" ]; then
+  WORLD_ENV+=( -e "ORACLE_MATERIALIZE_EPOCH_TILES=$LODESTONE_ORACLE_EPOCH_TILES" )
+fi
 if [ -n "${LODESTONE_ORACLE_FROZEN_WORLD_ROOT:-}" ]; then
   if [ ! -d "$LODESTONE_ORACLE_FROZEN_WORLD_ROOT" ]; then
     echo "LODESTONE_ORACLE_FROZEN_WORLD_ROOT must name an existing frozen-world directory" >&2

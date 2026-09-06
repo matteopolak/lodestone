@@ -14,6 +14,7 @@ import java.net.Proxy;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -21,6 +22,7 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -74,6 +76,9 @@ public final class LargeParityOracle {
     static final byte[] MANIFEST_DOMAIN = "lodestone.worldgen.large-parity.manifest/v3/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN = "lodestone.worldgen.large-parity.chunk/v3/semantic".getBytes(StandardCharsets.US_ASCII);
     static final String FREEZE_STAMP = "lodestone-large-parity-v3.freeze.sha256";
+    static final String MATERIALIZE_PROGRESS = "lodestone-large-parity-v3.materialize";
+    static final String MATERIALIZE_PROGRESS_TEMP = MATERIALIZE_PROGRESS + ".tmp";
+    static final int MATERIALIZE_TILE = 16;
     static String diagnosticPacketOut, diagnosticRecordOut;
 
     static final class Args {
@@ -232,24 +237,98 @@ public final class LargeParityOracle {
         if (capture) out.addAll(server.submit(() -> { try { List<byte[]> result = new ArrayList<>(positions.size()); for (ChunkPos pos : positions) { LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z()); if (chunk == null) throw new IllegalStateException("loaded chunk was evicted: " + pos); if (diagnosticPacketOut != null) Files.write(Path.of(diagnosticPacketOut), packetBody(server, chunk, level)); byte[] record = semanticRecord(level, chunk); if (diagnosticRecordOut != null) Files.write(Path.of(diagnosticRecordOut), record); result.add(digest(record)); } return result; } catch (Exception e) { throw new IllegalStateException("canonical chunk export failed", e); } }).join());
         server.submit(() -> { for (ChunkPos pos : positions) level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0); }).join();
     }
+
+    record MaterializeProgress(int minX, int maxX, int minZ, int maxZ, int tilesX, int tilesZ, int epochTiles, int nextTile, int inflightEnd) {
+        int totalTiles() { return Math.multiplyExact(tilesX, tilesZ); }
+        MaterializeProgress withInflight(int end) { return new MaterializeProgress(minX, maxX, minZ, maxZ, tilesX, tilesZ, epochTiles, nextTile, end); }
+        MaterializeProgress withNext(int next) { return new MaterializeProgress(minX, maxX, minZ, maxZ, tilesX, tilesZ, epochTiles, next, -1); }
+    }
+
+    static int materializeEpochTiles() {
+        String value = System.getenv("ORACLE_MATERIALIZE_EPOCH_TILES");
+        if (value == null || value.isBlank()) throw new IllegalStateException("materialize requires ORACLE_MATERIALIZE_EPOCH_TILES; use large-parity.sh, which starts a fresh JVM for every epoch");
+        try { int parsed = Integer.parseInt(value); if (parsed <= 0) throw new NumberFormatException(); return parsed; }
+        catch (NumberFormatException e) { throw new IllegalStateException("ORACLE_MATERIALIZE_EPOCH_TILES must be a positive integer: " + value, e); }
+    }
+
+    static String progressText(MaterializeProgress progress) {
+        return "lodestone-large-parity-v3-materialize=1\n"
+            + "seed=" + SEED + "\n"
+            + "tile-size=" + MATERIALIZE_TILE + "\n"
+            + "min-x=" + progress.minX + "\nmax-x=" + progress.maxX + "\nmin-z=" + progress.minZ + "\nmax-z=" + progress.maxZ + "\n"
+            + "tiles-x=" + progress.tilesX + "\ntiles-z=" + progress.tilesZ + "\nepoch-tiles=" + progress.epochTiles + "\n"
+            + "next-tile=" + progress.nextTile + "\ninflight-end=" + progress.inflightEnd + "\n";
+    }
+
+    static MaterializeProgress readProgress(Path root) throws Exception {
+        Path progress = root.resolve(MATERIALIZE_PROGRESS), temporary = root.resolve(MATERIALIZE_PROGRESS_TEMP);
+        if (Files.exists(temporary)) throw new IllegalStateException("materialization progress has an unfinished atomic update; refusing to resume: " + temporary);
+        if (!Files.isRegularFile(progress)) throw new IllegalStateException("materialization root has no validated progress: " + root);
+        Map<String, String> values = new HashMap<>();
+        for (String line : Files.readAllLines(progress, StandardCharsets.US_ASCII)) {
+            int split = line.indexOf('=');
+            if (split <= 0 || values.put(line.substring(0, split), line.substring(split + 1)) != null) throw new IllegalStateException("malformed materialization progress: " + progress);
+        }
+        if (values.size() != 12 || !"1".equals(values.get("lodestone-large-parity-v3-materialize")) || !Long.toString(SEED).equals(values.get("seed")) || !Integer.toString(MATERIALIZE_TILE).equals(values.get("tile-size"))) throw new IllegalStateException("materialization progress provenance differs: " + progress);
+        try {
+            MaterializeProgress result = new MaterializeProgress(Integer.parseInt(values.get("min-x")), Integer.parseInt(values.get("max-x")), Integer.parseInt(values.get("min-z")), Integer.parseInt(values.get("max-z")), Integer.parseInt(values.get("tiles-x")), Integer.parseInt(values.get("tiles-z")), Integer.parseInt(values.get("epoch-tiles")), Integer.parseInt(values.get("next-tile")), Integer.parseInt(values.get("inflight-end")));
+            if (result.minX > result.maxX || result.minZ > result.maxZ || result.tilesX != (result.maxX - result.minX) / MATERIALIZE_TILE + 1 || result.tilesZ != (result.maxZ - result.minZ) / MATERIALIZE_TILE + 1 || result.epochTiles <= 0 || result.nextTile < 0 || result.nextTile > result.totalTiles() || result.inflightEnd < -1 || result.inflightEnd > result.totalTiles()) throw new IllegalStateException("materialization progress is out of range: " + progress);
+            return result;
+        } catch (NumberFormatException e) { throw new IllegalStateException("materialization progress contains a non-integer: " + progress, e); }
+    }
+
+    static void writeProgress(Path root, MaterializeProgress progress) throws Exception {
+        Path destination = root.resolve(MATERIALIZE_PROGRESS), temporary = root.resolve(MATERIALIZE_PROGRESS_TEMP);
+        Files.writeString(temporary, progressText(progress), StandardCharsets.US_ASCII);
+        try { Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
+        catch (AtomicMoveNotSupportedException e) { Files.move(temporary, destination, StandardCopyOption.REPLACE_EXISTING); }
+    }
+
+    static void verifyProgress(Args a, MaterializeProgress progress, int epochTiles) {
+        int minX = Math.max(-501, a.loX - 1), maxX = Math.min(501, a.hiX + 1), minZ = Math.max(-501, a.loZ - 1), maxZ = Math.min(501, a.hiZ + 1);
+        if (progress.minX != minX || progress.maxX != maxX || progress.minZ != minZ || progress.maxZ != maxZ || progress.epochTiles != epochTiles) throw new IllegalStateException("materialization geometry or epoch size differs from durable progress; refusing gap or reorder");
+        if (progress.inflightEnd != -1) throw new IllegalStateException("previous materialization epoch did not exit cleanly; refusing to resume uncertain world state at tiles " + progress.nextTile + ".." + progress.inflightEnd);
+    }
+
     static void materialize(Args a, Path root) throws Exception {
         // The halo is part of the frozen state: a feature may write one chunk past
         // the requested grid. This phase records no baseline bytes.
-        // A failed generation can leave valid-looking region files with no finished
-        // feature pass. Never resume such a root: freeze provenance requires one
-        // complete materialization from an empty persistent directory.
-        if (Files.exists(root)) try (var entries = Files.list(root)) {
-            if (entries.findAny().isPresent()) throw new IllegalStateException("materialize requires an empty world root; refusing an unsealed or previously frozen world: " + root);
+        // Each epoch is a distinct JVM because server shutdown closes shared work
+        // executors. The journal is written before work starts and only advances
+        // after runServer has closed and flushed, so an interrupted epoch fails
+        // closed rather than silently reordering or repeating feature work.
+        int epochTiles = materializeEpochTiles();
+        Files.createDirectories(root);
+        if (Files.exists(root.resolve(FREEZE_STAMP))) throw new IllegalStateException("materialize refuses an already frozen world: " + root);
+        MaterializeProgress progress;
+        if (Files.exists(root.resolve(MATERIALIZE_PROGRESS))) {
+            progress = readProgress(root); verifyProgress(a, progress, epochTiles);
+        } else {
+            try (var entries = Files.list(root)) {
+                if (entries.findAny().isPresent()) throw new IllegalStateException("materialize requires an empty world root or its validated v3 progress journal: " + root);
+            }
+            int minX = Math.max(-501, a.loX - 1), maxX = Math.min(501, a.hiX + 1), minZ = Math.max(-501, a.loZ - 1), maxZ = Math.min(501, a.hiZ + 1);
+            progress = new MaterializeProgress(minX, maxX, minZ, maxZ, (maxX - minX) / MATERIALIZE_TILE + 1, (maxZ - minZ) / MATERIALIZE_TILE + 1, epochTiles, 0, -1);
+            writeProgress(root, progress);
         }
+        if (progress.nextTile == progress.totalTiles()) {
+            byte[] frozen = worldTreeDigest(root); Files.writeString(root.resolve(FREEZE_STAMP), hex(frozen) + "\n", StandardCharsets.US_ASCII); System.err.println("[large-parity v3] sealed frozen world " + hex(frozen)); return;
+        }
+        int end = (int)Math.min(progress.totalTiles(), (long)progress.nextTile + progress.epochTiles);
+        writeProgress(root, progress.withInflight(end));
+        MaterializeProgress current = progress;
         runServer(root, false, (server, level) -> {
-            int batch = Math.max(1, Integer.parseInt(System.getenv().getOrDefault("LODESTONE_ORACLE_BATCH", "256"))); int minX = Math.max(-501, a.loX - 1), maxX = Math.min(501, a.hiX + 1), minZ = Math.max(-501, a.loZ - 1), maxZ = Math.min(501, a.hiZ + 1); long total = (long)(maxX - minX + 1) * (maxZ - minZ + 1), done = 0, start = System.nanoTime();
-            for (int z0 = minZ; z0 <= maxZ; z0 += 16) for (int x0 = minX; x0 <= maxX; x0 += 16) {
-                List<ChunkPos> positions = new ArrayList<>(256); for (int z = z0; z <= Math.min(maxZ, z0 + 15); z++) for (int x = x0; x <= Math.min(maxX, x0 + 15); x++) positions.add(new ChunkPos(x, z));
+            int batch = Math.max(1, Integer.parseInt(System.getenv().getOrDefault("LODESTONE_ORACLE_BATCH", "256"))); long start = System.nanoTime();
+            for (int tile = current.nextTile; tile < end; tile++) {
+                int x0 = current.minX + (tile % current.tilesX) * MATERIALIZE_TILE, z0 = current.minZ + (tile / current.tilesX) * MATERIALIZE_TILE;
+                List<ChunkPos> positions = new ArrayList<>(MATERIALIZE_TILE * MATERIALIZE_TILE); for (int z = z0; z <= Math.min(current.maxZ, z0 + MATERIALIZE_TILE - 1); z++) for (int x = x0; x <= Math.min(current.maxX, x0 + MATERIALIZE_TILE - 1); x++) positions.add(new ChunkPos(x, z));
                 for (int off = 0; off < positions.size(); off += batch) loadBatch(server, level, positions.subList(off, Math.min(positions.size(), off + batch)), false, new ArrayList<>());
-                done += positions.size(); if (done % 4096 == 0 || done == total) System.err.printf("[large-parity v3] materialized=%d/%d rate=%.1f chunks/s%n", done, total, done / ((System.nanoTime() - start) / 1_000_000_000.0));
+                System.err.printf("[large-parity v3] materialized-tile=%d/%d epoch=%d..%d rate=%.1f tiles/s%n", tile + 1, current.totalTiles(), current.nextTile + 1, end, (tile - current.nextTile + 1) / ((System.nanoTime() - start) / 1_000_000_000.0));
             }
         });
-        byte[] frozen = worldTreeDigest(root); Files.writeString(root.resolve(FREEZE_STAMP), hex(frozen) + "\n", StandardCharsets.US_ASCII); System.err.println("[large-parity v3] sealed frozen world " + hex(frozen));
+        progress = current.withNext(end); writeProgress(root, progress);
+        if (end == progress.totalTiles()) { byte[] frozen = worldTreeDigest(root); Files.writeString(root.resolve(FREEZE_STAMP), hex(frozen) + "\n", StandardCharsets.US_ASCII); System.err.println("[large-parity v3] sealed frozen world " + hex(frozen)); }
+        else System.err.printf("[large-parity v3] clean epoch complete; next tile %d/%d%n", end, progress.totalTiles());
     }
 
     interface ServerWork { void run(MinecraftServer server, ServerLevel level) throws Exception; }
