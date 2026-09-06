@@ -775,8 +775,8 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   complete; the remaining gaps are structure families and gameplay such as the dragon
   fight rather than missing terrain or a disconnected dimension source.
 - [Large worldgen parity harness](./worldgen-large-parity.md) —
-  `scripts/worldgen-oracle/LargeParityOracle.java` is the resumable, million-chunk
-  parity oracle for the 1001 by 1001 overworld grid centred at `(0, 0)`. Version 3
+  `scripts/worldgen-oracle/LargeParityOracle.java` is the resumable, 251,001-chunk
+  parity oracle for the 501 by 501 overworld grid centred at `(0, 0)`. Version 3
   freezes one generated reference world first, then records a full SHA-256 digest of
   each chunk's canonical semantic record; the old v2 raw 16-bit packet fingerprints
   are explicitly rejected.

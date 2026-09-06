@@ -72,6 +72,10 @@ import net.minecraft.network.RegistryFriendlyByteBuf;
 public final class LargeParityOracle {
     static final byte[] MAGIC = "LWP26P03".getBytes(StandardCharsets.US_ASCII);
     static final int HEADER_BYTES = 256, FORMAT_VERSION = 3, SCHEMA_VERSION = 3, DIGEST_BYTES = 32;
+    static final int GRID_MIN = -250, GRID_MAX = 250;
+    static final int GRID_SIDE = GRID_MAX - GRID_MIN + 1;
+    static final long GRID_COUNT = (long) GRID_SIDE * GRID_SIDE;
+    static final int HALO_MIN = GRID_MIN - 1, HALO_MAX = GRID_MAX + 1;
     static final long SEED = 42L;
     static final byte[] MANIFEST_DOMAIN = "lodestone.worldgen.large-parity.manifest/v3/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN = "lodestone.worldgen.large-parity.chunk/v3/semantic".getBytes(StandardCharsets.US_ASCII);
@@ -86,7 +90,7 @@ public final class LargeParityOracle {
         String mode;
         String packetOut;
         String recordOut;
-        int loX = -500, hiX = 500, loZ = -500, hiZ = 500;
+        int loX = GRID_MIN, hiX = GRID_MAX, loZ = GRID_MIN, hiZ = GRID_MAX;
         boolean resume, help;
     }
 
@@ -107,7 +111,7 @@ public final class LargeParityOracle {
         }
         if (out.help) return out;
         if (!"materialize".equals(out.mode) && !"export".equals(out.mode)) throw new IllegalArgumentException("--mode must be materialize or export");
-        if (out.loX > out.hiX || out.loZ > out.hiZ || out.loX < -500 || out.hiX > 500 || out.loZ < -500 || out.hiZ > 500) throw new IllegalArgumentException("ranges must lie in -500..=500");
+        if (out.loX > out.hiX || out.loZ > out.hiZ || out.loX < GRID_MIN || out.hiX > GRID_MAX || out.loZ < GRID_MIN || out.hiZ > GRID_MAX) throw new IllegalArgumentException("ranges must lie in -250..=250");
         if ("materialize".equals(out.mode) && out.out != null) throw new IllegalArgumentException("materialize has no --out; it seals the persistent world");
         if ("export".equals(out.mode) && out.out == null) throw new IllegalArgumentException("export requires --out");
         if ((out.packetOut != null || out.recordOut != null) && (out.loX != out.hiX || out.loZ != out.hiZ)) throw new IllegalArgumentException("--packet-out and --record-out require exactly one chunk");
@@ -127,7 +131,7 @@ public final class LargeParityOracle {
     static byte[] header(Args a, long count, byte[] frozenDigest, byte[] payloadDigest) {
         ByteBuffer b = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
         b.put(MAGIC).putShort((short)FORMAT_VERSION).putShort((short)HEADER_BYTES).putShort((short)2).putShort((short)SCHEMA_VERSION).putInt(776).putLong(SEED);
-        b.putInt(-500).putInt(500).putInt(-500).putInt(500).putInt(a.loX).putInt(a.hiX).putInt(a.loZ).putInt(a.hiZ).putLong(count);
+        b.putInt(GRID_MIN).putInt(GRID_MAX).putInt(GRID_MIN).putInt(GRID_MAX).putInt(a.loX).putInt(a.hiX).putInt(a.loZ).putInt(a.hiZ).putLong(count);
         b.putShort((short)DIGEST_BYTES).putShort((short)0).put(digest(MANIFEST_DOMAIN)).put(frozenDigest).put(payloadDigest);
         return b.array();
     }
@@ -139,7 +143,7 @@ public final class LargeParityOracle {
             byte[] h = new byte[HEADER_BYTES]; in.readFully(h); ByteBuffer b = ByteBuffer.wrap(h).order(ByteOrder.BIG_ENDIAN); byte[] magic = new byte[8]; b.get(magic);
             if (!Arrays.equals(magic, MAGIC) || b.getShort() != FORMAT_VERSION || b.getShort() != HEADER_BYTES || b.getShort() != 2 || b.getShort() != SCHEMA_VERSION || b.getInt() != 776 || b.getLong() != SEED) throw new IllegalStateException("v2/raw manifests are rejected; resume requires v3: " + f);
             b.position(28);
-            if (b.getInt()!=-500 || b.getInt()!=500 || b.getInt()!=-500 || b.getInt()!=500 || b.getInt()!=a.loX || b.getInt()!=a.hiX || b.getInt()!=a.loZ || b.getInt()!=a.hiZ || b.getLong()!=count || b.getShort()!=DIGEST_BYTES) throw new IllegalStateException("resume shard geometry differs: " + f);
+            if (b.getInt()!=GRID_MIN || b.getInt()!=GRID_MAX || b.getInt()!=GRID_MIN || b.getInt()!=GRID_MAX || b.getInt()!=a.loX || b.getInt()!=a.hiX || b.getInt()!=a.loZ || b.getInt()!=a.hiZ || b.getLong()!=count || b.getShort()!=DIGEST_BYTES) throw new IllegalStateException("resume shard geometry differs: " + f);
             b.getShort(); byte[] domain = new byte[32]; b.get(domain); byte[] recordedFrozen = new byte[32]; b.get(recordedFrozen); byte[] expected = new byte[32]; b.get(expected);
             if (!Arrays.equals(domain, digest(MANIFEST_DOMAIN)) || !Arrays.equals(recordedFrozen, frozenDigest)) throw new IllegalStateException("resume schema or frozen-world identity differs: " + f);
             long records = (f.length() - HEADER_BYTES) / DIGEST_BYTES;
@@ -285,7 +289,7 @@ public final class LargeParityOracle {
     }
 
     static void verifyProgress(Args a, MaterializeProgress progress, int epochTiles) {
-        int minX = Math.max(-501, a.loX - 1), maxX = Math.min(501, a.hiX + 1), minZ = Math.max(-501, a.loZ - 1), maxZ = Math.min(501, a.hiZ + 1);
+        int minX = Math.max(HALO_MIN, a.loX - 1), maxX = Math.min(HALO_MAX, a.hiX + 1), minZ = Math.max(HALO_MIN, a.loZ - 1), maxZ = Math.min(HALO_MAX, a.hiZ + 1);
         if (progress.minX != minX || progress.maxX != maxX || progress.minZ != minZ || progress.maxZ != maxZ || progress.epochTiles != epochTiles) throw new IllegalStateException("materialization geometry or epoch size differs from durable progress; refusing gap or reorder");
         if (progress.inflightEnd != -1) throw new IllegalStateException("previous materialization epoch did not exit cleanly; refusing to resume uncertain world state at tiles " + progress.nextTile + ".." + progress.inflightEnd);
     }
@@ -307,7 +311,7 @@ public final class LargeParityOracle {
             try (var entries = Files.list(root)) {
                 if (entries.findAny().isPresent()) throw new IllegalStateException("materialize requires an empty world root or its validated v3 progress journal: " + root);
             }
-            int minX = Math.max(-501, a.loX - 1), maxX = Math.min(501, a.hiX + 1), minZ = Math.max(-501, a.loZ - 1), maxZ = Math.min(501, a.hiZ + 1);
+            int minX = Math.max(HALO_MIN, a.loX - 1), maxX = Math.min(HALO_MAX, a.hiX + 1), minZ = Math.max(HALO_MIN, a.loZ - 1), maxZ = Math.min(HALO_MAX, a.hiZ + 1);
             progress = new MaterializeProgress(minX, maxX, minZ, maxZ, (maxX - minX) / MATERIALIZE_TILE + 1, (maxZ - minZ) / MATERIALIZE_TILE + 1, epochTiles, 0, -1);
             writeProgress(root, progress);
         }

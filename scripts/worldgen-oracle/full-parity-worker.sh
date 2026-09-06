@@ -20,17 +20,19 @@ if [[ "$shard_dir" == /* || "$shard_dir" == *".."* ]]; then
 fi
 
 here="$(cd "$(dirname "$0")" && pwd)"
+grid_min=-250
+grid_max=250
 slot=0
-for (( x_lo = -500; x_lo <= 500; x_lo += 16, slot += 1 )); do
+for (( x_lo = grid_min; x_lo <= grid_max; x_lo += 16, slot += 1 )); do
   if (( slot % workers != worker )); then
     continue
   fi
   x_hi=$((x_lo + 15))
-  if (( x_hi > 500 )); then
-    x_hi=500
+  if (( x_hi > grid_max )); then
+    x_hi=grid_max
   fi
   "$here/large-parity.sh" \
     --mode export \
     --out "/oracle/${shard_dir}/shard-x${x_lo}-${x_hi}.lwp" \
-    --cx "$x_lo" "$x_hi" --cz -500 500 --resume
+    --cx "$x_lo" "$x_hi" --cz "$grid_min" "$grid_max" --resume
 done

@@ -1,5 +1,5 @@
-//! Manual million-chunk parity-manifest gate. It intentionally remains ignored:
-//! a full 1001² run is an external oracle job, not a regular unit test.
+//! Manual large-grid parity-manifest gate. It intentionally remains ignored:
+//! a full 501² run is an external oracle job, not a regular unit test.
 mod support { pub mod large_parity_manifest; }
 
 use std::{fs::File, io::{BufReader, Read, Seek, SeekFrom}};
@@ -8,6 +8,17 @@ use lodestone_server::{ChunkSource, ServerDirective, ServerProtocol, overworld_c
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use support::large_parity_manifest::{HEADER_BYTES, read_header, payload_digest_from_header, semantic_digest, semantic_record, verify_payload};
+
+#[test]
+fn canonical_grid_has_the_requested_square_and_one_chunk_halo() {
+    use support::large_parity_manifest::{GRID_COUNT, GRID_MAX, GRID_MIN, GRID_SIDE};
+
+    assert_eq!(GRID_SIDE, 501);
+    assert_eq!(GRID_COUNT, 251_001);
+    assert_eq!((GRID_MIN - 1, GRID_MAX + 1), (-251, 251));
+    let halo_side = (GRID_MAX - GRID_MIN + 3) as u64;
+    assert_eq!(halo_side * halo_side, 253_009);
+}
 
 #[test]
 fn sha256_control_and_bit_flip_are_detected() {
@@ -29,7 +40,13 @@ fn bounded_shard_header_control_is_accepted() {
     raw[14..16].copy_from_slice(&3u16.to_be_bytes());
     raw[16..20].copy_from_slice(&776u32.to_be_bytes());
     raw[20..28].copy_from_slice(&42i64.to_be_bytes());
-    for (offset, value) in [(28, -500i32), (32, 500), (36, -500), (40, 500), (44, -2), (48, 1), (52, 7), (56, 8)] {
+    for (offset, value) in [
+        (28, support::large_parity_manifest::GRID_MIN),
+        (32, support::large_parity_manifest::GRID_MAX),
+        (36, support::large_parity_manifest::GRID_MIN),
+        (40, support::large_parity_manifest::GRID_MAX),
+        (44, -2), (48, 1), (52, 7), (56, 8),
+    ] {
         raw[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
     }
     raw[60..68].copy_from_slice(&8u64.to_be_bytes());
@@ -89,7 +106,13 @@ fn parity_manifest_streams_before_rust_comparison() {
     let mut raw_header = [0; HEADER_BYTES]; let mut f = File::open(&path).expect("open manifest"); f.read_exact(&mut raw_header).expect("read header");
     let h = read_header(&raw_header[..]).expect("valid parity shard header");
     if std::env::var_os("LODESTONE_LARGE_PARITY_REQUIRE_FULL_GRID").is_some() {
-        assert_eq!((h.cx0,h.cx1,h.cz0,h.cz1,h.count), (-500,500,-500,500,1_002_001));
+        assert_eq!((h.cx0,h.cx1,h.cz0,h.cz1,h.count), (
+            support::large_parity_manifest::GRID_MIN,
+            support::large_parity_manifest::GRID_MAX,
+            support::large_parity_manifest::GRID_MIN,
+            support::large_parity_manifest::GRID_MAX,
+            support::large_parity_manifest::GRID_COUNT,
+        ));
     }
     let mut payload_file = File::open(&path).expect("reopen manifest"); payload_file.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek payload");
     verify_payload(BufReader::new(payload_file), h.count, payload_digest_from_header(&raw_header)).expect("payload integrity");

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Materialize in ordered, cleanly restarted epochs or run one read-only export
-# shard. The full target is --cx -500 500 --cz -500 500.
+# shard. The full target is --cx -250 250 --cz -250 250.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MODE=""
