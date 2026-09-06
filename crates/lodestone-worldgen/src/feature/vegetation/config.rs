@@ -61,6 +61,7 @@ impl HeightmapKind {
 #[derive(Clone, Debug)]
 pub enum BlockPredicate {
     True,
+    Solid,
     Not(Box<BlockPredicate>),
     /// The all-of/any-of predicate combinators — added for `patch_sugar_cane*`'s
     /// `block_predicate_filter`, which nests a `matching_block_tag` +
@@ -177,6 +178,7 @@ impl BlockPredicate {
     fn parse(v: &Value) -> Self {
         let ty = v["type"].as_str().unwrap_or("minecraft:true");
         match ty.strip_prefix("minecraft:").unwrap_or(ty) {
+            "solid" => BlockPredicate::Solid,
             "not" => BlockPredicate::Not(Box::new(BlockPredicate::parse(&v["predicate"]))),
             "all_of" => BlockPredicate::AllOf(parse_predicate_list(v)),
             "any_of" => BlockPredicate::AnyOf(parse_predicate_list(v)),
@@ -206,6 +208,10 @@ impl BlockPredicate {
 pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> bool {
         match self {
             BlockPredicate::True => true,
+            BlockPredicate::Solid => {
+                let base = super::base_id(grid.get(pos.x, pos.y, pos.z));
+                !is_air(base) && !is_fluid(base) && blocks_motion(base)
+            }
             BlockPredicate::Not(inner) => !inner.test(grid, tags, pos),
             BlockPredicate::AllOf(list) => list.iter().all(|p| p.test(grid, tags, pos)),
             BlockPredicate::AnyOf(list) => list.iter().any(|p| p.test(grid, tags, pos)),
@@ -217,6 +223,14 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
                     tag_at(grid, tags, Tag::Air, pos.x, pos.y, pos.z)
                 } else if tag == "minecraft:cannot_replace_below_tree_trunk" {
                     tag_at(grid, tags, Tag::CannotReplaceBelowTreeTrunk, pos.x, pos.y, pos.z)
+                } else if tag == "minecraft:huge_brown_mushroom_can_place_on" {
+                    tag_at(grid, tags, Tag::HugeBrownMushroomCanPlaceOn, pos.x, pos.y, pos.z)
+                } else if tag == "minecraft:huge_red_mushroom_can_place_on" {
+                    tag_at(grid, tags, Tag::HugeRedMushroomCanPlaceOn, pos.x, pos.y, pos.z)
+                } else if tag == "minecraft:replaceable_by_trees" {
+                    tag_at(grid, tags, Tag::ReplaceableByTrees, pos.x, pos.y, pos.z)
+                } else if tag == "minecraft:azalea_grows_on" {
+                    tags.azalea_grows_on.contains(super::base_id(grid.get(pos.x, pos.y, pos.z)))
                 } else {
                     false
                 }
@@ -425,6 +439,32 @@ pub enum BlockStateProvider {
         low_states: Vec<String>,
         high_states: Vec<String>,
     },
+    /// Selects one of its configured states from deterministic normal noise.
+    Noise {
+        seed: i64,
+        first_octave: i32,
+        amplitudes: Vec<f64>,
+        scale: f64,
+        states: Vec<String>,
+    },
+    /// Uses a slow normal-noise field to choose the fast-field frequency,
+    /// then selects a configured state from that fast field.
+    DualNoise {
+        seed: i64,
+        first_octave: i32,
+        amplitudes: Vec<f64>,
+        scale: f64,
+        slow_first_octave: i32,
+        slow_amplitudes: Vec<f64>,
+        slow_scale: f64,
+        variety_min: i32,
+        variety_max: i32,
+        states: Vec<String>,
+    },
+    RandomizedInt {
+        source: Vec<(i32, Vec<String>)>,
+        values: IntProvider,
+    },
     RuleBased {
         rules: Vec<(BlockPredicate, Box<BlockStateProvider>)>,
         fallback: Option<Box<BlockStateProvider>>,
@@ -474,6 +514,75 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                     .map(canon_state)
                     .collect(),
             }),
+            "noise_provider" => Some(BlockStateProvider::Noise {
+                seed: v["seed"].as_i64()?,
+                first_octave: v["noise"]["firstOctave"].as_i64().unwrap_or(0) as i32,
+                amplitudes: v["noise"]["amplitudes"]
+                    .as_array()?
+                    .iter()
+                    .map(|a| a.as_f64().unwrap_or(0.0))
+                    .collect(),
+                scale: v["scale"].as_f64()?,
+                states: v["states"]
+                    .as_array()?
+                    .iter()
+                    .map(canon_state)
+                    .collect(),
+            }),
+            "dual_noise_provider" => Some(BlockStateProvider::DualNoise {
+                seed: v["seed"].as_i64()?,
+                first_octave: v["noise"]["firstOctave"].as_i64().unwrap_or(0) as i32,
+                amplitudes: v["noise"]["amplitudes"]
+                    .as_array()?
+                    .iter()
+                    .map(|a| a.as_f64().unwrap_or(0.0))
+                    .collect(),
+                scale: v["scale"].as_f64()?,
+                slow_first_octave: v["slow_noise"]["firstOctave"].as_i64().unwrap_or(0) as i32,
+                slow_amplitudes: v["slow_noise"]["amplitudes"]
+                    .as_array()?
+                    .iter()
+                    .map(|a| a.as_f64().unwrap_or(0.0))
+                    .collect(),
+                slow_scale: v["slow_scale"].as_f64()?,
+                variety_min: v["variety"].get(0)?.as_i64()? as i32,
+                variety_max: v["variety"].get(1)?.as_i64()? as i32,
+                states: v["states"]
+                    .as_array()?
+                    .iter()
+                    .map(canon_state)
+                .collect(),
+            }),
+            "randomized_int_state_provider" => {
+                let property = v["property"].as_str()?;
+                let values = try_parse_int_provider(&v["values"])?;
+                let source = match BlockStateProvider::try_parse(&v["source"])? {
+                    BlockStateProvider::Simple(state) => vec![(1, vec![state])],
+                    BlockStateProvider::Weighted(entries) => entries
+                        .into_iter()
+                        .map(|(weight, state)| (weight, vec![state]))
+                        .collect(),
+                    _ => return None,
+                };
+                let (value_min, value_max) = match &values {
+                    IntProvider::Constant(value) => (*value, *value),
+                    IntProvider::Uniform { min, max } => (*min, *max),
+                    _ => return None,
+                };
+                Some(BlockStateProvider::RandomizedInt {
+                    source: source
+                        .into_iter()
+                        .map(|(weight, states)| (
+                            weight,
+                            states.into_iter().flat_map(|state| {
+                                (value_min..=value_max)
+                                    .map(move |value| replace_state_property(&state, property, value))
+                            }).collect(),
+                        ))
+                        .collect(),
+                    values,
+                })
+            }
             "rule_based_state_provider" => {
                 let raw_rules = v["rules"].as_array()?;
                 let mut rules = Vec::with_capacity(raw_rules.len());
@@ -552,6 +661,71 @@ pub(super)     fn get_state<'a, R: RandomSource>(
                     Some(default_state.as_str())
                 }
             }
+            BlockStateProvider::Noise { seed, first_octave, amplitudes, scale, states } => {
+                let mut legacy = crate::rng::LegacyRandomSource::new(*seed);
+                let noise = crate::noise::NormalNoise::create(&mut legacy, *first_octave, amplitudes);
+                let value = noise.get_value(
+                    f64::from(pos.x) * scale,
+                    f64::from(pos.y) * scale,
+                    f64::from(pos.z) * scale,
+                );
+                states.get(noise_state_index(value, states.len())).map(String::as_str)
+            }
+            BlockStateProvider::DualNoise {
+                seed,
+                first_octave,
+                amplitudes,
+                scale,
+                slow_first_octave,
+                slow_amplitudes,
+                slow_scale,
+                variety_min,
+                variety_max,
+                states,
+            } => {
+                let mut slow_random = crate::rng::LegacyRandomSource::new(*seed);
+                let slow_noise = crate::noise::NormalNoise::create(
+                    &mut slow_random,
+                    *slow_first_octave,
+                    slow_amplitudes,
+                );
+                let slow = slow_noise.get_value(
+                    f64::from(pos.x) * slow_scale,
+                    f64::from(pos.y) * slow_scale,
+                    f64::from(pos.z) * slow_scale,
+                );
+                let variety = (((slow + 1.0) * 0.5 * f64::from(variety_max - variety_min + 1))
+                    as i32
+                    + variety_min)
+                    .clamp(*variety_min, *variety_max)
+                    .max(1);
+                let mut fast_random = crate::rng::LegacyRandomSource::new(*seed);
+                let fast_noise = crate::noise::NormalNoise::create(
+                    &mut fast_random,
+                    *first_octave,
+                    amplitudes,
+                );
+                let value = fast_noise.get_value(
+                    f64::from(pos.x) * scale / f64::from(variety),
+                    f64::from(pos.y) * scale / f64::from(variety),
+                    f64::from(pos.z) * scale / f64::from(variety),
+                );
+                states.get(noise_state_index(value, states.len())).map(String::as_str)
+            }
+            BlockStateProvider::RandomizedInt { source, values } => {
+                let total: i32 = source.iter().map(|(weight, _)| *weight).sum();
+                let mut roll = random.next_int_bounded(total.max(1));
+                let states = source.iter().find_map(|(weight, states)| {
+                    roll -= *weight;
+                    (roll < 0).then_some(states)
+                }).or_else(|| source.last().map(|(_, states)| states))?;
+                let value = values.sample(random);
+                match values {
+                    IntProvider::Constant(_) => states.first().map(String::as_str),
+                    IntProvider::Uniform { min, .. } => states.get((value - min) as usize).map(String::as_str),
+                    _ => None,
+                }
+            }
             BlockStateProvider::RuleBased { rules, fallback } => {
                 for (predicate, then) in rules {
                     if predicate.test(grid, tags, pos) {
@@ -584,6 +758,25 @@ pub(super)     fn get_state_id<R: RandomSource>(
         let name = self.get_state(grid, tags, random, pos)?;
         Some(grid.interner().id_of(name))
     }
+}
+
+fn replace_state_property(state: &str, property: &str, value: i32) -> String {
+    let needle = format!("{property}=");
+    let Some(start) = state.find(&needle) else { return state.to_string() };
+    let value_start = start + needle.len();
+    let value_end = state[value_start..]
+        .find([',', ']'])
+        .map_or(state.len(), |offset| value_start + offset);
+    let mut out = state.to_string();
+    out.replace_range(value_start..value_end, &value.to_string());
+    out
+}
+
+fn noise_state_index(value: f64, state_count: usize) -> usize {
+    if state_count == 0 {
+        return 0;
+    }
+    (((value + 1.0) * 0.5 * state_count as f64) as usize).min(state_count - 1)
 }
 
 /// `#minecraft:cannot_replace_below_tree_trunk`/`#minecraft:supports_vegetation`/
@@ -619,6 +812,18 @@ pub struct VegTags {
     /// `#minecraft:mangrove_roots_can_grow_through` — [`RootPlacerCfg::Mangrove`]'s
     /// can-place-root extra OR-arm.
     pub mangrove_roots_can_grow_through: HashSet<String>,
+    /// `#minecraft:huge_brown_mushroom_can_place_on` — the exact floor gate
+    /// in the bundled brown mushroom record.
+    pub huge_brown_mushroom_can_place_on: HashSet<String>,
+    /// `#minecraft:huge_red_mushroom_can_place_on` — the exact floor gate
+    /// in the bundled red mushroom record.
+    pub huge_red_mushroom_can_place_on: HashSet<String>,
+    /// `#minecraft:supports_bamboo` — bamboo's floor survival rule.
+    pub supports_bamboo: HashSet<String>,
+    /// Ground accepted by the cave-root system's nested tree candidate.
+    pub azalea_grows_on: HashSet<String>,
+    /// Ground blocks replaced by bamboo's optional podzol disk.
+    pub beneath_bamboo_podzol_replaceable: HashSet<String>,
     /// Unit 8: the same membership questions as the sets above, as bitsets
     /// indexed by [`crate::interner::StateId`] — see [`super::ids`] for the whole
     /// design, including why the sets above must not be mutated after
@@ -651,6 +856,11 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         leaves: resolve("minecraft:leaves"),
         mangrove_logs_can_grow_through: resolve("minecraft:mangrove_logs_can_grow_through"),
         mangrove_roots_can_grow_through: resolve("minecraft:mangrove_roots_can_grow_through"),
+        huge_brown_mushroom_can_place_on: resolve("minecraft:huge_brown_mushroom_can_place_on"),
+        huge_red_mushroom_can_place_on: resolve("minecraft:huge_red_mushroom_can_place_on"),
+        supports_bamboo: resolve("minecraft:supports_bamboo"),
+        azalea_grows_on: resolve("minecraft:azalea_grows_on"),
+        beneath_bamboo_podzol_replaceable: resolve("minecraft:beneath_bamboo_podzol_replaceable"),
         // Unbound: the bitsets are per-interner and the interner does not exist
         // yet at generator-construction time. The decoration driver binds them
         // once per pass. See [`super::ids`].
@@ -751,13 +961,15 @@ pub(super) fn try_parse_int_provider(v: &Value) -> Option<IntProvider> {
                         .as_array()?
                         .iter()
                         .map(|e| {
-                            Some((
-                                e["data"].as_i64()? as i32,
-                                e["weight"].as_i64()? as i32,
-                            ))
+                            Some((try_parse_int_provider(&e["data"])?, e["weight"].as_i64()? as i32))
                         })
                         .collect::<Option<Vec<_>>>()?;
-                    Some(IntProvider::WeightedList(entries))
+                    Some(IntProvider::WeightedProviders(
+                        entries
+                            .into_iter()
+                            .map(|(provider, weight)| (Box::new(provider), weight))
+                            .collect(),
+                    ))
                 }
                 "biased_to_bottom" => Some(IntProvider::BiasedToBottom {
                     min: v["min_inclusive"].as_i64()? as i32,
@@ -1409,6 +1621,8 @@ pub enum ConfiguredFeature {
     /// biomes' `fallen_*_tree` `RandomSelector` branches at a small
     /// (~1-1.25%) chance each. See [`super::features::place_fallen_tree`].
     FallenTree(Box<super::features::FallenTreeCfg>),
+    RootSystem(Box<super::features::RootSystemCfg>),
+    Coral(super::features::CoralKind),
     RandomSelector {
         default: Box<PlacedRef>,
         options: Vec<(f32, PlacedRef)>,
@@ -1435,6 +1649,8 @@ pub enum ConfiguredFeature {
     WeepingVines,
     MultifaceGrowth(Box<super::features::MultifaceGrowthCfg>),
     Lake(Box<super::features::LakeCfg>),
+    HugeMushroom(Box<super::features::HugeMushroomCfg>),
+    Bamboo(f64),
     VegetationPatch(Box<super::features::VegetationPatchCfg>),
     SculkPatch(Box<super::features::SculkPatchCfg>),
     /// The random-boolean-selector feature — one boolean draw, then one branch.
@@ -1578,6 +1794,44 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 ),
             }
         }
+        "root_system" => {
+            let c = &doc["config"];
+            match (
+                BlockStateProvider::try_parse(&c["root_state_provider"]),
+                BlockStateProvider::try_parse(&c["hanging_root_state_provider"]),
+            ) {
+                (Some(root_state_provider), Some(hanging_root_state_provider)) => {
+                    let mut root_replaceable = std::collections::HashSet::new();
+                    let mut seen = std::collections::HashSet::new();
+                    if let Some(tag) = c["root_replaceable"].as_str().and_then(|s| s.strip_prefix('#')) {
+                        crate::compose::resolve_block_tag(resolver, tag, &mut root_replaceable, &mut seen);
+                    } else {
+                        root_replaceable.extend(parse_id_list(&c["root_replaceable"]));
+                    }
+                    ConfiguredFeature::RootSystem(Box::new(super::features::RootSystemCfg {
+                        feature: resolve_placed_feature_ref(resolver, &c["feature"]),
+                        required_vertical_space_for_tree: c["required_vertical_space_for_tree"].as_i64().unwrap_or(1) as i32,
+                        level_test_distance: c["level_test_distance"].as_i64().unwrap_or(0) as i32,
+                        max_level_deviation: c["max_level_deviation"].as_i64().unwrap_or(0) as i32,
+                        root_radius: c["root_radius"].as_i64().unwrap_or(1) as i32,
+                        root_replaceable,
+                        root_state_provider,
+                        root_placement_attempts: c["root_placement_attempts"].as_i64().unwrap_or(1) as i32,
+                        root_column_max_height: c["root_column_max_height"].as_i64().unwrap_or(1) as i32,
+                        hanging_root_radius: c["hanging_root_radius"].as_i64().unwrap_or(1) as i32,
+                        hanging_roots_vertical_span: c["hanging_roots_vertical_span"].as_i64().unwrap_or(1) as i32,
+                        hanging_root_state_provider,
+                        hanging_root_placement_attempts: c["hanging_root_placement_attempts"].as_i64().unwrap_or(1) as i32,
+                        allowed_vertical_water_for_tree: c["allowed_vertical_water_for_tree"].as_i64().unwrap_or(1) as i32,
+                        allowed_tree_position: BlockPredicate::parse(&c["allowed_tree_position"]),
+                    }))
+                }
+                _ => ConfiguredFeature::Unsupported("root_system: unsupported state provider".into()),
+            }
+        }
+        "coral_tree" => ConfiguredFeature::Coral(super::features::CoralKind::Tree),
+        "coral_claw" => ConfiguredFeature::Coral(super::features::CoralKind::Claw),
+        "coral_mushroom" => ConfiguredFeature::Coral(super::features::CoralKind::Mushroom),
         "random_selector" => {
             let cfg = &doc["config"];
             let default = resolve_placed_feature_ref(resolver, &cfg["default"]);
@@ -1704,24 +1958,8 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
             })
         }
         "weeping_vines" => ConfiguredFeature::WeepingVines,
-        // `multiface_growth` (glow lichen, sculk vein) is **deliberately still
-        // unsupported**, and this arm is the record of why. A later change ported it
-        // (body and config both still live in [`super::features`], reachable and
-        // compiled, just not selected here): the port reproduces vanilla's search
-        // loop and every draw, and `tests/vegetation_parity.rs` then matched the
-        // JVM's SINGLE-mode dump on **23 of 24** cells at
-        // `vegetation_plains_land_jvm.txt` — one extra `glow_lichen[up=true]` at
-        // (11, 82, 9) where vanilla wrote nothing.
-        //
-        // Every draw count therefore already agrees (a stream error could not
-        // produce 23 exact matches), so what is missing is a *predicate*: almost
-        // certainly the multiface block's own can-attach-to full-face test, which this crate
-        // has no block-support-shape table to answer, or the multiface spreader's own
-        // second placement. Landing it means implementing one of those, not tuning this.
-        //
-        // Flipping this to `MultifaceGrowth(...)` is a one-line change once that
-        // exists — and the parity gate is what will tell you it worked.
-        "multiface_growth_disabled_see_comment_above" => {
+        "bamboo" => ConfiguredFeature::Bamboo(doc["config"]["probability"].as_f64().unwrap_or(0.0)),
+        "multiface_growth" => {
             let c = &doc["config"];
             ConfiguredFeature::MultifaceGrowth(Box::new(super::features::MultifaceGrowthCfg {
                 block: c["block"].as_str().unwrap_or("minecraft:glow_lichen").to_string(),
@@ -1754,6 +1992,31 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                     }))
                 }
                 _ => ConfiguredFeature::Unsupported("lake: unsupported fluid/barrier".into()),
+            }
+        }
+        "huge_brown_mushroom" | "huge_red_mushroom" => {
+            let c = &doc["config"];
+            match (
+                BlockStateProvider::try_parse(&c["cap_provider"]),
+                BlockStateProvider::try_parse(&c["stem_provider"]),
+            ) {
+                (Some(cap_provider), Some(stem_provider)) => ConfiguredFeature::HugeMushroom(Box::new(
+                    super::features::HugeMushroomCfg {
+                        can_place_on: BlockPredicate::parse(&c["can_place_on"]),
+                        cap_provider,
+                        stem_provider,
+                        // Brown explicitly supplies 3; red uses the codec default 2.
+                        foliage_radius: c["foliage_radius"].as_i64().unwrap_or(2) as i32,
+                        kind: if short == "huge_brown_mushroom" {
+                            super::features::HugeMushroomKind::Brown
+                        } else {
+                            super::features::HugeMushroomKind::Red
+                        },
+                    },
+                )),
+                _ => ConfiguredFeature::Unsupported(
+                    "huge_mushroom: unsupported cap/stem provider".into(),
+                ),
             }
         }
         "vegetation_patch" | "waterlogged_vegetation_patch" => {
@@ -1889,6 +2152,18 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
                 }
             }
             ConfiguredFeature::VegetationPatch(cfg) => walk(&cfg.vegetation_feature.feature, out),
+            // The direct compiled-server map is exact, but the real composed
+            // cave fixture remains red. Keep this feature visible to the
+            // production gap census until that end-to-end gate turns green.
+            ConfiguredFeature::RootSystem(cfg) => {
+                out.push("root_system".to_string());
+                walk(&cfg.feature.feature, out);
+            }
+            ConfiguredFeature::Coral(kind) => out.push(match kind {
+                super::features::CoralKind::Tree => "coral_tree",
+                super::features::CoralKind::Claw => "coral_claw",
+                super::features::CoralKind::Mushroom => "coral_mushroom",
+            }.to_string()),
             // Every terminal (modelled) feature type. Listed rather than `_ => {}`
             // so a newly added variant is a compile error here — this walk is the
             // read side of the "which types are still gaps" instrument, and a
@@ -1915,6 +2190,8 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             | ConfiguredFeature::WeepingVines
             | ConfiguredFeature::MultifaceGrowth(_)
             | ConfiguredFeature::Lake(_)
+            | ConfiguredFeature::HugeMushroom(_)
+            | ConfiguredFeature::Bamboo(_)
             | ConfiguredFeature::SculkPatch(_)
             | ConfiguredFeature::NoOp => {}
         }

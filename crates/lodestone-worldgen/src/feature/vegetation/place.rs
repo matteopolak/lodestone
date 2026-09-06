@@ -19,7 +19,7 @@ use super::ids::{Rewrite, Tag, tag_at};
 use super::tree::{
     AboveRootPlacementCfg, Attachment, RootPlacerCfg, TrunkPlacerCfg, can_place_root,
     place_cherry_trunk, place_dark_oak_trunk, place_fancy_trunk, place_forking_trunk,
-    place_giant_trunk, place_mega_jungle_trunk, place_upwards_branching_trunk, simulate_roots,
+    place_bending_trunk, place_giant_trunk, place_mega_jungle_trunk, place_upwards_branching_trunk, simulate_roots,
     update_leaf_distances,
 };
 
@@ -544,6 +544,19 @@ pub(super) fn place_tree<R: RandomSource>(
             *place_branch_per_log_probability,
             extra_branch_length,
             Tag::MangroveLogsCanGrowThrough,
+            &mut attachments,
+            &mut trunk_positions,
+        ),
+        TrunkPlacerCfg::Bending { min_height_for_leaves, bend_length, .. } => place_bending_trunk(
+            random,
+            trunk_origin,
+            clipped_tree_height,
+            *min_height_for_leaves,
+            bend_length,
+            grid,
+            tags,
+            &cfg.trunk_provider,
+            &cfg.below_trunk_provider,
             &mut attachments,
             &mut trunk_positions,
         ),

@@ -174,8 +174,7 @@
 //! Fancy oak (`FancyTrunkPlacer`+`FancyFoliagePlacer` — the `fancy_oak_*`
 //! branch shared by oak, jungle, dark_forest and more), mangrove
 //! (`UpwardsBranchingTrunkPlacer` — has real above-water roots), cherry
-//! (`CherryTrunkPlacer`+`CherryFoliagePlacer`) and the bare-trunk "bending"
-//! placer (`BendingTrunkPlacer`) remain [`ConfiguredFeature::Unsupported`] —
+//! (`CherryTrunkPlacer`+`CherryFoliagePlacer`) remain [`ConfiguredFeature::Unsupported`] —
 //! each is a structurally distinct trunk/foliage shape, not a small
 //! extension of an already-implemented one, and none was attempted this
 //! session; see `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS` for
@@ -522,6 +521,14 @@ fn place_configured_feature<R: RandomSource>(
             census_bump(|c| c.other_feature += 1);
             features::place_fallen_tree(random, pos, cfg, grid, tags)
         }
+        ConfiguredFeature::RootSystem(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_root_system(random, pos, cfg, grid, tags)
+        }
+        ConfiguredFeature::Coral(kind) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_coral(random, pos, *kind, grid)
+        }
         ConfiguredFeature::RandomSelector { default, options } => {
             census_bump(|c| c.random_selector += 1);
             for (chance, option) in options {
@@ -617,6 +624,14 @@ fn place_configured_feature<R: RandomSource>(
         ConfiguredFeature::Lake(cfg) => {
             census_bump(|c| c.other_feature += 1);
             features::place_lake(random, pos, cfg, grid, tags)
+        }
+        ConfiguredFeature::HugeMushroom(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_huge_mushroom(random, pos, cfg, grid, tags)
+        }
+        ConfiguredFeature::Bamboo(probability) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_bamboo(random, pos, *probability, grid, tags)
         }
         ConfiguredFeature::VegetationPatch(cfg) => {
             census_bump(|c| c.other_feature += 1);
@@ -2261,5 +2276,258 @@ mod tests {
                 "a blocked root column must cancel the whole tree, not merely skip the roots"
             );
         }
+    }
+
+    struct EmptyMushroomResolver;
+
+    impl Resolver for EmptyMushroomResolver {
+        fn density_function(&self, _id: &str) -> Value {
+            Value::Null
+        }
+
+        fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+            unreachable!("the huge-mushroom fixture contains no noise reference")
+        }
+    }
+
+    fn bundled_huge_mushroom_cfg(name: &str) -> features::HugeMushroomCfg {
+        let source = match name {
+            "brown" => include_str!("../../../tests/support/worldgen_data/configured_feature/huge_brown_mushroom.json"),
+            "red" => include_str!("../../../tests/support/worldgen_data/configured_feature/huge_red_mushroom.json"),
+            _ => panic!("unknown bundled huge-mushroom fixture: {name}"),
+        };
+        let doc: Value = serde_json::from_str(source).expect("bundled configured-feature JSON");
+        match parse_configured_feature_doc(&EmptyMushroomResolver, &doc) {
+            ConfiguredFeature::HugeMushroom(cfg) => *cfg,
+            other => panic!("fixture must resolve to the production mushroom feature, got {other:?}"),
+        }
+    }
+
+    fn mushroom_tags() -> VegTags {
+        let mut tags = VegTags::default();
+        tags.huge_brown_mushroom_can_place_on.insert("minecraft:grass_block".to_string());
+        tags.huge_red_mushroom_can_place_on.insert("minecraft:grass_block".to_string());
+        tags
+    }
+
+    #[test]
+    fn coral_forms_require_water_above_and_write_distinct_geometries() {
+        let mut dry = VegGrid::new(-64, 384, 0, 0);
+        dry.seed(8, 70, 8, "minecraft:water".to_string());
+        let mut random = LegacyRandomSource::new(3);
+        place_configured_feature(
+            &mut random,
+            BlockPos { x: 8, y: 70, z: 8 },
+            &ConfiguredFeature::Coral(super::features::CoralKind::Claw),
+            &mut dry,
+            &VegTags::default(),
+        );
+        assert_eq!(dry.dirty_cells().count(), 0, "water without water immediately above must reject coral before any decoration draws");
+
+        let mut counts = Vec::new();
+        for (kind, seed) in [
+            (super::features::CoralKind::Tree, 11),
+            (super::features::CoralKind::Claw, 12),
+            (super::features::CoralKind::Mushroom, 13),
+        ] {
+            let mut grid = VegGrid::new(-64, 384, 0, 0);
+            for x in 0..16 { for y in 60..96 { for z in 0..16 { grid.seed(x, y, z, "minecraft:water".to_string()); } } }
+            let mut random = LegacyRandomSource::new(seed);
+            place_configured_feature(&mut random, BlockPos { x: 8, y: 70, z: 8 }, &ConfiguredFeature::Coral(kind), &mut grid, &VegTags::default());
+            let writes = grid.dirty_cells().count();
+            assert!(writes > 0, "each coral kind must reach its shared water-gated placement body");
+            counts.push(writes);
+        }
+        assert!(counts.windows(2).all(|w| w[0] != w[1]), "the three coral kinds must not collapse to one geometry: {counts:?}");
+    }
+
+    #[test]
+    fn coral_forms_match_the_compiled_server_fixture_exactly() {
+        use std::collections::BTreeMap;
+        let fixture = include_str!("../../../tests/support/coral_feature_jvm.txt");
+        for (label, kind) in [
+            ("tree.11", super::features::CoralKind::Tree),
+            ("claw.11", super::features::CoralKind::Claw),
+            ("mushroom.11", super::features::CoralKind::Mushroom),
+        ] {
+            // The fixture's first token is the label, followed by its position
+            // and canonical state; split it without assuming a coordinate sign.
+            let expected: BTreeMap<_, _> = fixture.lines().filter_map(|line| {
+                let mut words = line.splitn(3, ' ');
+                let row = words.next()?; let pos = words.next()?; let state = words.next()?;
+                (row == label).then_some((pos.to_string(), state.to_string()))
+            }).collect();
+            assert!(!expected.is_empty(), "{label}: compiled-server fixture must exercise this geometry");
+            let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
+            for x in -16..32 { for y in 0..96 { for z in -16..32 { grid.seed(x, y, z, "minecraft:water".to_string()); } } }
+            let mut random = LegacyRandomSource::new(11);
+            place_configured_feature(&mut random, BlockPos { x: 0, y: 64, z: 0 }, &ConfiguredFeature::Coral(kind), &mut grid, &VegTags::default());
+            let got: BTreeMap<_, _> = grid.dirty_cells().map(|(x,y,z,state)| (format!("{x},{y},{z}"), state.to_string())).collect();
+            assert_eq!(got, expected, "{label}: changed coral geometry, tag selection, or water-survival/decorating draw order");
+        }
+        assert!(fixture.contains("control.dry_origin result=false writes=1"));
+        assert!(fixture.contains("control.dry_above result=false writes=1"));
+    }
+
+    #[test]
+    fn root_system_matches_the_compiled_server_fixture_exactly() {
+        use std::collections::{BTreeMap, HashSet};
+        let fixture = include_str!("../../../tests/support/root_system_jvm.txt");
+        let expected: BTreeMap<_, _> = fixture.lines().filter_map(|line| {
+            if line.starts_with('#') { return None; }
+            let mut words = line.splitn(3, ' ');
+            let row = words.next()?; let pos = words.next()?; let state = words.next()?;
+            (row == "normal").then_some((pos.to_string(), state.to_string()))
+        }).collect();
+        assert!(expected.keys().any(|p| p.contains(",62,")), "fixture must include hanging roots below the root column");
+        let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
+        for x in -16..32 { for y in -64..=64 { for z in -16..32 { grid.seed(x, y, z, "minecraft:stone".to_string()); } } }
+        for x in -3..=3 { for z in -3..=3 { grid.seed(x, 62, z, "minecraft:air".to_string()); } }
+        grid.seed(0, 63, 0, "minecraft:air".to_string());
+        let mut tags = VegTags::default();
+        tags.supports_vegetation.insert("minecraft:stone".to_string());
+        tags.bind(grid.interner());
+        let cfg = super::features::RootSystemCfg {
+            feature: PlacedRef { placements: Vec::new(), feature: Box::new(ConfiguredFeature::SimpleBlock(BlockStateProvider::Simple("minecraft:oak_log".to_string()))) },
+            required_vertical_space_for_tree: 3, level_test_distance: 0, max_level_deviation: 0,
+            root_radius: 3, root_replaceable: HashSet::from(["minecraft:stone".to_string()]),
+            root_state_provider: BlockStateProvider::Simple("minecraft:rooted_dirt".to_string()), root_placement_attempts: 20,
+            root_column_max_height: 8, hanging_root_radius: 3, hanging_roots_vertical_span: 2,
+            hanging_root_state_provider: BlockStateProvider::Simple("minecraft:hanging_roots".to_string()), hanging_root_placement_attempts: 20,
+            allowed_vertical_water_for_tree: 2,
+            allowed_tree_position: BlockPredicate::MatchingBlocks { blocks: vec!["minecraft:air".to_string()], offset: (0, 0, 0) },
+        };
+        let mut random = LegacyRandomSource::new(19);
+        super::features::place_root_system(&mut random, BlockPos { x: 0, y: 63, z: 0 }, &cfg, &mut grid, &tags);
+        let got: BTreeMap<_, _> = grid.dirty_cells().map(|(x,y,z,state)| (format!("{x},{y},{z}"), state.to_string())).collect();
+        assert_eq!(got, expected, "root column, hanging-root support, or nested-feature success ordering drifted from the compiled-server fixture");
+
+        assert!(fixture.contains("blocked 0,63,0 minecraft:stone"), "fixture must retain the occupied-origin control");
+        let mut blocked = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
+        for x in -16..32 { for y in -64..=64 { for z in -16..32 { blocked.seed(x, y, z, "minecraft:stone".to_string()); } } }
+        blocked.seed(0, 63, 0, "minecraft:stone".to_string());
+        tags.bind(blocked.interner());
+        let mut random = LegacyRandomSource::new(19);
+        super::features::place_root_system(&mut random, BlockPos { x: 0, y: 63, z: 0 }, &cfg, &mut blocked, &tags);
+        assert_eq!(blocked.dirty_cells().count(), 0, "occupied outer origin must prevent all root-system writes");
+    }
+
+    /// Parsing the bundled records is not enough: this drives the resulting
+    /// configured feature through the same dispatcher the placed-feature
+    /// interpreter uses, proving the new variant is a consumer rather than an
+    /// uncalled placement island.
+    #[test]
+    fn bundled_huge_mushroom_records_reach_configured_feature_dispatch() {
+        for (fixture, cap) in [
+            ("brown", "minecraft:brown_mushroom_block"),
+            ("red", "minecraft:red_mushroom_block"),
+        ] {
+            let cfg = bundled_huge_mushroom_cfg(fixture);
+            let feature = ConfiguredFeature::HugeMushroom(Box::new(cfg));
+            let mut grid = grid_with_flat_ground(-64, 384, 69);
+            let tags = mushroom_tags();
+            let mut random = LegacyRandomSource::new(0);
+            place_configured_feature(
+                &mut random,
+                BlockPos { x: 8, y: 70, z: 8 },
+                &feature,
+                &mut grid,
+                &tags,
+            );
+            let mut stems = 0;
+            let mut caps = 0;
+            for y in 70..80 {
+                for x in 5..=11 {
+                    for z in 5..=11 {
+                        let base = base_id(grid.get(x, y, z));
+                        stems += usize::from(base == "minecraft:mushroom_stem");
+                        caps += usize::from(base == cap);
+                    }
+                }
+            }
+            assert!(stems >= 4, "{fixture} must dispatch to its stem placement");
+            assert!(caps > 0, "{fixture} must dispatch to its cap placement");
+        }
+    }
+
+    /// The bundled brown record is a 7×7 cap minus its four corners, over a
+    /// four-block stem. This pins the cap/stem split and the directional cap
+    /// state rather than merely counting mushroom blocks.
+    #[test]
+    fn bundled_brown_huge_mushroom_has_a_cornerless_cap_and_exposed_faces() {
+        let cfg = bundled_huge_mushroom_cfg("brown");
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = mushroom_tags();
+        let mut random = LegacyRandomSource::new(0);
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        features::place_huge_mushroom_at_height(&mut random, origin, &cfg, 4, &mut grid, &tags);
+
+        for y in 70..74 {
+            assert_eq!(
+                grid.get(8, y, 8),
+                "minecraft:mushroom_stem[down=false,east=true,north=true,south=true,up=false,west=true]",
+                "the configured stem must occupy every level below the cap"
+            );
+        }
+        let mut cap = 0;
+        for x in 5..=11 {
+            for z in 5..=11 {
+                if base_id(grid.get(x, 74, z)) == "minecraft:brown_mushroom_block" {
+                    cap += 1;
+                }
+            }
+        }
+        assert_eq!(cap, 45, "7×7 minus the four deliberately absent corners");
+        assert_eq!(base_id(grid.get(5, 74, 5)), "minecraft:air", "a brown-cap corner is absent");
+        assert_eq!(
+            grid.get(5, 74, 8),
+            "minecraft:brown_mushroom_block[down=false,east=true,north=true,south=true,up=true,west=false]",
+            "the west edge must expose only its west face"
+        );
+        assert_eq!(
+            grid.get(8, 74, 8),
+            "minecraft:brown_mushroom_block[down=false,east=true,north=true,south=true,up=true,west=true]",
+            "the cap centre retains the fixture's all-connected state"
+        );
+    }
+
+    /// The bundled red record has a different cap: three five-wide plus rims
+    /// and a filled three-wide top. The assertion makes a future accidental
+    /// reuse of the brown layout fail even though both shapes contain 45 caps.
+    #[test]
+    fn bundled_red_huge_mushroom_has_plus_rims_and_a_filled_top() {
+        let cfg = bundled_huge_mushroom_cfg("red");
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = mushroom_tags();
+        let mut random = LegacyRandomSource::new(0);
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        features::place_huge_mushroom_at_height(&mut random, origin, &cfg, 4, &mut grid, &tags);
+
+        for y in 71..74 {
+            let mut rim = 0;
+            for x in 6..=10 {
+                for z in 6..=10 {
+                    if base_id(grid.get(x, y, z)) == "minecraft:red_mushroom_block" {
+                        rim += 1;
+                    }
+                }
+            }
+            assert_eq!(rim, 12, "each lower red-cap layer is a five-wide plus rim");
+            assert_eq!(base_id(grid.get(6, y, 6)), "minecraft:air", "rim corners stay absent");
+        }
+        let mut top = 0;
+        for x in 7..=9 {
+            for z in 7..=9 {
+                if base_id(grid.get(x, 74, z)) == "minecraft:red_mushroom_block" {
+                    top += 1;
+                }
+            }
+        }
+        assert_eq!(top, 9, "the top layer is a filled 3×3 cap");
+        assert_eq!(
+            grid.get(7, 74, 7),
+            "minecraft:red_mushroom_block[down=false,east=true,north=false,south=true,up=true,west=false]",
+            "a top corner exposes both outward horizontal faces"
+        );
     }
 }

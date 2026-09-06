@@ -165,6 +165,8 @@ pub enum IntProvider {
     /// affect the *distribution*, but does affect [`WeightedList::sample`]'s
     /// draw semantics, which walks the list in order — see that fn's doc).
     WeightedList(Vec<(i32, i32)>),
+    /// A weighted choice among nested integer providers.
+    WeightedProviders(Vec<(Box<IntProvider>, i32)>),
     /// Vanilla's own biased-to-bottom int provider — used by
     /// `cactus`/`sugar_cane`'s block-column-feature layer heights (the
     /// cacti/sugar-cane increment). Additive: nothing before that
@@ -244,6 +246,17 @@ impl IntProvider {
                     }
                 }
                 entries.last().map_or(0, |(v, _)| *v)
+            }
+            IntProvider::WeightedProviders(entries) => {
+                let total: i32 = entries.iter().map(|(_, weight)| *weight).sum();
+                let mut roll = random.next_int_bounded(total.max(1));
+                for (provider, weight) in entries {
+                    roll -= *weight;
+                    if roll < 0 {
+                        return provider.sample(random);
+                    }
+                }
+                entries.last().map_or(0, |(provider, _)| provider.sample(random))
             }
             // Vanilla's own biased-to-bottom int provider's sample: `minInclusive + nextInt(nextInt(maxInclusive
             // - minInclusive + 1) + 1)` — two nested, dependent draws, not one.

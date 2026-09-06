@@ -31,12 +31,18 @@ sequence. An unmodelled feature type or placement modifier degrades to a silent,
 (`ConfiguredFeature::Unsupported`) rather than a panic — the census resolves every bundled biome's
 step list at generator construction time, including biomes nobody has tested yet, so a hard failure
 on one unmodelled type would break every biome's world generation, not just the untested one.
-Currently unmodelled: `multiface_growth` (glow lichen/sculk vein — ported and RNG-correct, held back
-by one missing block-support predicate), `fallen_tree`-adjacent decorators for a couple of species,
-`bamboo`, `huge_fungus`, the coral and End feature sets, and several rarer single-use types — each
+Currently unmodelled: `huge_fungus`, the End feature set, and several
+rarer single-use types — each
 tracked by name in `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`, which must be updated
 whenever a type lands so a regression (or a fixed gap that should be pruned) is loud rather than
 silent.
+
+Simple-block state providers include fixed, weighted, threshold-noise, noise and dual-noise forms.
+The two noise forms construct their deterministic fields from the bundled seed and octave data at
+selection time; dual noise first selects the fast-field frequency, then selects the output state.
+Block columns also accept weighted nested height providers and randomized integer state properties,
+which covers the hanging cave-vine records; bamboo uses the configured floor tag, stalk states and
+optional podzol disk.
 
 **One stated ordering deviation from vanilla**: because ore runs as its own earlier stage here,
 decoration steps 0–4 run after ores in this engine and before them in vanilla. Nothing in those
@@ -53,11 +59,26 @@ composed post-ore grid and folded back afterward. Trunk placers cover straight, 
 2×2, giant/mega-jungle, fancy, cherry and mangrove's upwards-branching shape; foliage placers cover
 the vanilla equivalents plus cherry's hanging-leaves pass and mangrove's dart-throw scatter; a
 mangrove root placer and a fallen-tree feature (stump + horizontal log, sharing decorator machinery
-with standing trees) are also modelled. Every reachable overworld biome's tree content is now
-covered by a real placer; the remaining named gaps are non-tree (`multiface_growth` and a couple of
-tree-adjacent decorators that degrade individually rather than disabling the whole tree).
+with standing trees) are also modelled. Huge red and brown mushrooms use their configured ground
+tags, a random four-to-six-block stem height, and their distinct directional cap layouts (brown's cornerless
+square versus red's three rim layers and smaller filled top). Every reachable overworld biome's tree content is now
+covered by a real placer. Multiface growth writes complete directional state, checks its support,
+and performs its one seeded outward spread; the external single-source and 3×3 fixtures compare that
+layout exactly. The remaining named gaps degrade individually rather than disabling the whole tree.
+Root systems scan upward for a valid nested feature site, scatter the root-column replacement only
+after that nested placement succeeds, then independently scatter hanging roots from supported ceilings.
+Coral tree, claw and mushroom forms share the tagged coral state choice and water gate but retain
+their distinct trunk, branched and hollow-shell geometries.
 
-Placement is off block-state strings only at the edges: tag-membership questions (13 of them — 7
+The direct compiled-server maps for root systems and all three coral forms are exact, including
+their blocked-origin and dry-water controls. Their real-biome composition captures remain an
+explicit production gap: `warm_ocean` currently diverges on seagrass and multiface writes, and
+`lush_caves` remains pending an exact composed replay. Keep `coral_*` and `root_system` in
+`KNOWN_VEGETATION_GAPS` until the ignored composed-fixture gate in
+`vegetation_parity.rs` passes; a successful feature-local map is not permission to remove that
+end-to-end ledger entry.
+
+Placement is off block-state strings only at the edges: tag-membership questions (17 of them — 11
 registry tags plus 6 base-name equalities) are answered by fixed bitsets indexed by `StateId`,
 exact and never needing to grow since a `StateId` is a `u16`. A bit above the interner's watermark
 (minted *during* the current decoration pass — a rewritten leaf's `distance=N` state, for instance)
