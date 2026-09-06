@@ -765,12 +765,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   complete; the remaining gaps are structure families and gameplay such as the dragon
   fight rather than missing terrain or a disconnected dimension source.
 - [Large worldgen parity harness](./worldgen-large-parity.md) —
-  `scripts/worldgen-oracle/LargeParityOracle.java` is the scaffold for resumable
-  compiled-26.2 oracle shards over exactly the 1001 by 1001 overworld chunk grid
-  centred at `(0, 0)`: `cx, cz = -500..=500`. Version 2 stores the first 16 bits of
-  SHA-256 for each packet payload. A complete manifest is 2,004,002 bytes of
-  fingerprints plus a 160-byte header (about 1.91 MiB), not a million retained chunk
-  snapshots.
+  `scripts/worldgen-oracle/LargeParityOracle.java` is the resumable, million-chunk
+  parity oracle for the 1001 by 1001 overworld grid centred at `(0, 0)`. Version 3
+  freezes one generated reference world first, then records a full SHA-256 digest of
+  each chunk's canonical semantic record; the old v2 raw 16-bit packet fingerprints
+  are explicitly rejected.
 - [Nether world generation](./worldgen-nether.md) —
   `lodestone_worldgen::nether::NetherGenerator` produces a complete Nether column from
   the bundled noise, biome, feature, tag and structure documents. It uses the legacy

@@ -9,6 +9,15 @@ if ! [[ "$worker" =~ ^[0-9]+$ && "$workers" =~ ^[1-9][0-9]*$ ]] || (( worker >= 
   echo "worker index must be in 0..WORKER_COUNT-1" >&2
   exit 2
 fi
+if [ -z "${LODESTONE_ORACLE_FROZEN_WORLD_ROOT:-}" ]; then
+  echo "LODESTONE_ORACLE_FROZEN_WORLD_ROOT must name the sealed shared world" >&2
+  exit 2
+fi
+shard_dir="${LODESTONE_ORACLE_SHARD_DIR:-baseline-tiles}"
+if [[ "$shard_dir" == /* || "$shard_dir" == *".."* ]]; then
+  echo "LODESTONE_ORACLE_SHARD_DIR must be a relative directory below /oracle" >&2
+  exit 2
+fi
 
 here="$(cd "$(dirname "$0")" && pwd)"
 slot=0
@@ -21,6 +30,7 @@ for (( x_lo = -500; x_lo <= 500; x_lo += 16, slot += 1 )); do
     x_hi=500
   fi
   "$here/large-parity.sh" \
-    --out "/oracle/baseline-tiles/shard-x${x_lo}-${x_hi}.lwp" \
+    --mode export \
+    --out "/oracle/${shard_dir}/shard-x${x_lo}-${x_hi}.lwp" \
     --cx "$x_lo" "$x_hi" --cz -500 500 --resume
 done

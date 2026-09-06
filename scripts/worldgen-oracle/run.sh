@@ -23,14 +23,36 @@ if [ ! -d "$CACHE" ]; then
 fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 container system start >/dev/null 2>&1 || true
-container run --rm \
-  --memory 3g \
-  -e ORACLE_ARGS="$ARGS" \
-  -v "$CACHE":/mc:ro \
-  -v "$HERE":/oracle \
-  -w /work \
-  eclipse-temurin:25-jdk \
-  bash -c '
+WORLD_MOUNTS=()
+WORLD_ENV=()
+if [ -n "${LODESTONE_ORACLE_WORLD_ROOT:-}" ]; then
+  if [ ! -d "$LODESTONE_ORACLE_WORLD_ROOT" ]; then
+    echo "LODESTONE_ORACLE_WORLD_ROOT must name an existing writable directory" >&2
+    exit 2
+  fi
+  WORLD_MOUNTS+=( -v "$LODESTONE_ORACLE_WORLD_ROOT:/world" )
+  WORLD_ENV+=( -e ORACLE_WORLD_ROOT=/world )
+fi
+if [ -n "${LODESTONE_ORACLE_FROZEN_WORLD_ROOT:-}" ]; then
+  if [ ! -d "$LODESTONE_ORACLE_FROZEN_WORLD_ROOT" ]; then
+    echo "LODESTONE_ORACLE_FROZEN_WORLD_ROOT must name an existing frozen-world directory" >&2
+    exit 2
+  fi
+  WORLD_MOUNTS+=( -v "$LODESTONE_ORACLE_FROZEN_WORLD_ROOT:/frozen:ro" )
+  WORLD_ENV+=( -e ORACLE_FROZEN_WORLD_ROOT=/frozen )
+fi
+CONTAINER_ARGS=(
+  --rm
+  --memory 3g
+  -e "ORACLE_ARGS=$ARGS"
+  -v "$CACHE:/mc:ro"
+  -v "$HERE:/oracle"
+  -w /work
+)
+set +u
+CONTAINER_ARGS+=( "${WORLD_ENV[@]}" "${WORLD_MOUNTS[@]}" )
+set -u
+container run "${CONTAINER_ARGS[@]}" eclipse-temurin:25-jdk bash -c '
     set -e
     CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
     mkdir -p /work
