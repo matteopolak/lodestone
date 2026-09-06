@@ -550,8 +550,8 @@ pub use brewing::{
     mix_bottle,
 };
 pub use chunk::{
-    ChunkColumn, ChunkGenerationStage, ChunkSource, NetherChunkSource, OverworldChunkSource,
-    WorldgenChunkSource,
+    ChunkColumn, ChunkGenerationStage, ChunkSource, EndChunkSource, NetherChunkSource,
+    OverworldChunkSource, WorldgenChunkSource,
 };
 // `chunk_store::ChunkStore` itself stays crate-private (its methods
 // are `pub(crate)` and `IntegratedServer` is the only thing that should build
@@ -671,7 +671,8 @@ pub use ticket::{
 pub use weather::{WeatherEvent, WeatherFeed, WeatherState};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{
-    bundled_biome_spawners, bundled_worldgen_serves, nether_chunk_source, nether_generator,
+    bundled_biome_spawners, bundled_worldgen_serves, end_chunk_source, end_generator,
+    nether_chunk_source, nether_generator,
     overworld_chunk_source, overworld_chunk_source_checked, overworld_chunk_source_of_type,
     overworld_generator, overworld_generator_of_type, BUNDLED_WORLDGEN_SCOPE, WorldType,
     WorldgenScopeMismatch,

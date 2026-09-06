@@ -8,6 +8,8 @@
 
 The reference seed is `42` and the target coordinates are `cx, cz = -250..=250`, for `501 × 501 = 251,001` chunks. A v3 record has a fixed semantic schema: chunk coordinates; heightmaps sorted by numeric type with 256 decoded heights each; 24 sections of resolved global block-state ids and biome ids; block entities sorted by relative position and type with recursively key-sorted NBT; and all 26 sky then block light sections, distinguishing missing, empty, and present 2048-byte arrays. Packet palettes, packet map traversal order, and packet framing do not enter the record.
 
+The dimension-aware v4 format is additive. It keeps the same 501 by 501 bounds and 32-byte per-chunk digests, but authenticates one of the three dimension identities (`minecraft:overworld`, `minecraft:the_nether`, or `minecraft:the_end`) in header bytes `168..200` as SHA-256 of its resource-location string and uses that dimension's decoded window: overworld `min_y=-64` with 24 sections, Nether/End `min_y=0` with 16 sections. The v3 format remains the legacy overworld manifest without a dimension field; its header, record bytes, and seal are not rewritten. A merge or duplicate-read acceptance rejects different dimensions (and never treats equal Nether/End heights as interchangeable).
+
 The workflow has two mandatory phases. `--mode materialize` generates the requested rectangle **plus its one-chunk halo** (the complete baseline therefore materializes `-251..=251`, or `253,009` chunks), completes the real chunk-status work, post-processes it, saves it, and writes a tree-digest seal. Materialization is ordered 16 by 16 chunk tiles, with each bounded epoch run in a fresh container/JVM against the same persistent root; the shell drives the epochs automatically. This matters because the server retains point-of-interest section data beyond ticket removal, and an in-process server restart closes shared executors instead of yielding a reusable clean heap. A progress journal records the exact geometry, epoch size, next tile, and an in-flight tile range. It advances only after the prior JVM exited cleanly; an interrupted epoch, a changed range or epoch size, a missing journal, or an already sealed root fails closed rather than being resumed ambiguously. For the complete baseline, omit the range flags so the requested grid is `-250..=250` and its halo is `-251..=251` in both axes. `--mode export` accepts only that sealed world through a read-only mount, copies it into the container's ephemeral server-access directory, and exports semantic digests from the restarted persisted content. The manifest carries the frozen-world digest, schema digest, geometry, full digest width, and SHA-256 payload checksum; merge refuses a shard from a different frozen world.
 
 This split prevents two independent failure modes. A generated chunk can receive a later neighbour feature write, so the old batch-immediate capture could observe transient state. Separately, semantically identical packets can have different heightmap map order or palette/container framing. Freezing before capture removes the first; canonical records remove the second.
@@ -16,7 +18,7 @@ This split prevents two independent failure modes. A generated chunk can receive
 
 ## How to change it
 
-The Java exporter and Rust comparator must change together whenever a semantic field changes. Bump the schema/domain strings and manifest version rather than reinterpreting existing data. Keep decoded ids in their existing packet-cell order, sort only collections without semantic order (heightmaps, block entities, compound keys), and keep NBT lists in order.
+The Java exporter and Rust comparator must change together whenever a semantic field changes. Bump the schema/domain strings and manifest version rather than reinterpreting existing data. Keep decoded ids in their existing packet-cell order, sort only collections without semantic order (heightmaps, block entities, compound keys), and keep NBT lists in order. For v4, pass the dimension identity through packet decoding and source selection; do not infer it from a column's height because Nether and End intentionally share a window.
 
 The Rust gate in `crates/versions/26.2/tests/large_worldgen_parity.rs` decodes Lodestone's production chunk packet and applies the same canonical record before comparing the full digest. The test support reader authenticates the entire manifest before generating a local chunk. Its v2 refusal is intentional: a short raw hash cannot be converted into a semantic hash.
 
@@ -47,7 +49,7 @@ LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_MANIFEST=/absolute/path/to/cross.lwp \
   java_and_rust_canonical_records_agree -- --ignored
 ```
 
-Only after this control passes, materialize the full grid once. Export can then use disjoint resumable shards; every export worker points at the same read-only sealed world. Run the first and second full reads into distinct shard directories, merge each, then use `accept` to make the final baseline. `accept` refuses anything except two byte-identical complete manifests from the same frozen-world identity. `full-parity-worker.sh` divides work into 16-chunk-wide shards, refuses to start without `LODESTONE_ORACLE_FROZEN_WORLD_ROOT`, and uses `LODESTONE_ORACLE_SHARD_DIR` to choose its relative output directory. Sequential workers avoid multiplying the ephemeral frozen-world copy; parallel workers are appropriate only when the host has measured enough space for those independent copies.
+Only after this control passes, materialize the full grid once. Export can then use disjoint resumable shards; every export worker points at the same read-only sealed world. Run the first and second full reads into distinct shard directories, merge each, then use `accept` to make the final baseline. `accept` refuses anything except two byte-identical complete manifests from the same frozen-world identity. `full-parity-worker.sh` divides work into 16-chunk-wide shards, refuses to start without `LODESTONE_ORACLE_FROZEN_WORLD_ROOT`, and uses `LODESTONE_ORACLE_SHARD_DIR` to choose its relative output directory. Legacy overworld shards remain directly below that directory; v4 Nether/End shards add a dimension subdirectory so existing v3 merge globs continue to work. Sequential workers avoid multiplying the ephemeral frozen-world copy; parallel workers are appropriate only when the host has measured enough space for those independent copies.
 
 ```text
 LODESTONE_ORACLE_WORLD_ROOT=/absolute/path/parity-world \
@@ -73,7 +75,31 @@ LODESTONE_LARGE_PARITY_MANIFEST=/absolute/path/full-v3.lwp \
 
 `LODESTONE_ORACLE_BATCH` controls the bounded loading batch in both phases; it does not change the frozen-world contract. `LODESTONE_ORACLE_EPOCH_TILES` controls the clean-JVM materialization epoch in 16 by 16 tiles and defaults to `32` (at most 8,192 nominal chunks before edge clipping). It is durable provenance: keep it unchanged while resuming a materialization. `LODESTONE_ORACLE_WORLD_ROOT` is a writable host directory mounted at `/world` only for materialization. `LODESTONE_ORACLE_FROZEN_WORLD_ROOT` is mounted read-only at `/frozen` for export. The source seal is checked before it is copied into the ephemeral server-access directory.
 
-The manifest tools accept `validate`, `merge`, `accept`, and `selftest`. `accept` is the final baseline gate: it requires two complete byte-identical read-only exports. `selftest` covers full-grid merge ordering, duplicate-read acceptance, payload tampering, different-world merge refusal, and v2 rejection.
+The manifest tools accept `validate`, `merge`, `accept`, and `selftest`. `accept` is the final baseline gate: it requires two complete byte-identical read-only exports from the same dimension and frozen-world identity. `selftest` covers full-grid merge ordering, duplicate-read acceptance, payload tampering, different-world and different-dimension merge/accept refusal, and v2 rejection. Existing v3 overworld exports continue to validate and merge byte-for-byte; v4 exports are selected by the oracle's dimension option and must be kept in separate shard directories.
+
+Dimension roots are independent worlds and must never share a materialization directory. Start a Nether or End materialization with an empty writable root (the command resumes clean epochs until its dimension-specific seal appears):
+
+```text
+mkdir -p /private/tmp/lodestone-nether-501-seed42
+LODESTONE_ORACLE_WORLD_ROOT=/private/tmp/lodestone-nether-501-seed42 \
+LODESTONE_ORACLE_DIMENSION=nether \
+  bash scripts/worldgen-oracle/large-parity.sh --mode materialize --dimension nether
+
+mkdir -p /private/tmp/lodestone-end-501-seed42
+LODESTONE_ORACLE_WORLD_ROOT=/private/tmp/lodestone-end-501-seed42 \
+LODESTONE_ORACLE_DIMENSION=end \
+  bash scripts/worldgen-oracle/large-parity.sh --mode materialize --dimension end
+```
+
+Use `LODESTONE_ORACLE_OUTPUT_ROOT` for shard files so exports do not write under the repository's `/oracle` mount. For example, a Nether worker writes to `/private/tmp/lodestone-nether-shards/baseline-tiles/nether/` while reading the sealed root read-only:
+
+```text
+mkdir -p /private/tmp/lodestone-nether-shards
+LODESTONE_ORACLE_FROZEN_WORLD_ROOT=/private/tmp/lodestone-nether-501-seed42 \
+LODESTONE_ORACLE_OUTPUT_ROOT=/private/tmp/lodestone-nether-shards \
+LODESTONE_ORACLE_DIMENSION=nether \
+  bash scripts/worldgen-oracle/full-parity-worker.sh 0 4
+```
 
 ## Dependencies
 

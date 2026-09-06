@@ -18,6 +18,15 @@ if [[ "$shard_dir" == /* || "$shard_dir" == *".."* ]]; then
   echo "LODESTONE_ORACLE_SHARD_DIR must be a relative directory below /oracle" >&2
   exit 2
 fi
+dimension="${LODESTONE_ORACLE_DIMENSION:-overworld}"
+case "$dimension" in
+  overworld|nether|end) ;;
+  *) echo "LODESTONE_ORACLE_DIMENSION must be overworld, nether, or end" >&2; exit 2 ;;
+esac
+output_prefix=/oracle
+if [ -n "${LODESTONE_ORACLE_OUTPUT_ROOT:-}" ]; then
+  output_prefix=/oracle-out
+fi
 
 here="$(cd "$(dirname "$0")" && pwd)"
 grid_min=-250
@@ -31,8 +40,15 @@ for (( x_lo = grid_min; x_lo <= grid_max; x_lo += 16, slot += 1 )); do
   if (( x_hi > grid_max )); then
     x_hi=grid_max
   fi
+  dimension_arg=()
+  if [ "$dimension" != overworld ]; then dimension_arg=( --dimension "$dimension" ); fi
+  output_rel="${shard_dir}/shard-x${x_lo}-${x_hi}.lwp"
+  if [ "$dimension" != overworld ]; then
+    output_rel="${shard_dir}/${dimension}/shard-x${x_lo}-${x_hi}.lwp"
+  fi
   "$here/large-parity.sh" \
     --mode export \
-    --out "/oracle/${shard_dir}/shard-x${x_lo}-${x_hi}.lwp" \
+    "${dimension_arg[@]}" \
+    --out "${output_prefix}/${output_rel}" \
     --cx "$x_lo" "$x_hi" --cz "$grid_min" "$grid_max" --resume
 done

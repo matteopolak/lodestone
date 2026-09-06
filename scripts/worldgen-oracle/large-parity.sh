@@ -27,10 +27,33 @@ EPOCH_TILES="${LODESTONE_ORACLE_EPOCH_TILES:-32}"
 case "$EPOCH_TILES" in
   *[!0-9]*|0) echo "LODESTONE_ORACLE_EPOCH_TILES must be a positive integer" >&2; exit 2 ;;
 esac
+dimension="${LODESTONE_ORACLE_DIMENSION:-overworld}"
+dimension_arg_explicit=0
+for (( i = 0; i < ${#ARGS[@]}; i++ )); do
+  if [ "${ARGS[$i]}" = "--dimension" ]; then
+    if [ $((i + 1)) -ge ${#ARGS[@]} ]; then echo "--dimension requires a value" >&2; exit 2; fi
+    dimension="${ARGS[$((i + 1))]}"
+    dimension_arg_explicit=1
+  fi
+done
+case "$dimension" in
+  overworld|nether|end) ;;
+  *) echo "LODESTONE_ORACLE_DIMENSION must be overworld, nether, or end" >&2; exit 2 ;;
+esac
+# Keep the Java invocation self-describing. This matters when callers select a
+# non-overworld only through the environment: the mode script must not silently
+# run an overworld materialization while waiting for a Nether/End seal.
+if [ "$dimension_arg_explicit" -eq 0 ] && [ "$dimension" != overworld ]; then
+  ARGS+=( --dimension "$dimension" )
+fi
+freeze_stamp=lodestone-large-parity-v3.freeze.sha256
+if [ "$dimension" != overworld ] || printf '%s\n' "${ARGS[@]}" | rg -q -- '--dimension'; then
+  freeze_stamp="lodestone-large-parity-v4-${dimension}.freeze.sha256"
+fi
 
 while :; do
   LODESTONE_ORACLE_EPOCH_TILES="$EPOCH_TILES" "$HERE/run.sh" LargeParityOracle "${ARGS[@]}"
-  if [ -f "$LODESTONE_ORACLE_WORLD_ROOT/lodestone-large-parity-v3.freeze.sha256" ]; then
+  if [ -f "$LODESTONE_ORACLE_WORLD_ROOT/$freeze_stamp" ]; then
     break
   fi
 done
