@@ -62,9 +62,11 @@
 //! and the reply itself is safely ignored when it arrives (`ServerBound::Ignored`,
 //! since no decode arm claims it).
 
+use lodestone_core::{Ctx, Decode, Reader};
 use lodestone_server::ServerDirective;
 
 use crate::packet_ids::configuration;
+use crate::packets::registry::RegistryData;
 
 /// Parses the same hex fixture format `tests/live_registry_data_full_set.rs`
 /// writes: `#`-prefixed comment lines are dropped, everything else is
@@ -223,6 +225,26 @@ pub(crate) fn passthrough_registry_directives() -> Vec<ServerDirective> {
         .collect()
 }
 
+/// The ordered biome holder names carried by the same captured registry packet
+/// the server sends during Configuration. Chunk biome palettes are bare holder
+/// ids, so their encoder must use this order rather than a separately sorted
+/// subset of the identifiers.
+pub(crate) fn biome_registry_names() -> Vec<String> {
+    let (_, fixture) = PASSTHROUGH_REGISTRY_FIXTURES
+        .iter()
+        .find(|(registry, _)| *registry == "minecraft:worldgen/biome")
+        .expect("biome registry fixture is present");
+    let bytes = parse_hex_fixture(fixture);
+    let mut reader = Reader::new(&bytes);
+    let registry = RegistryData::decode(&mut reader, Ctx { version: 776 })
+        .expect("captured biome registry fixture decodes");
+    reader
+        .ensure_empty()
+        .expect("captured biome registry fixture has no trailing bytes");
+    assert_eq!(registry.registry, "minecraft:worldgen/biome");
+    registry.entries.into_iter().map(|entry| entry.id).collect()
+}
+
 /// Builds the single `update_tags` send.
 pub(crate) fn update_tags_directive() -> ServerDirective {
     ServerDirective::Send {
@@ -263,6 +285,16 @@ mod tests {
                 .unwrap_or_else(|err| panic!("{registry}: {err}"));
             assert_eq!(&decoded_name, registry);
         }
+    }
+
+    #[test]
+    fn biome_holder_order_includes_entries_outside_the_overworld_subset() {
+        let names = biome_registry_names();
+        assert_eq!(names.first().map(String::as_str), Some("minecraft:badlands"));
+        assert_eq!(names.get(2).map(String::as_str), Some("minecraft:basalt_deltas"));
+        assert!(names.len() > 55, "the complete registry must not collapse to the old overworld-only list");
+        assert!(names.iter().any(|name| name == "minecraft:the_end"));
+        assert!(names.iter().any(|name| name == "minecraft:nether_wastes"));
     }
 
     #[test]

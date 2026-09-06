@@ -41,9 +41,11 @@ LODESTONE_LARGE_PARITY_MANIFEST=/absolute/path/full.lwp cargo test -p lodestone-
 
 The merger rejects overlaps, holes, wrong bounds, malformed headers and a changed payload bit. The ignored Rust comparator accepts any authenticated in-bounds shard, so a 2,000–5,000 chunk pilot can be compared immediately; set `LODESTONE_LARGE_PARITY_REQUIRE_FULL_GRID=1` when a comparison must prove the merged 1001² coverage. A new packet layout or hash input requires a new schema version/domain string and matching Java exporter, Python validator and Rust reader; never reinterpret a v2 fingerprint.
 
+When a short fingerprint first differs, run the oracle for that one coordinate with `--packet-out /oracle/name.bin` and set `LODESTONE_LARGE_PARITY_REFERENCE_PACKET` to the resulting host path on the bounded Rust comparison. The comparison decodes both packet bodies through the production client codec and reports block-cell, biome-cell and byte-length differences. `LODESTONE_LARGE_PARITY_PACKET_OUT` can likewise retain Lodestone's first encoded body. These captures are diagnosis artifacts, not committed baseline data.
+
 ## Configuration
 
-The exporter accepts `--out`, `--cx LO HI`, `--cz LO HI`, and `--resume`. Ranges must remain inside `-500..=500`; the only full valid merge is the complete target grid. It runs using `scripts/worldgen-oracle/run.sh`, which mounts the local compiled 26.2 jar cache into the Apple container runtime.
+The exporter accepts `--out`, `--cx LO HI`, `--cz LO HI`, `--resume`, and `--packet-out /oracle/name.bin`. Packet capture requires an exactly one-chunk rectangle. Ranges must remain inside `-500..=500`; the only full valid merge is the complete target grid. It runs using `scripts/worldgen-oracle/run.sh`, which mounts the local compiled 26.2 jar cache into the Apple container runtime. The Rust comparison also accepts `LODESTONE_LARGE_PARITY_MAX_CHUNKS`, `LODESTONE_LARGE_PARITY_REFERENCE_PACKET`, and `LODESTONE_LARGE_PARITY_PACKET_OUT` for bounded diagnostics.
 
 ## Dependencies
 

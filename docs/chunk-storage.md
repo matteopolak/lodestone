@@ -53,6 +53,13 @@ verbatim for any fluid-bearing section (a real client stores what the wire tells
 recomputes the count itself). Heightmap and light data sent alongside a column are separate,
 independently-tracked gaps from the block-state fix described here.
 
+Biome palettes use a different id space from block states: each entry is a holder index in the
+ordered `minecraft:worldgen/biome` registry sent during Configuration. The server derives that
+order by decoding the exact captured registry fixture it sends, rather than sorting an overworld
+subset of names. Keeping the producer and palette resolver on the same registry bytes is necessary
+because the complete holder table also contains entries for other dimensions; omitting those shifts
+later biome ids even when the generated biome names are correct.
+
 ### The `MOTION_BLOCKING` heightmap
 
 The generator computes a real per-column `MOTION_BLOCKING` heightmap (the height of the first block
@@ -93,6 +100,9 @@ was careful to avoid.
   the original value before applying the write that triggered it** — skipping that step silently
   turns every other cell in that section into the wrong block with no panic and no visible symptom
   until someone notices the terrain looks wrong.
+- **Biome holder ids must come from the registry packet order.** Do not replace the decoded fixture
+  with a sorted name list or a dimension-specific subset: the numeric palette values are shared with
+  the Configuration registry and have no independent stable ordering.
 
 ## Configuration
 
