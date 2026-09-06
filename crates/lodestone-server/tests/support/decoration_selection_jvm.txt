@@ -1,0 +1,3 @@
+global-step7=0:minecraft:sculk_vein,1:minecraft:sculk_patch_deep_dark,2:minecraft:sulfur_spike_cluster,3:minecraft:sulfur_spike,4:minecraft:dripstone_cluster,5:minecraft:pointed_dripstone,6:minecraft:ore_infested
+source -500,-500 biomes=minecraft:plains,minecraft:sulfur_caves
+source -500,-500 sulfur-step7=2:minecraft:sulfur_spike_cluster,3:minecraft:sulfur_spike

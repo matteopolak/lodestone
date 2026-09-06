@@ -8,7 +8,7 @@
 //! supplies shape/surface data (most of this crate's own test fixtures) is
 //! unaffected by this module existing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -223,6 +223,146 @@ pub fn build_biome_decoration(
         }
     }
     out
+}
+
+/// Globally sorted decoration features plus each biome's membership in that
+/// order. Decoration seeds use the global index, not the entry's local index
+/// in a biome document, so a source with more than one biome needs this shared
+/// catalog before it can select a subset to place.
+#[derive(Clone, Debug, Default)]
+pub struct DecorationCatalog {
+    ordered: Vec<(i32, String)>,
+    members: HashMap<String, HashSet<(i32, String)>>,
+    placed: HashMap<String, crate::feature::vegetation::PlacedRef>,
+}
+
+impl DecorationCatalog {
+    /// Whether no configured placed feature was available from any biome.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ordered.is_empty()
+    }
+
+    /// Selects the deduplicated global feature order for the supplied biome set.
+    #[must_use]
+    pub fn select<'a>(
+        &'a self,
+        biomes: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<(i32, usize, crate::feature::vegetation::PlacedRef)> {
+        let mut selected = HashSet::new();
+        for biome in biomes {
+            if let Some(entries) = self.members.get(biome) {
+                selected.extend(entries.iter().cloned());
+            }
+        }
+        let mut per_step = HashMap::<i32, usize>::new();
+        self.ordered
+            .iter()
+            .filter_map(|(step, id)| {
+                let index = per_step.entry(*step).or_default();
+                let result = selected
+                    .contains(&(*step, id.clone()))
+                    .then(|| self.placed.get(id).cloned().map(|placed| (*step, *index, placed)))
+                    .flatten();
+                *index += 1;
+                result
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct DecorationNode {
+    step: i32,
+    first_seen: usize,
+}
+
+/// Builds the global feature order once from the biome-source order.
+///
+/// The externally observable order is a topological ordering of every
+/// biome's complete feature sequence. Keeping entries from steps this crate
+/// does not drive is deliberate: they still constrain the relative order of
+/// entries in driven steps. `biome_order` must preserve the source's first
+/// occurrence order rather than sorting biome names.
+#[must_use]
+pub fn build_decoration_catalog(
+    resolver: &dyn Resolver,
+    biome_order: &[String],
+) -> DecorationCatalog {
+    let mut first_seen = HashMap::<String, usize>::new();
+    let mut placed = HashMap::new();
+    let mut members = HashMap::<String, HashSet<(i32, String)>>::new();
+    let mut edges = BTreeMap::<DecorationNode, BTreeSet<DecorationNode>>::new();
+    let mut node_ids = HashMap::<DecorationNode, String>::new();
+    let mut next_seen = 0usize;
+
+    for biome in biome_order {
+        let document = resolver.biome_document(biome);
+        let Some(steps) = document.get("features").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut sequence = Vec::new();
+        for (step, entries) in steps.iter().enumerate() {
+            let Some(entries) = entries.as_array() else { continue };
+            for entry in entries {
+                let Some(id) = entry.as_str() else { continue };
+                if resolver.placed_feature(id).is_null() {
+                    continue;
+                }
+                let ordinal = *first_seen.entry(id.to_string()).or_insert_with(|| {
+                    let assigned = next_seen;
+                    next_seen += 1;
+                    assigned
+                });
+                placed.entry(id.to_string()).or_insert_with(|| {
+                    crate::feature::vegetation::resolve_placed_feature_ref(resolver, entry)
+                });
+                let node = DecorationNode { step: step as i32, first_seen: ordinal };
+                edges.entry(node.clone()).or_default();
+                node_ids.entry(node.clone()).or_insert_with(|| id.to_string());
+                members.entry(biome.clone()).or_default().insert((step as i32, id.to_string()));
+                sequence.push(node);
+            }
+        }
+        for pair in sequence.windows(2) {
+            edges.entry(pair[0].clone()).or_default().insert(pair[1].clone());
+        }
+    }
+
+    fn visit(
+        node: &DecorationNode,
+        edges: &BTreeMap<DecorationNode, BTreeSet<DecorationNode>>,
+        discovered: &mut BTreeSet<DecorationNode>,
+        visiting: &mut BTreeSet<DecorationNode>,
+        reverse: &mut Vec<DecorationNode>,
+    ) {
+        if discovered.contains(node) {
+            return;
+        }
+        assert!(visiting.insert(node.clone()), "decoration feature order contains a cycle");
+        for next in edges.get(node).into_iter().flatten() {
+            visit(next, edges, discovered, visiting, reverse);
+        }
+        visiting.remove(node);
+        discovered.insert(node.clone());
+        reverse.push(node.clone());
+    }
+
+    let mut discovered = BTreeSet::new();
+    let mut visiting = BTreeSet::new();
+    let mut reverse = Vec::new();
+    for node in edges.keys() {
+        visit(node, &edges, &mut discovered, &mut visiting, &mut reverse);
+    }
+    reverse.reverse();
+    DecorationCatalog {
+        ordered: reverse
+            .into_iter()
+            .map(|node| (node.step, node_ids.remove(&node).expect("every graph node has an id")))
+            .collect(),
+        members,
+        placed,
+    }
 }
 
 /// The `GenerationStep.Decoration` indices [`build_biome_decoration`] drives, in

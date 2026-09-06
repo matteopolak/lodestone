@@ -511,8 +511,7 @@ pub struct OverworldGenerator {
     /// `crate::compose::DRIVEN_STEPS`**, so entries now carry their own step index
     /// and the map is no longer one-step-per-biome. The name is unchanged because
     /// [`Self::vegetation_stage`] is still the one stage that consumes it.
-    vegetation_by_biome:
-        HashMap<String, Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>>,
+    decoration_catalog: crate::compose::DecorationCatalog,
     /// Block-tag closures [`crate::feature::vegetation`]'s own predicates/
     /// checks need (`supports_vegetation`, `replaceable_by_trees`, `logs`,
     /// `cannot_replace_below_tree_trunk`) — resolved once, analogous to
@@ -733,15 +732,22 @@ impl OverworldGenerator {
         // construction time, not one per chunk or per source-chunk. Ore
         // features are deliberately not resolved here yet — see the module
         // doc.
-        let mut biome_names: std::collections::BTreeSet<String> = dynamic_biome
-            .as_ref()
-            .map(|d| d.table.iter().map(|p| p.biome.clone()).collect())
-            .unwrap_or_default();
-        biome_names.insert(biome.to_string());
+        let mut biome_source_order = Vec::new();
+        if let Some(dynamic) = &dynamic_biome {
+            for point in dynamic.table.iter() {
+                if !biome_source_order.contains(&point.biome) {
+                    biome_source_order.push(point.biome.clone());
+                }
+            }
+        }
+        if !biome_source_order.iter().any(|name| name == biome) {
+            biome_source_order.push(biome.to_string());
+        }
+        let biome_names: std::collections::BTreeSet<String> =
+            biome_source_order.iter().cloned().collect();
 
         let mut carvers_by_biome = HashMap::new();
         let mut ores_by_biome = HashMap::new();
-        let mut vegetation_by_biome = HashMap::new();
         // The same per-biome document walk also yields each
         // biome's `ClimateSettings` and whether it lists `freeze_top_layer`, so
         // `TOP_LAYER_MODIFICATION` composition costs no extra JSON parses.
@@ -755,10 +761,6 @@ impl OverworldGenerator {
                 crate::compose::build_biome_carvers(resolver, name),
             );
             ores_by_biome.insert(name.clone(), crate::compose::build_biome_ores(resolver, name));
-            vegetation_by_biome.insert(
-                name.clone(),
-                crate::compose::build_biome_decoration(resolver, name),
-            );
             let document = resolver.biome_document(name);
             if let Some(climate) = crate::feature::top_layer::parse_biome_climate(&document) {
                 biome_climates.insert(name.clone(), climate);
@@ -772,6 +774,7 @@ impl OverworldGenerator {
             }
         }
         let all_ores: Vec<PlacedOre> = ores_by_biome.values().flatten().cloned().collect();
+        let decoration_catalog = crate::compose::build_decoration_catalog(resolver, &biome_source_order);
         let ore_tag_map = crate::compose::build_ore_tag_map(resolver, &all_ores);
         let veg_tags = crate::feature::vegetation::build_veg_tags(resolver);
         let snow_support = crate::feature::top_layer::build_snow_support(resolver);
@@ -827,7 +830,7 @@ impl OverworldGenerator {
             ores_by_biome,
             ore_tag_map,
             store: store::StagedStore::new(STORE_RETENTION),
-            vegetation_by_biome,
+            decoration_catalog,
             veg_tags,
             biome_climates,
             spawners_by_biome,

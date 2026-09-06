@@ -1384,7 +1384,7 @@ mod tests {
     fn every_embedded_density_function_document_builds() {
         use lodestone_worldgen::density::Builder;
 
-        let resolver = embedded_resolver();
+        let resolver = super::embedded_resolver();
         let builder = Builder::new(0, &resolver);
         let mut checked = 0usize;
         for &(id, raw) in EMBEDDED_WORLDGEN {
@@ -3915,6 +3915,42 @@ mod single_biome_and_debug_world_selection {
             "minecraft:cinnabar",
             "the external surface oracle reports cinnabar at this fixed-biome point"
         );
+    }
+
+    /// The compiled-server selection fixture at this exact source proves that
+    /// decoration is driven by its section-biome neighbourhood, not only its
+    /// surface biome. In particular, sulfur's two step-7 features retain global
+    /// indices 2 and 3 even though the two earlier features are absent locally.
+    #[test]
+    fn sulfur_cave_decoration_uses_section_biomes_and_global_indices() {
+        use lodestone_worldgen::{
+            biome::{parse_table, usable_overworld_table},
+            compose::build_decoration_catalog,
+            density::Resolver,
+            feature::vegetation::ConfiguredFeature,
+        };
+
+        let expected = include_str!("../tests/support/decoration_selection_jvm.txt");
+        assert!(expected.contains("source -500,-500 biomes=minecraft:plains,minecraft:sulfur_caves"));
+        assert!(expected.contains("sulfur-step7=2:minecraft:sulfur_spike_cluster,3:minecraft:sulfur_spike"));
+
+        let resolver = super::embedded_resolver();
+        let mut order = Vec::new();
+        for point in usable_overworld_table(parse_table(&resolver.biome_parameters())) {
+            if !order.contains(&point.biome) {
+                order.push(point.biome);
+            }
+        }
+        let catalog = build_decoration_catalog(&resolver, &order);
+        let selected = catalog.select(["minecraft:plains", "minecraft:sulfur_caves"]);
+        let step_seven: Vec<_> = selected.into_iter().filter(|(step, _, _)| *step == 7).collect();
+        assert_eq!(step_seven.iter().map(|(_, index, _)| *index).collect::<Vec<_>>(), vec![2, 3]);
+        assert!(matches!(*step_seven[0].2.feature, ConfiguredFeature::SpeleothemCluster(_)));
+        assert!(matches!(
+            *step_seven[1].2.feature,
+            ConfiguredFeature::SimpleRandomSelector(ref options)
+                if options.iter().all(|option| matches!(option.feature.as_ref(), ConfiguredFeature::Speleothem(_)))
+        ));
     }
 
     #[test]
