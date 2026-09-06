@@ -3028,6 +3028,16 @@ fn pressing_play_reaches_a_running_integrated_server() {
         for update in net.poll() {
             match update {
                 crate::net::NetUpdate::LoggedIn { .. } => logged_in = true,
+                // The production consumer adopts the authoritative pose before
+                // releasing the driver's deferred correction response. This
+                // direct `NetClient` harness has no `Sim` to do that work, so
+                // mirror the consumer contract here; otherwise the driver
+                // intentionally pauses inbound reads at the placement teleport
+                // and this test would misdiagnose the missing chunk as a
+                // transport or decode failure.
+                crate::net::NetUpdate::Teleport { pos, rotation, .. } => {
+                    net.acknowledge_teleport_correction(pos, rotation);
+                }
                 crate::net::NetUpdate::Chunk { .. } => chunks += 1,
                 // Collected rather than ignored: an `Error`/`Disconnected`
                 // here is the actual diagnosis, and without it the failure
