@@ -118,6 +118,8 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8]) -> String {
     let mut differing_biomes = 0usize;
     let mut non_air_reference = 0usize;
     let mut non_air_actual = 0usize;
+    let mut first_block_difference = None;
+    let mut differing_state_pairs = std::collections::HashMap::<(u32, u32), usize>::new();
     for section in 0..24 {
         let reference_section = reference.column.section(section);
         let actual_section = actual.column.section(section);
@@ -127,6 +129,15 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8]) -> String {
             non_air_reference += usize::from(reference_block != 0);
             non_air_actual += usize::from(actual_block != 0);
             differing_blocks += usize::from(reference_block != actual_block);
+            if reference_block != actual_block {
+                *differing_state_pairs.entry((reference_block, actual_block)).or_default() += 1;
+            }
+            if first_block_difference.is_none() && reference_block != actual_block {
+                let x = cell % 16;
+                let z = (cell / 16) % 16;
+                let y = -64 + section as i32 * 16 + (cell / 256) as i32;
+                first_block_difference = Some((x, y, z, reference_block, actual_block));
+            }
         }
         for cell in 0..64 {
             let reference_biome = reference_section.map_or(0, |s| s.biomes().get(cell));
@@ -134,9 +145,40 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8]) -> String {
             differing_biomes += usize::from(reference_biome != actual_biome);
         }
     }
+    let first_block_difference = first_block_difference.map_or_else(
+        || "none".to_owned(),
+        |(x, y, z, reference, actual)| format!(
+            "local ({x},{y},{z}): {} ({reference}) vs {} ({actual})",
+            state_label(reference),
+            state_label(actual),
+        ),
+    );
+    let mut common_state_pairs = differing_state_pairs.into_iter().collect::<Vec<_>>();
+    common_state_pairs.sort_unstable_by(|left, right| right.1.cmp(&left.1));
+    let common_state_pairs = common_state_pairs
+        .into_iter()
+        .take(4)
+        .map(|((reference, actual), count)| format!("{count}× {} vs {}", state_label(reference), state_label(actual)))
+        .collect::<Vec<_>>()
+        .join("; ");
     format!(
-        "; captured-packet diagnosis: reference={} bytes, Lodestone={} bytes, block cells differ={differing_blocks}, biome cells differ={differing_biomes}, non-air reference={non_air_reference}, Lodestone={non_air_actual}",
+        "; captured-packet diagnosis: reference={} bytes, Lodestone={} bytes, block cells differ={differing_blocks}, biome cells differ={differing_biomes}, non-air reference={non_air_reference}, Lodestone={non_air_actual}, first block difference={first_block_difference}, common state pairs={common_state_pairs}",
         reference_len, actual_len,
     )
+}
+
+fn state_label(id: u32) -> String {
+    let name = lodestone_data::block_states::block_name(id).unwrap_or("unknown");
+    let properties = lodestone_data::block_states::properties(id).unwrap_or_default();
+    if properties.is_empty() {
+        name.to_owned()
+    } else {
+        let properties = properties
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{name}[{properties}]")
+    }
 }
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }

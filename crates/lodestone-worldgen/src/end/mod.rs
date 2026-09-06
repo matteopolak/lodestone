@@ -673,7 +673,7 @@ impl EndGenerator {
         // false, and nothing in the End's rule tree reads it — there is no
         // temperature condition to read it with.
         let biome_at =
-            |lx: i32, lz: i32| -> (&str, bool) { (biome_quarts[((lz >> 2) * 4 + (lx >> 2)) as usize], false) };
+            |lx: i32, _y: i32, lz: i32| -> (&str, bool) { (biome_quarts[((lz >> 2) * 4 + (lx >> 2)) as usize], false) };
 
         self.surface
             .build_surface(&pre, &heightmap, &biome_at, base_x, base_z)

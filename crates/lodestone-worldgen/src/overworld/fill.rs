@@ -13,7 +13,7 @@ use crate::density::Density;
 use crate::engine::Program;
 use crate::surface::{PreState, SurfaceDiff};
 
-use super::{OverworldGenerator, PreOreResult};
+use super::{BiomeCells, OverworldGenerator, PreOreResult};
 
 /// The real aquifer's eight router outputs plus its positional RNG factory,
 /// pre-built once from the same shared [`Builder`] that builds
@@ -66,7 +66,7 @@ impl OverworldGenerator {
         // would be two chances to diverge; see `biome_stage`.
         let biome_cells = self.biome_cells_stage(base_x, base_z);
         let biome_quarts = self.biome_stage(&biome_cells, &heights);
-        let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
+        let surface_diff = self.surface_stage(&field, &heights, &biome_cells, base_x, base_z);
 
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
@@ -220,7 +220,7 @@ impl OverworldGenerator {
         &self,
         field: &[BlockKind],
         heights: &[i32; 256],
-        biome_quarts: &[(String, bool); 16],
+        biome_cells: &BiomeCells,
         base_x: i32,
         base_z: i32,
     ) -> SurfaceDiff {
@@ -271,9 +271,17 @@ impl OverworldGenerator {
             }
         };
         let heightmap = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
-        let biome_at = |lx: i32, lz: i32| -> (&str, bool) {
-            let (name, cold) = &biome_quarts[((lz >> 2) * 4 + (lx >> 2)) as usize];
-            (name.as_str(), *cold)
+        let biome_at = |lx: i32, y: i32, lz: i32| -> (&str, bool) {
+            let name = biome_cells.at_quart(
+                (lx >> 2) as usize,
+                ((y - self.min_y) >> 2).max(0) as usize,
+                (lz >> 2) as usize,
+            );
+            let cold = match &self.dynamic_biome {
+                Some(dynamic) => crate::biome::cold_enough_to_snow(&dynamic.temperatures, name),
+                None => self.fallback_cold_enough_to_snow,
+            };
+            (name, cold)
         };
 
         self.surface
