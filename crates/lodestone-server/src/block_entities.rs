@@ -60,6 +60,10 @@ use crate::hopper::Hopper;
 /// [`BlockEntityRegistry`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockEntity {
+    /// `minecraft:end_gateway`: a generated return gateway with its configured
+    /// destination. It does not tick; a future contact handler can read the
+    /// destination through [`Self::gateway_destination`].
+    EndGateway { exit: BlockPos, exact: bool },
     /// `minecraft:composter`.
     Composter(Composter),
     /// `minecraft:furnace`/`minecraft:smoker`/`minecraft:blast_furnace`
@@ -295,6 +299,20 @@ pub fn container_type_for_block(block: &str) -> Option<&'static str> {
 }
 
 impl BlockEntity {
+    /// Return the configured destination for an End gateway.
+    ///
+    /// This is deliberately a data access point, not a teleport operation: the
+    /// current movement loop has no block-contact dispatch. Keeping the decision
+    /// here lets that loop consume a persisted or generated gateway without
+    /// teaching it about NBT fields.
+    #[must_use]
+    pub fn gateway_destination(&self) -> Option<(BlockPos, bool)> {
+        match self {
+            Self::EndGateway { exit, exact } => Some((*exit, *exact)),
+            _ => None,
+        }
+    }
+
     /// A fresh, empty `generic_9x3` container of type `id`.
     #[must_use]
     pub fn container(id: &str) -> Self {
@@ -338,6 +356,7 @@ impl BlockEntity {
     #[must_use]
     pub fn type_id(&self) -> &str {
         match self {
+            BlockEntity::EndGateway { .. } => "minecraft:end_gateway",
             BlockEntity::Composter(_) => "minecraft:composter",
             BlockEntity::Furnace(f) => match f.kind() {
                 FurnaceKind::Furnace => "minecraft:furnace",
@@ -380,7 +399,7 @@ impl BlockEntity {
             // dispenser/dropper's `Container` — hopper adjacency into one
             // works the identical way.
             BlockEntity::Crafter { slots, .. } => Some(slots.as_mut_slice()),
-            BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
+            BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
             | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => {
                 None
@@ -432,7 +451,7 @@ impl BlockEntity {
             } else {
                 "minecraft:generic_9x3"
             }),
-            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             // A command block opens its own dedicated GUI
             // (`Player.openCommandBlock`), not an `AbstractContainerMenu` —
             // there is no vanilla menu identifier for it at all.
@@ -468,7 +487,7 @@ impl BlockEntity {
             // `CrafterMenu.addSlots`'s own `x + y * 3` order — already this
             // array's own indexing.
             BlockEntity::Crafter { slots, .. } => slots.to_vec(),
-            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => Vec::new(),
         }
     }
@@ -536,7 +555,7 @@ impl BlockEntity {
                     *cell = item;
                 }
             }
-            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {}
         }
     }
@@ -548,7 +567,7 @@ impl BlockEntity {
             BlockEntity::Container { slots, .. } => slots.len(),
             BlockEntity::Beacon(_) => 1,
             BlockEntity::Crafter { slots, .. } => slots.len(),
-            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
+            BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => 0,
         }
     }
@@ -625,7 +644,7 @@ impl BlockEntity {
                 props.push(0);
                 props
             }
-            BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
+            BlockEntity::EndGateway { .. } | BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Container { .. } | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {
                 Vec::new()
@@ -687,7 +706,7 @@ impl BlockEntity {
             // No `craftingTicksRemaining` countdown here — see this variant's
             // own doc comment for why the trigger itself is out of scope.
             BlockEntity::Crafter { .. } => None,
-            BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
+            BlockEntity::EndGateway { .. } | BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
             | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => None,
         }
     }

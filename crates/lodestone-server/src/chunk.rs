@@ -619,15 +619,30 @@ impl ChunkColumn {
     /// `cache_2d`), so this is exact rather than an approximation.
     #[must_use]
     pub fn from_end(column: lodestone_worldgen::end::EndColumn, window_height: i32) -> Self {
+        let gateways = column.gateways().to_vec();
         let (min_y, generated_height, palette, blocks, biome_quarts) = column.into_raw();
-        Self::from_raw_window(
+        let mut out = Self::from_raw_window(
             min_y,
             generated_height,
             window_height,
             palette,
             &blocks,
             biome_quarts.map(str::to_string),
-        )
+        );
+        if !gateways.is_empty() {
+            let mut entities = out.block_entities().to_vec();
+            entities.extend(gateways.into_iter().map(|gateway| {
+                (
+                    BlockPos::new(gateway.pos.0, gateway.pos.1, gateway.pos.2),
+                    BlockEntity::EndGateway {
+                        exit: BlockPos::new(gateway.exit.0, gateway.exit.1, gateway.exit.2),
+                        exact: gateway.exact,
+                    },
+                )
+            }));
+            out.set_block_entities(entities);
+        }
+        out
     }
 
     /// Biome id at local `(x, z)` in `0..16` — quart resolution, the column's

@@ -6,9 +6,9 @@ The composed Nether and End generators (`lodestone_worldgen::nether::NetherGener
 `::end::EndGenerator`) and the engine-level differences from the Overworld that make them possible:
 a selectable RNG family, two bespoke Nether biome noises, a disabled-aquifer fill, dimension-specific
 cell geometry, the `minecraft:end_islands` density function, and the End's non-multi-noise biome
-source. All bundled 26.2 data for both dimensions is complete; every remaining gap is engine
-(unwritten decoration/structures) or gameplay (portal travel, the dragon fight) rather than missing
-data.
+source. All bundled 26.2 data for both dimensions is complete; the remaining gaps are structure
+families, dimension serving, and gameplay such as portal travel and the dragon fight rather than
+missing data.
 
 ## How it works
 
@@ -56,8 +56,8 @@ filtered per-dimension (`StructureRegistry::new_for_biomes`) to only the sets wh
 plus a dimension-specific height probe over this dimension's own density field. `bastion_remnant`
 places real blocks (jigsaw); `nether_fossil` places real blocks (template, and the dimension's only
 adaptation-bearing structure, so it is what first made the Nether's beardifier observably non-empty);
-`fortress` and `ruined_portal_nether` have no piece generator yet and yield advisory (blockless)
-starts.
+`ruined_portal_nether` places its frame and terrain refinement. `fortress` still has no piece
+generator and yields an advisory (blockless) start.
 
 A biome resolution tie at one recorded coordinate disagrees with the real vanilla world by
 construction — an exact climate-distance tie where vanilla's answer depends on the previous query on
@@ -69,38 +69,40 @@ exact fitness tie, rather than tolerating them by threshold.
 
 ### End
 
-The biome source is not multi-noise at all: `TheEndBiomeSource` is a small closed-form function of
-chunk position (a radius-64-chunk main-island hole) and one density sample (the `erosion` router
-slot, which for the End is exactly `cache_2d(end_islands)`), thresholded into five biomes. All five
-biome ids are constants (the registry, not JSON). `minecraft:end_islands` is the one density-function
-type the engine still needs to port — a seedless-looking `SimpleFunction` whose real seed (the raw
-world seed, via `LegacyRandomSource`, **independent of** the legacy-random-source flag) is substituted
-at wiring time, followed by 17,292 discarded RNG draws before a `SimplexNoise` is built. Its integer
-division must stay Java-truncating (not `div_euclid`), several intermediate values are `f32` not
-`f64`, and two boundary tests operate at different integer widths (`i32` vs `i64`) — six independent
-ways to port it plausibly wrong. It is deliberately not yet implemented, sequenced instead as part of
-the density-engine rewrite so it is written once against the final interpreter rather than ported
-twice.
+The End biome source is not multi-noise: `EndBiomeSource` is a closed-form function of chunk
+position (a radius-64-chunk main-island hole) and one `cache_2d(end_islands)` erosion sample,
+thresholded into five constant biome ids. `EndIslandNoise` consumes its seed through the legacy
+random stream before constructing its simplex sampler; its Java-style truncating division, `f32`
+intermediates, and mixed-width boundary predicates are all load-bearing. `EndGenerator` carries that
+source through fill, surface, materialization, and the served quart-biome grid.
 
 The End has no fluid at all (its sea level and fluid-level settings make the disabled aquifer's fluid
 picker return air everywhere, regardless of what `default_fluid` names) and no bedrock (its surface
 rule is a same-value no-op and, unlike the Nether, contains no `vertical_gradient` construct at all —
 copying the Nether's floor/roof shape here would be actively wrong). There is no carver (no bundled
-End biome names one) and no structure stage (`end_city`'s only structure has no piece generator yet,
-so a stage today would place starts nothing could build).
+End biome names one). Its structure stage samples and places End-city template pieces.
 
-**The End has no vanilla block oracle at all** — the reference save never visited it — so every End
-gate derives its expectation from a record definition, arithmetic, or a cross-dimension control
-(comparing against the Nether's own gates on the same mechanism) rather than a captured vanilla dump.
-Treat End-specific numeric claims as weaker evidence than the Nether's or Overworld's for this reason.
+The survival reference save still has no End region, but this is no longer an evidence gap:
+`scripts/worldgen-oracle/EndChunkOracle.java` runs the bundled 26.2 server classes directly and emits
+`crates/lodestone-worldgen/tests/support/end_chunk_jvm.txt`. The `end_gen` gate compares every block
+run and quart biome for a main-island chunk, an outer-ring chunk, and a distant small-islands biome across two
+seeds. Regenerate the fixture through `scripts/worldgen-oracle/run.sh EndChunkOracle`; do not replace
+it with output from `EndGenerator`.
 
 ### Decoration and structures, remaining
 
 Every biome document for both dimensions already carries its full decoration step-list wiring and
-every referenced `configured_feature`/`placed_feature` is bundled — glowstone, nether wart, crimson/
-warped vegetation, basalt pillars, obsidian pillars, chorus plants, gateways-as-features are all
-**composition work in the shared decoration engine** (see `worldgen-decoration.md`), not missing
-data. `end_city` and the Nether's `fortress` are the remaining structures with no piece generator.
+every referenced configured/placed feature is bundled. `EndGenerator` reads the fixed platform entry
+from `the_end` and applies its 5×5, four-row block shape after materialization. The independent
+`EndPlatformOracle.java` fixture covers those 100 writes. The generator constructs a three-by-three
+decoration region before serving its centre, so outer-island and chorus writers from neighbouring
+source chunks compose into the served column. Return gateways carry their block position, exit, and
+exact-teleport flag through `EndColumn::gateways`; `ChunkColumn::from_end` turns that sidecar into a
+persisted block entity. The End-filtered structure registry samples city starts from the End's own
+pre-surface density field and applies intersecting template pieces before palette extraction. The
+positive `end_city_jvm.txt` capture gates one start, its nine-piece sequence, and two placed block
+states. The terrain fixture deliberately stops before later writers, so it is not evidence that they
+were placed.
 Portal travel, the dimension registry, and reaching either dimension from a live server are
 `lodestone-server`-side gaps: `EmbeddedResolver` still hardcodes the Overworld's documents for the
 default singleplayer path, though `EndChunkSource`/`NetherChunkSource`-shaped wrappers and a real
@@ -141,7 +143,8 @@ biome documents, `density_function/{nether,end}/base_3d_noise`, `end/sloped_chee
 `structure::beardifier`; `lodestone-worldgen-core`'s `density`, `engine`, `noise::SimplexNoise`,
 `rng::{Algorithm, LegacyRandomSource}`. Evidence: the Nether is verified against a real vanilla
 26.2 server's own generated region files (`.cache/mc/survival/world/dimensions/minecraft/the_nether`,
-seed −195764831) for both biome assignment and bedrock shell; the End has no such oracle (see above).
+seed −195764831) for both biome assignment and bedrock shell; the End terrain and fixed-platform
+fixtures are captured by its bundled-server oracle harnesses (see above).
 `scripts/worldgen-oracle/{NetherParametersOracle,DensityOracle}.java` for the Nether's climate table
 and future `end_islands` verification. See `docs/worldgen.md` for the shared density/RNG engine,
 `docs/worldgen-biomes.md` for the Overworld's own climate search and tie-break behaviour this doc's

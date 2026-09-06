@@ -1106,6 +1106,13 @@ pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, Block
 pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
     let (id, mut extra): (&str, Vec<(String, Nbt)>) = match entity {
         BlockEntity::Opaque { nbt, .. } => return nbt.clone(),
+        BlockEntity::EndGateway { exit, exact } => (
+            "minecraft:end_gateway",
+            vec![
+                ("ExitPortal".to_owned(), Nbt::IntArray(vec![exit.x, exit.y, exit.z])),
+                ("ExactTeleport".to_owned(), Nbt::Byte(i8::from(*exact))),
+            ],
+        ),
         BlockEntity::Furnace(f) => {
             let (lit_remaining, lit_total, cooking_spent, cooking_total) = f.burn_state();
             let recipes: Vec<(String, Nbt)> = {
@@ -1426,6 +1433,16 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
     );
 
     let entity = match id {
+        "minecraft:end_gateway" => {
+            let exit = match field(nbt, "ExitPortal") {
+                Some(Nbt::IntArray(values)) if values.len() == 3 => BlockPos::new(values[0], values[1], values[2]),
+                _ => return None,
+            };
+            BlockEntity::EndGateway {
+                exit,
+                exact: matches!(field(nbt, "ExactTeleport"), Some(Nbt::Byte(value)) if *value != 0),
+            }
+        }
         "minecraft:furnace" | "minecraft:smoker" | "minecraft:blast_furnace" => {
             let kind = match id {
                 "minecraft:smoker" => FurnaceKind::Smoker,
@@ -1842,6 +1859,40 @@ mod beacon_nbt_tests {
             .find(|(name, _)| name == "id")
             .map(|(_, value)| value.clone());
         assert_eq!(id, Some(lodestone_core::Nbt::String("minecraft:beacon".to_owned())));
+    }
+}
+
+#[cfg(test)]
+mod end_gateway_nbt_tests {
+    use super::{block_entity_from_nbt, block_entity_to_nbt};
+    use crate::block_entities::BlockEntity;
+    use lodestone_model::BlockPos;
+
+    #[test]
+    fn end_gateway_exit_and_exact_teleport_round_trip() {
+        let position = BlockPos::new(18, 72, -9);
+        let entity = BlockEntity::EndGateway {
+            exit: BlockPos::new(100, 50, 0),
+            exact: true,
+        };
+        let nbt = block_entity_to_nbt(position, &entity);
+        let (decoded_position, decoded) = block_entity_from_nbt(&nbt).expect("gateway must decode");
+
+        assert_eq!(decoded_position, position);
+        assert_eq!(decoded, entity);
+        assert_eq!(decoded.gateway_destination(), Some((BlockPos::new(100, 50, 0), true)));
+    }
+
+    #[test]
+    fn end_gateway_without_exact_teleport_remains_inexact() {
+        let entity = BlockEntity::EndGateway {
+            exit: BlockPos::new(-10, 70, 22),
+            exact: false,
+        };
+        let nbt = block_entity_to_nbt(BlockPos::new(0, 64, 0), &entity);
+        let (_, decoded) = block_entity_from_nbt(&nbt).expect("gateway must decode");
+
+        assert_eq!(decoded.gateway_destination(), Some((BlockPos::new(-10, 70, 22), false)));
     }
 }
 

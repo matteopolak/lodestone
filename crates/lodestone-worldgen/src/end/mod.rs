@@ -43,14 +43,17 @@
 //!   `mobs/dragon.rs`'s own module docs (in `lodestone-server`) disclosed
 //!   them as the reason the dragon fight has no production entry point. The
 //!   gateway and the dragon entity itself are still not here.
-//! * **Decoration.** All the End's placed features are bundled and the five biome
-//!   documents carry the step wiring, so that is `crate::feature` step work with
-//!   zero data missing.
-//! * **`end_city`**, a template-piece structure, and therefore not a terrain gap.
-//! * **A structure stage.** Unlike the Nether, the End composes none — deliberately,
-//!   because `end_city` is the only End structure and it has no piece generator, so
-//!   a stage today would place starts nothing could build. The Nether's stage is the
-//!   template when it lands.
+//! * **Decoration — partial, production-connected coverage.** The fixed
+//!   `end_platform` entry, outer islands, chorus plants, and return gateways
+//!   are applied during [`EndGenerator::column`]. A three-by-three region lets
+//!   source chunks write over a served chunk boundary. Return gateways retain
+//!   their exit data in [`EndColumn::gateways`], so a consumer can create a
+//!   block entity instead of silently retaining only its blocks.
+//! * **`end_city`** is a template-piece structure rather than a terrain feature.
+//!   [`EndGenerator`] builds an End-filtered structure registry, samples its
+//!   four-point start height against the End density field, and applies every
+//!   intersecting complete city piece after materialization. It has no terrain
+//!   adaptation or placement-time refinement.
 //!
 //! # How it works
 //!
@@ -83,15 +86,12 @@
 //! object and its five holders come from the registry,
 //! so they are constants here too rather than a resolver lookup.
 //!
-//! **There is no End block oracle anywhere**, and that bounds what any gate here can
-//! claim. `.cache/mc/survival/world/dimensions/minecraft/the_end/` has a `data/`
-//! directory and **no `region/`** — the world's End was never visited, so not one
-//! generated End chunk exists on this machine. Comparing End output against our own
-//! output is the closed loop the evidence rules forbid, so every gate in
-//! `tests/end_gen.rs` derives its expectation from **geometry, arithmetic, or a
-//! record definition read out of `.cache/mc/26.2/src`**, and `docs/worldgen-end.md`
-//! names the one thing that leaves ungated (`consumeCount(17292)`). Do not add a
-//! gate here whose expected value came from this code.
+//! `scripts/worldgen-oracle/EndChunkOracle.java` supplies an independent terrain
+//! fixture by driving the bundled server classes. `EndPlatformOracle.java` and
+//! `EndDecorationOracle.java` independently capture the platform and feature
+//! shapes; `end_city_jvm.txt` captures a positive city start, piece list, and
+//! placed-block controls. Each fixture has a narrowly scoped gate — no terrain
+//! fixture is treated as evidence for a later writer.
 //!
 //! # Dependencies
 //!
@@ -99,11 +99,14 @@
 //! [`crate::dense_grid`], [`crate::interner`], [`crate::noise::EndIslandNoise`] and
 //! `lodestone-worldgen-core`'s density interpreter. Nothing version-specific.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::aquifer::{AquiferSystem, BlockKind};
+use crate::dense_grid::DenseBlockGrid;
 use crate::density::{Builder, Resolver};
 use crate::engine::Program;
 use crate::interner::StateInterner;
@@ -112,6 +115,7 @@ use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
 
 mod podium;
 mod spikes;
+mod decorate;
 
 pub use podium::{PodiumBlock, end_podium};
 pub use spikes::{EndSpike, SPIKE_COUNT, end_spike_blocks, end_spikes_for_seed};
@@ -220,6 +224,7 @@ pub struct EndColumn {
     palette: Vec<String>,
     blocks: Vec<u16>,
     biome_quarts: [&'static str; 16],
+    gateways: Vec<decorate::EndGateway>,
 }
 
 impl EndColumn {
@@ -257,6 +262,13 @@ impl EndColumn {
     #[must_use]
     pub fn biome_at(&self, lx: usize, lz: usize) -> &'static str {
         self.biome_at_quart(lx >> 2, lz >> 2)
+    }
+
+    /// Return-gateway exits generated in this column.  The gateway block is in
+    /// the palette; this sidecar is the block-entity data a server must retain.
+    #[must_use]
+    pub fn gateways(&self) -> &[decorate::EndGateway] {
+        &self.gateways
     }
 
     /// Count of non-air blocks — the cheapest "did this actually generate terrain"
@@ -297,6 +309,7 @@ impl EndColumn {
 /// without changing a byte.
 #[allow(missing_debug_implementations)]
 pub struct EndGenerator {
+    seed: i64,
     slot_count: usize,
     interner: Arc<StateInterner>,
     surface: SurfaceSystem,
@@ -318,6 +331,8 @@ pub struct EndGenerator {
     /// nowhere, and then look correct.
     default_fluid: BlockKind,
     default_fluid_pre: PreState,
+    decoration: decorate::EndDecoration,
+    structures: Option<crate::structure::StructureRegistry>,
 }
 
 impl EndGenerator {
@@ -376,7 +391,15 @@ impl EndGenerator {
 
         let slot_count = builder.slot_count();
 
+        let possible_biomes = [THE_END, END_HIGHLANDS, END_MIDLANDS, SMALL_END_ISLANDS, END_BARRENS]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        let registry = crate::structure::StructureRegistry::new_for_biomes(seed, resolver, Some(&possible_biomes));
+        let structures = (!registry.is_empty()).then_some(registry);
+
         Self {
+            seed,
             slot_count,
             interner,
             surface,
@@ -391,6 +414,8 @@ impl EndGenerator {
             default_block_pre,
             default_fluid,
             default_fluid_pre,
+            decoration: decorate::EndDecoration::from_resolver(resolver),
+            structures,
         }
     }
 
@@ -408,14 +433,54 @@ impl EndGenerator {
 
     /// The generated column for chunk `(cx, cz)`.
     ///
-    /// Vanilla's stage order, minus the two stages this dimension has none of: fill,
-    /// biome, surface, materialise. No carve step (no End biome document names a
-    /// carver) and no structure stage (see the module doc).
+    /// The End's served order: fill, biome, surface, materialise, structures,
+    /// then decoration. No End biome names a carver.
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> EndColumn {
+        let (world, gateways) = self.decoration_region(cx, cz);
+        let biome_quarts = self.biomes.chunk_quarts(cx, cz);
+        let mut served = DenseBlockGrid::with_interner(
+            self.interner.clone(),
+            cx * 16,
+            self.min_y,
+            cz * 16,
+            16,
+            self.height,
+            16,
+            self.interner.id_of("minecraft:air"),
+        );
+        for y in self.min_y..self.min_y + self.height {
+            for z in cz * 16..cz * 16 + 16 {
+                for x in cx * 16..cx * 16 + 16 {
+                    let state = world.get_id(x, y, z);
+                    served.set_id(x, y, z, state);
+                }
+            }
+        }
+        let (palette, blocks) = served.into_palette_and_blocks();
+        EndColumn { min_y: self.min_y, height: self.height, palette, blocks, biome_quarts, gateways }
+    }
+
+    /// Complete structure starts whose origin is `(cx, cz)`.
+    ///
+    /// City placement uses this same start calculation before looking through
+    /// nearby starts for pieces that touch a served chunk.
+    #[must_use]
+    pub fn structure_starts(&self, cx: i32, cz: i32) -> Vec<crate::structure::StructureStart> {
+        let Some(registry) = &self.structures else {
+            return Vec::new();
+        };
+        let sampler = EndStartSampler::new(self);
+        registry
+            .starts_at(cx, cz, &sampler)
+            .into_iter()
+            .filter(|start| start.pieces_complete)
+            .collect()
+    }
+
+    fn base_world(&self, cx: i32, cz: i32) -> DenseBlockGrid {
         let base_x = cx * 16;
         let base_z = cz * 16;
-
         let aquifer = self.build_fill(cx, cz);
         // `Beardifier::empty()` rather than an `Option`: it takes
         // `fill_column`'s no-addition loop, so the End's density is the interpolated
@@ -443,15 +508,90 @@ impl EndGenerator {
             self.default_block_pre.state,
             self.default_fluid_pre.state,
         );
+        self.structure_place_stage(cx, cz, world)
+    }
 
-        let (palette, blocks) = world.into_palette_and_blocks();
-        EndColumn {
-            min_y: self.min_y,
-            height: self.height,
-            palette,
-            blocks,
-            biome_quarts,
+    /// Places every complete End-city piece intersecting this chunk after
+    /// materialization and before the palette is extracted. City pieces have no
+    /// terrain adaptation or later refinement, so a bounded start scan and the
+    /// grid's normal write clipping are sufficient.
+    fn structure_place_stage(&self, cx: i32, cz: i32, mut world: DenseBlockGrid) -> DenseBlockGrid {
+        const START_SCAN_RADIUS: i32 = 16;
+        let Some(registry) = &self.structures else {
+            return world;
+        };
+        let sampler = EndStartSampler::new(self);
+        let (min_x, min_z) = (cx * 16, cz * 16);
+        for start_x in cx - START_SCAN_RADIUS..=cx + START_SCAN_RADIUS {
+            for start_z in cz - START_SCAN_RADIUS..=cz + START_SCAN_RADIUS {
+                for start in registry.starts_at(start_x, start_z, &sampler) {
+                    if !start.pieces_complete {
+                        continue;
+                    }
+                    let reference = crate::structure::jigsaw::reference_position(&start.pieces);
+                    for piece in &start.pieces {
+                        if !piece.bounding_box.intersects_xz(min_x, min_z, min_x + 15, min_z + 15) {
+                            continue;
+                        }
+                        if let Some(blocks) = &piece.blocks {
+                            for block in blocks.iter() {
+                                world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+                            }
+                        }
+                        if let Some(placement) = &piece.placement {
+                            let origin = crate::structure::template::PlaceOrigin {
+                                position: placement.position,
+                                reference,
+                                seed: registry.seed(),
+                            };
+                            placement.template.place(origin, &placement.settings, &mut world);
+                            for extra in &piece.extra_placements {
+                                let origin = crate::structure::template::PlaceOrigin {
+                                    position: extra.position,
+                                    reference,
+                                    seed: registry.seed(),
+                                };
+                                extra.template.place(origin, &extra.settings, &mut world);
+                            }
+                        }
+                    }
+                }
+            }
         }
+        world
+    }
+
+    fn decoration_region(&self, cx: i32, cz: i32) -> (DenseBlockGrid, Vec<decorate::EndGateway>) {
+        let mut region = DenseBlockGrid::with_interner(
+            self.interner.clone(),
+            (cx - 1) * 16,
+            self.min_y,
+            (cz - 1) * 16,
+            48,
+            self.height,
+            48,
+            self.interner.id_of("minecraft:air"),
+        );
+        for source_x in cx - 1..=cx + 1 {
+            for source_z in cz - 1..=cz + 1 {
+                let source = self.base_world(source_x, source_z);
+                for y in self.min_y..self.min_y + self.height {
+                    for z in source_z * 16..source_z * 16 + 16 {
+                        for x in source_x * 16..source_x * 16 + 16 {
+                            region.set_id(x, y, z, source.get_id(x, y, z));
+                        }
+                    }
+                }
+            }
+        }
+        let gateways = self.decoration.apply_region(
+            self.seed,
+            cx,
+            cz,
+            &mut region,
+            |source_x, source_z| self.biomes.biome_at_quart(source_x * 4, 0, source_z * 4),
+        );
+        (region, gateways)
     }
 
     /// `Aquifer.createDisabled` bound to this chunk — the End's whole fill decision,
@@ -537,6 +677,70 @@ impl EndGenerator {
 
         self.surface
             .build_surface(&pre, &heightmap, &biome_at, base_x, base_z)
+    }
+}
+
+/// A start probe over the End's pre-surface density output.
+///
+/// The city start check samples four columns. Caching its disabled aquifers
+/// avoids recomputing a sampled chunk when more than one of those columns lands
+/// in it, while keeping starts independent of generated-column ordering.
+struct EndStartSampler<'a> {
+    generator: &'a EndGenerator,
+    aquifers: RefCell<HashMap<(i32, i32), Arc<AquiferSystem>>>,
+}
+
+impl<'a> EndStartSampler<'a> {
+    fn new(generator: &'a EndGenerator) -> Self {
+        Self { generator, aquifers: RefCell::new(HashMap::new()) }
+    }
+
+    fn aquifer(&self, cx: i32, cz: i32) -> Arc<AquiferSystem> {
+        if let Some(existing) = self.aquifers.borrow().get(&(cx, cz)) {
+            return Arc::clone(existing);
+        }
+        let built = Arc::new(self.generator.build_fill(cx, cz));
+        self.aquifers.borrow_mut().insert((cx, cz), Arc::clone(&built));
+        built
+    }
+}
+
+impl crate::structure::StartContext for EndStartSampler<'_> {
+    fn first_occupied_height(&self, x: i32, z: i32, heightmap: crate::structure::HeightmapKind) -> i32 {
+        let generator = self.generator;
+        let aquifer = self.aquifer(x.div_euclid(16), z.div_euclid(16));
+        for ly in (0..generator.height).rev() {
+            let y = generator.min_y + ly;
+            let kind = aquifer.block_at(x, y, z);
+            let matches = match heightmap {
+                crate::structure::HeightmapKind::WorldSurfaceWg => kind != BlockKind::Air,
+                crate::structure::HeightmapKind::OceanFloorWg => kind == BlockKind::Stone,
+            };
+            if matches {
+                return y;
+            }
+        }
+        generator.min_y - 1
+    }
+
+    fn biome_at_quart(&self, qx: i32, _qy: i32, qz: i32) -> String {
+        self.generator.biomes.biome_at_quart(qx, 0, qz).to_owned()
+    }
+
+    fn sea_level(&self) -> i32 {
+        self.generator.sea_level
+    }
+
+    fn min_y(&self) -> i32 {
+        self.generator.min_y
+    }
+
+    fn dimension_height(&self) -> i32 {
+        self.generator.height
+    }
+
+    fn block_kind_at(&self, x: i32, y: i32, z: i32) -> BlockKind {
+        self.aquifer(x.div_euclid(16), z.div_euclid(16)).block_at(x, y, z)
     }
 }
 

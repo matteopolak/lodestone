@@ -338,7 +338,6 @@ pub struct PoolStore {
     pools: HashMap<String, Arc<TemplatePool>>,
     processor_lists: HashMap<String, Arc<Vec<super::processor::Processor>>>,
     block_tags: HashMap<String, Arc<HashSet<String>>>,
-    dangling: BTreeSet<String>,
 }
 
 /// The alias names and targets of one jigsaw structure, as
@@ -374,14 +373,6 @@ impl PoolStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.pools.is_empty()
-    }
-
-    /// Every template id a loaded pool names that the resolver could not serve, and
-    /// which was therefore replaced by [`StructureTemplate::empty`] — vanilla's own
-    /// `getOrCreate` behaviour. Reported on the ledger; see [`Self::parse_element`].
-    #[must_use]
-    pub fn dangling_templates(&self) -> &BTreeSet<String> {
-        &self.dangling
     }
 
     /// Loads `start` and everything transitively reachable from it, returning
@@ -507,10 +498,10 @@ impl PoolStore {
                 //   `lodestone-server`'s own `no_structure_is_demoted_for_unloadable_templates`
                 //   gate detects, and it must keep detecting it.
                 // * **this one template is missing from an otherwise complete
-                //   bundle** — vanilla's own dangling reference. Substitute an
-                //   empty template, exactly as `getOrCreate` does, and record the
-                //   id. Refusing here would delete `ancient_city` over one wall
-                //   variant vanilla itself never shipped.
+                //   bundle** — the data's deliberate dangling reference. Substitute
+                //   an empty template, preserving its shuffle position and pool
+                //   graph. Refusing here would delete `ancient_city` over one wall
+                //   variant the data deliberately leaves empty.
                 let failures = templates.load(resolver, &[template.as_str()]);
                 let decoded = match templates.get(&template) {
                     Some(loaded) => Arc::clone(loaded),
@@ -521,7 +512,6 @@ impl PoolStore {
                                 .map_or("template not bundled", |(_, why)| why.as_str());
                             return Err(format!("template '{template}' unusable ({why})"));
                         }
-                        self.dangling.insert(template.clone());
                         Arc::new(StructureTemplate::empty())
                     }
                 };

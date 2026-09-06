@@ -300,13 +300,11 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
             ledger.get(id)
         );
     }
-    for id in [
-        // The Nether-side variant only — the six overworld `ruined_portal*`
-        // ids came off the ledger once the structure's own generator landed.
-        "minecraft:ruined_portal_nether",
-    ] {
-        assert!(ledger.contains_key(id), "{id} should still be ledgered");
-    }
+    assert!(
+        !ledger.contains_key("minecraft:ruined_portal_nether"),
+        "the Nether portal builds and its Nether placement stage writes its refinement: {:?}",
+        ledger.get("minecraft:ruined_portal_nether")
+    );
     assert!(
         !ledger.contains_key("minecraft:ruined_portal"),
         "minecraft:ruined_portal has a generator now and must not be ledgered: {:?}",
@@ -317,10 +315,8 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         "coded:average_ground_height",
         "coded:region_random",
         "coded:worldgen_entities",
-        "coded:chests",
         "coded:chest_reorient",
         "coded:decoration_random",
-        "coded:buried_treasure_chest",
         "coded:ruined_portal_terrain_skirt",
         "dimension:nether_structures",
         "mineshaft:post_process_scope",
@@ -359,21 +355,25 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         nether_row.contains("ChunkSource") || nether_row.contains("chunk source"),
         "the row must name what is still missing — a chunk source: {nether_row}"
     );
-    // The two rows S6 corrected. `template:data_markers` claimed shipwreck / igloo /
-    // ocean-ruin loot chests were not placed at all; `lodestone_server`'s
-    // `structure_loot` has been rolling them for a while now, so the row named a closed
-    // gap and hid the open one. It must be **gone**, and its replacement present:
-    // the 132 templates whose loot lives in a block's own `nbt` compound.
+    // Every structure-container path has a consumer. Marker containers had one
+    // already; self-named template containers and coded-piece containers now do
+    // too. Buried treasure's material-sensitive walk also runs at placement time.
+    // These absence checks keep completed seams from being reported as gaps.
     assert!(
         !ledger.contains_key("template:data_markers"),
         "template:data_markers described a closed gap and must not come back"
     );
-    let nbt_row = ledger
-        .get("template:block_entity_nbt")
-        .expect("the real template-loot gap must be named");
     assert!(
-        nbt_row.contains("132"),
-        "the row should carry the measured template count: {nbt_row}"
+        !ledger.contains_key("template:block_entity_nbt"),
+        "self-named template containers have a loot consumer"
+    );
+    assert!(
+        !ledger.contains_key("coded:chests"),
+        "coded containers have a loot consumer"
+    );
+    assert!(
+        !ledger.contains_key("coded:buried_treasure_chest"),
+        "buried treasure's refinement places its chest"
     );
     let brush_row = ledger
         .get("block_entity:append_loot")

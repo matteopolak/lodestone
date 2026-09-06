@@ -708,9 +708,12 @@ fn the_nether_ledger_names_the_remaining_gaps_and_not_the_closed_one() {
         "bastion_remnant assembles and now places: {:?}",
         ledger.get("minecraft:bastion_remnant")
     );
-    for id in ["minecraft:fortress", "minecraft:ruined_portal_nether"] {
-        assert!(ledger.contains_key(id), "{id} has no piece generator and must be ledgered");
-    }
+    assert!(ledger.contains_key("minecraft:fortress"), "fortress has no piece generator and must be ledgered");
+    assert!(
+        !ledger.contains_key("minecraft:ruined_portal_nether"),
+        "the Nether portal now has pieces and a post-template placement consumer: {:?}",
+        ledger.get("minecraft:ruined_portal_nether")
+    );
     // S7: `nether_fossil` places 14 possible bone templates and a coin-flip dried
     // ghast, so it comes **off** the ledger. Asserted as an absence for the same
     // reason the bastion row above is: a registry that quietly demoted it for an
