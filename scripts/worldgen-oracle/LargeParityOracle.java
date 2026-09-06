@@ -45,8 +45,8 @@ import net.minecraft.util.datafix.DataFixers;
 import net.minecraft.util.Util;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunk;
-import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.dimension.LevelStem;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.storage.LevelDataAndDimensions;
 import net.minecraft.world.level.storage.LevelStorageSource;
 
@@ -206,24 +206,30 @@ public final class LargeParityOracle {
             for (long batchStart = done; batchStart < count; batchStart += batchSize) {
                 long batchEnd = Math.min(count, batchStart + batchSize);
                 int width = a.hiX - a.loX + 1;
-                List<CompletableFuture<net.minecraft.server.level.ChunkResult<ChunkAccess>>> futures = new ArrayList<>();
+                List<ChunkPos> positions = new ArrayList<>((int)(batchEnd - batchStart));
                 for (long index = batchStart; index < batchEnd; index++) {
-                    int cx = a.loX + (int)(index % width), cz = a.loZ + (int)(index / width);
-                    futures.add(level.getChunkSource().getChunkFuture(cx, cz, ChunkStatus.FULL, true));
+                    positions.add(new ChunkPos(a.loX + (int)(index % width), a.loZ + (int)(index / width)));
                 }
-                List<LevelChunk> chunks = new ArrayList<>(futures.size());
-                for (int offset = 0; offset < futures.size(); offset++) {
-                    long index = batchStart + offset;
-                    int cx = a.loX + (int)(index % width), cz = a.loZ + (int)(index / width);
-                    net.minecraft.server.level.ChunkResult<ChunkAccess> result = futures.get(offset).join();
-                    if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + cx + "," + cz + ": " + result.getError());
-                    ChunkAccess raw = result.orElseThrow(() -> new IllegalStateException("chunk generation returned no value at " + cx + "," + cz));
-                    if (!(raw instanceof LevelChunk chunk)) throw new IllegalStateException("full status did not yield LevelChunk at " + cx + "," + cz);
-                    chunks.add(chunk);
+                // Keep a non-expiring loading ticket for every target until its packet
+                // has been encoded. The ordinary getChunkFuture path uses a one-tick
+                // ticket, so a later batch can otherwise unload chunks before encode.
+                List<CompletableFuture<?>> regionFutures = server.submit(() -> {
+                    List<CompletableFuture<?>> futures = new ArrayList<>(positions.size());
+                    for (ChunkPos pos : positions) {
+                        futures.add(level.getChunkSource().addTicketAndLoadWithRadius(
+                            net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0));
+                    }
+                    return futures;
+                }).join();
+                for (int i = 0; i < positions.size(); i++) {
+                    net.minecraft.server.level.ChunkResult<?> region = (net.minecraft.server.level.ChunkResult<?>) regionFutures.get(i).join();
+                    if (!region.isSuccess()) throw new IllegalStateException("region generation failed at " + positions.get(i) + ": " + region.getError());
                 }
                 List<byte[]> hashes = server.submit(() -> {
-                    List<byte[]> result = new ArrayList<>(chunks.size());
-                    for (LevelChunk chunk : chunks) {
+                    List<byte[]> result = new ArrayList<>(positions.size());
+                    for (ChunkPos pos : positions) {
+                        LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
+                        if (chunk == null) throw new IllegalStateException("region future did not retain FULL chunk at " + pos);
                         chunk.postProcessGeneration(level);
                         result.add(digest(packetBody(server, level, chunk)));
                     }
@@ -232,6 +238,11 @@ public final class LargeParityOracle {
                 for (byte[] hash : hashes) {
                     file.write(hash, 0, 2); payloadDigest.update(hash, 0, 2);
                 }
+                server.submit(() -> {
+                    for (ChunkPos pos : positions) {
+                        level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0);
+                    }
+                }).join();
                 double rate = (batchEnd - done) / ((System.nanoTime() - start) / 1_000_000_000.0);
                 System.err.printf("[large-parity] chunks=%d/%d rate=%.1f chunks/s coord=(%d,%d)%n", batchEnd, count, rate,
                     a.loX + (int)((batchEnd - 1) % width), a.loZ + (int)((batchEnd - 1) / width));
