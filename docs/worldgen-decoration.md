@@ -42,6 +42,16 @@ union selects `sulfur_spike_cluster` and `sulfur_spike` at step-7 indices 2 and 
 indices 0 and 1. `decoration_selection_jvm.txt` preserves that external control
 alongside the server-worldgen test.
 
+`UNDERGROUND_ORES` is dispatched through the same catalog rather than treated as an ore-only
+list. `select_ores` emits the configured ore entries, while `select_step6_disks` emits disk
+features to the existing `VegGrid` placement interpreter; both walks count every raw step entry
+so the feature seed index remains global. The disk placement data is still authoritative: its
+heightmap, water and biome modifiers run before the configured disk body, which preserves the
+count/radius/target behavior for sand, gravel and clay disks without duplicating a second disk
+implementation in the ore engine.
+
+Each synthetic 3x3 source pass resets the random wrapper's Gaussian cache before reseeding that source. This keeps cached paired draws local to one source, matching independent source wrappers; sharing the cache would leak a prior source's spare Gaussian into the next feature stream.
+
 Placement modifiers (count, in_square, heightmap, biome, rarity_filter,
 surface_water_depth_filter, noise_threshold_count, random_offset, block_predicate_filter,
 height_range, and the list fan-out `Positions::List`/`count_on_every_layer`/`fixed_placement` need)

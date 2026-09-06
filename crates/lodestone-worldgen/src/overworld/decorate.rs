@@ -434,10 +434,17 @@ impl OverworldGenerator {
                         biomes.extend(pre.3.palette().iter().cloned());
                     }
                 }
-                source_features.insert(
-                    (source_x, source_z),
-                    self.decoration_catalog.select(biomes.iter().map(String::as_str)),
+                let mut features = self.decoration_catalog.select(biomes.iter().map(String::as_str));
+                features.extend(
+                    self.decoration_catalog
+                        .select_step6_disks(biomes.iter().map(String::as_str)),
                 );
+                // `select` omits step 6 because the ore and disk dispatchers
+                // share its raw global index but have different placement
+                // engines. Reinsert disks into the generation-step order after
+                // both selections have walked the same catalog.
+                features.sort_by_key(|(step, index, _)| (*step, *index));
+                source_features.insert((source_x, source_z), features);
             }
         }
         let features_for_source = |source_x: i32, source_z: i32| {

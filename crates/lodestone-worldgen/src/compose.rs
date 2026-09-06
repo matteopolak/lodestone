@@ -249,7 +249,13 @@ impl DecorationCatalog {
         self.ordered.is_empty()
     }
 
-    /// Selects the deduplicated global feature order for the supplied biome set.
+    /// Selects the deduplicated global feature order for the supplied biome set,
+    /// excluding `UNDERGROUND_ORES`.
+    ///
+    /// That step has two consumers: [`Self::select_ores`] and
+    /// [`Self::select_step6_disks`]. Both walk the same catalog and therefore
+    /// retain the one raw per-step index even though they dispatch different
+    /// configured-feature kinds.
     #[must_use]
     pub fn select<'a>(
         &'a self,
@@ -266,14 +272,53 @@ impl DecorationCatalog {
             .iter()
             .filter_map(|(step, id)| {
                 let index = per_step.entry(*step).or_default();
-                let result = selected
-                    .contains(&(*step, id.clone()))
+                let result = (*step != STEP_UNDERGROUND_ORES
+                    && selected.contains(&(*step, id.clone())))
                     .then(|| self.placed.get(id).cloned().map(|placed| (*step, *index, placed)))
                     .flatten();
                 *index += 1;
                 result
             })
             .collect()
+    }
+
+    /// Selects disk features from `UNDERGROUND_ORES` with their global raw
+    /// index. Ore entries and other unsupported step-6 entries remain in the
+    /// index walk but are dispatched by their own engine or as no-ops.
+    #[must_use]
+    pub fn select_step6_disks<'a>(
+        &'a self,
+        biomes: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<(i32, usize, crate::feature::vegetation::PlacedRef)> {
+        let mut selected = HashSet::new();
+        for biome in biomes {
+            if let Some(entries) = self.members.get(biome) {
+                selected.extend(entries.iter().cloned());
+            }
+        }
+        let mut per_step = HashMap::<i32, usize>::new();
+        let out = self
+            .ordered
+            .iter()
+            .filter_map(|(step, id)| {
+                let index = per_step.entry(*step).or_default();
+                let result = (*step == STEP_UNDERGROUND_ORES
+                    && selected.contains(&(*step, id.clone())))
+                    .then(|| {
+                        self.placed.get(id).and_then(|placed| {
+                            matches!(
+                                placed.feature.as_ref(),
+                                crate::feature::vegetation::ConfiguredFeature::Disk(_)
+                            )
+                            .then(|| (*step, *index, placed.clone()))
+                        })
+                    })
+                    .flatten();
+                *index += 1;
+                result
+            })
+            .collect::<Vec<_>>();
+        out
     }
 
     /// Resolves all ore-capable selected entries with their **global** index in
@@ -899,6 +944,73 @@ mod tests {
             ores[0].index, 2,
             "the second biome's preceding feature occupies global index 1 even when it is not eligible"
         );
+    }
+
+    #[test]
+    fn step6_disk_selection_keeps_global_index_and_excludes_ores() {
+        let mut first_steps = vec![Value::Array(Vec::new()); 7];
+        first_steps[STEP_UNDERGROUND_ORES as usize] = serde_json::json!([
+            "minecraft:non_disk_a",
+            "minecraft:disk_gravel"
+        ]);
+        let mut second_steps = vec![Value::Array(Vec::new()); 7];
+        second_steps[STEP_UNDERGROUND_ORES as usize] = serde_json::json!([
+            "minecraft:non_disk_b",
+            "minecraft:disk_gravel"
+        ]);
+        let mut biomes = HashMap::new();
+        biomes.insert("minecraft:first", serde_json::json!({"features": first_steps}));
+        biomes.insert("minecraft:second", serde_json::json!({"features": second_steps}));
+
+        let mut placed = HashMap::new();
+        for id in ["minecraft:non_disk_a", "minecraft:non_disk_b"] {
+            placed.insert(id, serde_json::json!({"feature": "minecraft:plain", "placement": []}));
+        }
+        placed.insert(
+            "minecraft:disk_gravel",
+            serde_json::json!({"feature": "minecraft:disk_gravel_cf", "placement": []}),
+        );
+        let mut features = HashMap::new();
+        features.insert("minecraft:plain", serde_json::json!({"type": "minecraft:lake", "config": {}}));
+        features.insert(
+            "minecraft:disk_gravel_cf",
+            serde_json::json!({
+                "type": "minecraft:disk",
+                "config": {
+                    "half_height": 2,
+                    "radius": {"type": "minecraft:uniform", "min_inclusive": 2, "max_inclusive": 5},
+                    "state_provider": {
+                        "type": "minecraft:simple_state_provider",
+                        "state": {"Name": "minecraft:gravel"}
+                    },
+                    "target": {"type": "minecraft:matching_blocks", "blocks": ["minecraft:dirt"]}
+                }
+            }),
+        );
+        let resolver = FakeResolver {
+            tags: HashMap::new(),
+            biomes,
+            carvers: HashMap::new(),
+            features,
+            placed,
+        };
+
+        let catalog = build_decoration_catalog(
+            &resolver,
+            &["minecraft:first".to_string(), "minecraft:second".to_string()],
+        );
+        let disks = catalog.select_step6_disks(["minecraft:first"]);
+        assert_eq!(disks.len(), 1);
+        assert_eq!(disks[0].0, STEP_UNDERGROUND_ORES);
+        assert_eq!(disks[0].1, 2, "step-6 index includes both preceding global entries");
+        assert!(matches!(
+            disks[0].2.feature.as_ref(),
+            crate::feature::vegetation::ConfiguredFeature::Disk(_)
+        ));
+        assert!(catalog
+            .select(["minecraft:first"])
+            .iter()
+            .all(|(step, _, _)| *step != STEP_UNDERGROUND_ORES));
     }
 
     #[test]
