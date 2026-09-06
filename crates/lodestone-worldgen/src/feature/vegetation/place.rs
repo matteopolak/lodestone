@@ -34,14 +34,15 @@ pub(super) fn place_simple_block<R: RandomSource>(
         census_bump(|c| c.simple_block_no_state += 1);
         return;
     };
-    // Vanilla's own vegetation-block "can survive": the block below must support vegetation
-    // — see module doc on why this is applied uniformly.
+    // Resolve the target state's own survival family: vegetation requires the
+    // compact supports_vegetation approximation, while support-free feature
+    // states such as potent sulfur do not.
     //
     // This is the single most-executed rejection in the whole engine —
     // `docs/worldgen-vegetation-census.md` counts 74,745 of them in one
     // 136-chunk sweep, every one of which used to be an interner read guard, a
     // `split('[')` and a `HashSet<String>` probe. Unit 8 made it a bit test.
-    if !tag_at(grid, tags, Tag::SupportsVegetation, pos.x, pos.y - 1, pos.z) {
+    if !super::features::simple_block_can_survive(grid, tags, state, pos) {
         census_bump(|c| c.simple_block_unsupported_ground += 1);
         return;
     }
