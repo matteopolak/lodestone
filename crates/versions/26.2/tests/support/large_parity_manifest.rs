@@ -23,7 +23,7 @@ pub fn read_header(mut r: impl Read) -> io::Result<Header> {
     }
     if b[68..100] != sha256(DOMAIN) { return Err(io::Error::new(io::ErrorKind::InvalidData, "large-parity schema digest differs")); }
     if (be_i32(&b[28..32]), be_i32(&b[32..36]), be_i32(&b[36..40]), be_i32(&b[40..44])) != (-500, 500, -500, 500) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "not the required 1001-by-1001 large-parity grid"));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest global bounds differ"));
     }
     let h = Header { cx0: be_i32(&b[44..48]), cx1: be_i32(&b[48..52]), cz0: be_i32(&b[52..56]), cz1: be_i32(&b[56..60]), count: be_u64(&b[60..68]) };
     let expected = (i64::from(h.cx1 - h.cx0 + 1) * i64::from(h.cz1 - h.cz0 + 1)) as u64;

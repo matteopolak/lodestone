@@ -21,14 +21,14 @@ bash scripts/worldgen-oracle/large-parity.sh --out /oracle/pilot.lwp --cx -1 0 -
 python3 scripts/worldgen-oracle/large-parity-manifest.py validate scripts/worldgen-oracle/pilot.lwp
 ```
 
-Use disjoint rectangles for parallel shards. The exporter schedules 256 chunks at a time by default, then post-processes and serializes that batch on the server thread before continuing. `LODESTONE_ORACLE_BATCH` can raise or lower the bounded future set, but a 1,024-future experiment failed after its first 256 completions, so keep the default unless a host-specific pilot proves a larger bound safe. The measured 256-chunk pilot (`0..=15` in both axes) sustained 35.3 chunks/s after server startup on the local Apple Container host; one serial JVM would therefore take roughly 7.9 hours for 1,002,001 chunks. Run disjoint shards in parallel to use more cores, and retain each completed shard. `--resume` authenticates a completed shard, or continues an interrupted file whose payload ends on a 2-byte record boundary and whose final checksum is still zero (the durable in-progress marker). It re-hashes the existing prefix before appending; a partial file carrying a final checksum is rejected rather than guessed at. Merge only complete coverage:
+Use disjoint rectangles for parallel shards. The exporter schedules 256 chunks at a time by default, retaining a non-expiring loading ticket for every target until the server-thread post-processing and packet encoding complete, then releasing those tickets before the next batch. `LODESTONE_ORACLE_BATCH` can raise or lower the bounded future set, but keep it bounded because the server-thread encode step retains each loaded chunk. The earlier one-tick ticket path could unload chunks between batches; the loading-ticket lifetime is now explicit. Measure a fresh pilot on the host before projecting the million-chunk run. Run disjoint shards in parallel to use more cores, and retain each completed shard. `--resume` authenticates a completed shard, or continues an interrupted file whose payload ends on a 2-byte record boundary and whose final checksum is still zero (the durable in-progress marker). It re-hashes the existing prefix before appending; a partial file carrying a final checksum is rejected rather than guessed at. Merge only complete coverage:
 
 ```text
 python3 scripts/worldgen-oracle/large-parity-manifest.py merge --out /absolute/path/full.lwp shard-*.lwp
 LODESTONE_LARGE_PARITY_MANIFEST=/absolute/path/full.lwp cargo test -p lodestone-v26-2 --test large_worldgen_parity -- --ignored
 ```
 
-The merger rejects overlaps, holes, wrong bounds, malformed headers and a changed payload bit. A new packet layout or hash input requires a new schema version/domain string and matching Java exporter, Python validator and Rust reader; never reinterpret a v2 fingerprint.
+The merger rejects overlaps, holes, wrong bounds, malformed headers and a changed payload bit. The ignored Rust comparator accepts any authenticated in-bounds shard, so a 2,000–5,000 chunk pilot can be compared immediately; set `LODESTONE_LARGE_PARITY_REQUIRE_FULL_GRID=1` when a comparison must prove the merged 1001² coverage. A new packet layout or hash input requires a new schema version/domain string and matching Java exporter, Python validator and Rust reader; never reinterpret a v2 fingerprint.
 
 ## Configuration
 
