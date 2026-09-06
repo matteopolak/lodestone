@@ -12,7 +12,15 @@ CLASS="${1:?usage: run.sh <OracleClass> [args...]}"
 shift || true
 ARGS="$*"
 export ORACLE_ARGS="$ARGS"
-CACHE="$(cd "$(dirname "$0")/../../.cache/mc/26.2" && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+CACHE="${LODESTONE_MC_CACHE:-$REPO_ROOT/.cache/mc/26.2}"
+if [ ! -d "$CACHE" ]; then
+  CACHE="/Users/matthew/projects/lodestone/.cache/mc/26.2"
+fi
+if [ ! -d "$CACHE" ]; then
+  echo "26.2 cache not found; set LODESTONE_MC_CACHE to a cache containing the server jar" >&2
+  exit 1
+fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 container system start >/dev/null 2>&1 || true
 container run --rm \
@@ -25,7 +33,21 @@ container run --rm \
   bash -c '
     set -e
     CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
-    mkdir -p /work && cp /oracle/'"$CLASS"'.java /work/
+    mkdir -p /work
+    if [ ! -f /work/server.properties ]; then
+      printf "%s\\n" \
+        "level-name=world" \
+        "level-seed=42" \
+        "level-type=minecraft\\:normal" \
+        "online-mode=false" \
+        "enable-status=false" \
+        "pause-when-empty-seconds=0" \
+        "view-distance=2" \
+        "simulation-distance=2" \
+        "server-port=25565" > /work/server.properties
+    fi
+    printf 'eula=true\n' > /work/eula.txt
+    cp /oracle/'"$CLASS"'.java /work/
     javac -cp "$CP" -d /work /work/'"$CLASS"'.java
     java -cp "/work:$CP" '"$CLASS"'
   '

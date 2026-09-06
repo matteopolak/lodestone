@@ -10,7 +10,7 @@ The recorded seed is `42`, matching the existing composed 26.2 fixture. The expo
 
 Per-chunk SHA-256 v2 is defined over the exact uncompressed `level_chunk_with_light` packet payload bytes. This includes the packet body's chunk coordinates, heightmaps, section data, block entities, and light data. Packet id, VarInt packet-length framing, compression framing, encryption, and transport are excluded. The row-major manifest position identifies which coordinate each fingerprint belongs to. The finished exporter must obtain the payload only after the real server bulk chunk-status pipeline has produced the final chunk, including decoration, structure state, block entities, spawns and light.
 
-The current low-level exporter cannot supply that byte source and remains a blocked scaffold; it must not produce a v2 comparison dataset. The ignored comparison belongs downstream with the production `lodestone-v26-2` packet encoder, not in `lodestone-worldgen`, because recreating serialization here would compare two independently-maintained encoders rather than the delivered protocol.
+`LargeParityOracle` now boots the bundled compiled server in-process, obtains each chunk through the real scheduled `FULL` status pipeline, runs the final post-processing step, constructs `ClientboundLevelChunkWithLightPacket`, and invokes its production stream codec with the server's registry access. It therefore hashes the same uncompressed packet body a network connection would carry, without packet framing, compression, encryption, or transport. The exporter is deliberately separate from `lodestone-worldgen`: recreating packet serialization in the generator would compare two independently-maintained encoders rather than the delivered protocol.
 
 ## How to change it
 
@@ -21,7 +21,7 @@ bash scripts/worldgen-oracle/large-parity.sh --out /oracle/pilot.lwp --cx -1 0 -
 python3 scripts/worldgen-oracle/large-parity-manifest.py validate scripts/worldgen-oracle/pilot.lwp
 ```
 
-Use disjoint rectangles for parallel shards. `--resume` authenticates a completed shard, or continues an interrupted file whose payload ends on a 2-byte record boundary and whose final checksum is still zero (the durable in-progress marker). It re-hashes the existing prefix before appending; a partial file carrying a final checksum is rejected rather than guessed at. Merge only complete coverage:
+Use disjoint rectangles for parallel shards. The exporter schedules 256 chunks at a time, then serializes and fingerprints that batch before continuing. The first measured 256-chunk pilot (`0..=15` in both axes) sustained 10.3 chunks/s after server startup on the local Apple Container host; one serial JVM would therefore take roughly 27 hours for 1,002,001 chunks. Run disjoint shards in parallel to use more cores, and retain each completed shard. `--resume` authenticates a completed shard, or continues an interrupted file whose payload ends on a 2-byte record boundary and whose final checksum is still zero (the durable in-progress marker). It re-hashes the existing prefix before appending; a partial file carrying a final checksum is rejected rather than guessed at. Merge only complete coverage:
 
 ```text
 python3 scripts/worldgen-oracle/large-parity-manifest.py merge --out /absolute/path/full.lwp shard-*.lwp

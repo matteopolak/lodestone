@@ -3,6 +3,8 @@
 mod support { pub mod large_parity_manifest; }
 
 use std::{fs::File, io::{BufReader, Read, Seek, SeekFrom}};
+use lodestone_server::{ChunkSource, ServerDirective, ServerProtocol, overworld_chunk_source};
+use lodestone_v26_2::V770ServerProtocol;
 use support::large_parity_manifest::{HEADER_BYTES, read_header, payload_digest_from_header, verify_payload};
 
 #[test]
@@ -27,6 +29,38 @@ fn full_grid_manifest_streams_before_rust_comparison() {
     assert_eq!((h.cx0,h.cx1,h.cz0,h.cz1,h.count), (-500,500,-500,500,1_002_001));
     let mut payload_file = File::open(&path).expect("reopen manifest"); payload_file.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek payload");
     verify_payload(BufReader::new(payload_file), h.count, payload_digest_from_header(&raw_header)).expect("payload integrity");
-    panic!("manifest is authentic and stream-addressable, but this v26-2 test needs a narrow public production chunk-packet encoding seam; do not duplicate serialization in test support");
+    let mut payload_file = File::open(&path).expect("reopen manifest payload");
+    payload_file.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek payload");
+    let mut expected = BufReader::new(payload_file);
+    let source = overworld_chunk_source(42);
+    let max_chunks = std::env::var("LODESTONE_LARGE_PARITY_MAX_CHUNKS")
+        .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(h.count);
+    let limit = max_chunks.min(h.count);
+    let width = (h.cx1 - h.cx0 + 1) as u64;
+    let mut fingerprint = [0u8; 2];
+    for index in 0..limit {
+        expected.read_exact(&mut fingerprint).expect("manifest fingerprint");
+        let cx = h.cx0 + (index % width) as i32;
+        let cz = h.cz0 + (index / width) as i32;
+        let directive = V770ServerProtocol.encode_chunk(cx, cz, &source.column(cx, cz));
+        let payload = match directive {
+            ServerDirective::Send { packet_id, payload } => {
+                assert_eq!(packet_id, lodestone_v26_2::packets::play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
+                payload
+            }
+            other => panic!("production chunk encoder returned {other:?} at ({cx},{cz})"),
+        };
+        let full = support::large_parity_manifest::sha256(&payload);
+        if full[..2] != fingerprint {
+            panic!(
+                "large packet parity mismatch at ({cx},{cz}) after {index} matching chunks: reference fingerprint {:02x}{:02x}, Lodestone SHA-256 {}",
+                fingerprint[0], fingerprint[1], hex(&full),
+            );
+        }
+        if (index + 1) % 256 == 0 || index + 1 == limit {
+            eprintln!("large packet parity: compared {}/{} chunks (batch boundary at ({cx},{cz}))", index + 1, limit);
+        }
+    }
+    assert_eq!(limit, h.count, "bounded pilot completed; set LODESTONE_LARGE_PARITY_MAX_CHUNKS only for an explicit pilot");
 }
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
