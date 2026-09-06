@@ -21,7 +21,18 @@ bash scripts/worldgen-oracle/large-parity.sh --out /oracle/pilot.lwp --cx -1 0 -
 python3 scripts/worldgen-oracle/large-parity-manifest.py validate scripts/worldgen-oracle/pilot.lwp
 ```
 
-Use disjoint rectangles for parallel shards. The exporter schedules 256 chunks at a time by default, retaining a non-expiring loading ticket for every target until the server-thread post-processing and packet encoding complete, then releasing those tickets before the next batch. `LODESTONE_ORACLE_BATCH` can raise or lower the bounded future set, but keep it bounded because the server-thread encode step retains each loaded chunk. The earlier one-tick ticket path could unload chunks between batches; the loading-ticket lifetime is now explicit. A local 4,096-chunk pilot (16 batches, `cx=-244..=-229`, `cz=-244..=11`) sustained 78.1 chunks/s after startup, projecting about 3.56 hours for 1,002,001 chunks in one JVM; measure again when the host or batch size changes. Run disjoint shards in parallel to use more cores, and retain each completed shard. `--resume` authenticates a completed shard, or continues an interrupted file whose payload ends on a 2-byte record boundary and whose final checksum is still zero (the durable in-progress marker). It re-hashes the existing prefix before appending; a partial file carrying a final checksum is rejected rather than guessed at. Merge only complete coverage:
+Use disjoint rectangles for parallel shards. The exporter schedules 256 chunks at a time by default, retaining a non-expiring loading ticket for every target until the server-thread post-processing and packet encoding complete, then releasing those tickets before the next batch. `LODESTONE_ORACLE_BATCH` can raise or lower the bounded future set, but keep it bounded because the server-thread encode step retains each loaded chunk. The earlier one-tick ticket path could unload chunks between batches; the loading-ticket lifetime is now explicit. A local 4,096-chunk pilot (16 batches, `cx=-244..=-229`, `cz=-244..=11`) sustained 78.1 chunks/s after startup, projecting about 3.56 hours for 1,002,001 chunks in one JVM; measure again when the host or batch size changes. Run disjoint shards in parallel to use more cores, and retain each completed shard. `--resume` authenticates a completed shard, or continues an interrupted file whose payload ends on a 2-byte record boundary and whose final checksum is still zero (the durable in-progress marker). It re-hashes the existing prefix before appending; a partial file carrying a final checksum is rejected rather than guessed at.
+
+For the full run, start several `full-parity-worker.sh` processes with distinct zero-based worker indices and the same worker count. The script partitions `cx=-500..=500` into 16-wide vertical shards. Each row-major 256-record batch is then a compact 16 by 16 tile instead of a 256 by 1 strip, avoiding repeated dependency-boundary generation. Every output shard remains independently resumable and mergeable.
+
+```text
+bash scripts/worldgen-oracle/full-parity-worker.sh 0 4
+bash scripts/worldgen-oracle/full-parity-worker.sh 1 4
+bash scripts/worldgen-oracle/full-parity-worker.sh 2 4
+bash scripts/worldgen-oracle/full-parity-worker.sh 3 4
+```
+
+Merge only complete coverage:
 
 ```text
 python3 scripts/worldgen-oracle/large-parity-manifest.py merge --out /absolute/path/full.lwp shard-*.lwp
