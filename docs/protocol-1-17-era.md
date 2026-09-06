@@ -217,10 +217,15 @@ state table because the numbering spaces differ.
 synchronizes block entities, and emits one section-dirty event. Its packed
 header decodes x/z as signed 22-bit fields and handles the important era
 difference: section Y is unsigned at 756 but signed at 758. Equipment uses the
-top-bit-terminated list, but remains ignored because this family has no
-authoritative 1.17/1.18 item registry map; the current `lodestone-data` item
-table is for a different protocol. `block_action` is likewise left ignored
-until a protocol-local block registry map exists. Textual attribute names and
+top-bit-terminated list and the committed per-protocol jar reports resolve its
+item ids before `EntityEquipmentUpdated` reaches ECS and rendering consumers.
+The supported census is every empty or NBT-free item slot and every defined
+equipment ordinal (at most eight records); an item with legacy NBT fails
+explicitly because the
+canonical item-component model cannot preserve that payload. `block_action`
+uses the same reports to resolve every defined block id and emits `BlockEvent`
+with the exact position and opaque parameter bytes for the shell's chest,
+note-block, piston, and similar visible-event consumers. Textual attribute names and
 UUID modifiers are retained with bounded attribute and modifier counts; the
 wire `minecraft:generic.*` keys are normalized to the model's canonical
 `minecraft:*` keys, and unknown keys are consumed but omitted. Explosions also

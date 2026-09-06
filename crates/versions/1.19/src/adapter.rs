@@ -11,7 +11,8 @@ use lodestone_model::{
     ChatAckInfo, ChatKind, ChatMode, ChatSessionInfo, ChunkPos, ClientAction, ClientEvent,
     ClientSettings, CollisionRule,
     ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityAttributeModifier,
-    EntityAttributeSnapshot, EntityInteraction, EntityMetadataUpdate, EntityMovement, GameMode, Hand,
+    EntityAttributeSnapshot, EntityEquipment, EntityInteraction, EntityMetadataUpdate, EntityMovement,
+    EquipmentSlot, GameMode, Hand, ItemStack,
     LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType, PlayerCommand, PlayerListEntry,
     ProfileProperty, RecipeBookType, ResourceKey,
     ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, TeamAction, TeamColor,
@@ -49,6 +50,8 @@ use crate::packets::window::{
     CloseWindow, EnchantItem, HeldItemSlot, ServerboundCloseWindow, ServerboundHeldItemSlot,
     SetCreativeSlot,
 };
+use crate::packets::world::BlockAction;
+use crate::registry::{block as protocol_block, item as protocol_item};
 
 /// The protocol this family speaks, and the one a zero-argument [`adapter`]
 /// constructs.
@@ -773,6 +776,35 @@ fn dec_err(err: impl std::fmt::Display) -> AdapterError {
     AdapterError::Decode(err.to_string())
 }
 
+/// Converts the pre-component item stack carried by protocol 762 into the
+/// model's canonical item identity. The numeric id is resolved through the
+/// 1.19.4 jar registry, never through the 26.2 table in `lodestone-data`.
+fn slot_to_item_stack(slot: Slot) -> Result<Option<ItemStack>, AdapterError> {
+    let Slot::Item { id, count, nbt } = slot else {
+        return Ok(None);
+    };
+    let item = protocol_item(PROTOCOL_1_19_4, id)
+        .ok_or_else(|| AdapterError::Decode(format!("unknown protocol-762 item id {id}")))?;
+    let count = u32::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("negative item count {count}")))?;
+    Ok(Some(ItemStack {
+        item,
+        count,
+        // Protocol 762 carries legacy NBT rather than a component patch. Keep
+        // the identity and count usable, while marking the opaque tail so a
+        // consumer does not mistake it for a genuinely bare stack.
+        components: lodestone_model::ItemComponents {
+            has_unmodeled: nbt.is_some(),
+            ..lodestone_model::ItemComponents::default()
+        },
+    }))
+}
+
+fn equipment_slot(ordinal: u8) -> Result<EquipmentSlot, AdapterError> {
+    EquipmentSlot::from_ordinal(ordinal)
+        .ok_or_else(|| AdapterError::Decode(format!("unknown equipment slot ordinal {ordinal}")))
+}
+
 /// Maps a `boss_bar` varint colour ordinal to the canonical [`BossColor`].
 fn boss_color_from_ordinal(ordinal: i32) -> Result<BossColor, AdapterError> {
     match ordinal {
@@ -1287,6 +1319,43 @@ impl V762Adapter {
         let body: EntityDestroy = adapter.decode_body_exact(payload)?;
         Ok(vec![Directive::Emit(ClientEvent::EntityRemoved {
             entity_ids: body.entity_ids,
+        })])
+    }
+
+    /// `minecraft:entity_equipment`. The slot ordinal's high bit means that
+    /// another slot follows; this is a batched packet even when one slot is
+    /// the common case. The item body is the pre-1.20 boolean/id/count/NBT
+    /// slot shape, so it must not be decoded as a component patch.
+    fn handle_play_entity_equipment(
+        adapter: &V762Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let entity_id = reader.var_i32().map_err(dec_err)?;
+        let mut equipment = Vec::new();
+        loop {
+            if equipment.len() >= EquipmentSlot::ALL.len() {
+                return Err(AdapterError::Decode(format!(
+                    "entity equipment list exceeds {} slots",
+                    EquipmentSlot::ALL.len()
+                )));
+            }
+            let slot_byte = reader.u8().map_err(dec_err)?;
+            let slot = equipment_slot(slot_byte & 0x7f)?;
+            let item = Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)?;
+            equipment.push(EntityEquipment {
+                slot,
+                item: slot_to_item_stack(item)?,
+            });
+            if slot_byte & 0x80 == 0 {
+                break;
+            }
+        }
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+            entity_id,
+            equipment,
         })])
     }
 
@@ -1898,6 +1967,94 @@ impl V762Adapter {
                 pos.y.rem_euclid(16) as u8,
                 pos.z.rem_euclid(16) as u8,
             ]],
+        })])
+    }
+
+    /// `minecraft:multi_block_change`. The header is a packed section
+    /// position, followed by the light-suppression flag, a VarInt count and
+    /// VarLong records carrying `state << 12 | local_x << 8 | local_z << 4 |
+    /// local_y`. Every state is bridged through this protocol's canonical
+    /// table before entering the world store.
+    fn handle_play_multi_block_change(
+        adapter: &V762Adapter,
+        world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let packed = reader.i64().map_err(dec_err)? as u64;
+        let sign_extend = |value: u64, bits: u32| -> i32 {
+            let shift = 64 - bits;
+            ((value << shift) as i64 >> shift) as i32
+        };
+        let section_x = sign_extend(packed >> 42, 22);
+        let section_z = sign_extend((packed >> 20) & ((1 << 22) - 1), 22);
+        let section_y = sign_extend(packed & ((1 << 20) - 1), 20);
+        let _suppress_light_updates = reader.bool().map_err(dec_err)?;
+        let raw_count = reader.var_i32().map_err(dec_err)?;
+        let count = usize::try_from(raw_count)
+            .map_err(|_| AdapterError::Decode(format!("negative multi-block count {raw_count}")))?;
+        const MAX_MULTI_BLOCKS: usize = 4096;
+        if count > MAX_MULTI_BLOCKS {
+            return Err(AdapterError::Decode(format!(
+                "multi-block count {count} exceeds {MAX_MULTI_BLOCKS}"
+            )));
+        }
+        let mut blocks = Vec::with_capacity(count);
+        let mut changed = Vec::with_capacity(count);
+        let mut tally = FallbackTally::default();
+        for _ in 0..count {
+            let record = reader.var_i64().map_err(dec_err)? as u64;
+            let local = (record & 0xfff) as u16;
+            let wire_state = (record >> 12) as u32;
+            let x = ((local >> 8) & 0xf) as u8;
+            let z = ((local >> 4) & 0xf) as u8;
+            let y = (local & 0xf) as u8;
+            let state = adapter
+                .current_shape()
+                .canonical
+                .resolve_or_air(wire_state, &mut tally);
+            blocks.push((x, y, z, state.raw()));
+            changed.push([x, y, z]);
+        }
+        reader.ensure_empty().map_err(dec_err)?;
+        world.set_blocks(section_x, section_y, section_z, &blocks);
+        for &(x, y, z, state) in &blocks {
+            world.sync_block_entity(
+                (section_x << 4) | i32::from(x),
+                (section_y << 4) | i32::from(y),
+                (section_z << 4) | i32::from(z),
+                block_entity_type(
+                    lodestone_data::block_states::StateId::new(state)
+                        .expect("canonical state id is validated by the table"),
+                )
+                .map(|kind| kind.raw()),
+            );
+        }
+        if changed.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
+            section: SectionPos::new(section_x, section_y, section_z),
+            blocks: changed,
+        })])
+    }
+
+    /// `minecraft:block_action` / block event. Its final VarInt is a
+    /// protocol-762 block registry id, distinct from the canonical block
+    /// table used for world state ids.
+    fn handle_play_block_action(
+        adapter: &V762Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: BlockAction = adapter.decode_body_exact(payload)?;
+        let block = protocol_block(adapter.protocol, body.block_id)
+            .ok_or_else(|| AdapterError::Decode(format!("unknown protocol-762 block id {}", body.block_id)))?;
+        Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
+            pos: body.location.0,
+            b0: body.byte1,
+            b1: body.byte2,
+            block,
         })])
     }
 
@@ -2828,6 +2985,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:entity_equipment",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V762Adapter::handle_play_entity_equipment,
+        ),
+    ),
+    (
         "minecraft:kick_disconnect",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2954,6 +3118,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:block_action",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V762Adapter::handle_play_block_action,
+        ),
+    ),
+    (
         "minecraft:explosion",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2986,6 +3157,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
             V762Adapter::handle_play_block_change,
+        ),
+    ),
+    (
+        "minecraft:multi_block_change",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V762Adapter::handle_play_multi_block_change,
         ),
     ),
     (
@@ -3227,7 +3405,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "minecraft:tile_entity_data",
         "v26-2 has this; backport (BLOCK_ENTITY_DATA)",
     ),
-    lodestone_core::dispatch::IGNORED::new("minecraft:block_action", "v26-2 has this; backport (BLOCK_EVENT)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:declare_commands", "v26-2 has this; backport (COMMANDS)"),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:ping",
@@ -3266,14 +3443,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:resource_pack_send",
         "v26-2 has this; backport (RESOURCE_PACK_PUSH)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:multi_block_change",
-        "v26-2 has this; backport (SECTION_BLOCKS_UPDATE)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_equipment",
-        "v26-2 has this; backport (SET_EQUIPMENT)",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:entity_sound_effect",

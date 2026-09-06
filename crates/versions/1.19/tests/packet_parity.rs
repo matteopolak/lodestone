@@ -314,3 +314,113 @@ fn textual_attributes_map_to_canonical_keys_and_keep_uuid_modifiers() {
     assert_eq!(attributes[1].base, 0.7);
     assert!(attributes[1].modifiers.is_empty());
 }
+
+#[test]
+fn entity_equipment_decodes_762_legacy_slot_and_registry_id() {
+    // Entity 42; terminal head slot; three diamonds (1.19.4 item registry id
+    // 760); the final zero is the legacy no-NBT marker.
+    let body = hex("2a0501f8050300");
+    let directives = decode(packet_ids::play::clientbound::ENTITY_EQUIPMENT, &body);
+    let [Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+        entity_id,
+        equipment,
+    })] = directives.as_slice()
+    else {
+        panic!("expected equipment directive, got {directives:?}");
+    };
+    assert_eq!(*entity_id, 42);
+    assert_eq!(equipment.len(), 1);
+    assert_eq!(equipment[0].slot, lodestone_model::EquipmentSlot::Head);
+    let item = equipment[0].item.as_ref().expect("slot is occupied");
+    assert_eq!(item.item.to_string(), "minecraft:diamond");
+    assert_eq!(item.count, 3);
+    assert!(!item.components.has_unmodeled);
+}
+
+#[test]
+fn entity_equipment_rejects_more_than_the_eight_defined_slots() {
+    // Entity 1; eight continued empty entries (ordinals 0..=7), followed by
+    // a ninth terminal entry. The decoder must reject before reading or
+    // allocating for that ninth entry.
+    let body = hex("01800081008200830084008500860087000000");
+    let error = adapter_for(PROTOCOL_1_19_4)
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            packet_ids::play::clientbound::ENTITY_EQUIPMENT,
+            &body,
+        )
+        .expect_err("an overlong equipment continuation must be rejected");
+    assert!(error.to_string().contains("exceeds 8 slots"), "{error}");
+}
+
+#[test]
+fn multi_block_change_updates_world_and_emits_section_dirty_signal() {
+    // Section (x=2, y=-1, z=-3), no light suppression, two records. The
+    // packed long and VarLong records are literal protocol bytes, not encoded
+    // with this crate's packet definitions.
+    let body = hex("00000bffffdfffff0002b222edbf01");
+    let mut world = World::new();
+    world.load(
+        ChunkPos::new(2, -3),
+        LoadedChunk::new(
+            ChunkColumn::new(
+                -64,
+                24,
+                PaletteKind::block_states(),
+                PaletteKind::biomes(),
+                0,
+                0,
+            ),
+            ColumnLight::new(24),
+            Heightmaps::new(),
+            Vec::new(),
+        ),
+    );
+    let directives = adapter_for(PROTOCOL_1_19_4)
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            packet_ids::play::clientbound::MULTI_BLOCK_CHANGE,
+            &body,
+        )
+        .expect("literal multi-block update decodes");
+    assert_eq!(world.block_state_at(33, -14, -45), Some(1));
+    let [Directive::Emit(ClientEvent::SectionBlocksChanged { section, blocks })] = directives.as_slice()
+    else {
+        panic!("expected section dirty signal, got {directives:?}");
+    };
+    assert_eq!(*section, lodestone_model::SectionPos::new(2, -1, -3));
+    assert_eq!(blocks, &vec![[1, 2, 3], [15, 13, 14]]);
+}
+
+#[test]
+fn multi_block_change_rejects_trailing_bytes() {
+    let body = hex("00000bffffdfffff0001b222ff");
+    let error = adapter_for(PROTOCOL_1_19_4)
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            packet_ids::play::clientbound::MULTI_BLOCK_CHANGE,
+            &body,
+        )
+        .expect_err("a trailing byte must not be accepted");
+    assert!(error.to_string().contains("trailing"), "{error}");
+}
+
+#[test]
+fn block_action_maps_762_block_registry_id_to_block_event() {
+    // Position (3, 10, -4), note-block parameters (0, 6), block registry id
+    // 101 from the 1.19.4 jar registry.
+    let body = hex("000000ffffffc00a000665");
+    let directives = decode(packet_ids::play::clientbound::BLOCK_ACTION, &body);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::BlockEvent {
+            pos: lodestone_model::BlockPos::new(3, 10, -4),
+            b0: 0,
+            b1: 6,
+            block: "minecraft:note_block".parse().unwrap(),
+        })]
+    );
+}

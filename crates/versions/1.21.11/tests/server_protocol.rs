@@ -1,11 +1,10 @@
-use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
+use lodestone_core::{Ctx, Decode, Reader, State};
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Vec3f};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_21_11::{V774ServerProtocol, packet_ids};
 use lodestone_v1_21_11::packets::chunk::{ChunkShape, LevelChunk};
 use lodestone_v1_21_11::packets::configuration::RegistryData;
-use lodestone_v1_21_11::packets::game::{JoinGame, PlayerAction};
-use lodestone_v1_21_11::packets::position::Position;
+use lodestone_v1_21_11::packets::game::JoinGame;
 
 const CTX: Ctx = Ctx { version: 774 };
 
@@ -121,9 +120,11 @@ fn chunk_framing_and_exact_state_rejection() {
 #[test]
 fn block_action_and_initial_chunk_batch_use_the_hosted_wire_shapes() {
     let protocol = V774ServerProtocol;
-    let body = encode_body(&PlayerAction {
-        status: 0, location: Position::new(3, 101, 5), face: 1, sequence: 17,
-    }, CTX).unwrap();
+    // Independently assembled protocol-774 body: start-destroy status 0,
+    // packed position (3, 101, 5), upward face 1 and prediction sequence 17.
+    let mut body = vec![0x00];
+    body.extend((3_i64 << 38 | 5_i64 << 12 | 101_i64).to_be_bytes());
+    body.extend([0x01, 0x11]);
     assert_eq!(protocol.decode(State::Play, packet_ids::play::serverbound::PLAYER_ACTION, &body),
         ServerBound::BlockAction {
             action: BlockActionKind::StartDestroy,

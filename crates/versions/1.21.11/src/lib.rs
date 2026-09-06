@@ -66,8 +66,10 @@ pub(crate) mod generated_entity_types;
 pub mod generated_canonical;
 
 pub mod adapter;
+mod block_registry;
 pub mod canonical;
 pub mod entity_types;
+mod item_registry;
 pub mod packets;
 pub mod server_protocol;
 pub use server_protocol::V774ServerProtocol;

@@ -226,22 +226,31 @@ The block-state and entity-type tables are generated from the jar's own reports
 and pinned by an FNV-1a content hash on the committed dump, with a `#[ignore]`d
 drift guard that regenerates under `LODESTONE_REGEN=1`.
 
-`cargo xtask connectedness` reports this family at **64/122 clientbound
-decoded, 63/122 emitting, 0 decoded-but-stranded, 31/58 serverbound encoded**.
+`cargo xtask connectedness` reports this family at **67/122 clientbound
+decoded, 66/122 emitting, 0 decoded-but-stranded, 31/58 serverbound encoded**.
 The 58 that decode nothing are enumerated in `adapter::IGNORED` with a reason
 each, so the dispatch table refuses to build if a packet is dropped by
 omission. The commonest reason is a missing 766 registry table — item ids, sound
 ids and attribute ids all name registry entries this crate cannot yet resolve
-into canonical keys, which is what keeps `window_items`, `set_slot`,
-`open_window`, `entity_equipment` and the sound packets out.
+into canonical keys, which still keeps `window_items`, `set_slot`, `open_window`,
+and the sound packets out.
 
-The committed 1.20.6 registry dump does contain the source numeric item,
-attribute, block, and sound registries, but this crate has no generated
-production mapping from those ids to canonical item/attribute/block keys.
-`entity_equipment`, `entity_update_attributes`, and `block_action` therefore
-remain ignored: adding any one requires a checked generated mapping and exact
-wire-byte tests, rather than consulting the test-only dump at runtime or
-guessing an id from a newer registry.
+`entity_equipment`, `entity_update_attributes`, and `block_action` use the
+generated `generated_registry` table. `tests/registry_mappings.rs` renders its
+1,330 item, 22 attribute, and 1,060 block rows from the committed jar report;
+the production adapter binary-searches that table and never consults test data
+at runtime. Equipment uses the continuation bit to preserve every changed slot,
+then enters the existing entity/ECS render flow as canonical `ItemStack` values.
+An added or removed component patch is retained as `ItemComponents::has_unmodeled`,
+so a consumer cannot mistake a prototype-only stack for its complete effective
+value. Attributes carry a numeric registry holder, base value, and UUID modifiers;
+the adapter removes the wire registry's `generic.*`, `player.*`, and `zombie.*`
+prefixes to form the model's canonical attribute keys before the existing attribute
+consumer merges them. Block events
+preserve their packed position, both opaque bytes, and canonical block key; the
+shell's established event stream feeds chest lids, bells, gateways, and spawners.
+`tests/packet_parity.rs` supplies independent literal bodies for all three
+paths, including a continued equipment list and a non-square packed position.
 
 ## How to change it
 
@@ -251,11 +260,17 @@ guessing an id from a newer registry.
   `PROTOCOLS`, widen the `#[mc(protocols = ...)]` range on each packet whose
   shape the adjacency table says is unchanged, and record a second capture. The
   22 shapes the measurement says differ are the work; the rest is a table.
-* **Wiring one of the 61 ignored packets.** Move its `IGNORED` entry to
+* **Wiring one of the 58 ignored packets.** Move its `IGNORED` entry to
   `CLIENTBOUND` and write the handler. Spell the row as a literal
   `Handler::new(` with the packet name beside it: `cargo xtask connectedness`
   anchors on exactly that text, and a helper function that builds the row leaves
   the instrument reporting zero arms examined while the table is correct.
+* **Refreshing a registry bridge.** Update the jar-generated report, update the
+  pinned counts in `tests/registry_mappings.rs` if the report shape genuinely
+  changed, then run its ignored `committed_table_matches_dump` test with
+  `LODESTONE_REGEN=1`. Do not import the test report from production code or
+  borrow a neighbouring protocol's numeric order: a valid but shifted id names
+  the wrong item, attribute, or block without a decode error.
 * **Adding a component type.** Extend `read_component_payload`'s table in
   `packets/slot.rs`. Never add a default arm: the payload widths are
   type-implied, so a wrong guess desynchronises the stream.

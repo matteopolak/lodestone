@@ -88,10 +88,20 @@ rejects the *join*, not the message.
 
 ### Bounded gameplay updates
 
-The adapter consumes five small gameplay paths that are not represented by the
-flat-world join capture. `block_break_animation` preserves its entity id,
-packed position and raw stage byte as `ClientEvent::BlockDestruction` so the
-overlay consumer can also see its clear sentinel. `entity_metadata` reuses the
+The adapter consumes eight small gameplay paths that are not represented by the
+flat-world join capture. `entity_equipment` decodes the continuation-bit slot
+list and the pre-component item shape, resolving item ids through the committed
+1.19.4 jar registry before emitting `ClientEvent::EntityEquipmentUpdated`.
+`multi_block_change` applies every canonicalised state to the loaded section,
+synchronises block entities, and emits `ClientEvent::SectionBlocksChanged` so
+the renderer's section consumer remeshes server-authoritative edits. The
+`block_action` block event resolves its final block-type id through the same
+era-local registry and emits the opaque parameters as `ClientEvent::BlockEvent`.
+These registry lookups are deliberately separate from the canonical 26.2
+block-state and item tables: the numeric spaces do not share an ordering.
+`block_break_animation` preserves its entity id, packed position and raw stage
+byte as `ClientEvent::BlockDestruction` so the overlay consumer can also see
+its clear sentinel. `entity_metadata` reuses the
 era's typed, sentinel-terminated codec, but reports only index zero's shared
 flags byte: all other indexes need an entity category the packet does not
 carry. Its serializer table is not inherited from 1.17: the real capture's
@@ -395,12 +405,9 @@ and are read from there by `tests/capture_join.rs`. The 1.19.4 row sets
 `level-type=FLAT` and `enforce-secure-profile=false`; the second is not
 optional, because an enforcing server rejects the join rather than the message.
 
-Two things this era does **not** settle. `minecraft-data` models 1.19.4's
-`multi_block_change` records as VarInts where every neighbouring release uses
-VarLongs; the committed real capture has no such packet and this crate does
-not translate it until a capture or local source resolves that width. And it
-models `player_info`'s `update_listed` field as a VarInt where the wire writes
-a boolean — the two coincide for the only values that occur, so nothing here
+One thing this era does **not** settle: `minecraft-data` models
+`player_info`'s `update_listed` field as a VarInt where the wire writes a
+boolean. The two coincide for the only values that occur, so nothing here
 depends on which is right.
 
 ## Dependencies

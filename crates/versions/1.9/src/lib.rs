@@ -73,6 +73,7 @@ pub(crate) mod generated_item_types;
 pub(crate) mod generated_sound_ids;
 
 pub mod adapter;
+pub mod entity_metadata;
 pub mod entity_types;
 pub mod item_types;
 pub mod packets;

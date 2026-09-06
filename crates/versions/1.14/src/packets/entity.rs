@@ -4,10 +4,68 @@
 //! metadata list; because [`EntityMetadata`](super::metadata::EntityMetadata)
 //! implements `Encode`/`Decode`, these are ordinary derived structs.
 
+use lodestone_core::{Ctx, Decode as CoreDecode, Error, Reader, Result};
 use lodestone_macros::{Decode, Encode, Packet};
 use uuid::Uuid;
 
 use super::metadata::EntityMetadata;
+use super::slot::Slot;
+
+/// Clientbound `entity_equipment` for protocols 498 and 578 — one entity slot
+/// update.
+///
+/// Those protocol revisions carry a VarInt entity id, a VarInt equipment-slot
+/// ordinal, and the 1.13.1+ presence-prefixed [`Slot`]. Protocol 754 uses the
+/// continuation-flagged [`EntityEquipment754Packet`] shape below instead.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:entity_equipment", state = Play, bound = Client)]
+pub struct EntityEquipmentPacket {
+    /// Entity whose equipment changed.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Canonical equipment-slot ordinal.
+    #[mc(varint)]
+    pub slot: i32,
+    /// New item, or an empty slot marker.
+    pub item: Slot,
+}
+
+/// Clientbound `entity_equipment` for protocol 754.
+///
+/// The entity id is followed by one or more `(slot, item)` records. The slot
+/// is an i8-shaped byte whose top bit says another record follows; the low
+/// seven bits carry the equipment-slot ordinal. Keeping this decoder separate
+/// from [`EntityEquipmentPacket`] is required because 498/578 use a single
+/// VarInt ordinal and have no continuation byte.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityEquipment754Packet {
+    /// Entity whose equipment changed.
+    pub entity_id: i32,
+    /// Continuation-flagged slot records, in wire order.
+    pub entries: Vec<(i8, Slot)>,
+}
+
+impl CoreDecode for EntityEquipment754Packet {
+    fn decode(r: &mut Reader<'_>, ctx: Ctx) -> Result<Self> {
+        let entity_id = r.var_i32()?;
+        let mut entries = Vec::new();
+        loop {
+            if entries.len() >= 8 {
+                return Err(Error::LimitExceeded {
+                    limit: 8,
+                    actual: entries.len() + 1,
+                });
+            }
+            let encoded_slot = r.i8()?;
+            let item = Slot::decode(r, ctx)?;
+            entries.push((encoded_slot, item));
+            if encoded_slot >= 0 {
+                break;
+            }
+        }
+        Ok(Self { entity_id, entries })
+    }
+}
 
 /// Clientbound `spawn_entity_living` — spawns a mob.
 ///

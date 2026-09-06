@@ -9,9 +9,9 @@ use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
-    ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts,
+    ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment,
     EntityAttributeModifier, EntityAttributeSnapshot, EntityInteraction, EntityMetadataUpdate,
-    EntityMovement, GameMode, Hand, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
+    EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
     PlayerCommand, PlayerListEntry, ProfileProperty, RecipeBookType, Reported, ResourceKey,
     ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, TeamAction, TeamColor,
     TeamParameters, TeleportFlags, Text, Vec3, VersionAdapter, Visibility, WorldSink,
@@ -20,6 +20,8 @@ use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk};
 
 use crate::canonical::FallbackTally;
 use crate::entity_types;
+use crate::block_types::block_type_name;
+use crate::item_types::item_name;
 use crate::packets::chunk::{ChunkShape, MapChunk, UnloadChunk};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::{
@@ -28,7 +30,8 @@ use crate::packets::entity::{
     SpawnEntityLiving, SpawnObject,
 };
 use crate::packets::game::{
-    AttachEntity, BlockBreakAnimation, BlockDig, BlockPlace, ClientCommand, ClientboundChat,
+    AttachEntity, BlockAction, BlockBreakAnimation, BlockDig, BlockPlace, ClientCommand, ClientboundChat,
+    ClientboundEntityEquipment,
     ClientboundPositionLook, Collect, CraftingBookData, DifficultyPacket, EntityAction,
     EntityEffect, Explosion, GameStateChange, JoinGame, KickDisconnect, OpenSignEntity,
     PlayerlistHeader, RemoveEntityEffect, Respawn,
@@ -1737,6 +1740,76 @@ impl V404Adapter {
             .collect())
     }
 
+    /// `minecraft:block_action`. The block type is resolved through the
+    /// protocol-404 type registry, never through the flat block-state table.
+    fn handle_play_block_action(
+        adapter: &V404Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: BlockAction = adapter.decode_body_exact(payload)?;
+        let name = block_type_name(body.block_id).ok_or_else(|| {
+            AdapterError::Decode(format!(
+                "unsupported protocol-404 block_action type id {}",
+                body.block_id
+            ))
+        })?;
+        let block = name.parse().map_err(|_| {
+            AdapterError::Decode(format!("block_action registry entry {name} is not a key"))
+        })?;
+        Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
+            pos: body.location.0,
+            b0: body.byte1,
+            b1: body.byte2,
+            block,
+        })])
+    }
+
+    /// `minecraft:entity_equipment`.  Protocol 404 carries one slot per
+    /// packet, unlike the later continuation-bit list.
+    fn handle_play_entity_equipment(
+        adapter: &V404Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: ClientboundEntityEquipment = adapter.decode_body_exact(payload)?;
+        let ordinal = u8::try_from(body.slot).map_err(|_| {
+            AdapterError::Decode(format!("entity_equipment slot ordinal {} is outside u8", body.slot))
+        })?;
+        let slot = EquipmentSlot::from_ordinal(ordinal).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown protocol-404 equipment slot ordinal {ordinal}"))
+        })?;
+        let item = match body.item {
+            Slot::Empty => None,
+            Slot::Item { id, count, nbt } => {
+                let name = item_name(id).ok_or_else(|| {
+                    AdapterError::Decode(format!("unsupported protocol-404 equipment item id {id}"))
+                })?;
+                let count = u32::try_from(count).map_err(|_| {
+                    AdapterError::Decode(format!("invalid protocol-404 equipment item count {count}"))
+                })?;
+                if count == 0 {
+                    return Err(AdapterError::Decode(
+                        "protocol-404 equipment item has a zero count".to_owned(),
+                    ));
+                }
+                let key = name.parse().map_err(|_| {
+                    AdapterError::Decode(format!("equipment registry entry {name} is not a key"))
+                })?;
+                let mut stack = ItemStack::new(key, count);
+                // The legacy NBT payload is preserved as raw bytes by Slot,
+                // while the version-free item model can only mark it as an
+                // unmodeled extension.
+                stack.components.has_unmodeled = nbt.is_some();
+                Some(stack)
+            }
+        };
+        Ok(vec![Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+            entity_id: body.entity_id,
+            equipment: vec![EntityEquipment { slot, item }],
+        })])
+    }
+
     /// `minecraft:block_break_animation`.
     fn handle_play_block_break_animation(
         adapter: &V404Adapter,
@@ -2813,6 +2886,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:block_action",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V404Adapter::handle_play_block_action,
+        ),
+    ),
+    (
         "minecraft:block_break_animation",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2845,6 +2925,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
             V404Adapter::handle_play_entity_update_attributes,
+        ),
+    ),
+    (
+        "minecraft:entity_equipment",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V404Adapter::handle_play_entity_equipment,
         ),
     ),
     (
@@ -2994,7 +3081,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "minecraft:tile_entity_data",
         "v26-2 has this; backport (BLOCK_ENTITY_DATA)",
     ),
-    lodestone_core::dispatch::IGNORED::new("minecraft:block_action", "v26-2 has this; backport (BLOCK_EVENT)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:declare_commands", "v26-2 has this; backport (COMMANDS)"),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:transaction",
@@ -3037,10 +3123,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:resource_pack_send",
         "v26-2 has this; backport (RESOURCE_PACK_PUSH)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_equipment",
-        "v26-2 has this; backport (SET_EQUIPMENT)",
     ),
     lodestone_core::dispatch::IGNORED::new("minecraft:sound_effect", "v26-2 has this; backport (SOUND)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:stop_sound", "v26-2 has this; backport (STOP_SOUND)"),
