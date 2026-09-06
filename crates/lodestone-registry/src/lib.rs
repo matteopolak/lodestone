@@ -348,6 +348,10 @@ struct ServerFamily {
     /// separate from [`Family::protocols`]: a family can join revisions whose
     /// server packet layouts are not implemented.
     protocols: &'static [i32],
+    /// Worldgen bundle this host can serve. `None` is an explicit refusal
+    /// until a family-specific generator exists; it must never fall through
+    /// to the embedded 26.2 bundle.
+    worldgen_scope: lodestone_server::WorldgenScope,
     /// Constructs a boxed server protocol for the negotiated protocol.
     make: fn(i32) -> Box<dyn lodestone_server::ServerProtocol>,
 }
@@ -358,6 +362,7 @@ impl std::fmt::Debug for ServerFamily {
             .debug_struct("ServerFamily")
             .field("label", &self.label)
             .field("protocols", &self.protocols)
+            .field("worldgen_scope", &self.worldgen_scope)
             .finish_non_exhaustive()
     }
 }
@@ -372,18 +377,21 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
     ServerFamily {
         label: "v1-7",
         protocols: &[lodestone_v1_7::PROTOCOL],
+        worldgen_scope: lodestone_server::WorldgenScope::None,
         make: |_| Box::new(lodestone_v1_7::V5ServerProtocol),
     },
     #[cfg(feature = "v1-8")]
     ServerFamily {
         label: "v1-8",
         protocols: &[lodestone_v1_8::PROTOCOL],
+        worldgen_scope: lodestone_server::WorldgenScope::None,
         make: |_| Box::new(lodestone_v1_8::V47ServerProtocol),
     },
     #[cfg(feature = "v26-2")]
     ServerFamily {
         label: "v26-2",
         protocols: &[lodestone_v26_2::PROTOCOL],
+        worldgen_scope: lodestone_server::WorldgenScope::V26_2,
         make: |_| Box::new(lodestone_v26_2::V770ServerProtocol),
     },
     #[cfg(feature = "v1-9")]
@@ -393,6 +401,7 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
         // family adapter covers earlier revisions too, but their server packet
         // layouts have not been implemented.
         protocols: &[110, 210, 316, lodestone_v1_9::PROTOCOL],
+        worldgen_scope: lodestone_server::WorldgenScope::None,
         make: |protocol| match protocol {
             110 => Box::new(lodestone_v1_9::V110ServerProtocol),
             210 => Box::new(lodestone_v1_9::V210ServerProtocol),
@@ -404,6 +413,7 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
     ServerFamily {
         label: "v1-13",
         protocols: &[lodestone_v1_13::PROTOCOL],
+        worldgen_scope: lodestone_server::WorldgenScope::None,
         make: |_| Box::new(lodestone_v1_13::V404ServerProtocol),
     },
     #[cfg(feature = "v1-14")]
@@ -416,6 +426,7 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
             lodestone_v1_14::PROTOCOL_1_15_2,
             lodestone_v1_14::PROTOCOL_1_16_5,
         ],
+        worldgen_scope: lodestone_server::WorldgenScope::None,
         make: |protocol| match protocol {
             lodestone_v1_14::PROTOCOL_1_14_4 => Box::new(lodestone_v1_14::V498ServerProtocol),
             lodestone_v1_14::PROTOCOL_1_15_2 => Box::new(lodestone_v1_14::V578ServerProtocol),
@@ -430,6 +441,7 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
             lodestone_v1_17::PROTOCOL_1_17_1,
             lodestone_v1_17::PROTOCOL_1_18_2,
         ],
+        worldgen_scope: lodestone_server::WorldgenScope::None,
         make: |protocol| match protocol {
             lodestone_v1_17::PROTOCOL_1_17_1 => Box::new(lodestone_v1_17::V756ServerProtocol),
             lodestone_v1_17::PROTOCOL_1_18_2 => Box::new(lodestone_v1_17::V758ServerProtocol),
@@ -440,18 +452,21 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
     ServerFamily {
         label: "v1-19",
         protocols: &[lodestone_v1_19::PROTOCOL_1_19_4],
+        worldgen_scope: lodestone_server::WorldgenScope::None,
         make: |_| Box::new(lodestone_v1_19::V762ServerProtocol),
     },
     #[cfg(feature = "v1-20-6")]
     ServerFamily {
         label: "v1-20-6",
         protocols: &[lodestone_v1_20_6::PROTOCOL],
+        worldgen_scope: lodestone_server::WorldgenScope::None,
         make: |_| Box::new(lodestone_v1_20_6::V766ServerProtocol),
     },
     #[cfg(feature = "v1-21-11")]
     ServerFamily {
         label: "v1-21-11",
         protocols: &[lodestone_v1_21_11::PROTOCOL],
+        worldgen_scope: lodestone_server::WorldgenScope::None,
         make: |_| Box::new(lodestone_v1_21_11::V774ServerProtocol),
     },
 ];
@@ -478,6 +493,24 @@ pub fn server_protocol_for_protocol(
         .iter()
         .find(|family| family.protocols.contains(&protocol))
         .map(|family| (family.make)(protocol))
+}
+
+/// Returns the worldgen data scope declared by the host for `protocol`.
+///
+/// `Some(WorldgenScope::None)` is deliberate: the protocol is hostable, but
+/// it has not declared a generator matching the bundle embedded by
+/// `lodestone-server`. Consumers must pass that scope through the checked
+/// worldgen construction path, which turns it into a user-visible refusal
+/// instead of silently serving 26.2 terrain to an older client. `None` means
+/// that no server family in this build hosts the protocol at all.
+#[must_use]
+pub fn worldgen_scope_for_protocol(
+    protocol: i32,
+) -> Option<lodestone_server::WorldgenScope> {
+    SERVER_FAMILIES
+        .iter()
+        .find(|family| family.protocols.contains(&protocol))
+        .map(|family| family.worldgen_scope)
 }
 
 /// Returns every protocol number compiled into this build that can be hosted
@@ -551,6 +584,7 @@ mod tests {
             // resolve to `None` and be *reported*, not fail to compile.
             assert!(compiled_server_families().is_empty());
             assert!(server_protocol_for_protocol(776).is_none());
+            assert!(worldgen_scope_for_protocol(776).is_none());
             // No family compiled means `physics_profile_for_protocol` has
             // nothing to match, so it must fall back to `mc_1_21` — never
             // `None`, and never a panic. This is also what
@@ -642,6 +676,10 @@ mod tests {
     fn resolves_the_v770_server_protocol_when_enabled() {
         assert!(server_protocol_for_protocol(776).is_some());
         assert!(compiled_server_families().contains(&"v26-2"));
+        assert_eq!(
+            worldgen_scope_for_protocol(776),
+            Some(lodestone_server::WorldgenScope::V26_2)
+        );
         // The same protocol the client adapter claims, and nothing else: a
         // number no family supports must be `None` even with v26-2 compiled in,
         // or `find` is matching unconditionally.
@@ -660,6 +698,41 @@ mod tests {
         assert!(server_protocol_for_protocol(109).is_none());
         assert!(server_protocol_for_protocol(315).is_none());
         assert!(server_protocol_for_protocol(341).is_none());
+    }
+
+    /// The registry must not let a newly-hosted family inherit the embedded
+    /// 26.2 terrain accidentally. The positive v26-2 assertion above is the
+    /// control proving this check is not vacuous; every other hosted row must
+    /// report `None` until it has a version-appropriate generator.
+    #[test]
+    fn every_hosted_protocol_has_an_explicit_worldgen_scope() {
+        let hosted = hosted_protocols();
+        for protocol in hosted.iter().copied() {
+            let scope = worldgen_scope_for_protocol(protocol)
+                .unwrap_or_else(|| panic!("hosted protocol {protocol} has no scope"));
+            let host = server_protocol_for_protocol(protocol)
+                .unwrap_or_else(|| panic!("hosted protocol {protocol} has no server"));
+            assert_eq!(
+                host.worldgen_scope(),
+                scope,
+                "registry scope and protocol declaration must agree for {protocol}"
+            );
+            let expected = if protocol == 776 {
+                lodestone_server::WorldgenScope::V26_2
+            } else {
+                lodestone_server::WorldgenScope::None
+            };
+            assert_eq!(
+                scope, expected,
+                "protocol {protocol} must declare its own worldgen capability"
+            );
+        }
+        if cfg!(feature = "v26-2") {
+            assert!(
+                hosted.contains(&776),
+                "v26-2's scope control requires its host row to be registered"
+            );
+        }
     }
 
     #[cfg(feature = "v1-13")]
