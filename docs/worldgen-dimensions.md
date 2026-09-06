@@ -7,8 +7,8 @@ The composed Nether and End generators (`lodestone_worldgen::nether::NetherGener
 a selectable RNG family, two bespoke Nether biome noises, a disabled-aquifer fill, dimension-specific
 cell geometry, the `minecraft:end_islands` density function, and the End's non-multi-noise biome
 source. All bundled 26.2 data for both dimensions is complete; the remaining gaps are structure
-families, dimension serving, and gameplay such as portal travel and the dragon fight rather than
-missing data.
+families and gameplay such as the dragon fight rather than missing terrain or a disconnected
+dimension source.
 
 ## How it works
 
@@ -103,11 +103,18 @@ pre-surface density field and applies intersecting template pieces before palett
 positive `end_city_jvm.txt` capture gates one start, its nine-piece sequence, and two placed block
 states. The terrain fixture deliberately stops before later writers, so it is not evidence that they
 were placed.
-The dimension registry and reaching either dimension from a live server are wired through the
-integrated server. End portal entry lands on the generated fixed platform, and generated outer-island
-return gateways carry an exact destination sidecar that the server consumes on contact. The remaining
-worldgen-side gap is that `EmbeddedResolver` still hardcodes the Overworld's documents for the default
-singleplayer path, so a future resolver split must preserve the End generator's own data source.
+The integrated server's `DimensionalSource` builds the Nether and End sources lazily behind the
+same chunk lifecycle used by the primary dimension. A generated Nether column therefore passes
+through the shared cache, the dimension-specific Anvil region path when persistence is enabled,
+lighting, and the selected protocol's chunk encoder. The in-memory packet gate in
+`crates/lodestone-server/tests/integrated_memory.rs` drives that connection path and checks the
+Nether's 256-row wire window plus a bedrock floor marker against the external full-region oracle
+at `crates/lodestone-worldgen/tests/support/nether_vanilla_oracle.txt`. End portal entry lands on
+the generated fixed platform, and generated outer-island return gateways carry an exact destination
+sidecar that the server consumes on contact. Portal travel still needs an external-client round trip
+and restart fixture; the remaining worldgen-side gap is that `EmbeddedResolver` hardcodes the
+Overworld's documents for the default singleplayer path, so a future resolver split must preserve
+each dimension's own data source.
 
 ## How to change it
 
