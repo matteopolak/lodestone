@@ -71,10 +71,12 @@ silent.
 Simple-block state providers include fixed, weighted, threshold-noise, noise and dual-noise forms.
 The two noise forms construct their deterministic fields from the bundled seed and octave data at
 selection time; dual noise first selects the fast-field frequency, then selects the output state.
-Simple-block placement uses the target state's survival family: vegetation states require a
-`supports_vegetation` block below, while support-free states such as `potent_sulfur` may replace a
-solid block at a water interface. Applying the vegetation rule to every provider would leave the
-lake feature's wet potent-sulfur cap as plain sulfur.
+Simple-block placement dispatches through a finite target-state survival table. Ordinary vegetation
+uses `supports_vegetation`; dry vegetation, azalea, crimson roots, small dripleaf and soul fire use
+their own resolved floor tags; mushrooms, lily pads, ceiling plants, carpets, leaf litter and fire
+read their respective local support geometry. Full blocks (`melon`, `pumpkin`, `tuff`) and potent
+sulfur have no survival floor gate. The tag sets are resolved once and bound as state-id bitsets per
+decoration pass, so this fidelity does not reintroduce string-set work into each placement attempt.
 Block columns also accept weighted nested height providers and randomized integer state properties,
 which covers the hanging cave-vine records; bamboo uses the configured floor tag, stalk states and
 optional podzol disk.

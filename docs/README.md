@@ -86,6 +86,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   sand, piston heads, primed TNT) and flat "ground-plate" blocks (carpets, pressure
   plates, leaf litter, rails) whose flicker problems turned out to be a
   mipmap/sampling issue rather than a geometry one.
+- [Block survival capabilities](./block-survival-capabilities.md) —
+  `lodestone-data::block_survival` supplies the exact state facts used to decide
+  whether a simple world-generation block can remain placed. The server converts its
+  fixed 26.2 state-id bitsets into the version-free generator's canonical-state
+  predicates.
 - [Blocks: placement, breaking, outlines, sound, entities and persistence](./blocks.md) —
   Everything about a block once it exists in the world: how a right-click resolves to
   a placed state (server rule table, and the client's own prediction of it), how long
@@ -138,6 +143,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `#[ignore]`d as they are locally. CI proves the hermetic majority of the suite on
   every push; the rest stays a local, explicit, opt-in run
   (`docs/oracles-and-benchmarks.md`).
+- [Clamped-normal placement offsets](./clamped-normal-placement.md) — Clamped-normal
+  integer providers supply the non-uniform offsets used by cave placed features such
+  as sulfur spikes and pointed dripstone. They are part of the shared
+  placement-provider model, so every feature that uses the same JSON form receives the
+  same sampling rule.
 - [Colour and tint](./colour-and-tint.md) — The one rule that governs every colour
   operation in this renderer — vanilla is not colour-managed, so tint, shade, fog
   and text all multiply and blend in **gamma** (sRGB byte) space, never linear — and

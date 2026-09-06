@@ -98,6 +98,8 @@ pub(crate) mod generated_potions;
 pub(crate) mod generated_shade_brightness;
 #[path = "generated/snow_support.rs"]
 pub(crate) mod generated_snow_support;
+#[path = "generated/block_survival.rs"]
+pub(crate) mod generated_block_survival;
 #[path = "generated/sound_events.rs"]
 pub(crate) mod generated_sound_events;
 #[path = "generated/sound_types.rs"]
@@ -112,6 +114,7 @@ pub mod block_blast;
 pub mod block_entity_types;
 pub mod block_items;
 pub mod block_solidity;
+pub mod block_survival;
 pub mod block_states;
 pub mod collision_shapes;
 pub mod damage_types;

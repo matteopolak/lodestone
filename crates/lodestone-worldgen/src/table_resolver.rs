@@ -33,12 +33,13 @@
 //!
 //! # What is NOT covered
 //!
-//! [`Resolver::block_freeze_facts`] is not a JSON lookup: it is a census of
+//! [`Resolver::block_freeze_facts`] and [`Resolver::block_survival_facts`] are not JSON lookups: they are censuses of
 //! the game's *compiled* behaviour (collision, fluid state), sourced from
 //! `lodestone_data::{block_solidity, snow_support}`, not from a JSON asset —
 //! and this crate must stay version-free, so it cannot depend on
 //! `lodestone-data`. An embedder that wants it supplies a census factory to
-//! [`TableResolver::with_block_freeze_facts`].
+//! [`TableResolver::with_block_freeze_facts`] and
+//! [`TableResolver::with_block_survival_facts`].
 
 use serde_json::Value;
 
@@ -52,6 +53,7 @@ pub struct TableResolver<'a> {
     biome_parameters_key: Option<&'a str>,
     biome_temperatures_key: Option<&'a str>,
     block_freeze_facts: Option<fn() -> &'static Value>,
+    block_survival_facts: Option<fn() -> &'static Value>,
 }
 
 /// The keys the bundled Overworld resolver uses for the two dimension-scoped
@@ -75,6 +77,7 @@ impl<'a> TableResolver<'a> {
             biome_parameters_key: Some(DEFAULT_BIOME_PARAMETERS_KEY),
             biome_temperatures_key: Some(DEFAULT_BIOME_TEMPERATURES_KEY),
             block_freeze_facts: None,
+            block_survival_facts: None,
         }
     }
 
@@ -117,6 +120,14 @@ impl<'a> TableResolver<'a> {
     #[must_use]
     pub const fn with_block_freeze_facts(mut self, facts: fn() -> &'static Value) -> Self {
         self.block_freeze_facts = Some(facts);
+        self
+    }
+
+    /// Supplies the version-specific census required by
+    /// [`Resolver::block_survival_facts`].
+    #[must_use]
+    pub const fn with_block_survival_facts(mut self, facts: fn() -> &'static Value) -> Self {
+        self.block_survival_facts = Some(facts);
         self
     }
 
@@ -286,6 +297,11 @@ impl Resolver for TableResolver<'_> {
         self.block_freeze_facts
             .map_or(Value::Null, |facts| facts().clone())
     }
+
+    fn block_survival_facts(&self) -> Value {
+        self.block_survival_facts
+            .map_or(Value::Null, |facts| facts().clone())
+    }
 }
 
 #[cfg(test)]
@@ -345,6 +361,7 @@ mod tests {
         assert_eq!(r.structure("minecraft:mineshaft"), Value::Null);
         // block_freeze_facts is not overridden — the trait default holds.
         assert_eq!(r.block_freeze_facts(), Value::Null);
+        assert_eq!(r.block_survival_facts(), Value::Null);
     }
 
     #[test]

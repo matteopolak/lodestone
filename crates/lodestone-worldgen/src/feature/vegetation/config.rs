@@ -17,6 +17,7 @@ use crate::rng::RandomSource;
 use super::grid::VegGrid;
 use super::grid::census::bump as census_bump;
 use super::ids::{IdTags, Tag, tag_at};
+use super::super::top_layer::StatePredicate;
 use super::tree::{FoliagePlacerCfg, RootPlacerCfg, TrunkPlacerCfg};
 
 /// The reference heightmap-type enum (the subset vegetal decoration references). See this
@@ -842,6 +843,22 @@ pub struct VegTags {
     pub huge_red_mushroom_can_place_on: HashSet<String>,
     /// `#minecraft:supports_bamboo` — bamboo's floor survival rule.
     pub supports_bamboo: HashSet<String>,
+    /// The dedicated floor tag for dry grass and dead bushes.
+    pub supports_dry_vegetation: HashSet<String>,
+    /// The dedicated floor tag for azalea bushes.
+    pub supports_azalea: HashSet<String>,
+    /// The dedicated floor tag for crimson roots.
+    pub supports_crimson_roots: HashSet<String>,
+    /// The dedicated floor tag for the lower half of small dripleaves.
+    pub supports_small_dripleaf: HashSet<String>,
+    /// The only two valid floor blocks for soul fire.
+    pub soul_fire_base_blocks: HashSet<String>,
+    /// Mushroom floors which bypass the raw-brightness check during decoration.
+    pub overrides_mushroom_light_requirement: HashSet<String>,
+    /// Non-fluid floors that can support lily pads.
+    pub supports_lily_pad: HashSet<String>,
+    /// Exact canonical-state capability facts supplied by the version boundary.
+    pub simple_block_support: SimpleBlockSupport,
     /// Ground accepted by the cave-root system's nested tree candidate.
     pub azalea_grows_on: HashSet<String>,
     /// Ground blocks replaced by bamboo's optional podzol disk.
@@ -855,6 +872,29 @@ pub struct VegTags {
     /// caller that could reach it could desynchronise it. Callers ask through
     /// [`Self::bind`] (once per pass) and [`super::ids::tag_at`] (per query).
     pub(super) id_tags: IdTags,
+}
+
+/// State-shape and fire facts consumed by the simple-block survival dispatcher.
+/// Each predicate is a complete canonical-state override map plus default-state
+/// bases, produced from the version-specific block-state registry.
+#[derive(Debug, Default, Clone)]
+pub struct SimpleBlockSupport {
+    pub solid_render: StatePredicate,
+    pub sturdy_up: StatePredicate,
+    pub center_support_down: StatePredicate,
+    pub fire_flammable: StatePredicate,
+}
+
+impl SimpleBlockSupport {
+    #[must_use]
+    pub fn parse(facts: &Value) -> Self {
+        Self {
+            solid_render: StatePredicate::parse(&facts["solid_render"]),
+            sturdy_up: StatePredicate::parse(&facts["sturdy_up"]),
+            center_support_down: StatePredicate::parse(&facts["center_support_down"]),
+            fire_flammable: StatePredicate::parse(&facts["fire_flammable"]),
+        }
+    }
 }
 
 /// Resolves [`VegTags`] from a [`Resolver`]. Empty sets (never a panic) if
@@ -881,6 +921,14 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         huge_brown_mushroom_can_place_on: resolve("minecraft:huge_brown_mushroom_can_place_on"),
         huge_red_mushroom_can_place_on: resolve("minecraft:huge_red_mushroom_can_place_on"),
         supports_bamboo: resolve("minecraft:supports_bamboo"),
+        supports_dry_vegetation: resolve("minecraft:supports_dry_vegetation"),
+        supports_azalea: resolve("minecraft:supports_azalea"),
+        supports_crimson_roots: resolve("minecraft:supports_crimson_roots"),
+        supports_small_dripleaf: resolve("minecraft:supports_small_dripleaf"),
+        soul_fire_base_blocks: resolve("minecraft:soul_fire_base_blocks"),
+        overrides_mushroom_light_requirement: resolve("minecraft:overrides_mushroom_light_requirement"),
+        supports_lily_pad: resolve("minecraft:supports_lily_pad"),
+        simple_block_support: SimpleBlockSupport::parse(&resolver.block_survival_facts()),
         azalea_grows_on: resolve("minecraft:azalea_grows_on"),
         beneath_bamboo_podzol_replaceable: resolve("minecraft:beneath_bamboo_podzol_replaceable"),
         // Unbound: the bitsets are per-interner and the interner does not exist
@@ -977,6 +1025,12 @@ pub(super) fn try_parse_int_provider(v: &Value) -> Option<IntProvider> {
                     min: v["min"].as_i64()? as i32,
                     max: v["max"].as_i64()? as i32,
                     plateau: v["plateau"].as_i64().unwrap_or(0) as i32,
+                }),
+                "clamped_normal" => Some(IntProvider::ClampedNormal {
+                    mean: v["mean"].as_f64()? as f32,
+                    deviation: v["deviation"].as_f64()? as f32,
+                    min: v["min_inclusive"].as_i64()? as i32,
+                    max: v["max_inclusive"].as_i64()? as i32,
                 }),
                 "weighted_list" => {
                     let entries = v["distribution"]

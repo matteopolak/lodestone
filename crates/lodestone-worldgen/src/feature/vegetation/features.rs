@@ -51,7 +51,7 @@ use super::config::{
     BlockPredicate, BlockStateProvider, Decorator, PlacedRef, VegTags, blocks_motion, is_air, is_fluid,
 };
 use super::grid::VegGrid;
-use super::ids::Rewrite;
+use super::ids::{Rewrite, Tag, tag_at};
 use super::place::{place_attached_to_logs_decorator, place_trunk_vine_decorator};
 use super::tree::valid_tree_pos;
 
@@ -79,21 +79,102 @@ fn sturdy_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
     !is_air(base) && !is_fluid(base) && blocks_motion(base)
 }
 
-/// The simple-block feature asks the placed state's own survival rule, not a
-/// vegetation-only support predicate. Most bundled simple blocks are plants and
-/// therefore use the compact `#supports_vegetation` approximation; support-free
-/// blocks such as potent sulfur must still be placeable on a solid/water
-/// interface created by another feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SimpleBlockSurvival {
+    Vegetation,
+    TagBelow(Tag),
+    Mushroom,
+    SmallDripleaf,
+    LilyPad,
+    CeilingCenter,
+    SturdyBelow,
+    NonAirBelow,
+    Fire,
+    Always,
+}
+
+/// The exceptional states from the bundled `simple_block` records. Every other
+/// bundled output is an ordinary vegetation block, so the fallback remains
+/// explicit instead of turning an unrecognised new state into an unconditional
+/// placement.
+const SIMPLE_BLOCK_SURVIVAL: &[(&str, SimpleBlockSurvival)] = &[
+    ("minecraft:dead_bush", SimpleBlockSurvival::TagBelow(Tag::SupportsDryVegetation)),
+    ("minecraft:short_dry_grass", SimpleBlockSurvival::TagBelow(Tag::SupportsDryVegetation)),
+    ("minecraft:tall_dry_grass", SimpleBlockSurvival::TagBelow(Tag::SupportsDryVegetation)),
+    ("minecraft:azalea", SimpleBlockSurvival::TagBelow(Tag::SupportsAzalea)),
+    ("minecraft:flowering_azalea", SimpleBlockSurvival::TagBelow(Tag::SupportsAzalea)),
+    ("minecraft:crimson_roots", SimpleBlockSurvival::TagBelow(Tag::SupportsCrimsonRoots)),
+    ("minecraft:brown_mushroom", SimpleBlockSurvival::Mushroom),
+    ("minecraft:red_mushroom", SimpleBlockSurvival::Mushroom),
+    ("minecraft:small_dripleaf", SimpleBlockSurvival::SmallDripleaf),
+    ("minecraft:lily_pad", SimpleBlockSurvival::LilyPad),
+    ("minecraft:spore_blossom", SimpleBlockSurvival::CeilingCenter),
+    ("minecraft:leaf_litter", SimpleBlockSurvival::SturdyBelow),
+    ("minecraft:moss_carpet", SimpleBlockSurvival::NonAirBelow),
+    ("minecraft:pale_moss_carpet", SimpleBlockSurvival::NonAirBelow),
+    ("minecraft:fire", SimpleBlockSurvival::Fire),
+    ("minecraft:soul_fire", SimpleBlockSurvival::TagBelow(Tag::SoulFireBaseBlocks)),
+    ("minecraft:melon", SimpleBlockSurvival::Always),
+    ("minecraft:pumpkin", SimpleBlockSurvival::Always),
+    ("minecraft:tuff", SimpleBlockSurvival::Always),
+    ("minecraft:potent_sulfur", SimpleBlockSurvival::Always),
+];
+
+fn simple_block_survival_rule(base: &str) -> SimpleBlockSurvival {
+    SIMPLE_BLOCK_SURVIVAL
+        .iter()
+        .find_map(|&(name, rule)| (name == base).then_some(rule))
+        .unwrap_or(SimpleBlockSurvival::Vegetation)
+}
+
+/// The simple-block feature asks the placed state's own survival rule. During
+/// decoration the reference raw-brightness query is zero (lighting has not yet
+/// been initialised), which makes the mushroom light arm unconditional and
+/// leaves only its floor rule here.
 pub(super) fn simple_block_can_survive(
     grid: &VegGrid,
     tags: &super::config::VegTags,
     state: StateId,
     pos: BlockPos,
 ) -> bool {
-    match super::base_id(grid.interner().name_of(state)) {
-        "minecraft:potent_sulfur" => true,
-        _ => super::ids::tag_at(grid, tags, super::ids::Tag::SupportsVegetation, pos.x, pos.y - 1, pos.z),
+    let base = super::base_id(grid.interner().name_of(state));
+    let rule = simple_block_survival_rule(base);
+    match rule {
+        SimpleBlockSurvival::Vegetation => tag_at(grid, tags, Tag::SupportsVegetation, pos.x, pos.y - 1, pos.z),
+        SimpleBlockSurvival::TagBelow(tag) => tag_at(grid, tags, tag, pos.x, pos.y - 1, pos.z),
+        SimpleBlockSurvival::Mushroom => {
+            tag_at(grid, tags, Tag::OverridesMushroomLightRequirement, pos.x, pos.y - 1, pos.z)
+                || tags.simple_block_support.solid_render.test(grid.interner().name_of(grid.get_id(pos.x, pos.y - 1, pos.z)))
+        }
+        SimpleBlockSurvival::SmallDripleaf => {
+            tag_at(grid, tags, Tag::SupportsSmallDripleaf, pos.x, pos.y - 1, pos.z)
+                || (water_at(grid, pos.x, pos.y, pos.z)
+                    && tag_at(grid, tags, Tag::SupportsVegetation, pos.x, pos.y - 1, pos.z))
+        }
+        SimpleBlockSurvival::LilyPad => {
+            !is_fluid(base_at(grid, pos.x, pos.y, pos.z))
+                && (water_at(grid, pos.x, pos.y - 1, pos.z)
+                    || tag_at(grid, tags, Tag::SupportsLilyPad, pos.x, pos.y - 1, pos.z))
+        }
+        SimpleBlockSurvival::CeilingCenter => {
+            !water_at(grid, pos.x, pos.y, pos.z)
+                && tags.simple_block_support.center_support_down.test(grid.interner().name_of(grid.get_id(pos.x, pos.y + 1, pos.z)))
+        }
+        SimpleBlockSurvival::SturdyBelow => tags.simple_block_support.sturdy_up.test(grid.interner().name_of(grid.get_id(pos.x, pos.y - 1, pos.z))),
+        SimpleBlockSurvival::NonAirBelow => !air_at(grid, pos.x, pos.y - 1, pos.z),
+        SimpleBlockSurvival::Fire => {
+            tags.simple_block_support.sturdy_up.test(grid.interner().name_of(grid.get_id(pos.x, pos.y - 1, pos.z)))
+                || [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
+                    .iter()
+                    .any(|&(dx, dy, dz)| fire_fuel_at(grid, tags, pos.x + dx, pos.y + dy, pos.z + dz))
+        }
+        SimpleBlockSurvival::Always => true,
     }
+}
+
+/// Exact per-state fire capability supplied by the version boundary.
+fn fire_fuel_at(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i32) -> bool {
+    tags.simple_block_support.fire_flammable.test(grid.interner().name_of(grid.get_id(x, y, z)))
 }
 
 fn water_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
@@ -2548,7 +2629,10 @@ pub(super) fn place_fallen_tree<R: RandomSource>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
+
     use super::*;
+    use crate::feature::top_layer::StatePredicate;
     use crate::rng::LegacyRandomSource;
 
     #[test]
@@ -2593,5 +2677,108 @@ mod tests {
             "minecraft:air",
             "vegetation still requires a supports_vegetation block below"
         );
+    }
+
+    #[test]
+    fn simple_block_survival_uses_exact_state_capabilities() {
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        for x in 0..16 { for z in 0..16 { for y in 60..80 { grid.seed(x, y, z, "minecraft:air".to_string()); } } }
+        let mut tags = VegTags::default();
+        tags.simple_block_support = super::super::config::SimpleBlockSupport {
+            solid_render: StatePredicate::new(["minecraft:stone".to_string()].into_iter().collect(), HashMap::new()),
+            sturdy_up: StatePredicate::new(["minecraft:stone".to_string()].into_iter().collect(), HashMap::new()),
+            center_support_down: StatePredicate::new(HashSet::new(), [("minecraft:oak_fence[east=false,north=false,south=false,waterlogged=false,west=false]".to_string(), true)].into_iter().collect()),
+            fire_flammable: StatePredicate::new(["minecraft:oak_planks".to_string()].into_iter().collect(), HashMap::new()),
+        };
+        let pos = BlockPos { x: 5, y: 70, z: 5 };
+        let survives = |grid: &mut VegGrid, state: &str| {
+            grid.seed(pos.x, pos.y, pos.z, state.to_string());
+            simple_block_can_survive(grid, &tags, grid.get_id(pos.x, pos.y, pos.z), pos)
+        };
+
+        grid.seed(5, 69, 5, "minecraft:stone".to_string());
+        assert!(survives(&mut grid, "minecraft:brown_mushroom"), "solid-render stone supports a mushroom during unlit decoration");
+        assert!(survives(&mut grid, "minecraft:leaf_litter[segment_amount=1,facing=north]"), "the exact full-up state supports leaf litter");
+        grid.seed(5, 71, 5, "minecraft:oak_fence[east=false,north=false,south=false,waterlogged=false,west=false]".to_string());
+        assert!(survives(&mut grid, "minecraft:spore_blossom"), "center-down support is independent of full-up support");
+        grid.seed(5, 69, 5, "minecraft:air".to_string());
+        grid.seed(6, 70, 5, "minecraft:oak_planks".to_string());
+        assert!(survives(&mut grid, "minecraft:fire[age=0,east=false,north=false,south=false,up=false,west=false]"), "a flammable side neighbour supports fire without a sturdy floor");
+    }
+
+    #[test]
+    fn bundled_simple_block_outputs_have_a_complete_survival_family_audit() {
+        use std::path::Path;
+
+        fn collect_provider_states(value: &serde_json::Value, out: &mut HashSet<String>) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if let Some(name) = object.get("Name").and_then(serde_json::Value::as_str) {
+                        out.insert(name.to_owned());
+                    }
+                    for child in object.values() { collect_provider_states(child, out); }
+                }
+                serde_json::Value::Array(values) => for child in values { collect_provider_states(child, out); },
+                _ => {}
+            }
+        }
+        fn visit(value: &serde_json::Value, out: &mut HashSet<String>) -> bool {
+            match value {
+                serde_json::Value::Object(object) => {
+                    let mut found = false;
+                    if object.get("type").and_then(serde_json::Value::as_str) == Some("minecraft:simple_block") {
+                        found = true;
+                        // A selector can nest this record beneath another feature;
+                        // walk the matched record itself so no provider level is
+                        // accidentally skipped (forest flowers exercises this).
+                        collect_provider_states(value, out);
+                    }
+                    for child in object.values() { found |= visit(child, out); }
+                    found
+                }
+                serde_json::Value::Array(values) => {
+                    let mut found = false;
+                    for child in values {
+                        found |= visit(child, out);
+                    }
+                    found
+                }
+                _ => false,
+            }
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestone-server/assets/worldgen/configured_feature");
+        let mut records = 0;
+        let mut outputs = HashSet::new();
+        for entry in std::fs::read_dir(root).expect("bundled configured-feature directory") {
+            let path = entry.expect("directory entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+            let text = std::fs::read_to_string(path).expect("bundled configured-feature JSON");
+            if visit(&serde_json::from_str(&text).expect("valid configured-feature JSON"), &mut outputs) { records += 1; }
+        }
+        assert_eq!(records, 36, "the audit must traverse every bundled simple_block record");
+        assert_eq!(outputs.len(), 46, "the audit must retain every distinct output state base: {outputs:?}");
+
+        let expected: HashMap<&str, SimpleBlockSurvival> = [
+            ("minecraft:dead_bush", SimpleBlockSurvival::TagBelow(Tag::SupportsDryVegetation)),
+            ("minecraft:short_dry_grass", SimpleBlockSurvival::TagBelow(Tag::SupportsDryVegetation)),
+            ("minecraft:tall_dry_grass", SimpleBlockSurvival::TagBelow(Tag::SupportsDryVegetation)),
+            ("minecraft:azalea", SimpleBlockSurvival::TagBelow(Tag::SupportsAzalea)),
+            ("minecraft:flowering_azalea", SimpleBlockSurvival::TagBelow(Tag::SupportsAzalea)),
+            ("minecraft:crimson_roots", SimpleBlockSurvival::TagBelow(Tag::SupportsCrimsonRoots)),
+            ("minecraft:brown_mushroom", SimpleBlockSurvival::Mushroom), ("minecraft:red_mushroom", SimpleBlockSurvival::Mushroom),
+            ("minecraft:small_dripleaf", SimpleBlockSurvival::SmallDripleaf), ("minecraft:lily_pad", SimpleBlockSurvival::LilyPad),
+            ("minecraft:spore_blossom", SimpleBlockSurvival::CeilingCenter), ("minecraft:leaf_litter", SimpleBlockSurvival::SturdyBelow),
+            ("minecraft:moss_carpet", SimpleBlockSurvival::NonAirBelow), ("minecraft:pale_moss_carpet", SimpleBlockSurvival::NonAirBelow),
+            ("minecraft:fire", SimpleBlockSurvival::Fire), ("minecraft:soul_fire", SimpleBlockSurvival::TagBelow(Tag::SoulFireBaseBlocks)),
+            ("minecraft:melon", SimpleBlockSurvival::Always), ("minecraft:pumpkin", SimpleBlockSurvival::Always),
+            ("minecraft:tuff", SimpleBlockSurvival::Always), ("minecraft:potent_sulfur", SimpleBlockSurvival::Always),
+        ].into_iter().collect();
+        for output in &outputs {
+            let actual = simple_block_survival_rule(output);
+            let intended = expected.get(output.as_str()).copied().unwrap_or(SimpleBlockSurvival::Vegetation);
+            assert_eq!(actual, intended, "{output} must use its audited survival family");
+        }
+        assert_eq!(SIMPLE_BLOCK_SURVIVAL.len(), expected.len(), "no exceptional state may silently take the vegetation fallback");
     }
 }
