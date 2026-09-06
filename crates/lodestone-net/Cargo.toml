@@ -58,6 +58,7 @@ ws-web = [
     "dep:js-sys",
     "dep:web-sys",
 ]
+worker-web = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
 
 # --- Native (non-wasm) target dependencies ---
 # Tokio keeps the full workspace feature set (including `net` and
@@ -115,5 +116,6 @@ web-sys = { version = "0.3", optional = true, features = [
     "ErrorEvent",
     "Event",
     "MessageEvent",
+    "MessagePort",
     "WebSocket",
 ] }

@@ -58,6 +58,14 @@ command_arguments = [
   "if [ -f ../.cache/mc/26.2/client.jar ]; then if [ \"${LODESTONE_WEB_CLIENT_JAR_PARTS:-0}\" = 1 ]; then python3 scripts/stage_client_jar_parts.py --jar ../.cache/mc/26.2/client.jar --out \"$TRUNK_STAGING_DIR\"; else cp ../.cache/mc/26.2/client.jar \"$TRUNK_STAGING_DIR/\"; fi; else echo \"trunk hook: ../.cache/mc/26.2/client.jar is absent, not staged — the page will report ASSET LOAD FAILED and draw nothing (see web/README.md)\"; fi; if [ -f ../.cache/mc/26.2/generated/reports/blocks.json ]; then cp ../.cache/mc/26.2/generated/reports/blocks.json \"$TRUNK_STAGING_DIR/\"; else echo \"trunk hook: ../.cache/mc/26.2/generated/reports/blocks.json is absent, not staged — the page will report ASSET LOAD FAILED and draw nothing (see web/README.md)\"; fi",
 ]
 
+# The server bundle is a second wasm module because it must execute in a
+# dedicated Worker, not beside winit on the page. It is built and staged after
+# the page bundle so the bootstrap and its wasm sibling share one deployment.
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = ["-c", "scripts/stage_worker.sh \"$TRUNK_STAGING_DIR\""]
+
 # Stage the real (non-stub) title-screen panorama faces, IF the local
 # asset-object store has them — same conditional-staging shape as the hook
 # above, and the same reason: these come from ~2.6 MB of gitignored files

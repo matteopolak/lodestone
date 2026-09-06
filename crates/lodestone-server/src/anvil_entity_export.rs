@@ -158,10 +158,7 @@ mod tests {
     use lodestone_storage_schema::BuiltinDimension;
 
     fn scratch(name: &str) -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let path = std::env::temp_dir().join(format!(
             "lodestone-native-entity-export-{name}-{}-{unique}",
             std::process::id()

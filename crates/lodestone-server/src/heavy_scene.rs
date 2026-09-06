@@ -11,7 +11,7 @@ use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use lodestone_time::Instant;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1483,7 +1483,7 @@ fn entity_spawn_actions(commands: &[String]) -> Result<Vec<(ResourceKey, Vec3)>,
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn wait_for_mob_reseed(mobs: &MobHandle) -> Result<(), HeavyError> {
-    let started = tokio::time::Instant::now();
+    let started = Instant::now();
     let limit = std::time::Duration::from_secs(5);
     while started.elapsed() < limit {
         if mobs.with(|sim| sim.next_id()) >= 1000 {

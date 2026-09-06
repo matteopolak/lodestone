@@ -174,4 +174,17 @@ mod tests {
         let got = drain_in_chunks(&mut inbox, 100);
         assert_eq!(got, vec![4, 5, 6, 7, 8, 9]);
     }
+
+    #[test]
+    fn buffered_bytes_survive_until_eof_can_be_reported() {
+        // A transport checks `inbox` before its closed flag. This is the
+        // control for that ordering: a port may close in the same turn that
+        // delivered its final bytes, and EOF is correct only after those bytes
+        // have been handed to the protocol reader.
+        let mut inbox = ByteInbox::default();
+        inbox.push(&[0x02, 0x7f]);
+        assert!(!inbox.is_empty(), "a closing transport must drain first");
+        assert_eq!(drain_in_chunks(&mut inbox, 1), vec![0x02, 0x7f]);
+        assert!(inbox.is_empty(), "only an empty inbox may yield EOF");
+    }
 }

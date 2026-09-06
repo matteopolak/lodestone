@@ -3097,6 +3097,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-server-worker"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "lodestone-shell",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "lodestone-shell"
 version = "0.1.0"
 dependencies = [

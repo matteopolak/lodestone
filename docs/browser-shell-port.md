@@ -34,6 +34,31 @@ manifest. `web/Trunk.toml` runs it when `LODESTONE_WEB_CLIENT_JAR_PARTS=1`; pack
 workflows must omit the direct jar afterward for hosts that reject it. URLs are
 intentionally relative, so the same output works below a deployment subpath.
 
+### Dedicated integrated-server Worker
+
+Browser singleplayer has two wasm modules. The page module owns the client,
+renderer, input, and page ECS. `web/worker/` builds the server module, and
+`web/scripts/stage_worker.sh` places its bootstrap and wasm output beside the
+page bundle. On Play, `net::launch_browser_worker` creates a `Worker` and a
+`MessageChannel`; the Worker receives one port together with launch settings,
+constructs the one world source and integrated server, then replies `ready`.
+
+`lodestone_net::MessagePortTransport` turns the two ports into an async byte
+stream. It intentionally transports raw framed bytes only: message boundaries
+can split or coalesce protocol packets, and `ByteInbox` reassembles them before
+the codec reads. Startup/error messages remain on the Worker control channel,
+so they can never be decoded as packets. The page retains the worker object for
+the session; a post-ready worker failure closes the port and reaches the normal
+client disconnect path. It must not fall back then, because that would create a
+second authoritative mutable world. A failure before `ready` is the one safe
+fallback point and uses the existing in-page duplex server.
+
+The page's synchronous ECS command dispatch cannot cross this boundary. The
+worker installs a command sink that visibly refuses page-plugin commands rather
+than silently accepting or losing them. Bridging those commands needs an
+explicit request/reply protocol and page-side authorization policy; it is not
+implicit byte transport work.
+
 ### The measurement that reorders the whole census
 
 Hazard calls that compile for `wasm32-unknown-unknown` and "die at runtime" are usually
@@ -214,15 +239,18 @@ clock seam; `lodestone-render`'s `target.rs` owns the swapchain sRGB-view decisi
 
 ## Open work
 
-The server's own per-connection periodic driver (keep-alive, air supply, world-border damage,
-burning, status effects, hunger) has a working browser timer seam
-(`crate::browser_timer::BrowserInterval`, built on `window.setTimeout` with `Delay` missed-tick
-semantics — never `Burst`, which races a timer against a socket read). **Not yet ported to the
-same seam**: the world tick loop itself (mob AI, scheduled/random block ticks, weather, periodic
-block-entity ticks) is still entirely native-only, so a browser singleplayer world has no mob
-AI, crop growth, fluid flow, scheduled redstone, or weather. Also open: the options file has no
-wasm persistence seam yet, and one world-list error path swallows a failure without surfacing it
-to the UI.
+The server's per-connection periodic driver (keep-alive, air supply, world-border damage,
+burning, status effects, hunger) and the integrated-world driver both use
+`crate::browser_timer::BrowserInterval`, built on `window.setTimeout` with `Delay` missed-tick
+semantics. The timer is the only target-specific part: browser singleplayer runs the same world
+simulation body and shares its source, scheduled-tick registries, entity snapshots, and block
+change feeds with the duplex connection. This makes item falling, scheduled fluid and block work,
+random ticks, weather, and block-entity updates reach the normal wire path without a catch-up
+burst after a delayed tab. A Nether or End source first created by portal travel starts its own
+task through that same tick body, follows the shared per-dimension anchor set, and races the same
+shutdown signal; it does not share the overworld's queues or tick task. Also open: the options
+file has no wasm persistence seam yet, and one world-list error path swallows a failure without
+surfacing it to the UI.
 
 ## What the record got wrong
 

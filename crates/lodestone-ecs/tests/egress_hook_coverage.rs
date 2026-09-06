@@ -46,6 +46,10 @@ const KNOWN_DIRECT_SEND_FILES: &[&str] = &[
     "lodestone-shell/src/net.rs",
     // The hook's own call site: `Sim::drain_action_queue`. Covered by definition.
     "lodestone-shell/src/sim/step.rs",
+    // The newline-delimited stdio diagnostic has no ECS world or `ActionQueue`:
+    // it forwards typed chat directly to its private `NetClient`. The interactive
+    // terminal surface uses the normal `Sim` path; only `run_stdio` is a bypass.
+    "lodestone-shell/src/terminal.rs",
     // Test harnesses that push actions straight at a handle to drive a scenario.
     // Not user-visible paths.
     "lodestone-shell/src/app/tests.rs",

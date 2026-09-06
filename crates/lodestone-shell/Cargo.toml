@@ -318,6 +318,10 @@ web-sys = { version = "0.3", features = [
     # as a DOM event instead; `Document`/`Element` inherit this but the
     # method is not visible without enabling it explicitly.
     "EventTarget",
+    "ErrorEvent",
+    "Worker",
+    "MessageChannel",
+    "MessagePort",
     # `platform::relay::relay_ws_url`'s `window.location().host()/.protocol()`,
     # so the browser server-list ping can dial the relay without a hardcoded
     # port — see that function's doc.
@@ -344,7 +348,7 @@ web-sys = { version = "0.3", features = [
 # already `cfg(all(feature = "ws-web", target_arch = "wasm32"))`-gated in
 # `lodestone-net`, so this line is a no-op off wasm32, but keeping it out of the
 # native dependency set is one fewer thing for `check-seam` to reason about.
-lodestone-net = { workspace = true, features = ["ws-web"] }
+lodestone-net = { workspace = true, features = ["ws-web", "worker-web"] }
 
 
 [dev-dependencies]

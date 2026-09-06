@@ -758,10 +758,7 @@ mod tests {
     use crate::world_storage::WorldStorageBackend;
 
     fn scratch(name: &str) -> PathBuf {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after Unix epoch")
-            .as_nanos();
+        let unique = lodestone_time::epoch_duration().as_nanos();
         let path = std::env::temp_dir().join(format!(
             "lodestone-anvil-player-storage-{name}-{}-{unique}",
             std::process::id()
