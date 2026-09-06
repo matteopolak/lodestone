@@ -59,23 +59,28 @@ pub fn resolve_block_tag(
 /// Resolves one biome's `carvers` list into parsed [`CarverConfig`]s, in the
 /// biome JSON's own declared order — `WorldgenRandom::set_large_feature_seed`'s
 /// `index` (see [`crate::carver::apply_carvers`]) is the position in *this*
-/// list, so order matters and must match vanilla's `BiomeGenerationSettings
-/// .getCarvers()` (the JSON array's own order; nothing reorders it).
+/// list, so order matters and remains the JSON array's own order; nothing
+/// reorders it.
 ///
+/// The data representation is either one carver id or an ordered array of ids.
 /// Empty if [`Resolver::biome_document`] has no data for `biome` — a biome
 /// genuinely absent from the resolver's data carves nothing, matching the
 /// earlier behaviour for a `Resolver` that never implemented this method.
 #[must_use]
 pub fn build_biome_carvers(resolver: &dyn Resolver, biome: &str) -> Vec<CarverConfig> {
     let doc = resolver.biome_document(biome);
-    let Some(carvers) = doc.get("carvers").and_then(Value::as_array) else {
+    let Some(carvers) = doc.get("carvers") else {
         return Vec::new();
     };
-    carvers
-        .iter()
-        .filter_map(Value::as_str)
-        .map(|id| CarverConfig::parse(&resolver.configured_carver(id)))
-        .collect()
+    match carvers {
+        Value::String(id) => vec![CarverConfig::parse(&resolver.configured_carver(id))],
+        Value::Array(ids) => ids
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|id| CarverConfig::parse(&resolver.configured_carver(id)))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Resolves one biome's `UNDERGROUND_ORES` decoration step
@@ -839,6 +844,49 @@ mod tests {
             })
             .collect();
         assert_eq!(probs, vec![0.1_f32, 0.2_f32]);
+    }
+
+    #[test]
+    fn build_biome_carvers_accepts_a_single_declared_id() {
+        let mut biomes = HashMap::new();
+        biomes.insert(
+            "minecraft:test",
+            serde_json::json!({"carvers": "minecraft:only"}),
+        );
+        let mut carvers = HashMap::new();
+        carvers.insert(
+            "minecraft:only",
+            serde_json::json!({
+                "type": "minecraft:nether_cave",
+                "config": {
+                    "probability": 0.2,
+                    "y": {
+                        "type": "minecraft:uniform",
+                        "min_inclusive": {"absolute": 0},
+                        "max_inclusive": {"absolute": 10}
+                    },
+                    "yScale": 0.5,
+                    "horizontal_radius_multiplier": 1.0,
+                    "vertical_radius_multiplier": 1.0,
+                    "floor_level": -0.7,
+                    "lava_level": {"absolute": 10}
+                }
+            }),
+        );
+        let resolver = FakeResolver {
+            tags: HashMap::new(),
+            biomes,
+            carvers,
+            features: HashMap::new(),
+            placed: HashMap::new(),
+        };
+
+        let list = build_biome_carvers(&resolver, "minecraft:test");
+        assert_eq!(list.len(), 1, "a singleton carver must not be discarded");
+        assert!(matches!(
+            list[0],
+            CarverConfig::Cave(ref cave) if cave.nether
+        ));
     }
 
     #[test]

@@ -14,6 +14,12 @@ coordinate. It then drives the shared 3×3 feature writers: neighbouring source
 chunks can place blocks into the served chunk, exactly as a feature near a
 border requires.
 
+Biome carvers are normalized by `compose::build_biome_carvers` before that
+prefix runs. A biome document may declare one carver id directly or an ordered
+array; both forms become the same ordered carver list. Treating the direct form
+as an empty array removes the entire cave pass, which leaves solid netherrack
+where the generated terrain has cave air and lava.
+
 The Nether differs from the Overworld at decoration step 7. Each bundled biome
 has a mixed list containing springs, fire, glowstone and mushrooms alongside
 quartz, gold and debris ores. `NetherGenerator` splits only the placement body:
@@ -41,6 +47,11 @@ than adding a Nether-specific algorithm.
 Do not use the Overworld's step-6 ore resolver for Nether step 7, and do not
 replace `LegacyRandomSource` with xoroshiro in either Nether feature pass. Both
 errors create plausible terrain with a different world layout.
+
+When changing the biome-document parser, preserve a direct carver id as a
+single-element list and preserve array order exactly. The source chunk and list
+index seed each carver, so dropping or reordering an entry changes the whole
+17×17 carve neighbourhood.
 
 ## Configuration
 

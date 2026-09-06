@@ -57,6 +57,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use lodestone_worldgen::compose::build_biome_carvers;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::nether::NetherGenerator;
 use serde_json::Value;
@@ -166,6 +167,25 @@ fn settings() -> Value {
         &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display())),
     )
     .expect("nether.json")
+}
+
+/// The production Nether biome data declares its carver as one id, unlike the
+/// Overworld's ordered array. This is a consumer gate: a parser that accepts
+/// only arrays makes every Nether 17×17 carve neighbourhood empty.
+#[test]
+fn nether_singleton_carver_reaches_the_production_parser() {
+    let resolver = NetherAssets { root: assets_root() };
+    let document = resolver.biome_document("minecraft:nether_wastes");
+    assert!(
+        document["carvers"].is_string(),
+        "the bundled Nether fixture must exercise the singleton representation"
+    );
+    let carvers = build_biome_carvers(&resolver, "minecraft:nether_wastes");
+    assert_eq!(carvers.len(), 1, "the Nether carver must reach the generator");
+    assert!(matches!(
+        carvers[0],
+        lodestone_worldgen::carver::CarverConfig::Cave(ref cave) if cave.nether
+    ));
 }
 
 /// The oracle fixture, parsed: the legend, the per-chunk biome grids, and the
