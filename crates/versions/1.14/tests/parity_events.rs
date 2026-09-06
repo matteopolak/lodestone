@@ -210,6 +210,128 @@ fn bulk_block_change_has_legacy_chunk_and_754_section_fixtures() {
 }
 
 #[test]
+fn entity_equipment_literal_fixture_resolves_each_historical_item_registry() {
+    for (protocol, item_id) in [
+        (PROTOCOL_1_14_4, 575),
+        (PROTOCOL_1_15_2, 575),
+    ] {
+        let mut wire = Writer::default();
+        wire.var_i32(17); // entity id
+        wire.var_i32(5); // head slot
+        wire.bool(true);
+        wire.var_i32(item_id);
+        wire.i8(1);
+        wire.u8(10); // populated legacy NBT: empty named compound
+        wire.u16(0);
+        wire.u8(0);
+        let directives = dispatch(
+            protocol,
+            clientbound_id(protocol, "minecraft:entity_equipment"),
+            wire.into_vec(),
+        );
+        match directives.as_slice() {
+            [Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+                entity_id,
+                equipment,
+            })] => {
+                assert_eq!(*entity_id, 17);
+                assert_eq!(equipment.len(), 1);
+                assert_eq!(equipment[0].slot, lodestone_model::EquipmentSlot::Head);
+                let item = equipment[0].item.as_ref().expect("populated item");
+                assert_eq!(item.item.to_string(), "minecraft:diamond_helmet");
+                assert_eq!(item.count, 1);
+                assert!(item.components.has_unmodeled);
+            }
+            other => panic!("unexpected equipment directives for {protocol}: {other:?}"),
+        }
+    }
+
+    // Protocol 754 changed the slot field to an i8-shaped byte whose top bit
+    // continues the packet. This two-entry body distinguishes it from the
+    // single-VarInt shape used above and keeps both entries visible.
+    let mut wire = Writer::default();
+    wire.var_i32(17); // entity id
+    wire.u8(0x80); // main hand, another entry follows
+    wire.bool(false); // clear main hand
+    wire.u8(0x05); // head, final entry
+    wire.bool(true);
+    wire.var_i32(634); // diamond helmet in protocol 754
+    wire.i8(1);
+    wire.u8(0); // no item NBT
+    let directives = dispatch(
+        PROTOCOL_1_16_5,
+        clientbound_id(PROTOCOL_1_16_5, "minecraft:entity_equipment"),
+        wire.into_vec(),
+    );
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+            entity_id,
+            equipment,
+        })] => {
+            assert_eq!(*entity_id, 17);
+            assert_eq!(equipment.len(), 2);
+            assert_eq!(equipment[0].slot, lodestone_model::EquipmentSlot::MainHand);
+            assert!(equipment[0].item.is_none());
+            assert_eq!(equipment[1].slot, lodestone_model::EquipmentSlot::Head);
+            let item = equipment[1].item.as_ref().expect("populated item");
+            assert_eq!(item.item.to_string(), "minecraft:diamond_helmet");
+            assert_eq!(item.count, 1);
+            assert!(!item.components.has_unmodeled);
+        }
+        other => panic!("unexpected 754 equipment directives: {other:?}"),
+    }
+}
+
+#[test]
+fn entity_equipment_rejects_nonpositive_present_counts() {
+    for count in [0, -1] {
+        let mut wire = Writer::default();
+        wire.var_i32(17);
+        wire.var_i32(5);
+        wire.bool(true);
+        wire.var_i32(575);
+        wire.i8(count);
+        wire.u8(0);
+        let result = adapter_for(PROTOCOL_1_14_4).handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            clientbound_id(PROTOCOL_1_14_4, "minecraft:entity_equipment"),
+            &wire.into_vec(),
+        );
+        assert!(result.is_err(), "present count {count} must be rejected");
+    }
+}
+
+#[test]
+fn block_action_literal_fixture_resolves_each_historical_block_registry() {
+    let fixtures = [
+        (PROTOCOL_1_14_4, 145, "minecraft:chest"),
+        (PROTOCOL_1_15_2, 145, "minecraft:chest"),
+        (PROTOCOL_1_16_5, 147, "minecraft:chest"),
+    ];
+    for (protocol, block_id, expected) in fixtures {
+        let mut wire = Writer::default();
+        // x=-12, y=63, z=34 in the 1.14+ x/z/y packed-position layout.
+        wire.i64(-3_298_534_744_001);
+        wire.u8(1);
+        wire.u8(9);
+        wire.var_i32(block_id);
+        let directives = dispatch(
+            protocol,
+            clientbound_id(protocol, "minecraft:block_action"),
+            wire.into_vec(),
+        );
+        match directives.as_slice() {
+            [Directive::Emit(ClientEvent::BlockEvent { pos, b0, b1, block })] => {
+                assert_eq!((*pos, *b0, *b1), (lodestone_model::BlockPos::new(-12, 63, 34), 1, 9));
+                assert_eq!(block.to_string(), expected);
+            }
+            other => panic!("unexpected block-event directives for {protocol}: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn metadata_flags_and_textual_attribute_keys_are_lifted() {
     let mut metadata = Writer::default();
     metadata.var_i32(19);

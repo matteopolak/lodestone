@@ -26,6 +26,15 @@ fn var_i32(value: i32) -> Vec<u8> {
     }
 }
 
+/// The 1.14+ position layout written independently from the packet codec:
+/// signed x and z are 26-bit fields, and y is the low 12 bits.
+fn position_body(x: i32, y: i32, z: i32) -> [u8; 8] {
+    (((i64::from(x) & ((1 << 26) - 1)) << 38)
+        | ((i64::from(z) & ((1 << 26) - 1)) << 12)
+        | (i64::from(y) & ((1 << 12) - 1)))
+        .to_be_bytes()
+}
+
 fn dispatch(protocol: i32, id: i32, payload: &[u8]) -> Vec<Directive> {
     let adapter = V756Adapter::for_protocol(protocol);
     let mut world = World::new();
@@ -182,4 +191,65 @@ fn block_destruction_preserves_clear_stage_byte() {
     body.push(255);
     let events = dispatch(PROTOCOL_1_18_2, packet_ids_758::play::clientbound::BLOCK_BREAK_ANIMATION, &body);
     assert!(matches!(events.as_slice(), [Directive::Emit(ClientEvent::BlockDestruction { entity_id: 42, progress: 255, .. })]));
+}
+
+#[test]
+fn block_action_resolves_its_protocol_local_block_and_preserves_visible_parameters() {
+    for &(protocol, id) in &[
+        (PROTOCOL_1_17_1, packet_ids::play::clientbound::BLOCK_ACTION),
+        (PROTOCOL_1_18_2, packet_ids_758::play::clientbound::BLOCK_ACTION),
+    ] {
+        // `153` is chest in each committed jar report, not a 26.2 block id.
+        let mut body = position_body(-12, 64, 35).to_vec();
+        body.extend_from_slice(&[1, 0]); // chest opens; these values stay opaque to the adapter
+        body.extend_from_slice(&var_i32(153));
+        let events = dispatch(protocol, id, &body);
+        assert!(matches!(events.as_slice(), [Directive::Emit(ClientEvent::BlockEvent { pos, b0: 1, b1: 0, block })]
+            if *pos == lodestone_model::BlockPos::new(-12, 64, 35) && block.to_string() == "minecraft:chest"));
+    }
+}
+
+#[test]
+fn entity_equipment_resolves_continuation_slots_from_literal_slot_bodies() {
+    for &(protocol, id) in &[
+        (PROTOCOL_1_17_1, packet_ids::play::clientbound::ENTITY_EQUIPMENT),
+        (PROTOCOL_1_18_2, packet_ids_758::play::clientbound::ENTITY_EQUIPMENT),
+    ] {
+        let mut body = var_i32(73);
+        body.extend_from_slice(&[0x80, 0]); // MainHand, another entry, empty slot
+        body.push(5); // Head, final entry
+        body.push(1); // occupied slot
+        body.extend_from_slice(&var_i32(746)); // iron_helmet in both jar reports
+        body.extend_from_slice(&[1, 0]); // count, TAG_End (no legacy NBT)
+        let events = dispatch(protocol, id, &body);
+        assert!(matches!(events.as_slice(), [Directive::Emit(ClientEvent::EntityEquipmentUpdated { entity_id: 73, equipment })]
+            if equipment.len() == 2
+                && equipment[0].slot == lodestone_model::EquipmentSlot::MainHand
+                && equipment[0].item.is_none()
+                && equipment[1].slot == lodestone_model::EquipmentSlot::Head
+                && matches!(&equipment[1].item, Some(item) if item.item.to_string() == "minecraft:iron_helmet" && item.count == 1)));
+    }
+}
+
+#[test]
+fn entity_equipment_rejects_legacy_nbt_instead_of_discarding_it() {
+    let mut body = var_i32(73);
+    body.push(5); // Head, final entry
+    body.push(1); // occupied slot
+    body.extend_from_slice(&var_i32(746));
+    body.push(1); // count
+    // A minimal named compound. Its contents are deliberately not decoded into
+    // modern components, so a successful event here would be a false claim.
+    body.extend_from_slice(&[10, 0, 0, 0]);
+    let adapter = V756Adapter::for_protocol(PROTOCOL_1_17_1);
+    let mut world = World::new();
+    let error = adapter
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            packet_ids::play::clientbound::ENTITY_EQUIPMENT,
+            &body,
+        )
+        .expect_err("legacy NBT must not silently become an empty component set");
+    assert!(error.to_string().contains("legacy NBT"));
 }

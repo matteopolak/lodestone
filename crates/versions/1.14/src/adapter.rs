@@ -11,9 +11,10 @@ use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
     ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts,
-    EntityAttributeModifier, EntityAttributeSnapshot, EntityInteraction, EntityMetadataUpdate,
-    EntityMovement, GameMode, Hand, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
-    PlayerCommand, PlayerListEntry, ProfileProperty, RecipeBookType, ResourceKey,
+    EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment, EntityInteraction,
+    EntityMetadataUpdate, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile,
+    MainHand, ObjectiveMode, ObjectiveRenderType, PlayerCommand, PlayerListEntry, ProfileProperty,
+    RecipeBookType, ResourceKey,
     ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, TeamAction, TeamColor,
     TeamParameters, TeleportFlags, Text, Vec3, VersionAdapter, Visibility, WorldSink,
 };
@@ -21,16 +22,18 @@ use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk};
 
 use crate::canonical::FallbackTally;
 use crate::entity_types;
+use crate::legacy_registries;
 use crate::packets::chunk::{ChunkShape, MapChunk, UnloadChunk, UpdateLight};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::{
-    EntityDestroy, EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
-    EntityMetadataPacket, NamedEntitySpawn, RelEntityMove, SpawnEntityExperienceOrb,
-    SpawnEntityLiving, SpawnObject,
+    EntityDestroy, EntityEquipment754Packet, EntityEquipmentPacket, EntityLook, EntityMoveLook, EntityTeleport,
+    EntityVelocityPacket, EntityMetadataPacket, NamedEntitySpawn, RelEntityMove,
+    SpawnEntityExperienceOrb, SpawnEntityLiving, SpawnObject,
 };
 use crate::packets::game::{
-    AttachEntity, BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook,
-    Collect, DifficultyPacket, EntityAction, EntityEffect, JoinGame, KickDisconnect,
+    AttachEntity, BlockAction, BlockDig, BlockPlace, ClientCommand, ClientboundChat,
+    ClientboundPositionLook, Collect, DifficultyPacket, EntityAction, EntityEffect, JoinGame,
+    KickDisconnect,
     CraftingBookData, GameStateChange, OpenSignEntity, PlayerlistHeader, RecipeBook,
     RemoveEntityEffect, Respawn,
     ServerboundArmAnimation, ServerboundChat, ServerboundFlying, ServerboundLook,
@@ -817,6 +820,44 @@ fn dec_err(err: impl std::fmt::Display) -> AdapterError {
     AdapterError::Decode(err.to_string())
 }
 
+/// Resolves a post-flattening legacy slot into the shared item model.
+///
+/// The 1.14-era slot codec preserves the numeric item id and raw NBT, but the
+/// event model needs a namespaced key. Empty slots are valid equipment clears;
+/// a present id absent from this protocol's historical registry is a wire
+/// error, not an invitation to consult the current registry.
+fn legacy_slot_to_item_stack(
+    protocol: i32,
+    slot: &Slot,
+) -> Result<Option<ItemStack>, AdapterError> {
+    match slot {
+        Slot::Empty => Ok(None),
+        Slot::Item { id, count, nbt } => {
+            let count = u32::try_from(*count).map_err(|_| {
+                AdapterError::Decode(format!(
+                    "negative legacy item stack count {count}"
+                ))
+            })?;
+            if count == 0 {
+                return Err(AdapterError::Decode(
+                    "present legacy item stack has zero count".to_owned(),
+                ));
+            }
+            let name = legacy_registries::item_name(protocol, *id).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown legacy item registry id {id}"))
+            })?;
+            let key = name
+                .parse()
+                .map_err(|_| AdapterError::Decode(format!("legacy item id {id} is not a key")))?;
+            let mut stack = ItemStack::new(key, count);
+            if nbt.is_some() {
+                stack.components.has_unmodeled = true;
+            }
+            Ok(Some(stack))
+        }
+    }
+}
+
 /// Maps a `boss_bar` varint colour ordinal to the canonical [`BossColor`].
 fn boss_color_from_ordinal(ordinal: i32) -> Result<BossColor, AdapterError> {
     match ordinal {
@@ -1539,6 +1580,55 @@ impl V735Adapter {
         })])
     }
 
+    /// `minecraft:entity_equipment`. Protocols 498/578 carry one VarInt slot;
+    /// protocol 754 carries a continuation-flagged sequence of i8-shaped slot
+    /// bytes. The shared event uses a vector so both wire shapes preserve all
+    /// updates in one packet.
+    fn handle_play_entity_equipment(
+        adapter: &V735Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let (entity_id, entries): (i32, Vec<(u8, Slot)>) =
+            if adapter.protocol == PROTOCOL_1_16_5 {
+                let body: EntityEquipment754Packet = adapter.decode_body_exact(payload)?;
+                let entity_id = body.entity_id;
+                let entries = body
+                    .entries
+                    .into_iter()
+                    .map(|(encoded_slot, item)| {
+                        (encoded_slot as u8 & 0x7f, item)
+                    })
+                    .collect();
+                (entity_id, entries)
+            } else {
+                let body: EntityEquipmentPacket = adapter.decode_body_exact(payload)?;
+                let ordinal = u8::try_from(body.slot).map_err(|_| {
+                    AdapterError::Decode(format!(
+                        "entity_equipment slot ordinal {} is outside u8 range",
+                        body.slot
+                    ))
+                })?;
+                (body.entity_id, vec![(ordinal, body.item)])
+            };
+        let equipment = entries
+            .into_iter()
+            .map(|(ordinal, item)| {
+                let slot = EquipmentSlot::from_ordinal(ordinal).ok_or_else(|| {
+                    AdapterError::Decode(format!(
+                        "unknown entity_equipment slot ordinal {ordinal}"
+                    ))
+                })?;
+                let item = legacy_slot_to_item_stack(adapter.protocol, &item)?;
+                Ok(EntityEquipment { slot, item })
+            })
+            .collect::<Result<Vec<_>, AdapterError>>()?;
+        Ok(vec![Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+            entity_id,
+            equipment,
+        })])
+    }
+
     /// Converts this era's signed, one-based wire id to the shared zero-based
     /// built-in registry id. The conversion is kept at packet ingress so an
     /// unknown or extension value cannot index the canonical table.
@@ -1659,6 +1749,36 @@ impl V735Adapter {
                 pos.y.rem_euclid(16) as u8,
                 pos.z.rem_euclid(16) as u8,
             ]],
+        })])
+    }
+
+    /// `minecraft:block_action` (the legacy name for the block-event wire
+    /// packet). Its block id is a historical block-type registry id; resolving
+    /// it before emission is what lets chest, bell, piston and note-block
+    /// consumers interpret the two opaque event bytes correctly.
+    fn handle_play_block_action(
+        adapter: &V735Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: BlockAction = adapter.decode_body_exact(payload)?;
+        let name = legacy_registries::block_name(adapter.protocol, body.block_id).ok_or_else(|| {
+            AdapterError::Decode(format!(
+                "unknown legacy block registry id {}",
+                body.block_id
+            ))
+        })?;
+        let block = name.parse().map_err(|_| {
+            AdapterError::Decode(format!(
+                "legacy block registry id {} is not a key",
+                body.block_id
+            ))
+        })?;
+        Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
+            pos: body.location.0,
+            b0: body.action,
+            b1: body.parameter,
+            block,
         })])
     }
 
@@ -2902,6 +3022,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:entity_equipment",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V735Adapter::handle_play_entity_equipment,
+        ),
+    ),
+    (
         "minecraft:entity_effect",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2927,6 +3054,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
             V735Adapter::handle_play_block_change,
+        ),
+    ),
+    (
+        "minecraft:block_action",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V735Adapter::handle_play_block_action,
         ),
     ),
     (
@@ -3118,11 +3252,10 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
 /// [`CLIENTBOUND`] above — `Table::build` rejects construction otherwise,
 /// which is the anti-island guard replacing the old if-chain's trailing
 /// `Ok(Vec::new())`. Re-derived by grepping the pre-conversion if-chain for
-/// every `play::clientbound::X` it tested (54 handled) against the full
-/// 92-entry `ENTRIES` table, then checking `crates/versions/26.2/src/adapter/`
-/// for each of the 38 gaps by canonical name or an obvious Mojang-naming
-/// synonym (v26-2 uses Mojang's own names, which differ from minecraft-data's
-/// for the same packet).
+/// every `play::clientbound::X` it tested against the full generated
+/// `ENTRIES` tables, then checking `crates/versions/26.2/src/adapter/` for
+/// each remaining gap by canonical name or an obvious naming synonym (the
+/// modern family uses a different naming source for the same packets).
 static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:spawn_entity_painting",
@@ -3137,7 +3270,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "minecraft:tile_entity_data",
         "v26-2 has this; backport (BLOCK_ENTITY_DATA)",
     ),
-    lodestone_core::dispatch::IGNORED::new("minecraft:block_action", "v26-2 has this; backport (BLOCK_EVENT)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:declare_commands", "v26-2 has this; backport (COMMANDS)"),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:transaction",
@@ -3186,10 +3318,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:resource_pack_send",
         "v26-2 has this; backport (RESOURCE_PACK_PUSH)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_equipment",
-        "v26-2 has this; backport (SET_EQUIPMENT)",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:entity_sound_effect",

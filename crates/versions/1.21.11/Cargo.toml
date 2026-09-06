@@ -24,4 +24,5 @@ lodestone-registry = { workspace = true, features = ["v1-21-11"] }
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true }

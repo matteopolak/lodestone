@@ -70,9 +70,21 @@ pub mod generated_canonical;
 #[path = "generated/object_types.rs"]
 pub(crate) mod generated_object_types;
 
+/// Generated protocol-404 item-id→name table, sourced from the vendored
+/// 1.13.2 registry census.
+#[path = "generated/item_types.rs"]
+pub(crate) mod generated_item_types;
+
+/// Generated protocol-404 block-type-id→name table, distinct from the
+/// protocol's block-state canonical table.
+#[path = "generated/block_types.rs"]
+pub(crate) mod generated_block_types;
+
 pub mod adapter;
+pub mod block_types;
 pub mod canonical;
 pub mod entity_types;
+pub mod item_types;
 pub mod packets;
 pub mod server_protocol;
 

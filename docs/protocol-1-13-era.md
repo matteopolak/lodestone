@@ -45,12 +45,13 @@ pose) and `minecraft:entity` (an abstract base packet no real server sends).
 
 The clientbound world/event path now also consumes the legacy explosion frame,
 game-state reasons 1/2/3/7/8 (rain start/stop, game mode, rain strength and
-thunder strength), multi-block changes, and block-break overlays. Flat 404
-state ids go through the committed canonical table before bulk writes; each
-write synchronizes block-entity presence and emits a section-scoped dirty
-signal. Explosion offsets and the always-present local impulse are preserved
-as an `Explosion` event, including an explicit zero impulse. Before that event
-is emitted, every removed offset is applied to a loaded world at
+thunder strength), multi-block changes, block-break overlays, block events and
+single-slot equipment changes. Flat 404 state ids go through the committed
+canonical table before bulk writes; each write synchronizes block-entity
+presence and emits a section-scoped dirty signal. Explosion offsets and the
+always-present local impulse are preserved as an `Explosion` event, including
+an explicit zero impulse. Before that event is emitted, every removed offset is
+applied to a loaded world at
 `floor(center) + signed_offset` as canonical air and its block-entity record
 is removed, so the event does not leave world storage stale. The entity
 metadata codec is wired for spawn-time and incremental lists, but only the
@@ -59,15 +60,24 @@ three entity-base fields whose index/serializer pair is universal here
 are textual on this wire; modifier UUIDs are retained losslessly as
 `minecraft:uuid/<uuid>` identifiers.
 
-Two historical-registry surfaces remain deliberately refused. `block_action`
-needs the 404 block-type registry, which is not the block-state report in
-`tests/support/blocks_1_13_2_jar.json`; that report's state id 25 is a birch
-sapling while the block-action type numbering is a different space. Likewise,
-`entity_equipment` needs the 404 item registry to turn a flat numeric slot id
-into a canonical item key, and no authoritative local item mapping is
-committed. Reusing the current registry would create plausible but wrong
-items, so both packets stay explicitly ignored until their own historical
-reports are available.
+`block_action` reads its packed pre-1.14 position, two opaque bytes and a
+protocol-404 block-*type* id. Its complete 598-entry block-type census is
+generated from the vendored 1.13.2 data and is deliberately separate from the
+flat block-state canonical table. The adapter raises `BlockEvent` without
+interpreting the bytes; the shell forwards it to block-animation state. An
+unknown type fails explicitly rather than being treated as a same-numbered
+current block.
+
+`entity_equipment` is one `(entity, slot, Slot)` record per packet. Its full
+789-entry flattened item registry is generated from the vendored 1.13.2
+`minecraft-data` census and committed into the family, so every valid item id
+becomes an `EntityEquipmentUpdated` event that the ECS ingests per slot. The
+hermetic table test pins low, middle and high ids; its ignored drift test
+compares every entry with the vendored census. A present stack with legacy NBT
+is marked `has_unmodeled`, preserving the model's honest statement that the
+old payload was not translated field by field. Unknown item ids and unsupported
+slot ordinals fail explicitly; they are not silently displayed as the item that
+happens to use the same id in another era.
 
 ### What breaks at each side
 

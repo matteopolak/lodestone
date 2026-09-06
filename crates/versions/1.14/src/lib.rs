@@ -100,6 +100,7 @@ pub mod generated_canonical_578;
 pub mod adapter;
 pub mod canonical;
 pub mod entity_types;
+pub(crate) mod legacy_registries;
 pub mod packets;
 pub mod server_protocol;
 

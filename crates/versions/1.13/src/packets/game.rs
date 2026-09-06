@@ -4,6 +4,40 @@ use lodestone_macros::{Decode, Encode, Packet};
 use uuid::Uuid;
 
 use crate::packets::position::Position;
+use crate::packets::slot::Slot;
+
+/// Clientbound `block_action`: a block event with two block-defined bytes.
+///
+/// The trailing VarInt is a protocol-404 block *type* registry id rather than
+/// a block-state id.  It selects the event family; the adapter leaves the two
+/// parameter bytes untouched for the shell's animation consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:block_action", state = Play, bound = Client)]
+pub struct BlockAction {
+    /// Block at which the event occurred.
+    pub location: Position,
+    /// Block-defined event parameter.
+    pub byte1: u8,
+    /// Block-defined event parameter.
+    pub byte2: u8,
+    /// Protocol-404 block type registry id.
+    #[mc(varint)]
+    pub block_id: i32,
+}
+
+/// Clientbound `entity_equipment`: exactly one slot update in protocol 404.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:entity_equipment", state = Play, bound = Client)]
+pub struct ClientboundEntityEquipment {
+    /// Entity whose equipment changed.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Equipment-slot ordinal.
+    #[mc(varint)]
+    pub slot: i32,
+    /// Replacement stack, or empty for an explicit clear.
+    pub item: Slot,
+}
 
 /// Clientbound `explosion` (protocol 404).
 ///

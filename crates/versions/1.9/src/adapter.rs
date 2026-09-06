@@ -22,6 +22,7 @@ use lodestone_model::{
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk};
 
 use crate::canonical::{self, FallbackTally};
+use crate::entity_metadata;
 use crate::entity_types;
 use crate::item_types;
 use crate::particle_ids;
@@ -986,6 +987,7 @@ static PLAY_CLIENTBOUND_HANDLERS: &[(&str, lodestone_core::dispatch::Handler<Pla
     ("minecraft:entity_teleport", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_teleport)),
     ("minecraft:entity_velocity", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_velocity)),
     ("minecraft:entity_destroy", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_destroy)),
+    ("minecraft:entity_metadata", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_metadata)),
     ("minecraft:kick_disconnect", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_kick_disconnect)),
     ("minecraft:update_health", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_update_health)),
     ("minecraft:respawn", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_respawn)),
@@ -1065,7 +1067,6 @@ static PLAY_CLIENTBOUND_IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     ),
     lodestone_core::dispatch::IGNORED::new("minecraft:resource_pack_send", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:camera", "v26-2 has this; backport"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:entity_metadata", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::ranged(
         "minecraft:advancements",
         "v26-2 has this; backport",
@@ -1316,7 +1317,7 @@ impl V340Adapter {
             .map_err(|_| {
                 AdapterError::Decode(format!("mob type id {} is not a key", body.kind))
             })?;
-        return Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
+        let mut directives = vec![Directive::Emit(ClientEvent::EntitySpawned {
             entity_id: body.entity_id,
             uuid: Some(body.entity_uuid),
             entity_type,
@@ -1327,7 +1328,15 @@ impl V340Adapter {
                 f64::from(body.velocity_y) / VELOCITY_SCALE,
                 f64::from(body.velocity_z) / VELOCITY_SCALE,
             )),
-        })]);
+        })];
+        let metadata = entity_metadata::fold(&body.metadata);
+        if !metadata.is_empty() {
+            directives.push(Directive::Emit(ClientEvent::EntityMetadataUpdated {
+                entity_id: body.entity_id,
+                metadata,
+            }));
+        }
+        Ok(directives)
     }
 
     fn play_spawn_entity(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
@@ -1458,6 +1467,22 @@ impl V340Adapter {
         return Ok(vec![Directive::Emit(ClientEvent::EntityRemoved {
             entity_ids: body.entity_ids,
         })]);
+    }
+
+    fn play_entity_metadata(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: crate::packets::entity::EntityMetadataPacket = self.decode_body_exact(payload)?;
+        let metadata = entity_metadata::fold(&body.metadata);
+        if metadata.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![Directive::Emit(ClientEvent::EntityMetadataUpdated {
+            entity_id: body.entity_id,
+            metadata,
+        })])
     }
 
     fn play_kick_disconnect(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {

@@ -249,11 +249,20 @@ flags immediately after the spawn event; later rows keep the standalone
 metadata packet path. The fixture's terminator makes an omitted protocol gate
 fail as trailing bytes rather than silently losing the flags.
 
-Equipment and block-event packets remain deliberately unhandled. Their item or
-block-type numeric ids need an authoritative registry for every protocol in
-this era; the only committed item/block registries describe the current
-protocol and would silently name the wrong resource. Add jar-derived 498, 578,
-and 754 registries before wiring either packet.
+Equipment and block-event packets now resolve their historical registration
+ids at ingress. The 498 and 578 tables come from the committed release-jar
+registry reports; the 754 table uses the matching 1.16 registry census, with a
+shared-name index keeping the three production tables compact. A present item
+id or block id absent from the negotiated table is rejected rather than looked
+up in the current registry. Protocols 498 and 578 carry one equipment entry;
+754 carries a top-bit-continued sequence, and the adapter preserves every
+entry in the emitted `EntityEquipmentUpdated` vector. Populated legacy NBT is
+retained as `ItemComponents::has_unmodeled`; present zero or negative counts
+are rejected instead of being normalized. Each block event emits its
+position, two opaque parameters, and canonical block key. Equipment is
+consumed by the ECS entity-equipment ingest path; block events are forwarded
+into the shell's chest, bell, spawner, and gateway event trackers, so both
+signals reach a visible production consumer.
 
 ### External-client acceptance
 

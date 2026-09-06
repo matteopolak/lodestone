@@ -5,6 +5,25 @@ use uuid::Uuid;
 
 use crate::packets::position::Position;
 
+/// Clientbound `block_action` / block-event packet.
+///
+/// Its final numeric field is a block-type registry id, not a block-state id;
+/// the adapter resolves it through the negotiated protocol's historical
+/// registry table before emitting the shared block-event model event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:block_action", state = Play, bound = Client)]
+pub struct BlockAction {
+    /// Block position.
+    pub location: Position,
+    /// First per-block event parameter.
+    pub action: u8,
+    /// Second per-block event parameter.
+    pub parameter: u8,
+    /// Historical block-type registry id.
+    #[mc(varint)]
+    pub block_id: i32,
+}
+
 /// Clientbound `login` (game-join) packet for 1.16.5 (protocol 754) only.
 ///
 /// [`JoinGameLegacy`] is the 498/578 form. The two share the leading entity

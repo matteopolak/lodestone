@@ -20,6 +20,7 @@ lodestone-server = { path = "../../lodestone-server" }
 lodestone-world = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 # Enables the white-box live chunk-decode test, which drives a real 1.16.5 join
@@ -53,4 +54,3 @@ lodestone-client = { workspace = true }
 lodestone-registry = { workspace = true, features = ["v1-17"] }
 lodestone-testsupport = { workspace = true }
 tokio = { workspace = true }
-serde_json = { workspace = true }

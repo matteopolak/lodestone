@@ -173,14 +173,21 @@ operation ordinals, maps the ten built-in textual keys to canonical resource key
 UUID modifier a stable `lodestone:legacy_modifier_<hex>` identity. Unknown extension keys are
 skipped individually rather than dropping otherwise valid snapshots.
 
-The metadata *list* codec is intentionally not folded into `ClientEvent::EntityMetadataUpdated`
-yet. Its current evidence establishes the self-terminating wire list and serializer ids, but the
-committed 1.9.4/1.10.2/1.11.2 join captures do not annotate which runtime entity class supplied
-each index, and the available 1.12.2 live decode only proves parse completion, not base-field
-meaning. A universal-index mapping would therefore be a guess. Before wiring it, add exact-era
-evidence that changes one known base field at a time and records its index, serializer and value
-for each represented protocol; then test both a spawn-time list and an incremental update through
-the adapter.
+Entity metadata now has an explicit supported-field census in
+`crates/versions/1.9/src/entity_metadata.rs`. The universal shared-entity flags byte is index `0`
+with serializer `Byte` in protocols 110, 210, 316 and 340; the adapter preserves its complete
+bitset in `EntityMetadataUpdate::flags` for both the metadata list embedded in a living-entity
+spawn and an incremental `entity_metadata` packet. The canonical event is the production handoff
+to the ECS metadata consumer, which inserts `EntityFlags` and drives the existing render/simulation
+views. `crates/versions/1.9/tests/entity_metadata.rs` feeds literal packet bodies through each
+protocol's generated packet id and asserts that handoff, plus trailing-byte rejection.
+
+The codec still decodes every known serializer and retains every decoded entry, but the semantic
+fold deliberately leaves class-specific indices, health, custom-name serializers, pose, and
+living/mob flags unsupported. Their historical index/type assignments require an entity-class
+registry that this family does not currently carry; they are documented limitations rather than
+guessed mappings. Unknown serializer ids fail during decode instead of silently misaligning the
+rest of the packet.
 
 ### Exact inversion of legacy block-state ids
 

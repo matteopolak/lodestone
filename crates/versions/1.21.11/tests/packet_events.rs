@@ -63,6 +63,125 @@ fn var_i32(value: i32) -> Vec<u8> {
     }
 }
 
+fn string(value: &str) -> Vec<u8> {
+    let mut out = var_i32(value.len() as i32);
+    out.extend_from_slice(value.as_bytes());
+    out
+}
+
+fn packed_position(x: i64, y: i64, z: i64) -> [u8; 8] {
+    ((x << 38) | ((z & 0x3ffffff) << 12) | (y & 0xfff)).to_be_bytes()
+}
+
+#[test]
+fn set_equipment_774_decodes_terminated_slots_and_registry_item() {
+    // Entity 300; main hand carries one diamond chestplate (wire id 971,
+    // which is not the same canonical id after later registry insertions),
+    // helmet is explicitly cleared.
+    // The high bit on the first slot is the continuation marker.
+    let mut body = var_i32(300);
+    body.extend([0x80, 1, 0xcb, 0x07, 0, 0, 5, 0]);
+    let events = packet(
+        &V774Adapter::default(),
+        packet_ids::play::clientbound::SET_EQUIPMENT,
+        &body,
+    );
+    let Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+        entity_id,
+        equipment,
+    }) = &events[0]
+    else {
+        panic!("expected equipment event: {events:?}");
+    };
+    assert_eq!(*entity_id, 300);
+    assert_eq!(equipment.len(), 2);
+    assert_eq!(equipment[0].slot, lodestone_model::EquipmentSlot::MainHand);
+    assert_eq!(equipment[0].item.as_ref().map(|item| item.item.to_string()), Some("minecraft:diamond_chestplate".into()));
+    assert_eq!(equipment[0].item.as_ref().map(|item| item.count), Some(1));
+    assert_eq!(equipment[1].slot, lodestone_model::EquipmentSlot::Head);
+    assert!(equipment[1].item.is_none());
+}
+
+#[test]
+fn set_equipment_774_rejects_an_overlong_continuation_list() {
+    // Eight entries with continuation set would require a ninth slot record;
+    // the wire enum has only eight legal ordinals, so the adapter must reject
+    // before attempting to consume an unbounded list.
+    let mut body = var_i32(300);
+    for _ in 0..lodestone_model::EquipmentSlot::ALL.len() {
+        body.extend([0x80, 0]);
+    }
+    let mut sink = Sink;
+    let error = V774Adapter::default()
+        .handle_packet(
+            &mut sink,
+            ConnectionState::Play,
+            packet_ids::play::clientbound::SET_EQUIPMENT,
+            &body,
+        )
+        .expect_err("an equipment continuation list cannot exceed all slots");
+    assert!(error.to_string().contains("too many 1.21.11 equipment entries"));
+}
+
+#[test]
+fn update_attributes_774_decodes_mapper_keys_and_string_uuid_modifiers() {
+    let mut body = var_i32(300);
+    body.extend(var_i32(2));
+    body.extend(var_i32(20));
+    body.extend_from_slice(&0.25_f64.to_be_bytes());
+    body.extend(var_i32(0));
+    body.extend(var_i32(19));
+    body.extend_from_slice(&20.0_f64.to_be_bytes());
+    body.extend(var_i32(1));
+    body.extend(string("123e4567-e89b-12d3-a456-426614174000"));
+    body.extend_from_slice(&1.5_f64.to_be_bytes());
+    body.push(0);
+    let events = packet(
+        &V774Adapter::default(),
+        packet_ids::play::clientbound::UPDATE_ATTRIBUTES,
+        &body,
+    );
+    let Directive::Emit(ClientEvent::EntityAttributesUpdated {
+        entity_id,
+        attributes,
+    }) = &events[0]
+    else {
+        panic!("expected attributes event: {events:?}");
+    };
+    assert_eq!(*entity_id, 300);
+    assert_eq!(attributes[0].attribute.to_string(), "minecraft:movement_speed");
+    assert!((attributes[0].base - 0.25).abs() < f64::EPSILON);
+    assert_eq!(attributes[1].attribute.to_string(), "minecraft:max_health");
+    assert_eq!(attributes[1].modifiers.len(), 1);
+    assert_eq!(attributes[1].modifiers[0].operation, 0);
+    assert!((attributes[1].modifiers[0].amount - 1.5).abs() < f64::EPSILON);
+    assert_eq!(
+        attributes[1].modifiers[0].id.to_string(),
+        "lodestone:protocol_774_modifier_123e4567e89b12d3a456426614174000"
+    );
+}
+
+#[test]
+fn block_event_774_decodes_literal_position_parameters_and_block_registry() {
+    let mut body = packed_position(3, 70, -5).to_vec();
+    body.extend([7, 2]);
+    body.extend(var_i32(109)); // 1.21.11's note_block registry id.
+    let events = packet(
+        &V774Adapter::default(),
+        packet_ids::play::clientbound::BLOCK_EVENT,
+        &body,
+    );
+    assert_eq!(
+        events,
+        vec![Directive::Emit(ClientEvent::BlockEvent {
+            pos: lodestone_model::BlockPos::new(3, 70, -5),
+            b0: 7,
+            b1: 2,
+            block: "minecraft:note_block".parse().unwrap(),
+        })]
+    );
+}
+
 fn explode_prefix() -> Vec<u8> {
     let mut body = Vec::new();
     for value in [12.25_f64, 64.5, -3.75] {

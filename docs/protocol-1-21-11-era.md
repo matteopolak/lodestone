@@ -96,11 +96,29 @@ VarInt breaker id, packed block position and raw stage byte into
 `ClientEvent::BlockDestruction`; stages outside the visible range remain raw so
 the session overlay can clear an existing crack.
 
-The family does not claim `set_equipment`, `update_attributes` or
-`block_event`: each needs a version-local item, attribute or block registry
-numeric mapping. No authoritative 1.21.11 bridge for those registries is
-committed here, so decoding them with the canonical 26.2 ids would silently
-name the wrong value.
+The family decodes `set_equipment`, `update_attributes` and `block_event` into
+the existing entity and block-event consumers. `set_equipment` translates the
+protocol's 1,505-item registry through the version-local bridge in
+`src/item_registry.rs`, preserving explicit empty slots and opaque component
+patches. `update_attributes` validates the 31-key mapper, bounded modifier
+lists and string UUIDs before emitting canonical snapshots. `block_event`
+translates the 1,166-entry block registry through `src/block_registry.rs` and
+preserves both opaque event bytes for rendering and audio consumers.
+
+The two registry bridges are generated from the independent 1.21.11
+`minecraft-data` tables and map by canonical name into the 26.2 model enums;
+the canonical ids must not be indexed directly because later releases insert
+entries. The complete ordered source-name extract is pinned in
+`tests/support/protocol_774_registries.json` (extract SHA-256
+`e6c7331e064307012bd6460f0bc5e029dcdd5abfc6f144883cf47ced1441adfb4`). Its
+metadata records the source hashes for the 1,505-item table
+(`0031a948bf8210aaf68d4964499cb2c31f2c3bf5d7339439540ca82a9eb28686`) and the
+1,166-block table
+(`894b926701b73047f1e24ad9650356d8d6f4c1a6d79f65143facbc9c58598a47`). The
+module drift guards resolve every source name and compare every resulting
+canonical id, so a sample cannot leave a table partially stale. Literal packet
+fixtures in `tests/packet_events.rs` pin the continuation bit, mapper keys,
+UUID string framing, packed position and version-local registry ids.
 
 ### The evidence, and where each claim rests
 

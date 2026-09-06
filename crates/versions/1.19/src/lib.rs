@@ -58,6 +58,7 @@ pub mod adapter;
 pub mod canonical;
 pub mod entity_types;
 pub mod packets;
+mod registry;
 pub mod server_protocol;
 
 pub use adapter::{PROTOCOL, PROTOCOL_1_19_4, PROTOCOLS, V762Adapter, adapter, adapter_for};

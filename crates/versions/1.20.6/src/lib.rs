@@ -62,10 +62,15 @@ pub(crate) mod generated_entity_types;
 #[path = "generated/canonical.rs"]
 pub mod generated_canonical;
 
+/// Generated protocol-766 item, attribute, and block id tables.
+#[path = "generated/registry.rs"]
+pub(crate) mod generated_registry;
+
 pub mod adapter;
 pub mod canonical;
 pub mod entity_types;
 pub mod packets;
+pub mod registry;
 pub mod server_protocol;
 pub use server_protocol::V766ServerProtocol;
 

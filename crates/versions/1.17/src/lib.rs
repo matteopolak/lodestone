@@ -63,6 +63,7 @@ pub mod adapter;
 pub mod canonical;
 pub mod entity_types;
 pub mod packets;
+mod registry;
 pub mod server_protocol;
 
 pub use adapter::{

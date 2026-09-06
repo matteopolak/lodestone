@@ -10,8 +10,8 @@ use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockStateRef, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
     ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityInteraction,
-    EntityAttributeModifier, EntityAttributeSnapshot, EntityMovement,
-    GameMode, Hand, LevelEventData, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
+    EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment, EntityMovement, EquipmentSlot,
+    GameMode, Hand, ItemComponents, ItemStack, LevelEventData, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
     PlayerCommand, PlayerListEntry, ProfileProperty, RecipeBookType, ResourceKey,
     ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, TeamAction, TeamColor,
     TeamParameters, TeleportFlags, Text, Vec3, VersionAdapter, Visibility, WorldSink,
@@ -20,6 +20,7 @@ use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk};
 
 use crate::canonical::FallbackTally;
 use crate::entity_types;
+use crate::registry;
 use crate::packets::chunk::{ChunkShape, MapChunk, UnloadChunk, UpdateLight};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::{
@@ -1541,6 +1542,77 @@ impl V756Adapter {
         })])
     }
 
+    /// `minecraft:block_action`: a position, two block-specific bytes, and a
+    /// protocol-local block registry id. The event consumer interprets the
+    /// bytes from the canonical block key (chest lid, note pitch, piston move,
+    /// and so on), so this handler preserves both bytes unchanged.
+    fn handle_play_block_action(
+        adapter: &V756Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let pos: Position = Position::decode(&mut reader, adapter.ctx()).map_err(dec_err)?;
+        let b0 = reader.u8().map_err(dec_err)?;
+        let b1 = reader.u8().map_err(dec_err)?;
+        let id = reader.var_i32().map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        let block = registry::block(adapter.protocol, id).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown protocol-{} block registry id {id}", adapter.protocol))
+        })?;
+        Ok(vec![Directive::Emit(ClientEvent::BlockEvent { pos: pos.0, b0, b1, block })])
+    }
+
+    /// `minecraft:entity_equipment`: an entity id followed by a
+    /// continuation-flagged sequence of `(slot, slot)` records. The old slot
+    /// payload has optional NBT rather than item components; a non-empty tag
+    /// cannot be represented by `ItemComponents`, so reject it explicitly.
+    fn handle_play_entity_equipment(
+        adapter: &V756Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let entity_id = reader.var_i32().map_err(dec_err)?;
+        let mut equipment = Vec::new();
+        loop {
+            if equipment.len() == EquipmentSlot::ALL.len() {
+                return Err(AdapterError::Decode("too many entity equipment entries".to_owned()));
+            }
+            let encoded_slot = reader.u8().map_err(dec_err)?;
+            let slot = EquipmentSlot::from_ordinal(encoded_slot & 0x7f).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown equipment slot ordinal {}", encoded_slot & 0x7f))
+            })?;
+            let item = match Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)? {
+                Slot::Empty => None,
+                Slot::Item { id, nbt: Some(_), .. } => {
+                    return Err(AdapterError::Unsupported(format!(
+                        "protocol-{} entity equipment item {id} carries legacy NBT, which the canonical item model cannot represent",
+                        adapter.protocol
+                    )));
+                }
+                Slot::Item { id, count, nbt: None } => {
+                    let count = u32::try_from(count).map_err(|_| {
+                        AdapterError::Decode(format!("negative entity equipment item count {count}"))
+                    })?;
+                    if count == 0 {
+                        return Err(AdapterError::Decode("zero entity equipment item count".to_owned()));
+                    }
+                    let item = registry::item(adapter.protocol, id).ok_or_else(|| {
+                        AdapterError::Decode(format!("unknown protocol-{} item registry id {id}", adapter.protocol))
+                    })?;
+                    Some(ItemStack { item, count, components: ItemComponents::default() })
+                }
+            };
+            equipment.push(EntityEquipment { slot, item });
+            if encoded_slot & 0x80 == 0 {
+                break;
+            }
+        }
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::EntityEquipmentUpdated { entity_id, equipment })])
+    }
+
     /// `minecraft:block_break_animation`.
     fn handle_play_block_break_animation(
         _adapter: &V756Adapter,
@@ -2586,6 +2658,20 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:block_action",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V756Adapter::handle_play_block_action,
+        ),
+    ),
+    (
+        "minecraft:entity_equipment",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V756Adapter::handle_play_entity_equipment,
+        ),
+    ),
+    (
         "minecraft:keep_alive",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -3049,14 +3135,6 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
 /// synonym (v26-2 uses Mojang's own names, which differ from minecraft-data's
 /// for the same packet).
 static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:block_action",
-        "protocol-local block registry ids have no authoritative 1.17/1.18 map in this family",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_equipment",
-        "protocol-local item registry ids have no authoritative 1.17/1.18 map in this family",
-    ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:spawn_entity_painting",
         "v26-2 has this; backport (painting spawns fold into the generic add_entity path there, ADD_ENTITY)",

@@ -22,6 +22,7 @@
 //! section count desynchronises the stream rather than erroring.
 
 use std::collections::BTreeMap;
+use std::mem::size_of;
 use std::sync::{Arc, LockResult, Mutex, MutexGuard, PoisonError};
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
@@ -30,15 +31,18 @@ use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, ChatAckInfo, ChatKind, ChatMode,
     ChatSessionInfo, ChunkPos, ClientAction, ClientEvent, ClientSettings, ConnectionState,
-    ContainerClickType, Difficulty, Directive, DisplayedSkinParts, EntityInteraction,
-    EntityMetadataUpdate, EntityMovement, GameMode, Hand, LoginProfile, MainHand, PlayerCommand,
-    PlayerListEntry, ProfileProperty, RecipeBookType, ResourceKey, ResourcePackResponseKind,
-    Rotation, SectionPos, ServerAddress, TeleportFlags, Text, Vec3, VersionAdapter, WorldSink,
+    ContainerClickType, Difficulty, Directive, DisplayedSkinParts, EntityAttributeModifier,
+    EntityAttributeSnapshot, EntityEquipment, EntityInteraction, EntityMetadataUpdate,
+    EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile, MainHand,
+    PlayerCommand, PlayerListEntry, ProfileProperty, RecipeBookType, ResourceKey,
+    ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, TeleportFlags, Text, Vec3,
+    VersionAdapter, WorldSink,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk};
 
 use crate::canonical::FallbackTally;
 use crate::entity_types;
+use crate::registry;
 use crate::packets::chat::{
     ChatCommand, ChatMessage, MessageAcknowledgement, PlayerChat, ProfilelessChat, SystemChat,
 };
@@ -870,6 +874,41 @@ const ABILITY_INSTABUILD: i8 = 0x08;
 /// only this one.
 const METADATA_INDEX_SHARED_FLAGS: u8 = 0;
 
+/// A server cannot validly send more than 128 attribute snapshots in one
+/// update; the cap bounds hostile allocation before the first entry is read.
+const MAX_ATTRIBUTE_ENTRIES: usize = 128;
+
+fn checked_count(raw: i32, cap: usize, available: usize, what: &str) -> Result<usize, AdapterError> {
+    let count = usize::try_from(raw)
+        .map_err(|_| AdapterError::Decode(format!("negative {what} {raw}")))?;
+    let limit = cap.min(available);
+    if count > limit {
+        return Err(AdapterError::Decode(format!(
+            "{what} {count} exceeds bounded limit {limit}"
+        )));
+    }
+    Ok(count)
+}
+
+fn canonical_attribute_key(wire: &str) -> Result<ResourceKey, AdapterError> {
+    // This wire registry has three namespaces (`generic`, `player`, and
+    // `zombie`) that all collapse into the model's unqualified attribute
+    // paths. Keep the accepted prefixes explicit: another dotted namespace
+    // would need a deliberate model mapping rather than silently becoming a
+    // canonical key.
+    let path = wire
+        .strip_prefix("minecraft:generic.")
+        .or_else(|| wire.strip_prefix("minecraft:player."))
+        .or_else(|| wire.strip_prefix("minecraft:zombie."))
+        .ok_or_else(|| {
+            AdapterError::Decode(format!("unsupported attribute key {wire}"))
+        })?;
+    let canonical = format!("minecraft:{path}");
+    canonical
+        .parse()
+        .map_err(|_| AdapterError::Decode(format!("invalid attribute key {wire}")))
+}
+
 /// Converts a low-level [`lodestone_core::Error`] into an [`AdapterError`].
 fn dec_err(err: impl std::fmt::Display) -> AdapterError {
     AdapterError::Decode(err.to_string())
@@ -1514,6 +1553,156 @@ impl V766Adapter {
                 flags,
                 ..EntityMetadataUpdate::default()
             },
+        })])
+    }
+
+    /// `minecraft:entity_equipment`: the high bit on each slot byte means
+    /// another `(slot, stack)` pair follows. The item bridge turns the
+    /// protocol-local registry id into the canonical key the ECS and renderer
+    /// consume; component payloads have already been framed by [`Slot`].
+    fn handle_play_entity_equipment(
+        adapter: &V766Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let entity_id = reader.var_i32().map_err(dec_err)?;
+        let mut equipment = Vec::new();
+        loop {
+            if equipment.len() == EquipmentSlot::ALL.len() {
+                return Err(AdapterError::Decode(format!(
+                    "entity equipment carries more than {} entries",
+                    EquipmentSlot::ALL.len()
+                )));
+            }
+            let encoded_slot = reader.u8().map_err(dec_err)?;
+            let slot = EquipmentSlot::from_ordinal(encoded_slot & 0x7f).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown equipment slot {}", encoded_slot & 0x7f))
+            })?;
+            let item = match Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)? {
+                Slot::Empty => None,
+                Slot::Item {
+                    id,
+                    count,
+                    components,
+                    removed,
+                } => {
+                    let name = registry::item_name(id).ok_or_else(|| {
+                        AdapterError::Decode(format!("unknown item registry id {id}"))
+                    })?;
+                    let key: ResourceKey = name.parse().map_err(|_| {
+                        AdapterError::Decode(format!("invalid item key {name}"))
+                    })?;
+                    let count = u32::try_from(count).map_err(|_| {
+                        AdapterError::Decode(format!("invalid item count {count}"))
+                    })?;
+                    let mut item = ItemStack::new(key, count);
+                    // The model has no semantic projection for this era's
+                    // component patch. Retain its presence so consumers do
+                    // not mistake the prototype-only stack for a complete
+                    // effective stack.
+                    item.components.has_unmodeled =
+                        !components.is_empty() || !removed.is_empty();
+                    Some(item)
+                }
+            };
+            equipment.push(EntityEquipment { slot, item });
+            if encoded_slot & 0x80 == 0 {
+                break;
+            }
+        }
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+            entity_id,
+            equipment,
+        })])
+    }
+
+    /// `minecraft:entity_update_attributes`: registry-holder attributes, a
+    /// base double, then UUID-identified modifiers. The registry bridge is
+    /// deliberately local to this protocol; borrowing a neighbour's dense
+    /// order would produce plausible but wrong attributes.
+    fn handle_play_entity_update_attributes(
+        _adapter: &V766Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let entity_id = reader.var_i32().map_err(dec_err)?;
+        let count = checked_count(
+            reader.var_i32().map_err(dec_err)?,
+            MAX_ATTRIBUTE_ENTRIES,
+            reader.remaining(),
+            "attribute count",
+        )?;
+        let mut attributes = Vec::with_capacity(count);
+        for _ in 0..count {
+            let id = reader.var_i32().map_err(dec_err)?;
+            let wire = registry::attribute_name(id).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown attribute registry id {id}"))
+            })?;
+            let base = reader.f64().map_err(dec_err)?;
+            let modifier_count = checked_count(
+                reader.var_i32().map_err(dec_err)?,
+                reader.remaining() / (16 + size_of::<f64>() + 1),
+                reader.remaining() / (16 + size_of::<f64>() + 1),
+                "attribute modifier count",
+            )?;
+            let mut modifiers = Vec::with_capacity(modifier_count);
+            for _ in 0..modifier_count {
+                let uuid = reader.uuid().map_err(dec_err)?;
+                let amount = reader.f64().map_err(dec_err)?;
+                let operation = reader.u8().map_err(dec_err)?;
+                if operation > 2 {
+                    return Err(AdapterError::Decode(format!(
+                        "attribute modifier operation {operation} is outside 0..=2"
+                    )));
+                }
+                let modifier = format!("lodestone:legacy_modifier_{}", uuid.simple())
+                    .parse()
+                    .map_err(|_| AdapterError::Decode("invalid modifier identifier".to_owned()))?;
+                modifiers.push(EntityAttributeModifier {
+                    id: modifier,
+                    amount,
+                    operation,
+                });
+            }
+            attributes.push(EntityAttributeSnapshot {
+                attribute: canonical_attribute_key(wire)?,
+                base,
+                modifiers,
+            });
+        }
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::EntityAttributesUpdated {
+            entity_id,
+            attributes,
+        })])
+    }
+
+    /// `minecraft:block_action`: two opaque event bytes associated with a
+    /// block type. The shell's block-event path owns their interpretation and
+    /// turns them into the chest, bell, gateway, and spawner animation state.
+    fn handle_play_block_action(
+        adapter: &V766Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let pos: Position = Position::decode(&mut reader, adapter.ctx()).map_err(dec_err)?;
+        let b0 = reader.u8().map_err(dec_err)?;
+        let b1 = reader.u8().map_err(dec_err)?;
+        let id = reader.var_i32().map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        let block = registry::block_name(id)
+            .ok_or_else(|| AdapterError::Decode(format!("unknown block registry id {id}")))?
+            .parse()
+            .map_err(|_| AdapterError::Decode(format!("invalid block registry id {id}")))?;
+        Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
+            pos: pos.0,
+            b0,
+            b1,
+            block,
         })])
     }
 
@@ -2343,6 +2532,13 @@ impl V766Adapter {
 /// Every clientbound play packet this era decodes, by name.
 static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = &[
     (
+        "minecraft:block_action",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_block_action,
+        ),
+    ),
+    (
         "minecraft:login",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -2536,6 +2732,20 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
             V766Adapter::handle_play_entity_metadata,
+        ),
+    ),
+    (
+        "minecraft:entity_equipment",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_entity_equipment,
+        ),
+    ),
+    (
+        "minecraft:entity_update_attributes",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_entity_update_attributes,
         ),
     ),
     (
@@ -2810,10 +3020,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "a block entity's payload is modelled only where a column delivers it; a standalone update needs a per-type NBT model",
     ),
     lodestone_core::dispatch::IGNORED::new(
-        "minecraft:block_action",
-        "the animated-block cue (chests, note blocks, pistons) has no consumer for this era",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
         "minecraft:boss_bar",
         "the boss bar surface is not wired for this era",
     ),
@@ -2970,10 +3176,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "the scoreboard surface is not wired for this era",
     ),
     lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_equipment",
-        "equipment carries item stacks, which need the 766 item-id registry window_items lacks",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
         "minecraft:scoreboard_objective",
         "the scoreboard surface is not wired for this era",
     ),
@@ -3012,10 +3214,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:advancements",
         "the advancements screen has no surface for this era",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_update_attributes",
-        "attribute modifiers name registry ids, and no 766 attribute registry table exists to resolve one",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:declare_recipes",
