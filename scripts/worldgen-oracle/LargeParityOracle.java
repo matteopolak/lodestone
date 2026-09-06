@@ -211,13 +211,23 @@ public final class LargeParityOracle {
                     int cx = a.loX + (int)(index % width), cz = a.loZ + (int)(index / width);
                     futures.add(level.getChunkSource().getChunkFuture(cx, cz, ChunkStatus.FULL, true));
                 }
+                List<LevelChunk> chunks = new ArrayList<>(futures.size());
                 for (int offset = 0; offset < futures.size(); offset++) {
                     long index = batchStart + offset;
                     int cx = a.loX + (int)(index % width), cz = a.loZ + (int)(index / width);
                     ChunkAccess raw = futures.get(offset).join().orElseThrow(() -> new IllegalStateException("chunk generation failed at " + cx + "," + cz));
                     if (!(raw instanceof LevelChunk chunk)) throw new IllegalStateException("full status did not yield LevelChunk at " + cx + "," + cz);
-                    chunk.postProcessGeneration(level);
-                    byte[] hash = digest(packetBody(server, level, chunk));
+                    chunks.add(chunk);
+                }
+                List<byte[]> hashes = server.submit(() -> {
+                    List<byte[]> result = new ArrayList<>(chunks.size());
+                    for (LevelChunk chunk : chunks) {
+                        chunk.postProcessGeneration(level);
+                        result.add(digest(packetBody(server, level, chunk)));
+                    }
+                    return result;
+                }).join();
+                for (byte[] hash : hashes) {
                     file.write(hash, 0, 2); payloadDigest.update(hash, 0, 2);
                 }
                 double rate = (batchEnd - done) / ((System.nanoTime() - start) / 1_000_000_000.0);
