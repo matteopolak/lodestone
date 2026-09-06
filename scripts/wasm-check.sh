@@ -183,6 +183,16 @@ if (( CONFINEMENT_ONLY == 0 )) && ! command -v trunk >/dev/null 2>&1; then
   exit 2
 fi
 
+# The worker bootstrap has a deterministic control-plane test. It runs under
+# Node because it exercises a Web Worker-shaped event/port envelope without
+# requiring a browser or the compiled game assets; missing Node must fail rather
+# than silently skipping the only test for worker launch/error ordering.
+if (( CONFINEMENT_ONLY == 0 )) && ! command -v node >/dev/null 2>&1; then
+  echo "error: 'node' is not installed (required for the browser worker control-plane test)."
+  echo "       this check CANNOT RUN without it — failing rather than passing quietly."
+  exit 2
+fi
+
 # Workspace crates that are expected to compile to wasm, with any features that
 # the browser configuration requires. Format: "<pkg>[|<extra cargo args>]".
 CRATES=(
@@ -352,6 +362,16 @@ if (( CONFINEMENT_ONLY == 0 )); then
     fails+=("lodestone-server-worker")
     report_build_failure "$worker_log"
     echo "      └─ reproduce: cargo build --manifest-path web/worker/Cargo.toml --target $TARGET"
+  fi
+
+  printf '  %-34s ' "server-worker control test"
+  if node --test "$ROOT/web/worker/worker_bootstrap.test.mjs" > "$LOGDIR/server-worker-control.log" 2>&1; then
+    echo "PASS"
+  else
+    echo "FAIL"
+    fails+=("server-worker control test")
+    report_build_failure "$LOGDIR/server-worker-control.log"
+    echo "      └─ reproduce: node --test web/worker/worker_bootstrap.test.mjs"
   fi
 fi
 

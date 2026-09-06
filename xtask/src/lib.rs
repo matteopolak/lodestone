@@ -9918,6 +9918,17 @@ pub fn run_wasm_check(workspace_root: &Path) -> Result<()> {
         }
     }
 
+    print!("  {:<34} ", "server-worker control test");
+    match run_worker_bootstrap_tests(workspace_root) {
+        Ok(()) => println!("PASS"),
+        Err(failure) => {
+            println!("FAIL");
+            failures.push("server-worker control test".to_string());
+            report_build_failure(&failure);
+            println!("      └─ reproduce: node --test web/worker/worker_bootstrap.test.mjs");
+        }
+    }
+
     // A count with a verdict that depends on the count, printed unconditionally. A
     // confinement rule that reported neither clean nor leaked has measured nothing,
     // and the whole reason these guards exist is that five of them did exactly that
@@ -10035,6 +10046,17 @@ fn ensure_wasm_prereqs() -> Result<()> {
              or (prebuilt, faster): curl -sSL \\\n       \
              https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-$(uname -m)-apple-darwin.tar.gz \\\n       \
              | tar xz -C ~/.cargo/bin trunk"
+        );
+    }
+    let node_present = Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if !node_present {
+        bail!(
+            "error: 'node' is not installed (required for the browser worker control-plane test).\n       \
+             this check CANNOT RUN without it — failing rather than passing quietly."
         );
     }
     Ok(())
@@ -10339,6 +10361,17 @@ fn build_web_with_trunk(workspace_root: &Path) -> Result<(), CapturedBuild> {
         .env(WASM_CODEGEN_BACKEND_ENV.0, WASM_CODEGEN_BACKEND_ENV.1)
         .current_dir(workspace_root.join("web"));
     run_captured_build(&mut command, workspace_root, "lodestone-web-trunk")
+}
+
+/// Runs the browser-worker control-plane test without needing a browser. The
+/// test supplies a synthetic Worker event and port, then proves startup never
+/// reports `ready` before the supplied wasm entry point accepts that port.
+fn run_worker_bootstrap_tests(workspace_root: &Path) -> Result<(), CapturedBuild> {
+    let mut command = Command::new("node");
+    command
+        .args(["--test", "web/worker/worker_bootstrap.test.mjs"])
+        .current_dir(workspace_root);
+    run_captured_build(&mut command, workspace_root, "server-worker-control")
 }
 
 #[cfg(test)]

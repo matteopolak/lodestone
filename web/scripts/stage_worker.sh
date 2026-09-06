@@ -13,3 +13,4 @@ cargo build --manifest-path "$worker_manifest" --target wasm32-unknown-unknown -
 wasm-bindgen --target web --out-dir "$out_dir" --out-name lodestone-server-worker-wasm \
   "$worker_target/wasm32-unknown-unknown/release/lodestone_server_worker.wasm"
 cp "$root/web/worker/worker.js" "$out_dir/lodestone-server-worker.js"
+cp "$root/web/worker/worker_bootstrap.js" "$out_dir/lodestone-server-worker-bootstrap.js"
