@@ -1038,6 +1038,7 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
         for dz in -1..=1 {
             let source_x = center_x + dx;
             let source_z = center_z + dz;
+            random.begin_decoration_source();
             let input = OreInput {
                 chunk_x: source_x,
                 chunk_z: source_z,
