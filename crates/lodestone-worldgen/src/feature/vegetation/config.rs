@@ -208,10 +208,14 @@ impl BlockPredicate {
                 offset: parse_offset(&v["offset"]),
             },
             "matching_fluids" => BlockPredicate::MatchingFluid {
-                fluids: v["fluids"]
-                    .as_array()
-                    .map(|arr| arr.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
-                    .unwrap_or_default(),
+                fluids: match &v["fluids"] {
+                    Value::String(fluid) => vec![fluid.clone()],
+                    Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|f| f.as_str().map(str::to_string))
+                        .collect(),
+                    _ => Vec::new(),
+                },
                 offset: parse_offset(&v["offset"]),
             },
             "would_survive" => match v["state"]["Name"].as_str().unwrap_or("") {
@@ -2324,4 +2328,22 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
     let mut out = Vec::new();
     walk(&placed.feature, &mut out);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BlockPredicate;
+
+    #[test]
+    fn matching_fluids_accepts_the_registry_string_shape() {
+        let predicate = BlockPredicate::parse(&serde_json::json!({
+            "type": "minecraft:matching_fluids",
+            "fluids": "minecraft:water"
+        }));
+        assert!(matches!(
+            predicate,
+            BlockPredicate::MatchingFluid { fluids, offset: (0, 0, 0) }
+                if fluids == vec!["minecraft:water"]
+        ));
+    }
 }
