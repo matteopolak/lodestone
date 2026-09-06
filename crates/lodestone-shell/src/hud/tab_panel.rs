@@ -5,7 +5,7 @@
 
 use super::TAB_LINE_H;
 
-/// `PlayerTabOverlay.MAX_ROWS_PER_COL`.
+/// Maximum rows allowed in one column before the list grows another column.
 pub(super) const TAB_MAX_ROWS_PER_COL: usize = 20;
 
 /// Horizontal gap between two columns — the literal `5` in
@@ -51,8 +51,8 @@ pub(super) const TAB_INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// See [`TAB_INK`].
 pub(super) const TAB_INK_SPECTATOR: [f32; 4] = [1.0, 1.0, 1.0, 0x90 as f32 / 255.0];
 
-/// The Tab player-list overlay's geometry, transcribed from
-/// `PlayerTabOverlay.extractRenderState`.
+/// The Tab player-list overlay's geometry, following the server-list screen's
+/// column growth, slot sizing, and centered plate rules.
 ///
 /// **Exists so the draw and its gate share one expression rather than two that
 /// agree today.** A pixel gate that recomputed `y` from its own copy of this
