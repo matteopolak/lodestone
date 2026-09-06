@@ -27,13 +27,14 @@
 //!    Nether decoration feature places or removes it. So this comparison is exact
 //!    without needing the decoration steps this generator does not run.
 //!
-//! # What is deliberately *not* compared
+//! # What is deliberately not compared whole-column-for-whole-column
 //!
-//! Whole columns. Nether decoration (`glowstone_extra`, `patch_fire`,
-//! `nether_wart`, the crimson/warped vegetation, basalt pillars, ores) and the
-//! fortress/bastion structures are not composed yet, so a block-for-block sweep
-//! would measure their absence rather than this generator's correctness. See
-//! `docs/worldgen-nether.md` for what that leaves.
+//! The cached region oracle predates a portable feature-block dump, so it cannot
+//! provide an exact full-column assertion for glowstone, fire, wart, forest
+//! vegetation, basalt or ores. The bedrock shell remains exact external evidence
+//! even with those stages live, because no bundled Nether feature may replace
+//! bedrock. `nether_features_reach_production_columns` supplies the separate
+//! absent-consumer control against the same cached full chunks.
 //!
 //! # The 1,328 chunks that are excluded, and why that is not cherry-picking
 //!
@@ -115,8 +116,41 @@ impl Resolver for NetherAssets {
     fn configured_carver(&self, id: &str) -> Value {
         self.try_read("configured_carver", id)
     }
+    fn configured_feature(&self, id: &str) -> Value {
+        self.try_read("configured_feature", id)
+    }
+    fn placed_feature(&self, id: &str) -> Value {
+        self.try_read("placed_feature", id)
+    }
     fn block_tag(&self, id: &str) -> Value {
         self.try_read("tags/block", id)
+    }
+}
+
+/// A deliberately incomplete production resolver. It retains the real cached
+/// terrain, biome, carver and tag data but refuses every feature body, so a
+/// comparison against it distinguishes a live Nether decoration consumer from
+/// a parser/table that happens to exist but is never reached by `column()`.
+struct NoFeatures(NetherAssets);
+
+impl Resolver for NoFeatures {
+    fn density_function(&self, id: &str) -> Value {
+        self.0.density_function(id)
+    }
+    fn noise(&self, id: &str) -> NoiseParams {
+        self.0.noise(id)
+    }
+    fn biome_parameters(&self) -> Value {
+        self.0.biome_parameters()
+    }
+    fn biome_document(&self, id: &str) -> Value {
+        self.0.biome_document(id)
+    }
+    fn configured_carver(&self, id: &str) -> Value {
+        self.0.configured_carver(id)
+    }
+    fn block_tag(&self, id: &str) -> Value {
+        self.0.block_tag(id)
     }
 }
 
@@ -389,8 +423,8 @@ fn nether_biomes_do_not_vary_with_y() {
 }
 
 /// Bedrock floor and roof, exact, against eight `full` chunks the vanilla server
-/// wrote. See the module doc for why bedrock specifically is comparable without
-/// the decoration steps.
+/// wrote. The generator below now runs its mixed feature stages too; the cached
+/// oracle still applies because none of those features may replace bedrock.
 ///
 /// This is the gate on the *surface* half of legacy init: `vertical_gradient`
 /// draws `factory.at(x, y, z).next_float()` from
@@ -483,6 +517,83 @@ fn nether_bedrock_shell_matches_the_vanilla_oracle_world() {
     );
 }
 
+/// The production resolver's step-7/step-9 feature documents must change a
+/// column from the otherwise-identical cached-world resolver that withholds
+/// those bodies. This is an absent-consumer control: parsing an ore list at
+/// construction would make a table-only implementation look healthy, whereas
+/// this comparison requires a block that reaches `NetherGenerator::column`.
+///
+/// The coordinates are the same eight `minecraft:full` chunks whose bedrock
+/// masks the real cached Nether region supplies to the preceding oracle test.
+/// Therefore the test checks two independent properties of production output:
+/// decoration is live, and its block writes do not invalidate the external
+/// bedrock-shell evidence.
+#[test]
+fn nether_features_reach_production_columns() {
+    let o = oracle();
+    let settings = settings();
+    let decorated = NetherGenerator::new(SEED, &settings, &NetherAssets { root: assets_root() });
+    let undecorated = NetherGenerator::new(
+        SEED,
+        &settings,
+        &NoFeatures(NetherAssets { root: assets_root() }),
+    );
+    let mut changed = 0usize;
+    let mut first = None;
+    let mut ore_changed = 0usize;
+    let mut decoration_changed = 0usize;
+    for &(cx, cz) in o.bedrock.keys() {
+        let with = decorated.column(cx, cz);
+        let without = undecorated.column(cx, cz);
+        for y in with.min_y()..with.min_y() + with.height() {
+            for lz in 0..16 {
+                for lx in 0..16 {
+                    if with.block_state(lx, y, lz) != without.block_state(lx, y, lz) {
+                        changed += 1;
+                        let state = with.block_state(lx, y, lz);
+                        first.get_or_insert((cx, cz, lx, y, lz, state.to_string()));
+                        if matches!(
+                            state,
+                            "minecraft:nether_quartz_ore"
+                                | "minecraft:nether_gold_ore"
+                                | "minecraft:ancient_debris"
+                                | "minecraft:magma_block"
+                                | "minecraft:gravel"
+                                | "minecraft:blackstone"
+                        ) {
+                            ore_changed += 1;
+                        }
+                        if matches!(
+                            state,
+                            "minecraft:fire"
+                                | "minecraft:soul_fire"
+                                | "minecraft:glowstone"
+                                | "minecraft:brown_mushroom"
+                                | "minecraft:red_mushroom"
+                        ) {
+                            decoration_changed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        changed > 0,
+        "the real cached Nether feature documents changed no cells in the eight externally recorded full chunks; decoration is absent or unwired"
+    );
+    let (cx, cz, lx, y, lz, state) = first.expect("changed above");
+    assert!(ore_changed > 0, "no step-7 ore reached the production chunks");
+    assert!(
+        decoration_changed > 0,
+        "no non-ore step-7/step-9 feature reached the production chunks"
+    );
+    assert!(
+        state != "minecraft:bedrock",
+        "feature-stage control found a bedrock write at chunk ({cx},{cz}) local ({lx},{y},{lz})"
+    );
+}
+
 /// Memoised per chunk so the bedrock test generates each of the eight columns
 /// once rather than 2,560 times.
 fn generator_bedrock(
@@ -518,7 +629,10 @@ fn generator_bedrock(
 /// expectation with it.
 #[test]
 fn a_nether_column_is_real_terrain_not_a_uniform_field() {
-    let resolver = NetherAssets { root: assets_root() };
+    // Inspect the fill/carver prefix through the explicit no-feature control:
+    // production decoration can legitimately add a lava spring above the sea
+    // level, so that observation is no longer evidence about the fluid picker.
+    let resolver = NoFeatures(NetherAssets { root: assets_root() });
     let settings = settings();
     let generator = NetherGenerator::new(SEED, &settings, &resolver);
     let column = generator.column(0, 0);
