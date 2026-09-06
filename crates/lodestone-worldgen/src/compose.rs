@@ -104,27 +104,33 @@ pub fn build_biome_ores(resolver: &dyn Resolver, biome: &str) -> Vec<PlacedOre> 
         let Some(placed_id) = entry.as_str() else {
             continue;
         };
-        let placed = resolver.placed_feature(placed_id);
-        if placed.is_null() {
-            continue;
+        if let Some(mut ore) = parse_placed_ore(resolver, placed_id) {
+            ore.index = i;
+            ores.push(ore);
         }
-        let Some(cf_id) = placed.get("feature").and_then(Value::as_str) else {
-            continue;
-        };
-        let configured = resolver.configured_feature(cf_id);
-        if configured.get("type").and_then(Value::as_str) != Some("minecraft:ore") {
-            // Vegetation/other feature kinds in the same step are not yet
-            // ported — skipped, but the loop index above
-            // still advances, keeping every later ore's `index` correct.
-            continue;
-        }
-        ores.push(PlacedOre {
-            index: i,
-            placements: parse_placements(&placed),
-            config: parse_ore_config(&configured["config"]),
-        });
     }
     ores
+}
+
+/// Resolves one placed-feature id when its configured feature is an ore.
+///
+/// The returned [`PlacedOre`] carries a placeholder index because a placed
+/// feature's actual decoration index belongs to the global per-step ordering,
+/// not to the feature document. [`DecorationCatalog::select_ores`] assigns that
+/// index at selection time. `build_biome_ores` remains the single-biome helper
+/// and overwrites it with the local raw position for its isolated fixtures.
+fn parse_placed_ore(resolver: &dyn Resolver, placed_id: &str) -> Option<PlacedOre> {
+    let placed = resolver.placed_feature(placed_id);
+    if placed.is_null() {
+        return None;
+    }
+    let cf_id = placed.get("feature").and_then(Value::as_str)?;
+    let configured = resolver.configured_feature(cf_id);
+    (configured.get("type").and_then(Value::as_str) == Some("minecraft:ore")).then(|| PlacedOre {
+        index: 0,
+        placements: parse_placements(&placed),
+        config: parse_ore_config(&configured["config"]),
+    })
 }
 
 /// Resolves one biome's `VEGETAL_DECORATION` decoration step
@@ -270,6 +276,46 @@ impl DecorationCatalog {
             .collect()
     }
 
+    /// Resolves all ore-capable selected entries with their **global** index in
+    /// `UNDERGROUND_ORES`. The set of eligible biomes is normally the source
+    /// chunk's 3×3 section-biome neighbourhood: one point biome is insufficient
+    /// when an underground feature's eligible biome differs from the surface.
+    ///
+    /// `ore_definitions` is keyed by placed-feature id and contains only the
+    /// configured features this engine can place as ores. Unsupported entries
+    /// still advance the global per-step index, but produce no placement work.
+    #[must_use]
+    pub fn select_ores<'a>(
+        &'a self,
+        biomes: impl IntoIterator<Item = &'a str>,
+        ore_definitions: &HashMap<String, PlacedOre>,
+    ) -> Vec<PlacedOre> {
+        let mut selected = HashSet::new();
+        for biome in biomes {
+            if let Some(entries) = self.members.get(biome) {
+                selected.extend(entries.iter().cloned());
+            }
+        }
+        let mut per_step = HashMap::<i32, usize>::new();
+        self.ordered
+            .iter()
+            .filter_map(|(step, id)| {
+                let index = per_step.entry(*step).or_default();
+                let result = (*step == STEP_UNDERGROUND_ORES
+                    && selected.contains(&(*step, id.clone())))
+                    .then(|| {
+                        ore_definitions.get(id).cloned().map(|mut ore| {
+                            ore.index = *index;
+                            ore
+                        })
+                    })
+                    .flatten();
+                *index += 1;
+                result
+            })
+            .collect()
+    }
+
     /// The biomes which list each placed feature at any decoration step.
     /// [`crate::feature::vegetation::VegGrid`] uses this with its 3-D biome
     /// cells when a placement pipeline reaches the `biome` modifier.
@@ -283,6 +329,24 @@ impl DecorationCatalog {
         }
         out
     }
+}
+
+/// Parses the ore-capable entries in a global decoration catalog once at
+/// generator construction. The catalog retains every feature (including the
+/// unsupported ones) for global index accounting; this map only avoids parsing
+/// the same ore document each time a source chunk is decorated.
+#[must_use]
+pub fn build_ore_definitions(
+    resolver: &dyn Resolver,
+    catalog: &DecorationCatalog,
+) -> HashMap<String, PlacedOre> {
+    let mut out = HashMap::new();
+    for (_, id) in &catalog.ordered {
+        if let Some(ore) = parse_placed_ore(resolver, id) {
+            out.entry(id.clone()).or_insert(ore);
+        }
+    }
+    out
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -781,6 +845,60 @@ mod tests {
         let ores = build_biome_ores(&resolver, "minecraft:test");
         assert_eq!(ores.len(), 1, "the non-ore entry must not produce a PlacedOre");
         assert_eq!(ores[0].index, 1, "index must be the raw step position, not a count");
+    }
+
+    #[test]
+    fn global_ore_selection_keeps_the_global_step_index() {
+        let mut first_steps = vec![Value::Array(Vec::new()); 7];
+        first_steps[STEP_UNDERGROUND_ORES as usize] = serde_json::json!([
+            "minecraft:non_ore_a",
+            "minecraft:test_ore"
+        ]);
+        let mut second_steps = vec![Value::Array(Vec::new()); 7];
+        second_steps[STEP_UNDERGROUND_ORES as usize] = serde_json::json!([
+            "minecraft:non_ore_b",
+            "minecraft:test_ore"
+        ]);
+        let mut biomes = HashMap::new();
+        biomes.insert("minecraft:first", serde_json::json!({"features": first_steps}));
+        biomes.insert("minecraft:second", serde_json::json!({"features": second_steps}));
+
+        let mut placed = HashMap::new();
+        for id in ["minecraft:non_ore_a", "minecraft:non_ore_b"] {
+            placed.insert(id, serde_json::json!({"feature": "minecraft:plain", "placement": []}));
+        }
+        placed.insert(
+            "minecraft:test_ore",
+            serde_json::json!({"feature": "minecraft:test_ore_config", "placement": []}),
+        );
+        let mut features = HashMap::new();
+        features.insert("minecraft:plain", serde_json::json!({"type": "minecraft:lake", "config": {}}));
+        features.insert(
+            "minecraft:test_ore_config",
+            serde_json::json!({
+                "type": "minecraft:ore",
+                "config": {"size": 1, "discard_chance_on_air_exposure": 0.0, "targets": []}
+            }),
+        );
+        let resolver = FakeResolver {
+            tags: HashMap::new(),
+            biomes,
+            carvers: HashMap::new(),
+            features,
+            placed,
+        };
+
+        let catalog = build_decoration_catalog(
+            &resolver,
+            &["minecraft:first".to_string(), "minecraft:second".to_string()],
+        );
+        let definitions = build_ore_definitions(&resolver, &catalog);
+        let ores = catalog.select_ores(["minecraft:first"], &definitions);
+        assert_eq!(ores.len(), 1);
+        assert_eq!(
+            ores[0].index, 2,
+            "the second biome's preceding feature occupies global index 1 even when it is not eligible"
+        );
     }
 
     #[test]

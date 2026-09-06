@@ -466,13 +466,11 @@ pub struct OverworldGenerator {
     /// name the [`Resolver`]'s biome-parameter table (or the fallback biome)
     /// can produce — see `crate::compose::build_biome_carvers`.
     carvers_by_biome: HashMap<String, Vec<CarverConfig>>,
-    /// Per-biome underground-ore decoration-step list, resolved the same way
-    /// and at the same time as `carvers_by_biome` — see
-    /// `crate::compose::build_biome_ores`. Empty (whole map) when the
-    /// resolver supplies no biome documents with an ore step, in which case
-    /// [`Self::ore_stage`] is a no-op (matches every other resolver
-    /// "no data supplied" convention).
-    ores_by_biome: HashMap<String, Vec<PlacedOre>>,
+    /// Every ore-capable placed feature in the global decoration catalog.
+    /// [`Self::ore_stage`] selects a source's eligible subset from that catalog
+    /// with global per-step indices, rather than treating a biome document's
+    /// local array offset as a seed index.
+    ore_definitions: HashMap<String, PlacedOre>,
     /// Block-tag closures for every tag referenced by any biome's ore
     /// targets, resolved once — see `crate::compose::build_ore_tag_map`.
     ore_tag_map: HashMap<String, HashSet<String>>,
@@ -747,7 +745,6 @@ impl OverworldGenerator {
             biome_source_order.iter().cloned().collect();
 
         let mut carvers_by_biome = HashMap::new();
-        let mut ores_by_biome = HashMap::new();
         // The same per-biome document walk also yields each
         // biome's `ClimateSettings` and whether it lists `freeze_top_layer`, so
         // `TOP_LAYER_MODIFICATION` composition costs no extra JSON parses.
@@ -760,7 +757,6 @@ impl OverworldGenerator {
                 name.clone(),
                 crate::compose::build_biome_carvers(resolver, name),
             );
-            ores_by_biome.insert(name.clone(), crate::compose::build_biome_ores(resolver, name));
             let document = resolver.biome_document(name);
             if let Some(climate) = crate::feature::top_layer::parse_biome_climate(&document) {
                 biome_climates.insert(name.clone(), climate);
@@ -773,9 +769,12 @@ impl OverworldGenerator {
                 spawners_by_biome.insert(name.clone(), spawners);
             }
         }
-        let all_ores: Vec<PlacedOre> = ores_by_biome.values().flatten().cloned().collect();
         let decoration_catalog = crate::compose::build_decoration_catalog(resolver, &biome_source_order);
-        let ore_tag_map = crate::compose::build_ore_tag_map(resolver, &all_ores);
+        let ore_definitions = crate::compose::build_ore_definitions(resolver, &decoration_catalog);
+        let ore_tag_map = crate::compose::build_ore_tag_map(
+            resolver,
+            &ore_definitions.values().cloned().collect::<Vec<_>>(),
+        );
         let veg_tags = crate::feature::vegetation::build_veg_tags(resolver);
         let snow_support = crate::feature::top_layer::build_snow_support(resolver);
 
@@ -827,7 +826,7 @@ impl OverworldGenerator {
             aquifer_trees,
             carver_replaceable,
             carvers_by_biome,
-            ores_by_biome,
+            ore_definitions,
             ore_tag_map,
             store: store::StagedStore::new(STORE_RETENTION),
             decoration_catalog,

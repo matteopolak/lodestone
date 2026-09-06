@@ -660,23 +660,30 @@ pub type RegionGrid = crate::dense_grid::DenseBlockGrid;
 pub const REGION_MIN: i32 = -16;
 pub const REGION_MAX: i32 = 32;
 
+/// Centre-relative local bounds of ore placement's **read** context. Ores still
+/// run and write only for the inner 3×3 sources, but an outer source can probe
+/// terrain one chunk farther out while deciding whether a boundary blob is
+/// exposed to air.
+pub const ORE_READ_MIN: i32 = REGION_MIN - 16;
+pub const ORE_READ_MAX: i32 = REGION_MAX + 16;
+pub const ORE_READ_SIDE: i32 = ORE_READ_MAX - ORE_READ_MIN;
+
 /// Additional padding beyond [`REGION_MIN`]/[`REGION_MAX`] for the vegetation
 /// grid, so a placed tree spilling past the 3×3 neighbourhood's edge is kept
 /// rather than silently dropped. The worst case is a giant jungle tree whose
 /// canopy touches 15×15 at the trunk; an 8-block pad on every side of a 48-block
 /// region gives a 64×64 footprint — enough for any 26.2 tree, including a 2×2
 /// dark oak whose 6×6 canopy at a source-chunk corner reaches 22 blocks from the
-/// centre. The ore driver keeps the tighter bound, since ores are single-block
-/// clusters that never spill.
+/// centre. Ore has its own wider chunk-aligned read context because a boundary
+/// blob can probe terrain outside the source chunks it is allowed to decorate.
 pub const VEG_PADDING: i32 = 8;
 
 /// Side of the driven 3×3 region in blocks (48) — [`REGION_MAX`] − [`REGION_MIN`].
 pub const REGION_SIDE: i32 = REGION_MAX - REGION_MIN;
 
-/// The `OCEAN_FLOOR_WG` heightmap over the driven 3×3 region as a **dense
-/// array**, addressed by centre-relative local `(lx, lz)` already clamped into
-/// `[`[`REGION_MIN`]`, `[`REGION_MAX`]`)` — i.e. by exactly the key space
-/// [`OreInput::region_local`] produces.
+/// The `OCEAN_FLOOR_WG` heightmap over ore's 5×5 **read** context as a dense
+/// array, addressed by a centre-relative local `(lx, lz)` already clamped into
+/// `[`[`ORE_READ_MIN`]`, `[`ORE_READ_MAX`]`).
 ///
 /// # Why this is not a `HashMap`
 ///
@@ -685,14 +692,14 @@ pub const REGION_SIDE: i32 = REGION_MAX - REGION_MIN;
 /// `(2·(ceil(size/8) + max_radius) + 1)²` — up to 27 × 27 for the `size = 64`
 /// blob ores — for **every** emitted position of **every** ore feature of
 /// **all nine** source chunks. Each of those was a SipHash of an `(i32, i32)`
-/// tuple against a 2,304-entry map.
+/// tuple against a 6,400-entry map.
 ///
 /// Measured (`samply` 0.13.1, release, `threadCPUDelta`-weighted,
 /// `bench_ore_composition_sweep`, seed 42): inside the ore engine's own subtree
 /// (`apply_one_source`, 22.85% of process CPU), `hash_one::<&(i32, i32)>` was
 /// **7.36% inclusive / 2.78% self** and `get_height` itself a further 2.95%
 /// self. `overworld/decorate.rs`'s own doc had already named this fix — "if it
-/// ever matters, the win is a dense `[i32; 48 * 48]` array rather than a
+/// ever matters, the win is a dense `[i32; 80 * 80]` array rather than a
 /// `HashMap`, and the clamp has to move with it" — and the clamp did move with
 /// it: it stays in [`OreInput::region_local`], and this type's accessors assume
 /// their caller already applied it.
@@ -705,7 +712,7 @@ pub const REGION_SIDE: i32 = REGION_MAX - REGION_MIN;
 /// [`Self::UNSET`] and [`Self::get`] panics on it, rather than defaulting.
 #[derive(Clone)]
 pub struct RegionHeights {
-    /// `REGION_SIDE × REGION_SIDE`, row-major in `lz`.
+    /// `ORE_READ_SIDE × ORE_READ_SIDE`, row-major in `lz`.
     heights: Box<[i32]>,
 }
 
@@ -731,8 +738,8 @@ impl RegionHeights {
     /// least `min_y - 1`.
     pub const UNSET: i32 = i32::MIN;
 
-    /// Number of columns in the driven region (48 × 48 = 2,304).
-    pub const AREA: usize = (REGION_SIDE * REGION_SIDE) as usize;
+    /// Number of columns in ore's 5×5 read context (80 × 80 = 6,400).
+    pub const AREA: usize = (ORE_READ_SIDE * ORE_READ_SIDE) as usize;
 
     /// An all-[`Self::UNSET`] map — nothing stitched yet.
     #[must_use]
@@ -744,9 +751,9 @@ impl RegionHeights {
 
     #[inline]
     fn index(lx: i32, lz: i32) -> usize {
-        debug_assert!((REGION_MIN..REGION_MAX).contains(&lx), "lx {lx} not clamped");
-        debug_assert!((REGION_MIN..REGION_MAX).contains(&lz), "lz {lz} not clamped");
-        ((lz - REGION_MIN) * REGION_SIDE + (lx - REGION_MIN)) as usize
+        debug_assert!((ORE_READ_MIN..ORE_READ_MAX).contains(&lx), "lx {lx} not clamped");
+        debug_assert!((ORE_READ_MIN..ORE_READ_MAX).contains(&lz), "lz {lz} not clamped");
+        ((lz - ORE_READ_MIN) * ORE_READ_SIDE + (lx - ORE_READ_MIN)) as usize
     }
 
     /// Records one column's height. `(lx, lz)` must already be inside the
@@ -786,7 +793,7 @@ impl RegionHeights {
     pub fn from_map(map: &HashMap<(i32, i32), i32>) -> Self {
         let mut out = Self::unset();
         for (&(lx, lz), &y) in map {
-            if (REGION_MIN..REGION_MAX).contains(&lx) && (REGION_MIN..REGION_MAX).contains(&lz) {
+            if (ORE_READ_MIN..ORE_READ_MAX).contains(&lx) && (ORE_READ_MIN..ORE_READ_MAX).contains(&lz) {
                 out.set(lx, lz, y);
             }
         }
@@ -813,10 +820,12 @@ pub struct OreInput<'a> {
     /// Vanilla's own min-gen-y / gen-depth accessors for `VerticalAnchor` resolution.
     pub min_gen_y: i32,
     pub gen_depth: i32,
-    /// `OCEAN_FLOOR_WG` heightmap across the whole driven 3×3 region, as
-    /// vanilla's own level height-lookup returns it, keyed by centre-relative local
-    /// `(x, z) ∈ [`[`REGION_MIN`]`,`[`REGION_MAX`]`)` (see
-    /// [`OreInput::region_local`] for probes landing outside that range).
+    /// Centre-relative bounds of the terrain and heightmap read context. The
+    /// 3×3 fixture driver retains [`REGION_MIN`]..[`REGION_MAX`]; production
+    /// widens this to [`ORE_READ_MIN`]..[`ORE_READ_MAX`] for boundary probes.
+    pub read_min: i32,
+    pub read_max: i32,
+    /// `OCEAN_FLOOR_WG` heightmap across the supplied read context.
     pub ocean_floor_wg: &'a RegionHeights,
     /// `true` iff the given block base name is in the given tag (closure already
     /// resolved by the caller).
@@ -834,6 +843,8 @@ impl std::fmt::Debug for OreInput<'_> {
             .field("height", &self.height)
             .field("min_gen_y", &self.min_gen_y)
             .field("gen_depth", &self.gen_depth)
+            .field("read_min", &self.read_min)
+            .field("read_max", &self.read_max)
             .field("ocean_floor_wg", &self.ocean_floor_wg)
             .finish_non_exhaustive()
     }
@@ -848,8 +859,8 @@ impl OreInput<'_> {
         }
     }
 
-    /// Centre-relative local coordinates, **clamped** into the driven 3×3
-    /// region (`[`[`REGION_MIN`]`,`[`REGION_MAX`]`)` each axis).
+    /// Centre-relative local coordinates, clamped into this driver's supplied
+    /// read context.
     ///
     /// Vanilla's real `blockStateWriteRadius(1)` reach is nominally one
     /// chunk, but the largest overworld blob ores (`size=64`:
@@ -864,8 +875,8 @@ impl OreInput<'_> {
     /// probe, not just this residual). See `docs/worldgen-parity.md`'s
     /// "known gap" section for the measured scope of this.
     fn region_local(&self, x: i32, z: i32) -> (i32, i32) {
-        let lx = (x - self.center_x * 16).clamp(REGION_MIN, REGION_MAX - 1);
-        let lz = (z - self.center_z * 16).clamp(REGION_MIN, REGION_MAX - 1);
+        let lx = (x - self.center_x * 16).clamp(self.read_min, self.read_max - 1);
+        let lz = (z - self.center_z * 16).clamp(self.read_min, self.read_max - 1);
         (lx, lz)
     }
 
@@ -987,6 +998,8 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
         height,
         min_gen_y,
         gen_depth,
+        REGION_MIN,
+        REGION_MAX,
         &dense,
         in_tag,
         view,
@@ -1013,6 +1026,8 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
     height: i32,
     min_gen_y: i32,
     gen_depth: i32,
+    read_min: i32,
+    read_max: i32,
     ocean_floor_wg: &RegionHeights,
     in_tag: &dyn Fn(&str, &str) -> bool,
     view: &mut RegionView<'_>,
@@ -1032,6 +1047,8 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
                 height,
                 min_gen_y,
                 gen_depth,
+                read_min,
+                read_max,
                 ocean_floor_wg,
                 in_tag,
             };
@@ -1779,6 +1796,8 @@ mod tests {
             height: 384,
             min_gen_y: -64,
             gen_depth: 384,
+            read_min: REGION_MIN,
+            read_max: REGION_MAX,
             ocean_floor_wg: &dense,
             in_tag: &|_, _| false,
         };
