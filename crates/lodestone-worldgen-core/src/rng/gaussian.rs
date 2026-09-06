@@ -16,23 +16,25 @@
 //! There is no formulation that fixes this, because there is no single value to
 //! be exact *to*.
 //!
-//! What makes it acceptable is the blast radius, which is zero blocks:
+//! The numerical latitude must not turn into a stream-consumption latitude:
 //!
-//! * **Terrain never calls it.** `WorldgenRandom::next_gaussian` is
-//!   `unimplemented!()` (`rng/mod.rs`) precisely because no terrain path draws a
-//!   Gaussian; a caller appearing there would hit the panic, not a silent
-//!   divergence.
-//! * The only production consumer is `lodestone-render`'s weather jitter, a
-//!   visual effect that reaches no world state.
+//! * Terrain consumers use `WorldgenRandom`'s own cache and inherited
+//!   bit-random `nextDouble` shape. It is deliberately separate from either
+//!   wrapped source's cache, because the xoroshiro backend consumes uniforms
+//!   differently when used directly.
+//! * The direct random-source implementation is also used by visual weather
+//!   jitter, but its cache cannot be substituted into a worldgen wrapper.
 //! * `rng_parity`'s `nextGaussian` comparison is a JVM oracle check, so if a
 //!   platform libm ever did disagree it would surface as a **loud test failure
 //!   on that machine** rather than as divergent worlds.
 //!
-//! If a terrain feature ever needs a Gaussian, this note is the reason it must
-//! not simply be wired up: the value would have to be declared a bounded
-//! divergence, not assumed exact.
+//! Both direct sources and the wrapper are checked against a JVM oracle. Tests
+//! allow the documented platform-libm latitude for the Gaussian value and pin
+//! the following random draw exactly, so a wrong transform or pair-consumption
+//! shape cannot hide behind that tolerance.
 
-/// Cached-pair Gaussian state. `reset` is called on every `set_seed`.
+/// Cached-pair Gaussian state. Each owning source decides when its reseed path
+/// resets this cache.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct Gaussian {
     next: f64,

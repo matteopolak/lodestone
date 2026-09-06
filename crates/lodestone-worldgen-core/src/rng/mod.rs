@@ -59,7 +59,9 @@ pub trait RandomSource {
     /// Forks an independent positional factory from the current state, exactly
     /// as vanilla's own random-source fork-positional.
     fn fork_positional(&mut self) -> Self::Positional;
-    /// Re-seeds the generator, resetting any cached Gaussian.
+    /// Re-seeds the generator. Concrete sources reset their own cached
+    /// Gaussian; `WorldgenRandom` forwards this call and retains its inherited
+    /// wrapper cache, matching its distinct reseed semantics.
     fn set_seed(&mut self, seed: i64);
     /// The primitive bit generator: advances the source and yields the top
     /// `bits` bits. For the LCG this is `java.util.Random.next(bits)`; for
@@ -113,13 +115,22 @@ pub trait PositionalRandomFactory {
 #[derive(Debug)]
 pub struct WorldgenRandom<R: RandomSource> {
     inner: R,
+    // This cache belongs to the wrapper, not `inner`: the wrapper inherits the
+    // bit-random Gaussian implementation while replacing only its bit source.
+    // In particular, calling `inner.next_gaussian()` would use an incompatible
+    // pair cache and (for xoroshiro) a different next-double shape.
+    gaussian: gaussian::Gaussian,
     count: u32,
 }
 
 impl<R: RandomSource> WorldgenRandom<R> {
     /// Wraps a base generator.
     pub fn new(inner: R) -> Self {
-        Self { inner, count: 0 }
+        Self {
+            inner,
+            gaussian: gaussian::Gaussian::default(),
+            count: 0,
+        }
     }
 
     /// Number of `next(bits)` draws performed (mirrors vanilla's own
@@ -257,15 +268,20 @@ pub fn is_slime_chunk(chunk_x: i32, chunk_z: i32, seed: i64) -> bool {
 }
 
 impl<R: RandomSource> RandomSource for WorldgenRandom<R> {
-    type Positional = LegacyPositionalFactory;
+    type Positional = R::Positional;
 
-    fn fork_positional(&mut self) -> LegacyPositionalFactory {
-        // WorldgenRandom extends LegacyRandomSource, so forkPositional yields a
-        // legacy factory seeded from its (overridden) nextLong.
-        LegacyPositionalFactory::from_seed_value(self.next_long())
+    fn fork_positional(&mut self) -> R::Positional {
+        // This is deliberately not inherited bit-random behaviour. The wrapper
+        // delegates positional forks to its wrapped source, preserving the
+        // selected family and its positional derivation.
+        self.inner.fork_positional()
     }
 
     fn set_seed(&mut self, seed: i64) {
+        // The inherited Gaussian cache deliberately survives this forwarding
+        // reseed. The wrapper's upstream override does not call its superclass
+        // reset; resetting here would consume a new pair where the reference
+        // returns the cached mate.
         self.inner.set_seed(seed);
     }
 
@@ -324,9 +340,22 @@ impl<R: RandomSource> RandomSource for WorldgenRandom<R> {
     }
 
     fn next_gaussian(&mut self) -> f64 {
-        // Not needed by terrain; WorldgenRandom's gaussian would come from its
-        // LegacyRandomSource superclass. Left unimplemented on purpose.
-        unimplemented!("WorldgenRandom::next_gaussian is not used by terrain generation")
+        // Split the independent cache, counter and backend borrows. Each
+        // accepted uniform is the inherited bit-random `nextDouble` shape: two
+        // wrapped `next(bits)` draws, rather than `inner.next_double()`.
+        let gaussian = &mut self.gaussian;
+        let inner = &mut self.inner;
+        let count = &mut self.count;
+        gaussian.next(|| {
+            crate::counters::bump_rng_draw();
+            *count = count.wrapping_add(1);
+            let upper = inner.next_bits(26);
+            crate::counters::bump_rng_draw();
+            *count = count.wrapping_add(1);
+            let lower = inner.next_bits(27);
+            let combined = (i64::from(upper) << 27).wrapping_add(i64::from(lower));
+            combined as f64 * (1.110_223e-16_f32 as f64)
+        })
     }
 
     fn consume_count(&mut self, rounds: u32) {
@@ -340,10 +369,83 @@ impl<R: RandomSource> RandomSource for WorldgenRandom<R> {
 mod tests {
     use super::*;
 
+    fn advance_two_bit_random_doubles<R: RandomSource>(random: &mut WorldgenRandom<R>) {
+        let _ = random.next_double();
+        let _ = random.next_double();
+    }
+
     #[test]
     fn get_seed_matches_known_origin() {
         // the seed-mixing function at (0,0,0) reduces to 0*0*.. == 0, >>16 == 0.
         assert_eq!(get_seed(0, 0, 0), 0);
+    }
+
+    /// This seed accepts its first pair through the wrapper's bit-random double
+    /// shape: two doubles, each using two wrapper bit draws. The cached mate
+    /// performs no draws. The independently advanced control makes the
+    /// post-pair state observable rather than assuming the draw count from the
+    /// output shape.
+    #[test]
+    fn worldgen_gaussian_caches_a_pair_without_advancing_its_backend_twice() {
+        let mut gaussian = WorldgenRandom::new(XoroshiroRandomSource::new(42));
+        let _ = gaussian.next_gaussian();
+        assert_eq!(gaussian.count(), 4, "first pair must use two bit-random doubles");
+        let _ = gaussian.next_gaussian();
+        assert_eq!(gaussian.count(), 4, "cached mate must not advance the backend");
+        let after_pair = gaussian.next_long();
+
+        let mut bit_random_control = WorldgenRandom::new(XoroshiroRandomSource::new(42));
+        advance_two_bit_random_doubles(&mut bit_random_control);
+        assert_eq!(
+            after_pair,
+            bit_random_control.next_long(),
+            "the pair must leave exactly the same backend state as two wrapper doubles"
+        );
+
+        let mut direct_backend = XoroshiroRandomSource::new(42);
+        let _ = direct_backend.next_gaussian();
+        let _ = direct_backend.next_gaussian();
+        assert_ne!(
+            after_pair,
+            direct_backend.next_long(),
+            "delegating to the backend Gaussian uses its incompatible double shape"
+        );
+    }
+
+    /// The wrapper reseed forwards only to the selected backend. Its inherited
+    /// Gaussian cache survives, so the cached mate is returned before the
+    /// freshly reseeded backend is advanced.
+    #[test]
+    fn worldgen_gaussian_cache_survives_forwarded_reseed() {
+        let mut reseeded = WorldgenRandom::new(XoroshiroRandomSource::new(42));
+        let _ = reseeded.next_gaussian();
+        reseeded.set_seed(-918_273_645);
+        let cached = reseeded.next_gaussian();
+        let after_cached = reseeded.next_long();
+
+        let mut paired = WorldgenRandom::new(XoroshiroRandomSource::new(42));
+        let _ = paired.next_gaussian();
+        assert_eq!(cached, paired.next_gaussian(), "reseed must retain the cached mate");
+
+        let mut freshly_seeded = WorldgenRandom::new(XoroshiroRandomSource::new(-918_273_645));
+        assert_eq!(
+            after_cached,
+            freshly_seeded.next_long(),
+            "returning the cached mate must not consume the newly seeded backend"
+        );
+    }
+
+    /// Positional forks retain their selected backend family; deriving a legacy
+    /// factory from wrapper bit draws would silently change xoroshiro callers.
+    #[test]
+    fn worldgen_positional_fork_delegates_to_the_selected_backend() {
+        let mut wrapped = WorldgenRandom::new(XoroshiroRandomSource::new(42));
+        let mut direct = XoroshiroRandomSource::new(42);
+        let wrapped_factory = wrapped.fork_positional();
+        let direct_factory = direct.fork_positional();
+        let mut wrapped_at = wrapped_factory.at(-17, 63, 29);
+        let mut direct_at = direct_factory.at(-17, 63, 29);
+        assert_eq!(wrapped_at.next_long(), direct_at.next_long());
     }
     /// `is_slime_chunk` is a pure function of `(chunk_x, chunk_z,
     /// seed)`, so this is element-wise and exact — not a match count and not a

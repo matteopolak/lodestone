@@ -103,6 +103,27 @@ fn dump_suite<R: RandomSource>(d: &mut Dump, tag: &str, r: &mut R) {
     }
 }
 
+fn dump_worldgen_gaussian<R: RandomSource>(
+    d: &mut Dump,
+    tag: &str,
+    paired_inner: R,
+    reseeded_inner: R,
+) {
+    let mut paired = WorldgenRandom::new(paired_inner);
+    d.d(format!("{tag}.0"), paired.next_gaussian());
+    d.d(format!("{tag}.1"), paired.next_gaussian());
+    d.i(format!("{tag}.afterPair.nextLong"), paired.next_long());
+
+    let mut reseeded = WorldgenRandom::new(reseeded_inner);
+    d.d(format!("{tag}.reseed.first"), reseeded.next_gaussian());
+    reseeded.set_seed(-918_273_645);
+    d.d(format!("{tag}.reseed.cached"), reseeded.next_gaussian());
+    d.i(
+        format!("{tag}.reseed.afterCached.nextLong"),
+        reseeded.next_long(),
+    );
+}
+
 #[test]
 fn rng_matches_jvm_bit_for_bit() {
     let mut d = Dump::default();
@@ -208,6 +229,32 @@ fn rng_matches_jvm_bit_for_bit() {
             };
             for c in chunks {
                 derive(c, &mut d);
+            }
+        }
+    }
+
+    // A WorldgenRandom inherits a bit-random Gaussian sampler, so each uniform
+    // takes two wrapper bit draws even around xoroshiro. Capture two calls plus
+    // a following long to pin the cached mate and its exact stream position.
+    // Its reseed override only forwards to the inner source, leaving that
+    // inherited cache intact.
+    for &seed in &[42i64, -8_823_894_646] {
+        for (label, xoro) in [("xoro", true), ("legacy", false)] {
+            let tag = format!("wgr[{label},{seed}].nextGaussian");
+            if xoro {
+                dump_worldgen_gaussian(
+                    &mut d,
+                    &tag,
+                    XoroshiroRandomSource::new(seed),
+                    XoroshiroRandomSource::new(seed),
+                );
+            } else {
+                dump_worldgen_gaussian(
+                    &mut d,
+                    &tag,
+                    LegacyRandomSource::new(seed),
+                    LegacyRandomSource::new(seed),
+                );
             }
         }
     }

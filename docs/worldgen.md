@@ -78,6 +78,15 @@ switches vanilla's **entire** noise stack between the two families per dimension
 is `Copy` because both variants are, which is what keeps a dimension-aware `Builder::with_algorithm`
 to a type-name change in four files rather than a generic parameter through every stage.
 
+`WorldgenRandom<R>` is a bit-random wrapper, not a delegation wrapper: its ordinary `double` and
+Gaussian draws are constructed from its own `next_bits` funnel, so each accepted Gaussian pair uses
+four wrapped bit draws. The cached mate belongs to the wrapper rather than `R`; it must not call
+`R::next_gaussian`, whose cache and double-draw shape can differ. Its forwarding reseed deliberately
+leaves that wrapper cache alive, while a positional fork delegates to `R` and retains the selected
+family. `RngOracle` records two fixed-seed Gaussian pairs, the following `long`, and a reseed-between-
+pair control; keep all three when changing this seam. The following `long` makes a cache or draw-count
+mistake observable even where platform logarithm rounding leaves the Gaussian's last bit variable.
+
 ### World-type selection
 
 `worldgen_data::WorldType` (`Overworld`/`Amplified`/`LargeBiomes`) all share one
