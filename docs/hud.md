@@ -121,8 +121,10 @@ common one in practice (a server that colors names by team rarely also sends an 
 component). Only *listed* players appear here; chat's tab-completion reads the full online-player set,
 which is a different, unfiltered projection over the same underlying roster.
 
-Player-list identity is optional all the way through the public model and folded `GameProfile`.
-Protocols with a wire UUID use it as the row key; protocol 5 has only a display name, so its rows live
+Player-list identity is optional all the way through the public model and folded `GameProfile`. The
+geometry model lives in `hud/tab_panel.rs`; it is re-exported as `hud::TabPanel` so the renderer,
+pixel gates and callers continue to share the same public path. Protocols with a wire UUID use it as
+the row key; protocol 5 has only a display name, so its rows live
 in a separate name-keyed map and expose `profile.id = None`. The split permits allocation-free
 borrowed-name lookup on the render path. This does not hide the row: name rendering,
 latency, ordering, scoreboard decoration and name-based chat completion continue to work, and a
@@ -186,8 +188,8 @@ should be added.
 
 ## Dependencies
 
-- `crates/lodestone-shell/src/hud.rs` and `hud/{anim,vanilla_font,item_icon}.rs` — layout, animation
-  state machines, and the vanilla font draw path.
+- `crates/lodestone-shell/src/hud.rs` and `hud/{anim,tab_panel,vanilla_font,item_icon}.rs` — layout,
+  Tab geometry, animation state machines, and the vanilla font draw path.
 - `crates/lodestone-shell/src/tablist.rs`, `scoreboard.rs` — the tab-list and sidebar projections.
 - `lodestone-game` — `tablist::TabList`, `scoreboard::Scoreboard`, `player_state::HeldItemHighlight`,
   the folded state every projection above reads.
