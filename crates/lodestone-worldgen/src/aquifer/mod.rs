@@ -44,17 +44,14 @@ use crate::math::{clamp, clamped_map, floor, map};
 use crate::rng::{PositionalRandomFactory, RandomSource};
 pub use crate::rng::AnyPositionalFactory;
 
-const CELL_WIDTH: i32 = 4;
-const CELL_HEIGHT: i32 = 8;
-
 /// Vanilla's own noise-settings derived cell size — its own quart-to-block
 /// conversion applied to `size_horizontal` and `size_vertical`, i.e. `size * 4`.
 ///
 /// **Not the same for every dimension.** The Overworld and the Nether are
-/// `1, 2` → 4 wide / 8 tall (the [`CELL_WIDTH`]/[`CELL_HEIGHT`] this file's
-/// Overworld path uses as constants); **the End is `2, 1` → 8 wide / 4 tall**.
+/// `1, 2` → 4 wide / 8 tall; **the End is `2, 1` → 8 wide / 4 tall**.
 /// Interpolation happens on cell corners, so a wrong cell size does not fail —
-/// it produces smoothly wrong terrain.
+/// it produces smoothly wrong terrain. Callers must carry this pair through
+/// every sampler they construct for a settings document.
 #[must_use]
 pub fn cell_geometry(settings: &Value) -> (i32, i32) {
     let noise = &settings["noise"];
@@ -78,7 +75,7 @@ pub enum BlockKind {
     Stone,
     /// Air (vanilla's own compute-substance call returned an air fluid state).
     Air,
-    /// The default fluid (overworld: water).
+    /// A settings-selected fluid (water, lava, or air).
     Water,
     /// Lava.
     Lava,
@@ -114,6 +111,15 @@ enum Fluid {
 }
 
 impl Fluid {
+    fn from_block(block: BlockKind) -> Self {
+        match block {
+            BlockKind::Air => Self::Air,
+            BlockKind::Water => Self::Water,
+            BlockKind::Lava => Self::Lava,
+            BlockKind::Stone => panic!("default_fluid is not a fluid: Stone"),
+        }
+    }
+
     fn to_block(self) -> BlockKind {
         match self {
             Fluid::Air => BlockKind::Air,
@@ -223,12 +229,11 @@ pub struct AquiferSystem {
     /// Vanilla's own default-fluid query — the fluid the *global* picker's sea status
     /// carries.
     ///
-    /// Was hardcoded to water, which is right for the Overworld and wrong for
-    /// the Nether: `noise_settings/nether.json` says `minecraft:lava` with
-    /// `sea_level: 32`, so the whole "lava sea" comes from here rather than from
-    /// any aquifer behaviour. The `-54` deep-lava status below is a *separate*
-    /// Overworld status and is unreachable in the Nether (`min(-54, 32) = -54`
-    /// against a `min_y 0` dimension).
+    /// This comes from the settings document for every enabled aquifer. The
+    /// Overworld uses water, while a custom aquifer-enabled settings document
+    /// may select another supported fluid. The `-54` deep-lava status below is
+    /// a separate global status and is selected by the height rule rather than
+    /// by this field.
     default_fluid: Fluid,
     /// `false` when the settings say `aquifers_enabled: false` — the Nether and
     /// the End. Vanilla swaps the whole implementation
@@ -259,15 +264,14 @@ impl AquiferSystem {
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
         let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
         let sea_level = settings["sea_level"].as_i64().unwrap_or(63) as i32;
+        let default_fluid = fluid_from_settings(settings);
+        let (cell_width, cell_height) = cell_geometry(settings);
 
         // Vanilla's own per-chunk field constructor. A dimension with `aquifers_enabled: false`
         // gets a *different implementation*, not a tuned one, and none of the
         // four aquifer noise fields is instantiated for it — so this branch is
         // taken before any of the `builder.build` calls below.
         if !settings["aquifers_enabled"].as_bool().unwrap_or(true) {
-            let (cell_width, cell_height) = cell_geometry(settings);
-            let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
-            let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
             return Self::disabled(
                 Program::compile(
                     &builder
@@ -276,7 +280,7 @@ impl AquiferSystem {
                 ),
                 builder.slot_count(),
                 sea_level,
-                fluid_from_settings(settings),
+                default_fluid,
                 min_y,
                 height,
                 chunk_x,
@@ -325,7 +329,7 @@ impl AquiferSystem {
 
         let slots = builder.slot_count();
 
-        Self::from_parts(
+        let mut system = Self::from_parts(
             final_density_node,
             erosion_node,
             depth_node,
@@ -341,7 +345,14 @@ impl AquiferSystem {
             chunk_x,
             chunk_z,
             slots,
-        )
+            cell_width,
+            cell_height,
+        );
+        // `from_parts` is also used by the cached Overworld route builder,
+        // whose historical call contract is water. The settings-backed path
+        // must overwrite that compatibility default before any block query.
+        system.default_fluid = Fluid::from_block(default_fluid);
+        system
     }
 
     /// Same construction as [`Self::new`], but from already-built density
@@ -359,6 +370,8 @@ impl AquiferSystem {
     /// five point-evaluated ones as `Arc<Density>`. Before that they were eight
     /// recursive deep copies of a `Box`-linked tree whose every node was 232
     /// bytes wide, performed once per chunk — diagnostic D3.
+    /// `cell_width` and `cell_height` are the settings-derived interpolation
+    /// geometry and must be shared by all three field samplers.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn from_parts(
@@ -377,6 +390,8 @@ impl AquiferSystem {
         chunk_x: i32,
         chunk_z: i32,
         slots: usize,
+        cell_width: i32,
+        cell_height: i32,
     ) -> Self {
         // Grid bounds, verbatim from NoiseBasedAquifer's constructor.
         let min_block_x = chunk_x * 16;
@@ -402,8 +417,8 @@ impl AquiferSystem {
         let final_density = NoiseChunkSampler::from_program(
             final_density_node,
             slots,
-            CELL_WIDTH,
-            CELL_HEIGHT,
+            cell_width,
+            cell_height,
             Some(Bounds {
                 x: (min_block_x, max_block_x),
                 y: (min_y, min_y + height - 1),
@@ -411,9 +426,9 @@ impl AquiferSystem {
             }),
         );
         let erosion =
-            NoiseChunkSampler::from_program(erosion_node, slots, CELL_WIDTH, CELL_HEIGHT, None);
+            NoiseChunkSampler::from_program(erosion_node, slots, cell_width, cell_height, None);
         let depth =
-            NoiseChunkSampler::from_program(depth_node, slots, CELL_WIDTH, CELL_HEIGHT, None);
+            NoiseChunkSampler::from_program(depth_node, slots, cell_width, cell_height, None);
 
         let min_grid_x = grid_x(min_block_x + -5);
         let max_grid_x = grid_x(max_block_x + -5) + 1;
@@ -528,15 +543,7 @@ impl AquiferSystem {
             // is the cheapest inert stand-in and is never sampled.
             positional: crate::rng::Algorithm::Legacy.root_positional(0),
             sea_level,
-            default_fluid: match default_fluid {
-                BlockKind::Lava => Fluid::Lava,
-                BlockKind::Water => Fluid::Water,
-                // The End's `default_fluid` really is air, so this arm is not a
-                // degenerate case — see `fluid_from_settings`.
-                BlockKind::Air => Fluid::Air,
-                // A silent fall-through to water would produce a plausible world.
-                BlockKind::Stone => panic!("default_fluid is not a fluid: Stone"),
-            },
+            default_fluid: Fluid::from_block(default_fluid),
             enabled: false,
             min_grid_x: 0,
             min_grid_y: 0,
@@ -1008,5 +1015,108 @@ impl AquiferSystem {
             }
         }
         fluid_type
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AquiferSystem, BlockKind};
+    use crate::density::{Builder, NoiseParams, Resolver};
+    use serde_json::Value;
+
+    struct NoReferences;
+
+    impl Resolver for NoReferences {
+        fn density_function(&self, id: &str) -> Value {
+            panic!("unexpected density-function reference: {id}");
+        }
+
+        fn noise(&self, id: &str) -> NoiseParams {
+            panic!("unexpected noise reference: {id}");
+        }
+    }
+
+    fn constant_density() -> Value {
+        serde_json::json!({"type": "minecraft:constant", "argument": 0.0})
+    }
+
+    fn nonlinear_density() -> Value {
+        serde_json::json!({
+            "type": "minecraft:interpolated",
+            "argument": {
+                "type": "minecraft:square",
+                "argument": {
+                    "type": "minecraft:y_clamped_gradient",
+                    "from_y": 0,
+                    "to_y": 8,
+                    "from_value": 0.0,
+                    "to_value": 1.0
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn enabled_aquifer_uses_settings_cell_geometry() {
+        let settings = serde_json::json!({
+            "aquifers_enabled": true,
+            "sea_level": 0,
+            "default_fluid": {"Name": "minecraft:water"},
+            "noise": {
+                "min_y": 0,
+                "height": 16,
+                "size_horizontal": 2,
+                "size_vertical": 1
+            },
+            "noise_router": {
+                "final_density": nonlinear_density(),
+                "erosion": constant_density(),
+                "depth": constant_density(),
+                "barrier": constant_density(),
+                "fluid_level_floodedness": constant_density(),
+                "fluid_level_spread": constant_density(),
+                "lava": constant_density(),
+                "preliminary_surface_level": constant_density()
+            }
+        });
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let system = AquiferSystem::new(&settings, &builder, 0, 0);
+
+        // The square of the gradient is 0 at y=0 and 0.25 at y=4. With a
+        // four-block vertical cell, y=2 is halfway between those corners.
+        assert_eq!(system.final_density.final_density(0, 2, 0).to_bits(), 0.125_f64.to_bits());
+    }
+
+    #[test]
+    fn enabled_aquifer_uses_settings_default_fluid() {
+        let settings = serde_json::json!({
+            "aquifers_enabled": true,
+            "sea_level": 4,
+            "default_fluid": {"Name": "minecraft:lava"},
+            "noise": {
+                "min_y": 0,
+                "height": 16,
+                "size_horizontal": 1,
+                "size_vertical": 2
+            },
+            "noise_router": {
+                "final_density": constant_density(),
+                "erosion": constant_density(),
+                "depth": constant_density(),
+                "barrier": constant_density(),
+                "fluid_level_floodedness": constant_density(),
+                "fluid_level_spread": constant_density(),
+                "lava": constant_density(),
+                "preliminary_surface_level": constant_density()
+            }
+        });
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let system = AquiferSystem::new(&settings, &builder, 0, 0);
+
+        // At y=0 the global status is below its level 4, so an enabled
+        // aquifer must preserve the settings-selected lava identity.
+        assert_eq!(system.block_at(0, 0, 0), BlockKind::Lava);
     }
 }

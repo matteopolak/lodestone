@@ -26,6 +26,10 @@ their noise settings feed a cell geometry derived from `size_horizontal`/`size_v
 the Overworld's hardcoded 4-wide/8-tall assumption (the End's `2, 1` gives an **8-wide/4-tall** cell,
 the transpose of the Overworld/Nether's `1, 2`).
 
+When aquifers are enabled in another settings document, `AquiferSystem::new` carries that document's
+`default_fluid` into the global fluid picker as well; the picker does not assume water for every
+dimension.
+
 This terrain selection does not choose the feature scheduler's carrier source.
 Per-chunk decoration always begins with a fresh xoroshiro `WorldgenRandom`, then derives the
 decoration seed and each feature stream from it. In particular, `NetherGenerator::mixed_step7_stage`

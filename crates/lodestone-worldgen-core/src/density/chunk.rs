@@ -8,10 +8,12 @@
 //! kinds:
 //!
 //! * **`interpolated`** samples its wrapped function only at the corners of a
-//!   4×8×4 (cell-width×cell-height×cell-width) cell grid, then trilinearly
-//!   interpolates per block, in vanilla's own three-axis lerp's nesting — **X innermost**, then
-//!   Y, then Z. That order is bit-significant and it is *not* the one vanilla's
-//!   driver loop appears to produce; see `## Which interpolation order` below.
+//!   settings-selected (cell-width×cell-height×cell-width) cell grid, then
+//!   trilinearly interpolates per block, in vanilla's own three-axis lerp's
+//!   nesting — **X innermost**, then Y, then Z. That order is bit-significant
+//!   and it is *not* the one vanilla's driver loop appears to produce; see
+//!   `## Which interpolation order` below. The usual geometry is 4×8; the End
+//!   uses 8×4.
 //! * **`flat_cache`** snaps XZ to the quart grid (`blockX >> 2 << 2`) and forces
 //!   `y = 0`, so 2D climate/shift fields are sampled once per 4×4 column.
 //!
@@ -113,9 +115,8 @@ pub struct NoiseChunkSampler {
 }
 
 impl NoiseChunkSampler {
-    /// Creates a sampler. `cell_width`/`cell_height` are
-    /// vanilla's own noise-settings cell-width/cell-height queries — 4 and 8 for the
-    /// overworld.
+    /// Creates a sampler. `cell_width`/`cell_height` are the settings-derived
+    /// cell-width/cell-height values — usually 4 and 8, with 8 and 4 in the End.
     ///
     /// Compiles `root` into a fresh [`Program`]. Callers generating many chunks
     /// should compile once and use [`from_program`](Self::from_program) instead;

@@ -60,7 +60,9 @@
 //!
 //! ## Configuration
 //!
-//! None. No feature flag or env var selects any of this. The `gen-counters`
+//! The owning generator supplies each sampler's cell width and height from its
+//! settings document; this leaf engine does not parse settings itself. No
+//! feature flag or env var selects the evaluation rules. The `gen-counters`
 //! feature turns the `corner_lookups` / `density_evals` / `slot_hit` /
 //! `slot_miss` hooks from inert to live.
 //!

@@ -28,6 +28,8 @@ use super::{OverworldGenerator, PreOreResult};
 /// around far longer than any one `Resolver` borrow — can still build a fresh
 /// per-chunk [`AquiferSystem`] (matching vanilla's own per-chunk `NoiseChunk`)
 /// via [`AquiferSystem::from_parts`] instead of re-resolving JSON every chunk.
+/// The cell geometry is captured alongside the trees because it is part of the
+/// settings contract, not a universal 4×8 default.
 #[allow(missing_debug_implementations)]
 pub(super) struct AquiferTrees {
     /// The three routes that become [`NoiseChunkSampler`]s, held as compiled
@@ -42,6 +44,8 @@ pub(super) struct AquiferTrees {
     pub(super) lava: Arc<Density>,
     pub(super) prelim: Arc<Density>,
     pub(super) positional: AnyPositionalFactory,
+    pub(super) cell_width: i32,
+    pub(super) cell_height: i32,
 }
 
 impl OverworldGenerator {
@@ -112,6 +116,8 @@ impl OverworldGenerator {
             cx,
             cz,
             self.slot_count,
+            t.cell_width,
+            t.cell_height,
         )
     }
 
