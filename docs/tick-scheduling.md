@@ -49,6 +49,17 @@ a neighbouring column's pending work. The real `IntegratedServer` tick loop cons
 the focused controls cover positive and negative chunk coordinates, global equal-time ordering, and
 the piston cancellation negative control.
 
+Generated columns enter the same fluid queue through an exposure-aware admission pass when they first
+become entity-ticking. Worldgen writes a complete snapshot and therefore cannot invoke placement or
+neighbor hooks; the admission pass mirrors the fluid spread decision and schedules only liquid cells
+that can currently write into an adjacent destination. A cheap immediate-neighbour gate rejects
+settled interior cells before the shape and slope walk, so the one-time scan is bounded by the stored
+column cells plus the exposed fluid boundary rather than a full spread search for every ocean cell.
+Later edits use the ordinary placement/neighbor scheduling path. The tick-area loop remembers which
+columns have been admitted, so a moving player does not repeatedly rescan or requeue an ocean. The
+fluid environment is selected from the loop's dimension: Nether lava keeps its faster drop-off and
+delay, while overworld and End use the regular rules with each source's actual build-height extent.
+
 ### Neighbor-update propagation
 
 A fixed visitation order (west, east, down, up, north, south) and a depth-first cascade: notifying

@@ -130,6 +130,7 @@ use std::collections::HashMap;
 use lodestone_model::BlockPos;
 
 use crate::chunk::ChunkSource;
+use crate::dimension::Dimension;
 use crate::neighbor_update::Direction;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, ScheduledTickSink, TickPriority};
 
@@ -381,6 +382,23 @@ impl FluidEnv {
             lava_source_conversion: FluidEnv::OVERWORLD.lava_source_conversion,
             min_y,
             height,
+        }
+    }
+
+    /// Selects the dimension's fluid rules while taking the actual column
+    /// extent from the source. The tick loop is bound to one source, so this
+    /// keeps its seed and drain paths on the same rules; a Nether loop must not
+    /// accidentally use overworld lava's drop-off or delay.
+    #[must_use]
+    pub(crate) const fn for_dimension(dimension: Dimension, min_y: i32, height: i32) -> FluidEnv {
+        let base = match dimension {
+            Dimension::Nether => FluidEnv::NETHER,
+            Dimension::Overworld | Dimension::End => FluidEnv::OVERWORLD,
+        };
+        FluidEnv {
+            min_y,
+            height,
+            ..base
         }
     }
 
@@ -1551,6 +1569,161 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<String> 
     }
 }
 
+/// Seeds the first scheduled ticks for liquids written by world generation.
+///
+/// Worldgen adopts a complete column in one operation, so it does not pass
+/// through the placement hooks that call [`ticks_after_edit`]. The generated
+/// column therefore needs the same initial fluid lifecycle explicitly when it
+/// enters an entity-ticking area. Interior cells of a settled pool are not
+/// queued: only cells whose normal spread decision would write something are
+/// admitted, which keeps a loaded ocean from creating tens of thousands of
+/// useless due entries.
+pub(crate) fn schedule_generated_ticks<S: ChunkSource + ?Sized, Q: ScheduledTickSink<String> + ?Sized>(
+    world: &S,
+    column: &crate::chunk::ChunkColumn,
+    chunk_x: i32,
+    chunk_z: i32,
+    env: FluidEnv,
+    current_tick: u64,
+    fluid_ticks: &mut Q,
+) -> usize {
+    let mut scheduled = 0;
+    column.for_each_block_state(|x, y, z, state| {
+        let Some(fluid) = fluid_state_of(state) else {
+            return;
+        };
+        // A waterlogged block has a fluid state for reads, but this module's
+        // scheduled-fluid consumer deliberately only originates spread from a
+        // liquid block state. Keep generation seeding on that same boundary.
+        if !matches!(base_name(state), "minecraft:water" | "minecraft:lava") {
+            return;
+        }
+        let pos = BlockPos::new(chunk_x * 16 + x, y, chunk_z * 16 + z);
+        // A generated column is normally a settled snapshot. Avoid the
+        // expensive shape/slope walk for interior cells whose immediate
+        // neighbours are the same fluid; no fluid write can replace one of
+        // those neighbours, while exposed cells still reach the exact filter.
+        if !has_possible_destination(
+            world,
+            column,
+            chunk_x,
+            chunk_z,
+            x,
+            y,
+            z,
+            env,
+            fluid.kind,
+        ) {
+            return;
+        }
+        if !would_spread(world, env, pos, state, fluid) {
+            return;
+        }
+        if fluid_ticks.schedule_tick(
+            (pos.x, pos.y, pos.z),
+            TICK_FLUID.to_owned(),
+            current_tick + env.tick_delay(fluid.kind),
+            TickPriority::Normal,
+        ) {
+            scheduled += 1;
+        }
+    });
+    scheduled
+}
+
+/// Cheap conservative gate for [`would_spread`]. It deliberately only rejects
+/// a cell when every adjacent cell is the same fluid or a solid block. Air and
+/// the other fluid remain candidates, so generated boundary flow and
+/// water/lava interaction still use the exact spread predicates below. Reads
+/// within the generated column use its clone directly; only a horizontal
+/// chunk seam consults `ChunkSource`, keeping a large settled pool off the
+/// store's lock-taking read path.
+fn has_possible_destination<S: ChunkSource + ?Sized>(
+    world: &S,
+    column: &crate::chunk::ChunkColumn,
+    chunk_x: i32,
+    chunk_z: i32,
+    local_x: i32,
+    y: i32,
+    local_z: i32,
+    env: FluidEnv,
+    kind: FluidKind,
+) -> bool {
+    let pos = BlockPos::new(chunk_x * 16 + local_x, y, chunk_z * 16 + local_z);
+    for direction in [
+        Direction::Down,
+        Direction::North,
+        Direction::South,
+        Direction::West,
+        Direction::East,
+    ] {
+        let target = direction.relative(pos);
+        if !env.contains_y(target.y) {
+            continue;
+        }
+        if target.x.div_euclid(16) == chunk_x && target.z.div_euclid(16) == chunk_z {
+            if neighbour_has_destination(column.block_state(
+                target.x.rem_euclid(16),
+                target.y,
+                target.z.rem_euclid(16),
+            ), kind) {
+                return true;
+            }
+        } else if neighbour_has_destination(&world.block_state(target.x, target.y, target.z), kind) {
+            // Only a horizontal chunk seam needs an external source read here;
+            // vertical bounds were handled above and same-column neighbours
+            // came from the already-cloned generated column.
+            return true;
+        }
+    }
+    false
+}
+
+fn neighbour_has_destination(state: &str, kind: FluidKind) -> bool {
+    match fluid_state_of(state) {
+        Some(neighbour) if neighbour.kind != kind => true,
+        Some(_) => false,
+        None => can_hold_any_fluid(state),
+    }
+}
+
+/// Whether the normal fluid tick would write at least one destination now.
+///
+/// This mirrors the two branches in [`spread`] without mutating the world, so
+/// generation seeding is an admission filter rather than a second fluid
+/// implementation. It is intentionally private: callers should schedule the
+/// production tick and let [`run_scheduled_tick`] perform the write.
+fn would_spread<S: ChunkSource + ?Sized>(
+    world: &S,
+    env: FluidEnv,
+    pos: BlockPos,
+    state: &str,
+    fluid: FluidState,
+) -> bool {
+    let below = Direction::Down.relative(pos);
+    let below_state = block_at(world, env, below);
+    if can_maybe_pass_through(fluid.kind, Direction::Down, state, &below_state) {
+        if let Some(new_below) = new_liquid(world, env, below, &below_state, fluid.kind) {
+            let below_above_state = block_at(world, env, pos);
+            if can_be_replaced_with(
+                fluid_state_of(&below_state),
+                &below_above_state,
+                new_below.kind,
+                Direction::Down,
+            ) && can_hold_specific_fluid(&below_state, new_below.fluid_type())
+            {
+                return true;
+            }
+        }
+    }
+
+    if fluid.is_source() || !is_water_hole(state, &below_state, fluid.kind) {
+        !spread_targets(world, env, pos, state, fluid.kind).is_empty()
+    } else {
+        false
+    }
+}
+
 /// The fluid ticks one block edit owes — the edited cell and each of its six
 /// neighbours that already holds a fluid, each at that fluid's own
 /// [`FluidEnv::tick_delay`], as a **relative** delay [`crate::tick::run_tick_loop`]
@@ -1609,6 +1782,7 @@ pub fn ticks_after_edit<S: ChunkSource + ?Sized>(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use super::*;
@@ -1695,6 +1869,47 @@ mod tests {
                 .entry((cx, cz))
                 .or_insert_with(|| ChunkColumn::new(MIN_Y, HEIGHT))
                 .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+        }
+    }
+
+    struct ProbeRig {
+        inner: Rig,
+        external_probes: AtomicUsize,
+    }
+
+    impl ProbeRig {
+        fn new() -> Self {
+            Self {
+                inner: Rig::flat(),
+                external_probes: AtomicUsize::new(0),
+            }
+        }
+
+        fn reset_probes(&self) {
+            self.external_probes.store(0, Ordering::Relaxed);
+        }
+
+        fn probes(&self) -> usize {
+            self.external_probes.load(Ordering::Relaxed)
+        }
+    }
+
+    impl ChunkSource for ProbeRig {
+        fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+            self.inner.column(cx, cz)
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.external_probes.fetch_add(1, Ordering::Relaxed);
+            self.inner.block_state(x, y, z)
+        }
+
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            self.inner.biome_state_at(x, y, z)
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+            self.inner.set_block(x, y, z, name);
         }
     }
 
@@ -1887,6 +2102,130 @@ mod tests {
         assert_eq!(rig.block_state(-1, FLOOR_Y + 1, 0), "minecraft:water[level=3]");
     }
 
+    /// Worldgen's complete-column adoption must seed exposed liquids, while an
+    /// interior source in the same pool must remain quiet until a neighbour
+    /// change gives it work.
+    #[test]
+    fn generated_fluid_ticks_seed_only_cells_that_can_spread() {
+        let rig = Rig::flat();
+        for x in 0..3 {
+            for z in 0..3 {
+                rig.set_block(x, FLOOR_Y + 1, z, "minecraft:water[level=0]");
+            }
+        }
+        let column = rig.column(0, 0);
+        let mut queue = ScheduledTickQueue::new();
+        let scheduled = schedule_generated_ticks(
+            &rig,
+            &column,
+            0,
+            0,
+            FluidEnv::OVERWORLD,
+            100,
+            &mut queue,
+        );
+
+        assert_eq!(scheduled, 8, "only the 3x3 pool perimeter can spread");
+        assert!(!queue.has_scheduled(
+            (1, FLOOR_Y + 1, 1),
+            &TICK_FLUID.to_owned(),
+        ));
+        assert!(queue.iter().all(|tick| tick.trigger_tick == 105));
+    }
+
+    #[test]
+    fn generated_fluid_admission_reads_same_column_without_external_probes() {
+        let rig = ProbeRig::new();
+        let y = FLOOR_Y + 1;
+        for x in 1..=3 {
+            for z in 1..=3 {
+                rig.set_block(x, y, z, "minecraft:water[level=0]");
+            }
+        }
+        for x in 0..=4 {
+            rig.set_block(x, y, 0, "minecraft:stone");
+            rig.set_block(x, y, 4, "minecraft:stone");
+        }
+        for z in 0..=4 {
+            rig.set_block(0, y, z, "minecraft:stone");
+            rig.set_block(4, y, z, "minecraft:stone");
+        }
+
+        let mut queue = ScheduledTickQueue::new();
+        assert_eq!(
+            schedule_generated_ticks(
+                &rig,
+                &rig.column(0, 0),
+                0,
+                0,
+                FluidEnv::overworld_in(MIN_Y, HEIGHT),
+                100,
+                &mut queue,
+            ),
+            0,
+            "a completely enclosed generated pool has no spread candidate"
+        );
+        assert_eq!(rig.probes(), 0, "same-column admission must not query ChunkSource");
+
+        rig.set_block(15, y, 8, "minecraft:water[level=0]");
+        rig.reset_probes();
+        let mut boundary_queue = ScheduledTickQueue::new();
+        assert!(schedule_generated_ticks(
+            &rig,
+            &rig.column(0, 0),
+            0,
+            0,
+            FluidEnv::overworld_in(MIN_Y, HEIGHT),
+            100,
+            &mut boundary_queue,
+        ) > 0);
+        assert!(
+            rig.probes() > 0,
+            "only a candidate crossing the chunk boundary should need external reads"
+        );
+    }
+
+    #[test]
+    fn generated_source_water_schedules_and_waterlogs_a_dry_container() {
+        let rig = Rig::flat();
+        let y = FLOOR_Y + 1;
+        rig.set_block(0, y, 0, "minecraft:water[level=0]");
+        rig.set_block(1, y, 0, "minecraft:oak_slab[type=bottom,waterlogged=false]");
+        rig.set_block(2, y, 0, "minecraft:water[level=0]");
+
+        let mut queue = ScheduledTickQueue::new();
+        let generated = rig.column(0, 0);
+        assert_eq!(
+            schedule_generated_ticks(
+                &rig,
+                &generated,
+                0,
+                0,
+                FluidEnv::OVERWORLD,
+                100,
+                &mut queue,
+            ),
+            2,
+            "generated sources beside a dry waterloggable block need live seeds"
+        );
+
+        let mut changes = Vec::new();
+        for tick in queue.drain_due(105, usize::MAX) {
+            run_scheduled_tick(
+                &rig,
+                FluidEnv::OVERWORLD,
+                BlockPos::new(tick.pos.0, tick.pos.1, tick.pos.2),
+                &mut queue,
+                105,
+                &mut changes,
+            );
+        }
+        assert_eq!(
+            rig.block_state(1, y, 0),
+            "minecraft:oak_slab[type=bottom,waterlogged=true]"
+        );
+    }
+
     /// The `level` ⇄ `(amount, falling)` mapping, both directions, against the
     /// two real functions that define it — the real legacy-level derivation and
     /// the real liquid block's own state cache.
@@ -1948,6 +2287,14 @@ mod tests {
         assert_eq!(nether.slope_find_distance(FluidKind::Lava), 4);
         assert_eq!(nether.tick_delay(FluidKind::Lava), 10);
         assert_eq!(nether.drop_off(FluidKind::Water), 1, "water is dimension-independent");
+
+        let nether_column = FluidEnv::for_dimension(Dimension::Nether, 0, 256);
+        assert!(nether_column.fast_lava);
+        assert_eq!(nether_column.min_y, 0);
+        assert_eq!(nether_column.height, 256);
+        let end_column = FluidEnv::for_dimension(Dimension::End, 0, 256);
+        assert!(!end_column.fast_lava);
+        assert_eq!(end_column.tick_delay(FluidKind::Lava), 30);
     }
 
     /// **The headline gate.** A water source on flat ground must settle into the
