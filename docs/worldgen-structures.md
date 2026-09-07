@@ -42,6 +42,11 @@ placements: after adding the feature descriptor to `StructurePiece`, call it wit
 stream and placement grid before later decoration stages. Do not reseed it from the decorating chunk
 or substitute the chunk origin — either changes both its candidate positions and random sequence.
 
+`StructureRegistry::feature_placement_key` uses the captured runtime registry order for the
+`underground_structures` and `underground_decoration` steps. This remains true after dimension
+filtering removes structures that still occupy positions in the complete registry; the other steps
+and datapack-only ids use the bundled registration-order fallback until runtime order is captured.
+
 Mineshaft starts eagerly retain their complete tree and bounding boxes, because the vertical shift
 depends on the finished tree. Their block-writing walk is replayed for the decorating chunk instead:
 the liquid-shell refusal is clipped to that chunk before the piece writes. This matters at a chunk
