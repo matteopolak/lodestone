@@ -29,7 +29,7 @@
 //! reported back but not yet consulted by the mob/combat simulation — see
 //! `crate::commands::team_store`'s own module doc.
 
-use lodestone_command::{IntegerArgument, StringArgument};
+use lodestone_command::StringArgument;
 use lodestone_command_mc::{ScoreHolderArg, TeamArg, TeamColorArg};
 
 use super::registrar::{ArgKey, Ctx, Registrar};

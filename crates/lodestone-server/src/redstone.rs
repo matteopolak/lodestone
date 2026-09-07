@@ -973,7 +973,7 @@ where
 /// immutably) — every call site in `crate::random_tick`/`crate::tick`
 /// constructs a fresh one per query rather than reusing one across a
 /// mutation, for exactly this reason.
-#[must_use]
+#[cfg(test)]
 pub fn make_lookup(column: &crate::chunk::ChunkColumn, min_x: i32, min_z: i32) -> impl Fn(BlockPos) -> WorldState + '_ {
     move |p: BlockPos| -> WorldState {
         let lx = p.x - min_x;

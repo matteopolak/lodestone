@@ -841,7 +841,7 @@ fn covers_unit_square(rects: &[FaceRect]) -> bool {
     }
     let mut us: Vec<f32> = vec![0.0, 1.0];
     let mut vs: Vec<f32> = vec![0.0, 1.0];
-    let mut push_interior = |axis: &mut Vec<f32>, value: f32| {
+    let push_interior = |axis: &mut Vec<f32>, value: f32| {
         if value > 0.0 && value < 1.0 {
             axis.push(value);
         }

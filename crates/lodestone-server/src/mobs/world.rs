@@ -4,15 +4,14 @@
 //! `docs/plans/crate-and-file-splits.md`). No `MobSim` dependency.
 
 use std::collections::HashMap;
-use std::str::FromStr;
 
 use lodestone_data::{
     block_states::{self, StateId},
-    collision_shapes, entity_dimensions, path_types,
+    collision_shapes, path_types,
 };
-use lodestone_entity::pathfinding::{Aabb, BlockCues, MobShape, PathType, PathWorld};
-use lodestone_entity::{RayView, seen_percent};
-use lodestone_model::{BlockPos, Vec3};
+use lodestone_entity::pathfinding::{Aabb, BlockCues, PathType, PathWorld};
+use lodestone_entity::RayView;
+use lodestone_model::Vec3;
 
 use crate::chunk::{AIR, ChunkColumn, ChunkSource};
 

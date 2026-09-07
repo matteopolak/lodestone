@@ -266,6 +266,17 @@ pub struct CommandWorld<'a> {
     pub blocks: Option<&'a dyn crate::chunk::ChunkSource>,
 }
 
+impl std::fmt::Debug for CommandWorld<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandWorld")
+            .field("players", &self.players)
+            .field("mobs", &self.mobs.is_some())
+            .field("border", &self.border.is_some())
+            .field("blocks", &self.blocks.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Read/write access to the world's game rules, abstracted over *which* store.
 ///
 /// This exists because of a real split that the previous island hid: the
@@ -363,6 +374,23 @@ pub struct Ctx<'a> {
     /// [`Dispatcher`]'s own field doc for why this is threaded here instead
     /// of a second dispatcher.
     commands: &'a super::ServerCommands,
+}
+
+impl std::fmt::Debug for Ctx<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ctx")
+            .field("tree", &self.tree)
+            .field("tree_id", &self.tree_id)
+            .field("parsed", &self.parsed)
+            .field("depth", &self.depth)
+            .field("source", &self.source)
+            .field("feedback", &self.feedback)
+            .field("effects", &self.effects)
+            .field("store_sink_count", &self.store_sinks.len())
+            .field("has_contextual_dispatch", &self.contextual_dispatch.is_some())
+            .field("has_contextual_caller", &self.contextual_caller.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> Ctx<'a> {
@@ -583,6 +611,19 @@ pub struct Registrar {
     wire: HashMap<NodeId, WireDescriptor>,
 }
 
+impl std::fmt::Debug for Registrar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registrar")
+            .field("tree", &self.tree)
+            .field("tree_id", &self.tree_id)
+            .field("executor_count", &self.executors.len())
+            .field("modifier_count", &self.modifiers.len())
+            .field("fork_count", &self.forks.len())
+            .field("wire_count", &self.wire.len())
+            .finish()
+    }
+}
+
 /// The permission-node prefix a required *level* is recorded under.
 ///
 /// `lodestone-command`'s permission seam is a dotted string, because that crate
@@ -711,6 +752,19 @@ pub struct RegistrarParts {
     pub modifiers: HashMap<NodeId, Modifier>,
     pub forks: HashSet<NodeId>,
     pub wire: HashMap<NodeId, WireDescriptor>,
+}
+
+impl std::fmt::Debug for RegistrarParts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistrarParts")
+            .field("tree", &self.tree)
+            .field("tree_id", &self.tree_id)
+            .field("executor_count", &self.executors.len())
+            .field("modifier_count", &self.modifiers.len())
+            .field("fork_count", &self.forks.len())
+            .field("wire_count", &self.wire.len())
+            .finish()
+    }
 }
 
 /// The outcome of one dispatch.

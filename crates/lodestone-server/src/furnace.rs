@@ -948,7 +948,6 @@ impl Furnace {
 /// `[0.0, 1.0)` sample standing in for the real random draw, the
 /// same "caller supplies the randomness" shape [`crate::composter::Composter::insert`]
 /// uses.
-#[must_use]
 /// Turns one drained [`Furnace::take_recipes_used`] map into a total XP award —
 /// the real experience-award step, which
 /// walks the banked recipes and derives an experience amount for each.

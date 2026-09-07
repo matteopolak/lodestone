@@ -2,8 +2,9 @@
 //! block-pattern match and spawn. Moved out of `mobs/mod.rs` verbatim as part
 //! of the `mobs.rs` file split (see `docs/plans/crate-and-file-splits.md`).
 
-use lodestone_model::{BlockPos, ResourceKey, Vec3};
+use lodestone_model::{BlockPos, Vec3};
 
+#[cfg(test)]
 use super::{ChunkWorld, MobSim};
 
 /// One cell of a golem-construction block pattern, in the pattern's own

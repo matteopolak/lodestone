@@ -306,6 +306,7 @@ impl<'w> MobSim<'w> {
     /// Each completion starts from a cloned tick-start orb and cannot mutate
     /// the live map. The central application below restores the old entity-id
     /// sequence before expiry or any later merge becomes visible.
+    #[cfg(test)]
     pub(crate) fn tick_orb_owner_batches(
         &mut self,
         view: &dyn CollisionView,

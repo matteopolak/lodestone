@@ -96,7 +96,7 @@ pub fn embedded_structure_template(id: &str) -> Option<&'static [u8]> {
 /// answerable by walking every template. A gate that scanned a hand-picked list
 /// instead could not see a structure whose templates were added later — the same
 /// in-scope/out-of-scope hole CLAUDE.md's drift-gate rule names.
-#[must_use]
+#[cfg(test)]
 pub fn embedded_structure_template_ids() -> impl Iterator<Item = &'static str> {
     EMBEDDED_STRUCTURE_TEMPLATES.iter().map(|(key, _)| *key)
 }

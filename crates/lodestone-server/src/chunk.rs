@@ -1096,6 +1096,7 @@ impl ChunkColumn {
     /// Worldgen fluid seeding uses this bulk view when a generated column first
     /// becomes tick-active. Keeping the traversal here lets that path inspect
     /// the packed sections without materialising a second flat block array.
+    #[cfg(test)]
     pub(crate) fn for_each_block_state(&self, mut f: impl FnMut(i32, i32, i32, &str)) {
         for section in 0..self.blocks.section_count() {
             self.blocks.for_each_in_section(section, |cell, id| {

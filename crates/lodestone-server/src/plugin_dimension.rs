@@ -134,6 +134,14 @@ pub struct DimensionRegistry {
     sources: Mutex<HashMap<String, Arc<dyn ChunkSource>>>,
 }
 
+impl std::fmt::Debug for DimensionRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DimensionRegistry")
+            .field("entries", &self.entries)
+            .finish_non_exhaustive()
+    }
+}
+
 impl DimensionRegistry {
     #[must_use]
     pub fn new() -> Self {

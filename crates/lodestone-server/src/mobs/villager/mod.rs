@@ -296,6 +296,7 @@ impl WorkstationClaims {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn get(&self, pos: BlockPos) -> Option<&PoiRecord> {
         self.records.get(&(pos.x, pos.y, pos.z))
     }
@@ -311,6 +312,7 @@ impl WorkstationClaims {
     /// Releases a previously claimed ticket at `pos`. A no-op if nothing is
     /// claimed there (a claim that outlived its record, already handled by
     /// [`remove`](Self::remove)).
+    #[cfg(test)]
     pub fn release(&mut self, pos: BlockPos) {
         if let Some(record) = self.records.get_mut(&(pos.x, pos.y, pos.z)) {
             record.release_ticket();
@@ -488,6 +490,7 @@ impl BedClaims {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn get(&self, pos: BlockPos) -> Option<&PoiRecord> {
         self.records.get(&(pos.x, pos.y, pos.z))
     }
@@ -500,6 +503,7 @@ impl BedClaims {
 
     /// Releases a previously claimed ticket at `pos`. A no-op if nothing is
     /// claimed there.
+    #[cfg(test)]
     pub fn release(&mut self, pos: BlockPos) {
         if let Some(record) = self.records.get_mut(&(pos.x, pos.y, pos.z)) {
             record.release_ticket();
@@ -633,6 +637,7 @@ impl BellClaims {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn get(&self, pos: BlockPos) -> Option<&PoiRecord> {
         self.records.get(&(pos.x, pos.y, pos.z))
     }
@@ -645,6 +650,7 @@ impl BellClaims {
 
     /// Releases a previously claimed ticket at `pos`. A no-op if nothing is
     /// claimed there.
+    #[cfg(test)]
     pub fn release(&mut self, pos: BlockPos) {
         if let Some(record) = self.records.get_mut(&(pos.x, pos.y, pos.z)) {
             record.release_ticket();
