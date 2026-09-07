@@ -939,6 +939,7 @@ fn apply_one_source<R: RandomSource>(
     seed: i64,
     input: &OreInput<'_>,
     ores: &[PlacedOre],
+    feature_step: i32,
     working: &mut RegionView<'_>,
 ) -> i64 {
     ore_probe::bump_source_pass(1);
@@ -951,7 +952,7 @@ fn apply_one_source<R: RandomSource>(
             biome_allows: input.biome_allows,
             feature_id: ore.registry_id.as_deref(),
         };
-        random.set_feature_seed(decoration_seed, ore.index as i32, STEP_UNDERGROUND_ORES);
+        random.set_feature_seed(decoration_seed, ore.index as i32, feature_step);
         place_placed_feature(random, origin, ore, input, &ctx, working);
     }
     decoration_seed
@@ -980,10 +981,10 @@ pub fn apply_ore_step<R: RandomSource>(
     view: &mut RegionView<'_>,
     ores: &[PlacedOre],
 ) -> i64 {
-    apply_one_source(random, seed, input, ores, view)
+    apply_one_source(random, seed, input, ores, STEP_UNDERGROUND_ORES, view)
 }
 
-/// The real vanilla 3×3 neighbourhood driver for one CENTRE chunk.
+/// The complete 3×3 neighbourhood driver for one CENTRE chunk.
 ///
 /// Vanilla's own one-chunk-into-neighbours write spill at the FEATURES generation stage
 /// means a NEIGHBOUR chunk's own ore decoration
@@ -1048,7 +1049,7 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
     )
 }
 
-/// The real vanilla 3×3 neighbourhood driver, generalised to a **per-source**
+/// The complete 3×3 neighbourhood driver, generalised to a **per-source**
 /// ore list: `ores_for_source(x, z)`
 /// is called once per of the 9 source chunks (their own chunk coordinates,
 /// not centre-relative) and must return that source's own biome's
@@ -1075,6 +1076,53 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
     view: &mut RegionView<'_>,
     ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
 ) -> i64 {
+    apply_ore_step_3x3_per_source_at_step(
+        random,
+        seed,
+        center_x,
+        center_z,
+        min_y,
+        height,
+        min_gen_y,
+        gen_depth,
+        read_min,
+        read_max,
+        ocean_floor_wg,
+        in_tag,
+        biome_allows,
+        STEP_UNDERGROUND_ORES,
+        view,
+        ores_for_source,
+    )
+}
+
+/// The 3×3 ore driver with an explicit feature-list step for seed derivation.
+///
+/// Most dimensions use [`STEP_UNDERGROUND_ORES`] (6), and
+/// [`apply_ore_step_3x3_per_source`] remains the compatibility wrapper for that
+/// path. The Nether deliberately mixes ore entries into decoration step 7, so it
+/// must pass 7 here: the feature-seed derivation includes the step number, and
+/// using 6 gives every ore a plausible but unrelated blob even though its list
+/// index is right.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_ore_step_3x3_per_source_at_step<'a, R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    seed: i64,
+    center_x: i32,
+    center_z: i32,
+    min_y: i32,
+    height: i32,
+    min_gen_y: i32,
+    gen_depth: i32,
+    read_min: i32,
+    read_max: i32,
+    ocean_floor_wg: &RegionHeights,
+    in_tag: &dyn Fn(&str, &str) -> bool,
+    biome_allows: Option<&dyn Fn(BlockPos, &str) -> bool>,
+    feature_step: i32,
+    view: &mut RegionView<'_>,
+    ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
+) -> i64 {
     let mut center_decoration_seed = 0;
     for dx in -1..=1 {
         for dz in -1..=1 {
@@ -1097,7 +1145,7 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
                 biome_allows,
             };
             let ores = ores_for_source(source_x, source_z);
-            let ds = apply_one_source(random, seed, &input, ores, view);
+            let ds = apply_one_source(random, seed, &input, ores, feature_step, view);
             if dx == 0 && dz == 0 {
                 center_decoration_seed = ds;
             }
@@ -1780,8 +1828,11 @@ fn is_air(base: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rng::XoroshiroRandomSource;
+    use crate::dense_grid::DenseBlockGrid;
+    use crate::interner::StateInterner;
+    use crate::rng::{LegacyRandomSource, WorldgenRandom, XoroshiroRandomSource};
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     #[test]
     fn biome_modifier_uses_the_candidate_feature_membership() {
@@ -1809,6 +1860,109 @@ mod tests {
             feature_id: Some("minecraft:ore_copper"),
         };
         assert_eq!(Placement::Biome.get_positions(&mut random, ordinary, &se), OrePositions::One(ordinary));
+    }
+
+    #[test]
+    fn explicit_feature_step_selects_a_distinct_ore_rng_stream() {
+        const EXPECTED_STEP_SIX_DRAW: i64 = 4_268_483_508_567_859_036;
+        const EXPECTED_STEP_SEVEN_DRAW: i64 = 6_897_945_521_832_461_235;
+
+        // Independent Java-LCG arithmetic for this fixture: seed 42 at origin
+        // (0, 0), feature index 4, then the direction/endpoints/blob-radius
+        // draws made by the one-position ore below. This deliberately does not
+        // call the production feature-seed helper.
+        fn standalone_post_feature_draw(step: i64) -> i64 {
+            const MULTIPLIER: i64 = 0x5_DEEC_E66D;
+            const INCREMENT: i64 = 0xB;
+            const MASK48: i64 = (1 << 48) - 1;
+            let mut state = ((42 + 4 + 10_000 * step) ^ MULTIPLIER) & MASK48;
+            let next = |state: &mut i64, bits: i32| -> i32 {
+                *state = state.wrapping_mul(MULTIPLIER).wrapping_add(INCREMENT) & MASK48;
+                (*state >> (48 - bits)) as i32
+            };
+            let next_bounded = |state: &mut i64, bound: i32| -> i32 {
+                loop {
+                    let sample = next(state, 31);
+                    let modulo = sample % bound;
+                    if sample.wrapping_sub(modulo).wrapping_add(bound - 1) >= 0 {
+                        break modulo;
+                    }
+                }
+            };
+            let _direction = next(&mut state, 24);
+            let _y0 = next_bounded(&mut state, 3);
+            let _y1 = next_bounded(&mut state, 3);
+            let _radius_upper = next(&mut state, 26);
+            let _radius_lower = next(&mut state, 27);
+            let upper = next(&mut state, 32);
+            let lower = next(&mut state, 32);
+            (i64::from(upper) << 32).wrapping_add(i64::from(lower))
+        }
+
+        assert_eq!(standalone_post_feature_draw(6), EXPECTED_STEP_SIX_DRAW);
+        assert_eq!(standalone_post_feature_draw(7), EXPECTED_STEP_SEVEN_DRAW);
+
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let grids: Vec<DenseBlockGrid> = (-1..=1)
+            .flat_map(|dx| (-1..=1).map(move |dz| (dx, dz)))
+            .map(|(dx, dz)| {
+                DenseBlockGrid::with_interner(
+                    Arc::clone(&interner),
+                    dx * 16,
+                    0,
+                    dz * 16,
+                    16,
+                    8,
+                    16,
+                    air,
+                )
+            })
+            .collect();
+        let mut view = RegionView::over_sources(Arc::clone(&interner), 0, 0, 0, 8, |dx, dz| {
+            grids.get(((dx + 1) * 3 + (dz + 1)) as usize)
+        });
+        let mut heights = RegionHeights::unset();
+        for lz in REGION_MIN..REGION_MAX {
+            for lx in REGION_MIN..REGION_MAX {
+                heights.set(lx, lz, 0);
+            }
+        }
+        let input = OreInput {
+            chunk_x: 0,
+            chunk_z: 0,
+            center_x: 0,
+            center_z: 0,
+            min_y: 0,
+            height: 8,
+            min_gen_y: 0,
+            gen_depth: 8,
+            read_min: REGION_MIN,
+            read_max: REGION_MAX,
+            ocean_floor_wg: &heights,
+            in_tag: &|_, _| false,
+            biome_allows: None,
+        };
+        // One zero-target blob still consumes the feature's direction and endpoint
+        // draws, making a wrong step observable without depending on block writes.
+        let ores = [PlacedOre {
+            registry_id: None,
+            index: 4,
+            placements: vec![Placement::Count(IntProvider::Constant(1))],
+            config: OreConfig {
+                size: 1,
+                discard_chance_on_air_exposure: 0.0,
+                targets: Vec::new(),
+            },
+        }];
+        let mut step_six = WorldgenRandom::new(LegacyRandomSource::new(42));
+        apply_one_source(&mut step_six, 42, &input, &ores, 6, &mut view);
+        let six_draw = step_six.next_long();
+        let mut step_seven = WorldgenRandom::new(LegacyRandomSource::new(42));
+        apply_one_source(&mut step_seven, 42, &input, &ores, 7, &mut view);
+        let seven_draw = step_seven.next_long();
+        assert_eq!(six_draw, EXPECTED_STEP_SIX_DRAW);
+        assert_eq!(seven_draw, EXPECTED_STEP_SEVEN_DRAW);
     }
 
     /// The height a probe resolves to must be, for **every** probe coordinate the

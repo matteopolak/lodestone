@@ -634,7 +634,11 @@ impl NetherGenerator {
             },
         );
         let mut random = crate::rng::WorldgenRandom::new(crate::rng::LegacyRandomSource::new(0));
-        crate::feature::apply_ore_step_3x3_per_source(
+        // Nether ores live in the mixed decoration step 7. The generic ore
+        // driver defaults to the Overworld's underground-ores step 6, which
+        // would derive a different feature seed for every otherwise-correct
+        // placement index.
+        crate::feature::apply_ore_step_3x3_per_source_at_step(
             &mut random,
             self.seed,
             cx,
@@ -648,6 +652,7 @@ impl NetherGenerator {
             &heights,
             &in_tag,
             None,
+            7,
             &mut view,
             &ores_for_source,
         );
