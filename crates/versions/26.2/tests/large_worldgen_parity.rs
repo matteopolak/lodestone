@@ -406,6 +406,90 @@ fn parse_bool(value: &str, what: &str) -> bool {
     value.parse().unwrap_or_else(|error| panic!("invalid {what} {value:?}: {error}"))
 }
 
+/// The lifecycle comparator normally consumes a manifest prefix.  A single
+/// target is a separate mode because its digest is not the first payload row
+/// and its replay can use the target-specific dependency closure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleTargetSelection {
+    Prefix { limit: u64 },
+    Single { index: usize },
+}
+
+fn lifecycle_target_selection(
+    count: u64,
+    max_chunks: Option<u64>,
+    target_index: Option<usize>,
+    scan_all: bool,
+) -> Result<LifecycleTargetSelection, String> {
+    if let Some(index) = target_index {
+        if scan_all {
+            return Err("LODESTONE_LARGE_PARITY_TARGET_INDEX cannot be combined with LODESTONE_LARGE_PARITY_SCAN_ALL".to_owned());
+        }
+        if u64::try_from(index).ok().is_none_or(|index| index >= count) {
+            return Err(format!("LODESTONE_LARGE_PARITY_TARGET_INDEX={index} is outside the {count}-digest manifest"));
+        }
+        if max_chunks.is_some_and(|limit| limit != 1) {
+            return Err("LODESTONE_LARGE_PARITY_TARGET_INDEX requires LODESTONE_LARGE_PARITY_MAX_CHUNKS to be unset or exactly 1".to_owned());
+        }
+        return Ok(LifecycleTargetSelection::Single { index });
+    }
+
+    Ok(LifecycleTargetSelection::Prefix {
+        limit: max_chunks.unwrap_or(count).min(count),
+    })
+}
+
+fn read_manifest_digest_at<R: Read + Seek>(reader: &mut R, index: usize) -> std::io::Result<[u8; 32]> {
+    let offset = (HEADER_BYTES as u64)
+        .checked_add(u64::try_from(index).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest digest index overflows u64"))?.checked_mul(32).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest digest offset overflows u64"))?)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest digest offset overflows u64"))?;
+    reader.seek(SeekFrom::Start(offset))?;
+    let mut digest = [0u8; 32];
+    reader.read_exact(&mut digest)?;
+    Ok(digest)
+}
+
+fn optional_usize_env(name: &str) -> Result<Option<usize>, String> {
+    std::env::var_os(name)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| format!("{name} must be valid UTF-8"))?
+                .parse::<usize>()
+                .map_err(|error| format!("{name} must be a non-negative integer: {error}"))
+        })
+        .transpose()
+}
+
+#[test]
+fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
+    assert_eq!(
+        lifecycle_target_selection(256, None, Some(7), false),
+        Ok(LifecycleTargetSelection::Single { index: 7 }),
+    );
+    assert_eq!(
+        lifecycle_target_selection(256, Some(1), Some(7), false),
+        Ok(LifecycleTargetSelection::Single { index: 7 }),
+    );
+    assert!(lifecycle_target_selection(256, None, Some(256), false).is_err());
+    assert!(lifecycle_target_selection(256, None, Some(7), true).is_err());
+    assert!(lifecycle_target_selection(256, Some(2), Some(7), false).is_err());
+    assert_eq!(
+        lifecycle_target_selection(256, Some(2), None, false),
+        Ok(LifecycleTargetSelection::Prefix { limit: 2 }),
+    );
+}
+
+#[test]
+fn lifecycle_target_digest_reader_seeks_to_only_the_selected_payload_row() {
+    let mut bytes = vec![0u8; HEADER_BYTES];
+    bytes.extend((0..4).flat_map(|index| [index as u8; 32]));
+    let mut reader = std::io::Cursor::new(bytes);
+    let digest = read_manifest_digest_at(&mut reader, 2).expect("selected manifest digest");
+    assert_eq!(digest, [2u8; 32]);
+    assert_eq!(reader.position(), HEADER_BYTES as u64 + 2 * 32 + 32);
+}
+
 #[test]
 fn canonical_grid_has_the_requested_square_and_one_chunk_halo() {
     use support::large_parity_manifest::{GRID_COUNT, GRID_MAX, GRID_MIN, GRID_SIDE};
@@ -656,10 +740,22 @@ fn parity_manifest_streams_before_rust_comparison() {
         Dimension::Nether => ServerDimension::Nether,
         Dimension::End => ServerDimension::End,
     };
-    let max_chunks = std::env::var("LODESTONE_LARGE_PARITY_MAX_CHUNKS")
-        .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(h.count);
-    let limit = max_chunks.min(h.count);
+    let max_chunks = match std::env::var("LODESTONE_LARGE_PARITY_MAX_CHUNKS") {
+        Ok(value) => Some(value.parse::<u64>().unwrap_or_else(|error| {
+            panic!("LODESTONE_LARGE_PARITY_MAX_CHUNKS must be a non-negative integer: {error}")
+        })),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("could not read LODESTONE_LARGE_PARITY_MAX_CHUNKS: {error}"),
+    };
     let scan_all = std::env::var_os("LODESTONE_LARGE_PARITY_SCAN_ALL").is_some();
+    let target_index = optional_usize_env("LODESTONE_LARGE_PARITY_TARGET_INDEX")
+        .unwrap_or_else(|error| panic!("invalid lifecycle target selection: {error}"));
+    let selection = lifecycle_target_selection(h.count, max_chunks, target_index, scan_all)
+        .unwrap_or_else(|error| panic!("invalid lifecycle target selection: {error}"));
+    let limit = match selection {
+        LifecycleTargetSelection::Prefix { limit } => limit,
+        LifecycleTargetSelection::Single { .. } => 1,
+    };
     let reference_packets = if scan_all {
         load_reference_packets(dimension, h.cx0, h.cx1, h.cz0, h.cz1, limit)
     } else {
@@ -671,6 +767,12 @@ fn parity_manifest_streams_before_rust_comparison() {
         && h.count == 256
         && h.cx1 - h.cx0 == 15
         && h.cz1 - h.cz0 == 15;
+    if target_index.is_some() {
+        assert!(
+            partial_lifecycle,
+            "LODESTONE_LARGE_PARITY_TARGET_INDEX requires an authenticated 16x16 Overworld or Nether lifecycle manifest",
+        );
+    }
     if partial_lifecycle {
         let capture = LifecycleCapture::load(dimension, &h, Path::new(&path));
         match dimension {
@@ -683,6 +785,7 @@ fn parity_manifest_streams_before_rust_comparison() {
                 server_dimension,
                 limit,
                 scan_all,
+                target_index,
                 &reference_packets,
                 &mut digest_mismatches,
                 &mut component_reports,
@@ -696,6 +799,7 @@ fn parity_manifest_streams_before_rust_comparison() {
                 server_dimension,
                 limit,
                 scan_all,
+                target_index,
                 &reference_packets,
                 &mut digest_mismatches,
                 &mut component_reports,
@@ -868,20 +972,45 @@ fn lifecycle_packet_payload<S: LifecycleWorldgenSource>(
 fn full_and_pruned_lifecycle_replay_have_identical_target_packet_bytes() {
     let path = std::env::var("LODESTONE_LARGE_PARITY_MANIFEST")
         .expect("set LODESTONE_LARGE_PARITY_MANIFEST to an accepted 16x16 manifest");
+    assert_full_and_pruned_lifecycle_packet_bytes(Path::new(&path), (-8, -8), true);
+}
+
+/// Raw-byte identity control for the Nether target-index pilot. This is kept
+/// separate from the streaming gate because the full side intentionally
+/// replays every captured admission and is expensive.
+#[test]
+#[ignore = "requires an authenticated lifecycle capture and accepted manifest; run only after reviewing the full replay cost"]
+fn nether_target_index_7_full_and_pruned_packet_bytes_match() {
+    let path = std::env::var("LODESTONE_LARGE_PARITY_MANIFEST")
+        .expect("set LODESTONE_LARGE_PARITY_MANIFEST to an accepted 16x16 Nether manifest");
     let mut raw_header = [0; HEADER_BYTES];
     let mut manifest = File::open(&path).expect("open accepted manifest");
     manifest.read_exact(&mut raw_header).expect("read manifest header");
     let header = read_header(&raw_header[..]).expect("validate accepted manifest header");
-    assert_eq!(header.count, 256, "the lifecycle byte control requires the accepted 16x16 manifest");
+    assert_eq!(header.dimension, Dimension::Nether, "target-index-7 raw control is Nether-specific");
     let capture = LifecycleCapture::load(header.dimension, &header, Path::new(&path));
-    let target = (-8, -8);
+    assert_eq!(capture.target_order.get(7), Some(&(-1, -8)), "authenticated target order changed for index 7");
+    assert_full_and_pruned_lifecycle_packet_bytes(Path::new(&path), (-1, -8), false);
+}
+
+fn assert_full_and_pruned_lifecycle_packet_bytes(path: &Path, target: ChunkPos, audit_corner_counts: bool) {
+    let mut raw_header = [0; HEADER_BYTES];
+    let mut manifest = File::open(path).expect("open accepted manifest");
+    manifest.read_exact(&mut raw_header).expect("read manifest header");
+    let header = read_header(&raw_header[..]).expect("validate accepted manifest header");
+    assert_eq!(header.count, 256, "the lifecycle byte control requires the accepted 16x16 manifest");
+    let capture = LifecycleCapture::load(header.dimension, &header, path);
+    assert!(capture.target_order.contains(&target), "target {target:?} is absent from the authenticated target order");
     let admissions = capture.admissions.iter().map(|admission| admission.chunk).collect::<Vec<_>>();
     let events = lifecycle_replay_events(&capture);
     let plan = LifecycleReplayPlan::for_target(target, &admissions, &events)
         .unwrap_or_else(|error| panic!("static target replay plan rejected authenticated capture: {error}"));
     assert_eq!(plan.target(), target);
-    assert_eq!(plan.feature_events().len(), 59, "audited tiled target closure must retain 59 FEATURES events");
-    assert_eq!(plan.admissions().len(), 105, "audited target closure must admit 105 resident destinations");
+    if audit_corner_counts {
+        assert_eq!(target, (-8, -8));
+        assert_eq!(plan.feature_events().len(), 59, "audited tiled target closure must retain 59 FEATURES events");
+        assert_eq!(plan.admissions().len(), 105, "audited target closure must admit 105 resident destinations");
+    }
     let server_dimension = match header.dimension {
         Dimension::Overworld => ServerDimension::Overworld,
         Dimension::Nether => ServerDimension::Nether,
@@ -916,6 +1045,7 @@ fn compare_lifecycle_manifest<S: LifecycleWorldgenSource>(
     server_dimension: ServerDimension,
     limit: u64,
     scan_all: bool,
+    target_index: Option<usize>,
     reference_packets: &BTreeMap<ChunkPos, Vec<u8>>,
     digest_mismatches: &mut Vec<(i32, i32, [u8; 32], [u8; 32])>,
     component_reports: &mut Vec<((i32, i32), PacketComponentReport)>,
@@ -930,16 +1060,19 @@ fn compare_lifecycle_manifest<S: LifecycleWorldgenSource>(
     // world state, not a set of target-fence snapshots.
     match replay_mode {
         LifecycleReplayMode::Pruned => {
-            let target = capture.target_order.first().copied().expect("capture target order must be non-empty");
+            let selected_index = target_index.unwrap_or(0);
+            let target = capture
+                .target_order
+                .get(selected_index)
+                .copied()
+                .unwrap_or_else(|| panic!("lifecycle target index {selected_index} is outside the authenticated target order"));
             let events = lifecycle_replay_events(capture);
             let plan = LifecycleReplayPlan::for_target(target, &full_admissions, &events)
                 .unwrap_or_else(|error| panic!("static target replay plan rejected authenticated capture: {error}"));
             assert_eq!(plan.target(), target);
-            assert_eq!(plan.feature_events().len(), 59);
-            assert_eq!(plan.admissions().len(), 105);
             materializer.prepare_lifecycle_replay(plan.admissions());
             materializer.replay_plan(&plan);
-            eprintln!("large lifecycle replay: pruned target {target:?}, admitted {} destinations, applied {} FEATURES events", plan.admissions().len(), plan.feature_events().len());
+            eprintln!("large lifecycle replay: pruned target index {selected_index} {target:?}, admitted {} destinations, applied {} FEATURES events", plan.admissions().len(), plan.feature_events().len());
         }
         LifecycleReplayMode::Full => {
             materializer.prepare_lifecycle_replay(&full_admissions);
@@ -959,28 +1092,29 @@ fn compare_lifecycle_manifest<S: LifecycleWorldgenSource>(
     }
     if let Some(computations) = materializer.lifecycle_pre_decoration_computations() {
         // The full 18x18 capture's 5x5 source context is a 22x22 closure. The
-        // one-target plan only reaches 159 unique pre-decoration source
-        // columns after clipping its irregular destination rows to the
-        // authenticated halo. This is a performance control only; it must
-        // never influence replay.
-        let expected_computations = match replay_mode {
-            LifecycleReplayMode::Full => 484,
-            LifecycleReplayMode::Pruned => 159,
-        };
-        assert_eq!(computations, expected_computations, "Nether lifecycle replay recomputed outside its admitted source closure");
-        eprintln!(
-            "large lifecycle replay: Nether pre-decoration computations={computations} (expected unique closure for {replay_mode:?} replay)"
-        );
+        // A pruned target has an irregular clipped closure, so its count is
+        // target-dependent and is telemetry rather than an acceptance
+        // invariant. Full replay retains the fixed authenticated geometry.
+        if replay_mode == LifecycleReplayMode::Full {
+            assert_eq!(computations, 484, "Nether full lifecycle replay must cover its 22x22 source closure");
+        }
+        eprintln!("large lifecycle replay: Nether pre-decoration computations={computations} ({replay_mode:?} replay)");
     }
 
     let mut expected_digest = [0u8; 32];
     for index in 0..limit {
-        expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
+        let manifest_index = target_index.unwrap_or_else(|| usize::try_from(index).expect("manifest prefix index fits usize"));
+        if target_index.is_some() {
+            expected_digest = read_manifest_digest_at(expected, manifest_index)
+                .expect("selected manifest semantic digest");
+        } else {
+            expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
+        }
         let target = capture
             .target_order
-            .get(index as usize)
+            .get(manifest_index)
             .copied()
-            .expect("capture target order must cover the manifest prefix");
+            .expect("capture target order must cover the selected manifest digest");
         let column = materializer.snapshot_for_packet(target);
         let mut neighbours = Vec::with_capacity(8);
         for dz in -1..=1 {
