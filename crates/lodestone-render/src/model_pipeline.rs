@@ -1391,6 +1391,25 @@ mod tests {
         assert_eq!(ALPHA_CUTOUT_TRANSLUCENT, 0.1);
     }
 
+    /// The white fuse overlay is a 63/255 material blend, not an opaque white
+    /// replacement. Keep the source-side constant visible here because shader
+    /// compilation alone cannot distinguish the two expressions.
+    #[test]
+    fn white_flash_keeps_the_reference_material_weight_before_world_shading() {
+        assert!(
+            MODEL_WGSL.contains("const WHITE_FLASH_MATERIAL_WEIGHT: f32 = 63.0 / 255.0;"),
+            "model.wgsl must keep the 63/255 white-overlay material weight"
+        );
+        assert!(
+            MODEL_WGSL.contains("mix(vec3<f32>(1.0, 1.0, 1.0), material_srgb, WHITE_FLASH_MATERIAL_WEIGHT)"),
+            "model.wgsl must blend white with material rather than replace it"
+        );
+        assert!(
+            MODEL_WGSL.contains("let lit_srgb = flashed_srgb * in.shade;"),
+            "model.wgsl must apply the white overlay before world shading"
+        );
+    }
+
     /// The same drift guard for the sampling-path selector, plus the two facts
     /// that make the default vanilla's: the shader's declared default and this
     /// file's enum default must both be `NONE`, because `Options`'
