@@ -4,6 +4,7 @@
 //! [`VersionAdapter`]; none require a real server.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,7 +14,8 @@ use lodestone_client::{
     SessionOutcome, VersionAdapter,
 };
 use lodestone_model::{
-    AdapterError, GameMode, Identifier, ResourcePackResponseKind, Rotation, TeleportFlags, Text,
+    AdapterError, GameMode, Hand, Identifier, ResourcePackResponseKind, Rotation, TeleportFlags,
+    Text,
     Vec3,
 };
 use lodestone_net::{Connection, memory_pair};
@@ -720,6 +722,84 @@ async fn keep_alive_auto_responds_and_surfaces() {
     assert_eq!(events.recv().await, Some(ClientEvent::KeepAlive { id: 99 }));
 
     drop(handle);
+}
+
+/// A held mouse button can produce an unbounded run of ordinary actions. The
+/// driver must still read a server packet from the other direction: otherwise
+/// the automatic response never exists and an integrated server eventually
+/// mistakes its own busy client for an unresponsive one. `EntityRemoved` is a
+/// cheap stand-in for the independent entity/block updates that must use the
+/// same inbound path.
+#[tokio::test(flavor = "current_thread")]
+async fn action_flood_still_reads_keep_alive_and_entity_updates() {
+    const INBOUND: i32 = 0x52;
+    const KEEP_ALIVE_ID: i64 = 0x0102_0304_0506_0708;
+    let adapter = FakeAdapter::new().on(
+        ConnectionState::Handshaking,
+        INBOUND,
+        vec![
+            Directive::Emit(ClientEvent::KeepAlive { id: KEEP_ALIVE_ID }),
+            Directive::Emit(ClientEvent::EntityRemoved { entity_ids: vec![73] }),
+        ],
+    );
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+    let handle = Arc::new(handle);
+    let keep_flooding = Arc::new(AtomicBool::new(true));
+    let flooded = Arc::clone(&keep_flooding);
+    let flood_handle = Arc::clone(&handle);
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let producer = tokio::spawn(async move {
+        let mut announced = Some(started_tx);
+        while flooded.load(Ordering::Relaxed) {
+            // A concrete, deterministic workload: each batch makes the action
+            // receiver ready after every loop turn. `SwingArm` is deliberately
+            // unrepresentable in this fake adapter, so the server-side duplex
+            // never becomes the limiting queue instead of the driver's select.
+            for _ in 0..64 {
+                flood_handle
+                    .send_action(ClientAction::SwingArm { hand: Hand::Main })
+                    .expect("the live driver accepts flood actions");
+            }
+            if let Some(sender) = announced.take() {
+                sender.send(()).expect("test waits for flood setup");
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    started_rx.await.expect("the action channel is continuously ready");
+
+    peer.write_packet(INBOUND, &[]).await.expect("send inbound packet");
+    let (id, payload) = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let frame = peer
+                .read_packet()
+                .await
+                .expect("read client frame")
+                .expect("client remains connected");
+            if frame.0 == KEEPALIVE_RESP_ID {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("an action flood must not starve the keep-alive read");
+    assert_eq!(id, KEEPALIVE_RESP_ID);
+    assert_eq!(&payload[1..], &KEEP_ALIVE_ID.to_be_bytes());
+    assert_eq!(
+        events.recv().await,
+        Some(ClientEvent::KeepAlive { id: KEEP_ALIVE_ID })
+    );
+    assert_eq!(
+        events.recv().await,
+        Some(ClientEvent::EntityRemoved {
+            entity_ids: vec![73]
+        })
+    );
+
+    keep_flooding.store(false, Ordering::Relaxed);
+    producer.await.expect("flood producer exits");
+    let mut handle = Arc::try_unwrap(handle).expect("flood task released client handle");
+    handle.shutdown();
 }
 
 /// Manual keep-alive: the event is surfaced but nothing is written.

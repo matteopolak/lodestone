@@ -13680,6 +13680,7 @@ where
                     );
                     return Ok(ServeSummary { username, chunks_sent, inventory });
                 };
+                let pending_keep_alive_before_packet = pending_keep_alive;
                 dispatch_play_packet(
                     conn,
                     proto,
@@ -13751,6 +13752,16 @@ where
                     &payload,
                 )
                 .await?;
+                if let Some(id) = pending_keep_alive_before_packet
+                    && pending_keep_alive.is_none()
+                {
+                    tracing::debug!(
+                        target: "lodestone_keepalive",
+                        id,
+                        round_trip_millis = keep_alive_sent_at.elapsed().as_millis() as u64,
+                        "server accepted keep-alive response"
+                    );
+                }
                 republish_inventory(entities.players(), player_uuid, &inventory);
                 // A death respawn that just sent the player home from a portal
                 // trip — see `apply_client_command`'s `dimension_reset` parameter
@@ -14059,6 +14070,11 @@ where
                 pending_keep_alive = Some(next_keep_alive_id);
                 keep_alive_sent_at = crate::tick::PlayTimerInstant::now();
                 watch.clear_unserviced();
+                tracing::debug!(
+                    target: "lodestone_keepalive",
+                    id = next_keep_alive_id,
+                    "server sent keep-alive challenge"
+                );
                 apply(conn, &mut state, proto.encode_keep_alive(next_keep_alive_id)).await?;
                 // Refresh the world-spawn ticket from the connection's
                 // keep-alive timer. Compatibility entry points use a detached
