@@ -677,3 +677,24 @@ fn mineshaft_scope_matches_external_corridor_sentinels() {
         );
     };
 }
+
+/// A decoded packet cell from the same corridor proves the production path
+/// reaches the column that becomes a clientbound chunk packet. Its 0.05 cobweb
+/// choice uses the target chunk's underground-structures stream, not the
+/// stream that built the owning start's tree.
+#[test]
+fn mineshaft_target_chunk_rng_matches_external_cobweb() {
+    const SEED_42: i64 = 42;
+    const CHUNK: (i32, i32) = (-249, 250);
+    const WORLD: (i32, i32, i32) = (-3975, 14, 4003);
+    let settings = settings();
+    let with = generator_for_seed(SEED_42, &ServerAssets::new(), &settings);
+    let column = with.column(CHUNK.0, CHUNK.1);
+    assert_eq!(WORLD.0.div_euclid(16), CHUNK.0);
+    assert_eq!(WORLD.2.div_euclid(16), CHUNK.1);
+    assert_eq!(
+        column.block_state(WORLD.0.rem_euclid(16) as usize, WORLD.1, WORLD.2.rem_euclid(16) as usize),
+        "minecraft:cobweb",
+        "captured section-Y0 palette entry at the corridor's probabilistic gate"
+    );
+}

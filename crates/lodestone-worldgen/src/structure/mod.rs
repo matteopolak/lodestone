@@ -167,7 +167,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use lodestone_worldgen_core::rng::{
-    LegacyRandomSource, PositionalRandomFactory, RandomSource, WorldgenRandom,
+    LegacyRandomSource, PositionalRandomFactory, RandomSource, WorldgenRandom, XoroshiroRandomSource,
 };
 use serde_json::Value;
 
@@ -223,9 +223,7 @@ const BOOTSTRAP_ORDER: &[&str] = &[
     "minecraft:trial_chambers",
 ];
 
-/// Bundled structure registry order. Feature-pool elements use their
-/// structure's zero-based index within one generation step as part of the
-/// decoration seed, so map iteration or alphabetical order is not equivalent.
+/// Bundled structure order used by feature-pool placements.
 const STRUCTURE_BOOTSTRAP_ORDER: &[&str] = &[
     "minecraft:pillager_outpost", "minecraft:mineshaft", "minecraft:mineshaft_mesa",
     "minecraft:mansion", "minecraft:jungle_pyramid", "minecraft:desert_pyramid",
@@ -239,6 +237,16 @@ const STRUCTURE_BOOTSTRAP_ORDER: &[&str] = &[
     "minecraft:ruined_portal_jungle", "minecraft:ruined_portal_swamp",
     "minecraft:ruined_portal_mountain", "minecraft:ruined_portal_ocean",
     "minecraft:ruined_portal_nether", "minecraft:ancient_city", "minecraft:trail_ruins",
+    "minecraft:trial_chambers",
+];
+
+/// Captured runtime registration order for the five structures in the
+/// `underground_structures` decoration step.
+const UNDERGROUND_STRUCTURES_RUNTIME_ORDER: &[&str] = &[
+    "minecraft:buried_treasure",
+    "minecraft:mineshaft",
+    "minecraft:mineshaft_mesa",
+    "minecraft:trail_ruins",
     "minecraft:trial_chambers",
 ];
 
@@ -2932,12 +2940,12 @@ impl StructureRegistry {
                 "mineshaft:post_process_scope".into(),
                 "a mineshaft piece's block-writing walk normally runs once **per decorating \
                  chunk** and clips every read and write to that chunk. The liquid-shell \
-                 survey follows that boundary now; the sturdy-neighbours check and every \
-                 other block read still see the eager piece overlay, and a corridor spanning two \
-                 chunks draws its cobwebs twice from two unrelated streams. This engine \
-                 replays one deterministic start stream per decorating chunk — a deviation \
-                 with no single deterministic answer to reproduce, the same class as \
-                 `coded:average_ground_height`"
+                 survey, interior checks, sturdy-neighbour checks and every other block read \
+                 follow that boundary now. A corridor spanning two \
+                 chunks draws its cobwebs twice from the two target-chunk structure streams. \
+                 Tree reconstruction is start-seeded, while the block walk consumes the \
+                 target chunk's underground-structures stream. The remaining limitation is \
+                 the pre-surface state exposed through `StartContext`"
                     .into(),
             );
             unsupported.insert(
@@ -3081,11 +3089,12 @@ impl StructureRegistry {
         chunk_x: i32,
         chunk_z: i32,
         ctx: &dyn StartContext,
+        placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
     ) -> Option<Vec<CodedBlock>> {
         let StructureKind::Mineshaft { wood, blocking } = &self.structures.get(&start.structure)?.kind else {
             return None;
         };
-        let mut random = structure_random(self.seed, start.chunk_x, start.chunk_z);
+        let mut tree_random = structure_random(self.seed, start.chunk_x, start.chunk_z);
         let pieces = mineshaft::generate_for_chunk(
             start.chunk_x,
             start.chunk_z,
@@ -3093,7 +3102,8 @@ impl StructureRegistry {
             ctx,
             *wood,
             blocking,
-            &mut random,
+            &mut tree_random,
+            placement_random,
         );
         let mut blocks = Vec::new();
         for piece in pieces {
@@ -3163,8 +3173,8 @@ impl StructureRegistry {
         self.structures.get(id)
     }
 
-    /// `(generation step, index within that step)` used to seed a structure's
-    /// feature-pool elements for one decorating chunk.
+    /// `(generation step, bootstrap index within that step)` used to
+    /// seed a structure's feature-pool elements for one decorating chunk.
     pub(crate) fn feature_placement_key(&self, id: &str) -> Option<(i32, usize)> {
         let step = structure_step_index(&self.structures.get(id)?.step)?;
         let index = self
@@ -3177,6 +3187,18 @@ impl StructureRegistry {
                     == Some(step)
             })
             .position(|other| other == id)?;
+        Some((step, index))
+    }
+
+    /// The runtime registry's decoration key for structures with captured
+    /// ordering evidence. This is deliberately distinct from the feature-pool
+    /// ordering above: the runtime registry does not use that bootstrap order.
+    pub(crate) fn runtime_decoration_key(&self, id: &str) -> Option<(i32, usize)> {
+        let step = structure_step_index(&self.structures.get(id)?.step)?;
+        let index = match step {
+            3 => UNDERGROUND_STRUCTURES_RUNTIME_ORDER.iter().position(|entry| *entry == id)?,
+            _ => return None,
+        };
         Some((step, index))
     }
 
@@ -3434,6 +3456,24 @@ fn collect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The target-chunk structure stream follows the runtime registry, whose
+    /// order is not lexical and is not the feature-pool bootstrap order.
+    #[test]
+    fn underground_structure_runtime_order_matches_capture() {
+        const CAPTURE: &str = include_str!("../../tests/support/underground-structures-runtime-order-26.2.txt");
+        let captured: Vec<_> = CAPTURE
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        assert_eq!(captured, UNDERGROUND_STRUCTURES_RUNTIME_ORDER);
+        assert_eq!(
+            UNDERGROUND_STRUCTURES_RUNTIME_ORDER
+                .iter()
+                .position(|id| *id == "minecraft:mineshaft"),
+            Some(1)
+        );
+    }
 
     /// A resolver with no structure data places nothing and names nothing —
     /// the convention every fixture resolver in this workspace relies on.

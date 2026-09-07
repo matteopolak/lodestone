@@ -46,8 +46,11 @@ Mineshaft starts eagerly retain their complete tree and bounding boxes, because 
 depends on the finished tree. Their block-writing walk is replayed for the decorating chunk instead:
 the liquid-shell refusal is clipped to that chunk before the piece writes. This matters at a chunk
 border, where water just outside the current chunk must not discard a corridor that is otherwise
-valid inside it. The replay still uses the start's deterministic stream; its remaining chunk-local
-read and RNG differences stay explicitly recorded in the structure ledger.
+valid inside it. Reconstructing the tree uses the owning start's stream, while its block walk uses
+the target chunk's `underground_structures` decoration stream at the structure's captured
+runtime-registry index within that step. That keeps the tree stable and makes probabilistic corridor
+output follow the chunk that receives it. The remaining pre-surface reads stay explicitly recorded in
+the structure ledger.
 
 A ruined portal combines the latter two forms: the template first writes the frame, then its
 placement-time refinement grows the netherrack skirt and downward columns and adds optional vines or

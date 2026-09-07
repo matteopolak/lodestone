@@ -41,12 +41,12 @@
 //!
 //! # How to change it
 //!
-//! * **The RNG order is the specification and the two passes share one stream.**
+//! * **The RNG order is the specification.**
 //!   The child-placement walk's draws interleave with the random-shaft-piece pick's
 //!   draw bounded by 100, with the corridor-size search's draw bounded by 3 and with the per-child
 //!   recursion, so a reordering that looks like a tidy-up builds a different
-//!   mineshaft. The block-writing walk then continues from the same stream — see the
-//!   deviation note below.
+//!   mineshaft. The block-writing walk uses the decorating chunk's structure-step
+//!   stream, while replay reconstructs the tree from the start stream.
 //! * **A block read sees what earlier pieces wrote.** [`Shaft::into_pieces`] holds
 //!   one [`View`] for the whole start, so a corridor's double lower/upper support placement
 //!   sees the planks the same corridor laid two statements earlier, and a crossing's
@@ -59,17 +59,16 @@
 //!
 //! # Remaining deviations
 //!
-//! A faithful implementation runs its block-writing walk once **per decorating chunk**, with that chunk's own
-//! feature random, and clips every write to that chunk's own box. A corridor spanning two
-//! chunks therefore draws its cobwebs twice, from two unrelated streams, and keeps
-//! whichever half landed. There is no single deterministic answer to reproduce, exactly as
-//! `swamp_hut`'s average ground height had none. The liquid-shell check now replays
-//! per decorating chunk; the remaining deviations are:
+//! The block-writing walk runs once **per decorating chunk**, from that chunk's
+//! structure-step stream, and clips every write to that chunk's own box. A
+//! corridor spanning two chunks therefore makes its probabilistic choices from
+//! the receiving chunk's stream. Tree reconstruction remains start-seeded so the
+//! retained start and every chunk replay share one piece layout. The remaining
+//! deviations are:
 //!
 //! | reference behaviour | here | ledger row |
 //! |---|---|---|
-//! | the block-writing walk's random is the decorating chunk's | the structure's own stream, continuing after piece layout | `coded:region_random` |
-//! | interior, support, and sturdy-neighbour reads ignore positions outside the decorating chunk's box | output writes are clipped, but those reads still inspect the neighbouring terrain | `mineshaft:post_process_scope` |
+//! | terrain reads see only the pre-surface state exposed by [`StartContext`] | post-carve and post-feature material is unavailable during the walk | `mineshaft:pre_surface_world_reads` |
 //!
 //! # Dependencies
 //!
@@ -313,7 +312,9 @@ pub fn generate<R: RandomSource>(
     blocking_biomes: &std::collections::HashSet<String>,
     random: &mut R,
 ) -> (Vec<StructurePiece>, [i32; 3]) {
-    generate_inner(cx, cz, ctx, wood, blocking_biomes, random, None)
+    let (shaft, dy) = grow_shaft(cx, cz, ctx, wood, random);
+    let pieces = into_pieces(shaft, ctx, blocking_biomes, random, None);
+    (pieces, [cx * 16 + 8, MAGIC_START_Y + dy, cz * 16])
 }
 
 /// Regenerates one mineshaft's block-writing pass for one decorating chunk.
@@ -323,36 +324,35 @@ pub fn generate<R: RandomSource>(
 /// preserves the per-chunk boundary of that predicate without changing start
 /// selection or the tree's RNG stream.
 #[must_use]
-pub(crate) fn generate_for_chunk<R: RandomSource>(
+pub(crate) fn generate_for_chunk<TreeRandom: RandomSource, PlacementRandom: RandomSource>(
     cx: i32,
     cz: i32,
     decorating_chunk: (i32, i32),
     ctx: &dyn StartContext,
     wood: Wood,
     blocking_biomes: &std::collections::HashSet<String>,
-    random: &mut R,
+    tree_random: &mut TreeRandom,
+    placement_random: &mut PlacementRandom,
 ) -> Vec<StructurePiece> {
-    generate_inner(
-        cx,
-        cz,
+    let (shaft, _) = grow_shaft(cx, cz, ctx, wood, tree_random);
+    into_pieces(
+        shaft,
         ctx,
-        wood,
         blocking_biomes,
-        random,
+        placement_random,
         Some(DecoratingChunk::new(decorating_chunk.0, decorating_chunk.1)),
     )
-    .0
 }
 
-fn generate_inner<R: RandomSource>(
+/// Builds the one persisted mineshaft tree. Placement replays this through the
+/// same helper, then supplies the decorating chunk's independent block stream.
+fn grow_shaft<R: RandomSource>(
     cx: i32,
     cz: i32,
     ctx: &dyn StartContext,
     wood: Wood,
-    blocking_biomes: &std::collections::HashSet<String>,
     random: &mut R,
-    decorating_chunk: Option<DecoratingChunk>,
-) -> (Vec<StructurePiece>, [i32; 3]) {
+) -> (Shaft, i32) {
     // One discarded double draw — the canonical
     // stream-shifting trap. Without it every draw below lands one value early.
     let _ = random.next_double();
@@ -406,11 +406,7 @@ fn generate_inner<R: RandomSource>(
         shaft.move_below_sea_level(sea_level, ctx.min_y(), random, 10)
     };
 
-    let pieces = into_pieces(shaft, ctx, blocking_biomes, random, decorating_chunk);
-    (
-        pieces,
-        [cx * 16 + 8, MAGIC_START_Y + dy, cz * 16],
-    )
+    (shaft, dy)
 }
 
 /// The spread bound, then
@@ -884,7 +880,15 @@ enum Sample<'a> {
 }
 
 impl<'a> View<'a> {
+    fn is_in_decorating_chunk(&self, pos: [i32; 3]) -> bool {
+        self.decorating_chunk
+            .is_none_or(|chunk| chunk.contains(pos[0], pos[2]))
+    }
+
     fn sample(&self, pos: [i32; 3]) -> Sample<'_> {
+        if !self.is_in_decorating_chunk(pos) {
+            return Sample::Terrain(BlockKind::Air);
+        }
         match self.overlay.get(&pos) {
             Some(state) => Sample::Written(state),
             None => Sample::Terrain(self.ctx.block_kind_at(pos[0], pos[1], pos[2])),
@@ -1019,6 +1023,9 @@ impl Place<'_, '_> {
     /// `OCEAN_FLOOR_WG` height, i.e. the piece is underground here.
     fn is_interior(&self, x: i32, y: i32, z: i32) -> bool {
         let pos = self.node.world_pos(x, y + 1, z);
+        if !self.view.is_in_decorating_chunk(pos) {
+            return false;
+        }
         pos[1] < free_height(self.view.ctx, pos[0], pos[2], HeightmapKind::OceanFloorWg)
     }
 
@@ -1477,12 +1484,8 @@ fn corridor_post<R: RandomSource>(
         maybe_place_cobweb(p, random, 0.05, 2, 2, z - 2);
         maybe_place_cobweb(p, random, 0.05, 0, 2, z + 2);
         maybe_place_cobweb(p, random, 0.05, 2, 2, z + 2);
-        if random.next_int_bounded(100) == 0 {
-            create_chest_minecart(p, random, loot, 2, 0, z - 1);
-        }
-        if random.next_int_bounded(100) == 0 {
-            create_chest_minecart(p, random, loot, 0, 0, z + 1);
-        }
+        maybe_create_chest_minecart(p, random, loot, 2, 0, z - 1);
+        maybe_create_chest_minecart(p, random, loot, 0, 0, z + 1);
         if spider_corridor && !placed_spider {
             // The draw bounded by 3 happens before the interior check runs, unlike
             // the cobweb placement's own draw-then-test order — the asymmetry
@@ -1561,6 +1564,22 @@ fn create_chest_minecart<R: RandomSource>(
         table: MINESHAFT_LOOT.to_string(),
         seed,
     });
+}
+
+/// The one-in-a-hundred gate belongs outside the target-box check. A candidate
+/// outside the decorating chunk still spends this draw; only the chest body is
+/// clipped by [`create_chest_minecart`].
+fn maybe_create_chest_minecart<R: RandomSource>(
+    p: &mut Place<'_, '_>,
+    random: &mut R,
+    loot: &mut Vec<super::CodedLoot>,
+    x: i32,
+    y: i32,
+    z: i32,
+) {
+    if random.next_int_bounded(100) == 0 {
+        create_chest_minecart(p, random, loot, x, y, z);
+    }
 }
 
 /// A crossing's block-writing walk — absolute coordinates throughout, because the
@@ -1658,7 +1677,9 @@ fn room_post(p: &mut Place<'_, '_>, entrances: &[BoundingBox]) {
 mod tests {
     use std::collections::HashSet;
 
-    use lodestone_worldgen_core::rng::{LegacyRandomSource, WorldgenRandom};
+    use lodestone_worldgen_core::rng::{
+        LegacyRandomSource, WorldgenRandom, XoroshiroRandomSource,
+    };
 
     use super::*;
 
@@ -1692,6 +1713,18 @@ mod tests {
         let mut r = WorldgenRandom::new(LegacyRandomSource::new(0));
         r.set_large_feature_seed(seed, 0, 0);
         r
+    }
+
+    fn decoration_random(
+        seed: i64,
+        cx: i32,
+        cz: i32,
+        index: i32,
+    ) -> WorldgenRandom<XoroshiroRandomSource> {
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = random.set_decoration_seed(seed, cx * 16, cz * 16);
+        random.set_feature_seed(decoration_seed, index, 3);
+        random
     }
 
     struct Corridor44LiquidShell;
@@ -1749,6 +1782,112 @@ mod tests {
         assert!(
             !blocked(Some(DecoratingChunk::new(-249, 250))),
             "the (-249, 250) decorating chunk excludes the liquid from its (-249, 249) neighbour"
+        );
+    }
+
+    /// Tree reconstruction has to reproduce the start stream, but its block
+    /// walk belongs to the target chunk's structure-decoration stream. The old
+    /// control deliberately continues the reconstructed start stream and must
+    /// disagree on probabilistic corridor output.
+    #[test]
+    fn target_chunk_decoration_stream_controls_probabilistic_blocks() {
+        let ctx = Solid { surface: 70 };
+        let decorating_chunk = (0, 0);
+        let mut tree = random(99);
+        let mut target = decoration_random(99, decorating_chunk.0, decorating_chunk.1, 1);
+        let actual = generate_for_chunk(
+            0,
+            0,
+            decorating_chunk,
+            &ctx,
+            Wood::Normal,
+            &HashSet::new(),
+            &mut tree,
+            &mut target,
+        );
+        let actual_blocks: Vec<_> = actual
+            .iter()
+            .filter_map(|piece| piece.blocks.as_ref())
+            .flat_map(|blocks| blocks.iter())
+            .map(|block| (block.pos, block.state.clone()))
+            .collect();
+
+        let mut old_stream = random(99);
+        let (old_shaft, _) = grow_shaft(0, 0, &ctx, Wood::Normal, &mut old_stream);
+        let old = into_pieces(
+            old_shaft,
+            &ctx,
+            &HashSet::new(),
+            &mut old_stream,
+            Some(DecoratingChunk::new(decorating_chunk.0, decorating_chunk.1)),
+        );
+        let old_blocks: Vec<_> = old
+            .iter()
+            .filter_map(|piece| piece.blocks.as_ref())
+            .flat_map(|blocks| blocks.iter())
+            .map(|block| (block.pos, block.state.clone()))
+            .collect();
+
+        assert!(!actual_blocks.is_empty(), "the positive stream must place blocks");
+        assert_ne!(
+            actual_blocks, old_blocks,
+            "continuing the start stream is the old placement RNG and must fail"
+        );
+    }
+
+    /// The chest probability gate advances the stream even when the candidate
+    /// itself lies outside the decorating chunk; only the chest body is clipped.
+    #[test]
+    fn outside_chunk_chest_candidate_still_consumes_its_roll() {
+        let ctx = Solid { surface: 70 };
+        let node = Node {
+            box_: BoundingBox {
+                min: [17, 12, 0],
+                max: [19, 14, 4],
+            },
+            orientation: Some(Facing::South),
+            gen_depth: 1,
+            kind: Kind::Corridor {
+                has_rails: false,
+                spider_corridor: false,
+                sections: 1,
+            },
+        };
+        let mut view = View {
+            ctx: &ctx,
+            decorating_chunk: Some(DecoratingChunk::new(0, 0)),
+            overlay: HashMap::new(),
+            emitted: Vec::new(),
+        };
+        let mut actual = random(77);
+        let mut expected = random(77);
+        let _ = expected.next_int_bounded(100);
+        {
+            let mut place = Place {
+                node: &node,
+                view: &mut view,
+                wood: Wood::Normal,
+                mirror: Mirror::None,
+                rotation: Rotation::None,
+            };
+            maybe_create_chest_minecart(&mut place, &mut actual, &mut Vec::new(), 2, 0, 1);
+        }
+        assert_eq!(actual.next_int(), expected.next_int());
+        assert!(view.take().is_empty(), "outside candidate must not place a chest rail");
+    }
+
+    /// Captured seed derivation for the target chunk's structure step. This is
+    /// a carrier control rather than a block gate: earlier intersecting pieces
+    /// consume the stream before corridor 44 reaches its cobweb choice.
+    #[test]
+    fn captured_target_chunk_stream_has_its_expected_first_draw() {
+        const SEED: i64 = 42;
+        const TARGET: (i32, i32) = (-249, 250);
+        let mut target = decoration_random(SEED, TARGET.0, TARGET.1, 1);
+        assert_eq!(
+            target.next_int(),
+            1_982_188_559,
+            "captured seed-42 target-stream first draw"
         );
     }
 
