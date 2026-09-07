@@ -1736,6 +1736,8 @@ pub enum ConfiguredFeature {
     BlockPile(BlockStateProvider),
     NetherForestVegetation(Box<super::features::NetherForestVegetationCfg>),
     BlockBlob(Box<super::features::BlockBlobCfg>),
+    Delta(Box<super::features::DeltaCfg>),
+    BasaltColumns(Box<super::features::BasaltColumnsCfg>),
     ReplaceBlobs(Box<super::features::ReplaceBlobsCfg>),
     GlowstoneBlob,
     BasaltPillar,
@@ -2031,6 +2033,29 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 state: canon_state(&c["state"]),
                 can_place_on: BlockPredicate::parse(&c["can_place_on"]),
             }))
+        }
+        "delta_feature" => {
+            let c = &doc["config"];
+            match (try_parse_int_provider(&c["rim_size"]), try_parse_int_provider(&c["size"])) {
+                (Some(rim_size), Some(size)) => ConfiguredFeature::Delta(Box::new(
+                    super::features::DeltaCfg {
+                        contents: canon_state(&c["contents"]),
+                        rim: canon_state(&c["rim"]),
+                        rim_size,
+                        size,
+                    },
+                )),
+                _ => ConfiguredFeature::Unsupported("delta_feature: unsupported size".into()),
+            }
+        }
+        "basalt_columns" => {
+            let c = &doc["config"];
+            match (try_parse_int_provider(&c["height"]), try_parse_int_provider(&c["reach"])) {
+                (Some(height), Some(reach)) => ConfiguredFeature::BasaltColumns(Box::new(
+                    super::features::BasaltColumnsCfg { height, reach },
+                )),
+                _ => ConfiguredFeature::Unsupported("basalt_columns: unsupported height/reach".into()),
+            }
         }
         "netherrack_replace_blobs" => {
             let c = &doc["config"];
@@ -2400,6 +2425,8 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             | ConfiguredFeature::BlockPile(_)
             | ConfiguredFeature::NetherForestVegetation(_)
             | ConfiguredFeature::BlockBlob(_)
+            | ConfiguredFeature::Delta(_)
+            | ConfiguredFeature::BasaltColumns(_)
             | ConfiguredFeature::ReplaceBlobs(_)
             | ConfiguredFeature::GlowstoneBlob
             | ConfiguredFeature::BasaltPillar
@@ -2443,4 +2470,5 @@ mod tests {
                 if fluids == vec!["minecraft:water"]
         ));
     }
+
 }

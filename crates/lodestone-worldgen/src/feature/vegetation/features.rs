@@ -637,6 +637,22 @@ pub struct BlockBlobCfg {
     pub can_place_on: BlockPredicate,
 }
 
+/// Contents, rim state, and radii for a floor-held delta patch.
+#[derive(Clone, Debug)]
+pub struct DeltaCfg {
+    pub contents: String,
+    pub rim: String,
+    pub rim_size: IntProvider,
+    pub size: IntProvider,
+}
+
+/// Height and horizontal-reach providers for the two basalt-column records.
+#[derive(Clone, Debug)]
+pub struct BasaltColumnsCfg {
+    pub height: IntProvider,
+    pub reach: IntProvider,
+}
+
 /// `NetherForestVegetationConfig`, and `BlockPileConfiguration` when the two
 /// spread fields are absent.
 #[derive(Clone, Debug)]
@@ -1010,7 +1026,207 @@ pub(super) fn place_block_blob<R: RandomSource>(
     }
 }
 
-/// Vanilla's own replace-blobs feature's place — Manhattan-ball replacement of one target block.
+fn within_manhattan_xz(mut visit: impl FnMut(i32, i32), reach_x: i32, reach_z: i32) {
+    let max_depth = reach_x + reach_z;
+    for depth in 0..=max_depth {
+        let max_x = reach_x.min(depth);
+        for x in -max_x..=max_x {
+            let z = depth - x.abs();
+            if z > reach_z {
+                continue;
+            }
+            visit(x, z);
+            if z != 0 {
+                visit(x, -z);
+            }
+        }
+    }
+}
+
+fn delta_clear(grid: &VegGrid, pos: BlockPos, contents: &str) -> bool {
+    const CANNOT_REPLACE: &[&str] = &[
+        "minecraft:bedrock",
+        "minecraft:nether_bricks",
+        "minecraft:nether_brick_fence",
+        "minecraft:nether_brick_stairs",
+        "minecraft:nether_wart",
+        "minecraft:chest",
+        "minecraft:spawner",
+    ];
+    let contents = super::base_id(contents);
+    let state = base_at(grid, pos.x, pos.y, pos.z);
+    if state == contents || CANNOT_REPLACE.contains(&state) {
+        return false;
+    }
+    for (dx, dy, dz) in DIRECTIONS {
+        let air = air_at(grid, pos.x + dx, pos.y + dy, pos.z + dz);
+        if (air && dy != 1) || (!air && dy == 1) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Places one basalt-deltas delta: a floor-held contents patch with an optional rim.
+pub(super) fn place_delta<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    cfg: &DeltaCfg,
+    grid: &mut VegGrid,
+) {
+    let spawn_rim = random.next_double() < 0.9;
+    let rim_x = if spawn_rim { cfg.rim_size.sample(random) } else { 0 };
+    let rim_z = if spawn_rim { cfg.rim_size.sample(random) } else { 0 };
+    let has_rim = spawn_rim && rim_x != 0 && rim_z != 0;
+    let radius_x = cfg.size.sample(random);
+    let radius_z = cfg.size.sample(random);
+    let limit = radius_x.max(radius_z);
+    within_manhattan_xz(
+        |dx, dz| {
+            if dx.abs() + dz.abs() > limit {
+                return;
+            }
+            let pos = BlockPos { x: origin.x + dx, y: origin.y, z: origin.z + dz };
+            if !delta_clear(grid, pos, &cfg.contents) {
+                return;
+            }
+            if has_rim {
+                grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.rim.clone());
+            }
+            let contents = BlockPos { x: pos.x + rim_x, y: pos.y, z: pos.z + rim_z };
+            if delta_clear(grid, contents, &cfg.contents) {
+                grid.set_if_in_bounds(contents.x, contents.y, contents.z, cfg.contents.clone());
+            }
+        },
+        radius_x,
+        radius_z,
+    );
+}
+
+fn basalt_cannot_place_on(state: &str) -> bool {
+    matches!(
+        state,
+        "minecraft:lava"
+            | "minecraft:bedrock"
+            | "minecraft:magma_block"
+            | "minecraft:soul_sand"
+            | "minecraft:nether_bricks"
+            | "minecraft:nether_brick_fence"
+            | "minecraft:nether_brick_stairs"
+            | "minecraft:nether_wart"
+            | "minecraft:chest"
+            | "minecraft:spawner"
+    )
+}
+
+fn air_or_lava_ocean(grid: &VegGrid, pos: BlockPos) -> bool {
+    air_at(grid, pos.x, pos.y, pos.z)
+        || (base_at(grid, pos.x, pos.y, pos.z) == "minecraft:lava" && pos.y <= 32)
+}
+
+fn basalt_can_place_at(grid: &VegGrid, pos: BlockPos) -> bool {
+    air_or_lava_ocean(grid, pos)
+        && !basalt_cannot_place_on(base_at(grid, pos.x, pos.y - 1, pos.z))
+        && !air_at(grid, pos.x, pos.y - 1, pos.z)
+}
+
+fn basalt_find_surface(grid: &VegGrid, mut pos: BlockPos, mut limit: i32) -> Option<BlockPos> {
+    while pos.y > grid.min_y + 1 && limit > 0 {
+        limit -= 1;
+        if basalt_can_place_at(grid, pos) {
+            return Some(pos);
+        }
+        pos.y -= 1;
+    }
+    None
+}
+
+fn basalt_find_air(grid: &VegGrid, mut pos: BlockPos, mut limit: i32) -> Option<BlockPos> {
+    while pos.y < grid.min_y + grid.height && limit > 0 {
+        limit -= 1;
+        let state = base_at(grid, pos.x, pos.y, pos.z);
+        if basalt_cannot_place_on(state) {
+            return None;
+        }
+        if is_air(state) {
+            return Some(pos);
+        }
+        pos.y += 1;
+    }
+    None
+}
+
+fn place_basalt_column(grid: &mut VegGrid, origin: BlockPos, height: i32, reach: i32) {
+    for x in origin.x - reach..=origin.x + reach {
+        for z in origin.z - reach..=origin.z + reach {
+            let distance = (x - origin.x).abs() + (z - origin.z).abs();
+            let at = BlockPos { x, y: origin.y, z };
+            let Some(mut cursor) = (if air_or_lava_ocean(grid, at) {
+                basalt_find_surface(grid, at, distance)
+            } else {
+                basalt_find_air(grid, at, distance)
+            }) else {
+                continue;
+            };
+            let mut blocks = height - distance / 2;
+            while blocks >= 0 {
+                if air_or_lava_ocean(grid, cursor) {
+                    grid.set_if_in_bounds(cursor.x, cursor.y, cursor.z, "minecraft:basalt[axis=y]".to_string());
+                    cursor.y += 1;
+                } else if base_at(grid, cursor.x, cursor.y, cursor.z) == "minecraft:basalt" {
+                    cursor.y += 1;
+                } else {
+                    break;
+                }
+                blocks -= 1;
+            }
+        }
+    }
+}
+
+fn visit_basalt_column_candidates<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    height: i32,
+    clustered: bool,
+    cfg: &BasaltColumnsCfg,
+    mut visit: impl FnMut(BlockPos, i32, i32),
+) {
+    let spread = height.min(if clustered { 5 } else { 8 });
+    let count = if clustered { 50 } else { 15 };
+    for _ in 0..count {
+        let x = origin.x - spread + random.next_int_bounded(spread * 2 + 1);
+        // The sampled Y range has one value, but that draw is still part of
+        // the feature's stream before the Z coordinate is chosen.
+        let _ = random.next_int_bounded(1);
+        let z = origin.z - spread + random.next_int_bounded(spread * 2 + 1);
+        let pos = BlockPos { x, y: origin.y, z };
+        let blocks = height - (pos.x - origin.x).abs() - (pos.z - origin.z).abs();
+        if blocks >= 0 {
+            visit(pos, blocks, cfg.reach.sample(random));
+        }
+    }
+}
+
+/// Places a basalt-deltas column cluster. These records occur only in the
+/// Nether, whose lava level is 32.
+pub(super) fn place_basalt_columns<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    cfg: &BasaltColumnsCfg,
+    grid: &mut VegGrid,
+) {
+    if !basalt_can_place_at(grid, origin) {
+        return;
+    }
+    let height = cfg.height.sample(random);
+    let clustered = random.next_float() < 0.9;
+    visit_basalt_column_candidates(random, origin, height, clustered, cfg, |pos, blocks, reach| {
+        place_basalt_column(grid, pos, blocks, reach);
+    });
+}
+
+/// Manhattan-ball replacement of one target block.
 pub(super) fn place_replace_blobs<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
@@ -2588,11 +2804,248 @@ pub(super) fn place_fallen_tree<R: RandomSource>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{HashMap, HashSet, VecDeque};
 
     use super::*;
+    use crate::feature::{HeightProvider, VerticalAnchor};
     use crate::feature::top_layer::StatePredicate;
-    use crate::rng::LegacyRandomSource;
+    use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom, XoroshiroPositionalFactory, XoroshiroRandomSource};
+
+    struct DeltaScriptRandom {
+        bounded: VecDeque<i32>,
+    }
+
+    impl DeltaScriptRandom {
+        fn new(bounded: [i32; 4]) -> Self {
+            Self { bounded: bounded.into() }
+        }
+    }
+
+    impl RandomSource for DeltaScriptRandom {
+        type Positional = XoroshiroPositionalFactory;
+
+        fn fork_positional(&mut self) -> Self::Positional { panic!("delta does not fork a positional source") }
+        fn set_seed(&mut self, _: i64) { panic!("delta does not reseed") }
+        fn next_bits(&mut self, _: u32) -> i32 { panic!("delta does not request raw bits") }
+        fn next_int(&mut self) -> i32 { panic!("delta only samples bounded providers") }
+        fn next_int_bounded(&mut self, bound: i32) -> i32 {
+            let value = self.bounded.pop_front().expect("scripted delta draw");
+            assert!((0..bound).contains(&value));
+            value
+        }
+        fn next_long(&mut self) -> i64 { panic!("delta does not request longs") }
+        fn next_bool(&mut self) -> bool { panic!("delta does not request booleans") }
+        fn next_float(&mut self) -> f32 { panic!("delta does not request floats") }
+        fn next_double(&mut self) -> f64 { 0.0 }
+        fn next_gaussian(&mut self) -> f64 { panic!("delta does not request gaussians") }
+        fn consume_count(&mut self, _: u32) { panic!("delta does not consume by count") }
+    }
+
+    #[test]
+    fn captured_step4_delta_stream_preserves_patch_shape() {
+        // Captured from the accepted 26.2 server jar with seed 123_456_789
+        // through the feature wrapper: rim=true, rim radii=(2, 1), contents
+        // radii=(5, 3).
+        let cfg = DeltaCfg {
+            contents: "minecraft:lava[level=0]".to_string(),
+            rim: "minecraft:magma_block".to_string(),
+            rim_size: IntProvider::Uniform { min: 0, max: 2 },
+            size: IntProvider::Uniform { min: 3, max: 7 },
+        };
+        let mut grid = VegGrid::new(0, 16, 0, 0);
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..=10 {
+                    grid.seed(x, y, z, "minecraft:netherrack".to_string());
+                }
+            }
+        }
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(123_456_789));
+        place_delta(&mut random, BlockPos { x: 8, y: 10, z: 8 }, &cfg, &mut grid);
+
+        assert_eq!(grid.get(3, 10, 8), "minecraft:magma_block");
+        assert_eq!(grid.get(10, 10, 9), "minecraft:lava[level=0]");
+        assert_eq!(grid.get(15, 10, 9), "minecraft:lava[level=0]");
+        assert_eq!(grid.get(10, 10, 12), "minecraft:lava[level=0]");
+        assert_eq!(grid.get(2, 10, 8), "minecraft:netherrack");
+    }
+
+    #[test]
+    fn captured_delta_overlap_keeps_later_contents_over_its_rim() {
+        let cfg = DeltaCfg {
+            contents: "minecraft:lava[level=0]".to_string(),
+            rim: "minecraft:magma_block".to_string(),
+            rim_size: IntProvider::Uniform { min: 0, max: 2 },
+            size: IntProvider::Uniform { min: 3, max: 7 },
+        };
+        let mut grid = VegGrid::with_footprint(0, 128, -4_000, -4_000, -24, 40);
+        for x in -4_024..-3_960 {
+            for z in -4_024..-3_960 {
+                for y in 0..=57 {
+                    grid.seed(x, y, z, "minecraft:netherrack".to_string());
+                }
+            }
+        }
+        // The scripted draws select a rim offset `(2, 1)` and `(5, 5)` extent
+        // at the captured local origin. The second support position shifts its
+        // contents write onto a prior rim position, so the final state proves
+        // both the traversal order and the re-check against live state.
+        let mut random = DeltaScriptRandom::new([2, 1, 2, 2]);
+        place_delta(&mut random, BlockPos { x: -4_014, y: 57, z: -3_972 }, &cfg, &mut grid);
+
+        assert_eq!(grid.get(-4_018, 57, -3_972), "minecraft:magma_block");
+        assert_eq!(grid.get(-4_016, 57, -3_971), "minecraft:lava[level=0]");
+        assert!(random.bounded.is_empty(), "the body must consume exactly four provider draws");
+
+        let mut blocked = VegGrid::with_footprint(0, 128, -4_000, -4_000, -24, 40);
+        for x in -4_024..-3_960 {
+            for z in -4_024..-3_960 {
+                for y in 0..=57 {
+                    blocked.seed(x, y, z, "minecraft:netherrack".to_string());
+                }
+            }
+        }
+        blocked.seed(-4_018, 57, -3_972, "minecraft:lava[level=0]".to_string());
+        let mut random = DeltaScriptRandom::new([2, 1, 2, 2]);
+        place_delta(&mut random, BlockPos { x: -4_014, y: 57, z: -3_972 }, &cfg, &mut blocked);
+        assert_eq!(blocked.get(-4_016, 57, -3_971), "minecraft:magma_block");
+    }
+
+    #[test]
+    fn captured_step4_column_stream_keeps_unit_y_draw_and_conditional_reach_order() {
+        // Captured from the accepted 26.2 server jar with seed 987_654_321
+        // through the feature wrapper: height=9, clustered=false, then these
+        // in-diamond attempts.
+        let cfg = BasaltColumnsCfg {
+            height: IntProvider::Uniform { min: 5, max: 10 },
+            reach: IntProvider::Uniform { min: 2, max: 3 },
+        };
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(987_654_321));
+        assert_eq!(cfg.height.sample(&mut random), 9);
+        assert!(!(random.next_float() < 0.9));
+        let mut seen = Vec::new();
+        visit_basalt_column_candidates(
+            &mut random,
+            BlockPos { x: 0, y: 10, z: 0 },
+            9,
+            false,
+            &cfg,
+            |pos, blocks, reach| seen.push(((pos.x, pos.y, pos.z), blocks, reach)),
+        );
+        assert_eq!(
+            seen,
+            vec![
+                ((6, 10, 1), 2, 3),
+                ((-3, 10, -1), 5, 3),
+                ((4, 10, 2), 3, 2),
+                ((-1, 10, -2), 6, 2),
+                ((8, 10, -1), 0, 3),
+                ((5, 10, -4), 0, 3),
+                ((1, 10, -6), 2, 3),
+                ((7, 10, -2), 0, 2),
+                ((-4, 10, 3), 2, 3),
+                ((1, 10, 8), 0, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn captured_replace_blob_shape_keeps_search_and_radius_streams() {
+        // Captured from the bundled server runtime with origin (0,20,0), a
+        // netherrack field through y=18, and xoroshiro seed 987_654_321:
+        // target y=18, radii=(7,3,7), then 300 basalt cells.
+        let cfg = ReplaceBlobsCfg {
+            target: "minecraft:netherrack".to_string(),
+            state: "minecraft:basalt[axis=y]".to_string(),
+            radius: IntProvider::Uniform { min: 3, max: 7 },
+        };
+        let mut grid = VegGrid::with_footprint(0, 128, 0, 0, -8, 9);
+        for x in -8..=8 {
+            for y in 2..=18 {
+                for z in -8..=8 {
+                    grid.seed(x, y, z, "minecraft:netherrack".to_string());
+                }
+            }
+        }
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(987_654_321));
+        place_replace_blobs(&mut random, BlockPos { x: 0, y: 20, z: 0 }, &cfg, &mut grid);
+        let mut written: Vec<_> = grid
+            .dirty_cells()
+            .filter(|(_, _, _, state)| *state == "minecraft:basalt[axis=y]")
+            .map(|(x, y, z, _)| (x, y, z))
+            .collect();
+        written.sort_unstable_by_key(|&(x, y, z)| (y, z, x));
+        assert_eq!(written.len(), 300);
+        assert_eq!(written.first(), Some(&(0, 15, -4)));
+        assert_eq!(written.last(), Some(&(0, 18, 7)));
+        assert_eq!(random.next_int(), 906_570_412);
+
+        let mut no_target = VegGrid::with_footprint(0, 128, 0, 0, -8, 9);
+        let mut no_target_random = WorldgenRandom::new(XoroshiroRandomSource::new(987_654_321));
+        place_replace_blobs(
+            &mut no_target_random,
+            BlockPos { x: 0, y: 20, z: 0 },
+            &cfg,
+            &mut no_target,
+        );
+        assert_eq!(no_target.dirty_len(), 0);
+        assert_eq!(no_target_random.next_int(), -1_294_795_328, "control: no target consumes no radius draws");
+    }
+
+    /// The first two body-interleaved attempts from the seed-42 Nether
+    /// packet fixture.  The field is deliberately all target material over
+    /// this small bound, so each origin reaches the body and the recorded
+    /// output distinguishes a lost radius draw from a modifier-only stream.
+    #[test]
+    fn captured_nether_index0_first_attempts_keep_body_interleaved_stream() {
+        let cfg = ReplaceBlobsCfg {
+            target: "minecraft:netherrack".to_string(),
+            state: "minecraft:basalt[axis=y]".to_string(),
+            radius: IntProvider::Uniform { min: 3, max: 7 },
+        };
+        let mut grid = VegGrid::with_footprint(0, 128, -4_000, -4_000, -8, 18);
+        for x in -4_008..-3_982 {
+            for y in 0..128 {
+                for z in -4_008..-3_982 {
+                    grid.seed(x, y, z, "minecraft:netherrack".to_string());
+                }
+            }
+        }
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = random.set_decoration_seed(42, -4_000, -4_000);
+        random.set_feature_seed(decoration_seed, 0, 7);
+        let height = HeightProvider::Uniform {
+            min: VerticalAnchor::AboveBottom(0),
+            max: VerticalAnchor::BelowTop(0),
+        };
+        let first_x = -4_000 + random.next_int_bounded(16);
+        let first_z = -4_000 + random.next_int_bounded(16);
+        let first = BlockPos {
+            x: first_x,
+            y: height.sample(&mut random, 0, 128),
+            z: first_z,
+        };
+        assert_eq!(first, BlockPos { x: -3_991, y: 118, z: -3_990 });
+        place_replace_blobs(&mut random, first, &cfg, &mut grid);
+        let first_writes: Vec<_> = grid.dirty_cells().collect();
+        assert_eq!(first_writes.len(), 535);
+        let bounds = first_writes.iter().fold(
+            (i32::MAX, i32::MAX, i32::MAX, i32::MIN, i32::MIN, i32::MIN),
+            |(min_x, min_y, min_z, max_x, max_y, max_z), &(x, y, z, _)| {
+                (min_x.min(x), min_y.min(y), min_z.min(z), max_x.max(x), max_y.max(y), max_z.max(z))
+            },
+        );
+        assert_eq!(bounds, (-3_997, 114, -3_997, -3_985, 122, -3_983));
+
+        let second_x = -4_000 + random.next_int_bounded(16);
+        let second_z = -4_000 + random.next_int_bounded(16);
+        let second = BlockPos {
+            x: second_x,
+            y: height.sample(&mut random, 0, 128),
+            z: second_z,
+        };
+        assert_eq!(second, BlockPos { x: -3_993, y: 91, z: -3_989 });
+    }
 
     #[test]
     fn potent_sulfur_simple_block_uses_state_survival_not_vegetation_support() {

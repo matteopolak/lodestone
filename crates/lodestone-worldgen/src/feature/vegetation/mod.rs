@@ -347,6 +347,22 @@ pub fn apply_decoration_steps<R: RandomSource>(
     }
 }
 
+/// Executes one decoration entry with a source seed the caller already derived.
+/// Mixed decoration steps use this to retain raw index order around ore entries.
+pub(crate) fn apply_decoration_entry_at_seed<R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    decoration_seed: i64,
+    origin: BlockPos,
+    step: i32,
+    index: usize,
+    placed: &PlacedRef,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    random.set_feature_seed(decoration_seed, index as i32, step);
+    place_placed_feature(random, origin, placed, grid, tags);
+}
+
 /// The 3×3 per-source driver for [`apply_decoration_steps`] — the same shape as
 /// [`apply_vegetal_decoration_step_3x3_per_source`], whose doc comment carries
 /// the whole rationale (rim, shared mutation, per-source biome resolution). Read
@@ -581,6 +597,14 @@ fn place_configured_feature<R: RandomSource>(
             census_bump(|c| c.other_feature += 1);
             features::place_block_blob(random, pos, cfg, grid, tags)
         }
+        ConfiguredFeature::Delta(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_delta(random, pos, cfg, grid)
+        }
+        ConfiguredFeature::BasaltColumns(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_basalt_columns(random, pos, cfg, grid)
+        }
         ConfiguredFeature::ReplaceBlobs(cfg) => {
             census_bump(|c| c.other_feature += 1);
             features::place_replace_blobs(random, pos, cfg, grid)
@@ -726,7 +750,7 @@ mod tests {
     use super::*;
     use crate::dense_grid::DenseBlockGrid;
     use crate::density::Resolver;
-    use crate::feature::IntProvider;
+    use crate::feature::{HeightProvider, IntProvider, VerticalAnchor};
     use crate::interner::StateInterner;
     use crate::overworld::BiomeCells;
     use serde_json::Value;
@@ -793,6 +817,53 @@ mod tests {
             random.next_double(),
             expected_next_double,
             "the final source pass must have a fresh wrapper cache after its decoration seed"
+        );
+    }
+
+    /// Captured from the bundled runtime for the first step-7 entry in the
+    /// seed-42 Nether fixture.  The target is deliberately absent, so the
+    /// whole placement-modifier pipeline is exercised while the body consumes
+    /// no radius draws.  This is a carrier control, not a shape oracle.
+    #[test]
+    fn captured_nether_index0_no_target_keeps_modifier_stream() {
+        let placed = PlacedRef {
+            registry_id: Some("test:netherrack_replace_blobs".to_string()),
+            placements: vec![
+                VegPlacement::Count(IntProvider::Constant(75)),
+                VegPlacement::InSquare,
+                VegPlacement::HeightRange(HeightProvider::Uniform {
+                    min: VerticalAnchor::AboveBottom(0),
+                    max: VerticalAnchor::BelowTop(0),
+                }),
+                VegPlacement::Biome,
+            ],
+            feature: Box::new(ConfiguredFeature::ReplaceBlobs(Box::new(
+                features::ReplaceBlobsCfg {
+                    target: "minecraft:netherrack".to_string(),
+                    state: "minecraft:basalt[axis=y]".to_string(),
+                    radius: IntProvider::Uniform { min: 3, max: 7 },
+                },
+            ))),
+        };
+        let mut grid = VegGrid::with_footprint(0, 128, -4_000, -4_000, 0, 16);
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = random.set_decoration_seed(42, -4_000, -4_000);
+        apply_decoration_entry_at_seed(
+            &mut random,
+            decoration_seed,
+            BlockPos { x: -4_000, y: 0, z: -4_000 },
+            7,
+            0,
+            &placed,
+            &mut grid,
+            &VegTags::default(),
+        );
+
+        assert_eq!(grid.dirty_len(), 0, "the absent target must reach the body without writes");
+        assert_eq!(
+            random.next_int(),
+            -51_016_890,
+            "the no-target body must leave the captured modifier terminal draw untouched",
         );
     }
 

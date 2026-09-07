@@ -104,11 +104,13 @@ collision, and merge draws in that order before it writes base layers and upward
 segments. `speleothem_cluster_jvm.txt` keeps an external compact cave fixture whose mixed base,
 frustum, tip, and paired-direction results catch a plausible single-column or non-Gaussian port.
 
-**One stated ordering deviation from vanilla**: because ore runs as its own earlier stage here,
-decoration steps 0–4 run after ores in this engine and before them in vanilla. Nothing in those
-steps reads a block ore placement writes in a way that changes an answer (ore replaces stone with
-ore in place, so every solidity/air test upstream sees the same thing either way) — a real
-difference with no known observable consequence, which is not the same claim as "none".
+The Nether's mixed step does not split ore from its neighbouring entries. Its scheduler applies
+each source's raw indices in order and transfers final writes across the bounded ore/decoration
+adapter boundary before the next entry reads. The padded decoration grid retains edge spill for
+the final fold while the ore adapter observes only its 3×3 read window; treating those as two
+independent completed stages would conceal order-sensitive body or input defects. Its production
+consumer control withholds only non-ore step-7/step-9 bodies while preserving their raw slots, so
+the returned dense columns prove the same mixed dispatcher carries a non-ore write end to end.
 
 ### Vegetation
 
@@ -132,6 +134,24 @@ Nether's `huge_fungus` body is also modelled: crimson and warped fungi retain th
 height, rare broad stem, probabilistic hat/decor blocks, and wart-hat hanging vines, while the
 two source biomes' feature-list indices remain unchanged. The
 remaining named gaps degrade individually rather than disabling the whole tree.
+
+The three Nether basalt-deltas records at step 4 use the same scheduler as the later vegetation
+records and retain their raw `(step, index)` identities. The delta writes a floor-held contents
+patch only when all horizontal and lower neighbours are occupied and the upper neighbour is air;
+its optional rim is decided before both patch radii are sampled. Small and large column records
+sample their height, select either the dense or sparse attempt count, then consume X, unit-range Y,
+and Z coordinates for every attempt in that order. The Y value is always zero but its draw advances
+the feature stream; a reach draw occurs only for an attempt inside the height diamond. They count as
+`other_feature` in the decoration census. The captured wrapper-stream controls in
+`feature::vegetation::features::tests` cover the delta's shifted patch/rim shape and the columns'
+conditional reach order.
+
+The step-7 netherrack replacement blobs have a separate captured single-invocation control: an
+origin at `(0,20,0)` finds its target at y 18, samples radii `(7,3,7)`, and emits 300 cells under a
+fixed xoroshiro stream. Its no-target companion confirms that the three radius draws are not consumed
+when the descending target search fails. Keep this body control distinct from the placed-feature
+modifier stream: a correct replacement shape does not prove that production chose the same origin.
+
 Root systems scan upward for a valid nested feature site, scatter the root-column replacement only
 after that nested placement succeeds, then independently scatter hanging roots from supported ceilings.
 Coral tree, claw and mushroom forms share the tagged coral state choice and water gate but retain

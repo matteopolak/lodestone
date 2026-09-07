@@ -2507,6 +2507,17 @@ impl NetherChunkSource {
         Self::WINDOW_HEIGHT
     }
 
+    /// The wrapped generator for read-only parity materialization diagnostics.
+    ///
+    /// The accessor deliberately exposes no edit map or cache state: callers
+    /// can ask the generator for its tagged decoration transitions while the
+    /// normal [`ChunkSource::column`] path retains its existing output and
+    /// ownership rules.
+    #[must_use]
+    pub fn generator(&self) -> &lodestone_worldgen::nether::NetherGenerator {
+        &self.generator
+    }
+
     fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
         ChunkColumn::from_nether(self.generator.column(cx, cz), Self::WINDOW_HEIGHT)
     }

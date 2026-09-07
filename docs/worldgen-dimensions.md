@@ -15,7 +15,7 @@ dimension source.
 ### What is shared, and the one flag everything else waited on
 
 `noise_settings/{nether,end}.json` both set `legacy_random_source: true` (the Overworld does not),
-which switches vanilla's **entire** noise stack to the legacy LCG family rather than xoroshiro —
+which switches the terrain-noise stack to the legacy LCG family rather than xoroshiro —
 `rng::Algorithm` and the `Copy` two-variant enums `AnyRandomSource`/`AnyPositionalFactory` make this a
 per-dimension constructor argument (`density::Builder::with_algorithm`) rather than a generic
 parameter threaded through every stage; the Overworld's own output is unchanged and byte-identical
@@ -25,6 +25,19 @@ pick at that height — and both
 their noise settings feed a cell geometry derived from `size_horizontal`/`size_vertical` rather than
 the Overworld's hardcoded 4-wide/8-tall assumption (the End's `2, 1` gives an **8-wide/4-tall** cell,
 the transpose of the Overworld/Nether's `1, 2`).
+
+This terrain selection does not choose the feature scheduler's carrier source.
+Per-chunk decoration always begins with a fresh xoroshiro `WorldgenRandom`, then derives the
+decoration seed and each feature stream from it. In particular, `NetherGenerator::mixed_step7_stage`
+must not reuse the legacy terrain carrier: the two seed-scale draws would move every feature placement.
+
+The Nether's mixed feature pass is `NetherGenerator::mixed_step7_stage`. It runs each source's raw
+feature entries in index order, retaining a bounded synchronization boundary between the ore reader
+and padded decoration grid after every entry. Only the 3×3 intersection is projected to the ore
+reader; decoration spill beyond that window remains in the padded grid for the final fold. Do not
+restore a split ore-then-decoration pass merely because a packet fixture initially looks closer: at
+the captured first Nether chunk, correcting this order exposed 231 additional differing cells, which
+identifies previously masked feature-body or input defects rather than a valid ordering exception.
 
 Both generators run vanilla's own stage order: structure starts → refs → beardifier → fill (shape,
 with the disabled-aquifer fluid picker) → biome → surface → carve → structure placement. Neither
