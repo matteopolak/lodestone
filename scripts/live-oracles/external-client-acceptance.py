@@ -271,9 +271,8 @@ def run_row(row: Row, args: argparse.Namespace) -> dict[str, Any]:
     write_properties(server_dir, port)
     evidence = row_dir / "external-client-evidence.json"
     server_log = row_dir / "server.log"
-    target = args.target_dir / f"protocol-{row.protocol}"
     command = [
-        "cargo", "run", "-j", str(args.jobs), "--target-dir", str(target),
+        "cargo", "run",
         "-p", "lodestone-dedicated-server", "--no-default-features", "--features", row.family,
         "--", "--protocol", str(row.protocol), str(server_dir),
     ]
@@ -324,9 +323,7 @@ def main() -> int:
     parser.add_argument("--mode", choices=("launch", "attach"), default="launch")
     parser.add_argument("--driver", default=os.environ.get("LODESTONE_EXTERNAL_CLIENT_DRIVER"))
     parser.add_argument("--output", type=pathlib.Path, help="empty directory for evidence and logs")
-    parser.add_argument("--target-dir", type=pathlib.Path, default=pathlib.Path("/private/tmp/lodestone-external-client-target"))
     parser.add_argument("--deadline-seconds", type=int, default=90)
-    parser.add_argument("--jobs", type=int, default=2)
     args = parser.parse_args()
     if args.list:
         for row in ROWS:
@@ -334,8 +331,8 @@ def main() -> int:
         return 0
     if args.output is None:
         parser.error("--output is required for an acceptance run")
-    if args.deadline_seconds <= 0 or args.jobs <= 0:
-        parser.error("--deadline-seconds and --jobs must be positive")
+    if args.deadline_seconds <= 0:
+        parser.error("--deadline-seconds must be positive")
     args.output = args.output.resolve()
     if args.output.exists():
         parser.error(f"--output must not already exist: {args.output}")

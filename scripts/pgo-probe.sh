@@ -15,23 +15,20 @@
 #   own output should land close to (machine load and thermal state will move
 #   the absolute instruction count a little; the RATIO is what to compare).
 #
-# WHY A SEPARATE PRIVATE TARGET DIR
+# WHY THE SHARED TARGET DIR
 #   PGO's `-Cprofile-generate`/`-Cprofile-use` flags change RUSTFLAGS between
-#   the three builds, and RUSTFLAGS is part of sccache's cache key -- reusing
-#   the shared target/ would mean every one of these three builds pays a full
-#   rebuild wave for whichever OTHER live agent's next ordinary build follows
-#   it (the same "flip cost" CLAUDE.md documents for the `-Z threads=8` and
-#   Cranelift RUSTFLAGS changes, but tripled since this script itself changes
-#   RUSTFLAGS three more times). A private CARGO_TARGET_DIR isolates all of
-#   that -- see docs/build-caching.md's own precedent for exactly this pattern.
+#   the three builds, so each build still pays its expected recompilation cost.
+#   The machine-wide Cargo configuration remains the single owner of the target
+#   directory, however: creating a private target under /private/tmp makes the
+#   probe invisible to the shared cache and leaves cleanup dependent on a trap.
 #
 # WHAT IT COSTS
 #   Three separate release builds of lodestone-worldgen + lodestone-worldgen-core
 #   (thin LTO, codegen-units=1, per this workspace's existing [profile.release])
-#   in one private target dir. Measured once: ~250-400 MiB total, a few minutes
-#   wall time. Deleted automatically on exit (trap below) unless
-#   PGO_PROBE_KEEP_TARGET=1 is set, in which case the path is printed instead
-#   so a human can inspect the two `.profraw` files or the merged `.profdata`.
+#   in the shared target dir. Its profile files remain in a temporary work
+#   directory and are deleted automatically on exit (trap below) unless
+#   PGO_PROBE_KEEP_TARGET=1 is set, in which case that work path is printed so
+#   a human can inspect the `.profraw` files or merged `.profdata`.
 #
 # USAGE
 #   ./scripts/pgo-probe.sh                # 3 runs per build (default)
@@ -54,7 +51,6 @@ cd "$(git rev-parse --show-toplevel)"
 
 RUNS="${PGO_PROBE_RUNS:-3}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/lodestone-pgo-probe.XXXXXX")"
-TARGET_DIR="$WORK/target"
 PROFILE_DIR="$WORK/profiles"
 mkdir -p "$PROFILE_DIR"
 
@@ -67,6 +63,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Do not let an inherited per-run override defeat the machine-wide policy.
+unset CARGO_TARGET_DIR
+
+SHARED_TARGET="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+
 TOOLCHAIN_SYSROOT="$(rustc --print sysroot)"
 LLVM_PROFDATA="$TOOLCHAIN_SYSROOT/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata"
 if [[ ! -x "$LLVM_PROFDATA" ]]; then
@@ -75,13 +76,12 @@ if [[ ! -x "$LLVM_PROFDATA" ]]; then
   exit 1
 fi
 
-BIN="$TARGET_DIR/release/examples/pgo_probe"
+BIN="$SHARED_TARGET/release/examples/pgo_probe"
 
 build() {
   local label="$1" flags="$2"
   echo "== building ($label) rustflags=[$flags] ==" >&2
-  CARGO_TARGET_DIR="$TARGET_DIR" RUSTFLAGS="$flags" \
-    cargo build --release -p lodestone-worldgen --example pgo_probe >&2
+  RUSTFLAGS="$flags" cargo build --release -p lodestone-worldgen --example pgo_probe >&2
 }
 
 # `pgo_probe` prints two lines, each prefixed `PGO_PROBE`:
@@ -121,7 +121,7 @@ run_median() {
 }
 
 echo "Runs per build: $RUNS"
-echo "Private target dir: $TARGET_DIR"
+echo "Shared target dir: $SHARED_TARGET"
 echo
 
 # 1. Baseline

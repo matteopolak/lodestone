@@ -71,6 +71,10 @@ if [[ ! -f "$ROOT/web/Cargo.toml" ]]; then
   exit 2
 fi
 
+# Use Cargo's machine-wide target directory rather than assuming this nested
+# workspace has a repository-local `web/target`.
+CARGO_TARGET="$(cd "$ROOT/web" && cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+
 echo "== Lodestone wasm bundle-size guard =="
 echo "target:  $TARGET   ceiling: $CEILING_BYTES B gzip ($CEILING_MIB MiB)"
 echo
@@ -81,7 +85,7 @@ if ! ( cd "$ROOT/web" && cargo build --release --target "$TARGET" >/dev/null 2>&
   exit 1
 fi
 
-WASM="$ROOT/web/target/$TARGET/release/lodestone-web.wasm"
+WASM="$CARGO_TARGET/$TARGET/release/lodestone-web.wasm"
 if [[ ! -f "$WASM" ]]; then
   echo "error: expected artifact not found: $WASM"
   exit 1
@@ -99,8 +103,8 @@ fi
 MEASURED="$WASM"
 if [[ -n "$WO" ]]; then
   # `-all` because rustc emits post-MVP wasm features (bulk-memory, sign-ext…).
-  if "$WO" -Oz -all "$WASM" -o "$ROOT/web/target/$TARGET/release/lodestone-web.opt.wasm" 2>/dev/null; then
-    MEASURED="$ROOT/web/target/$TARGET/release/lodestone-web.opt.wasm"
+  if "$WO" -Oz -all "$WASM" -o "$CARGO_TARGET/$TARGET/release/lodestone-web.opt.wasm" 2>/dev/null; then
+    MEASURED="$CARGO_TARGET/$TARGET/release/lodestone-web.opt.wasm"
     echo "wasm-opt: applied (-Oz) via $WO"
   fi
 else
@@ -131,7 +135,7 @@ echo
 if (( GZ > CEILING_BYTES )); then
   echo "RESULT: FAIL — gzip $GZ B exceeds ceiling $CEILING_BYTES B."
   echo "        A jump here is almost always a dependency/feature change. Inspect with:"
-  echo "          twiggy top web/target/$TARGET/release/lodestone-web.wasm   (build once with strip=false for names)"
+  echo "          twiggy top $WASM   (build once with strip=false for names)"
   exit 1
 fi
 echo "RESULT: PASS — gzip $GZ B within ceiling $CEILING_BYTES B."

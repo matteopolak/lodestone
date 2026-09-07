@@ -225,7 +225,9 @@ route or `lodestone-relay` dependency; use that build with the matching
 singleplayer-only WASM bundle above.
 
 ```sh
-web/target/release/lodestone-web-server \
+target_dir="$(cargo metadata --manifest-path web/Cargo.toml --format-version 1 --no-deps \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+"$target_dir/release/lodestone-web-server" \
   --listen 127.0.0.1:8080 --dist web/dist --target 127.0.0.1:25565
 ```
 
