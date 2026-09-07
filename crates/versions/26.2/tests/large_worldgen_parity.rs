@@ -448,6 +448,12 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
     let actual_len = actual.len();
     let reference = packet_decode_for_dimension(reference, dimension);
     let actual = packet_decode_for_dimension(actual, dimension);
+    if (reference.x, reference.z) != (actual.x, actual.z) {
+        return format!(
+            "; captured-packet diagnosis unavailable: reference packet is for ({},{}), current mismatch is ({},{})",
+            reference.x, reference.z, actual.x, actual.z,
+        );
+    }
     let mut differing_blocks = 0usize;
     let mut differing_biomes = 0usize;
     let mut non_air_reference = 0usize;
@@ -456,11 +462,48 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
     let mut block_difference_positions = Vec::new();
     let mut differing_state_pairs = std::collections::HashMap::<(u32, u32), usize>::new();
     let heightmaps_equal = reference.heightmaps == actual.heightmaps;
+    let mut heightmap_differences = Vec::new();
+    let mut heightmap_ids = reference
+        .heightmaps
+        .iter()
+        .map(|(id, _)| id)
+        .chain(actual.heightmaps.iter().map(|(id, _)| id))
+        .collect::<Vec<_>>();
+    heightmap_ids.sort_unstable();
+    heightmap_ids.dedup();
+    for id in heightmap_ids {
+        let reference_map = reference.heightmaps.get(id);
+        let actual_map = actual.heightmaps.get(id);
+        let mut differing = 0usize;
+        let mut first = None;
+        for z in 0..16 {
+            for x in 0..16 {
+                let reference_height = reference_map.map(|map| map.get(x, z));
+                let actual_height = actual_map.map(|map| map.get(x, z));
+                if reference_height != actual_height {
+                    differing += 1;
+                    first.get_or_insert((x, z, reference_height, actual_height));
+                }
+            }
+        }
+        if differing != 0 {
+            heightmap_differences.push(format!("id {id}: {differing} cells, first {first:?}"));
+        }
+    }
     let block_entities_equal = reference.block_entities == actual.block_entities;
+    let reference_stored_sky = (0..reference.light.light_section_count())
+        .filter(|&section| !matches!(reference.light.sky(section), lodestone_world::LightData::Missing))
+        .collect::<Vec<_>>();
+    let reference_stored_block = (0..reference.light.light_section_count())
+        .filter(|&section| !matches!(reference.light.block(section), lodestone_world::LightData::Missing))
+        .collect::<Vec<_>>();
     let mut differing_sky_light_cells = 0usize;
     let mut differing_block_light_cells = 0usize;
     let mut differing_sky_light_sections = Vec::new();
     let mut differing_block_light_sections = Vec::new();
+    let mut first_sky_light_differences = Vec::new();
+    let mut sky_light_difference_extents = Vec::new();
+    let mut light_representations = Vec::new();
     for section in 0..reference.column.section_count() {
         let reference_section = reference.column.section(section);
         let actual_section = actual.column.section(section);
@@ -499,9 +542,45 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
     for section in 0..reference.light.light_section_count() {
         if reference.light.sky(section) != actual.light.sky(section) {
             differing_sky_light_sections.push(section);
+            let mut first = None;
+            let mut min = (usize::MAX, usize::MAX, usize::MAX);
+            let mut max = (0usize, 0usize, 0usize);
+            let mut reference_brighter = 0usize;
+            let mut actual_brighter = 0usize;
+            for cell in 0..4096 {
+                let x = cell % 16;
+                let z = (cell / 16) % 16;
+                let y = cell / 256;
+                let reference_value = reference.light.section_light(section).sky_at(x, y, z);
+                let actual_value = actual.light.section_light(section).sky_at(x, y, z);
+                if reference_value != actual_value {
+                    first.get_or_insert((x, y, z, reference_value, actual_value));
+                    min.0 = min.0.min(x);
+                    min.1 = min.1.min(y);
+                    min.2 = min.2.min(z);
+                    max.0 = max.0.max(x);
+                    max.1 = max.1.max(y);
+                    max.2 = max.2.max(z);
+                    reference_brighter += usize::from(reference_value > actual_value);
+                    actual_brighter += usize::from(actual_value > reference_value);
+                }
+            }
+            first_sky_light_differences.push((section, first));
+            sky_light_difference_extents.push((section, min, max, reference_brighter, actual_brighter));
         }
         if reference.light.block(section) != actual.light.block(section) {
             differing_block_light_sections.push(section);
+        }
+        if reference.light.sky(section) != actual.light.sky(section)
+            || reference.light.block(section) != actual.light.block(section)
+        {
+            light_representations.push(format!(
+                "{section}: sky {:?} vs {:?}, block {:?} vs {:?}",
+                reference.light.sky(section),
+                actual.light.sky(section),
+                reference.light.block(section),
+                actual.light.block(section),
+            ));
         }
         for cell in 0..4096 {
             let x = cell % 16;
@@ -535,7 +614,7 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
         .join("; ");
     let block_difference_positions = block_difference_positions.join("; ");
     format!(
-        "; captured-packet diagnosis: reference={} bytes, Lodestone={} bytes, block cells differ={differing_blocks}, biome cells differ={differing_biomes}, heightmaps equal={heightmaps_equal}, block entities equal={block_entities_equal}, sky light cells differ={differing_sky_light_cells} in sections {differing_sky_light_sections:?}, block light cells differ={differing_block_light_cells} in sections {differing_block_light_sections:?}, non-air reference={non_air_reference}, Lodestone={non_air_actual}, first block difference={first_block_difference}, common state pairs={common_state_pairs}, differing blocks={block_difference_positions}",
+        "; captured-packet diagnosis: reference={} bytes, Lodestone={} bytes, block cells differ={differing_blocks}, biome cells differ={differing_biomes}, heightmaps equal={heightmaps_equal} ({heightmap_differences:?}), block entities equal={block_entities_equal}, reference stored sky={reference_stored_sky:?}, block={reference_stored_block:?}, sky light cells differ={differing_sky_light_cells} in sections {differing_sky_light_sections:?}, first sky differences={first_sky_light_differences:?}, sky difference extents={sky_light_difference_extents:?}, block light cells differ={differing_block_light_cells} in sections {differing_block_light_sections:?}, representations={light_representations:?}, non-air reference={non_air_reference}, Lodestone={non_air_actual}, first block difference={first_block_difference}, common state pairs={common_state_pairs}, differing blocks={block_difference_positions}",
         reference_len, actual_len,
     )
 }
