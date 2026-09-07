@@ -5623,6 +5623,47 @@ mod tests {
         }
     }
 
+    /// Worldgen's complete-column admission feeds the same queue that the
+    /// integrated tick loop drains. This covers the production handoff that a
+    /// direct fluid algorithm test cannot: the generated source crosses into
+    /// its neighbouring column only after the live loop discovers the active
+    /// area, seeds the generated column and consumes that seed.
+    #[tokio::test]
+    async fn integrated_server_generated_fluid_seed_reaches_live_tick_loop() {
+        let source = FluidFixtureSource::water_at_east_edge();
+        let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
+            Silent,
+            source,
+            (0..=0, 0..=0),
+            (8, 8),
+            0,
+            2,
+        );
+        server.world_state().tick_anchors().publish(vec![
+            crate::tick_area::TickAnchor {
+                dimension: crate::dimension::Dimension::Overworld,
+                cx: 0,
+                cz: 0,
+            },
+        ]);
+
+        let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if server
+                .resident_block_state_id(16, 1, 0)
+                .is_some_and(|state| state.name() == "minecraft:water")
+            {
+                return;
+            }
+            assert!(
+                lodestone_time::Instant::now() < deadline,
+                "the integrated tick loop reached {:?} ticks without consuming the generated fluid seed",
+                server.tick_stats().map(|stats| stats.tick_count),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
     /// The live `IntegratedServer` consumes a scheduled redstone tick held by
     /// column `(1, 0)`. This is the production consumer for the block half of
     /// the column-owned queue; the queue controls separately prove that a

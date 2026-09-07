@@ -1091,6 +1091,23 @@ impl ChunkColumn {
         &self.palette[self.blocks.get(x, y_local, z) as usize]
     }
 
+    /// Visits every stored block state in chunk-local `(x, y, z)` order.
+    ///
+    /// Worldgen fluid seeding uses this bulk view when a generated column first
+    /// becomes tick-active. Keeping the traversal here lets that path inspect
+    /// the packed sections without materialising a second flat block array.
+    pub(crate) fn for_each_block_state(&self, mut f: impl FnMut(i32, i32, i32, &str)) {
+        for section in 0..self.blocks.section_count() {
+            self.blocks.for_each_in_section(section, |cell, id| {
+                let y_local = (cell >> 8) as i32;
+                let z = ((cell >> 4) & 15) as i32;
+                let x = (cell & 15) as i32;
+                let y = self.min_y + section as i32 * SECTION_ROWS as i32 + y_local;
+                f(x, y, z, &self.palette[id as usize]);
+            });
+        }
+    }
+
     /// [`block_state`](Self::block_state), but cheap to call repeatedly on a
     /// hot read path: an `Arc<str>` clone (one atomic increment) rather than
     /// a fresh heap allocation and copy. Out-of-range Y clones the shared

@@ -1365,14 +1365,13 @@ fn run_command_block_command(
 /// own ordering contract and [`crate::random_tick`] for the random-tick
 /// selection and the one block (grass ↔ dirt) modeled end to end.
 ///
-/// **Nothing schedules a block or fluid tick yet** — `block_ticks`/
-/// `fluid_ticks` below are drained every iteration (proving the *order* is
-/// wired: block before fluid before random, every tick), but no producer in
-/// this crate calls [`ScheduledTickQueue::schedule`] on them today. Stated
-/// plainly: the scheduled-tick *queue* is
-/// real and tested in isolation (`crate::scheduled_tick`'s own test module),
-/// but is an acknowledged island here until a block behaviour (fluid flow
-/// gravity blocks, redstone) schedules into it. Random
+/// Generated liquid cells receive their initial admission pass when a column
+/// first enters `tick_area`; player edits and fluid writes continue to schedule
+/// through their placement/neighbor hooks. `block_ticks`/`fluid_ticks` below
+/// are drained every iteration (proving the order is wired: block before fluid
+/// before random, every tick). The queue is real and tested in isolation
+/// (`crate::scheduled_tick`'s own test module), and the generated-fluid bridge
+/// is covered by [`crate::fluid::schedule_generated_ticks`]. Random
 /// ticks are **not** an island: [`RandomTickScheduler::tick_chunk`]
 /// runs against `world` (the same [`ChunkSource`] the connection this loop
 /// shares a server with actually serves), and every resulting change is
@@ -1829,6 +1828,10 @@ async fn run_tick_loop_with_weather_impl<W>(
     // built-in tree across every caller.
     let command_tree = crate::commands::ServerCommands::new();
     let (tick_cx_range, tick_cz_range) = tick_area;
+    // `follow` is moved into `FollowArea`; retain the source dimension for
+    // both fluid queue entry points below so the Nether keeps its fast-lava
+    // rules instead of silently inheriting overworld timing.
+    let follow_dimension = follow.dimension;
     // **The columns this loop simulates, and they now follow the players.**
     //
     // This used to be two `RangeInclusive`s destructured above and iterated
@@ -1847,6 +1850,11 @@ async fn run_tick_loop_with_weather_impl<W>(
         tick_cx_range.clone(),
         tick_cz_range.clone(),
     );
+    // Generated columns bypass block-placement hooks, so remember which
+    // tick-area columns have received their initial fluid admission pass. The
+    // set is monotone for this loop: a pending fluid tick survives a temporary
+    // view move, while later edits use `ticks_after_edit` directly.
+    let mut fluid_seeded_chunks = HashSet::new();
     // The terrain view the natural spawner reads, rebuilt only when `area` moves
     // (or on the staleness cadence below) rather than per tick — see
     // `FollowArea::snapshot_terrain` for why that gate is the whole cost story.
@@ -2687,6 +2695,36 @@ async fn run_tick_loop_with_weather_impl<W>(
         scheduled.with(|queues| {
         let block_ticks = &mut queues.block;
         let fluid_ticks = &mut queues.fluid;
+        // A generated column is adopted as a complete snapshot, so no block
+        // placement callback has an opportunity to seed its liquids. Seed only
+        // columns entering the active area; `schedule_generated_ticks` filters
+        // settled pool interiors and leaves the ordinary queue/drain path to
+        // advance exposed water and lava.
+        if area_moved || fluid_seeded_chunks.is_empty() {
+            for owned in area.owned_chunks() {
+                let (cx, cz) = owned.chunk;
+                if !fluid_seeded_chunks.insert((cx, cz)) {
+                    continue;
+                }
+                let column = world.column(cx, cz);
+                let env = *fluid_env.get_or_insert_with(|| {
+                    crate::fluid::FluidEnv::for_dimension(
+                        follow_dimension,
+                        column.min_y,
+                        column.height,
+                    )
+                });
+                crate::fluid::schedule_generated_ticks(
+                    &*world,
+                    &column,
+                    cx,
+                    cz,
+                    env,
+                    game_tick,
+                    fluid_ticks,
+                );
+            }
+        }
         // Adopt the block ticks scheduled by a player's mutation.
         // `server::propagate_placement` runs the fan-out inline at packet time
         // (like vanilla) and cannot host what it schedules, because the queue
@@ -3519,7 +3557,11 @@ async fn run_tick_loop_with_weather_impl<W>(
             let (x, y, z) = due.pos;
             let env = *fluid_env.get_or_insert_with(|| {
                 let probe = world.column(x.div_euclid(16), z.div_euclid(16));
-                crate::fluid::FluidEnv::overworld_in(probe.min_y, probe.height)
+                crate::fluid::FluidEnv::for_dimension(
+                    follow_dimension,
+                    probe.min_y,
+                    probe.height,
+                )
             });
             fluid_changes.clear();
             crate::fluid::run_scheduled_tick(
