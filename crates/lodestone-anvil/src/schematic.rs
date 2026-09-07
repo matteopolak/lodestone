@@ -89,7 +89,10 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 
-use lodestone_core::{Nbt, NbtTag, Reader, read_named_nbt};
+use lodestone_core::{Nbt, Reader, read_named_nbt};
+
+#[cfg(test)]
+use lodestone_core::NbtTag;
 
 use crate::{Error, Result};
 

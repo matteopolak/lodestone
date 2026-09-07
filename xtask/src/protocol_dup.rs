@@ -158,6 +158,7 @@ pub struct AdjacencyRow {
     pub gone: usize,
 }
 
+#[derive(Debug)]
 pub struct ProtocolDupReport {
     pub struct_totals: BTreeMap<String, usize>,
     pub file_rows: Vec<FileSimilarityRow>,
