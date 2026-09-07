@@ -984,6 +984,28 @@ pub fn apply_ore_step<R: RandomSource>(
     apply_one_source(random, seed, input, ores, STEP_UNDERGROUND_ORES, view)
 }
 
+/// Executes one ore entry after its caller has already derived this source's
+/// decoration seed. This is the seam for dimensions whose ore entries share a
+/// step with non-ore entries: it preserves the caller's raw `(step, index)`
+/// order without deriving a second source seed or walking sibling entries.
+pub(crate) fn apply_ore_entry_at_seed<R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    decoration_seed: i64,
+    input: &OreInput<'_>,
+    feature_step: i32,
+    ore: &PlacedOre,
+    view: &mut RegionView<'_>,
+) {
+    let ctx = Ctx {
+        min_gen_y: input.min_gen_y,
+        gen_depth: input.gen_depth,
+        biome_allows: input.biome_allows,
+        feature_id: ore.registry_id.as_deref(),
+    };
+    random.set_feature_seed(decoration_seed, ore.index as i32, feature_step);
+    place_placed_feature(random, input.origin(), ore, input, &ctx, view);
+}
+
 /// The complete 3×3 neighbourhood driver for one CENTRE chunk.
 ///
 /// Vanilla's own one-chunk-into-neighbours write spill at the FEATURES generation stage
@@ -1091,6 +1113,7 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
         in_tag,
         biome_allows,
         STEP_UNDERGROUND_ORES,
+        None,
         view,
         ores_for_source,
     )
@@ -1104,6 +1127,11 @@ pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
 /// must pass 7 here: the feature-seed derivation includes the step number, and
 /// using 6 gives every ore a plausible but unrelated blob even though its list
 /// index is right.
+///
+/// `selected_source` is the bounded parity-materializer filter. It lives in
+/// this shared source loop, rather than beside a one-source helper, so the
+/// parity seam cannot drift from production's source construction, carrier
+/// lifecycle or per-source list lookup.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_ore_step_3x3_per_source_at_step<'a, R: RandomSource>(
     random: &mut WorldgenRandom<R>,
@@ -1120,6 +1148,7 @@ pub fn apply_ore_step_3x3_per_source_at_step<'a, R: RandomSource>(
     in_tag: &dyn Fn(&str, &str) -> bool,
     biome_allows: Option<&dyn Fn(BlockPos, &str) -> bool>,
     feature_step: i32,
+    selected_source: Option<(i32, i32)>,
     view: &mut RegionView<'_>,
     ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
 ) -> i64 {
@@ -1128,6 +1157,9 @@ pub fn apply_ore_step_3x3_per_source_at_step<'a, R: RandomSource>(
         for dz in -1..=1 {
             let source_x = center_x + dx;
             let source_z = center_z + dz;
+            if selected_source.is_some_and(|source| source != (source_x, source_z)) {
+                continue;
+            }
             random.begin_decoration_source();
             let input = OreInput {
                 chunk_x: source_x,
@@ -1833,6 +1865,58 @@ mod tests {
     use crate::rng::{LegacyRandomSource, WorldgenRandom, XoroshiroRandomSource};
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    #[test]
+    fn one_entry_ore_seam_keeps_the_callers_seed_and_sibling_streams_separate() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let grid = DenseBlockGrid::with_interner(Arc::clone(&interner), -16, 0, -16, 48, 8, 48, air);
+        let mut view = RegionView::over_region_grid(&grid, 0, 8);
+        let mut heights = RegionHeights::unset();
+        for z in REGION_MIN..REGION_MAX {
+            for x in REGION_MIN..REGION_MAX {
+                heights.set(x, z, 0);
+            }
+        }
+        let input = OreInput {
+            chunk_x: 0,
+            chunk_z: 0,
+            center_x: 0,
+            center_z: 0,
+            min_y: 0,
+            height: 8,
+            min_gen_y: 0,
+            gen_depth: 8,
+            read_min: REGION_MIN,
+            read_max: REGION_MAX,
+            ocean_floor_wg: &heights,
+            in_tag: &|_, _| false,
+            biome_allows: None,
+        };
+        let entry = |index| PlacedOre {
+            registry_id: None,
+            index,
+            placements: vec![Placement::Count(IntProvider::Constant(0))],
+            config: OreConfig {
+                size: 1,
+                discard_chance_on_air_exposure: 0.0,
+                targets: Vec::new(),
+            },
+        };
+        let mut expected = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = expected.set_decoration_seed(42, 0, 0);
+        expected.set_feature_seed(decoration_seed, 2, 7);
+        let after_first = expected.next_int();
+        expected.set_feature_seed(decoration_seed, 5, 7);
+        let after_second = expected.next_int();
+
+        let mut actual = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let caller_seed = actual.set_decoration_seed(42, 0, 0);
+        apply_ore_entry_at_seed(&mut actual, caller_seed, &input, 7, &entry(2), &mut view);
+        assert_eq!(actual.next_int(), after_first, "one entry must not derive a second source seed");
+        apply_ore_entry_at_seed(&mut actual, caller_seed, &input, 7, &entry(5), &mut view);
+        assert_eq!(actual.next_int(), after_second, "one entry must not walk or consume its sibling");
+    }
 
     #[test]
     fn biome_modifier_uses_the_candidate_feature_membership() {

@@ -35,10 +35,19 @@
 
 use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 
-use crate::feature::{PlacedOre, apply_ore_step_3x3_per_source};
+use crate::feature::{PlacedOre, apply_ore_step_3x3_per_source, apply_ore_step_3x3_per_source_at_step};
 use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
 
 use super::OverworldGenerator;
+
+/// Final source-tagged ore transition used only by the bounded parity
+/// materializer. State text prevents generator-local interner ids escaping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParityOreSpill {
+    pub source: (i32, i32),
+    pub position: (i32, i32, i32),
+    pub state: String,
+}
 
 impl OverworldGenerator {
     /// Stage 5: the real `UNDERGROUND_ORES` 3×3 neighbourhood
@@ -64,8 +73,32 @@ impl OverworldGenerator {
         center_world: crate::dense_grid::DenseBlockGrid,
         center_heights: &[i32; 256],
     ) -> crate::dense_grid::DenseBlockGrid {
+        self.ore_stage_with_source(cx, cz, center_world, center_heights, None).0
+    }
+
+    /// Runs exactly one source through the normal ore dispatcher and exposes
+    /// its final overlay for parity materialization. Normal generation passes
+    /// `None` above and retains the unfiltered 3x3 path.
+    #[must_use]
+    pub fn parity_source_ore_spills(
+        &self, target_x: i32, target_z: i32, source_x: i32, source_z: i32,
+    ) -> Vec<ParityOreSpill> {
+        assert!((target_x - source_x).abs() <= 1 && (target_z - source_z).abs() <= 1,
+            "a source must lie in the target ore dispatch window");
+        let pre = self.pre_ore_stage(target_x, target_z);
+        self.ore_stage_with_source(target_x, target_z, (*pre.0).clone(), &pre.1, Some((source_x, source_z))).1
+    }
+
+    fn ore_stage_with_source(
+        &self,
+        cx: i32,
+        cz: i32,
+        center_world: crate::dense_grid::DenseBlockGrid,
+        center_heights: &[i32; 256],
+        selected_source: Option<(i32, i32)>,
+    ) -> (crate::dense_grid::DenseBlockGrid, Vec<ParityOreSpill>) {
         if self.ore_definitions.is_empty() {
-            return center_world;
+            return (center_world, Vec::new());
         }
         // Entered AFTER the no-data early return, deliberately: `stage_entered`
         // must count stages that did real work, not stages that were called.
@@ -223,23 +256,29 @@ impl OverworldGenerator {
         // correct" from "does real 3x3 spill widen the gap against a
         // single-source oracle" — see docs/worldgen-parity.md. Not used by
         // `column()`'s normal path.
-        if std::env::var("LODESTONE_ORE_SINGLE_SOURCE_DEBUG").is_ok() {
+        if let Some((source_x, source_z)) = selected_source {
+            apply_ore_step_3x3_per_source_at_step(
+                &mut random,
+                self.seed,
+                cx,
+                cz,
+                self.min_y,
+                self.height,
+                self.min_y,
+                self.height,
+                crate::feature::ORE_READ_MIN,
+                crate::feature::ORE_READ_MAX,
+                &ocean_floor_wg,
+                &in_tag,
+                Some(&biome_allows),
+                crate::feature::STEP_UNDERGROUND_ORES,
+                Some((source_x, source_z)),
+                &mut view,
+                &ores_for_source,
+            );
+        } else if std::env::var("LODESTONE_ORE_SINGLE_SOURCE_DEBUG").is_ok() {
             let ores = ores_for_source(cx, cz);
-            let input = crate::feature::OreInput {
-                chunk_x: cx,
-                chunk_z: cz,
-                center_x: cx,
-                center_z: cz,
-                min_y: self.min_y,
-                height: self.height,
-                min_gen_y: self.min_y,
-                gen_depth: self.height,
-                read_min: crate::feature::ORE_READ_MIN,
-                read_max: crate::feature::ORE_READ_MAX,
-                ocean_floor_wg: &ocean_floor_wg,
-                in_tag: &in_tag,
-                biome_allows: Some(&biome_allows),
-            };
+            let input = crate::feature::OreInput { chunk_x: cx, chunk_z: cz, center_x: cx, center_z: cz, min_y: self.min_y, height: self.height, min_gen_y: self.min_y, gen_depth: self.height, read_min: crate::feature::ORE_READ_MIN, read_max: crate::feature::ORE_READ_MAX, ocean_floor_wg: &ocean_floor_wg, in_tag: &in_tag, biome_allows: Some(&biome_allows) };
             crate::feature::apply_ore_step(&mut random, self.seed, &input, &mut view, ores);
         } else {
             apply_ore_step_3x3_per_source(
@@ -273,6 +312,13 @@ impl OverworldGenerator {
         // to the palette sits at a written cell, and the new states' first-write
         // sequence is unchanged as long as the written cells are visited in the
         // same order. See `RegionView::centre_writes_in_scan_order`.
+        let parity_spills = selected_source.map_or_else(Vec::new, |source| {
+            view.writes_in_scan_order().into_iter().map(|(lx, y, lz, state)| ParityOreSpill {
+                source,
+                position: (cx * 16 + lx, y, cz * 16 + lz),
+                state: self.interner.name_of(state).to_owned(),
+            }).collect()
+        });
         let writes = view.centre_writes_in_scan_order();
         // Releases the view's borrow of `center_world` and of `wide_pre`.
         drop(view);
@@ -280,7 +326,7 @@ impl OverworldGenerator {
         for (lx, y, lz, state) in writes {
             center_world.set_id(cx * 16 + lx, y, cz * 16 + lz, state);
         }
-        center_world
+        (center_world, parity_spills)
     }
 
     /// Copies one source chunk's own `OCEAN_FLOOR_WG` heightmap into the shared

@@ -155,6 +155,73 @@ impl Resolver for NoFeatures {
     }
 }
 
+/// The production resolver with only non-ore entries from steps 7 and 9
+/// withheld. Entries stay in their source arrays as unresolved ids, so their
+/// raw indices — and therefore every remaining ore stream — are unchanged.
+/// Comparing it with the complete resolver proves those entries survive the
+/// mixed dispatcher and reach the returned dense column.
+struct NoLateDecorations(NetherAssets);
+
+impl NoLateDecorations {
+    fn is_ore_entry(&self, entry: &str) -> bool {
+        let placed = self.0.placed_feature(entry);
+        placed
+            .get("feature")
+            .and_then(Value::as_str)
+            .is_some_and(|id| {
+                self.0
+                    .configured_feature(id)
+                    .get("type")
+                    .and_then(Value::as_str)
+                    == Some("minecraft:ore")
+            })
+    }
+}
+
+impl Resolver for NoLateDecorations {
+    fn density_function(&self, id: &str) -> Value {
+        self.0.density_function(id)
+    }
+    fn noise(&self, id: &str) -> NoiseParams {
+        self.0.noise(id)
+    }
+    fn biome_parameters(&self) -> Value {
+        self.0.biome_parameters()
+    }
+    fn biome_document(&self, id: &str) -> Value {
+        let mut document = self.0.biome_document(id);
+        let Some(steps) = document.get_mut("features").and_then(Value::as_array_mut) else {
+            return document;
+        };
+        for step in [7usize, 9] {
+            let Some(entries) = steps.get_mut(step).and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for entry in entries {
+                let Some(placed) = entry.as_str() else {
+                    continue;
+                };
+                if step == 9 || !self.is_ore_entry(placed) {
+                    *entry = Value::String("lodestone:withheld_for_production_control".to_string());
+                }
+            }
+        }
+        document
+    }
+    fn configured_carver(&self, id: &str) -> Value {
+        self.0.configured_carver(id)
+    }
+    fn configured_feature(&self, id: &str) -> Value {
+        self.0.configured_feature(id)
+    }
+    fn placed_feature(&self, id: &str) -> Value {
+        self.0.placed_feature(id)
+    }
+    fn block_tag(&self, id: &str) -> Value {
+        self.0.block_tag(id)
+    }
+}
+
 const SEED: i64 = -195_764_831;
 
 fn assets_root() -> PathBuf {
@@ -558,13 +625,19 @@ fn nether_features_reach_production_columns() {
         &settings,
         &NoFeatures(NetherAssets { root: assets_root() }),
     );
+    let without_late_decorations = NetherGenerator::new(
+        SEED,
+        &settings,
+        &NoLateDecorations(NetherAssets { root: assets_root() }),
+    );
     let mut changed = 0usize;
     let mut first = None;
     let mut ore_changed = 0usize;
-    let mut decoration_changed = 0usize;
+    let mut late_decoration_changed = 0usize;
     for &(cx, cz) in o.bedrock.keys() {
         let with = decorated.column(cx, cz);
         let without = undecorated.column(cx, cz);
+        let without_late = without_late_decorations.column(cx, cz);
         for y in with.min_y()..with.min_y() + with.height() {
             for lz in 0..16 {
                 for lx in 0..16 {
@@ -583,16 +656,9 @@ fn nether_features_reach_production_columns() {
                         ) {
                             ore_changed += 1;
                         }
-                        if matches!(
-                            state,
-                            "minecraft:fire"
-                                | "minecraft:soul_fire"
-                                | "minecraft:glowstone"
-                                | "minecraft:brown_mushroom"
-                                | "minecraft:red_mushroom"
-                        ) {
-                            decoration_changed += 1;
-                        }
+                    }
+                    if with.block_state(lx, y, lz) != without_late.block_state(lx, y, lz) {
+                        late_decoration_changed += 1;
                     }
                 }
             }
@@ -605,8 +671,8 @@ fn nether_features_reach_production_columns() {
     let (cx, cz, lx, y, lz, state) = first.expect("changed above");
     assert!(ore_changed > 0, "no step-7 ore reached the production chunks");
     assert!(
-        decoration_changed > 0,
-        "no non-ore step-7/step-9 feature reached the production chunks"
+        late_decoration_changed > 0,
+        "non-ore step-7/step-9 entries did not change a production column"
     );
     assert!(
         state != "minecraft:bedrock",

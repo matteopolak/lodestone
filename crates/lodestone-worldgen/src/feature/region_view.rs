@@ -749,6 +749,24 @@ impl<'a> RegionView<'a> {
         self.overlay.len()
     }
 
+    /// Every write held by this view's overlay, in deterministic `(x, z, y)`
+    /// order.
+    ///
+    /// Unlike [`Self::centre_writes_in_scan_order`], this includes writes into
+    /// every driven source column. Consumers that transfer a complete
+    /// decoration result into another medium need the final overlay value at
+    /// each coordinate, not the caller-specific centre subset.
+    #[must_use]
+    pub fn writes_in_scan_order(&self) -> Vec<(i32, i32, i32, StateId)> {
+        let mut out: Vec<(i32, i32, i32, StateId)> = self
+            .overlay
+            .iter()
+            .map(|(&(lx, y, lz), &id)| (lx, y, lz, id))
+            .collect();
+        out.sort_unstable_by_key(|&(lx, y, lz, _)| (lx, lz, y));
+        out
+    }
+
     /// Every write that landed in the **centre** chunk's own 16×16 columns, in
     /// `(y, lz, lx)` order — what the caller folds back into the one grid it
     /// owns.
@@ -1298,6 +1316,29 @@ mod tests {
         assert_eq!(
             keys,
             vec![(2, 0, 1), (2, 3, 1), (2, 3, 9), (6, 1, 0), (6, 1, 3)],
+        );
+    }
+
+    #[test]
+    fn all_writes_have_a_stable_x_then_z_then_y_order() {
+        let interner = Arc::new(StateInterner::new());
+        let grids: Vec<DenseBlockGrid> = (0..9)
+            .map(|_| chunk_grid(&interner, 0, 0, "minecraft:stone"))
+            .collect();
+        let mut view = RegionView::over_sources(Arc::clone(&interner), 0, 0, 0, 8, |dx, dz| {
+            grids.get(((dx + 1) * 3 + (dz + 1)) as usize)
+        });
+        for &(lx, y, lz) in &[(3, 6, 1), (-1, 2, 3), (3, 2, 1), (1, 2, -3), (-1, 6, 3)] {
+            view.set(lx, y, lz, "minecraft:diamond_ore");
+        }
+        let keys: Vec<(i32, i32, i32)> = view
+            .writes_in_scan_order()
+            .into_iter()
+            .map(|(lx, y, lz, _)| (lx, lz, y))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![(-1, 3, 2), (-1, 3, 6), (1, -3, 2), (3, 1, 2), (3, 1, 6)],
         );
     }
 

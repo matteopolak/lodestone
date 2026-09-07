@@ -10,6 +10,56 @@ use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use support::large_parity_manifest::{Dimension, HEADER_BYTES, read_header, payload_digest_from_header, semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension, semantic_record, semantic_record_for_dimension, semantic_record_v5_for_dimension, verify_payload};
 
+type ChunkPos = (i32, i32);
+type AbsoluteCell = (i32, i32, i32);
+
+/// Stateful boundary used by the parity materializer while a bounded tile is
+/// still settling. A completed source may modify a generated, not-yet-encoded
+/// column; it may not recreate an evicted column or revise an encoded one.
+#[derive(Default)]
+struct ParityLifecycle {
+    resident: std::collections::BTreeMap<ChunkPos, std::collections::BTreeMap<AbsoluteCell, String>>,
+    encoded: std::collections::BTreeSet<ChunkPos>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpillDisposition {
+    Stored,
+    TargetNotResident,
+    TargetAlreadyEncoded,
+}
+
+impl ParityLifecycle {
+    fn seed_resident(&mut self, cell: AbsoluteCell, state: &str) {
+        self.resident
+            .entry((cell.0.div_euclid(16), cell.2.div_euclid(16)))
+            .or_default()
+            .insert(cell, state.to_owned());
+    }
+
+    fn apply_spill(&mut self, cell: AbsoluteCell, state: &str) -> SpillDisposition {
+        let target = (cell.0.div_euclid(16), cell.2.div_euclid(16));
+        if self.encoded.contains(&target) {
+            return SpillDisposition::TargetAlreadyEncoded;
+        }
+        let Some(column) = self.resident.get_mut(&target) else {
+            return SpillDisposition::TargetNotResident;
+        };
+        column.insert(cell, state.to_owned());
+        SpillDisposition::Stored
+    }
+
+    fn encode(&mut self, cell: AbsoluteCell) -> String {
+        let target = (cell.0.div_euclid(16), cell.2.div_euclid(16));
+        self.encoded.insert(target);
+        self.resident
+            .get(&target)
+            .and_then(|column| column.get(&cell))
+            .expect("the materializer only encodes resident generated cells")
+            .clone()
+    }
+}
+
 #[test]
 fn canonical_grid_has_the_requested_square_and_one_chunk_halo() {
     use support::large_parity_manifest::{GRID_COUNT, GRID_MAX, GRID_MIN, GRID_SIDE};
@@ -29,6 +79,88 @@ fn sha256_control_and_bit_flip_are_detected() {
     verify_payload(&payload[..], 1, good).expect("control payload must authenticate");
     let mut corrupt = payload; corrupt[1] ^= 1;
     assert!(verify_payload(&corrupt[..], 1, good).is_err(), "one changed fingerprint bit must be detected");
+}
+
+/// The external materializer's status order is observable at this tile: the
+/// western source completes before the centre is encoded, while the northern
+/// source completes after it. The first spill must be retained and the second
+/// must be rejected. These are captured Nether cells, not synthetic geometry.
+#[test]
+fn lifecycle_retains_earlier_spills_and_rejects_later_spills() {
+    let netherrack = "minecraft:netherrack";
+    let basalt = "minecraft:basalt[axis=y]";
+    let source = nether_chunk_source(42);
+
+    let mut earlier = ParityLifecycle::default();
+    let include = (-4000, 64, -4000); // centre (-250,-250), local (0,64,0)
+    let include_spill = source
+        .generator()
+        .parity_source_spills(-250, -250, -251, -250)
+        .into_iter()
+        .find(|spill| spill.position == include)
+        .expect("captured western source spill must be produced by the real dispatcher");
+    assert_eq!(include_spill.source, (-251, -250));
+    assert_eq!(include_spill.state, basalt);
+    earlier.seed_resident(include, netherrack);
+    assert_eq!(
+        earlier.apply_spill(include_spill.position, &include_spill.state),
+        SpillDisposition::Stored,
+        "earlier source (-251,-250), step 7/raw 0 writes basalt before the target reaches Full",
+    );
+    assert_eq!(earlier.encode(include), basalt, "the earlier neighbour's direct spill must reach the packet");
+
+    let mut later = ParityLifecycle::default();
+    let exclude = (-3991, 14, -4000); // centre (-250,-250), local (9,14,0)
+    let exclude_spill = source
+        .generator()
+        .parity_source_spills(-250, -250, -250, -251)
+        .into_iter()
+        .find(|spill| spill.position == exclude)
+        .expect("captured northern source spill must be produced by the real dispatcher");
+    assert_eq!(exclude_spill.source, (-250, -251));
+    assert_eq!(exclude_spill.state, basalt);
+    later.seed_resident(exclude, netherrack);
+    assert_eq!(later.encode(exclude), netherrack, "the frozen target reached Full as netherrack");
+    assert_eq!(
+        later.apply_spill(exclude_spill.position, &exclude_spill.state),
+        SpillDisposition::TargetAlreadyEncoded,
+        "later source (-250,-251) must not revise an encoded target",
+    );
+    assert_eq!(later.encode(exclude), netherrack, "the rejected later spill must not change the packet state");
+
+    let mut absent = ParityLifecycle::default();
+    assert_eq!(
+        absent.apply_spill(include, basalt),
+        SpillDisposition::TargetNotResident,
+        "a spill must never instantiate an ungenerated destination column",
+    );
+}
+
+#[test]
+fn overworld_lifecycle_geometry_keeps_the_settled_andesite_not_immediate_diorite() {
+    let target = (-250, -250);
+    let cell = (-3991, 10, -4000); // local (9,10,0), accepted/fresh 18x18 witness
+    let source = overworld_chunk_source(42);
+    let andesite = source.generator().parity_source_ore_spills(target.0, target.1, -250, -251)
+        .into_iter().find(|spill| spill.position == cell)
+        .expect("the earlier accepted-world source must reach the witness cell");
+    let diorite = source.generator().parity_source_ore_spills(target.0, target.1, -250, -250)
+        .into_iter().find(|spill| spill.position == cell)
+        .expect("the immediate 3x3 centre source must reach the witness cell");
+    assert_eq!(andesite.state, "minecraft:andesite");
+    assert_eq!(diorite.state, "minecraft:diorite");
+
+    let mut settled = ParityLifecycle::default();
+    settled.seed_resident(cell, "minecraft:stone");
+    assert_eq!(settled.apply_spill(andesite.position, &andesite.state), SpillDisposition::Stored);
+    assert_eq!(settled.encode(cell), "minecraft:andesite", "accepted/fresh 18x18 state");
+    assert_eq!(settled.apply_spill(diorite.position, &diorite.state), SpillDisposition::TargetAlreadyEncoded);
+
+    let mut immediate = ParityLifecycle::default();
+    immediate.seed_resident(cell, "minecraft:stone");
+    assert_eq!(immediate.apply_spill(andesite.position, &andesite.state), SpillDisposition::Stored);
+    assert_eq!(immediate.apply_spill(diorite.position, &diorite.state), SpillDisposition::Stored);
+    assert_eq!(immediate.encode(cell), "minecraft:diorite", "synthetic immediate 3x3 negative geometry");
 }
 
 #[test]

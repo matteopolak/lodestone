@@ -22,7 +22,8 @@
 //!
 //! | | Overworld | Nether |
 //! |---|---|---|
-//! | RNG family | xoroshiro | **legacy** (`legacy_random_source: true`) |
+//! | terrain RNG family | xoroshiro | **legacy** (`legacy_random_source: true`) |
+//! | decoration RNG family | xoroshiro | xoroshiro |
 //! | climate channels | 6 real | temperature + vegetation; the other four are `0.0` constants in the router |
 //! | biome noises | positional factory forked from a hash of the noise id | **`LegacyRandomSource(seed+0)` / `(seed+1)`**, legacy-init `NormalNoise` |
 //! | aquifer | vanilla's own noise-based aquifer | **disabled** — global fluid picker only |
@@ -86,9 +87,12 @@
 //! springs, fire, glowstone and mushrooms share raw indices with ore entries.
 //! This module separates those two bodies while preserving every raw index and
 //! seeding both with step 7; deleting the non-ore entries would shift every ore
-//! stream. Step 9 is driven through the existing vegetation interpreter. Both
-//! passes use `WorldgenRandom<LegacyRandomSource>` because this dimension's
-//! settings select the legacy random family.
+//! stream. Step 9 is driven through the existing vegetation interpreter. The
+//! terrain setting selects the legacy family for terrain construction, but the
+//! decoration scheduler derives each feature stream through
+//! `WorldgenRandom<XoroshiroRandomSource>` in every dimension. Do not reuse the
+//! terrain carrier here: its two decoration-seed scale draws relocate every
+//! feature even when the later placement body is otherwise identical.
 //!
 //! # How to change it
 //!
@@ -111,7 +115,7 @@
 //! Nothing version-specific.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -122,7 +126,7 @@ use crate::carver::{CarveGrid, CarverConfig, NoObserver};
 use crate::density::{Builder, Resolver};
 use crate::engine::Program;
 use crate::feature::PlacedOre;
-use crate::interner::StateInterner;
+use crate::interner::{StateId, StateInterner};
 use crate::overworld::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
 use crate::structure::beardifier::Beardifier;
 use crate::structure::{HeightmapKind, PieceRefinement, StartContext, StructureRegistry, StructureStart};
@@ -154,6 +158,22 @@ type PreDecorationResult = (
 );
 
 type DecorationFeatures = Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>;
+
+/// The final block state one completed decoration source wrote in a target's
+/// decoration region. The bounded parity materializer consumes these
+/// transitions in its captured completion order; normal chunk generation
+/// folds only the centre slice back into its returned [`NetherColumn`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParityDecorationSpill {
+    /// Chunk whose raw decoration entries produced this write.
+    pub source: (i32, i32),
+    /// Absolute block coordinate and canonical final state after that source
+    /// completed. Text is intentional at this public boundary: `StateId` is
+    /// local to this generator's interner and cannot be transferred into the
+    /// packet/source layer by its raw number.
+    pub position: (i32, i32, i32),
+    pub state: String,
+}
 
 impl NetherColumn {
     /// World Y of the lowest block row (0 for the Nether).
@@ -279,7 +299,6 @@ pub struct NetherGenerator {
     /// Overworld needed a view-pinned one.
     starts: Mutex<HashMap<(i32, i32), Arc<Vec<Arc<StructureStart>>>>>,
     pre_decoration: Mutex<HashMap<(i32, i32), Arc<PreDecorationResult>>>,
-    post_ore: Mutex<HashMap<(i32, i32), Arc<crate::dense_grid::DenseBlockGrid>>>,
 }
 
 /// Entries [`NetherGenerator::starts`] holds before it is cleared wholesale.
@@ -304,6 +323,98 @@ const PORTAL_TERRAIN_REACH: i32 = 14;
 /// 16×128×16 grids in a long-lived generator.
 const DECORATION_MEMO_CEILING: usize = 32;
 
+/// The feature scheduler's carrier source. Terrain construction in this
+/// dimension uses the legacy family, but per-chunk decoration seeds are derived
+/// through xoroshiro.
+fn decoration_random() -> crate::rng::WorldgenRandom<crate::rng::XoroshiroRandomSource> {
+    crate::rng::WorldgenRandom::new(crate::rng::XoroshiroRandomSource::new(0))
+}
+
+/// Which representation produced the entry that just completed.
+#[derive(Clone, Copy)]
+enum MixedEntryWriter {
+    Decoration,
+    Ore,
+}
+
+#[derive(Default)]
+struct MixedSync {
+    projected: usize,
+    retained_outside: usize,
+}
+
+/// Makes the entry that just finished visible through the other placement
+/// adapter before another raw feature entry begins. Ore placement reads a
+/// bounded `RegionView`, while the decoration interpreter keeps a padded
+/// sparse grid for feature-local height and neighbour queries; neither is an
+/// authoritative overlay on its own. This is the sole bridge between them.
+///
+/// The bridge transfers each entry's final value once per cell. Intermediate
+/// writes inside an entry are not observable until that entry returns, and
+/// replaying them would falsely make duplicate writes part of the next entry's
+/// state. The padded decoration footprint deliberately retains spill beyond
+/// the ore reader's 3×3 window; only the representable intersection is
+/// projected, and every coordinate in that intersection must land.
+fn synchronize_mixed_entry(
+    writer: MixedEntryWriter,
+    grid: &mut crate::feature::vegetation::VegGrid,
+    ore_view: &mut crate::feature::region_view::RegionView<'_>,
+    centre_x: i32,
+    centre_z: i32,
+    grid_cursor: &mut usize,
+    ore_transferred: &mut HashMap<(i32, i32, i32), StateId>,
+) -> MixedSync {
+    match writer {
+        MixedEntryWriter::Decoration => {
+            let end = grid.dirty_len();
+            let mut final_cells = BTreeMap::new();
+            for (x, y, z, state) in grid.dirty_cell_ids().skip(*grid_cursor) {
+                final_cells.insert((x, y, z), state);
+            }
+            *grid_cursor = end;
+            let mut sync = MixedSync::default();
+            for ((x, y, z), state) in &final_cells {
+                let lx = x - centre_x * 16;
+                let lz = z - centre_z * 16;
+                if !(crate::feature::REGION_MIN..crate::feature::REGION_MAX).contains(&lx)
+                    || !(crate::feature::REGION_MIN..crate::feature::REGION_MAX).contains(&lz)
+                {
+                    sync.retained_outside += 1;
+                    continue;
+                }
+                assert!(
+                    ore_view.set_id(lx, *y, lz, *state),
+                    "mixed decoration entry dropped an in-region write at ({x},{y},{z})"
+                );
+                ore_transferred.insert((*x, *y, *z), *state);
+                sync.projected += 1;
+            }
+            sync
+        }
+        MixedEntryWriter::Ore => {
+            let mut changed = Vec::new();
+            for (lx, y, lz, state) in ore_view.writes_in_scan_order() {
+                let x = centre_x * 16 + lx;
+                let z = centre_z * 16 + lz;
+                if ore_transferred.insert((x, y, z), state) != Some(state) {
+                    changed.push((x, y, z, state));
+                }
+            }
+            for (x, y, z, state) in &changed {
+                assert!(
+                    grid.set_id_if_in_bounds(*x, *y, *z, *state),
+                    "mixed ore entry wrote outside the decoration footprint at ({x},{y},{z})"
+                );
+            }
+            *grid_cursor = grid.dirty_len();
+            MixedSync {
+                projected: changed.len(),
+                retained_outside: 0,
+            }
+        }
+    }
+}
+
 /// Splits the Nether's deliberately mixed step 7 without changing the raw
 /// `(step, index)` identity either engine seeds from. Step 9 contains the
 /// usual vegetal pass. This is dimension-specific data interpretation: the
@@ -319,7 +430,7 @@ fn build_nether_feature_lists(
     };
     let mut ores = Vec::new();
     let mut decoration = Vec::new();
-    for &step in &[7_i32, crate::feature::STEP_VEGETAL_DECORATION] {
+    for &step in &[4_i32, 7, crate::feature::STEP_VEGETAL_DECORATION] {
         let Some(entries) = steps.get(step as usize).and_then(Value::as_array) else {
             continue;
         };
@@ -493,7 +604,6 @@ impl NetherGenerator {
             structures,
             starts: Mutex::new(HashMap::new()),
             pre_decoration: Mutex::new(HashMap::new()),
-            post_ore: Mutex::new(HashMap::new()),
         }
     }
 
@@ -501,7 +611,7 @@ impl NetherGenerator {
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> NetherColumn {
         let pre = self.pre_decoration_stage(cx, cz);
-        let world = self.decoration_stage(cx, cz, self.post_ore_world(cx, cz));
+        let world = self.mixed_step7_stage(cx, cz, (*pre.0).clone(), &pre.1);
 
         let (palette, blocks) = world.into_palette_and_blocks();
         NetherColumn {
@@ -511,6 +621,172 @@ impl NetherGenerator {
             blocks,
             biome_quarts: pre.2.clone(),
         }
+    }
+
+    /// Runs one source chunk's existing mixed decoration dispatcher against a
+    /// target's pre-decoration field and returns its final cross-column writes.
+    ///
+    /// This is deliberately a parity-materializer seam rather than a second
+    /// generator: it filters the same raw-entry loop [`Self::column`] uses,
+    /// including the shared ore/non-ore ordering and RNG carriers. Production
+    /// callers continue to receive the centre-only [`NetherColumn`] above.
+    #[must_use]
+    pub fn parity_source_spills(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        source_x: i32,
+        source_z: i32,
+    ) -> Vec<ParityDecorationSpill> {
+        assert!(
+            (target_x - source_x).abs() <= 1 && (target_z - source_z).abs() <= 1,
+            "a decoration source must be inside the target's 3x3 dispatch window",
+        );
+        let pre = self.pre_decoration_stage(target_x, target_z);
+        self.mixed_step7_stage_selected(
+            target_x,
+            target_z,
+            (*pre.0).clone(),
+            &pre.1,
+            Some((source_x, source_z)),
+        )
+        .1
+    }
+
+    /// Runs the Nether's mixed decoration steps in raw source/index order.
+    /// Ore and non-ore placement use different read/write adapters, so each
+    /// completed entry is copied across the one explicit synchronization
+    /// boundary before its successor can inspect the field.
+    fn mixed_step7_stage(
+        &self,
+        cx: i32,
+        cz: i32,
+        center_world: crate::dense_grid::DenseBlockGrid,
+        center_heights: &[i32; 256],
+    ) -> crate::dense_grid::DenseBlockGrid {
+        self.mixed_step7_stage_selected(cx, cz, center_world, center_heights, None).0
+    }
+
+    /// [`Self::mixed_step7_stage`] with an optional source filter for the
+    /// parity materializer. The single raw dispatcher below remains the only
+    /// placement/RNG implementation for both paths.
+    fn mixed_step7_stage_selected(
+        &self,
+        cx: i32,
+        cz: i32,
+        center_world: crate::dense_grid::DenseBlockGrid,
+        center_heights: &[i32; 256],
+        selected_source: Option<(i32, i32)>,
+    ) -> (crate::dense_grid::DenseBlockGrid, Vec<ParityDecorationSpill>) {
+        let mut nearby: [Option<Arc<PreDecorationResult>>; 9] = std::array::from_fn(|_| None);
+        for dx in -1..=1_i32 {
+            for dz in -1..=1_i32 {
+                if dx != 0 || dz != 0 {
+                    nearby[Self::region_slot(dx, dz)] = Some(self.pre_decoration_stage(cx + dx, cz + dz));
+                }
+            }
+        }
+        let mut heights = crate::feature::RegionHeights::unset();
+        Self::stitch_heights(&mut heights, 0, 0, center_heights);
+        for dx in -1..=1_i32 { for dz in -1..=1_i32 {
+            if dx != 0 || dz != 0 {
+                let source = nearby[Self::region_slot(dx, dz)].as_ref().expect("all sources present");
+                Self::stitch_heights(&mut heights, dx * 16, dz * 16, &source.1);
+            }
+        }}
+        let in_tag = |block: &str, tag: &str| self.ore_tag_map.get(tag).is_some_and(|members| members.contains(block));
+        let centre_source = &center_world;
+        let mut ore_view = crate::feature::region_view::RegionView::over_sources(
+            Arc::clone(&self.interner), cx, cz, self.min_y, self.height,
+            |dx, dz| if dx == 0 && dz == 0 { Some(centre_source) } else {
+                nearby[Self::region_slot(dx, dz)].as_ref().map(|source| &*source.0)
+            },
+        );
+        let centre_grid = Arc::new(center_world.clone());
+        let mut grid = crate::feature::vegetation::VegGrid::with_sources(
+            Arc::clone(&self.interner), self.min_y, self.height, cx * 16, cz * 16,
+            crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
+            crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
+            |dx, dz| if dx == 0 && dz == 0 { Some(Arc::clone(&centre_grid)) }
+            else { Some(Arc::clone(&self.pre_decoration_stage(cx + dx, cz + dz).0)) },
+        );
+        self.veg_tags.bind(grid.interner());
+        let mut decoration_rng = decoration_random();
+        let mut ore_random = decoration_random();
+        let mut grid_cursor = 0usize;
+        let mut ore_transferred = HashMap::new();
+        for dx in -1..=1_i32 { for dz in -1..=1_i32 {
+            let source_x = cx + dx;
+            let source_z = cz + dz;
+            if selected_source.is_some_and(|source| source != (source_x, source_z)) {
+                continue;
+            }
+            let origin = crate::feature::BlockPos { x: source_x * 16, y: self.min_y, z: source_z * 16 };
+            decoration_rng.begin_decoration_source();
+            ore_random.begin_decoration_source();
+            let decoration_seed = decoration_rng.set_decoration_seed(self.seed, origin.x, origin.z);
+            let ore_seed = ore_random.set_decoration_seed(self.seed, origin.x, origin.z);
+            let decorations = self.decoration_by_biome.get(self.biome_for_carver_source(source_x, source_z)).map(Vec::as_slice).unwrap_or(&[]);
+            let ores = self.ores_by_biome.get(self.biome_for_carver_source(source_x, source_z)).map(Vec::as_slice).unwrap_or(&[]);
+            for step in [4_i32, 7, crate::feature::STEP_VEGETAL_DECORATION] {
+                let mut decoration_at = 0usize;
+                let mut ore_at = 0usize;
+                loop {
+                    let next_decoration = decorations.iter().enumerate()
+                        .skip(decoration_at)
+                        .find(|(_, (s, _, _))| *s == step);
+                    let next_ore = if step == 7 { ores.get(ore_at) } else { None };
+                    let next_index = match (next_decoration, next_ore) {
+                        (Some((_, (_, index, _))), Some(ore)) => Some((*index).min(ore.index)),
+                        (Some((_, (_, index, _))), None) => Some(*index),
+                        (None, Some(ore)) => Some(ore.index),
+                        (None, None) => None,
+                    };
+                    let Some(index) = next_index else { break };
+                    if let Some((entry_at, (_, found, placed))) = next_decoration
+                        .filter(|(_, (_, found, _))| *found == index)
+                    {
+                        crate::feature::vegetation::apply_decoration_entry_at_seed(&mut decoration_rng, decoration_seed, origin, step, *found, placed, &mut grid, &self.veg_tags);
+                        synchronize_mixed_entry(
+                            MixedEntryWriter::Decoration,
+                            &mut grid,
+                            &mut ore_view,
+                            cx,
+                            cz,
+                            &mut grid_cursor,
+                            &mut ore_transferred,
+                        );
+                        decoration_at = entry_at + 1;
+                    } else if let Some(ore) = next_ore.filter(|ore| ore.index == index) {
+                        let input = crate::feature::OreInput { chunk_x: source_x, chunk_z: source_z, center_x: cx, center_z: cz, min_y: self.min_y, height: self.height, min_gen_y: self.min_y, gen_depth: self.height, read_min: crate::feature::REGION_MIN, read_max: crate::feature::REGION_MAX, ocean_floor_wg: &heights, in_tag: &in_tag, biome_allows: None };
+                        crate::feature::apply_ore_entry_at_seed(&mut ore_random, ore_seed, &input, 7, ore, &mut ore_view);
+                        synchronize_mixed_entry(
+                            MixedEntryWriter::Ore,
+                            &mut grid,
+                            &mut ore_view,
+                            cx,
+                            cz,
+                            &mut grid_cursor,
+                            &mut ore_transferred,
+                        );
+                        ore_at += 1;
+                    }
+                }
+            }
+        }}
+        let mut world = center_world;
+        for (x, y, z, state) in grid.dirty_cell_ids() { world.set_id(x, y, z, state); }
+        let mut final_spills = BTreeMap::new();
+        if let Some(source) = selected_source {
+            for (x, y, z, state) in grid.dirty_cell_ids() {
+                final_spills.insert((x, y, z), ParityDecorationSpill {
+                    source,
+                    position: (x, y, z),
+                    state: self.interner.name_of(state).to_owned(),
+                });
+            }
+        }
+        (world, final_spills.into_values().collect())
     }
 
     /// The complete prefix decorations read: terrain through structure pieces.
@@ -550,170 +826,6 @@ impl NetherGenerator {
             memo.clear();
         }
         Arc::clone(memo.entry((cx, cz)).or_insert_with(|| Arc::clone(&computed)))
-    }
-
-    /// The ore-composed field for one source chunk. This depends strictly
-    /// downward on [`Self::pre_decoration_stage`], so the cache cannot form a
-    /// recursive wait graph.
-    fn post_ore_world(&self, cx: i32, cz: i32) -> Arc<crate::dense_grid::DenseBlockGrid> {
-        if let Some(existing) = self
-            .post_ore
-            .lock()
-            .expect("nether post-ore memo poisoned")
-            .get(&(cx, cz))
-            .cloned()
-        {
-            return existing;
-        }
-        let pre = self.pre_decoration_stage(cx, cz);
-        let computed = Arc::new(self.ore_stage(cx, cz, (*pre.0).clone(), &pre.1));
-        let mut memo = self.post_ore.lock().expect("nether post-ore memo poisoned");
-        if memo.len() >= DECORATION_MEMO_CEILING {
-            memo.clear();
-        }
-        Arc::clone(memo.entry((cx, cz)).or_insert_with(|| Arc::clone(&computed)))
-    }
-
-    /// The Nether's step-7 ore subset over its real 3×3 write neighbourhood.
-    fn ore_stage(
-        &self,
-        cx: i32,
-        cz: i32,
-        center_world: crate::dense_grid::DenseBlockGrid,
-        center_heights: &[i32; 256],
-    ) -> crate::dense_grid::DenseBlockGrid {
-        if self.ores_by_biome.values().all(Vec::is_empty) {
-            return center_world;
-        }
-        let mut pre: [Option<Arc<PreDecorationResult>>; 9] = std::array::from_fn(|_| None);
-        for dx in -1..=1_i32 {
-            for dz in -1..=1_i32 {
-                if dx != 0 || dz != 0 {
-                    pre[Self::region_slot(dx, dz)] = Some(self.pre_decoration_stage(cx + dx, cz + dz));
-                }
-            }
-        }
-        let mut heights = crate::feature::RegionHeights::unset();
-        Self::stitch_heights(&mut heights, 0, 0, center_heights);
-        for dx in -1..=1_i32 {
-            for dz in -1..=1_i32 {
-                if dx != 0 || dz != 0 {
-                    let neighbour = pre[Self::region_slot(dx, dz)]
-                        .as_ref()
-                        .expect("all eight ore sources are present");
-                    Self::stitch_heights(&mut heights, dx * 16, dz * 16, &neighbour.1);
-                }
-            }
-        }
-        let ores_for_source = |source_x: i32, source_z: i32| -> &[PlacedOre] {
-            self.ores_by_biome
-                .get(self.biome_for_carver_source(source_x, source_z))
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
-        };
-        let in_tag = |block: &str, tag: &str| {
-            self.ore_tag_map
-                .get(tag)
-                .is_some_and(|members| members.contains(block))
-        };
-        let centre_source = &center_world;
-        let mut view = crate::feature::region_view::RegionView::over_sources(
-            Arc::clone(&self.interner),
-            cx,
-            cz,
-            self.min_y,
-            self.height,
-            |dx, dz| {
-                if dx == 0 && dz == 0 {
-                    Some(centre_source)
-                } else {
-                    pre[Self::region_slot(dx, dz)]
-                        .as_ref()
-                        .map(|source| &*source.0)
-                }
-            },
-        );
-        let mut random = crate::rng::WorldgenRandom::new(crate::rng::LegacyRandomSource::new(0));
-        // Nether ores live in the mixed decoration step 7. The generic ore
-        // driver defaults to the Overworld's underground-ores step 6, which
-        // would derive a different feature seed for every otherwise-correct
-        // placement index.
-        crate::feature::apply_ore_step_3x3_per_source_at_step(
-            &mut random,
-            self.seed,
-            cx,
-            cz,
-            self.min_y,
-            self.height,
-            self.min_y,
-            self.height,
-            crate::feature::REGION_MIN,
-            crate::feature::REGION_MAX,
-            &heights,
-            &in_tag,
-            None,
-            7,
-            &mut view,
-            &ores_for_source,
-        );
-        let writes = view.centre_writes_in_scan_order();
-        drop(view);
-        let mut world = center_world;
-        for (lx, y, lz, state) in writes {
-            world.set_id(cx * 16 + lx, y, cz * 16 + lz, state);
-        }
-        world
-    }
-
-    /// Runs all non-ore Nether decoration entries over the same 3×3 sources.
-    fn decoration_stage(
-        &self,
-        cx: i32,
-        cz: i32,
-        world: Arc<crate::dense_grid::DenseBlockGrid>,
-    ) -> crate::dense_grid::DenseBlockGrid {
-        if self.decoration_by_biome.values().all(Vec::is_empty) {
-            return (*world).clone();
-        }
-        let mut grid = crate::feature::vegetation::VegGrid::with_sources(
-            Arc::clone(&self.interner),
-            self.min_y,
-            self.height,
-            cx * 16,
-            cz * 16,
-            crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
-            crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
-            |dx, dz| {
-                if dx == 0 && dz == 0 {
-                    Some(Arc::clone(&world))
-                } else if dx.abs() <= 1 && dz.abs() <= 1 {
-                    Some(self.post_ore_world(cx + dx, cz + dz))
-                } else {
-                    Some(Arc::clone(&self.pre_decoration_stage(cx + dx, cz + dz).0))
-                }
-            },
-        );
-        let features_for_source = |source_x: i32, source_z: i32| -> &[(i32, usize, crate::feature::vegetation::PlacedRef)] {
-            self.decoration_by_biome
-                .get(self.biome_for_carver_source(source_x, source_z))
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
-        };
-        let mut random = crate::rng::WorldgenRandom::new(crate::rng::LegacyRandomSource::new(0));
-        crate::feature::vegetation::apply_decoration_steps_3x3_per_source(
-            &mut random,
-            self.seed,
-            cx,
-            cz,
-            &mut grid,
-            &self.veg_tags,
-            &features_for_source,
-        );
-        let mut world = (*world).clone();
-        for (x, y, z, state) in grid.dirty_cell_ids() {
-            world.set_id(x, y, z, state);
-        }
-        world
     }
 
     fn region_slot(dx: i32, dz: i32) -> usize {
@@ -1337,5 +1449,367 @@ fn canonical_state_from_settings(value: &Value, fallback: &str) -> String {
             format!("{name}[{}]", rendered.join(","))
         }
         _ => name.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use sha2::{Digest as _, Sha256};
+
+    use super::{MixedEntryWriter, NetherGenerator, decoration_random, synchronize_mixed_entry};
+    use crate::dense_grid::DenseBlockGrid;
+    use crate::density::{NoiseParams, Resolver};
+    use crate::feature::region_view::RegionView;
+    use crate::feature::vegetation::VegGrid;
+    use crate::interner::StateInterner;
+    use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
+    use serde_json::Value;
+
+    struct NetherAssets {
+        root: PathBuf,
+    }
+
+    impl NetherAssets {
+        fn read(&self, kind: &str, id: &str) -> Value {
+            let name = id.strip_prefix("minecraft:").unwrap_or(id);
+            let path = self.root.join(kind).join(format!("{name}.json"));
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
+        }
+
+        fn try_read(&self, kind: &str, id: &str) -> Value {
+            let name = id.strip_prefix("minecraft:").unwrap_or(id);
+            let path = self.root.join(kind).join(format!("{name}.json"));
+            std::fs::read_to_string(&path).map_or(Value::Null, |text| {
+                serde_json::from_str(&text)
+                    .unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
+            })
+        }
+    }
+
+    impl Resolver for NetherAssets {
+        fn density_function(&self, id: &str) -> Value { self.read("density_function", id) }
+        fn noise(&self, id: &str) -> NoiseParams {
+            let value = self.read("noise", id);
+            NoiseParams {
+                first_octave: value["firstOctave"].as_i64().expect("firstOctave") as i32,
+                amplitudes: value["amplitudes"].as_array().expect("amplitudes")
+                    .iter().map(|value| value.as_f64().expect("amplitude")).collect(),
+            }
+        }
+        fn biome_parameters(&self) -> Value { self.read("biome_parameters", "nether") }
+        fn biome_document(&self, id: &str) -> Value { self.try_read("biome", id) }
+        fn configured_carver(&self, id: &str) -> Value { self.try_read("configured_carver", id) }
+        fn configured_feature(&self, id: &str) -> Value { self.try_read("configured_feature", id) }
+        fn placed_feature(&self, id: &str) -> Value { self.try_read("placed_feature", id) }
+        fn block_tag(&self, id: &str) -> Value { self.try_read("tags/block", id) }
+    }
+
+    fn nether_assets_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestone-server/assets/worldgen")
+    }
+
+    fn grid_hash(
+        grid: &VegGrid,
+        center_x: i32,
+        center_z: i32,
+        local_lo: i32,
+        local_hi: i32,
+        min_y: i32,
+        height: i32,
+    ) -> String {
+        let mut digest = Sha256::new();
+        for lx in local_lo..local_hi {
+            for lz in local_lo..local_hi {
+                for y in min_y..min_y + height {
+                    digest.update(format!("{lx},{y},{lz}={}\n", grid.get(center_x * 16 + lx, y, center_z * 16 + lz)).as_bytes());
+                }
+            }
+        }
+        format!("{:x}", digest.finalize())
+    }
+
+    /// The external trace drives all 3×3 step-4 entries before the centre
+    /// source's step-7 index zero.  Hashing that identical bounded field keeps
+    /// a terrain/step-4 mismatch from being blamed on its first blob modifier.
+    #[test]
+    fn captured_nether_pre_index0_field_matches_step4_output() {
+        let assets = NetherAssets { root: nether_assets_root() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(assets.root.join("noise_settings/nether.json"))
+                .expect("reading Nether settings"),
+        ).expect("parsing Nether settings");
+        let generator = NetherGenerator::new(42, &settings, &assets);
+        let center_x = -250;
+        let center_z = -250;
+        let mut sources = HashMap::new();
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                sources.insert((dx, dz), generator.pre_decoration_stage(center_x + dx, center_z + dz));
+            }
+        }
+        let mut grid = VegGrid::with_sources(
+            Arc::clone(&generator.interner), generator.min_y, generator.height,
+            center_x * 16, center_z * 16,
+            crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
+            crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
+            |dx, dz| sources.get(&(dx, dz)).map(|source| Arc::clone(&source.0)),
+        );
+        generator.veg_tags.bind(grid.interner());
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let source_x = center_x + dx;
+                let source_z = center_z + dz;
+                let origin = crate::feature::BlockPos { x: source_x * 16, y: generator.min_y, z: source_z * 16 };
+                let mut random = decoration_random();
+                random.begin_decoration_source();
+                let decoration_seed = random.set_decoration_seed(generator.seed, origin.x, origin.z);
+                let biome = generator.biome_for_carver_source(source_x, source_z);
+                for (_, index, placed) in generator.decoration_by_biome[biome].iter().filter(|(step, _, _)| *step == 4) {
+                    if (source_x, source_z, *index) == (-251, -249, 0) {
+                        assert_eq!(
+                            grid_hash(
+                                &grid, center_x, center_z,
+                                crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
+                                crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
+                                generator.min_y, generator.height,
+                            ),
+                            "c057c17bc26d8d95038fce12a550f9d58468778cf9854b71465bda9e8eb23a07",
+                            "the reference delta's padded input must be identical before local write order can be compared",
+                        );
+                        assert_eq!(grid.get(-4_018, 57, -3_972), "minecraft:netherrack");
+                    }
+                    crate::feature::vegetation::apply_decoration_entry_at_seed(
+                        &mut random, decoration_seed, origin, 4, *index, placed, &mut grid, &generator.veg_tags,
+                    );
+                }
+            }
+        }
+        let actual = grid_hash(
+            &grid, center_x, center_z,
+            crate::feature::REGION_MIN, crate::feature::REGION_MAX,
+            generator.min_y, generator.height,
+        );
+        assert_eq!(actual, "56dc13107cdd7aafee3b0a299cc222bc0d8748e89200ff3cec2ef133fb501ef3");
+    }
+
+    #[test]
+    fn decoration_rng_uses_xoroshiro_at_first_large_parity_chunk() {
+        let mut decoration = decoration_random();
+        let seed = decoration.set_decoration_seed(42, -4_000, -4_000);
+        assert_eq!(seed, -2_931_187_344_497_052_822);
+        decoration.set_feature_seed(seed, 0, 7);
+        assert_eq!(decoration.next_int(), -1_735_331_230);
+
+        let mut legacy = WorldgenRandom::new(LegacyRandomSource::new(0));
+        let legacy_seed = legacy.set_decoration_seed(42, -4_000, -4_000);
+        legacy.set_feature_seed(legacy_seed, 0, 7);
+        assert_ne!(legacy_seed, seed, "control: legacy derives a different decoration stream");
+        assert_ne!(legacy.next_int(), -1_735_331_230);
+    }
+
+    #[test]
+    fn mixed_step7_ore_entry_uses_the_captured_xoroshiro_stream() {
+        let mut ore = decoration_random();
+        let seed = ore.set_decoration_seed(42, -4_000, -4_000);
+        ore.set_feature_seed(seed, 9, 7);
+        assert_eq!(ore.next_int(), 510_353_045);
+
+        let mut legacy = WorldgenRandom::new(LegacyRandomSource::new(0));
+        let legacy_seed = legacy.set_decoration_seed(42, -4_000, -4_000);
+        legacy.set_feature_seed(legacy_seed, 9, 7);
+        assert_ne!(legacy.next_int(), 510_353_045, "control: the terrain carrier is not a feature stream");
+    }
+
+    #[test]
+    fn mixed_entry_bridge_transfers_each_final_cell_once_in_both_directions() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let basalt = interner.id_of("minecraft:basalt[axis=y]");
+        let blackstone = interner.id_of("minecraft:blackstone");
+        let source = Arc::new(DenseBlockGrid::with_interner(
+            Arc::clone(&interner),
+            -16,
+            0,
+            -16,
+            48,
+            8,
+            48,
+            air,
+        ));
+        let mut ore_view = RegionView::over_region_grid(&source, 0, 8);
+        let mut grid = VegGrid::with_sources(
+            Arc::clone(&interner),
+            0,
+            8,
+            0,
+            0,
+            crate::feature::REGION_MIN,
+            crate::feature::REGION_MAX,
+            |_, _| Some(Arc::clone(&source)),
+        );
+        let mut grid_cursor = 0;
+        let mut ore_transferred = HashMap::new();
+
+        assert!(grid.set_id_if_in_bounds(1, 1, 1, basalt));
+        assert_eq!(
+            synchronize_mixed_entry(
+                MixedEntryWriter::Decoration,
+                &mut grid,
+                &mut ore_view,
+                0,
+                0,
+                &mut grid_cursor,
+                &mut ore_transferred,
+            ).projected,
+            1
+        );
+        assert_eq!(ore_view.get_id(1, 1, 1), basalt);
+        assert_eq!(
+            synchronize_mixed_entry(
+                MixedEntryWriter::Decoration,
+                &mut grid,
+                &mut ore_view,
+                0,
+                0,
+                &mut grid_cursor,
+                &mut ore_transferred,
+            ).projected,
+            0,
+            "control: a completed decoration entry is not replayed"
+        );
+
+        assert!(ore_view.set_id(2, 1, 2, blackstone));
+        assert_eq!(
+            synchronize_mixed_entry(
+                MixedEntryWriter::Ore,
+                &mut grid,
+                &mut ore_view,
+                0,
+                0,
+                &mut grid_cursor,
+                &mut ore_transferred,
+            ).projected,
+            1,
+            "only the new ore cell crosses back into the decoration grid"
+        );
+        assert_eq!(grid.get_id(2, 1, 2), blackstone);
+        assert_eq!(
+            synchronize_mixed_entry(
+                MixedEntryWriter::Ore,
+                &mut grid,
+                &mut ore_view,
+                0,
+                0,
+                &mut grid_cursor,
+                &mut ore_transferred,
+            ).projected,
+            0,
+            "control: unchanged ore overlay cells are not replayed"
+        );
+    }
+
+    #[test]
+    fn mixed_entry_bridge_converts_negative_region_view_coordinates_to_world_space() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let blackstone = interner.id_of("minecraft:blackstone");
+        let centre_x = -250;
+        let centre_z = -250;
+        let source = Arc::new(DenseBlockGrid::with_interner(
+            Arc::clone(&interner),
+            centre_x * 16 - 16,
+            0,
+            centre_z * 16 - 16,
+            48,
+            8,
+            48,
+            air,
+        ));
+        let mut ore_view = RegionView::over_sources(
+            Arc::clone(&interner), centre_x, centre_z, 0, 8, |_, _| Some(&*source),
+        );
+        let mut grid = VegGrid::with_sources(
+            Arc::clone(&interner),
+            0,
+            8,
+            centre_x * 16,
+            centre_z * 16,
+            crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
+            crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
+            |_, _| Some(Arc::clone(&source)),
+        );
+        let mut grid_cursor = 0;
+        let mut ore_transferred = HashMap::new();
+        assert!(ore_view.set_id(-16, 4, -16, blackstone));
+
+        assert_eq!(
+            synchronize_mixed_entry(
+                MixedEntryWriter::Ore,
+                &mut grid,
+                &mut ore_view,
+                centre_x,
+                centre_z,
+                &mut grid_cursor,
+                &mut ore_transferred,
+            ).projected,
+            1,
+        );
+        assert_eq!(grid.get_id(-4_016, 4, -4_016), blackstone);
+        assert_eq!(
+            ore_transferred.get(&(-4_016, 4, -4_016)),
+            Some(&blackstone),
+            "the bridge's ownership map stores absolute coordinates too",
+        );
+    }
+
+    #[test]
+    fn mixed_entry_bridge_retains_step9_spill_outside_the_ore_window() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let basalt = interner.id_of("minecraft:basalt[axis=y]");
+        let source = Arc::new(DenseBlockGrid::with_interner(
+            Arc::clone(&interner),
+            -16,
+            0,
+            -16,
+            48,
+            8,
+            48,
+            air,
+        ));
+        let mut ore_view = RegionView::over_region_grid(&source, 0, 8);
+        let mut grid = VegGrid::with_sources(
+            Arc::clone(&interner),
+            0,
+            8,
+            0,
+            0,
+            crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
+            crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
+            |_, _| Some(Arc::clone(&source)),
+        );
+        let mut grid_cursor = 0;
+        let mut ore_transferred = HashMap::new();
+        assert!(grid.set_id_if_in_bounds(-17, 1, 0, basalt));
+
+        let sync = synchronize_mixed_entry(
+            MixedEntryWriter::Decoration,
+            &mut grid,
+            &mut ore_view,
+            0,
+            0,
+            &mut grid_cursor,
+            &mut ore_transferred,
+        );
+        assert_eq!(sync.projected, 0);
+        assert_eq!(sync.retained_outside, 1);
+        assert_eq!(grid.get_id(-17, 1, 0), basalt, "padded spill remains for final decoration output");
+        assert_eq!(ore_view.get_id(-17, 1, 0), air, "the bounded ore reader does not fabricate a fourth source column");
     }
 }
