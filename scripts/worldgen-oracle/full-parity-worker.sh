@@ -38,7 +38,7 @@ for (( x_lo = grid_min; x_lo <= grid_max; x_lo += 16, slot += 1 )); do
   fi
   x_hi=$((x_lo + 15))
   if (( x_hi > grid_max )); then
-    x_hi=grid_max
+    x_hi="$grid_max"
   fi
   export_command=( "$here/large-parity.sh" --mode export )
   if [ "$dimension" != overworld ]; then
