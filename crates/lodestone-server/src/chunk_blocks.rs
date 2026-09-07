@@ -289,6 +289,17 @@ impl SectionedBlocks {
         self.sections.len()
     }
 
+    /// Returns the palette index when section `s` is represented by one value,
+    /// or `None` for a packed section. Read-only consumers use this to reject
+    /// uniform air/terrain sections before walking their cells.
+    #[inline]
+    pub(crate) fn uniform_id(&self, s: usize) -> Option<Id> {
+        match self.sections.get(s)? {
+            Section::Uniform(id) => Some(*id),
+            Section::Packed { .. } => None,
+        }
+    }
+
     /// Real block rows in section `s`. `16` for every section but a partial top
     /// one, and `0` past the end.
     ///

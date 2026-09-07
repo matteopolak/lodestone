@@ -52,9 +52,13 @@ the piston cancellation negative control.
 Generated columns enter the same fluid queue through an exposure-aware admission pass when they first
 become entity-ticking. Worldgen writes a complete snapshot and therefore cannot invoke placement or
 neighbor hooks; the admission pass mirrors the fluid spread decision and schedules only liquid cells
-that can currently write into an adjacent destination. A cheap immediate-neighbour gate rejects
-settled interior cells before the shape and slope walk, so the one-time scan is bounded by the stored
-column cells plus the exposed fluid boundary rather than a full spread search for every ocean cell.
+that can currently write into an adjacent destination. The pass preclassifies the column palette by
+canonical numeric state identity, then walks packed section indices without parsing a state string
+for air, terrain, or waterlogged blocks; uniform no-fluid sections are rejected before their cells
+are expanded. Uniform liquid sections are expanded directly through the integer visitor, without a
+temporary cell vector. A cheap immediate-neighbour gate rejects settled interior cells before the
+shape and slope walk, so the one-time scan is bounded by stored section indices plus the exposed
+fluid boundary rather than a full spread search for every ocean cell.
 Later edits use the ordinary placement/neighbor scheduling path. The tick-area loop remembers which
 columns have been admitted, so a moving player does not repeatedly rescan or requeue an ocean. The
 fluid environment is selected from the loop's dimension: Nether lava keeps its faster drop-off and

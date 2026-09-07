@@ -1306,6 +1306,26 @@ impl ChunkColumn {
         self.blocks.section_count()
     }
 
+    /// Returns the column-palette index when section `s` is uniform, or
+    /// `None` when its packed cells carry more than one value. Read-only
+    /// schedulers use this to skip uniform sections without materialising
+    /// their repeated indices.
+    #[inline]
+    pub(crate) fn uniform_section_palette_index(&self, s: usize) -> Option<u16> {
+        self.blocks.uniform_id(s)
+    }
+
+    /// Visits section `s`'s palette indices in block-storage order without
+    /// allocating a temporary cell vector. Uniform sections are expanded by
+    /// the storage layer only when the caller has decided their value matters.
+    pub(crate) fn for_each_section_palette_index(
+        &self,
+        s: usize,
+        f: impl FnMut(usize, u16),
+    ) {
+        self.blocks.for_each_in_section(s, f);
+    }
+
     /// Appends section `s`'s palette indices to `out`, in vanilla's own
     /// `(y_in_section << 8) | (z << 4) | x` order — so `crate::chunk_nbt` builds a
     /// region file's per-section container straight from it.
