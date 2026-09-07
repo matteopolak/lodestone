@@ -85,11 +85,19 @@ public final class LargeParityOracle {
     static final byte[] RECORD_DOMAIN = "lodestone.worldgen.large-parity.chunk/v3/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN_V4 = "lodestone.worldgen.large-parity.chunk/v4/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN_V5 = "lodestone.worldgen.large-parity.chunk/v5/semantic".getBytes(StandardCharsets.US_ASCII);
-    static final String FREEZE_STAMP = "lodestone-large-parity-v3.freeze.sha256";
-    static final String MATERIALIZE_PROGRESS = "lodestone-large-parity-v3.materialize";
+    // This namespace describes the generation scheduling contract, not the
+    // semantic manifest format. It changes whenever a root's construction
+    // rules change, even if its exported records do not.
+    static final String MATERIALIZATION_CONTRACT = "lodestone-large-parity-materialization-v2";
     static final int MATERIALIZE_TILE = 16;
     static final String OVERWORLD = "overworld", NETHER = "nether", END = "end";
     static String diagnosticPacketOut, diagnosticRecordOut;
+
+    static void verifySingleWorldgenWorker() {
+        if (!"1".equals(System.getProperty("max.bg.threads"))) {
+            throw new IllegalStateException("large-parity materialization requires -Dmax.bg.threads=1");
+        }
+    }
 
     static final class Args {
         String out;
@@ -97,7 +105,7 @@ public final class LargeParityOracle {
         String packetOut;
         String recordOut;
         int loX = GRID_MIN, hiX = GRID_MAX, loZ = GRID_MIN, hiZ = GRID_MAX;
-        boolean resume, help;
+        boolean resume, help, provenanceSelftest;
         String dimension = OVERWORLD;
         boolean explicitDimension;
         boolean dimensionFormat() { return explicitDimension || !OVERWORLD.equals(dimension); }
@@ -114,6 +122,7 @@ public final class LargeParityOracle {
         if (environmentDimension != null && !environmentDimension.isBlank()) { out.dimension = environmentDimension.toLowerCase(); out.explicitDimension = true; }
         for (int i = 0; i < a.length; i++) switch (a[i]) {
             case "--help", "-h" -> out.help = true;
+            case "--provenance-selftest" -> out.provenanceSelftest = true;
             case "--mode" -> out.mode = a[++i];
             case "--out" -> out.out = a[++i];
             case "--cx" -> { out.loX = Integer.parseInt(a[++i]); out.hiX = Integer.parseInt(a[++i]); }
@@ -124,7 +133,7 @@ public final class LargeParityOracle {
             case "--dimension" -> { out.dimension = a[++i].toLowerCase(); out.explicitDimension = true; }
             default -> throw new IllegalArgumentException("unknown argument " + a[i]);
         }
-        if (out.help) return out;
+        if (out.help || out.provenanceSelftest) return out;
         if (!OVERWORLD.equals(out.dimension) && !NETHER.equals(out.dimension) && !END.equals(out.dimension)) throw new IllegalArgumentException("--dimension must be overworld, nether, or end");
         if (!"materialize".equals(out.mode) && !"export".equals(out.mode)) throw new IllegalArgumentException("--mode must be materialize or export");
         if (out.loX > out.hiX || out.loZ > out.hiZ || out.loX < GRID_MIN || out.hiX > GRID_MAX || out.loZ < GRID_MIN || out.hiZ > GRID_MAX) throw new IllegalArgumentException("ranges must lie in -250..=250");
@@ -137,6 +146,7 @@ public final class LargeParityOracle {
     static void usage() {
         System.out.println("materialize: LargeParityOracle --mode materialize [--dimension overworld|nether|end]");
         System.out.println("export:      LargeParityOracle --mode export --out /oracle/shard.lwp --cx LO HI --cz LO HI [--dimension overworld|nether|end] [--resume] [--packet-out /oracle/chunk.bin] [--record-out /oracle/chunk.record]");
+        System.out.println("control:     LargeParityOracle --provenance-selftest");
         System.out.println("materialize needs LODESTONE_ORACLE_WORLD_ROOT; export needs LODESTONE_ORACLE_FROZEN_WORLD_ROOT.");
     }
 
@@ -191,8 +201,26 @@ public final class LargeParityOracle {
         try (var paths = Files.walk(source)) { for (Path from : paths.sorted().toList()) { Path to = copy.resolve(source.relativize(from).toString()); if (Files.isDirectory(from)) Files.createDirectories(to); else Files.copy(from, to, StandardCopyOption.COPY_ATTRIBUTES); } }
         return copy;
     }
-    static String freezeStamp(Args a) { return a.dimensionFormat() ? "lodestone-large-parity-v4-" + a.dimension + ".freeze.sha256" : FREEZE_STAMP; }
-    static String progressFile(Args a) { return a.dimensionFormat() ? "lodestone-large-parity-v4-" + a.dimension + ".materialize" : MATERIALIZE_PROGRESS; }
+    static String freezeStamp(Args a) { return MATERIALIZATION_CONTRACT + "-" + a.dimension + ".freeze.sha256"; }
+    static String progressFile(Args a) { return MATERIALIZATION_CONTRACT + "-" + a.dimension + ".materialize"; }
+    static String progressMarker(Args a) { return MATERIALIZATION_CONTRACT + "-" + a.dimension + "-progress"; }
+    static List<Path> legacyProvenancePaths(Path root) {
+        List<Path> result = new ArrayList<>();
+        result.add(root.resolve("lodestone-large-parity-v3.freeze.sha256"));
+        result.add(root.resolve("lodestone-large-parity-v3.materialize"));
+        result.add(root.resolve("lodestone-large-parity-v3.materialize.tmp"));
+        for (String dimension : List.of(OVERWORLD, NETHER, END)) {
+            result.add(root.resolve("lodestone-large-parity-v4-" + dimension + ".freeze.sha256"));
+            result.add(root.resolve("lodestone-large-parity-v4-" + dimension + ".materialize"));
+            result.add(root.resolve("lodestone-large-parity-v4-" + dimension + ".materialize.tmp"));
+        }
+        return result;
+    }
+    static void rejectLegacyProvenance(Path root) {
+        for (Path path : legacyProvenancePaths(root)) if (Files.exists(path)) {
+            throw new IllegalStateException("obsolete concurrent materialization provenance is refused: " + path + "; create a new empty root under " + MATERIALIZATION_CONTRACT);
+        }
+    }
     static String formatLabel(Args a) { return "v" + a.semanticVersion() + "-" + a.dimension; }
     static byte[] worldTreeDigest(Path root, Args a) throws Exception {
         MessageDigest sha = sha256();
@@ -204,8 +232,33 @@ public final class LargeParityOracle {
         return sha.digest();
     }
     static byte[] frozenDigest(Path root, Args a) throws Exception {
+        rejectLegacyProvenance(root);
         Path stamp = root.resolve(freezeStamp(a)); if (!Files.isRegularFile(stamp)) throw new IllegalStateException("frozen world has no selected-dimension seal: " + stamp);
         byte[] actual = worldTreeDigest(root, a); String expected = Files.readString(stamp, StandardCharsets.US_ASCII).trim(); if (!hex(actual).equals(expected)) throw new IllegalStateException("frozen world differs from its seal; re-materialize before export"); return actual;
+    }
+    interface CheckedWork { void run() throws Exception; }
+    static void assertProvenanceRefusal(String arm, CheckedWork work) throws Exception {
+        try {
+            work.run();
+        } catch (IllegalStateException expected) {
+            if (expected.getMessage().contains("obsolete concurrent materialization provenance")) return;
+            throw new AssertionError(arm + " failed for the wrong reason: " + expected.getMessage(), expected);
+        }
+        throw new AssertionError(arm + " accepted obsolete concurrent materialization provenance");
+    }
+    static void provenanceSelftest() throws Exception {
+        Path root = Files.createTempDirectory("large-parity-provenance-");
+        Args nether = new Args(); nether.dimension = NETHER; nether.explicitDimension = true;
+        try {
+            Files.writeString(root.resolve("lodestone-large-parity-v3.freeze.sha256"), "old\n", StandardCharsets.US_ASCII);
+            assertProvenanceRefusal("export old v3 seal", () -> frozenDigest(root, nether));
+            Files.delete(root.resolve("lodestone-large-parity-v3.freeze.sha256"));
+            Files.writeString(root.resolve("lodestone-large-parity-v4-nether.materialize"), "old\n", StandardCharsets.US_ASCII);
+            assertProvenanceRefusal("resume old v4 progress", () -> materialize(nether, root));
+        } finally {
+            try (var paths = Files.walk(root)) { for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.deleteIfExists(path); }
+        }
+        System.out.println("provenance selftest ok: old v3 export seal and v4 resume progress refused");
     }
 
     static void writeUtf8(DataOutputStream out, String value) throws Exception { byte[] b = value.getBytes(StandardCharsets.UTF_8); out.writeInt(b.length); out.write(b); }
@@ -314,55 +367,24 @@ public final class LargeParityOracle {
         }).join();
     }
 
-    static List<ChunkPos> lightNeighbourhood(List<ChunkPos> positions) {
-        java.util.LinkedHashSet<ChunkPos> result = new java.util.LinkedHashSet<>();
-        for (ChunkPos center : positions) for (int z = -1; z <= 1; z++) for (int x = -1; x <= 1; x++) result.add(new ChunkPos(center.x() + x, center.z() + z));
-        return new ArrayList<>(result);
-    }
-
-    static void awaitLight(MinecraftServer server, ServerLevel level, List<ChunkPos> positions) {
-        List<CompletableFuture<?>> fences = server.submit(() -> {
-            List<CompletableFuture<?>> result = new ArrayList<>(positions.size());
-            for (ChunkPos pos : positions) result.add(level.getChunkSource().getLightEngine().waitForPendingTasks(pos.x(), pos.z()));
-            return result;
-        }).join();
-        for (CompletableFuture<?> fence : fences) fence.join();
-    }
-
-    static void relightFromBlocks(MinecraftServer server, ServerLevel level, List<ChunkPos> positions) {
-        server.submit(() -> {
-            try {
-                var engine = level.getChunkSource().getLightEngine();
-                Method clear = net.minecraft.server.level.ThreadedLevelLightEngine.class.getDeclaredMethod("updateChunkStatus", ChunkPos.class);
-                clear.setAccessible(true);
-                for (ChunkPos pos : positions) clear.invoke(engine, pos);
-                engine.tryScheduleUpdate();
-            } catch (ReflectiveOperationException e) { throw new IllegalStateException("relight reset bridge failed", e); }
-        }).join();
-        awaitLight(server, level, positions);
-        List<CompletableFuture<?>> initialized = server.submit(() -> {
-            var engine = level.getChunkSource().getLightEngine(); List<CompletableFuture<?>> result = new ArrayList<>(positions.size());
-            for (ChunkPos pos : positions) { LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z()); if (chunk == null) throw new IllegalStateException("relight lost chunk: " + pos); result.add(engine.initializeLight(chunk, false)); }
-            engine.tryScheduleUpdate(); return result;
-        }).join();
-        for (CompletableFuture<?> future : initialized) future.join();
-        List<CompletableFuture<?>> lit = server.submit(() -> {
-            var engine = level.getChunkSource().getLightEngine(); List<CompletableFuture<?>> result = new ArrayList<>(positions.size());
-            for (ChunkPos pos : positions) { LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z()); if (chunk == null) throw new IllegalStateException("relight lost chunk: " + pos); result.add(engine.lightChunk(chunk, false)); }
-            engine.tryScheduleUpdate(); return result;
-        }).join();
-        for (CompletableFuture<?> future : lit) future.join();
-        awaitLight(server, level, positions);
+    static void materializeOne(MinecraftServer server, ServerLevel level, ChunkPos pos) {
+        CompletableFuture<?> future = server.submit(() -> level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)).join();
+        net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>)future.join();
+        if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + pos + ": " + result.getError());
+        settleMaterializedBatch(server, level, List.of(pos));
+        server.submit(() -> level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)).join();
     }
 
     static void loadBatch(MinecraftServer server, ServerLevel level, Args a, List<ChunkPos> positions, boolean capture, List<byte[]> out) {
-        List<ChunkPos> loaded = capture && a.v5() ? lightNeighbourhood(positions) : positions;
+        if (!capture) {
+            for (ChunkPos pos : positions) materializeOne(server, level, pos);
+            return;
+        }
+        List<ChunkPos> loaded = positions;
         List<CompletableFuture<?>> futures = server.submit(() -> { List<CompletableFuture<?>> result = new ArrayList<>(loaded.size()); for (ChunkPos pos : loaded) result.add(level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)); return result; }).join();
         for (int i = 0; i < loaded.size(); i++) { net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>)futures.get(i).join(); if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + loaded.get(i) + ": " + result.getError()); }
-        if (!capture) settleMaterializedBatch(server, level, positions);
-        if (capture && a.v5()) relightFromBlocks(server, level, loaded);
         if (capture) out.addAll(server.submit(() -> { try { List<byte[]> result = new ArrayList<>(positions.size()); for (ChunkPos pos : positions) { LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z()); if (chunk == null) throw new IllegalStateException("loaded chunk was evicted: " + pos); if (diagnosticPacketOut != null) Files.write(Path.of(diagnosticPacketOut), packetBody(server, chunk, level)); byte[] record = semanticRecord(level, chunk, a); if (diagnosticRecordOut != null) Files.write(Path.of(diagnosticRecordOut), record); result.add(digest(record)); } return result; } catch (Exception e) { throw new IllegalStateException("canonical chunk export failed", e); } }).join());
-        if (!capture || !a.v5()) server.submit(() -> { for (ChunkPos pos : loaded) level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0); }).join();
+        server.submit(() -> { for (ChunkPos pos : loaded) level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0); }).join();
     }
 
     record MaterializeProgress(int minX, int maxX, int minZ, int maxZ, int tilesX, int tilesZ, int epochTiles, int nextTile, int inflightEnd) {
@@ -379,7 +401,7 @@ public final class LargeParityOracle {
     }
 
     static String progressText(Args a, MaterializeProgress progress) {
-        String marker = a.dimensionFormat() ? "lodestone-large-parity-v4-" + a.dimension + "-materialize" : "lodestone-large-parity-v3-materialize";
+        String marker = progressMarker(a);
         return marker + "=1\n"
             + "seed=" + SEED + "\n"
             + "tile-size=" + MATERIALIZE_TILE + "\n"
@@ -397,7 +419,7 @@ public final class LargeParityOracle {
             int split = line.indexOf('=');
             if (split <= 0 || values.put(line.substring(0, split), line.substring(split + 1)) != null) throw new IllegalStateException("malformed materialization progress: " + progress);
         }
-        String marker = a.dimensionFormat() ? "lodestone-large-parity-v4-" + a.dimension + "-materialize" : "lodestone-large-parity-v3-materialize";
+        String marker = progressMarker(a);
         if (values.size() != 12 || !"1".equals(values.get(marker)) || !Long.toString(SEED).equals(values.get("seed")) || !Integer.toString(MATERIALIZE_TILE).equals(values.get("tile-size"))) throw new IllegalStateException("materialization progress provenance differs: " + progress);
         try {
             MaterializeProgress result = new MaterializeProgress(Integer.parseInt(values.get("min-x")), Integer.parseInt(values.get("max-x")), Integer.parseInt(values.get("min-z")), Integer.parseInt(values.get("max-z")), Integer.parseInt(values.get("tiles-x")), Integer.parseInt(values.get("tiles-z")), Integer.parseInt(values.get("epoch-tiles")), Integer.parseInt(values.get("next-tile")), Integer.parseInt(values.get("inflight-end")));
@@ -426,15 +448,16 @@ public final class LargeParityOracle {
         // executors. The journal is written before work starts and only advances
         // after runServer has closed and flushed, so an interrupted epoch fails
         // closed rather than silently reordering or repeating feature work.
-        int epochTiles = materializeEpochTiles();
         Files.createDirectories(root);
+        rejectLegacyProvenance(root);
+        int epochTiles = materializeEpochTiles();
         if (Files.exists(root.resolve(freezeStamp(a)))) throw new IllegalStateException("materialize refuses an already frozen world: " + root);
         MaterializeProgress progress;
         if (Files.exists(root.resolve(progressFile(a))) || Files.exists(root.resolve(progressFile(a) + ".tmp"))) {
             progress = readProgress(root, a); verifyProgress(a, progress, epochTiles);
         } else {
             try (var entries = Files.list(root)) {
-                if (entries.findAny().isPresent()) throw new IllegalStateException("materialize requires an empty world root or its validated v3 progress journal: " + root);
+                if (entries.findAny().isPresent()) throw new IllegalStateException("materialize requires an empty world root or its validated " + MATERIALIZATION_CONTRACT + " progress journal: " + root);
             }
             int minX = Math.max(HALO_MIN, a.loX - 1), maxX = Math.min(HALO_MAX, a.hiX + 1), minZ = Math.max(HALO_MIN, a.loZ - 1), maxZ = Math.min(HALO_MAX, a.hiZ + 1);
             progress = new MaterializeProgress(minX, maxX, minZ, maxZ, (maxX - minX) / MATERIALIZE_TILE + 1, (maxZ - minZ) / MATERIALIZE_TILE + 1, epochTiles, 0, -1);
@@ -447,11 +470,11 @@ public final class LargeParityOracle {
         writeProgress(root, a, progress.withInflight(end));
         MaterializeProgress current = progress;
         runServer(root, false, a, (server, level) -> {
-            int batch = Math.max(1, Integer.parseInt(System.getenv().getOrDefault("LODESTONE_ORACLE_BATCH", "256"))); long start = System.nanoTime();
+            long start = System.nanoTime();
             for (int tile = current.nextTile; tile < end; tile++) {
                 int x0 = current.minX + (tile % current.tilesX) * MATERIALIZE_TILE, z0 = current.minZ + (tile / current.tilesX) * MATERIALIZE_TILE;
                 List<ChunkPos> positions = new ArrayList<>(MATERIALIZE_TILE * MATERIALIZE_TILE); for (int z = z0; z <= Math.min(current.maxZ, z0 + MATERIALIZE_TILE - 1); z++) for (int x = x0; x <= Math.min(current.maxX, x0 + MATERIALIZE_TILE - 1); x++) positions.add(new ChunkPos(x, z));
-                for (int off = 0; off < positions.size(); off += batch) loadBatch(server, level, a, positions.subList(off, Math.min(positions.size(), off + batch)), false, new ArrayList<>());
+                loadBatch(server, level, a, positions, false, new ArrayList<>());
                 System.err.printf("[large-parity %s] materialized-tile=%d/%d epoch=%d..%d rate=%.1f tiles/s%n", formatLabel(a), tile + 1, current.totalTiles(), current.nextTile + 1, end, (tile - current.nextTile + 1) / ((System.nanoTime() - start) / 1_000_000_000.0));
             }
         });
@@ -497,7 +520,7 @@ public final class LargeParityOracle {
         } });
     }
     public static void main(String[] ignored) throws Exception {
-        verifyCanonicalLightContract(); Args a = args(); if (a.help) { usage(); return; }
+        verifySingleWorldgenWorker(); verifyCanonicalLightContract(); Args a = args(); if (a.help) { usage(); return; } if (a.provenanceSelftest) { provenanceSelftest(); return; }
         if ("materialize".equals(a.mode)) { String root = System.getenv("ORACLE_WORLD_ROOT"); if (root == null || root.isBlank()) throw new IllegalStateException("materialize requires LODESTONE_ORACLE_WORLD_ROOT"); materialize(a, Path.of(root)); }
         else { String root = System.getenv("ORACLE_FROZEN_WORLD_ROOT"); if (root == null || root.isBlank()) throw new IllegalStateException("export requires LODESTONE_ORACLE_FROZEN_WORLD_ROOT"); export(a, Path.of(root)); }
     }

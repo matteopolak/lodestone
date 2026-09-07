@@ -148,6 +148,26 @@ def accept(out, first, second):
     print(f"accepted duplicate-read semantic baseline into {out}")
 
 
+def reproducible(first, second):
+    """Require independent materializations to agree without sharing a root id."""
+    first_header, first_payload, first_dim = read(first)
+    second_header, second_payload, second_dim = read(second)
+    complete = (GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX, GRID_COUNT)
+    if first_header[11:16] != complete:
+        raise ValueError(f"{first}: independent-root reproducibility requires the complete {GRID_SIDE}x{GRID_SIDE} manifest")
+    if second_header[11:16] != complete:
+        raise ValueError(f"{second}: independent-root reproducibility requires the complete {GRID_SIDE}x{GRID_SIDE} manifest")
+    if second_header[1] != first_header[1] or second_header[18] != first_header[18]:
+        raise ValueError("independent materializations have different semantic schemas")
+    if second_dim != first_dim:
+        raise ValueError("independent materializations have different dimensions")
+    if second_header[11:16] != first_header[11:16]:
+        raise ValueError("independent materializations cover different geometry")
+    if second_payload != first_payload:
+        raise ValueError("independent materializations differ in semantic payload")
+    print(f"independent materializations reproduce semantic payload: dimension={first_dim} cx={first_header[11]}..{first_header[12]} cz={first_header[13]}..{first_header[14]}")
+
+
 def selftest():
     """Exercise a full merge, payload tampering, incompatible worlds, and v2 refusal."""
     def make(path, sx0, sx1, byte, frozen):
@@ -185,6 +205,37 @@ def selftest():
         try: accept(accepted, out, duplicate)
         except ValueError: pass
         else: raise AssertionError("mismatched duplicate frozen-world read was accepted")
+        independent = directory/"independent.lwp"
+        _, full_payload, _ = read(out)
+        independent.write_bytes(make_header(3, "overworld", GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX,
+                                            GRID_COUNT, hashlib.sha256(b"independent root").digest(),
+                                            hashlib.sha256(full_payload).digest()) + full_payload)
+        reproducible(out, independent)
+        raw = bytearray(independent.read_bytes()); raw[HEADER+3] ^= 1; independent.write_bytes(raw)
+        try: reproducible(out, independent)
+        except ValueError as error: assert "checksum" in str(error)
+        else: raise AssertionError("independent payload bit flip was accepted")
+        one_record = bytes([0x5A]) * WIDTH
+        incomplete = directory/"incomplete.lwp"
+        incomplete.write_bytes(make_header(3, "overworld", GRID_MIN, GRID_MIN, GRID_MIN, GRID_MIN,
+                                           1, frozen, hashlib.sha256(one_record).digest()) + one_record)
+        try: reproducible(incomplete, incomplete)
+        except ValueError as error: assert "complete" in str(error)
+        else: raise AssertionError("matching incomplete independent-root manifests were accepted")
+        schema_v4 = directory/"schema-v4.lwp"
+        schema_v4.write_bytes(make_header(4, "overworld", GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX,
+                                          GRID_COUNT, hashlib.sha256(b"schema root").digest(),
+                                          hashlib.sha256(full_payload).digest()) + full_payload)
+        try: reproducible(out, schema_v4)
+        except ValueError as error: assert "schema" in str(error)
+        else: raise AssertionError("independent schema mismatch was accepted")
+        dimension_v4 = directory/"dimension-v4.lwp"
+        dimension_v4.write_bytes(make_header(4, "nether", GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX,
+                                             GRID_COUNT, hashlib.sha256(b"dimension root").digest(),
+                                             hashlib.sha256(full_payload).digest()) + full_payload)
+        try: reproducible(schema_v4, dimension_v4)
+        except ValueError as error: assert "dimension" in str(error)
+        else: raise AssertionError("independent dimension mismatch was accepted")
         raw = bytearray(left.read_bytes()); raw[HEADER+3] ^= 1; left.write_bytes(raw)
         try: read(left)
         except ValueError: pass
@@ -221,7 +272,7 @@ def selftest():
         try: read(v5)
         except ValueError as error: assert "schema" in str(error)
         else: raise AssertionError("v5 schema/domain mismatch was accepted")
-    print("selftest ok: authenticated v3/v4/v5 merge, duplicate-read acceptance, tamper/world/dimension/schema controls, v2 refusal")
+    print("selftest ok: authenticated v3/v4/v5 merge, duplicate-read and independent-root controls, tamper/world/dimension/schema controls, v2 refusal")
 
 
 def main():
@@ -230,11 +281,15 @@ def main():
     validate_parser = sub.add_parser("validate"); validate_parser.add_argument("paths", nargs="+")
     merge_parser = sub.add_parser("merge"); merge_parser.add_argument("--out", required=True); merge_parser.add_argument("paths", nargs="+")
     accept_parser = sub.add_parser("accept"); accept_parser.add_argument("--out", required=True); accept_parser.add_argument("first"); accept_parser.add_argument("second")
+    reproducible_parser = sub.add_parser("reproducible"); reproducible_parser.add_argument("first"); reproducible_parser.add_argument("second")
     sub.add_parser("selftest")
     args = parser.parse_args()
     try:
         if args.__dict__.get("first"):
-            accept(args.out, args.first, args.second)
+            if args.__dict__.get("out"):
+                accept(args.out, args.first, args.second)
+            else:
+                reproducible(args.first, args.second)
         elif args.__dict__.get("out"):
             merge(args.out, args.paths)
         elif args.__dict__.get("paths"):

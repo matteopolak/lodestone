@@ -46,10 +46,7 @@ esac
 if [ "$dimension_arg_explicit" -eq 0 ] && [ "$dimension" != overworld ]; then
   ARGS+=( --dimension "$dimension" )
 fi
-freeze_stamp=lodestone-large-parity-v3.freeze.sha256
-if [ "$dimension" != overworld ] || printf '%s\n' "${ARGS[@]}" | rg -q -- '--dimension'; then
-  freeze_stamp="lodestone-large-parity-v4-${dimension}.freeze.sha256"
-fi
+freeze_stamp="lodestone-large-parity-materialization-v2-${dimension}.freeze.sha256"
 
 while :; do
   LODESTONE_ORACLE_EPOCH_TILES="$EPOCH_TILES" "$HERE/run.sh" LargeParityOracle "${ARGS[@]}"
