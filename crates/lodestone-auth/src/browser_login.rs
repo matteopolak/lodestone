@@ -390,6 +390,7 @@ pub fn parse_redirect_request(request: &str) -> Result<RedirectOutcome> {
 /// Shaped to mirror [`crate::flow::PendingLogin`] so a UI can drive either from
 /// one timer. Dropping it closes the listener, which is the whole teardown —
 /// there is no task to leak.
+#[derive(Debug)]
 pub struct LoopbackLogin {
     listener: TcpListener,
     redirect_uri: String,
