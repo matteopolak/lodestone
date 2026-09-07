@@ -86,6 +86,15 @@ entities present in the live registry; they do not load chunks from disk.
 Other hosting families retain the trait's unsupported default until they provide
 a response encoder. No new configuration or external dependency is required.
 
+The 26.2 chunk encoder has a separate `chunk_nbt::block_entity_update_nbt` view.
+The packet already carries each entity's registry id and position, so its NBT is
+the update payload rather than a persisted record: save metadata is omitted,
+spawner potentials are omitted, and the protocol's empty-update types (including
+generated dungeon chests and beehives) carry an empty compound. End gateways
+retain their age, destination, and exact-teleport fields under the 26.2 keys.
+This split keeps deferred loot and generated occupants in region saves without
+mistaking those save-only fields for clientbound chunk state.
+
 ### Operator entity queries
 
 On native hosts, `ENTITY_TAG_QUERY` uses the same permission level and response

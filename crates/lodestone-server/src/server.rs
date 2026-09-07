@@ -7725,7 +7725,7 @@ where
     if let Some(item) = held_item {
         let spawner_here = block_entities.with(|reg| {
             reg.get(pos)
-                .is_some_and(|entity| entity.type_id() == "minecraft:spawner")
+                .is_some_and(|entity| entity.type_id() == "minecraft:mob_spawner")
         });
         if !spawner_here {
             match crate::spawn_egg::apply_spawn_egg(

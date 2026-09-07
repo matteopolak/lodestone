@@ -558,7 +558,7 @@ fn block_changed_ack_emits_sequence() {
     assert_eq!(
         directives,
         vec![Directive::Emit(ClientEvent::BlockChangedAck {
-            sequence: 99
+            sequence: lodestone_model::PredictionSequence::new(99),
         })]
     );
 }

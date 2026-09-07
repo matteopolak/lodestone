@@ -97,7 +97,7 @@ impl GeneratedBlockEntity {
         match self {
             GeneratedBlockEntity::Beehive { .. } => "minecraft:beehive",
             GeneratedBlockEntity::DungeonChest { .. } => "minecraft:chest",
-            GeneratedBlockEntity::DungeonSpawner { .. } => "minecraft:spawner",
+            GeneratedBlockEntity::DungeonSpawner { .. } => "minecraft:mob_spawner",
         }
     }
 }

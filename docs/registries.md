@@ -135,6 +135,12 @@ block-entity packet by accident. A key not in the built-in census stays a miss;
 it must remain in the dynamic registry that supplied it rather than being
 coerced into a built-in slot.
 
+The monster-spawner block has two names at different boundaries: its block
+state is `minecraft:spawner`, while the block-entity registry and chunk-NBT
+key are `minecraft:mob_spawner` (fixed registry id 9). Server records expose
+the latter through `BlockEntity::type_id`, and the decoder accepts the former
+only as a compatibility alias for worlds written by older Lodestone builds.
+
 Entity writers follow the same two-stage boundary. `EntitySnapshot` deliberately
 keeps a `ResourceKey`: the server protocol trait also serves legacy families,
 and a custom/session-synchronized key cannot honestly be represented by the

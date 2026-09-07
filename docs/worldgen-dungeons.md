@@ -4,8 +4,9 @@
 
 The `monster_room` configured feature places an underground cobblestone room,
 up to two deferred-loot chests, and one monster spawner during Overworld
-decoration. Generated block entities travel with the column, so the room's
-metadata is present when the server encodes or saves the receiving chunk.
+decoration. Generated block entities travel with the column, so the server's
+chunk packet carries their registry records while the save path retains the
+deferred loot, occupants, and spawner state needed after reload.
 
 ## How it works
 

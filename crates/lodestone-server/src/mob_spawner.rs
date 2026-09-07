@@ -2,8 +2,9 @@
 //!
 //! # What it is
 //!
-//! Given a `minecraft:spawner` block entity that has counted its delay down to
-//! zero, this answers **which entities to materialize and where** — or that
+//! Given a monster-spawner block whose `minecraft:mob_spawner` block entity
+//! state has counted its delay down to zero, this answers **which entities to
+//! materialize and where** — or that
 //! nothing should spawn this tick. It performs no world mutation and no
 //! spawning; the caller hands each [`SpawnAttempt`] to
 //! [`crate::MobSim::spawn_species`], the same composition
@@ -331,7 +332,7 @@ pub struct SpawnCtx<'a> {
     pub nearby_count: &'a dyn Fn(&ResourceKey, i32) -> i32,
 }
 
-/// A `minecraft:spawner` block entity's live state — `BaseSpawner`'s fields,
+/// A monster-spawner block entity's live state — its persisted timing fields,
 /// NBT-shaped so [`crate::chunk_nbt`] can load/save them verbatim.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpawnerState {
