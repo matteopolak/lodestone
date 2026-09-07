@@ -127,6 +127,8 @@
 
 use std::collections::HashMap;
 
+use lodestone_data::block::Block;
+use lodestone_data::block_states::StateId;
 use lodestone_model::BlockPos;
 
 use crate::chunk::ChunkSource;
@@ -1588,16 +1590,11 @@ pub(crate) fn schedule_generated_ticks<S: ChunkSource + ?Sized, Q: ScheduledTick
     fluid_ticks: &mut Q,
 ) -> usize {
     let mut scheduled = 0;
-    column.for_each_block_state(|x, y, z, state| {
-        let Some(fluid) = fluid_state_of(state) else {
-            return;
-        };
-        // A waterlogged block has a fluid state for reads, but this module's
-        // scheduled-fluid consumer deliberately only originates spread from a
-        // liquid block state. Keep generation seeding on that same boundary.
-        if !matches!(base_name(state), "minecraft:water" | "minecraft:lava") {
-            return;
-        }
+    for_each_generated_liquid(column, |x, y, z, fluid| {
+        // The expensive spread admission still consumes the canonical text at
+        // its boundary, but only after the numeric palette classifier admitted
+        // this cell. No string is parsed for air, terrain, or waterlogged cells.
+        let state = column.block_state(x, y, z);
         let pos = BlockPos::new(chunk_x * 16 + x, y, chunk_z * 16 + z);
         // A generated column is normally a settled snapshot. Avoid the
         // expensive shape/slope walk for interior cells whose immediate
@@ -1629,6 +1626,89 @@ pub(crate) fn schedule_generated_ticks<S: ChunkSource + ?Sized, Q: ScheduledTick
         }
     });
     scheduled
+}
+
+/// The generated-column fluid classifier, keyed by the column palette's
+/// resolved [`StateId`] rather than by a state string. Packed cells still have
+/// to be visited to obtain their coordinates, but uniform non-fluid sections
+/// stop at this cheap integer classification and never expand into cell indices
+/// or enter the shape/slope admission walk.
+fn for_each_generated_liquid(
+    column: &crate::chunk::ChunkColumn,
+    mut visit: impl FnMut(i32, i32, i32, FluidState),
+) {
+    let palette: Vec<Option<FluidState>> = column
+        .palette_state_ids()
+        .iter()
+        .copied()
+        .map(fluid_state_for_generated_id)
+        .collect();
+    for_each_generated_palette_cell(column, &palette, |section, cell, palette_index| {
+        let Some(fluid) = palette[palette_index as usize] else {
+            return;
+        };
+        let x = (cell & 15) as i32;
+        let z = ((cell >> 4) & 15) as i32;
+        let y = column.min_y + (section * 16 + (cell >> 8)) as i32;
+        visit(x, y, z, fluid);
+    });
+}
+
+/// Visits integer palette indices in sections that may contain a generated
+/// liquid. Uniform non-liquid sections are rejected from the storage layer
+/// before any per-cell index visit; packed sections remain integer-only and
+/// are visited once without a temporary allocation.
+fn for_each_generated_palette_cell(
+    column: &crate::chunk::ChunkColumn,
+    palette: &[Option<FluidState>],
+    mut visit: impl FnMut(usize, usize, u16),
+) {
+    for section in 0..column.section_count() {
+        if let Some(palette_index) = column.uniform_section_palette_index(section) {
+            if palette[palette_index as usize].is_none() {
+                continue;
+            }
+        }
+        column.for_each_section_palette_index(section, |cell, palette_index| {
+            visit(section, cell, palette_index);
+        });
+    }
+}
+
+/// Resolves the only two block identities that may originate a scheduled
+/// fluid tick. Waterlogged blocks intentionally return `None`: they carry a
+/// fluid for neighbour reads, but this scheduler follows the production
+/// consumer's liquid-block boundary.
+fn fluid_state_for_generated_id(id: StateId) -> Option<FluidState> {
+    let kind = match id.block() {
+        Block::Water => FluidKind::Water,
+        Block::Lava => FluidKind::Lava,
+        _ => return None,
+    };
+    let level = id
+        .properties()
+        .iter()
+        .find_map(|&(key, value)| (key == "level").then_some(value))
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(0)
+        .min(8);
+    Some(match level {
+        0 => FluidState {
+            kind,
+            amount: 8,
+            falling: false,
+        },
+        8 => FluidState {
+            kind,
+            amount: 8,
+            falling: true,
+        },
+        other => FluidState {
+            kind,
+            amount: 8 - other,
+            falling: false,
+        },
+    })
 }
 
 /// Cheap conservative gate for [`would_spread`]. It deliberately only rejects
@@ -2183,6 +2263,146 @@ mod tests {
             rig.probes() > 0,
             "only a candidate crossing the chunk boundary should need external reads"
         );
+    }
+
+    /// The numeric classifier must retain the old state-string result for
+    /// liquid blocks while keeping the waterlogged exception at the scheduler
+    /// boundary. The expected side is deliberately computed by the previous
+    /// parser, not by reconstructing the same mapping from `StateId`.
+    #[test]
+    fn generated_state_id_classification_matches_state_parser() {
+        for state in [
+            "minecraft:water",
+            "minecraft:water[level=0]",
+            "minecraft:water[level=1]",
+            "minecraft:water[level=7]",
+            "minecraft:water[level=8]",
+            "minecraft:lava",
+            "minecraft:lava[level=1]",
+            "minecraft:lava[level=8]",
+            "minecraft:oak_slab[type=bottom,waterlogged=true]",
+            "minecraft:oak_slab[type=bottom,waterlogged=false]",
+            "minecraft:stone",
+            "minecraft:air",
+        ] {
+            let id = StateId::from_state_str(state).expect("fixture is in the state census");
+            let expected = if matches!(base_name(state), "minecraft:water" | "minecraft:lava") {
+                fluid_state_of(state)
+            } else {
+                None
+            };
+            assert_eq!(
+                fluid_state_for_generated_id(id),
+                expected,
+                "numeric generated classifier disagrees for {state}"
+            );
+        }
+    }
+
+    /// The scan's callback count is the work that reaches the spread-admission
+    /// path. A full column has 98,304 cells, but a sparse generated snapshot
+    /// with one liquid and one waterlogged cell must invoke it once: the
+    /// waterlogged cell and every uniform/no-fluid section are rejected before
+    /// any shape or world read.
+    #[test]
+    fn generated_scan_counts_candidates_not_all_cells() {
+        let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+        let water_y = FLOOR_Y + 1;
+        column.set_block(2, water_y, 3, "minecraft:water[level=0]");
+        column.set_block(
+            4,
+            water_y,
+            3,
+            "minecraft:oak_slab[type=bottom,waterlogged=true]",
+        );
+
+        let mut callbacks = 0;
+        let mut positions = Vec::new();
+        for_each_generated_liquid(&column, |x, y, z, _fluid| {
+            callbacks += 1;
+            positions.push((x, y, z));
+        });
+
+        assert_eq!(callbacks, 1, "only the liquid block reaches the candidate path");
+        assert_eq!(positions, vec![(2, water_y, 3)]);
+    }
+
+    /// The section classifier must short-circuit an all-air column before the
+    /// storage layer expands any uniform section into cell indices. This counts
+    /// the integer-index visitor itself, rather than the liquid callback, so a
+    /// zero result proves the storage walk was skipped.
+    #[test]
+    fn generated_scan_skips_uniform_air_without_index_visits() {
+        let column = ChunkColumn::new(MIN_Y, HEIGHT);
+        let palette: Vec<_> = column
+            .palette_state_ids()
+            .iter()
+            .copied()
+            .map(fluid_state_for_generated_id)
+            .collect();
+        let mut index_visits = 0;
+        for_each_generated_palette_cell(&column, &palette, |_, _, _| {
+            index_visits += 1;
+        });
+        assert_eq!(index_visits, 0, "uniform air must not expand into cell indices");
+    }
+
+    /// The optimized section/palette walk must produce exactly the same
+    /// generated starts as the former per-cell state-string walk, including
+    /// mixed water/lava levels and the waterlogged negative control.
+    #[test]
+    fn generated_numeric_scan_preserves_scheduled_starts() {
+        let rig = Rig::flat();
+        let y = FLOOR_Y + 1;
+        for (x, z, state) in [
+            (1, 1, "minecraft:water[level=0]"),
+            (2, 1, "minecraft:water[level=3]"),
+            (3, 1, "minecraft:lava[level=0]"),
+            (4, 1, "minecraft:oak_slab[type=bottom,waterlogged=true]"),
+        ] {
+            rig.set_block(x, y, z, state);
+        }
+        let column = rig.column(0, 0);
+
+        let mut expected = Vec::new();
+        column.for_each_block_state(|x, cell_y, z, state| {
+            let Some(fluid) = fluid_state_of(state) else {
+                return;
+            };
+            if !matches!(base_name(state), "minecraft:water" | "minecraft:lava") {
+                return;
+            }
+            if !has_possible_destination(
+                &rig,
+                &column,
+                0,
+                0,
+                x,
+                cell_y,
+                z,
+                FluidEnv::OVERWORLD,
+                fluid.kind,
+            ) {
+                return;
+            }
+            let pos = BlockPos::new(x, cell_y, z);
+            if would_spread(&rig, FluidEnv::OVERWORLD, pos, state, fluid) {
+                expected.push((pos.x, pos.y, pos.z));
+            }
+        });
+
+        let mut queue = ScheduledTickQueue::new();
+        schedule_generated_ticks(
+            &rig,
+            &column,
+            0,
+            0,
+            FluidEnv::OVERWORLD,
+            100,
+            &mut queue,
+        );
+        let actual: Vec<_> = queue.iter().map(|tick| tick.pos).collect();
+        assert_eq!(actual, expected, "numeric palette walk changed generated starts");
     }
 
     #[test]
