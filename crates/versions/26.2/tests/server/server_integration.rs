@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lodestone_client::{
-    BlockPos, ChatKind, ClientBuilder, ClientEvent, LoginProfile, ServerAddress,
+    BlockPos, ClientBuilder, ClientEvent, LoginProfile, ServerAddress,
 };
 use lodestone_server::{ChunkSource, IntegratedServer, WorldgenChunkSource};
 use lodestone_v26_2::{V770ServerProtocol, adapter};
@@ -202,40 +202,27 @@ async fn real_client_and_real_v770_protocol_reach_play_with_worldgen_chunks() {
         handle.loaded_chunk_count()
     );
 
-    // `welcome_message` exercises the newly landed `lodestone_core` NBT writer
-    // for real: the server encodes a `system_chat` packet with a network-form
-    // NBT text component, and the real client's `V770Adapter` decodes it back
-    // via `read_network_nbt`/`plain_text_from_nbt_component` — proving the
-    // writer/reader round-trip through the actual wire, not a unit test of
-    // either side alone.
-    let chat_deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut seen_welcome = false;
+    // A join must not synthesize chat. Keep reading through the other initial
+    // events for a bounded quiet window so this checks the production client /
+    // server path rather than merely inspecting the first event after spawn.
+    let chat_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut join_chats = Vec::new();
     while std::time::Instant::now() < chat_deadline {
-        let Some(event) = tokio::time::timeout(Duration::from_millis(500), events.recv())
+        let remaining = chat_deadline.saturating_duration_since(std::time::Instant::now());
+        let Some(event) = tokio::time::timeout(remaining, events.recv())
             .await
             .ok()
             .flatten()
         else {
-            continue;
-        };
-        if let ClientEvent::Chat { text, kind, .. } = event {
-            assert_eq!(
-                kind,
-                ChatKind::System,
-                "welcome message should be System chat, not overlay"
-            );
-            assert_eq!(
-                text.to_plain_string(),
-                "Welcome to Lodestone",
-                "welcome message text mismatch"
-            );
-            seen_welcome = true;
             break;
+        };
+        if let ClientEvent::Chat { text, .. } = event {
+            join_chats.push(text.to_plain_string());
         }
     }
     assert!(
-        seen_welcome,
-        "never received the post-join system_chat welcome message within 30s"
+        join_chats.is_empty(),
+        "joining must not emit an automatic system-chat line; saw {join_chats:?}"
     );
 
     drop(handle);

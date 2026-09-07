@@ -77,7 +77,7 @@ struct Observed {
 /// command as a real `chat_command` frame, and collects what came back.
 ///
 /// `expected_events` bounds the wait: the loop stops as soon as it has that many
-/// non-welcome observations. A bounded wait rather than an unbounded one, because
+/// observations. A bounded wait rather than an unbounded one, because
 /// a test that hangs when the wire is broken is a worse failure report than one
 /// that returns an empty `Observed`.
 async fn run(commands: &[&str], expected_events: usize) -> Observed {
@@ -126,9 +126,7 @@ async fn run(commands: &[&str], expected_events: usize) -> Observed {
         match tokio::time::timeout_at(deadline, events.recv()).await {
             Ok(Some(ClientEvent::Chat { text, .. })) => {
                 let line = plain(&text);
-                if line != "Welcome to Lodestone" {
-                    observed.chat.push(line);
-                }
+                observed.chat.push(line);
             }
             Ok(Some(ClientEvent::GameModeChanged { game_mode })) => {
                 observed.game_modes.push(game_mode);

@@ -11,9 +11,8 @@
 //! # Why each test has a control
 //!
 //! [`undecorated_adapter_delivers_everything_verbatim`] establishes what an
-//! undecorated [`V770Adapter`] does with no wrapper in the path: the join-time
-//! welcome line arrives unmodified, and a player's own chat comes back
-//! exactly as typed. Every other test changes exactly one thing relative to
+//! undecorated [`V770Adapter`] does with no wrapper in the path: a player's
+//! own chat comes back exactly as typed. Every other test changes exactly one thing relative to
 //! that baseline — the [`Hooks`] variant — so a passing drop/rewrite/append
 //! test can only be explained by the decorator actually running.
 //!
@@ -272,19 +271,12 @@ async fn collect_chat_lines(events: &mut EventStream, timeout: Duration) -> Vec<
     lines
 }
 
-/// **Control.** With no decorator in the path, the join-time welcome line
-/// arrives unmodified and a player's own chat comes back exactly as typed.
+/// **Control.** With no decorator in the path, a player's own chat comes back
+/// exactly as typed.
 #[tokio::test]
 async fn undecorated_adapter_delivers_everything_verbatim() {
     let (mut handle, mut events, server) =
         join(|inner| Box::new(inner), "ControlClient").await;
-
-    let welcome = collect_chat_lines(&mut events, Duration::from_secs(2)).await;
-    assert_eq!(
-        welcome,
-        vec!["Welcome to Lodestone".to_string()],
-        "an undecorated adapter must deliver the welcome line verbatim"
-    );
 
     handle
         .chat("hello from the client control run")
@@ -324,10 +316,7 @@ async fn decorator_with_no_hook_behaves_like_the_undecorated_adapter() {
     let lines = collect_chat_lines(&mut events, Duration::from_secs(5)).await;
     assert_eq!(
         lines,
-        vec![
-            "Welcome to Lodestone".to_string(),
-            "<Passthrough> hello from the passthrough run".to_string(),
-        ],
+        vec!["<Passthrough> hello from the passthrough run".to_string()],
         "a decorator with no hook must reproduce the undecorated adapter's traffic exactly"
     );
 
@@ -412,7 +401,7 @@ async fn decorator_rewrites_the_outbound_chat_action() {
 
 /// **Verb: drop, inbound.** [`Hooks::DropInboundChat`] filters every
 /// `ClientEvent::Chat` out of `handle_packet`'s returned batch — the server
-/// really did send the welcome line, and the decorator erases it before the
+/// really does send the player's chat, and the decorator erases it before the
 /// application's event stream ever sees it.
 #[tokio::test]
 async fn decorator_drops_the_inbound_chat_event() {
@@ -427,7 +416,10 @@ async fn decorator_drops_the_inbound_chat_event() {
     )
     .await;
 
-    let lines = collect_chat_lines(&mut events, Duration::from_secs(2)).await;
+    handle
+        .chat("hello from the inbound drop test")
+        .expect("client still connected");
+    let lines = collect_chat_lines(&mut events, Duration::from_secs(5)).await;
     assert!(
         lines.is_empty(),
         "the decorator must drop every inbound chat event; saw {lines:?}"
@@ -453,10 +445,16 @@ async fn decorator_rewrites_the_inbound_chat_event() {
     )
     .await;
 
-    let lines = collect_chat_lines(&mut events, Duration::from_secs(2)).await;
+    handle
+        .chat("hello from the inbound rewrite test")
+        .expect("client still connected");
+    let lines = collect_chat_lines(&mut events, Duration::from_secs(5)).await;
     assert_eq!(
         lines,
-        vec!["[rewritten by client decorator] Welcome to Lodestone".to_string()],
+        vec![
+            "[rewritten by client decorator] <RewriteInClnt> hello from the inbound rewrite test"
+                .to_string()
+        ],
         "the decorator must rewrite the inbound chat event's text"
     );
 
@@ -480,14 +478,17 @@ async fn decorator_appends_an_inbound_chat_event() {
     )
     .await;
 
-    let lines = collect_chat_lines(&mut events, Duration::from_secs(2)).await;
+    handle
+        .chat("hello from the inbound append test")
+        .expect("client still connected");
+    let lines = collect_chat_lines(&mut events, Duration::from_secs(5)).await;
     assert_eq!(
         lines,
         vec![
-            "Welcome to Lodestone".to_string(),
+            "<AppendInClnt> hello from the inbound append test".to_string(),
             "Appended by client decorator".to_string(),
         ],
-        "the decorator must append its own event after the real one"
+        "the decorator must append its own event after the real server event"
     );
 
     handle.shutdown();

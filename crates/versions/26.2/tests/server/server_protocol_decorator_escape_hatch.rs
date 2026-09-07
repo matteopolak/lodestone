@@ -13,8 +13,8 @@
 //! # Why each test has a control
 //!
 //! [`undecorated_protocol_broadcasts_the_players_own_chat_verbatim`] and
-//! [`undecorated_protocol_sends_exactly_one_welcome_message`] establish what
-//! the wire does with *no* decorator in the path. Every other test below
+//! [`undecorated_protocol_sends_no_join_chat`] establish what the wire does
+//! with *no* decorator in the path. Every other test below
 //! changes exactly one thing relative to one of those two controls — the
 //! [`Hooks`] variant — so a passing "drop" or "rewrite" test can only be
 //! explained by the decorator actually running, not by a connection that
@@ -280,7 +280,7 @@ async fn undecorated_protocol_broadcasts_the_players_own_chat_verbatim() {
 
 /// **Sanity check, not a verb.** [`Hooks::Passthrough`] hooks nothing, so
 /// wrapping [`V770ServerProtocol`] in [`Decorator`] must behave exactly like
-/// the control above — the same welcome line, the same verbatim echo. This
+/// the control above — no synthetic join chat and the same verbatim echo. This
 /// is what isolates every other test's assertion to the one [`Hooks`]
 /// variant it sets: without this, a passing drop/rewrite/append test could
 /// in principle be explained by the `Decorator` wrapper itself changing
@@ -303,10 +303,7 @@ async fn decorator_with_no_hook_behaves_like_the_undecorated_protocol() {
     let lines = collect_chat_lines(&mut events, Duration::from_secs(2)).await;
     assert_eq!(
         lines,
-        vec![
-            "Welcome to Lodestone".to_string(),
-            "<Passthrough> hello from the passthrough run".to_string(),
-        ],
+        vec!["<Passthrough> hello from the passthrough run".to_string()],
         "a decorator with no hook must reproduce the undecorated protocol's traffic exactly"
     );
 
@@ -392,17 +389,16 @@ async fn decorator_rewrites_the_outbound_chat_broadcast() {
 }
 
 /// **Control for the append test below.** An undecorated protocol's join
-/// sends exactly one chat line — `welcome_message`'s own "Welcome to
-/// Lodestone" — and nothing else in the same window.
+/// sends no chat line when its optional `welcome_message` hook is empty.
 #[tokio::test]
-async fn undecorated_protocol_sends_exactly_one_welcome_message() {
-    let (mut handle, mut events, server) = join(V770ServerProtocol, "WelcomeControl").await;
+async fn undecorated_protocol_sends_no_join_chat() {
+    let (mut handle, mut events, server) = join(V770ServerProtocol, "JoinControl").await;
 
     let lines = collect_chat_lines(&mut events, Duration::from_secs(2)).await;
     assert_eq!(
         lines,
-        vec!["Welcome to Lodestone".to_string()],
-        "an undecorated join must send exactly the one welcome line"
+        Vec::<String>::new(),
+        "an undecorated join must not synthesize a chat line"
     );
 
     handle.shutdown();
@@ -410,7 +406,7 @@ async fn undecorated_protocol_sends_exactly_one_welcome_message() {
 }
 
 /// **Verb: append, outbound.** [`Hooks::AppendWelcome`] forwards the wrapped
-/// protocol's real `welcome_message()` batch, then pushes one more
+/// protocol's `welcome_message()` batch, then pushes one more
 /// [`ServerDirective::Send`] built from the wrapped protocol's own
 /// `encode_system_chat` — a plugin author's "announce something at join" case
 /// (a MOTD-of-the-day plugin, or a disguise announcing itself). The control
@@ -429,11 +425,8 @@ async fn decorator_appends_an_outbound_directive_to_the_welcome_batch() {
     let lines = collect_chat_lines(&mut events, Duration::from_secs(2)).await;
     assert_eq!(
         lines,
-        vec![
-            "Welcome to Lodestone".to_string(),
-            "Appended by decorator escape hatch".to_string(),
-        ],
-        "the decorator must append its own line after the real welcome message"
+        vec!["Appended by decorator escape hatch".to_string()],
+        "the decorator must be able to append its own join line"
     );
 
     handle.shutdown();
