@@ -290,13 +290,12 @@ fn one_chunk(scene: &Scene) -> Run {
     }
 }
 
-/// The bound. The residual is the diff map's own growth series and nothing else:
-/// two independent instruments agree on that — the sampled backtrace table
-/// attributes 100% of the post-U21 surface allocations to
-/// `build_surface`'s `FastMap`, and the **unsampled** size histogram shows
-/// exactly 14 distinct sizes (76, 144, 280, 552, 1096, 2184, 4360, 8712, 17416,
-/// 34824, 69640, 139272, 278536, 557064 bytes — a doubling series for a 16-byte
-/// entry) each occurring once per stage entry.
+/// The bound. The residual is the diff map's growth series plus the fixed setup
+/// cost of the X/Z and Y condition-cache arrays. Two independent instruments
+/// measured the map's **unsampled** size histogram as exactly 14 distinct sizes
+/// (76, 144, 280, 552, 1096, 2184, 4360, 8712, 17416, 34824, 69640, 139272,
+/// 278536, 557064 bytes — a doubling series for a 16-byte entry), each once per
+/// stage entry; the cache contributes at most two additional allocations.
 ///
 /// So the expected value is ⌈log2(rewrites)⌉-ish, ~14 for a full chunk, and the
 /// bound is set at 64 to leave room for a fixture with more rewrites without
@@ -346,14 +345,16 @@ fn a_whole_chunk_of_surface_rules_allocates_a_bounded_amount_not_one_per_probe()
         //  * H_string — the pre-U21 representation allocated a `String` for
         //    every probe (`pre`, 77.08% of the stage) plus one per matched rule
         //    (`try_apply`, 21.92%), so it predicts at least `probes`.
-        //  * H_id — nothing is allocated per probe or per match; only the diff
-        //    map's growth series is, i.e. O(log rewrites).
+        //  * H_id — nothing is allocated per probe or per match; the diff map's
+        //    growth series and at most two condition-cache arrays are, i.e.
+        //    O(log rewrites) + O(1).
         let h_string = run.probes;
         assert!(
             run.allocs <= PER_CHUNK_BOUND,
             "[{label}] surface allocations regressed: {} for {} probes and {} \
              rewrites.\n  H_id     (ids carried across the seam) predicts \
-             ~{} — the diff map's growth series, ⌈log2({})⌉ doublings\n  \
+             ~{} — the diff map's growth series plus fixed condition-cache setup, \
+             ⌈log2({})⌉ doublings\n  \
              H_string (a String per probe, the pre-U21 shape) predicts >= {}\n  \
              measured {} allocations = {:.4} per 1000 probes; the id \
              representation reads well under 1 and the string one ~800.\n  \
