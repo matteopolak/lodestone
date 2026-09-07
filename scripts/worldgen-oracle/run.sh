@@ -85,5 +85,5 @@ container run "${CONTAINER_ARGS[@]}" eclipse-temurin:25-jdk bash -c '
     printf 'eula=true\n' > /work/eula.txt
     cp /oracle/'"$CLASS"'.java /work/
     javac -cp "$CP" -d /work /work/'"$CLASS"'.java
-    java -cp "/work:$CP" '"$CLASS"'
+    java -Dmax.bg.threads=1 -cp "/work:$CP" '"$CLASS"'
   '
