@@ -100,7 +100,7 @@
 //! `lodestone-worldgen-core`'s density interpreter. Nothing version-specific.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -478,6 +478,46 @@ impl EndGenerator {
             .into_iter()
             .filter(|start| start.pieces_complete)
             .collect()
+    }
+
+    /// Complete structure starts whose horizontal boxes intersect `(cx, cz)`.
+    ///
+    /// The returned map is the save-facing structure-reference view: each
+    /// structure id owns packed origin-chunk coordinates. The scan is kept
+    /// separate from [`Self::structure_starts`] because a chunk can reference
+    /// a city that started in a neighbouring chunk, while only the origin
+    /// chunk persists the start itself.
+    #[must_use]
+    pub fn structure_references(&self, cx: i32, cz: i32) -> BTreeMap<String, Vec<i64>> {
+        const REFERENCE_RADIUS: i32 = 8;
+
+        let Some(registry) = &self.structures else {
+            return BTreeMap::new();
+        };
+        let sampler = EndStartSampler::new(self);
+        let (min_x, min_z) = (cx * 16, cz * 16);
+        let mut references = BTreeMap::new();
+        for start_x in cx - REFERENCE_RADIUS..=cx + REFERENCE_RADIUS {
+            for start_z in cz - REFERENCE_RADIUS..=cz + REFERENCE_RADIUS {
+                for start in registry.starts_at(start_x, start_z, &sampler) {
+                    if !start.pieces_complete
+                        || !start.bounding_box.intersects_xz(min_x, min_z, min_x + 15, min_z + 15)
+                    {
+                        continue;
+                    }
+                    let packed =
+                        (i64::from(start_z as u32) << 32) | i64::from(start_x as u32);
+                    let entries = references.entry(start.structure).or_insert_with(Vec::new);
+                    if !entries.contains(&packed) {
+                        entries.push(packed);
+                    }
+                }
+            }
+        }
+        for entries in references.values_mut() {
+            entries.sort_unstable();
+        }
+        references
     }
 
     fn base_world(&self, cx: i32, cz: i32) -> DenseBlockGrid {
