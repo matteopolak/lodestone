@@ -99,6 +99,9 @@ the renderer's section consumer remeshes server-authoritative edits. The
 era-local registry and emits the opaque parameters as `ClientEvent::BlockEvent`.
 These registry lookups are deliberately separate from the canonical 26.2
 block-state and item tables: the numeric spaces do not share an ordering.
+The literal bodies in `tests/block_updates.rs` query the loaded world for a
+translated state and verify that a block event reaches the visible-event route,
+so these paths are covered beyond directive construction alone.
 `block_break_animation` preserves its entity id, packed position and raw stage
 byte as `ClientEvent::BlockDestruction` so the overlay consumer can also see
 its clear sentinel. `entity_metadata` reuses the

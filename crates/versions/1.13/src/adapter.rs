@@ -1691,9 +1691,13 @@ impl V404Adapter {
                 "multi_block_change count {count} exceeds a full column"
             )));
         }
-        let mut by_section: std::collections::BTreeMap<i32, Vec<[u8; 3]>> =
-            std::collections::BTreeMap::new();
-        let mut updates = Vec::with_capacity(count);
+        // Keep the decoded state with its section-relative coordinates.  The
+        // world sink has a bulk section primitive so one packet does not make
+        // the world fork the same section once per record.
+        let mut by_section = std::collections::BTreeMap::<
+            (i32, i32, i32),
+            Vec<(u8, u8, u8, u32)>,
+        >::new();
         let mut tally = FallbackTally::default();
         for _ in 0..count {
             let horizontal = reader.u8().map_err(dec_err)?;
@@ -1707,34 +1711,40 @@ impl V404Adapter {
             let x = chunk_x * 16 + i32::from(x_rel);
             let z = chunk_z * 16 + i32::from(z_rel);
             let y = i32::from(y_wire);
-            updates.push((x, y, z, state));
-            by_section.entry(y >> 4).or_default().push([
+            let section = (x >> 4, y >> 4, z >> 4);
+            by_section.entry(section).or_default().push((
                 x_rel,
-                (y_wire & 0xF),
+                y_wire & 0xF,
                 z_rel,
-            ]);
+                state,
+            ));
         }
         reader.ensure_empty().map_err(dec_err)?;
         // Do not mutate a loaded world until the complete packet, including
         // its trailing-byte check, has been validated. A malformed suffix
         // must not leave a valid prefix partially applied.
-        for (x, y, z, state) in updates {
-            world.set_block(x, y, z, state);
-            world.sync_block_entity(
-                x,
-                y,
-                z,
-                lodestone_data::block_states::StateId::new(state)
-                    .and_then(block_entity_type)
-                    .map(|kind| kind.raw()),
-            );
+        for (&(section_x, section_y, section_z), blocks) in &by_section {
+            world.set_blocks(section_x, section_y, section_z, blocks);
+            for &(x, y, z, state) in blocks {
+                world.sync_block_entity(
+                    (section_x << 4) | i32::from(x),
+                    (section_y << 4) | i32::from(y),
+                    (section_z << 4) | i32::from(z),
+                    lodestone_data::block_states::StateId::new(state)
+                        .and_then(block_entity_type)
+                        .map(|kind| kind.raw()),
+                );
+            }
         }
         Ok(by_section
             .into_iter()
-            .map(|(section_y, blocks)| {
+            .map(|((section_x, section_y, section_z), blocks)| {
                 Directive::Emit(ClientEvent::SectionBlocksChanged {
-                    section: SectionPos::new(chunk_x, section_y, chunk_z),
-                    blocks,
+                    section: SectionPos::new(section_x, section_y, section_z),
+                    blocks: blocks
+                        .into_iter()
+                        .map(|(x, y, z, _state)| [x, y, z])
+                        .collect(),
                 })
             })
             .collect())

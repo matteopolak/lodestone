@@ -215,6 +215,11 @@ The bulk packet has two layouts: 498/578 name a chunk and encode each local
 `x/z`, `y`, state triple; 754 names a packed section and encodes each update as
 `state << 12 | local-position`. The tests use one fixture of each layout,
 including negative section coordinates, rather than the adapter's encoder.
+After the full packet validates, records are grouped by touched section and
+applied through `WorldSink::set_blocks`, preserving duplicate-record order
+within a section while avoiding repeated storage forks. The literal fixtures in
+`tests/block_updates.rs` query the world after dispatch for all three protocols
+and assert that block events reach the visible-event route.
 
 Explosions lift their three floating-point centre coordinates, radius,
 signed affected-block offsets, and the always-present local-player impulse.
