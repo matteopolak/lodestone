@@ -7,25 +7,11 @@
 use crate::sim::{SessionEnd, SessionEndKind};
 use super::*;
 
-/// The bottom-right corner string on the title screen, occupying vanilla's
-/// `title.credits` slot (`TitleScreen.init`, vanilla's own title-screen rendering). Vanilla's own
-/// text there — `"Copyright Mojang AB. Do not distribute!"` — is a notice about
-/// Mojang's own client assets and, on its face, an instruction not to
-/// distribute; neither is true of this project's own build, so it is replaced
-/// with Lodestone's own notice rather than reproduced.
-pub(super) const COPYRIGHT: &str = "Lodestone — a from-scratch, open-source client";
-
-/// The bottom-left corner string, occupying vanilla's
-/// `"Minecraft " + version.name()` slot (+ `menu.modded` for a modified
-/// client, vanilla's own title-screen rendering).
-///
-/// Phrased as Lodestone's own version string, not vanilla's: it leads with
-/// this project's name and version, with the protocol version it speaks
-/// (`26.2`) kept alongside because that is functionally meaningful — it says
-/// which server family this build can join — rather than because it is
-/// vanilla's own line.
+/// The bottom-left title-screen label identifies the client and compatible
+/// game release without exposing Lodestone's package version or protocol
+/// terminology in player-facing copy.
 pub(super) fn version_line() -> String {
-    format!("Lodestone {} (protocol: Minecraft 26.2)", env!("CARGO_PKG_VERSION"))
+    "Lodestone (Minecraft 26.2)".to_owned()
 }
 
 /// Builds the pause menu's overlay frame: vanilla's widgets at vanilla's

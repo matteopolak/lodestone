@@ -72,6 +72,19 @@ fn title_frame_renders_the_multiplayer_disabled_tooltip_on_hover() {
     );
 }
 
+#[test]
+fn title_frame_has_only_the_release_label_in_its_bottom_corners() {
+    let nav = test_nav("title-corner-labels");
+    let ui = UiState::new();
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut favicons = FaviconCache::new();
+
+    let frame = frame_for(&ui, &nav, &statuses, &mut favicons).expect("title frame");
+    assert_eq!(frame.labels.len(), 1);
+    assert_eq!(frame.labels[0].text, "Lodestone (Minecraft 26.2)");
+    assert_eq!(frame.labels[0].origin, Origin::BottomLeft);
+}
+
 /// A nav with a temporary (never-loaded) list path, so no test reads the
 /// developer's real `servers.json`.
 fn test_nav(tag: &str) -> MenuNav {
