@@ -8,7 +8,7 @@ use lodestone_model::{
     ClientEvent, ConnectionState, Directive, EquipmentSlot, VersionAdapter,
 };
 use lodestone_v1_20_6::{PROTOCOL_1_20_6, adapter_for, packet_ids};
-use lodestone_world::World;
+use lodestone_world::{ChunkColumn, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World};
 
 fn hex(input: &str) -> Vec<u8> {
     assert_eq!(input.len() % 2, 0, "fixture has an odd number of hex digits");
@@ -22,6 +22,31 @@ fn decode(packet_id: i32, body: &[u8]) -> Vec<Directive> {
     adapter_for(PROTOCOL_1_20_6)
         .handle_packet(&mut World::new(), ConnectionState::Play, packet_id, body)
         .expect("literal protocol-766 fixture decodes")
+}
+
+fn world_with_loaded_section() -> World {
+    let mut column = ChunkColumn::new(
+        -64,
+        24,
+        PaletteKind::block_states(),
+        PaletteKind::biomes(),
+        0,
+        0,
+    );
+    // Materialise the section that the fixtures update; an absent section
+    // would make the world's no-op-on-unloaded contract hide a bad dispatch.
+    column.set_block(2, 68, 3, 1);
+    let mut world = World::new();
+    world.load(
+        lodestone_world::ChunkPos::new(0, 0),
+        LoadedChunk::new(
+            column,
+            ColumnLight::new(24),
+            Heightmaps::new(),
+            Vec::new(),
+        ),
+    );
+    world
 }
 
 #[test]
@@ -147,6 +172,75 @@ fn block_action_reaches_the_shell_block_event_stream() {
     assert_eq!((pos.x, pos.y, pos.z), (1, 64, -3));
     assert_eq!((*b0, *b1), (1, 7));
     assert_eq!(block.to_string(), "minecraft:chest");
+}
+
+#[test]
+fn block_change_applies_the_canonical_state_to_the_loaded_world() {
+    // Packed (x=2, y=68, z=3), followed by source state 4276, the
+    // property-free diamond block in the protocol-766 state table. Its
+    // canonical id is intentionally obtained from the independent 26.2 data
+    // table rather than assuming the two numeric spaces are aligned.
+    let mut world = world_with_loaded_section();
+    let canonical_diamond = lodestone_data::block_states::state_id("minecraft:diamond_block")
+        .expect("canonical diamond block exists");
+    assert_ne!(canonical_diamond, 4276, "the fixture must distinguish wire and canonical ids");
+    let directives = adapter_for(PROTOCOL_1_20_6)
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            packet_ids::play::clientbound::BLOCK_CHANGE,
+            &hex("0000008000003044b421"),
+        )
+        .expect("literal block_change fixture decodes");
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
+            section: lodestone_model::SectionPos::new(0, 4, 0),
+            blocks: vec![[2, 4, 3]],
+        })]
+    );
+    assert_eq!(
+        world.block_state_at(2, 68, 3),
+        Some(canonical_diamond),
+        "block_change must write canonical state ids, not protocol-766 ids"
+    );
+}
+
+#[test]
+fn multi_block_change_batches_world_writes_and_canonicalizes_each_state() {
+    // Section (0, 4, 0), two records: protocol state 4276 at local (2, 4, 3)
+    // and protocol state 10 at local (15, 1, 0). Both records and the count
+    // are literal VarInts; no encoder is involved in this fixture.
+    let mut world = world_with_loaded_section();
+    let canonical_diamond = lodestone_data::block_states::state_id("minecraft:diamond_block")
+        .expect("canonical diamond block exists");
+    let canonical_dirt =
+        lodestone_data::block_states::state_id("minecraft:dirt").expect("canonical dirt exists");
+    assert_ne!(canonical_diamond, 4276, "the fixture must distinguish wire and canonical ids");
+    assert_ne!(canonical_dirt, 10, "the fixture must distinguish wire and canonical ids");
+    let directives = adapter_for(PROTOCOL_1_20_6)
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            packet_ids::play::clientbound::MULTI_BLOCK_CHANGE,
+            &hex("000000000000000402b484ad0881de02"),
+        )
+        .expect("literal multi_block_change fixture decodes");
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
+            section: lodestone_model::SectionPos::new(0, 4, 0),
+            blocks: vec![[2, 4, 3], [15, 1, 0]],
+        })]
+    );
+    assert_eq!(
+        world.block_state_at(2, 68, 3),
+        Some(canonical_diamond)
+    );
+    assert_eq!(
+        world.block_state_at(15, 65, 0),
+        Some(canonical_dirt)
+    );
 }
 
 #[test]

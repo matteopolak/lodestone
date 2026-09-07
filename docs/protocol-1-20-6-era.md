@@ -168,8 +168,9 @@ accept the wrong one.
 signed 22-bit x, 22-bit z, and 20-bit y fields; its records are **VarInt**
 values, with `state << 12 | x << 8 | z << 4 | y`. The decoder translates every
 source state through the same 766-to-canonical table as chunk columns and
-single-block changes, synchronizes block-entity ownership, and emits one
-`ClientEvent::SectionBlocksChanged` for the affected local coordinates.
+single-block changes, applies the resolved records through the one-section
+batched world sink, synchronizes block-entity ownership per cell, and emits
+one `ClientEvent::SectionBlocksChanged` for the affected local coordinates.
 `block_break_animation` similarly now delivers its entity id, packed position,
 and untouched progress byte to `ClientEvent::BlockDestruction`.
 

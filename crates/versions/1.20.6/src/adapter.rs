@@ -1858,25 +1858,40 @@ impl V766Adapter {
         let shape = adapter.current_shape();
         let mut tally = FallbackTally::default();
         let mut changed = Vec::with_capacity(body.blocks.len());
+        let mut writes = Vec::with_capacity(body.blocks.len());
+        let mut resolved = Vec::with_capacity(body.blocks.len());
         for (local, raw) in &body.blocks {
             let raw = u32::try_from(*raw).map_err(|_| {
                 AdapterError::Decode(format!("multi_block_change state id {raw} is negative"))
             })?;
             let state = shape.canonical.resolve_or_air(raw, &mut tally);
+            writes.push((local[0], local[1], local[2], state.raw()));
+            changed.push(*local);
+            resolved.push((*local, state));
+        }
+        if changed.is_empty() {
+            return Ok(Vec::new());
+        }
+        // The packet is constrained to one section. Keep the whole update on
+        // the section-batched sink seam so the world forks its storage once,
+        // rather than once per record. Block-entity agreement remains a
+        // per-cell tail because each new state can own a different type.
+        world.set_blocks(
+            body.section_x,
+            body.section_y,
+            body.section_z,
+            &writes,
+        );
+        for (local, state) in resolved {
             let x = body.section_x * 16 + i32::from(local[0]);
             let y = body.section_y * 16 + i32::from(local[1]);
             let z = body.section_z * 16 + i32::from(local[2]);
-            world.set_block(x, y, z, state.raw());
             world.sync_block_entity(
                 x,
                 y,
                 z,
                 block_entity_type(state).map(|kind| kind.raw()),
             );
-            changed.push(*local);
-        }
-        if changed.is_empty() {
-            return Ok(Vec::new());
         }
         Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
             section: SectionPos::new(body.section_x, body.section_y, body.section_z),
