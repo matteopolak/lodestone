@@ -219,6 +219,14 @@ header decodes x/z as signed 22-bit fields and handles the important era
 difference: section Y is unsigned at 756 but signed at 758. Equipment uses the
 top-bit-terminated list and the committed per-protocol jar reports resolve its
 item ids before `EntityEquipmentUpdated` reaches ECS and rendering consumers.
+The standalone `entity_metadata` packet is decoded for both protocols and
+exports the shared entity-flags byte at index `0` through
+`EntityMetadataUpdated`. Every other index is category-specific, so the
+adapter consumes its typed value but does not assign it a meaning without an
+entity-category map. The metadata codec rejects the unmodeled particle
+serializer and unknown type ids by name rather than risking stream
+desynchronization; literal 756 and 758 bodies pin the flags event and its
+ingest route.
 The supported census is every empty or NBT-free item slot and every defined
 equipment ordinal (at most eight records); an item with legacy NBT fails
 explicitly because the
