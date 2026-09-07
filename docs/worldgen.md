@@ -35,6 +35,16 @@ The numeric core (`rng`, `hash`, `math`, `noise`, `density`, `counters`) lives i
 `density`'s JSON-parsed graph). `lodestone-worldgen` re-exports those modules, so callers inside or
 outside the crate see no path change.
 
+### Bundled server data
+
+`lodestone-server/build.rs` walks its worldgen, loot, structure, recipe and item-tag asset trees and
+writes sorted lookup tables into Cargo's `$OUT_DIR`. Each generated include keeps only the path
+relative to its asset tree and resolves it through the compiling package's `CARGO_MANIFEST_DIR`.
+This matters when Cargo reuses a target directory after a temporary checkout or worktree has gone
+away: generated source must not retain the build script's old absolute path. Add or refresh bundled
+files under the relevant `crates/lodestone-server/assets/` directory; the build script tracks those
+directories and regenerates the corresponding table automatically.
+
 ### The density/noise engine
 
 A density function graph (`Density`, compiled by `engine::graph::Program`) is vanilla's

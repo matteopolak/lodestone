@@ -31,8 +31,10 @@ fn main() {
          pub static EMBEDDED_WORLDGEN: &[(&str, &str)] = &[\n",
     );
     for (id, path) in &entries {
-        let path = path.to_string_lossy().replace('\\', "\\\\");
-        code.push_str(&format!("    ({id:?}, include_str!(\"{path}\")),\n"));
+        code.push_str(&format!(
+            "    ({id:?}, {}),\n",
+            asset_include("assets/worldgen", path, "include_str")
+        ));
     }
     code.push_str("];\n");
 
@@ -57,8 +59,10 @@ fn main() {
          pub static EMBEDDED_LOOT: &[(&str, &str)] = &[\n",
     );
     for (id, path) in &loot_entries {
-        let path = path.to_string_lossy().replace('\\', "\\\\");
-        loot_code.push_str(&format!("    ({id:?}, include_str!(\"{path}\")),\n"));
+        loot_code.push_str(&format!(
+            "    ({id:?}, {}),\n",
+            asset_include("assets/loot_table", path, "include_str")
+        ));
     }
     loot_code.push_str("];\n");
 
@@ -91,8 +95,10 @@ fn main() {
          pub static EMBEDDED_STRUCTURE_TEMPLATES: &[(&str, &[u8])] = &[\n",
     );
     for (id, path) in &structure_entries {
-        let path = path.to_string_lossy().replace('\\', "\\\\");
-        structure_code.push_str(&format!("    ({id:?}, include_bytes!(\"{path}\")),\n"));
+        structure_code.push_str(&format!(
+            "    ({id:?}, {}),\n",
+            asset_include("assets/structure", path, "include_bytes")
+        ));
     }
     structure_code.push_str("];\n");
 
@@ -135,8 +141,10 @@ fn main() {
              pub static {table}: &[(&str, &str)] = &[\n"
         );
         for (id, path) in &entries {
-            let path = path.to_string_lossy().replace('\\', "\\\\");
-            code.push_str(&format!("    ({id:?}, include_str!(\"{path}\")),\n"));
+            code.push_str(&format!(
+                "    ({id:?}, {}),\n",
+                asset_include(dir, path, "include_str")
+            ));
         }
         code.push_str("];\n");
         let out = PathBuf::from(std::env::var("OUT_DIR").unwrap())
@@ -146,7 +154,10 @@ fn main() {
 }
 
 /// Recursively collects `*.json` files under `dir`, keyed by their path relative
-/// to `root` (extension stripped, forward slashes).
+/// to `root` (extension stripped, forward slashes). The returned path is also
+/// relative: generated source must not capture the build script's absolute
+/// checkout path, because that path can belong to a temporary worktree that no
+/// longer exists when Cargo recompiles a target.
 fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
     collect_ext(root, dir, "json", out);
 }
@@ -162,12 +173,22 @@ fn collect_ext(root: &Path, dir: &Path, ext: &str, out: &mut Vec<(String, PathBu
         if path.is_dir() {
             collect_ext(root, &path, ext, out);
         } else if path.extension().is_some_and(|x| x == ext) {
-            let rel = path.strip_prefix(root).unwrap().with_extension("");
-            let id = rel.to_string_lossy().replace('\\', "/");
-            let abs = path
-                .canonicalize()
-                .unwrap_or_else(|e| panic!("canonicalizing {}: {e}", path.display()));
-            out.push((id, abs));
+            let rel = path.strip_prefix(root).unwrap();
+            let id = rel.with_extension("").to_string_lossy().replace('\\', "/");
+            out.push((id, rel.to_owned()));
         }
     }
+}
+
+/// Renders an asset include that resolves from the package's source directory
+/// when the generated `$OUT_DIR` source is compiled. Using `env!("CARGO_MANIFEST_DIR")`
+/// here keeps generated artifacts relocatable across worktrees and target dirs.
+fn asset_include(asset_root: &str, relative_path: &Path, macro_name: &str) -> String {
+    let relative = relative_path
+        .to_string_lossy()
+        .replace('\\', "/");
+    let source_path = format!("/{asset_root}/{relative}");
+    format!(
+        "{macro_name}!(concat!(env!(\"CARGO_MANIFEST_DIR\"), {source_path:?}))"
+    )
 }
