@@ -30,6 +30,13 @@ That protocol packs two vertical pixels into each `▀` cell with independent tr
 background. It is forced instead of terminal-specific Kitty, Sixel, or iTerm2 image protocols so
 `--surface terminal` has stable Unicode output everywhere.
 
+Ratatui still performs its normal previous/current cell diff, so unchanged cells are not serialized.
+The Crossterm backend is wrapped in `TerminalFrameWriter`, which collects that diff (including cursor
+and style escape sequences) until the backend flush at the end of the draw. The collected bytes are then
+written and flushed as one presentation batch; this prevents the stdout line buffer from exposing a large
+frame one row at a time. The writer retains its allocation between frames, and it does not change the
+cell diff or the rendered pixels.
+
 Ratatui reserves the final row for a small input prompt and rasterizes the complete game frame into the
 remaining terminal area. When the tty reports physical window pixels, the headless target is sized to
 the measured cell geometry; this makes the camera projection correct for terminals whose cells are not
@@ -65,8 +72,10 @@ state.
   `terminal_pointer_moved`, and `terminal_pointer_button`) rather than mutating `Sim` directly.
   Gameplay effects in `crate::terminal::handle_key`/`crate::terminal::handle_mouse`, target geometry in
   `crate::terminal::terminal_pixel_size`/`crate::terminal::terminal_render_dimensions`, and image conversion
-  in `crate::terminal::halfblock_protocol`. Keep the pure mappers and geometry helpers covered with
-  synthetic Crossterm events or measured dimensions so behavior stays deterministic without a TTY.
+  in `crate::terminal::halfblock_protocol`. Keep the frame boundary in
+  `crate::terminal::TerminalFrameWriter`: a direct write from the backend would reintroduce
+  partial-frame presentation. Keep the pure mappers and geometry helpers covered with synthetic
+  Crossterm events or measured dimensions so behavior stays deterministic without a TTY.
 - Keep the `ratatui-image` primitive half-block backend free of Chafa and image decoder features. The
   surface starts from raw RGBA bytes, so those dependencies add no capability here.
 - Change the rendered scene through `WindowApp::redraw`, `Sim`, or `RenderState`, not by teaching the
