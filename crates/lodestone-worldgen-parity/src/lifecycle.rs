@@ -56,6 +56,15 @@ pub struct LifecycleFeatureResult {
 /// source-filtered worldgen dispatcher.  The replay state machine owns only
 /// admission, completion deduplication and applying the resulting transitions.
 pub trait LifecycleWorldgenSource {
+    /// Prepare immutable source caches for the complete admitted replay. The
+    /// default keeps sources with no replay-specific cache unchanged.
+    fn prepare_lifecycle_replay(&mut self, _admissions: &[ChunkPos]) {}
+
+    /// Optional source-specific computation count for replay controls.
+    fn lifecycle_pre_decoration_computations(&self) -> Option<usize> {
+        None
+    }
+
     /// Materialize the source's shaped prefix.
     fn shaped_column(&self, cx: i32, cz: i32) -> ChunkColumn;
 
@@ -126,6 +135,14 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
 }
 
 impl LifecycleWorldgenSource for NetherChunkSource {
+    fn prepare_lifecycle_replay(&mut self, admissions: &[ChunkPos]) {
+        self.generator().prepare_lifecycle_replay(admissions);
+    }
+
+    fn lifecycle_pre_decoration_computations(&self) -> Option<usize> {
+        Some(self.generator().pre_decoration_computations())
+    }
+
     fn shaped_column(&self, cx: i32, cz: i32) -> ChunkColumn {
         ChunkColumn::from_nether(
             self.generator().column_shaped(cx, cz),
@@ -223,6 +240,20 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             completions: BTreeSet::new(),
             overrides: BTreeMap::new(),
         }
+    }
+
+    /// Prepare source-local immutable caches before admission begins. The
+    /// caller supplies the authenticated replay admissions, not the bounded
+    /// packet target prefix: all source completions still run in order.
+    pub fn prepare_lifecycle_replay(&mut self, admissions: &[ChunkPos]) {
+        self.source.prepare_lifecycle_replay(admissions);
+    }
+
+    /// Read the optional source computation counter used by lifecycle parity
+    /// controls. It has no effect on replay state or generated output.
+    #[must_use]
+    pub fn lifecycle_pre_decoration_computations(&self) -> Option<usize> {
+        self.source.lifecycle_pre_decoration_computations()
     }
 
     /// Admit one shaped resident column.
