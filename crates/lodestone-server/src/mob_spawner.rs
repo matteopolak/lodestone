@@ -369,6 +369,23 @@ impl Default for SpawnerState {
 }
 
 impl SpawnerState {
+    /// Builds the generated-spawner payload for a fixed entity type.
+    ///
+    /// Generated spawners set their next spawn data directly while retaining
+    /// every ordinary freshly-placed-spawner timing default.  Keeping this
+    /// constructor here prevents a structure bridge from duplicating the
+    /// block-entity fields (and accidentally making the packet payload differ
+    /// from a newly loaded generated spawner).
+    #[must_use]
+    pub fn generated(entity_type: ResourceKey) -> Self {
+        Self {
+            next_spawn_data: Some(SpawnData {
+                entity_type: Some(entity_type),
+            }),
+            ..Self::default()
+        }
+    }
+
     /// Reconstructs a spawner's state from its saved NBT fields —
     /// [`crate::chunk_nbt`]'s load path. Mirrors `BaseSpawner.load` field for
     /// field; a caller building a fresh (not-loaded-from-disk) spawner should
