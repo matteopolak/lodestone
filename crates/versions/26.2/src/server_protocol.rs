@@ -7709,9 +7709,9 @@ mod block_edit_tests {
             LevelChunkWithLight::decode(&mut reader, &end_shape).expect("decode end initial");
         reader.ensure_empty().expect("no end initial trailing bytes");
         assert_eq!(
-            initial.light.section_light(1).sky_at(0, 0, 0),
-            15,
-            "End initial chunks retain sky light"
+            initial.light.sky(1),
+            &LightData::Missing,
+            "an all-air End initial chunk has no allocated light sections"
         );
         let update = proto
             .compute_column_light_with_neighbours_in_dimension(&end, &[], Dimension::End)
