@@ -39,14 +39,18 @@ existing value, so update packets always retain them.
 
 Sky seeding is a dimension property, not a consequence of a column's vertical shape. The Nether and
 the End both use a 0..256 served window, but only the Nether lacks skylight. Its initial chunk form
-therefore omits every sky section and keeps zero block-light data only through one section above the
-highest terrain section; its later light updates retain explicit zero sky and block values for the
-normal clear operation. The End has sky light, but its initial packet does not reconstruct a storage
-mask from terrain or from the order in which neighbouring columns arrived. It consumes the exact
-`ColumnLight` snapshot captured by the source's settlement transaction. The Overworld keeps the one-section sky form
-and elides uniform zero block light in an initial chunk. `ChunkSource::dimension` carries that choice
-to the protocol's dimension-aware initial-encoding and light-computation hooks. An unlabelled source
-uses the Overworld as the compatibility default; a dimension wrapper must always forward its label.
+therefore omits every sky section and keeps zero block-light data only in sections whose storage is
+allocated by the centre plus its loaded 3x3 footprint. Every non-air block section allocates its own
+layer and the immediately adjacent section nodes, so a non-emitting block in a neighbouring column can
+extend the explicit Empty mask by one section. This is an exact, potentially sparse mask: unallocated
+sections remain Missing even when a higher section is allocated. Its later light updates retain
+explicit zero sky and block values for the normal clear operation. The End has sky light, but its
+initial packet does not reconstruct a storage mask from terrain or from the order in which neighbouring
+columns arrived. It consumes the exact `ColumnLight` snapshot captured by the source's settlement
+transaction. The Overworld keeps the one-section sky form and elides uniform zero block light in an
+initial chunk. `ChunkSource::dimension` carries that choice to the protocol's dimension-aware
+initial-encoding and light-computation hooks. An unlabelled source uses the Overworld as the
+compatibility default; a dimension wrapper must always forward its label.
 
 ### Retained snapshots and reloads
 
