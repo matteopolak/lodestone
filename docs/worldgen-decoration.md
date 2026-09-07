@@ -70,11 +70,14 @@ sequence. An unmodelled feature type or placement modifier degrades to a silent,
 (`ConfiguredFeature::Unsupported`) rather than a panic — the census resolves every bundled biome's
 step list at generator construction time, including biomes nobody has tested yet, so a hard failure
 on one unmodelled type would break every biome's world generation, not just the untested one.
-Currently unmodelled: the End feature set and several
-rarer single-use types — each
-tracked by name in `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`, which must be updated
-whenever a type lands so a regression (or a fixed gap that should be pruned) is loud rather than
-silent.
+The End-specific families sit outside this common interpreter but are production-connected through
+`EndGenerator`'s three-by-three decoration region: the fixed platform, outer islands, chorus plants,
+return gateways, and spike blocks. Their independent feature fixtures cover the platform, island,
+chorus, and gateway shapes; the whole-column End terrain fixture deliberately stops before later
+writers, so it is not evidence for decoration scheduling or cross-source order. Several rarer
+single-use types remain unmodelled and are tracked by name in
+`lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`; update that set whenever a type lands so a
+regression (or a fixed gap that should be pruned) is loud rather than silent.
 
 Simple-block state providers include fixed, weighted, threshold-noise, noise and dual-noise forms.
 The two noise forms construct their deterministic fields from the bundled seed and octave data at
