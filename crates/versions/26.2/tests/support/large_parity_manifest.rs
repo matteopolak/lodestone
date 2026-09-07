@@ -14,10 +14,13 @@ pub const GRID_SIDE: i32 = GRID_MAX - GRID_MIN + 1;
 pub const GRID_COUNT: u64 = (GRID_SIDE as u64) * (GRID_SIDE as u64);
 const MAGIC: &[u8; 8] = b"LWP26P03";
 const MAGIC_V4: &[u8; 8] = b"LWP26P04";
+const MAGIC_V5: &[u8; 8] = b"LWP26P05";
 const DOMAIN: &[u8] = b"lodestone.worldgen.large-parity.manifest/v3/semantic";
 const DOMAIN_V4: &[u8] = b"lodestone.worldgen.large-parity.manifest/v4/semantic";
+const DOMAIN_V5: &[u8] = b"lodestone.worldgen.large-parity.manifest/v5/semantic";
 const RECORD_DOMAIN: &[u8] = b"lodestone.worldgen.large-parity.chunk/v3/semantic";
 const RECORD_DOMAIN_V4: &[u8] = b"lodestone.worldgen.large-parity.chunk/v4/semantic";
+const RECORD_DOMAIN_V5: &[u8] = b"lodestone.worldgen.large-parity.chunk/v5/semantic";
 const DIGEST_BYTES: u64 = 32;
 
 /// The dimension named by a large-parity manifest. The wire identity is the
@@ -52,13 +55,14 @@ impl Dimension {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Header {
+    pub semantic_version: u16,
     pub cx0: i32,
     pub cx1: i32,
     pub cz0: i32,
     pub cz1: i32,
     pub count: u64,
     pub frozen_world: [u8; 32],
-    /// v3 manifests are legacy overworld manifests; v4 stores this identity
+    /// v3 manifests are legacy overworld manifests; v4 and v5 store this identity
     /// explicitly in header bytes 168..200.
     pub dimension: Dimension,
 }
@@ -77,17 +81,19 @@ pub fn read_header(mut r: impl Read) -> io::Result<Header> {
     let schema = u16::from_be_bytes(b[14..16].try_into().unwrap());
     let valid_v3 = magic == MAGIC && version == 3 && schema == 3;
     let valid_v4 = magic == MAGIC_V4 && version == 4 && schema == 4;
-    if !(valid_v3 || valid_v4) || u16::from_be_bytes(b[10..12].try_into().unwrap()) != HEADER_BYTES as u16 || u16::from_be_bytes(b[12..14].try_into().unwrap()) != 2 || u32::from_be_bytes(b[16..20].try_into().unwrap()) != 776 || i64::from_be_bytes(b[20..28].try_into().unwrap()) != 42 || u16::from_be_bytes(b[68..70].try_into().unwrap()) != DIGEST_BYTES as u16 || u16::from_be_bytes(b[70..72].try_into().unwrap()) != 0 {
+    let valid_v5 = magic == MAGIC_V5 && version == 5 && schema == 5;
+    if !(valid_v3 || valid_v4 || valid_v5) || u16::from_be_bytes(b[10..12].try_into().unwrap()) != HEADER_BYTES as u16 || u16::from_be_bytes(b[12..14].try_into().unwrap()) != 2 || u32::from_be_bytes(b[16..20].try_into().unwrap()) != 776 || i64::from_be_bytes(b[20..28].try_into().unwrap()) != 42 || u16::from_be_bytes(b[68..70].try_into().unwrap()) != DIGEST_BYTES as u16 || u16::from_be_bytes(b[70..72].try_into().unwrap()) != 0 {
         return Err(invalid("unsupported large-parity v3 header"));
     }
     if valid_v3 && b[72..104] != sha256(DOMAIN) { return Err(invalid("large-parity semantic schema digest differs")); }
     if valid_v4 && b[72..104] != sha256(DOMAIN_V4) { return Err(invalid("large-parity dimension schema digest differs")); }
+    if valid_v5 && b[72..104] != sha256(DOMAIN_V5) { return Err(invalid("large-parity normalized-light schema digest differs")); }
     let frozen_world: [u8; 32] = b[104..136].try_into().unwrap();
     if frozen_world == [0; 32] { return Err(invalid("large-parity v3 manifest has no frozen-world identity")); }
     let dimension = if valid_v3 { Dimension::Overworld } else { Dimension::from_digest(b[168..200].try_into().unwrap())? };
-    if valid_v4 && b[168..200] == [0; 32] { return Err(invalid("large-parity v4 manifest has no dimension identity")); }
+    if (valid_v4 || valid_v5) && b[168..200] == [0; 32] { return Err(invalid("large-parity dimension manifest has no dimension identity")); }
     if (be_i32(&b[28..32]), be_i32(&b[32..36]), be_i32(&b[36..40]), be_i32(&b[40..44])) != (GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX) { return Err(invalid("manifest global bounds differ")); }
-    let h = Header { cx0: be_i32(&b[44..48]), cx1: be_i32(&b[48..52]), cz0: be_i32(&b[52..56]), cz1: be_i32(&b[56..60]), count: be_u64(&b[60..68]), frozen_world, dimension };
+    let h = Header { semantic_version: version, cx0: be_i32(&b[44..48]), cx1: be_i32(&b[48..52]), cz0: be_i32(&b[52..56]), cz1: be_i32(&b[56..60]), count: be_u64(&b[60..68]), frozen_world, dimension };
     let expected = (i64::from(h.cx1 - h.cx0 + 1) * i64::from(h.cz1 - h.cz0 + 1)) as u64;
     if !(h.cx0 >= GRID_MIN && h.cx1 <= GRID_MAX && h.cz0 >= GRID_MIN && h.cz1 <= GRID_MAX && h.cx0 <= h.cx1 && h.cz0 <= h.cz1 && h.count == expected) { return Err(invalid("invalid large-parity shard bounds")); }
     Ok(h)
@@ -163,9 +169,76 @@ pub fn semantic_digest_for_dimension(packet: &LevelChunkWithLight, dimension: Di
     sha256(&semantic_record_for_dimension(packet, dimension))
 }
 
+/// Canonical record for a v5 dimension manifest. V5 retains the v4 decoded
+/// terrain fields but removes only the redundant all-15 sky tail from an
+/// initial chunk, so independent light-storage layouts compare by what the
+/// client sees rather than by allocation history.
+pub fn semantic_record_v5_for_dimension(packet: &LevelChunkWithLight, dimension: Dimension) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.bytes(RECORD_DOMAIN_V5);
+    w.i32(packet.x);
+    w.i32(packet.z);
+    w.bytes(dimension.name().as_bytes());
+    let mut maps = packet.heightmaps.iter().collect::<Vec<_>>();
+    maps.sort_unstable_by_key(|(id, _)| *id);
+    w.i32(maps.len() as i32);
+    for (id, map) in maps {
+        w.i32(id as i32);
+        for z in 0..16 { for x in 0..16 { w.i32(map.get(x, z) as i32 + packet.column.min_y()); } }
+    }
+    for section_index in 0..packet.column.section_count() {
+        let section = packet.column.section(section_index);
+        for cell in 0..4096 { w.u32(section.map_or(0, |section| section.block_states().get(cell))); }
+        for cell in 0..64 { w.u32(section.map_or(0, |section| section.biomes().get(cell))); }
+    }
+    let mut entities = packet.block_entities.clone();
+    entities.sort_unstable_by_key(|entity| (entity.rel_x, entity.y, entity.rel_z, entity.type_id));
+    w.i32(entities.len() as i32);
+    for entity in &entities { w.u8(entity.rel_x); w.i16(entity.y); w.u8(entity.rel_z); w.u32(entity.type_id); canonical_nbt(&mut w, &entity.nbt); }
+    canonical_light_v5(&mut w, &packet.light, true);
+    canonical_light_v5(&mut w, &packet.light, false);
+    w.as_slice().to_vec()
+}
+
+pub fn semantic_digest_v5_for_dimension(packet: &LevelChunkWithLight, dimension: Dimension) -> [u8; 32] {
+    sha256(&semantic_record_v5_for_dimension(packet, dimension))
+}
+
 fn canonical_light(w: &mut Writer, light: &lodestone_world::ColumnLight, sky: bool) {
     for section in 0..light.light_section_count() {
         let value = if sky { light.sky(section) } else { light.block(section) };
+        match value {
+            LightData::Missing => w.u8(0),
+            LightData::Uniform(0) => w.u8(1),
+            LightData::Uniform(value) => { w.u8(2); w.bytes(&[*value | (*value << 4); 2048]); }
+            LightData::Values(values) => { w.u8(2); w.bytes(values.as_bytes()); }
+        }
+    }
+}
+
+fn full_sky(value: &LightData) -> bool {
+    match value {
+        LightData::Uniform(15) => true,
+        LightData::Values(values) => values.as_bytes().iter().all(|value| *value == 0xff),
+        LightData::Missing | LightData::Uniform(_) => false,
+    }
+}
+
+fn canonical_light_v5(w: &mut Writer, light: &lodestone_world::ColumnLight, sky: bool) {
+    let mut last_required = light.light_section_count();
+    if sky {
+        while last_required != 0 {
+            let value = light.sky(last_required - 1);
+            if matches!(value, LightData::Missing) || full_sky(value) { last_required -= 1; }
+            else { break; }
+        }
+    }
+    for section in 0..light.light_section_count() {
+        let value = if sky { light.sky(section) } else { light.block(section) };
+        if sky && section >= last_required && full_sky(value) {
+            w.u8(0);
+            continue;
+        }
         match value {
             LightData::Missing => w.u8(0),
             LightData::Uniform(0) => w.u8(1),
@@ -194,6 +267,44 @@ fn canonical_nbt(w: &mut Writer, value: &Nbt) {
 }
 
 fn canonical_utf8(w: &mut Writer, value: &str) { w.i32(value.len() as i32); w.bytes(value.as_bytes()); }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lodestone_world::{ColumnLight, NibbleArray};
+
+    fn encoded_light(light: &ColumnLight, sky: bool) -> Vec<u8> {
+        let mut writer = Writer::default();
+        canonical_light_v5(&mut writer, light, sky);
+        writer.into_vec()
+    }
+
+    #[test]
+    fn v5_elides_only_the_redundant_full_sky_tail() {
+        let missing = ColumnLight::new(0);
+        let mut full = ColumnLight::new(0);
+        *full.sky_mut(1) = LightData::Uniform(15);
+        assert_eq!(encoded_light(&missing, true), encoded_light(&full, true));
+        assert_eq!(encoded_light(&full, true).len(), 2, "full sky tail remains compact");
+
+        let mut near_full = ColumnLight::new(0);
+        let mut bytes = [0xff; 2048];
+        bytes[1487] = 0xef;
+        *near_full.sky_mut(1) = LightData::Values(NibbleArray::from_bytes(&bytes).unwrap());
+        assert_ne!(encoded_light(&near_full, true), encoded_light(&full, true), "a real sky value must survive normalization");
+    }
+
+    #[test]
+    fn v5_preserves_block_light_representations() {
+        let missing = ColumnLight::new(0);
+        let mut empty = ColumnLight::new(0);
+        *empty.block_mut(0) = LightData::Uniform(0);
+        let mut full = ColumnLight::new(0);
+        *full.block_mut(0) = LightData::Uniform(15);
+        assert_ne!(encoded_light(&missing, false), encoded_light(&empty, false));
+        assert_ne!(encoded_light(&missing, false), encoded_light(&full, false));
+    }
+}
 
 pub fn sha256(input: &[u8]) -> [u8; 32] { let mut s = Sha256::new(); s.update(input); s.finish() }
 struct Sha256 { state: [u32; 8], len: u64, buf: [u8; 64], used: usize }

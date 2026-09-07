@@ -30,6 +30,13 @@ live render-distance increase mid-session — never shrinks back down — becaus
 exactly the columns nearest the player (the innermost, least-recently-touched ring), turning a
 slider nudge into a visible regeneration stall.
 
+Tools that need this same hosted retention boundary construct it with
+`lodestone_server::retained_chunk_source_for_view_radius`. It accepts any `ChunkSource` and returns
+only another `ChunkSource`, deliberately keeping `ChunkStore` private. Use it when a tool materializes
+or encodes a finite generated area and must preserve resident columns between requests; pass the
+same hosted view radius as its consumer. It is not the integrated-server constructor: that path uses
+the local player's uncapped policy through `IntegratedServer`.
+
 ### Chunk tickets: residency independent of any one connection's view
 
 A ticket/level graph, ported from vanilla in shape, answers a question the LRU cache structurally

@@ -4,10 +4,11 @@ mod support { pub mod large_parity_manifest; }
 
 use std::{fs::File, io::{BufReader, Read, Seek, SeekFrom}};
 use lodestone_core::Reader;
-use lodestone_server::{ChunkSource, ServerDirective, ServerProtocol, end_chunk_source, nether_chunk_source, overworld_chunk_source};
+use lodestone_server::{ChunkColumn, ChunkSource, ServerDirective, ServerProtocol, end_chunk_source, nether_chunk_source, overworld_chunk_source, retained_chunk_source_for_view_radius};
+use lodestone_server::dimension::Dimension as ServerDimension;
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
-use support::large_parity_manifest::{Dimension, HEADER_BYTES, read_header, payload_digest_from_header, semantic_digest, semantic_digest_for_dimension, semantic_record, semantic_record_for_dimension, verify_payload};
+use support::large_parity_manifest::{Dimension, HEADER_BYTES, read_header, payload_digest_from_header, semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension, semantic_record, semantic_record_for_dimension, semantic_record_v5_for_dimension, verify_payload};
 
 #[test]
 fn canonical_grid_has_the_requested_square_and_one_chunk_halo() {
@@ -114,6 +115,47 @@ fn dimension_packet_shapes_match_the_published_level_windows() {
     assert_eq!((non_overworld.min_y, non_overworld.section_count, non_overworld.world_height), (0, 16, 256));
 }
 
+/// The full-grid gate must use the same neighbour-bearing initial-packet path
+/// as normal chunk sends. A north-column emitter reaches the centre's north
+/// edge; encoding the centre alone deliberately cannot reproduce that light.
+#[test]
+fn north_neighbour_light_requires_neighbour_aware_initial_encoding() {
+    let shape = ChunkShape::overworld_1_21();
+    let centre = ChunkColumn::new(shape.min_y, shape.world_height as i32);
+    let mut north = ChunkColumn::new(shape.min_y, shape.world_height as i32);
+    north.set_block(8, 0, 15, "minecraft:glowstone");
+    let proto = V770ServerProtocol;
+    let decode = |directive: ServerDirective| {
+        let ServerDirective::Send { payload, .. } = directive else {
+            panic!("chunk encoder must send a packet");
+        };
+        packet_decode_for_dimension(&payload, Dimension::Overworld)
+    };
+    let isolated = decode(ServerProtocol::encode_chunk(&proto, 0, 0, &centre));
+    let neighbour_aware = decode(
+        ServerProtocol::try_encode_chunk_with_neighbours_in_dimension(
+            &proto,
+            0,
+            0,
+            &centre,
+            &[(0, -1, north)],
+            ServerDimension::Overworld,
+        )
+        .expect("neighbour-aware initial encoding"),
+    );
+
+    assert_eq!(
+        isolated.light.section_light(5).block_at(8, 0, 0),
+        0,
+        "control: a one-column encoder cannot see the north-column source"
+    );
+    assert_eq!(
+        neighbour_aware.light.section_light(5).block_at(8, 0, 0),
+        14,
+        "the source crosses one north-border air cell into the centre"
+    );
+}
+
 /// Cross-language control: Java emits both the authoritative packet body and
 /// its canonical semantic bytes for one frozen chunk. Rust must decode that
 /// same body into byte-identical canonical bytes before their SHA-256 can be
@@ -132,7 +174,12 @@ fn java_and_rust_canonical_records_agree() {
     let mut manifest_header = [0; HEADER_BYTES]; manifest_header.copy_from_slice(&manifest_bytes[..HEADER_BYTES]);
     let manifest_header = read_header(&manifest_header[..]).expect("validate Java manifest header");
     let decoded = packet_decode_for_dimension(&std::fs::read(packet_path).expect("read Java packet body"), manifest_header.dimension);
-    let rust_record = if manifest_header.dimension == Dimension::Overworld { semantic_record(&decoded) } else { semantic_record_for_dimension(&decoded, manifest_header.dimension) };
+    let rust_record = match manifest_header.semantic_version {
+        3 => semantic_record(&decoded),
+        4 => semantic_record_for_dimension(&decoded, manifest_header.dimension),
+        5 => semantic_record_v5_for_dimension(&decoded, manifest_header.dimension),
+        version => panic!("unsupported parity semantic version {version}"),
+    };
     if rust_record != java_record {
         let first = rust_record.iter().zip(&java_record).position(|(left, right)| left != right).unwrap_or(rust_record.len().min(java_record.len()));
         panic!("canonical semantic bytes differ at offset {first}: Java length {}, Rust length {}, Java byte {:?}, Rust byte {:?}", java_record.len(), rust_record.len(), java_record.get(first), rust_record.get(first));
@@ -143,7 +190,12 @@ fn java_and_rust_canonical_records_agree() {
     assert_eq!(header.count, 1, "cross-language control must use exactly one chunk");
     let mut java_digest = [0; 32]; manifest.read_exact(&mut java_digest).expect("read Java semantic digest");
     assert_eq!(support::large_parity_manifest::sha256(&java_record), java_digest, "Java manifest digest must authenticate Java canonical bytes");
-    let rust_digest = if header.dimension == Dimension::Overworld { semantic_digest(&decoded) } else { semantic_digest_for_dimension(&decoded, header.dimension) };
+    let rust_digest = match header.semantic_version {
+        3 => semantic_digest(&decoded),
+        4 => semantic_digest_for_dimension(&decoded, header.dimension),
+        5 => semantic_digest_v5_for_dimension(&decoded, header.dimension),
+        version => panic!("unsupported parity semantic version {version}"),
+    };
     assert_eq!(rust_digest, java_digest, "Rust digest must authenticate the same canonical bytes");
 }
 
@@ -170,16 +222,20 @@ fn parity_manifest_streams_before_rust_comparison() {
     payload_file.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek payload");
     let mut expected = BufReader::new(payload_file);
     let dimension = h.dimension;
-    enum Source {
-        Overworld(lodestone_server::OverworldChunkSource),
-        Nether(lodestone_server::NetherChunkSource),
-        End(lodestone_server::EndChunkSource),
-    }
-    let source = match dimension {
-        Dimension::Overworld => Source::Overworld(overworld_chunk_source(42)),
-        Dimension::Nether => Source::Nether(nether_chunk_source(42)),
-        Dimension::End => Source::End(end_chunk_source(42)),
+    let source: Box<dyn ChunkSource> = match dimension {
+        // A frozen external world is a retained, settled lifecycle result.
+        // Keep the comparator on the server's retained-source path rather than
+        // regenerating an isolated column for every packet request.
+        Dimension::Overworld => Box::new(retained_chunk_source_for_view_radius(overworld_chunk_source(42), 8)),
+        Dimension::Nether => Box::new(retained_chunk_source_for_view_radius(nether_chunk_source(42), 8)),
+        Dimension::End => Box::new(retained_chunk_source_for_view_radius(end_chunk_source(42), 8)),
     };
+    let server_dimension = match dimension {
+        Dimension::Overworld => ServerDimension::Overworld,
+        Dimension::Nether => ServerDimension::Nether,
+        Dimension::End => ServerDimension::End,
+    };
+    let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
     let max_chunks = std::env::var("LODESTONE_LARGE_PARITY_MAX_CHUNKS")
         .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(h.count);
     let limit = max_chunks.min(h.count);
@@ -189,12 +245,24 @@ fn parity_manifest_streams_before_rust_comparison() {
         expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
         let cx = h.cx0 + (index % width) as i32;
         let cz = h.cz0 + (index / width) as i32;
-        let column = match &source {
-            Source::Overworld(source) => source.column(cx, cz),
-            Source::Nether(source) => source.column(cx, cz),
-            Source::End(source) => source.column(cx, cz),
-        };
-        let directive = V770ServerProtocol.encode_chunk(cx, cz, &column);
+        let column = column_for(cx, cz);
+        let mut neighbours = Vec::with_capacity(8);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if (dx, dz) != (0, 0) {
+                    neighbours.push((dx, dz, column_for(cx + dx, cz + dz)));
+                }
+            }
+        }
+        let directive = V770ServerProtocol
+            .try_encode_chunk_with_neighbours_in_dimension(
+                cx,
+                cz,
+                &column,
+                &neighbours,
+                server_dimension,
+            )
+            .expect("production neighbour-aware chunk encoder");
         let payload = match directive {
             ServerDirective::Send { packet_id, payload } => {
                 assert_eq!(packet_id, lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
@@ -208,7 +276,12 @@ fn parity_manifest_streams_before_rust_comparison() {
             }
         }
         let decoded = packet_decode_for_dimension(&payload, dimension);
-        let full = if dimension == Dimension::Overworld { semantic_digest(&decoded) } else { semantic_digest_for_dimension(&decoded, dimension) };
+        let full = match h.semantic_version {
+            3 => semantic_digest(&decoded),
+            4 => semantic_digest_for_dimension(&decoded, dimension),
+            5 => semantic_digest_v5_for_dimension(&decoded, dimension),
+            version => panic!("unsupported parity semantic version {version}"),
+        };
         if full != expected_digest {
             let packet_summary = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET")
                 .map(|path| packet_difference_summary(&std::fs::read(path).expect("read authoritative packet capture"), &payload, dimension));
@@ -248,7 +321,14 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
     let mut non_air_reference = 0usize;
     let mut non_air_actual = 0usize;
     let mut first_block_difference = None;
+    let mut block_difference_positions = Vec::new();
     let mut differing_state_pairs = std::collections::HashMap::<(u32, u32), usize>::new();
+    let heightmaps_equal = reference.heightmaps == actual.heightmaps;
+    let block_entities_equal = reference.block_entities == actual.block_entities;
+    let mut differing_sky_light_cells = 0usize;
+    let mut differing_block_light_cells = 0usize;
+    let mut differing_sky_light_sections = Vec::new();
+    let mut differing_block_light_sections = Vec::new();
     for section in 0..reference.column.section_count() {
         let reference_section = reference.column.section(section);
         let actual_section = actual.column.section(section);
@@ -260,6 +340,16 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
             differing_blocks += usize::from(reference_block != actual_block);
             if reference_block != actual_block {
                 *differing_state_pairs.entry((reference_block, actual_block)).or_default() += 1;
+                if block_difference_positions.len() < 96 {
+                    let x = cell % 16;
+                    let z = (cell / 16) % 16;
+                    let y = reference.column.min_y() + section as i32 * 16 + (cell / 256) as i32;
+                    block_difference_positions.push(format!(
+                        "({x},{y},{z}) {} vs {}",
+                        state_label(reference_block),
+                        state_label(actual_block),
+                    ));
+                }
             }
             if first_block_difference.is_none() && reference_block != actual_block {
                 let x = cell % 16;
@@ -272,6 +362,27 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
             let reference_biome = reference_section.map_or(0, |s| s.biomes().get(cell));
             let actual_biome = actual_section.map_or(0, |s| s.biomes().get(cell));
             differing_biomes += usize::from(reference_biome != actual_biome);
+        }
+    }
+    for section in 0..reference.light.light_section_count() {
+        if reference.light.sky(section) != actual.light.sky(section) {
+            differing_sky_light_sections.push(section);
+        }
+        if reference.light.block(section) != actual.light.block(section) {
+            differing_block_light_sections.push(section);
+        }
+        for cell in 0..4096 {
+            let x = cell % 16;
+            let z = (cell / 16) % 16;
+            let y = cell / 256;
+            differing_sky_light_cells += usize::from(
+                reference.light.section_light(section).sky_at(x, y, z)
+                    != actual.light.section_light(section).sky_at(x, y, z),
+            );
+            differing_block_light_cells += usize::from(
+                reference.light.section_light(section).block_at(x, y, z)
+                    != actual.light.section_light(section).block_at(x, y, z),
+            );
         }
     }
     let first_block_difference = first_block_difference.map_or_else(
@@ -290,8 +401,9 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
         .map(|((reference, actual), count)| format!("{count}× {} vs {}", state_label(reference), state_label(actual)))
         .collect::<Vec<_>>()
         .join("; ");
+    let block_difference_positions = block_difference_positions.join("; ");
     format!(
-        "; captured-packet diagnosis: reference={} bytes, Lodestone={} bytes, block cells differ={differing_blocks}, biome cells differ={differing_biomes}, non-air reference={non_air_reference}, Lodestone={non_air_actual}, first block difference={first_block_difference}, common state pairs={common_state_pairs}",
+        "; captured-packet diagnosis: reference={} bytes, Lodestone={} bytes, block cells differ={differing_blocks}, biome cells differ={differing_biomes}, heightmaps equal={heightmaps_equal}, block entities equal={block_entities_equal}, sky light cells differ={differing_sky_light_cells} in sections {differing_sky_light_sections:?}, block light cells differ={differing_block_light_cells} in sections {differing_block_light_sections:?}, non-air reference={non_air_reference}, Lodestone={non_air_actual}, first block difference={first_block_difference}, common state pairs={common_state_pairs}, differing blocks={block_difference_positions}",
         reference_len, actual_len,
     )
 }
@@ -310,4 +422,5 @@ fn state_label(id: u32) -> String {
         format!("{name}[{properties}]")
     }
 }
+
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
