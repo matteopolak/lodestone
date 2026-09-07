@@ -66,6 +66,13 @@ unresolvable. `mining_efficiency`/`haste_amplifier`/`mining_fatigue`/
 `block_break_speed` remain at their defaults — no enchantment, potion or
 attribute input is modelled on this path yet.
 
+Creative block breaking is instant and has no client-side post-break delay. The
+window input path records each block ray hit when the attack press arrives, so
+a press followed by a release between fixed ticks is still delivered to
+`drive_mining`; queued presses are consumed one per tick in arrival order.
+Holding the button continues to use the same predictor, while survival keeps
+the five-tick post-break delay.
+
 `block_type_name`, the registry-id-to-name lookup used while decoding block
 events, reads `generated_block_registry::BLOCK_REGISTRY_NAMES`. This table is
 in registration order, as required by registry ids; the alphabetical

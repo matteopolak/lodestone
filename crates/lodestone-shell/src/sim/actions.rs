@@ -403,12 +403,17 @@ impl Sim {
             self.swing_main_hand_live();
             return;
         }
-        if self.target().is_some() {
-            // Unchanged from before this fix: arms the hold-to-mine loop.
-            // `drive_mining` itself queues the `SwingArm` the instant a dig
-            // actually starts, through the same `ActionQueue`/
-            // `drain_action_queue` funnel every other tick-driven swing uses.
-            self.write(|w| w.resource_mut::<Attacking>().0 = true);
+        if let Some(hit) = self.target() {
+            // Keep the press edge separate from the held state. A discrete
+            // click may be pressed and released between two fixed simulation
+            // ticks; recording its ray hit prevents that event from
+            // disappearing before `drive_mining` can deliver it.
+            self.write(|w| {
+                w.resource_mut::<Attacking>().0 = true;
+                w.resource_mut::<crate::interact::AttackPresses>()
+                    .0
+                    .push_back(hit);
+            });
             return;
         }
         // MISS: no block, no entity. Vanilla still swings.

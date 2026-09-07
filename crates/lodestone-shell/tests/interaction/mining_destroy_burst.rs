@@ -56,7 +56,7 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use lodestone::interact::{Attacking, MiningPredictor, NetHandle, ParticleSim, RayTarget};
+use lodestone::interact::{AttackPresses, Attacking, MiningPredictor, NetHandle, ParticleSim, RayTarget};
 use lodestone::mesher::{MeshScheduler, TerrainMesh};
 use lodestone::particles::Particles;
 use lodestone::raycast::RayHit;
@@ -66,9 +66,10 @@ use lodestone_client::{
 };
 use lodestone_ecs::ecs::schedule::Schedule;
 use lodestone_ecs::ecs::world::World as EcsWorld;
-use lodestone_ecs::player::{ActionQueue, Egress};
-use lodestone_ecs::session::SessionMenus;
-use lodestone_ecs::{EcsHandle, FrameClock, GameTick, LockHolds, VersionData};
+use lodestone_ecs::player::{ActionQueue, Egress, LocalPlayer};
+use lodestone_ecs::session::{Abilities, SessionMenus};
+use lodestone_ecs::{ChunkWorldWrite, EcsHandle, FrameClock, GameTick, LockHolds, VersionData};
+use lodestone_ecs::ecs::query::With;
 use lodestone_game::mining::BreakInputs;
 use lodestone_model::{AdapterError, BlockHardness, ClientAction, ItemStack, ToolMining};
 use lodestone_world::{
@@ -367,6 +368,29 @@ impl Harness {
             pos[2].rem_euclid(16) as usize,
         )
     }
+
+    fn set_creative(&self) {
+        let mut world = self.ecs.write();
+        let entity = {
+            let mut players = world.query_filtered::<lodestone_ecs::ecs::entity::Entity, With<LocalPlayer>>();
+            players.single(&world).expect("fixture has one local player")
+        };
+        world.entity_mut(entity).insert(Abilities {
+            instabuild: true,
+            ..Abilities::default()
+        });
+    }
+
+    fn reload_target(&self, state: u32) {
+        let write = {
+            let world = self.ecs.write();
+            world.resource::<ChunkWorldWrite>().clone()
+        };
+        write.write().load(
+            ChunkPos::new(TARGET[0].div_euclid(16), TARGET[2].div_euclid(16)),
+            column_with(TARGET, state),
+        );
+    }
 }
 
 fn build_resources(world: &mut EcsWorld, version: OneBlockVersion) {
@@ -375,6 +399,7 @@ fn build_resources(world: &mut EcsWorld, version: OneBlockVersion) {
         live: true,
     });
     world.insert_resource(Attacking(true));
+    world.insert_resource(AttackPresses::default());
     world.insert_resource(RayTarget(Some(RayHit::face_center(TARGET, [0, 1, 0]))));
     world.insert_resource(MiningPredictor::default());
     world.insert_resource(ParticleSim(Particles::new(None)));
@@ -603,6 +628,130 @@ fn an_instant_break_predicts_air_locally_with_no_server_round_trip() {
          laggy connection shows the break animation/burst and then the block \
          only vanishing once the server's ack arrives"
     );
+}
+
+/// A discrete press must reach the real mining consumer even when its release
+/// arrives before the next fixed tick. The held boolean is false here on
+/// purpose: this catches the old edge loss where `begin_attack` set the
+/// boolean and `end_attack` cleared it before `drive_mining` ever ran.
+#[test]
+fn a_discrete_attack_press_survives_a_same_frame_release() {
+    let harness = Harness::build(progressive_fixture());
+    let mut world = harness.ecs.write();
+    world.resource_mut::<Attacking>().0 = false;
+    world
+        .resource_mut::<AttackPresses>()
+        .0
+        .push_back(RayHit::face_center(TARGET, [0, 1, 0]));
+
+    world.run_schedule(GameTick);
+    let actions = std::mem::take(&mut world.resource_mut::<ActionQueue>().0);
+
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            ClientAction::BlockAction {
+                action: lodestone_model::BlockActionKind::StartDestroy,
+                ..
+            }
+        )),
+        "the queued press must reach drive_mining as START, got {actions:?}"
+    );
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            ClientAction::BlockAction {
+                action: lodestone_model::BlockActionKind::AbortDestroy,
+                ..
+            }
+        )),
+        "survival release semantics must abort the unfinished dig, got {actions:?}"
+    );
+    drop(world);
+    assert_eq!(
+        harness.block_at(TARGET),
+        STONE,
+        "a tapped survival block must not be predicted as broken"
+    );
+}
+
+/// The real `drive_mining` consumer must accept both forms of creative input:
+/// a queued press whose release happened before delivery, and a held button on
+/// the following tick. Reloading the fixture block between ticks isolates the
+/// predictor's cadence from the world mutation it correctly predicts.
+#[test]
+fn creative_press_and_hold_have_no_post_break_cooldown_in_the_consumer() {
+    let version = progressive_fixture();
+    let harness = Harness::build(version);
+    harness.set_creative();
+
+    {
+        let mut world = harness.ecs.write();
+        world.resource_mut::<Attacking>().0 = false;
+        world
+            .resource_mut::<AttackPresses>()
+            .0
+            .push_back(RayHit::face_center(TARGET, [0, 1, 0]));
+        world.run_schedule(GameTick);
+        let actions = std::mem::take(&mut world.resource_mut::<ActionQueue>().0);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            ClientAction::BlockAction {
+                action: lodestone_model::BlockActionKind::StartDestroy,
+                ..
+            }
+        )));
+        assert!(
+            !actions.iter().any(|action| matches!(
+                action,
+                ClientAction::BlockAction {
+                    action: lodestone_model::BlockActionKind::AbortDestroy,
+                    ..
+                }
+            )),
+            "creative release must not add a survival abort after instant START: {actions:?}"
+        );
+    }
+
+    harness.reload_target(version.state);
+    {
+        let mut world = harness.ecs.write();
+        world.resource_mut::<Attacking>().0 = false;
+        world
+            .resource_mut::<AttackPresses>()
+            .0
+            .push_back(RayHit::face_center(TARGET, [0, 1, 0]));
+        world.run_schedule(GameTick);
+        let actions = std::mem::take(&mut world.resource_mut::<ActionQueue>().0);
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                ClientAction::BlockAction {
+                    action: lodestone_model::BlockActionKind::StartDestroy,
+                    ..
+                }
+            )),
+            "a second discrete creative press must break immediately: {actions:?}"
+        );
+    }
+
+    harness.reload_target(version.state);
+    {
+        let mut world = harness.ecs.write();
+        world.resource_mut::<Attacking>().0 = true;
+        world.run_schedule(GameTick);
+        let actions = std::mem::take(&mut world.resource_mut::<ActionQueue>().0);
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                ClientAction::BlockAction {
+                    action: lodestone_model::BlockActionKind::StartDestroy,
+                    ..
+                }
+            )),
+            "held creative input must break on the next tick without cooldown: {actions:?}"
+        );
+    }
 }
 
 /// The progressive-dig half of the same gate: air must appear on the exact
