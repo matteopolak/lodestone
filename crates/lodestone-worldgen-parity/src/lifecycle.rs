@@ -21,6 +21,20 @@ pub type ChunkPos = (i32, i32);
 /// An absolute block coordinate used by lifecycle replay.
 pub type AbsoluteCell = (i32, i32, i32);
 
+/// Horizontal chunk radius sampled by an initial packet's light encoder.
+pub const PACKET_LIGHT_RADIUS: i32 = 1;
+
+/// Maximum horizontal chunk radius touched by one FEATURES source write.
+pub const FEATURES_WRITE_RADIUS: i32 = 2;
+
+/// Maximum source-to-source distance of a mutable dependency.
+pub const MUTABLE_READ_RADIUS: i32 = 4;
+
+// The reverse frontier already accounts for the selected source's write halo;
+// the remaining two chunks are the audited mutable-read contribution.
+const BACKWARD_FRONTIER_RADIUS: i32 = MUTABLE_READ_RADIUS - FEATURES_WRITE_RADIUS;
+const ADMITTED_DESTINATION_RADIUS: i32 = 2;
+
 /// A completion stage captured from the external scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LifecycleCompletion {
@@ -48,6 +62,128 @@ pub struct LifecycleFeatureResult {
     pub spills: Vec<LifecycleSpill>,
     /// Generated block entities carried with the source result.
     pub block_entities: Vec<GeneratedBlockEntity>,
+}
+
+/// One authenticated FEATURES event accepted by a target replay plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifecycleReplayEvent {
+    pub source: ChunkPos,
+    pub stage: LifecycleCompletion,
+    pub sequence: u64,
+}
+
+/// Static, validated dependency closure for one target packet.
+#[derive(Debug, Clone)]
+pub struct LifecycleReplayPlan {
+    target: ChunkPos,
+    admissions: Vec<ChunkPos>,
+    feature_events: Vec<LifecycleReplayEvent>,
+}
+
+impl LifecycleReplayPlan {
+    /// Build a target plan from a complete authenticated admission/event stream.
+    /// The reverse walk preserves event order while selecting only earlier
+    /// sources whose writes can affect the packet or a selected dependency.
+    pub fn for_target(
+        target: ChunkPos,
+        admissions: &[ChunkPos],
+        feature_events: &[LifecycleReplayEvent],
+    ) -> Result<Self, String> {
+        if admissions.is_empty() {
+            return Err("lifecycle replay capture has no admissions".to_owned());
+        }
+        let admitted = admissions.iter().copied().collect::<BTreeSet<_>>();
+        if admitted.len() != admissions.len() {
+            return Err("lifecycle replay admissions contain a duplicate coordinate".to_owned());
+        }
+        let min_x = admitted.iter().map(|&(x, _)| x).min().unwrap();
+        let max_x = admitted.iter().map(|&(x, _)| x).max().unwrap();
+        let min_z = admitted.iter().map(|&(_, z)| z).min().unwrap();
+        let max_z = admitted.iter().map(|&(_, z)| z).max().unwrap();
+        let expected_count = usize::try_from(i64::from(max_x - min_x + 1) * i64::from(max_z - min_z + 1))
+            .map_err(|_| "lifecycle replay admission rectangle is too large".to_owned())?;
+        if expected_count != admissions.len()
+            || (min_z..=max_z)
+                .flat_map(|z| (min_x..=max_x).map(move |x| (x, z)))
+                .any(|chunk| !admitted.contains(&chunk))
+        {
+            return Err(format!(
+                "lifecycle replay admissions are not a complete rectangle ({min_x}..={max_x}, {min_z}..={max_z})",
+            ));
+        }
+        let mut packet_domain = BTreeSet::new();
+        for x in target.0 - PACKET_LIGHT_RADIUS..=target.0 + PACKET_LIGHT_RADIUS {
+            for z in target.1 - PACKET_LIGHT_RADIUS..=target.1 + PACKET_LIGHT_RADIUS {
+                packet_domain.insert((x, z));
+            }
+        }
+        if packet_domain.iter().any(|chunk| !admitted.contains(chunk)) {
+            return Err(format!("target {target:?} does not have a complete admitted 3x3 packet-light domain"));
+        }
+        if feature_events.len() != admissions.len() {
+            return Err(format!(
+                "expected one FEATURES event per admission, got {} events for {} admissions",
+                feature_events.len(), admissions.len()
+            ));
+        }
+        let mut seen_sources = BTreeSet::new();
+        for (rank, event) in feature_events.iter().enumerate() {
+            if event.stage != LifecycleCompletion::Features {
+                return Err(format!("lifecycle replay event {} is not FEATURES", event.sequence));
+            }
+            if rank > 0 && feature_events[rank - 1].sequence >= event.sequence {
+                return Err(format!("lifecycle replay completion order is not increasing at sequence {}", event.sequence));
+            }
+            if admissions[rank] != event.source {
+                return Err(format!("lifecycle replay event {} source {:?} disagrees with admission {:?}", event.sequence, event.source, admissions[rank]));
+            }
+            if !seen_sources.insert(event.source) {
+                return Err(format!("lifecycle replay source {:?} appears more than once", event.source));
+            }
+        }
+
+        let mut event_frontier = packet_domain.clone();
+        let mut selected_sources = BTreeSet::new();
+        for event in feature_events.iter().rev() {
+            let reaches = event_frontier.iter().any(|destination| {
+                (event.source.0 - destination.0).abs().max((event.source.1 - destination.1).abs())
+                    <= FEATURES_WRITE_RADIUS
+            });
+            if !reaches {
+                continue;
+            }
+            selected_sources.insert(event.source);
+            for x in event.source.0 - BACKWARD_FRONTIER_RADIUS..=event.source.0 + BACKWARD_FRONTIER_RADIUS {
+                for z in event.source.1 - BACKWARD_FRONTIER_RADIUS..=event.source.1 + BACKWARD_FRONTIER_RADIUS {
+                    event_frontier.insert((x, z));
+                }
+            }
+        }
+        let mut destination_frontier = packet_domain;
+        for event in feature_events.iter().filter(|event| selected_sources.contains(&event.source)) {
+            for x in event.source.0 - ADMITTED_DESTINATION_RADIUS..=event.source.0 + ADMITTED_DESTINATION_RADIUS {
+                for z in event.source.1 - ADMITTED_DESTINATION_RADIUS..=event.source.1 + ADMITTED_DESTINATION_RADIUS {
+                    destination_frontier.insert((x, z));
+                }
+            }
+        }
+        let admissions = admissions.iter().copied().filter(|chunk| destination_frontier.contains(chunk)).collect::<Vec<_>>();
+        let feature_events = feature_events.iter().copied().filter(|event| selected_sources.contains(&event.source)).collect::<Vec<_>>();
+        let destination_set = admissions.iter().copied().collect::<BTreeSet<_>>();
+        if selected_sources.iter().any(|source| !destination_set.contains(source)) {
+            return Err(format!("target {target:?} dependency closure has an unadmitted source destination"));
+        }
+        Ok(Self { target, admissions, feature_events })
+    }
+
+    #[must_use]
+    pub const fn target(&self) -> ChunkPos { self.target }
+
+    #[must_use]
+    pub fn admissions(&self) -> &[ChunkPos] { &self.admissions }
+
+    #[must_use]
+    pub fn feature_events(&self) -> &[LifecycleReplayEvent] { &self.feature_events }
 }
 
 /// Production source boundary consumed by the lifecycle materializer.
@@ -256,6 +392,16 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.source.lifecycle_pre_decoration_computations()
     }
 
+    /// Admit and apply a validated target plan without changing its order.
+    pub fn replay_plan(&mut self, plan: &LifecycleReplayPlan) {
+        for &admission in plan.admissions() {
+            self.admit(admission);
+        }
+        for event in plan.feature_events() {
+            self.complete(event.source, event.stage, event.sequence);
+        }
+    }
+
     /// Admit one shaped resident column.
     pub fn admit(&mut self, chunk: ChunkPos) {
         assert!(
@@ -427,5 +573,60 @@ mod tests {
         materializer.complete((0, 0), LifecycleCompletion::Features, 10);
         assert_eq!(feature_calls.get(), 1);
         materializer.complete((0, 0), LifecycleCompletion::Features, 11);
+    }
+
+    #[test]
+    fn target_plan_matches_audited_corner_closure() {
+        let mut admissions = Vec::with_capacity(18 * 18);
+        for tile_z in 0..=1 {
+            for tile_x in 0..=1 {
+                let (min_x, max_x) = if tile_x == 0 { (-9, 6) } else { (7, 8) };
+                let (min_z, max_z) = if tile_z == 0 { (-9, 6) } else { (7, 8) };
+                for z in min_z..=max_z {
+                    for x in min_x..=max_x {
+                        admissions.push((x, z));
+                    }
+                }
+            }
+        }
+        let events = admissions.iter().enumerate().map(|(sequence, &source)| LifecycleReplayEvent {
+            source,
+            stage: LifecycleCompletion::Features,
+            sequence: sequence as u64,
+        }).collect::<Vec<_>>();
+        let plan = LifecycleReplayPlan::for_target((-8, -8), &admissions, &events)
+            .expect("complete tiled capture must produce a target plan");
+        assert_eq!(plan.feature_events().len(), 59);
+        assert_eq!(plan.admissions().len(), 105);
+
+        let expected_source_rows = [(-9, 6), (-9, 6), (-9, 3), (-9, -1), (-9, -5)];
+        for (z, (min_x, max_x)) in (-9..=-5).zip(expected_source_rows) {
+            let row = plan.feature_events().iter().filter(|event| event.source.1 == z).map(|event| event.source.0).collect::<Vec<_>>();
+            assert_eq!(row, (min_x..=max_x).collect::<Vec<_>>(), "selected source row at z={z}");
+        }
+        let expected_admission_rows = [(-9, 8), (-9, 8), (-9, 8), (-9, 8), (-9, 5), (-9, 1), (-9, -3)];
+        for (z, (min_x, max_x)) in (-9..=-3).zip(expected_admission_rows) {
+            let row = plan.admissions().iter().filter(|&&(_, admission_z)| admission_z == z).map(|&(x, _)| x).collect::<Vec<_>>();
+            assert_eq!(row, (min_x..=max_x).collect::<Vec<_>>(), "admitted destination row at z={z}");
+        }
+        assert!(plan.feature_events().windows(2).all(|pair| pair[0].sequence < pair[1].sequence));
+        assert!((-9..=-7).flat_map(|z| (-9..=-7).map(move |x| (x, z))).all(|chunk| plan.admissions().contains(&chunk)));
+        assert!(plan.feature_events().iter().all(|event| plan.admissions().contains(&event.source)));
+    }
+
+    #[test]
+    fn target_plan_rejects_mutated_event_order() {
+        let admissions = (-3..=3)
+            .flat_map(|z| (-3..=3).map(move |x| (x, z)))
+            .collect::<Vec<_>>();
+        let mut events = admissions.iter().enumerate().map(|(sequence, &source)| LifecycleReplayEvent {
+            source,
+            stage: LifecycleCompletion::Features,
+            sequence: sequence as u64,
+        }).collect::<Vec<_>>();
+        events.swap(0, 1);
+        let error = LifecycleReplayPlan::for_target((0, 0), &admissions, &events)
+            .expect_err("mutated authenticated event order must fail closed");
+        assert!(error.contains("order") || error.contains("disagrees"));
     }
 }
