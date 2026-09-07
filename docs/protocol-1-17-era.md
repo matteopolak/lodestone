@@ -232,7 +232,9 @@ wire `minecraft:generic.*` keys are normalized to the model's canonical
 apply every signed offset to loaded world storage as canonical air and remove
 any block entity at that position before emitting the event. Unsupported
 game-state reasons are consumed without emitting; malformed counts and
-trailing bytes fail closed.
+trailing bytes fail closed. Literal bodies in `tests/block_updates.rs` query
+the real world after both section-Y forms and verify both block-action events
+reach the visible-event route.
 
 ### Chunk framing, the era's real risk
 

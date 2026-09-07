@@ -48,7 +48,13 @@ game-state reasons 1/2/3/7/8 (rain start/stop, game mode, rain strength and
 thunder strength), multi-block changes, block-break overlays, block events and
 single-slot equipment changes. Flat 404 state ids go through the committed
 canonical table before bulk writes; each write synchronizes block-entity
-presence and emits a section-scoped dirty signal. Explosion offsets and the
+presence and emits a section-scoped dirty signal. The bulk decoder validates
+the complete record list before mutation, groups records by section, and calls
+`WorldSink::set_blocks` once per touched section; this keeps the wire order for
+duplicate cells while avoiding one copy-on-write fork per record.
+`tests/block_updates.rs` uses literal 404 bodies and queries the real world
+store after dispatch, so both canonical state translation and the section dirty
+signal have a production-shaped consumer control. Explosion offsets and the
 always-present local impulse are preserved as an `Explosion` event, including
 an explicit zero impulse. Before that event is emitted, every removed offset is
 applied to a loaded world at

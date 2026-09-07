@@ -1844,25 +1844,50 @@ impl V735Adapter {
         }
         reader.ensure_empty().map_err(dec_err)?;
 
-        let mut dirty = BTreeMap::<(i32, i32, i32), Vec<[u8; 3]>>::new();
+        let mut dirty = BTreeMap::<
+            (i32, i32, i32),
+            Vec<(u8, u8, u8, u32)>,
+        >::new();
         let mut tally = FallbackTally::default();
         let shape = adapter.current_shape();
         for (x, y, z, raw) in changes {
             let state = shape.canonical.resolve_or_air(raw, &mut tally);
-            world.set_block(x, y, z, state.raw());
-            world.sync_block_entity(x, y, z, block_entity_type(state).map(|kind| kind.raw()));
-            dirty.entry((x >> 4, y >> 4, z >> 4)).or_default().push([
+            let section = (x >> 4, y >> 4, z >> 4);
+            dirty.entry(section).or_default().push((
                 x.rem_euclid(16) as u8,
                 y.rem_euclid(16) as u8,
                 z.rem_euclid(16) as u8,
-            ]);
+                state.raw(),
+            ));
+        }
+        // Validate the complete packet above before touching the world. Apply
+        // each section through the bulk sink primitive so a packet containing
+        // many records forks each section once, while preserving wire order
+        // for duplicate locations within a section.
+        for (&(section_x, section_y, section_z), blocks) in &dirty {
+            world.set_blocks(section_x, section_y, section_z, blocks);
+            for &(x, y, z, state) in blocks {
+                world.sync_block_entity(
+                    (section_x << 4) | i32::from(x),
+                    (section_y << 4) | i32::from(y),
+                    (section_z << 4) | i32::from(z),
+                    block_entity_type(
+                        lodestone_data::block_states::StateId::new(state)
+                            .expect("canonical state id is validated by the table"),
+                    )
+                    .map(|kind| kind.raw()),
+                );
+            }
         }
         Ok(dirty
             .into_iter()
             .map(|((x, y, z), blocks)| {
                 Directive::Emit(ClientEvent::SectionBlocksChanged {
                     section: SectionPos::new(x, y, z),
-                    blocks,
+                    blocks: blocks
+                        .into_iter()
+                        .map(|(x, y, z, _state)| [x, y, z])
+                        .collect(),
                 })
             })
             .collect())
