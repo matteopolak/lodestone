@@ -156,20 +156,18 @@ impl OverworldGenerator {
             }
         }
 
-        // Ores use a source chunk's complete 3x3 section-biome neighbourhood,
-        // not the one y=0 biome that carvers use. The global catalog keeps the
-        // feature index stable across those biome combinations, which is the
-        // index `set_feature_seed` consumes.
+        // Ores use every section biome stored by the source *chunk*, not the
+        // one y=0 biome that carvers use. This is deliberately not a union of
+        // the eight neighbouring chunk containers: they supply read context and
+        // cross-border writes, but do not make their feature lists eligible for
+        // this source's decoration stream. The global catalog keeps the feature
+        // index stable across the selected biome set, which is the index
+        // `set_feature_seed` consumes.
         let mut source_ores = BTreeMap::new();
         for source_x in cx - 1..=cx + 1 {
             for source_z in cz - 1..=cz + 1 {
-                let mut biomes = BTreeSet::new();
-                for dx in -1..=1 {
-                    for dz in -1..=1 {
-                        let pre = self.pre_ore_stage(source_x + dx, source_z + dz);
-                        biomes.extend(pre.3.palette().iter().cloned());
-                    }
-                }
+                let source_pre = self.pre_ore_stage(source_x, source_z);
+                let biomes = source_pre.3.palette();
                 source_ores.insert(
                     (source_x, source_z),
                     self.decoration_catalog

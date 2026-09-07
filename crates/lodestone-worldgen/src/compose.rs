@@ -328,9 +328,10 @@ impl DecorationCatalog {
     }
 
     /// Resolves all ore-capable selected entries with their **global** index in
-    /// `UNDERGROUND_ORES`. The set of eligible biomes is normally the source
-    /// chunk's 3×3 section-biome neighbourhood: one point biome is insufficient
-    /// when an underground feature's eligible biome differs from the surface.
+    /// `UNDERGROUND_ORES`. The eligible set is the source chunk's complete
+    /// section-biome container: one point biome is insufficient when an
+    /// underground feature's eligible biome differs from the surface, while a
+    /// neighbouring chunk's container belongs to that neighbour's source pass.
     ///
     /// `ore_definitions` is keyed by placed-feature id and contains only the
     /// configured features this engine can place as ores. Unsupported entries

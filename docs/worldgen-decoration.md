@@ -12,9 +12,9 @@ index)` pair — never a flattened running count — is what isolates its RNG st
 
 ## How it works
 
-The decoration driver first uses the complete 3×3 section-biome union to decide
-which globally ordered placed features receive a random stream. A `biome`
-placement modifier is a second, narrower gate: it checks the candidate's exact
+The decoration driver first uses section-biome containers to decide which
+globally ordered placed features receive a random stream. A `biome` placement
+modifier is a second, narrower gate: it checks the candidate's exact
 three-dimensional biome cell against the biome memberships of that placed
 feature. These two decisions cannot be collapsed. In particular, a cave feature
 can be eligible because one section contains its cave biome while an above-ground
@@ -190,8 +190,8 @@ lookups rather than re-derived per call.
 
 `feature/mod.rs`'s ore engine (`UNDERGROUND_ORES`) is the same placement-modifier/positions shape as
 vegetation, composed into `column()` over the real vanilla 3×3 `blockStateWriteRadius(1)` driver. Each
-source selects ore-capable entries from the global decoration catalog using the union of section biomes
-in its own 3×3 neighbourhood; the retained global step index, not a biome document's local array offset,
+source selects ore-capable entries from the global decoration catalog using every section biome in
+that source chunk; the retained global step index, not a biome document's local array offset,
 seeds that ore. The same nine sources write the result, but their terrain and
 heightmap probes use a 5×5 read context: a blob at an outer source edge can
 inspect the real neighbour column rather than a clamped substitute. Those probes
@@ -205,6 +205,13 @@ blob can carry stale set bits into a smaller one, which makes the placer skip a 
 place at — a dropped ore, not a slow one. RNG draw order and count are unaffected by any of the
 allocation work above; the surface stage (see `worldgen-biomes.md`), not the ore engine, is where
 worldgen's remaining string-classification cost actually lives.
+
+`overworld_ore_ne_250_neg250_oracle.txt` preserves a packet-derived boundary
+control for that separation. Two independent frozen-world packet exports agree
+on twenty non-copper cells at chunk `(250,-250)`'s positive-Z edge. Including
+the neighbouring chunk containers in this source's selection reintroduces
+copper at all twenty cells; keeping those containers only as the 3×3 driver's
+read/write context restores the external states.
 
 ### Generation-time mob spawns
 
