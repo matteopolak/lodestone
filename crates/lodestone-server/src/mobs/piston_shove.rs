@@ -70,13 +70,10 @@
 //!   and the player's connection applies that displacement to its tracked
 //!   position before sending a teleport.
 //! - **Mob collision lookup treats `moving_piston` as a full block, but
-//!   player physics are not modeled here.** `crate::mobs::world::ChunkWorld::collision_top` — the
-//!   [`lodestone_entity::pathfinding::PathWorld`] method
-//!   `NavigatingMob::ground_below` reads to find the floor beneath a mob —
-//!   now treats a `moving_piston` cell as a full block rather than reading
-//!   the per-state table straight through (which is genuinely empty for
-//!   that state; see that method's own doc for why). A mob standing on a
-//!   block mid-push no longer falls through it. **This crate has no
+//!   player physics are not modeled here.** Both `ChunkWorld::collision_top`
+//!   (navigation) and `LiveBlockCollision` (the emitted-position sweep) do
+//!   this rather than reading the empty static state shape straight through.
+//!   A mob standing on a block mid-push no longer falls through it. **This crate has no
 //!   server-side physics for a connected player** (position is
 //!   client-reported, the same boundary the player-shoving note above
 //!   already states), so whether a real client itself falls through a
@@ -157,8 +154,10 @@ impl<'w> MobSim<'w> {
             if !mob_aabb(m).intersects(&region) {
                 continue;
             }
-            let pos = m.position();
-            m.mob.set_position(Vec3::new(pos.x + delta.x, pos.y + delta.y, pos.z + delta.z));
+            // Preserve the last live-collision origin. A piston displacement is
+            // physical motion, unlike an intentional teleport, so the shared
+            // end-of-tick terrain sweep must be able to clip it against a wall.
+            m.apply_knockback(delta);
             shoved.push(m.id);
         }
         shoved

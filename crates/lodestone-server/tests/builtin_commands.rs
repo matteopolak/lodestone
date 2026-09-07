@@ -1371,6 +1371,49 @@ fn summon_spawns_into_the_shared_mob_handle_at_the_resolved_position() {
     assert_eq!(cow.position, Vec3::new(11.0, 65.0, 4.0));
 }
 
+/// A command-spawned living body reaches the same snapshot consumer after a
+/// live-world tick. The immutable navigation seed behind `MobHandle::default`
+/// has no terrain at this distant coordinate; the real floor comes only from
+/// the live source, which distinguishes this from a private `spawn_species`
+/// unit test.
+#[test]
+fn summon_warden_lands_on_live_terrain_before_entity_streaming_reads_its_snapshot() {
+    use lodestone_server::{EntitySource, MobHandle};
+    let commands = ServerCommands::new();
+    let state = lodestone_server::world_state::WorldStateHandle::new();
+    let alice = source(1, "alice");
+    let players = roster();
+    let mobs = MobHandle::default();
+    let blocks = FixedBlockSource::default();
+    blocks.set(160, 0, 160, "minecraft:stone");
+    let world = CommandWorld {
+        rules: &state,
+        players: &players,
+        state: &state,
+        mobs: Some(&mobs),
+        border: None,
+        access: None,
+        blocks: Some(&blocks),
+    };
+
+    let outcome = commands
+        .run(&world, &alice, "summon minecraft:warden 160 5 160")
+        .expect("root matched");
+    assert!(outcome.response.is_ran(), "{outcome:?}");
+
+    mobs.with(|sim| {
+        for _ in 0..160 {
+            sim.tick_with_terrain(&|x, y, z| blocks.block_state(x, y, z));
+        }
+    });
+    let snapshots = mobs.snapshots();
+    let [warden] = snapshots.as_slice() else {
+        panic!("expected exactly one streamed entity snapshot, got {snapshots:?}")
+    };
+    assert_eq!(warden.entity_type, "minecraft:warden".parse().unwrap());
+    assert_eq!(warden.position.y, 1.0, "the streamed Warden must rest on the live floor");
+}
+
 /// `/summon` refuses an unknown entity type at **parse** time — the tree
 /// itself, not the executor — because [`lodestone_command_mc::EntityTypeArg`]
 /// validates against the real entity-type census.

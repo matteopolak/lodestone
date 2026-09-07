@@ -260,6 +260,15 @@ pub struct NavigatingMob<'w> {
     /// velocity in **blocks per tick** (vanilla `getDeltaMovement`). Zero when the
     /// follower did not move this tick.
     velocity: Vec3,
+    /// Last feet position accepted by the server's live terrain sweep. External
+    /// impulses can arrive after the AI step, so the next sweep starts here
+    /// rather than silently treating that displacement as already collision-free.
+    live_collision_origin: Vec3,
+    /// A newly spawned body has no prior live sweep, so the server must check
+    /// whether the requested spawn point is embedded in a block. Explicit
+    /// position authorities clear this: a teleport or ridden-mob report is not
+    /// a physics proposal to depenetrate.
+    needs_live_unembed: bool,
     /// The stored downward speed carried between ticks while the mob is
     /// falling toward a waypoint below it — vanilla's own `deltaMovement.y`
     /// between calls to `LivingEntity.travel`, integrated by
@@ -269,6 +278,10 @@ pub struct NavigatingMob<'w> {
     /// follower's gravity is always downward, unlike vanilla's single
     /// signed `deltaMovement.y` which also carries jump/knockback).
     fall_speed: f64,
+    /// Whether the last terrain sweep blocked downward motion. The navigation
+    /// snapshot answers path topology, while the server owns the live collision
+    /// sweep that refreshes this after each tick.
+    on_ground: bool,
     /// The mob's body yaw in degrees, derived from its horizontal movement
     /// direction and retained across idle ticks (vanilla `yBodyRot`).
     body_yaw: f32,
@@ -645,7 +658,10 @@ impl<'w> NavigatingMob<'w> {
             tick_count: 0,
             last_search_tick: None,
             velocity: Vec3::new(0.0, 0.0, 0.0),
+            live_collision_origin: pos,
+            needs_live_unembed: true,
             fall_speed: 0.0,
+            on_ground: false,
             body_yaw: 0.0,
             love_ticks: 0,
             partner_candidate: None,
@@ -709,6 +725,8 @@ impl<'w> NavigatingMob<'w> {
     /// must skip `tick` for exactly as long as it calls this instead.
     pub fn set_position(&mut self, pos: Vec3) -> &mut Self {
         self.pos = pos;
+        self.live_collision_origin = pos;
+        self.needs_live_unembed = false;
         self
     }
 
@@ -869,6 +887,75 @@ impl<'w> NavigatingMob<'w> {
     #[must_use]
     pub fn velocity(&self) -> Vec3 {
         self.velocity
+    }
+
+    /// Feet position from which the next live collision sweep must begin.
+    #[must_use]
+    pub fn live_collision_origin(&self) -> Vec3 {
+        self.live_collision_origin
+    }
+
+    /// Whether the most recent live-terrain sweep found support below this mob.
+    #[must_use]
+    pub fn is_on_ground(&self) -> bool {
+        self.on_ground
+    }
+
+    /// Whether the initial command/plugin spawn position still needs one
+    /// live-shape overlap check before normal swept movement begins.
+    #[must_use]
+    pub fn needs_live_unembed(&self) -> bool {
+        self.needs_live_unembed
+    }
+
+    /// Commits the live terrain collision result after this tick's kinematic
+    /// navigation step.
+    ///
+    /// `NavigatingMob` deliberately owns navigation over an immutable
+    /// [`PathWorld`], while the server owns the current block-state source and
+    /// its collision-shape census. The server therefore sweeps the actual body
+    /// after [`tick`](Self::tick) and calls this with the resolved feet position.
+    /// Keeping the write here makes the next navigation tick observe the same
+    /// velocity, grounded state, and vertical reset as the snapshot sent to a
+    /// client instead of leaving collision as a server-only correction.
+    pub fn apply_live_collision(
+        &mut self,
+        before: Vec3,
+        resolved: Vec3,
+        on_ground: bool,
+        vertical_collision: bool,
+    ) {
+        self.pos = resolved;
+        self.live_collision_origin = resolved;
+        self.needs_live_unembed = false;
+        self.velocity = Vec3::new(
+            resolved.x - before.x,
+            resolved.y - before.y,
+            resolved.z - before.z,
+        );
+        self.on_ground = on_ground;
+        if vertical_collision {
+            self.fall_speed = 0.0;
+        }
+    }
+
+    /// Starts one gravity step when the live world removed the support that the
+    /// navigation snapshot still contains.
+    ///
+    /// The ordinary [`advance`](Self::advance) path already integrated a fall
+    /// when its snapshot had no floor. This narrow companion is only for the
+    /// inverse case: a block was mined after the snapshot, so navigation
+    /// supplied a stationary floor height even though the live collision sweep
+    /// found no support. Keeping the integration beside `fall_speed` preserves
+    /// the same gravity and drag sequence instead of inventing a server-side
+    /// teleport-down correction.
+    pub fn begin_live_fall_from_unsupported_surface(&mut self) {
+        if self.fall_speed < 0.0 {
+            return;
+        }
+        let displacement = self.fall_speed + FALL_GRAVITY_PER_TICK;
+        self.fall_speed = displacement * FALL_VERTICAL_AIR_DRAG;
+        self.pos.y -= displacement;
     }
 
     /// Applies an external velocity impulse — e.g. melee/explosion knockback
@@ -1928,6 +2015,8 @@ impl MobController for NavigatingMob<'_> {
         // following) recomputes fresh from the new position, exactly as it
         // does after knockback.
         self.pos = target;
+        self.live_collision_origin = target;
+        self.needs_live_unembed = false;
         self.velocity = Vec3::new(0.0, 0.0, 0.0);
         // Fully-qualified: `BrainMob` also declares `stop_navigation`.
         MobController::stop_navigation(self);

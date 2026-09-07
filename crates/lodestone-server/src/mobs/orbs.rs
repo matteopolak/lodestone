@@ -382,7 +382,7 @@ impl<'w> MobSim<'w> {
         let min_y = f64::from(self.world.min_y);
         let plan = self.orb_owner_plan;
         let mut batches = crate::tick_region::run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
-            let view = super::ItemCollision {
+            let view = super::LiveBlockCollision {
                 block_state,
                 probe_count: std::cell::Cell::new(0),
             };
@@ -775,7 +775,7 @@ mod experience_orb_tests {
     fn orb_owner_batches_restore_serial_state_after_reversed_completion() {
         let world = flat_world();
         let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
-        let view = super::super::ItemCollision {
+        let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
         };
@@ -828,7 +828,7 @@ mod experience_orb_tests {
     fn orb_owner_batch_merge_rejects_a_missing_owner() {
         let world = flat_world();
         let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
-        let view = super::super::ItemCollision {
+        let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
         };
@@ -843,7 +843,7 @@ mod experience_orb_tests {
     fn orb_owner_batch_merge_rejects_a_duplicate_owner() {
         let world = flat_world();
         let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
-        let view = super::super::ItemCollision {
+        let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
         };
@@ -889,7 +889,7 @@ mod experience_orb_tests {
     fn orb_owner_batches_reject_stale_plan_completions() {
         let world = flat_world();
         let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
-        let view = super::super::ItemCollision {
+        let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
         };
@@ -904,7 +904,7 @@ mod experience_orb_tests {
     fn orb_owner_batches_reject_replayed_completions() {
         let world = flat_world();
         let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
-        let view = super::super::ItemCollision {
+        let view = super::super::LiveBlockCollision {
             block_state: &state_at,
             probe_count: std::cell::Cell::new(0),
         };
