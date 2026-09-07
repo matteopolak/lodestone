@@ -56,14 +56,6 @@
 #   LODESTONE_RELAY_TARGET the real Minecraft server /relay bridges to;
 #                         default 127.0.0.1:25565, matching web/README.md and
 #                         the standalone `lodestone-relay`/`just run-relay`.
-#   LODESTONE_JOBS        cargo -j cap for the lodestone-web-server build, same
-#                         meaning as in the Justfile. NOT applied as
-#                         --target-dir: web/server is a member of web/'s OWN
-#                         workspace (web/Cargo.lock, web/target/), so it never
-#                         contends for the shared target/ lock the Justfile's
-#                         {{tdir}} exists to avoid — same reasoning the
-#                         `run-wasm` recipe's own comment already gives for
-#                         why trunk gets neither flag.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -72,15 +64,16 @@ ROOT="$(pwd)"
 WEB_LISTEN="${LODESTONE_WEB_LISTEN:-127.0.0.1:8080}"
 RELAY_TARGET="${LODESTONE_RELAY_TARGET:-127.0.0.1:25565}"
 
-CARGO_FLAGS=()
-if [[ -n "${LODESTONE_JOBS:-}" ]]; then
-  CARGO_FLAGS+=(-j "$LODESTONE_JOBS")
-fi
-
 if [[ ! -f "$ROOT/web/Cargo.toml" ]]; then
   echo "error: web/Cargo.toml not found — nothing to serve." >&2
   exit 2
 fi
+
+# Cargo's machine-wide configuration owns the output location. Resolve it from
+# the web workspace instead of assuming a repository-local `web/target`; this
+# keeps the launcher aligned with the same target directory used by every other
+# workspace build.
+WEB_TARGET_DIR="$(cd "$ROOT/web" && cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 
 for tool in trunk cargo; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -148,17 +141,12 @@ if [[ "$FIXED_PORT" != "0" ]] && command -v lsof >/dev/null 2>&1; then
 fi
 
 echo "== building lodestone-web-server =="
-# "${CARGO_FLAGS[@]}" alone throws "unbound variable" under `set -u` on this
-# repo's actual /usr/bin/env bash (3.2 on macOS) when the array is empty — the
-# classic bash-3.2 empty-array quirk. The `+` form below expands to nothing
-# rather than erroring when CARGO_FLAGS is unset/empty, and to the array
-# otherwise. MEASURED: the plain form failed this script's own first live run.
-if ! (cd "$ROOT/web" && cargo build --release -p lodestone-web-server "${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"}"); then
+if ! (cd "$ROOT/web" && cargo build --release -p lodestone-web-server); then
   echo "error: lodestone-web-server failed to build." >&2
   exit 1
 fi
 
-WEB_BIN="$ROOT/web/target/release/lodestone-web-server"
+WEB_BIN="$WEB_TARGET_DIR/release/lodestone-web-server"
 if [[ ! -x "$WEB_BIN" ]]; then
   echo "error: expected binary not found: $WEB_BIN" >&2
   exit 1

@@ -39,9 +39,12 @@ The workload seed is fixed at `42`; it accepts no workload-size environment vari
 files. Run a direct witness with `just profile-distant-horizon`. To record a local capture, use:
 
 ```text
-LODESTONE_TARGET_DIR=/private/tmp/lodestone-horizon-target LODESTONE_JOBS=2 \
-  just samply-distant-horizon bench-results/profiles/distant-horizon.json.gz
+just samply-distant-horizon bench-results/profiles/distant-horizon.json.gz
 ```
+
+Cargo's machine-wide configuration supplies the shared target directory and
+build queue; the profiling command does not create a private target or cap
+parallelism for the sampled run.
 
 The capture location is caller-selected and is not tracked. The command requires a local Samply
 installation; the workload itself does not require a GPU adapter. The wrapper first runs the same

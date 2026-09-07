@@ -12,7 +12,7 @@ server per selected row and accepts a witness only from an installed, unmodified
 
 The runner keeps the registry's complete hostable-row matrix for `--list` and gates every hosted
 row. Rows run serially. Each gets a fresh temporary world,
-ephemeral localhost port, deadline, server log, and isolated Cargo target directory; a timeout or
+ephemeral localhost port, deadline, and server log; Cargo uses the machine-wide shared target queue. A timeout or
 nonzero client-driver exit stops the server and records a failed row.
 
 The eight-stage minimum Play contract is identical for every row. Join and chunk evidence also
@@ -175,9 +175,9 @@ CI, or ordinary tests.
   `LODESTONE_EXTERNAL_CLIENT_DRIVER`; `--mode attach` waits for a separately created evidence file.
 - `--output` must name a new directory. It receives each row's server directory, logs, evidence,
   and aggregate `report.json`.
-- `--deadline-seconds` defaults to 90; `--jobs` defaults to 2 for the dedicated-server build.
-  `--target-dir` defaults to `/private/tmp/lodestone-external-client-target` so family builds do
-  not contend with the shared workspace target.
+- `--deadline-seconds` defaults to 90. Build parallelism and the target directory come from the
+  machine-wide Cargo configuration (`~/.cargo/config.toml`); the runner does not create per-run
+  target directories or override the shared build queue.
 
 ## Dependencies
 
