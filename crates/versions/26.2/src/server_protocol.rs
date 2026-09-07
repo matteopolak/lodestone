@@ -2942,38 +2942,52 @@ const fn initial_full_sky_sections(dimension: Dimension) -> usize {
     }
 }
 
-/// Highest non-air block section in the light-section coordinate system.
+/// Returns the exact block-light storage mask implied by a loaded 3x3 chunk
+/// footprint.
 ///
-/// Light section zero is the apron below the world, so a block section's index
-/// has an offset of one. A protocol's initial packet masks stop just above this
-/// populated range; deriving the boundary from the column avoids treating an
-/// empty upper build window as meaningful light data.
-fn highest_non_air_light_section(column: &WorldChunkColumn) -> Option<usize> {
-    for section in (0..column.section_count()).rev() {
-        if column.section(section).is_none() {
-            continue;
-        }
-        let base_y = column.min_y() + (section * ChunkSection::EDGE) as i32;
-        for y in (base_y..base_y + ChunkSection::EDGE as i32).rev() {
-            for z in 0..ChunkSection::EDGE {
-                for x in 0..ChunkSection::EDGE {
-                    if column.get_block(x, y, z) != column.air_id() {
-                        return Some(section + 1);
-                    }
+/// The light engine allocates a zero-filled section for every non-air block
+/// section and for each of its 26 immediately adjacent section nodes. In the
+/// packet's coordinate system, a non-air block section therefore allocates its
+/// own light section and one section below and above it. A neighbouring column
+/// can consequently add one explicit empty section even when it has no
+/// emissive block at that height. The result is intentionally a sparse mask:
+/// unallocated holes remain Missing rather than being filled merely because a
+/// higher section is allocated. Retained snapshots bypass this reconstruction
+/// and remain authoritative.
+fn initial_block_light_storage_sections(
+    center: &WorldChunkColumn,
+    neighbours: &[WorldChunkColumn],
+) -> Vec<bool> {
+    let mut stored = vec![false; center.section_count() + 2];
+    for column in std::iter::once(center).chain(neighbours) {
+        for block_section in 0..column.section_count() {
+            // A section with only a non-default biome is still empty to the
+            // light storage allocator; only block occupancy changes status.
+            if !column
+                .section(block_section)
+                .is_some_and(|section| !section.is_air_only())
+            {
+                continue;
+            }
+            for light_section in block_section..=block_section + 2 {
+                if light_section < stored.len() {
+                    stored[light_section] = true;
                 }
             }
         }
     }
-    None
+    stored
 }
 
-/// Retains explicit zero block-light sections through `last`, eliding only the
-/// redundant tail. Values are never touched: a non-uniform section carries a
-/// real source or propagation result even if its first byte happens to be zero.
-fn retain_zero_block_light_through(light: &mut ColumnLight, last: Option<usize>) {
+/// Retains explicit zero block-light sections only where the light engine has
+/// allocated storage, eliding unallocated sections. Values are never touched:
+/// a non-uniform section carries a real source or propagation result even if
+/// its first byte happens to be zero.
+fn retain_zero_block_light_for_storage(light: &mut ColumnLight, stored: &[bool]) {
+    debug_assert_eq!(stored.len(), light.light_section_count());
     for section in 0..light.light_section_count() {
         if matches!(light.block(section), LightData::Uniform(0))
-            && last.is_none_or(|last| section > last)
+            && !stored.get(section).copied().unwrap_or(false)
         {
             *light.block_mut(section) = LightData::Missing;
         }
@@ -2987,7 +3001,7 @@ fn retain_zero_block_light_through(light: &mut ColumnLight, last: Option<usize>)
 fn normalize_initial_chunk_light(
     light: &mut ColumnLight,
     dimension: Dimension,
-    highest_non_air: Option<usize>,
+    block_light_storage: Option<&[bool]>,
 ) {
     match dimension {
         Dimension::Overworld => elide_zero_block_light_for_chunk(light),
@@ -2997,15 +3011,9 @@ fn normalize_initial_chunk_light(
             for section in 0..light.light_section_count() {
                 *light.sky_mut(section) = LightData::Missing;
             }
-            let last_nonzero = (0..light.light_section_count())
-                .rev()
-                .find(|&section| !matches!(light.block(section), LightData::Uniform(0) | LightData::Missing));
-            let last = highest_non_air
-                .and_then(|section| section.checked_add(1))
-                .into_iter()
-                .chain(last_nonzero)
-                .max();
-            retain_zero_block_light_through(light, last);
+            let storage = block_light_storage
+                .expect("Nether initial light normalization needs storage allocation");
+            retain_zero_block_light_for_storage(light, storage);
         }
         // A fresh End snapshot is retained by the server before the column's
         // loading ticket is released. If this fallback is reached, preserve
@@ -3023,7 +3031,9 @@ fn compute_served_initial_light(column: &WorldChunkColumn, dimension: Dimension)
         },
         initial_full_sky_sections(dimension),
     );
-    normalize_initial_chunk_light(&mut light, dimension, highest_non_air_light_section(column));
+    let block_light_storage = (dimension == Dimension::Nether)
+        .then(|| initial_block_light_storage_sections(column, &[]));
+    normalize_initial_chunk_light(&mut light, dimension, block_light_storage.as_deref());
     light
 }
 
@@ -3096,7 +3106,9 @@ fn compute_served_initial_light_with_neighbours(
         },
         initial_full_sky_sections(dimension),
     );
-    normalize_initial_chunk_light(&mut light, dimension, highest_non_air_light_section(center));
+    let block_light_storage = (dimension == Dimension::Nether)
+        .then(|| initial_block_light_storage_sections(center, &neighbour_columns));
+    normalize_initial_chunk_light(&mut light, dimension, block_light_storage.as_deref());
     light
 }
 
@@ -7538,6 +7550,79 @@ mod block_edit_tests {
         assert_eq!(with_east, 14, "east-neighbour source crosses one air cell");
     }
 
+    /// Initial Nether masks follow light-section storage allocation, not just
+    /// the highest local block or the presence of an emitter. This models the
+    /// accepted (-7,-8) row with a high diagonal section and keeps (-8,-8) as
+    /// the negative control: a same-height neighbour must not extend its mask.
+    #[test]
+    fn nether_initial_masks_follow_neighbour_section_allocation_with_minus_eight_control() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::nether_or_end_1_21();
+        let proto = V770ServerProtocol;
+        let decode = |center: &ServerChunkColumn,
+                      neighbours: &[(i32, i32, ServerChunkColumn)]| {
+            let ServerDirective::Send { payload, .. } = proto
+                .try_encode_chunk_with_neighbours_in_dimension(
+                    0,
+                    0,
+                    center,
+                    neighbours,
+                    Dimension::Nether,
+                )
+                .expect("initial Nether chunk")
+            else {
+                panic!("initial Nether chunk must send a packet");
+            };
+            let mut reader = Reader::new(&payload);
+            let packet =
+                LevelChunkWithLight::decode(&mut reader, &shape).expect("decode Nether chunk");
+            reader.ensure_empty().expect("no Nether trailing bytes");
+            packet.light
+        };
+
+        let mut center = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        center.set_block(8, 127, 8, "minecraft:netherrack");
+
+        // This is intentionally non-emissive: the extra Empty mask comes from
+        // the allocated section, not from a computed non-zero block-light cell.
+        let mut high_diagonal = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        high_diagonal.set_block(8, 128, 8, "minecraft:netherrack");
+        let with_high_diagonal = decode(&center, &[(1, 1, high_diagonal)]);
+        assert_eq!(with_high_diagonal.block(9), &LightData::Uniform(0));
+        assert_eq!(
+            with_high_diagonal.block(10),
+            &LightData::Uniform(0),
+            "a non-air diagonal section allocates the one-section vertical apron"
+        );
+        assert_eq!(with_high_diagonal.block(11), &LightData::Missing);
+
+        let mut same_height = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        same_height.set_block(8, 127, 8, "minecraft:netherrack");
+        let without_high_section = decode(&center, &[(1, 1, same_height)]);
+        for section in 0..7 {
+            assert_eq!(
+                without_high_section.block(section),
+                &LightData::Missing,
+                "(-8,-8) control omits the unallocated lower light section {section}"
+            );
+        }
+        for section in 7..=9 {
+            assert_eq!(
+                without_high_section.block(section),
+                &LightData::Uniform(0),
+                "(-8,-8) control keeps its allocated light section {section}"
+            );
+        }
+        for section in 10..18 {
+            assert_eq!(
+                without_high_section.block(section),
+                &LightData::Missing,
+                "(-8,-8) control omits unallocated light section {section}"
+            );
+        }
+    }
+
     /// Initial chunks and later light updates must use the dimension carried by
     /// the source, not infer skylight from the column's shared 0..256 window.
     #[test]
@@ -7703,12 +7788,12 @@ mod block_edit_tests {
             );
             assert_eq!(
                 nether.light.block(section),
-                if section <= 9 {
+                if (7..=9).contains(&section) {
                     &LightData::Uniform(0)
                 } else {
                     &LightData::Missing
                 },
-                "a highest block in light section eight frames Nether block section {section}"
+                "a non-air block section allocates its own light section and one-section apron {section}"
             );
         }
 
