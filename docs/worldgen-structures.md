@@ -42,10 +42,16 @@ placements: after adding the feature descriptor to `StructurePiece`, call it wit
 stream and placement grid before later decoration stages. Do not reseed it from the decorating chunk
 or substitute the chunk origin — either changes both its candidate positions and random sequence.
 
-`StructureRegistry::feature_placement_key` uses the captured runtime registry order for the
-`underground_structures` and `underground_decoration` steps. This remains true after dimension
-filtering removes structures that still occupy positions in the complete registry; the other steps
-and datapack-only ids use the bundled registration-order fallback until runtime order is captured.
+`StructureRegistry::feature_placement_key` uses the complete runtime registry's resource-location
+order for every generation step. This remains true after dimension filtering removes structures
+that still occupy positions in the complete registry. Datapack-only ids use the filtered registry's
+resource-location order as a best-effort fallback because the resolver does not expose unrelated
+registry values.
+
+`OverworldGenerator::structure_place_stage` reorders the retained references by generation step
+and that same complete registry position before writing pieces. The 17×17 source-chunk walk remains
+the persistence and retention order; a stable tie-break keeps starts of one structure in that walk's
+order while putting different structure types in the order their decoration lifecycle consumes.
 
 Mineshaft starts eagerly retain their complete tree and bounding boxes, because the vertical shift
 depends on the finished tree. Their block-writing walk is replayed for the decorating chunk instead:

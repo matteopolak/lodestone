@@ -119,6 +119,24 @@ impl StructureRefs {
     }
 }
 
+/// Orders target-chunk structure starts the way the decoration lifecycle
+/// consumes them: generation step first, then the complete structure-registry
+/// position within that step. The reference walk itself is source-chunk-first,
+/// which is the right order for building the persisted reference sets but not
+/// for placing overlapping structures. A stable sort keeps the source walk's
+/// order among starts of one structure, matching the ordered reference set
+/// iterator used by the placement pass.
+fn order_structure_entries<'a>(
+    registry: &crate::structure::StructureRegistry,
+    entries: &mut Vec<&'a (i32, i32, Arc<StructureStart>)>,
+) {
+    entries.sort_by_key(|(_, _, start)| {
+        registry
+            .feature_placement_key(&start.structure)
+            .unwrap_or((i32::MAX, usize::MAX))
+    });
+}
+
 /// Chebyshev chunk radius `structure_refs` reads `structure_starts` over —
 /// vanilla's `ChunkGenerator.createReferences`' hardcoded `int range = 8`, i.e.
 /// a 17×17 neighbourhood.
@@ -733,6 +751,9 @@ impl OverworldGenerator {
             generator: self,
             aquifers: RefCell::new(HashMap::new()),
         };
+        let structure_refs = self.structure_refs_stage(cx, cz);
+        let mut structure_entries = structure_refs.entries.iter().collect::<Vec<_>>();
+        order_structure_entries(registry, &mut structure_entries);
         // Each structure's target-chunk stream starts at its runtime-registry
         // index within the decoration step. Every start of that structure then
         // shares it, while each start reconstructs its own retained tree.
@@ -740,7 +761,7 @@ impl OverworldGenerator {
             String,
             WorldgenRandom<XoroshiroRandomSource>,
         > = HashMap::new();
-        for (_, _, start) in &self.structure_refs_stage(cx, cz).entries {
+        for (_, _, start) in structure_entries {
             if !start.pieces_complete {
                 continue;
             }
@@ -1090,5 +1111,143 @@ mod tests {
             "minecraft:obsidian",
             "terrain growth replaced a protected block"
         );
+    }
+
+    /// A reference walk is source-chunk-first, while the decoration lifecycle
+    /// groups starts by generation step and then by the complete registry's
+    /// resource order. Keeping this deliberately reversed control catches a
+    /// direct `StructureRefs.entries` walk: the two orders differ both across
+    /// steps and within the same step.
+    #[test]
+    fn target_structure_replay_groups_by_step_and_registry_order() {
+        use crate::density::{NoiseParams, Resolver};
+        use serde_json::Value;
+
+        struct ResolverForOrder;
+
+        impl Resolver for ResolverForOrder {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+
+            fn noise(&self, _id: &str) -> NoiseParams {
+                NoiseParams {
+                    first_octave: 0,
+                    amplitudes: Vec::new(),
+                }
+            }
+
+            fn structure_set_ids(&self) -> Vec<String> {
+                [
+                    "minecraft:order_mansion",
+                    "minecraft:order_mineshaft",
+                    "minecraft:order_fortress",
+                    "minecraft:order_ancient_city",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+            }
+
+            fn structure_set(&self, id: &str) -> Value {
+                let structure = match id {
+                    "minecraft:order_mansion" => "minecraft:mansion",
+                    "minecraft:order_mineshaft" => "minecraft:mineshaft",
+                    "minecraft:order_fortress" => "minecraft:fortress",
+                    "minecraft:order_ancient_city" => "minecraft:ancient_city",
+                    _ => return Value::Null,
+                };
+                serde_json::json!({
+                    "placement": {
+                        "type": "minecraft:random_spread",
+                        "spacing": 1,
+                        "separation": 0,
+                        "salt": 0
+                    },
+                    "structures": [{"structure": structure, "weight": 1}]
+                })
+            }
+
+            fn structure(&self, id: &str) -> Value {
+                let step = match id {
+                    "minecraft:mansion" | "minecraft:fortress" | "minecraft:ancient_city" => {
+                        if id == "minecraft:ancient_city" || id == "minecraft:fortress" {
+                            "underground_decoration"
+                        } else {
+                            "surface_structures"
+                        }
+                    }
+                    "minecraft:mineshaft" => "underground_structures",
+                    _ => return Value::Null,
+                };
+                serde_json::json!({
+                    "type": "minecraft:test_unsupported",
+                    "biomes": [],
+                    "step": step,
+                    "terrain_adaptation": "none"
+                })
+            }
+        }
+
+        fn start(id: &str) -> Arc<StructureStart> {
+            Arc::new(StructureStart {
+                structure: id.to_string(),
+                chunk_x: 0,
+                chunk_z: 0,
+                references: 0,
+                bounding_box: crate::structure::BoundingBox {
+                    min: [0, 0, 0],
+                    max: [0, 0, 0],
+                },
+                pieces: Vec::new(),
+                terrain_adaptation: crate::structure::TerrainAdjustment::None,
+                pieces_complete: true,
+            })
+        }
+
+        let registry = crate::structure::StructureRegistry::new(0, &ResolverForOrder);
+        let starts = [
+            start("minecraft:mansion"),
+            start("minecraft:mineshaft"),
+            start("minecraft:fortress"),
+            start("minecraft:ancient_city"),
+        ];
+        let structure_refs = StructureRefs {
+            entries: starts
+                .into_iter()
+                .enumerate()
+                .map(|(source_order, start)| (source_order as i32, 0, start))
+                .collect(),
+        };
+        let mut entries = structure_refs.entries.iter().collect::<Vec<_>>();
+        let source_order = entries
+            .iter()
+            .map(|(_, _, start)| start.structure.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_order,
+            [
+                "minecraft:mansion",
+                "minecraft:mineshaft",
+                "minecraft:fortress",
+                "minecraft:ancient_city"
+            ]
+        );
+
+        order_structure_entries(&registry, &mut entries);
+        let replay_order = entries
+            .iter()
+            .map(|(_, _, start)| start.structure.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replay_order,
+            [
+                "minecraft:mineshaft",
+                "minecraft:mansion",
+                "minecraft:ancient_city",
+                "minecraft:fortress"
+            ]
+        );
+        assert_ne!(source_order, replay_order);
     }
 }
