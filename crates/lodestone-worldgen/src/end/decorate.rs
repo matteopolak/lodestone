@@ -36,6 +36,18 @@ struct PlatformOrigin {
     z: i32,
 }
 
+/// The configured part of an End gateway feature.
+///
+/// The return gateway is the only End decoration whose configured feature has
+/// meaningful data in the bundled registry.  Keeping that data next to the
+/// placement flag prevents the decoration driver from silently replacing a
+/// datapack (or version refresh) with the historical `(100, 50, 0)` default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GatewayConfig {
+    exit: (i32, i32, i32),
+    exact: bool,
+}
+
 /// End decoration with a block-column representation.
 ///
 /// The fixed platform, outer islands, chorus plants, and return-gateway blocks
@@ -47,7 +59,7 @@ pub(crate) struct EndDecoration {
     platforms: Vec<PlatformOrigin>,
     outer_islands: bool,
     chorus: bool,
-    gateway_return: bool,
+    gateway_return: Option<GatewayConfig>,
     spikes: bool,
 }
 
@@ -111,7 +123,7 @@ impl EndDecoration {
             platforms,
             outer_islands: feature_in_step(resolver, SMALL_END_ISLANDS, 0, "minecraft:end_island"),
             chorus: feature_in_step(resolver, END_HIGHLANDS, 9, "minecraft:chorus_plant"),
-            gateway_return: feature_in_step(resolver, END_HIGHLANDS, 4, "minecraft:end_gateway"),
+            gateway_return: gateway_config_in_step(resolver, END_HIGHLANDS, 4),
             spikes: feature_in_step(resolver, THE_END, 4, "minecraft:end_spike"),
         }
     }
@@ -180,7 +192,7 @@ impl EndDecoration {
                         }
                     }
                 }
-                if biome == END_HIGHLANDS && self.gateway_return {
+                if biome == END_HIGHLANDS && self.gateway_return.is_some() {
                     random.set_feature_seed(decoration_seed, 0, 4);
                     if random.next_float() < 1.0 / 700.0 {
                         let x = source_x * 16 + random.next_int_bounded(16);
@@ -188,7 +200,10 @@ impl EndDecoration {
                         let y = surface_y(world, x, z) + 3 + random.next_int_bounded(7);
                         write_gateway(world, (x, y, z));
                         if x.div_euclid(16) == cx && z.div_euclid(16) == cz {
-                            gateways.push(EndGateway { pos: (x, y, z), exit: (100, 50, 0), exact: true });
+                            let config = self
+                                .gateway_return
+                                .expect("gateway flag checked immediately above");
+                            gateways.push(EndGateway { pos: (x, y, z), exit: config.exit, exact: config.exact });
                         }
                     }
                 }
@@ -295,6 +310,58 @@ fn feature_in_step(resolver: &dyn Resolver, biome: &str, step: usize, kind: &str
         })
 }
 
+/// Resolves the first End-gateway configured feature in a biome step.
+///
+/// An End gateway can be configured without an exit (the delayed gameplay
+/// gateway uses that form), but the block-column output can only retain
+/// gateways whose exit metadata is known.  The worldgen End document points at
+/// the exit-bearing return gateway, so a malformed or delayed configuration is
+/// rejected here instead of being silently emitted with a guessed destination.
+fn gateway_config_in_step(
+    resolver: &dyn Resolver,
+    biome: &str,
+    step: usize,
+) -> Option<GatewayConfig> {
+    let document = resolver.biome_document(biome);
+    let entries = document
+        .get("features")
+        .and_then(Value::as_array)
+        .and_then(|steps| steps.get(step))
+        .and_then(Value::as_array)?;
+
+    for id in entries.iter().filter_map(Value::as_str) {
+        let placed = resolver.placed_feature(id);
+        let Some(configured_id) = placed.get("feature").and_then(Value::as_str) else {
+            continue;
+        };
+        let configured = resolver.configured_feature(configured_id);
+        if configured.get("type").and_then(Value::as_str) != Some("minecraft:end_gateway") {
+            continue;
+        }
+        let Some(config) = configured.get("config") else {
+            continue;
+        };
+        let Some(exit) = config.get("exit").and_then(parse_position) else {
+            continue;
+        };
+        let exact = config.get("exact").and_then(Value::as_bool).unwrap_or(false);
+        return Some(GatewayConfig { exit, exact });
+    }
+    None
+}
+
+fn parse_position(value: &Value) -> Option<(i32, i32, i32)> {
+    let values = value.as_array()?;
+    let [x, y, z] = values.as_slice() else {
+        return None;
+    };
+    Some((
+        i32::try_from(x.as_i64()?).ok()?,
+        i32::try_from(y.as_i64()?).ok()?,
+        i32::try_from(z.as_i64()?).ok()?,
+    ))
+}
+
 fn surface_y(world: &DenseBlockGrid, x: i32, z: i32) -> i32 {
     for y in (0..128).rev() {
         if world.get(x, y, z) != "minecraft:air" {
@@ -361,7 +428,53 @@ pub(crate) fn place_outer_island<R: RandomSource>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::density::{NoiseParams, Resolver};
     use crate::rng::LegacyRandomSource;
+
+    struct GatewayResolver {
+        configured: Value,
+    }
+
+    impl Resolver for GatewayResolver {
+        fn density_function(&self, _id: &str) -> Value {
+            Value::Null
+        }
+
+        fn noise(&self, _id: &str) -> NoiseParams {
+            NoiseParams { first_octave: 0, amplitudes: Vec::new() }
+        }
+
+        fn biome_document(&self, id: &str) -> Value {
+            if id == THE_END {
+                serde_json::json!({ "features": [[], [], [], [], [], [], [], [], [], [], []] })
+            } else if id == END_HIGHLANDS {
+                serde_json::json!({
+                    "features": [[], [], [], [], ["minecraft:test_gateway"]]
+                })
+            } else {
+                Value::Null
+            }
+        }
+
+        fn placed_feature(&self, id: &str) -> Value {
+            if id == "minecraft:test_gateway" {
+                serde_json::json!({
+                    "feature": "minecraft:test_gateway",
+                    "placement": []
+                })
+            } else {
+                Value::Null
+            }
+        }
+
+        fn configured_feature(&self, id: &str) -> Value {
+            if id == "minecraft:test_gateway" {
+                self.configured.clone()
+            } else {
+                Value::Null
+            }
+        }
+    }
 
     /// The native feature fixture is intentionally a direct feature invocation:
     /// placement modifiers belong to the future three-by-three region driver.
@@ -452,5 +565,39 @@ mod tests {
         }
         assert_eq!(writes, 45, "fixture must include the complete gateway box");
         assert_eq!(exit, Some(EndGateway { pos: (50, 70, 50), exit: (100, 50, 0), exact: true }));
+    }
+
+    /// **Control** for the old hardcoded destination: a configured return
+    /// gateway with a different exit and exactness must reach the decoration
+    /// state unchanged.  Reading only the feature type would leave the
+    /// historical `(100, 50, 0), exact=true` pair in place and this would fail.
+    #[test]
+    fn return_gateway_uses_configured_exit_and_exact_flag() {
+        let resolver = GatewayResolver {
+            configured: serde_json::json!({
+                "type": "minecraft:end_gateway",
+                "config": { "exit": [-17, 88, 203], "exact": false }
+            }),
+        };
+        let decoration = EndDecoration::from_resolver(&resolver);
+        assert_eq!(
+            decoration.gateway_return,
+            Some(GatewayConfig { exit: (-17, 88, 203), exact: false })
+        );
+    }
+
+    /// A delayed gateway has no configured exit and belongs to gameplay's
+    /// destination-search path.  It must not accidentally enable the
+    /// worldgen return-gateway writer with a guessed destination.
+    #[test]
+    fn gateway_without_configured_exit_does_not_enable_return_writer() {
+        let resolver = GatewayResolver {
+            configured: serde_json::json!({
+                "type": "minecraft:end_gateway",
+                "config": { "exact": false }
+            }),
+        };
+        let decoration = EndDecoration::from_resolver(&resolver);
+        assert_eq!(decoration.gateway_return, None);
     }
 }
