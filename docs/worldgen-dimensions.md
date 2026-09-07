@@ -122,12 +122,22 @@ neighbouring source chunks compose into the served column. A spike is selected o
 holding its centre; its circular block footprint is then clipped by each served column, while its
 crystal remains a gameplay entity. Return gateways carry their block position, exit, and
 exact-teleport flag through `EndColumn::gateways`; `ChunkColumn::from_end` turns that sidecar into a
-persisted block entity. The End-filtered structure registry samples city starts from the End's own
+persisted block entity. Gateway metadata is resolved from the configured feature rather than supplied
+as a generator default: `EndDecoration::from_resolver` follows the End-highlands step-4 placed-feature
+reference to the configured entry, and the decoration pass copies its three-coordinate `exit` and
+`exact` values into `EndGateway`. A configured gateway without a parseable exit is not treated as a
+return gateway, keeping delayed destination search separate from a fixed worldgen destination. The
+End-filtered structure registry samples city starts from the End's own
 pre-surface density field and applies intersecting template pieces before palette extraction. Its
 recursive assembler keeps its ship choice at city scope, including collision-rejected branches, so
 the template list cannot acquire a second ship later in the same city. The positive
 `end_city_jvm.txt` capture gates one start, its nine-piece sequence, and two placed block states. The
 terrain fixture deliberately stops before later writers, so it is not evidence that they were placed.
+`EndChunkSource::generate` copies complete city starts and the chunk's intersecting references onto
+the served `ChunkColumn`; it resolves referenced origins again for template-owned container payloads
+before the column reaches packet encoding or region persistence. This source attachment is separate
+from block placement so a city can remain visible while its save metadata and container sidecars are
+still checked independently.
 The integrated server's `DimensionalSource` builds the Nether and End sources lazily behind the
 same chunk lifecycle used by the primary dimension. A generated Nether column therefore passes
 through the shared cache, the dimension-specific Anvil region path when persistence is enabled,
@@ -166,6 +176,10 @@ singleplayer path, so a future resolver split must preserve each dimension's own
   (`LODESTONE_REGEN=1 cargo test -p lodestone-data --test worldgen_dimension_data … -- --ignored`);
   the Nether's climate-parameter table has no jar entry to copy and is regenerated from
   `NetherParametersOracle` instead.
+- **Keep End gateway metadata data-driven**: when the bundled feature layout changes, update
+  `EndDecoration::gateway_config_in_step` and its resolver tests to follow the biome step's
+  placed-feature reference and parse a three-integer exit. Do not restore a fallback exit for
+  missing or malformed metadata; absence disables return-gateway sidecar output.
 
 ## Configuration
 
@@ -174,11 +188,19 @@ No runtime configuration; both dimensions' data is embedded at build time by
 `noise/nether/{temperature,vegetation}`, `biome_parameters/nether`, the five Nether and five End
 biome documents, `density_function/{nether,end}/base_3d_noise`, `end/sloped_cheese`,
 `configured_carver/nether_cave`).
+The End return gateway is selected by the End-highlands placed-feature reference and its configured
+feature. In the bundled data, that configured object carries `{ "exact": true, "exit": [100, 50,
+0] }`; the placed object owns rarity, square spread, heightmap anchoring, and the random Y offset.
+An entry without a three-integer exit is not eligible for `EndColumn::gateways` and remains available
+only to delayed destination logic.
 
 ## Dependencies
 
 `lodestone-worldgen`'s `aquifer`, `biome`, `compose`, `surface`, `dense_grid`, `interner`,
-`structure::beardifier`; `lodestone-worldgen-core`'s `density`, `engine`, `noise::SimplexNoise`,
+`structure::beardifier`; the End decoration path also depends on `density::Resolver` and
+`serde_json::Value` to read configured and placed feature documents. `EndColumn::gateways` is
+consumed by `lodestone-server::ChunkColumn::from_end` when constructing persisted block entities.
+`lodestone-worldgen-core`'s `density`, `engine`, `noise::SimplexNoise`,
 `rng::{Algorithm, LegacyRandomSource}`. Evidence: the Nether is verified against a real vanilla
 26.2 server's own generated region files (`.cache/mc/survival/world/dimensions/minecraft/the_nether`,
 seed −195764831) for both biome assignment and bedrock shell; the End terrain and fixed-platform

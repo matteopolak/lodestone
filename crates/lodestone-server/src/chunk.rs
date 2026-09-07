@@ -2913,7 +2913,70 @@ impl EndChunkSource {
     }
 
     fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
-        ChunkColumn::from_end(self.generator.column(cx, cz), Self::WINDOW_HEIGHT)
+        let generated = self.generator.column(cx, cz);
+        let mut column = ChunkColumn::from_end(generated, Self::WINDOW_HEIGHT);
+        self.attach_structures(&mut column, cx, cz);
+        column
+    }
+
+    /// Copies End-city starts and references onto the generated column and
+    /// resolves any container payloads whose blocks land in this chunk.
+    ///
+    /// End generation already uses the same starts to place city pieces, but
+    /// the chunk/save seam is a separate product: without this attachment the
+    /// blocks reach the client while `structures` and template containers stay
+    /// empty. References are resolved back to their origin chunks so a city
+    /// crossing a chunk boundary retains its chest sidecars too.
+    fn attach_structures(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
+        let starts = self
+            .generator
+            .structure_starts(cx, cz)
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect::<Vec<_>>();
+        let references = self.generator.structure_references(cx, cz);
+
+        let mut origins: Vec<(i32, i32)> = references
+            .values()
+            .flatten()
+            .map(|packed| (*packed as u32 as i32, (*packed >> 32) as u32 as i32))
+            .collect();
+        origins.sort_unstable();
+        origins.dedup();
+
+        let mut referenced_starts = Vec::new();
+        for (origin_x, origin_z) in origins {
+            referenced_starts.extend(
+                self.generator
+                    .structure_starts(origin_x, origin_z)
+                    .into_iter()
+                    .map(std::sync::Arc::new),
+            );
+        }
+        let chests = crate::structure_loot::chests_for_chunk(
+            &referenced_starts,
+            cx,
+            cz,
+            crate::block_drops::bundled_tables(),
+        );
+        let spawners = crate::structure_loot::spawners_for_chunk(&referenced_starts, cx, cz);
+        if !chests.is_empty() || !spawners.is_empty() {
+            let mut entities = column.block_entities().to_vec();
+            for chest in chests {
+                if let Some(block) = chest.block {
+                    column.set_block(
+                        chest.pos.x.rem_euclid(16),
+                        chest.pos.y,
+                        chest.pos.z.rem_euclid(16),
+                        block,
+                    );
+                }
+                entities.push((chest.pos, chest.entity));
+            }
+            entities.extend(spawners);
+            column.set_block_entities(entities);
+        }
+        column.set_structures(starts, references);
     }
 }
 
@@ -3124,6 +3187,48 @@ mod tests {
             .flat_map(|x| (0..16).map(move |z| (x, z)))
             .any(|(x, z)| (0..128).any(|y| column.block_state(x, y, z) != "minecraft:air"));
         assert!(solid, "the generator's own 0..128 range must not be entirely air at the island's centre");
+    }
+
+    /// Structure blocks, save metadata and the block-entity handoff must all
+    /// survive the End source boundary. Checking only the generator would
+    /// leave a source-level island: city blocks could reach the packet while
+    /// the region writer still saw no start or reference.
+    #[test]
+    fn end_chunk_source_attaches_city_structures_and_references() {
+        const SEED: i64 = -195_764_831;
+        const CX: i32 = 45;
+        const CZ: i32 = -115;
+        let source = crate::worldgen_data::end_chunk_source(SEED);
+        let column = source.column(CX, CZ);
+
+        let starts = column.structure_starts();
+        assert_eq!(starts.len(), 1, "the captured End city origin must persist one start");
+        let city = &starts[0];
+        assert_eq!(city.structure, "minecraft:end_city");
+        assert_eq!((city.chunk_x, city.chunk_z), (CX, CZ));
+        assert!(city.pieces_complete, "the persisted city start must carry its pieces");
+        assert_eq!(city.pieces.len(), 9, "the captured city has nine template pieces");
+
+        let packed_origin = (i64::from(CZ as u32) << 32) | i64::from(CX as u32);
+        let references = column
+            .structure_references()
+            .get("minecraft:end_city")
+            .expect("the served city chunk must retain an End-city reference");
+        assert!(
+            references.contains(&packed_origin),
+            "the references sidecar must point at the city's origin chunk"
+        );
+
+        // This city contains no container-bearing template in the captured
+        // piece sequence, so the attachment must not invent a structure
+        // payload while preserving any entities returned by `from_end`.
+        assert!(
+            column
+                .block_entities()
+                .iter()
+                .all(|(_, entity)| !matches!(entity, BlockEntity::Container { .. })),
+            "the captured city must not gain a fabricated container sidecar"
+        );
     }
 
     #[test]
