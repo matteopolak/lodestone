@@ -44,13 +44,16 @@ allocated by the centre plus its loaded 3x3 footprint. Every non-air block secti
 layer and the immediately adjacent section nodes, so a non-emitting block in a neighbouring column can
 extend the explicit Empty mask by one section. This is an exact, potentially sparse mask: unallocated
 sections remain Missing even when a higher section is allocated. Its later light updates retain
-explicit zero sky and block values for the normal clear operation. The End has sky light, but its
-initial packet does not reconstruct a storage mask from terrain or from the order in which neighbouring
-columns arrived. It consumes the exact `ColumnLight` snapshot captured by the source's settlement
-transaction. The Overworld keeps the one-section sky form and elides uniform zero block light in an
-initial chunk. `ChunkSource::dimension` carries that choice to the protocol's dimension-aware
-initial-encoding and light-computation hooks. An unlabelled source uses the Overworld as the
-compatibility default; a dimension wrapper must always forward its label.
+explicit zero sky and block values for the normal clear operation. The End has sky light, and its
+initial packet consumes the exact `ColumnLight` snapshot captured by the source's settlement
+transaction. A generated source without a retained snapshot uses a bounded fallback: it keeps the
+complete computed sky result, then removes both light layers from sections that the centre plus loaded
+3x3 footprint would not allocate. This preserves the lower-apron omission and full-sky run seen in
+the first small-batch capture while leaving persisted snapshots untouched. The Overworld keeps the
+one-section sky form and elides uniform zero block light in an initial chunk. `ChunkSource::dimension`
+carries that choice to the protocol's dimension-aware initial-encoding and light-computation hooks. An
+unlabelled source uses the Overworld as the compatibility default; a dimension wrapper must always
+forward its label.
 
 ### Retained snapshots and reloads
 
