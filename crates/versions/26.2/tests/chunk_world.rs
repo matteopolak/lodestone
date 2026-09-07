@@ -11,6 +11,8 @@ mod chunk_batch_ack;
 mod chunk_decode;
 #[path = "chunk_world/chunk_encode_cycles.rs"]
 mod chunk_encode_cycles;
+#[path = "chunk_world/block_entity_packets.rs"]
+mod block_entity_packets;
 #[path = "chunk_world/heightmaps.rs"]
 mod heightmaps;
 #[path = "chunk_world/chunk_events.rs"]

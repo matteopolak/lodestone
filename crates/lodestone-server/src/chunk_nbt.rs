@@ -1161,11 +1161,13 @@ const RECIPES_USED_FIELD: &str = "lodestone:recipes_used";
 /// [`ChunkColumn`] carries in its chunk extras.
 ///
 /// The generator's typed enum becomes a [`BlockEntity::Opaque`] holding the full
-/// vanilla save-form compound: this crate has no beehive *simulation* to put the
+/// save-form compound: this crate has no beehive *simulation* to put the
 /// occupants into, and `Opaque` is exactly the variant for "a real block entity
-/// we preserve verbatim but do not tick". Both consumers — the region writer
-/// ([`block_entity_to_nbt`], which returns an `Opaque`'s tree unchanged) and the
-/// chunk packet's block-entity array — want that same tree.
+/// we preserve verbatim but do not tick". The region writer
+/// ([`block_entity_to_nbt`], which returns an `Opaque`'s tree unchanged) needs
+/// that full tree. The chunk packet uses [`block_entity_update_nbt`] instead,
+/// because its NBT field is the update-tag view and does not carry save
+/// metadata such as `id` or absolute coordinates.
 ///
 /// # Schema provenance
 ///
@@ -1256,19 +1258,24 @@ pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, Block
 /// every real entry measured. `components` is written as an empty compound
 /// because this crate models no block-entity components.
 ///
-/// `pub` because the **chunk packet** wants the same tree the region file does:
-/// a `ServerProtocol::encode_chunk` writes it as the block entity's network NBT
-/// The extra `id`/`x`/`y`/`z`/`keepPacked` fields are redundant
-/// there — position and type travel in the record header — but harmless, since
-/// readers use the fields they know and ignore the rest.
+/// `pub` because persistence, operator inspection and the protocol boundary
+/// all need a stable conversion from the server-side enum. The 26.2 chunk
+/// encoder uses [`block_entity_update_nbt`] for its network payload instead of
+/// writing this save-form tree directly.
 #[must_use]
 pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
     let (id, mut extra): (&str, Vec<(String, Nbt)>) = match entity {
         BlockEntity::Opaque { nbt, .. } => return nbt.clone(),
         BlockEntity::EndGateway { exit, exact } => {
-            let mut fields = vec![("ExactTeleport".to_owned(), Nbt::Byte(i8::from(*exact)))];
+            let mut fields = vec![("Age".to_owned(), Nbt::Long(0))];
             if let Some(exit) = exit {
-                fields.insert(0, ("ExitPortal".to_owned(), Nbt::IntArray(vec![exit.x, exit.y, exit.z])));
+                fields.push((
+                    "exit_portal".to_owned(),
+                    Nbt::IntArray(vec![exit.x, exit.y, exit.z]),
+                ));
+            }
+            if *exact {
+                fields.push(("ExactTeleport".to_owned(), Nbt::Byte(1)));
             }
             ("minecraft:end_gateway", fields)
         }
@@ -1437,7 +1444,7 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             if let Some(next) = next {
                 fields.push(("SpawnData".to_owned(), spawn_data_to_nbt(next)));
             }
-            ("minecraft:spawner", fields)
+            ("minecraft:mob_spawner", fields)
         }
         // Sign data stores `messages`/`color`/`has_glowing_text` per side,
         // under `front_text`/`back_text`, plus a sibling `is_waxed`.
@@ -1547,6 +1554,91 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
     Nbt::Compound(fields)
 }
 
+/// Encodes the NBT update tag a 26.2 chunk packet carries for one block entity.
+///
+/// Persistence and the network intentionally use different views. Region
+/// records need the `id` and absolute coordinates so they can be loaded without
+/// a packet header; the packet already has a registry id and a compact position
+/// header, and its NBT is the entity's custom update payload. Keeping this
+/// projection here prevents the two callers from accidentally sharing the
+/// save-only metadata.
+///
+/// The default 26.2 update tag is empty for the container, furnace, hopper,
+/// brewing-stand and crafter families. Generated chests and beehives are
+/// therefore represented by an empty packet payload even though their full
+/// save records retain deferred loot or occupants. Spawners and End gateways
+/// override that default and expose the fields needed by a client to render
+/// their state. Signs and beacons likewise expose their modeled custom fields;
+/// opaque records are stripped of save metadata as a conservative passthrough.
+#[must_use]
+pub fn block_entity_update_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
+    match entity {
+        BlockEntity::EndGateway { exit, exact } => {
+            let mut fields = vec![("Age".to_owned(), Nbt::Long(0))];
+            if let Some(exit) = exit {
+                fields.push((
+                    "exit_portal".to_owned(),
+                    Nbt::IntArray(vec![exit.x, exit.y, exit.z]),
+                ));
+            }
+            if *exact {
+                fields.push(("ExactTeleport".to_owned(), Nbt::Byte(1)));
+            }
+            Nbt::Compound(fields)
+        }
+        BlockEntity::Spawner(_) => {
+            let Nbt::Compound(fields) = block_entity_to_nbt(pos, entity) else {
+                return Nbt::Compound(Vec::new());
+            };
+            Nbt::Compound(
+                fields
+                    .into_iter()
+                    .filter(|(name, _)| {
+                        !matches!(
+                            name.as_str(),
+                            "id" | "x" | "y" | "z" | "keepPacked" | "components" | "SpawnPotentials"
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        BlockEntity::Sign(_) | BlockEntity::Beacon(_) => {
+            strip_block_entity_metadata(block_entity_to_nbt(pos, entity))
+        }
+        BlockEntity::Opaque { id, nbt } => {
+            // These types inherit the empty default update tag in 26.2. Their
+            // custom data remains in the region record and is consulted when
+            // the server opens the container or simulates the block entity.
+            if matches!(id.as_str(), "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" | "minecraft:beehive") {
+                Nbt::Compound(Vec::new())
+            } else {
+                strip_block_entity_metadata(nbt.clone())
+            }
+        }
+        BlockEntity::Container { .. }
+        | BlockEntity::Furnace(_)
+        | BlockEntity::Hopper(_)
+        | BlockEntity::BrewingStand(_)
+        | BlockEntity::Composter(_)
+        | BlockEntity::CommandBlock(_)
+        | BlockEntity::Crafter { .. } => Nbt::Compound(Vec::new()),
+    }
+}
+
+fn strip_block_entity_metadata(nbt: Nbt) -> Nbt {
+    let Nbt::Compound(fields) = nbt else {
+        return nbt;
+    };
+    Nbt::Compound(
+        fields
+            .into_iter()
+            .filter(|(name, _)| {
+                !matches!(name.as_str(), "id" | "x" | "y" | "z" | "keepPacked" | "components")
+            })
+            .collect(),
+    )
+}
+
 /// The vanilla item id a [`BottleKind`] is stored as.
 #[must_use]
 fn bottle_item_id(kind: BottleKind) -> &'static str {
@@ -1593,12 +1685,14 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
 
     let entity = match id {
         "minecraft:end_gateway" => {
-            let exit = match field(nbt, "ExitPortal") {
-                Some(Nbt::IntArray(values)) if values.len() == 3 => {
-                    Some(BlockPos::new(values[0], values[1], values[2]))
+            let exit = ["exit_portal", "ExitPortal"].into_iter().find_map(|name| {
+                match field(nbt, name) {
+                    Some(Nbt::IntArray(values)) if values.len() == 3 => {
+                        Some(BlockPos::new(values[0], values[1], values[2]))
+                    }
+                    _ => None,
                 }
-                _ => None,
-            };
+            });
             BlockEntity::EndGateway {
                 exit,
                 exact: matches!(field(nbt, "ExactTeleport"), Some(Nbt::Byte(value)) if *value != 0),
@@ -1707,7 +1801,10 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
                 ),
             }
         }
-        "minecraft:spawner" => {
+        // `minecraft:mob_spawner` is the 26.2 registry/save key. The shorter
+        // key was emitted by older Lodestone versions, so retain it as a
+        // read-only compatibility alias for worlds written before the fix.
+        "minecraft:mob_spawner" | "minecraft:spawner" => {
             // `BaseSpawner.load`: `SpawnData` (if present) is parsed
             // unconditionally; `SpawnPotentials`, if *absent*, falls back to a
             // one-entry weighted list built from that same `SpawnData` (or a
@@ -2027,7 +2124,17 @@ mod beacon_nbt_tests {
 mod end_gateway_nbt_tests {
     use super::{block_entity_from_nbt, block_entity_to_nbt};
     use crate::block_entities::BlockEntity;
+    use lodestone_core::Nbt;
     use lodestone_model::BlockPos;
+
+    fn field<'a>(nbt: &'a Nbt, key: &str) -> Option<&'a Nbt> {
+        let Nbt::Compound(fields) = nbt else {
+            return None;
+        };
+        fields
+            .iter()
+            .find_map(|(name, value)| (name == key).then_some(value))
+    }
 
     #[test]
     fn end_gateway_exit_and_exact_teleport_round_trip() {
@@ -2041,6 +2148,11 @@ mod end_gateway_nbt_tests {
 
         assert_eq!(decoded_position, position);
         assert_eq!(decoded, entity);
+        assert_eq!(field(&nbt, "Age"), Some(&Nbt::Long(0)));
+        assert_eq!(
+            field(&nbt, "exit_portal"),
+            Some(&Nbt::IntArray(vec![100, 50, 0]))
+        );
         assert_eq!(decoded.gateway_destination(), Some((BlockPos::new(100, 50, 0), true)));
     }
 
@@ -2075,7 +2187,8 @@ mod end_gateway_nbt_tests {
         assert!(matches!(
             encoded,
             lodestone_core::Nbt::Compound(fields)
-                if !fields.iter().any(|(key, _)| key == "ExitPortal")
+                if !fields.iter().any(|(key, _)| key == "exit_portal")
+                    && !fields.iter().any(|(key, _)| key == "ExactTeleport")
         ));
     }
 }

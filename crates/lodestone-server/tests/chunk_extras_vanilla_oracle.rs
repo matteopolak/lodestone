@@ -200,12 +200,12 @@ fn vanilla_p_is_the_priority_value_and_the_ordinal_would_be_a_different_priority
 }
 
 /// A real vanilla chunk is **full of block entities this crate does not
-/// simulate**, and reading one must skip them rather than fail.
+/// simulate**, and reading one must preserve them rather than fail.
 ///
 /// The fixture chunks happen to hold only kinds we model or none at all, so
 /// this drives the decoder with a hand-built list of the ids actually measured
 /// in `.cache/mc` — chest, vault, mob spawner, decorated pot, brushable block
-/// — and requires the modelled one in the same list to survive.
+/// — and requires both modelled entries in the same list to survive.
 ///
 /// Before this fix, every unmodelled block entity was silently dropped —
 /// a chest loaded and re-saved lost its contents. The `Opaque` variant now
@@ -253,6 +253,13 @@ fn unmodelled_block_entity_ids_are_skipped_rather_than_failing_the_chunk() {
     assert!(matches!(
         extras.block_entities[0].1,
         BlockEntity::Container { .. }
+    ));
+    // The external registry/save key is `minecraft:mob_spawner`, not the
+    // block-state key `minecraft:spawner`; it must resolve to the concrete
+    // spawner state rather than falling through to Opaque.
+    assert!(matches!(
+        extras.block_entities[2].1,
+        BlockEntity::Spawner(_)
     ));
     // The vault (still unmodelled) is at x=1 and is preserved verbatim as
     // Opaque — the arm that keeps a chunk written by a real server loadable.

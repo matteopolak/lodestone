@@ -2804,7 +2804,7 @@ fn fluid_count(section: &ChunkSection) -> u16 {
 /// Writes the chunk packet's block-entity array: a VarInt count
 /// then, per entry, the section-relative XZ packed into one byte (`x << 4 | z`),
 /// the **absolute** Y as a big-endian short, the block-entity type's registry id
-/// as a VarInt, and the network-NBT payload. Exactly the layout
+/// as a VarInt, and the network-NBT update payload. Exactly the layout
 /// [`lodestone_world::BlockEntity::decode`] reads back.
 ///
 /// This used to be a hardcoded `var_i32(0)` — every chunk claiming it held no
@@ -2817,9 +2817,9 @@ fn fluid_count(section: &ChunkSection) -> u16 {
 /// is built into a scratch buffer per entry rather than straight into `w`: a
 /// wrong VarInt type id merely mis-draws one entity, while a count that does not
 /// match the records that follow desynchronises the stream and takes the
-/// connection down. An `Opaque` entity's tree comes from a region file we did
-/// not write, so "this NBT does not encode" is a real input, not an invariant to
-/// `expect` on.
+/// connection down. An `Opaque` entity's update tree may come from a region
+/// file we did not write, so "this NBT does not encode" is a real input, not an
+/// invariant to `expect` on.
 fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) {
     let entries: Vec<(
         lodestone_model::BlockPos,
@@ -2831,7 +2831,7 @@ fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) {
         .filter_map(|(pos, entity)| {
             let type_id =
                 lodestone_data::block_entity_types::block_entity_type_id(entity.type_id())?;
-            let nbt = lodestone_server::chunk_nbt::block_entity_to_nbt(*pos, entity);
+            let nbt = lodestone_server::chunk_nbt::block_entity_update_nbt(*pos, entity);
             let mut body = Writer::default();
             write_network_nbt(&mut body, &nbt).ok()?;
             Some((*pos, type_id, body.into_vec()))

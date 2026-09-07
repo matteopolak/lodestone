@@ -97,7 +97,8 @@ pub enum BlockEntity {
     /// module's own doc for the data model and the pure tick semantics. The
     /// running tick loop supplies the player and world context separately.
     CommandBlock(crate::command_block::CommandBlockData),
-    /// `minecraft:spawner`. See `crate::mob_spawner`'s own doc for the
+    /// The monster-spawner block entity (wire/save key
+    /// `minecraft:mob_spawner`). See `crate::mob_spawner`'s own doc for the
     /// decision this state feeds, and `crate::tick::run_tick_loop` for the
     /// driver — this registry's own [`tick_all`](BlockEntityRegistry::tick_all)
     /// does **not** advance a spawner, the same way it does not run the
@@ -371,7 +372,7 @@ impl BlockEntity {
             // the three command-block *blocks* it is attached to — unlike
             // `Furnace`, there is no per-instance kind to switch on here.
             BlockEntity::CommandBlock(_) => "minecraft:command_block",
-            BlockEntity::Spawner(_) => "minecraft:spawner",
+            BlockEntity::Spawner(_) => "minecraft:mob_spawner",
             BlockEntity::Sign(sign) => {
                 if sign.hanging {
                     "minecraft:hanging_sign"
