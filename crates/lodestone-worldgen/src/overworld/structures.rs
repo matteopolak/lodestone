@@ -49,10 +49,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, get_seed};
+use lodestone_worldgen_core::rng::{
+    LegacyRandomSource, RandomSource, WorldgenRandom, XoroshiroRandomSource, get_seed,
+};
 
 use crate::aquifer::{AquiferSystem, BlockKind};
-use crate::structure::{HeightmapKind, PieceRefinement, StartContext, StructureStart, VerticalPlacement};
+use crate::structure::{
+    HeightmapKind, PieceRefinement, StartContext, StructureKind, StructureStart, VerticalPlacement,
+};
 
 use super::OverworldGenerator;
 
@@ -729,22 +733,42 @@ impl OverworldGenerator {
             generator: self,
             aquifers: RefCell::new(HashMap::new()),
         };
+        // Each structure's target-chunk stream starts at its runtime-registry
+        // index within the decoration step. Every start of that structure then
+        // shares it, while each start reconstructs its own retained tree.
+        let mut mineshaft_randoms: HashMap<
+            String,
+            WorldgenRandom<XoroshiroRandomSource>,
+        > = HashMap::new();
         for (_, _, start) in &self.structure_refs_stage(cx, cz).entries {
             if !start.pieces_complete {
                 continue;
             }
-            if start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15)
-                && let Some(blocks) = registry.mineshaft_blocks_for_chunk(
+            let is_mineshaft = registry
+                .structure(&start.structure)
+                .is_some_and(|definition| matches!(definition.kind, StructureKind::Mineshaft { .. }));
+            if is_mineshaft && start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) {
+                let mineshaft_random = mineshaft_randoms.entry(start.structure.clone()).or_insert_with(|| {
+                    let (step, index) = registry
+                        .runtime_decoration_key(&start.structure)
+                        .expect("mineshaft structure has a decoration key");
+                    let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+                    let decoration_seed = random.set_decoration_seed(seed, bx, bz);
+                    random.set_feature_seed(decoration_seed, index as i32, step);
+                    random
+                });
+                if let Some(blocks) = registry.mineshaft_blocks_for_chunk(
                     start,
                     cx,
                     cz,
                     &mineshaft_sampler,
-                )
-            {
-                for block in blocks {
-                    world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+                    mineshaft_random,
+                ) {
+                    for block in blocks {
+                        world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+                    }
+                    continue;
                 }
-                continue;
             }
             if start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15)
                 && registry.place_fortress_for_chunk(start, cx, cz, &mut world)
