@@ -343,9 +343,12 @@ pub(super) fn place_geode<R: RandomSource>(
                 let dist_sum_shell = points
                     .iter()
                     .fold(0.0, |sum, (point, offset)| {
-                        sum + (inv_sqrt(
-                            distance_squared(BlockPos { x, y, z }, *point) + *offset as f64,
-                        ) + noise_offset)
+                        add_distance_term(
+                            sum,
+                            distance_squared(BlockPos { x, y, z }, *point),
+                            f64::from(*offset),
+                            noise_offset,
+                        )
                     });
                 if dist_sum_shell < outer_crust {
                     continue;
@@ -353,10 +356,12 @@ pub(super) fn place_geode<R: RandomSource>(
                 let dist_sum_crack = crack_points
                     .iter()
                     .fold(0.0, |sum, point| {
-                        sum + (inv_sqrt(
-                            distance_squared(BlockPos { x, y, z }, *point)
-                                + cfg.crack_point_offset as f64,
-                        ) + noise_offset)
+                        add_distance_term(
+                            sum,
+                            distance_squared(BlockPos { x, y, z }, *point),
+                            f64::from(cfg.crack_point_offset),
+                            noise_offset,
+                        )
                     });
                 let pos = BlockPos { x, y, z };
                 if should_generate_crack && dist_sum_crack >= crack_size && dist_sum_shell < inner_air {
@@ -453,6 +458,15 @@ fn distance_squared(a: BlockPos, b: BlockPos) -> f64 {
 
 fn inv_sqrt(value: f64) -> f64 {
     1.0 / value.sqrt()
+}
+
+/// Add one geode distance contribution without allowing the compiler to
+/// reassociate the per-point sum. The contribution is rounded before it is
+/// added to the running accumulator, which is observable at shell thresholds.
+#[inline(always)]
+fn add_distance_term(sum: f64, distance_squared: f64, point_offset: f64, noise_offset: f64) -> f64 {
+    let contribution = inv_sqrt(distance_squared + point_offset) + noise_offset;
+    sum + contribution
 }
 
 fn safe_set_provider<R: RandomSource>(
@@ -605,6 +619,17 @@ mod tests {
         assert!(can_cluster_grow_at_state("minecraft:water[level=0]"));
         assert!(!can_cluster_grow_at_state("minecraft:water[level=1]"));
         assert!(!can_cluster_grow_at_state("minecraft:lava"));
+    }
+
+    #[test]
+    fn distance_term_rounds_before_accumulator_addition() {
+        let sum = 10_000_000_000_000_000.0;
+        let grouped = add_distance_term(sum, 1.0, 0.0, 0.5);
+        let reassociated = (sum + inv_sqrt(1.0)) + 0.5;
+
+        assert_eq!(grouped.to_bits(), 0x4341_c379_37e0_8001);
+        assert_eq!(reassociated.to_bits(), 0x4341_c379_37e0_8000);
+        assert_ne!(grouped.to_bits(), reassociated.to_bits());
     }
 
     #[test]
