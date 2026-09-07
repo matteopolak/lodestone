@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
-"""Validate and deterministically merge frozen-world semantic parity manifests."""
+"""Validate and deterministically merge frozen-world parity manifests."""
 import argparse, hashlib, pathlib, struct, sys, tempfile
 
 MAGIC = b"LWP26P03"
 MAGIC_V4 = b"LWP26P04"
 MAGIC_V5 = b"LWP26P05"
+MAGIC_V6 = b"LWP26P06"
 HEADER = 256
 WIDTH = 32
+RAW_WIDTH = 2
 DOMAIN = b"lodestone.worldgen.large-parity.manifest/v3/semantic"
 DOMAIN_V4 = b"lodestone.worldgen.large-parity.manifest/v4/semantic"
 DOMAIN_V5 = b"lodestone.worldgen.large-parity.manifest/v5/semantic"
+DOMAIN_V6 = b"lodestone.worldgen.large-parity.manifest/v6/raw-packet"
+# These names are retained for the v3-v5 semantic diagnostics. Do not change
+# them when the raw-packet grid changes: old manifests are still readable.
 GRID_MIN = -250
 GRID_MAX = 250
 GRID_SIDE = GRID_MAX - GRID_MIN + 1
 GRID_COUNT = GRID_SIDE * GRID_SIDE
+RAW_GRID_MIN = -500
+RAW_GRID_MAX = 500
+RAW_GRID_SIDE = RAW_GRID_MAX - RAW_GRID_MIN + 1
+RAW_GRID_COUNT = RAW_GRID_SIDE * RAW_GRID_SIDE
 DIMENSIONS = {"overworld": b"minecraft:overworld", "nether": b"minecraft:the_nether", "end": b"minecraft:the_end"}
 # magic, version, header, digest algorithm, schema, protocol, seed, global/shard
 # bounds, record count, per-record digest width, reserved, schema/world/payload SHA-256;
@@ -32,28 +41,51 @@ def dimension(raw, h):
     raise ValueError("manifest has an unknown dimension identity")
 
 
-def make_header(version, dim, sx0, sx1, sz0, sz1, count, frozen, payload_digest):
+def _format(version):
     if version == 3:
-        magic, schema, domain, dim_digest = MAGIC, 3, DOMAIN, bytes(32)
-    elif version == 4:
-        magic, schema, domain = MAGIC_V4, 4, DOMAIN_V4
-        try:
-            dim_digest = hashlib.sha256(DIMENSIONS[dim]).digest()
-        except KeyError as error:
-            raise ValueError(f"unsupported dimension {dim!r}") from error
-    elif version == 5:
-        magic, schema, domain = MAGIC_V5, 5, DOMAIN_V5
-        try:
-            dim_digest = hashlib.sha256(DIMENSIONS[dim]).digest()
-        except KeyError as error:
-            raise ValueError(f"unsupported dimension {dim!r}") from error
+        return MAGIC, 3, DOMAIN, WIDTH, (GRID_MIN, GRID_MAX)
+    if version == 4:
+        return MAGIC_V4, 4, DOMAIN_V4, WIDTH, (GRID_MIN, GRID_MAX)
+    if version == 5:
+        return MAGIC_V5, 5, DOMAIN_V5, WIDTH, (GRID_MIN, GRID_MAX)
+    if version == 6:
+        return MAGIC_V6, 6, DOMAIN_V6, RAW_WIDTH, (RAW_GRID_MIN, RAW_GRID_MAX)
+    raise ValueError(f"unsupported manifest version {version}")
+
+
+def raw_packet_hash(packet_body):
+    """Return the committed 16-bit prefix of the exact packet-body digest.
+
+    The complete SHA-256 remains available to callers for an audit sidecar;
+    manifest records intentionally stay two bytes per coordinate.
+    """
+    return hashlib.sha256(packet_body).digest()[:RAW_WIDTH]
+
+
+def raw_packet_full_digest(packet_body):
+    """Return the optional audit digest without changing the v6 record width."""
+    return hashlib.sha256(packet_body).digest()
+
+
+def hash_exact_chunk_with_light_body(packet_body):
+    """Name the v6 hash input explicitly for exporter/audit callers."""
+    return raw_packet_hash(packet_body)
+
+
+def make_header(version, dim, sx0, sx1, sz0, sz1, count, frozen, payload_digest):
+    magic, schema, domain, width, (grid_min, grid_max) = _format(version)
+    if version == 3:
+        dim_digest = bytes(32)
     else:
-        raise ValueError(f"unsupported manifest version {version}")
+        try:
+            dim_digest = hashlib.sha256(DIMENSIONS[dim]).digest()
+        except KeyError as error:
+            raise ValueError(f"unsupported dimension {dim!r}") from error
     header = struct.pack(FMT, magic, version, HEADER, 2, schema, 776, 42,
-                         GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX, sx0, sx1, sz0, sz1,
-                         count, WIDTH, 0, hashlib.sha256(domain).digest(), frozen,
+                         grid_min, grid_max, grid_min, grid_max, sx0, sx1, sz0, sz1,
+                         count, width, 0, hashlib.sha256(domain).digest(), frozen,
                          payload_digest)
-    return header[:168] + dim_digest + header[200:] if version in (4, 5) else header
+    return header[:168] + dim_digest + header[200:] if version != 3 else header
 
 
 def read(path):
@@ -64,29 +96,35 @@ def read(path):
     (magic, version, size, algorithm, schema, protocol, seed, gx0, gx1, gz0,
      gz1, sx0, sx1, sz0, sz1, count, width, reserved, domain, frozen,
      payload_digest) = h
-    if magic not in (MAGIC, MAGIC_V4, MAGIC_V5):
+    if magic not in (MAGIC, MAGIC_V4, MAGIC_V5, MAGIC_V6):
         if magic == b"LWP26P02":
             raise ValueError(f"{path}: v2 stores raw 16-bit packet fingerprints and is rejected; regenerate from a frozen world as v3")
         raise ValueError(f"{path}: unsupported manifest magic {magic!r}")
     valid_v3 = (magic == MAGIC and version == 3 and schema == 3)
     valid_v4 = (magic == MAGIC_V4 and version == 4 and schema == 4)
     valid_v5 = (magic == MAGIC_V5 and version == 5 and schema == 5)
-    if not (valid_v3 or valid_v4 or valid_v5) or (size, algorithm, protocol, seed, width, reserved) != (HEADER, 2, 776, 42, WIDTH, 0):
+    valid_v6 = (magic == MAGIC_V6 and version == 6 and schema == 6)
+    expected_width = RAW_WIDTH if valid_v6 else WIDTH
+    if not (valid_v3 or valid_v4 or valid_v5 or valid_v6) or (size, algorithm, protocol, seed, width, reserved) != (HEADER, 2, 776, 42, expected_width, 0):
         raise ValueError(f"{path}: unsupported parity manifest header")
-    if (gx0, gx1, gz0, gz1) != (GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX):
-        raise ValueError(f"{path}: not the required {GRID_SIDE}x{GRID_SIDE} grid")
+    grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if valid_v6 else (GRID_MIN, GRID_MAX)
+    if (gx0, gx1, gz0, gz1) != (grid_min, grid_max, grid_min, grid_max):
+        side = grid_max - grid_min + 1
+        raise ValueError(f"{path}: not the required {side}x{side} grid")
     expected = (sx1-sx0+1)*(sz1-sz0+1)
     if sx0 < gx0 or sx1 > gx1 or sz0 < gz0 or sz1 > gz1 or count != expected:
         raise ValueError(f"{path}: invalid shard bounds/count")
-    expected_domain = DOMAIN if version == 3 else DOMAIN_V4 if version == 4 else DOMAIN_V5
+    expected_domain = (DOMAIN if version == 3 else DOMAIN_V4 if version == 4 else
+                       DOMAIN_V5 if version == 5 else DOMAIN_V6)
     if domain != hashlib.sha256(expected_domain).digest():
-        raise ValueError(f"{path}: semantic-record schema digest differs")
+        kind = "raw-packet" if version == 6 else "semantic-record"
+        raise ValueError(f"{path}: {kind} schema digest differs")
     dim = dimension(raw, h)
     if frozen == bytes(32):
         raise ValueError(f"{path}: missing frozen-world identity")
     payload = raw[HEADER:]
-    if len(payload) != count*WIDTH:
-        raise ValueError(f"{path}: payload size is {len(payload)}, expected {count*WIDTH}")
+    if len(payload) != count*expected_width:
+        raise ValueError(f"{path}: payload size is {len(payload)}, expected {count*expected_width}")
     if payload_digest != hashlib.sha256(payload).digest():
         raise ValueError(f"{path}: payload checksum differs")
     return h, payload, dim
@@ -95,15 +133,17 @@ def read(path):
 def validate(paths):
     for path in paths:
         h, _, dim = read(path)
-        print(f"ok {path}: dimension={dim} cx={h[11]}..{h[12]} cz={h[13]}..{h[14]} semantic_sha256={h[15]} frozen={h[19].hex()}")
+        kind = "raw-packet" if h[1] == 6 else "semantic"
+        print(f"ok {path}: kind={kind} width={h[16]} dimension={dim} cx={h[11]}..{h[12]} cz={h[13]}..{h[14]} payload_sha256={h[20].hex()} frozen={h[19].hex()}")
 
 
 def merge(out, paths):
     slots, frozen, dim, version = {}, None, None, None
+    record_width = None
     for path in paths:
         h, payload, shard_dim = read(path)
         if version is None:
-            version, dim = h[1], shard_dim
+            version, dim, record_width = h[1], shard_dim, h[16]
         elif (h[1], shard_dim) != (version, dim):
             raise ValueError(f"{path}: manifest format or dimension differs; do not merge dimensions or schema versions")
         if frozen is None:
@@ -117,27 +157,31 @@ def merge(out, paths):
                 key = (cx, cz)
                 if key in slots:
                     raise ValueError(f"overlap at {key}: {path}")
-                slots[key] = payload[record*WIDTH:(record+1)*WIDTH]
+                slots[key] = payload[record*record_width:(record+1)*record_width]
                 record += 1
-    required = GRID_COUNT
+    required = RAW_GRID_COUNT if version == 6 else GRID_COUNT
+    grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if version == 6 else (GRID_MIN, GRID_MAX)
     if len(slots) != required:
         raise ValueError(f"incomplete merge: {len(slots)}/{required}; missing shards are not silently zero-filled")
     payload = bytearray()
-    for cz in range(GRID_MIN, GRID_MAX + 1):
-        for cx in range(GRID_MIN, GRID_MAX + 1):
+    for cz in range(grid_min, grid_max + 1):
+        for cx in range(grid_min, grid_max + 1):
             payload.extend(slots[(cx, cz)])
-    header = make_header(version, dim, GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX,
+    header = make_header(version, dim, grid_min, grid_max, grid_min, grid_max,
                          required, frozen, hashlib.sha256(payload).digest())
     pathlib.Path(out).write_bytes(header + payload)
-    print(f"merged {required} full semantic SHA-256 digests into {out}")
+    kind = "raw packet hashes" if version == 6 else "semantic SHA-256 digests"
+    print(f"merged {required} {kind} into {out}")
 
 
 def accept(out, first, second):
     """Freeze a baseline only after two independent read-only exports agree."""
     first_header, first_payload, first_dim = read(first)
     second_header, second_payload, second_dim = read(second)
-    if first_header[11:16] != (GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX, GRID_COUNT):
-        raise ValueError(f"{first}: duplicate-read acceptance requires the complete {GRID_SIDE}x{GRID_SIDE} manifest")
+    grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if first_header[1] == 6 else (GRID_MIN, GRID_MAX)
+    required = RAW_GRID_COUNT if first_header[1] == 6 else GRID_COUNT
+    if first_header[11:16] != (grid_min, grid_max, grid_min, grid_max, required):
+        raise ValueError(f"{first}: duplicate-read acceptance requires the complete {grid_max-grid_min+1}x{grid_max-grid_min+1} manifest")
     if second_header[11:16] != first_header[11:16]:
         raise ValueError("duplicate frozen-world reads cover different bounds")
     if second_header[1] != first_header[1] or second_header[18:20] != first_header[18:20] or second_dim != first_dim:
@@ -145,27 +189,31 @@ def accept(out, first, second):
     if second_payload != first_payload:
         raise ValueError("duplicate frozen-world reads differ; baseline is not accepted")
     pathlib.Path(out).write_bytes(pathlib.Path(first).read_bytes())
-    print(f"accepted duplicate-read semantic baseline into {out}")
+    print(f"accepted duplicate-read baseline into {out}")
 
 
 def reproducible(first, second):
     """Require independent materializations to agree without sharing a root id."""
     first_header, first_payload, first_dim = read(first)
     second_header, second_payload, second_dim = read(second)
-    complete = (GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX, GRID_COUNT)
+    raw_records = first_header[1] == 6
+    record_kind = "raw packet hash payload" if raw_records else "semantic payload"
+    grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if raw_records else (GRID_MIN, GRID_MAX)
+    required = RAW_GRID_COUNT if raw_records else GRID_COUNT
+    complete = (grid_min, grid_max, grid_min, grid_max, required)
     if first_header[11:16] != complete:
-        raise ValueError(f"{first}: independent-root reproducibility requires the complete {GRID_SIDE}x{GRID_SIDE} manifest")
+        raise ValueError(f"{first}: independent-root reproducibility requires the complete {grid_max-grid_min+1}x{grid_max-grid_min+1} manifest")
     if second_header[11:16] != complete:
-        raise ValueError(f"{second}: independent-root reproducibility requires the complete {GRID_SIDE}x{GRID_SIDE} manifest")
+        raise ValueError(f"{second}: independent-root reproducibility requires the complete {grid_max-grid_min+1}x{grid_max-grid_min+1} manifest")
     if second_header[1] != first_header[1] or second_header[18] != first_header[18]:
-        raise ValueError("independent materializations have different semantic schemas")
+        raise ValueError("independent materializations have different record schemas")
     if second_dim != first_dim:
         raise ValueError("independent materializations have different dimensions")
     if second_header[11:16] != first_header[11:16]:
         raise ValueError("independent materializations cover different geometry")
     if second_payload != first_payload:
-        raise ValueError("independent materializations differ in semantic payload")
-    print(f"independent materializations reproduce semantic payload: dimension={first_dim} cx={first_header[11]}..{first_header[12]} cz={first_header[13]}..{first_header[14]}")
+        raise ValueError(f"independent materializations differ in {record_kind}")
+    print(f"independent materializations reproduce {record_kind}: dimension={first_dim} cx={first_header[11]}..{first_header[12]} cz={first_header[13]}..{first_header[14]}")
 
 
 def selftest():
@@ -272,7 +320,34 @@ def selftest():
         try: read(v5)
         except ValueError as error: assert "schema" in str(error)
         else: raise AssertionError("v5 schema/domain mismatch was accepted")
-    print("selftest ok: authenticated v3/v4/v5 merge, duplicate-read and independent-root controls, tamper/world/dimension/schema controls, v2 refusal")
+        # v6 is deliberately a different geometry and record kind. Build two
+        # half-grid raw-packet-hash shards and prove merge/accept/reproducible
+        # preserve the 16-bit records without silently widening them.
+        v6_left = directory / "raw-left.lwp"; v6_right = directory / "raw-right.lwp"; v6_full = directory / "raw-full.lwp"
+        raw_frozen = hashlib.sha256(b"raw frozen world control").digest()
+        def make_v6(path, sx0, sx1, value):
+            count = (sx1 - sx0 + 1) * RAW_GRID_SIDE
+            payload = bytes([value, value ^ 0x5A]) * count
+            path.write_bytes(make_header(6, "nether", sx0, sx1, RAW_GRID_MIN, RAW_GRID_MAX,
+                                         count, raw_frozen, hashlib.sha256(payload).digest()) + payload)
+        make_v6(v6_left, RAW_GRID_MIN, 0, 0x61); make_v6(v6_right, 1, RAW_GRID_MAX, 0xA2)
+        merge(v6_full, [v6_left, v6_right]); v6_header, v6_payload, v6_dim = read(v6_full)
+        assert v6_dim == "nether" and v6_header[1] == 6 and v6_header[16] == RAW_WIDTH
+        assert len(v6_payload) == RAW_GRID_COUNT * RAW_WIDTH
+        assert raw_packet_hash(b"packet body") == hashlib.sha256(b"packet body").digest()[:2]
+        v6_copy = directory / "raw-copy.lwp"; v6_copy.write_bytes(v6_full.read_bytes())
+        accepted_v6 = directory / "raw-accepted.lwp"; accept(accepted_v6, v6_full, v6_copy)
+        reproducible(v6_full, v6_copy)
+        changed = bytearray(v6_copy.read_bytes()); changed[HEADER + 1] ^= 1; v6_copy.write_bytes(changed)
+        try: read(v6_copy)
+        except ValueError as error: assert "checksum" in str(error)
+        else: raise AssertionError("v6 payload corruption was accepted")
+        bad_dim = directory / "raw-bad-dimension.lwp"
+        bad = bytearray(v6_full.read_bytes()); bad[168] ^= 1; bad_dim.write_bytes(bad)
+        try: read(bad_dim)
+        except ValueError as error: assert "dimension" in str(error)
+        else: raise AssertionError("v6 dimension identity corruption was accepted")
+    print("selftest ok: authenticated v3/v4/v5 compatibility plus v6 raw-packet merge, duplicate-read, reproducibility, tamper, dimension, and frozen-world controls")
 
 
 def main():

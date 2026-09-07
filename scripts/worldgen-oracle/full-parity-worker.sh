@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Generate one disjoint share of the full parity grid as compact shards.
-# Compact 16-wide shards keep each 256-record scheduler batch spatially local.
+# Compact 32-wide shards keep each scheduler batch spatially local while
+# reducing the number of JVM restarts needed for the 1001 x 1001 raw grid.
 # End exports may opt into two-row horizontal shards so each JVM handles at most
-# 1002 centres before its dirty-chunk state is discarded.
+# 2002 centres before its dirty-chunk state is discarded.
 set -euo pipefail
 
 worker="${1:?usage: full-parity-worker.sh WORKER_INDEX WORKER_COUNT}"
@@ -31,8 +32,8 @@ if [ -n "${LODESTONE_ORACLE_OUTPUT_ROOT:-}" ]; then
 fi
 
 here="$(cd "$(dirname "$0")" && pwd)"
-grid_min=-250
-grid_max=250
+grid_min=-500
+grid_max=500
 
 if [[ "$dimension" == end && "${LODESTONE_ORACLE_END_BOUNDED:-0}" == 1 ]]; then
   slot=0
@@ -53,11 +54,11 @@ if [[ "$dimension" == end && "${LODESTONE_ORACLE_END_BOUNDED:-0}" == 1 ]]; then
 fi
 
 slot=0
-for (( x_lo = grid_min; x_lo <= grid_max; x_lo += 16, slot += 1 )); do
+for (( x_lo = grid_min; x_lo <= grid_max; x_lo += 32, slot += 1 )); do
   if (( slot % workers != worker )); then
     continue
   fi
-  x_hi=$((x_lo + 15))
+  x_hi=$((x_lo + 31))
   if (( x_hi > grid_max )); then
     x_hi="$grid_max"
   fi

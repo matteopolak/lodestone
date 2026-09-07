@@ -16,9 +16,37 @@ use lodestone_worldgen_parity::lifecycle::{
     LifecycleCompletion, LifecycleMaterializer, LifecycleReplayEvent, LifecycleReplayPlan,
     LifecycleWorldgenSource,
 };
-use support::large_parity_manifest::{Dimension, HEADER_BYTES, canonical_nbt, read_header, payload_digest_from_header, semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension, semantic_record, semantic_record_for_dimension, semantic_record_v5_for_dimension, verify_payload};
+use support::large_parity_manifest::{
+    Dimension, HEADER_BYTES, PACKET_AUDIT_RECORD_BYTES, RAW_PACKET_HASH_BYTES,
+    canonical_nbt, payload_digest_from_header,
+    raw_packet_full_digest, read_header, read_packet_audit_header,
+    semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension,
+    semantic_record, semantic_record_for_dimension, semantic_record_v5_for_dimension,
+    validate_packet_audit_header, verify_payload, verify_manifest_payload,
+    verify_raw_packet_audit_pair,
+};
 
 type ChunkPos = (i32, i32);
+
+const MAX_RAW_DIAGNOSTIC_EXAMPLES: usize = 32;
+const MAX_RAW_DIAGNOSTIC_GROUPS: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawPacketMismatch {
+    target: ChunkPos,
+    index: u64,
+    expected_prefix: [u8; RAW_PACKET_HASH_BYTES],
+    actual_prefix: [u8; RAW_PACKET_HASH_BYTES],
+    expected_full: [u8; PACKET_AUDIT_RECORD_BYTES],
+    actual_full: [u8; 32],
+    payload_bytes: usize,
+}
+
+impl RawPacketMismatch {
+    fn collision(self) -> bool {
+        self.expected_prefix == self.actual_prefix && self.expected_full != self.actual_full
+    }
+}
 
 /// One coordinate admission from the independent lifecycle capture.
 #[derive(Debug, Clone, Copy)]
@@ -439,14 +467,78 @@ fn lifecycle_target_selection(
     })
 }
 
-fn read_manifest_digest_at<R: Read + Seek>(reader: &mut R, index: usize) -> std::io::Result<[u8; 32]> {
+fn read_manifest_record_at<R: Read + Seek>(reader: &mut R, index: usize, width: usize) -> std::io::Result<Vec<u8>> {
+    let width = u64::try_from(width)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest record width overflows u64"))?;
     let offset = (HEADER_BYTES as u64)
-        .checked_add(u64::try_from(index).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest digest index overflows u64"))?.checked_mul(32).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest digest offset overflows u64"))?)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest digest offset overflows u64"))?;
+        .checked_add(
+            u64::try_from(index)
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest record index overflows u64"))?
+                .checked_mul(width)
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest record offset overflows u64"))?,
+        )
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest record offset overflows u64"))?;
     reader.seek(SeekFrom::Start(offset))?;
-    let mut digest = [0u8; 32];
-    reader.read_exact(&mut digest)?;
-    Ok(digest)
+    let width = usize::try_from(width)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "manifest record width does not fit usize"))?;
+    let mut record = vec![0u8; width];
+    reader.read_exact(&mut record)?;
+    Ok(record)
+}
+
+fn read_manifest_digest_at<R: Read + Seek>(reader: &mut R, index: usize) -> std::io::Result<[u8; 32]> {
+    read_manifest_record_at(reader, index, 32)?
+        .try_into()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "manifest semantic digest has the wrong width"))
+}
+
+fn raw_packet_audit_path(manifest: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_PACKET_AUDIT") {
+        return PathBuf::from(path);
+    }
+    let mut path = manifest.as_os_str().to_os_string();
+    path.push(".packet-audit");
+    PathBuf::from(path)
+}
+
+fn load_raw_packet_audit(
+    manifest: &Path,
+    main_header: &support::large_parity_manifest::Header,
+) -> (PathBuf, support::large_parity_manifest::PacketAuditHeader) {
+    let path = raw_packet_audit_path(manifest);
+    let mut file = File::open(&path)
+        .unwrap_or_else(|error| panic!("open v6 packet-audit sidecar {}: {error}", path.display()));
+    let mut raw = [0u8; HEADER_BYTES];
+    file.read_exact(&mut raw)
+        .unwrap_or_else(|error| panic!("read v6 packet-audit sidecar {} header: {error}", path.display()));
+    let header = read_packet_audit_header(&raw[..]).unwrap_or_else(|error| {
+        panic!("invalid v6 packet-audit sidecar {}: {error}", path.display())
+    });
+    validate_packet_audit_header(main_header, &header).unwrap_or_else(|error| {
+        panic!("v6 packet-audit sidecar {} does not match manifest: {error}", path.display())
+    });
+    (path, header)
+}
+
+fn verify_raw_packet_audit_files(
+    manifest: &Path,
+    raw_header: &[u8; HEADER_BYTES],
+    main_header: &support::large_parity_manifest::Header,
+    audit_path: &Path,
+    audit_header: &support::large_parity_manifest::PacketAuditHeader,
+) {
+    let mut main = File::open(manifest).unwrap_or_else(|error| panic!("reopen v6 manifest {}: {error}", manifest.display()));
+    main.seek(SeekFrom::Start(HEADER_BYTES as u64)).unwrap_or_else(|error| panic!("seek v6 manifest payload: {error}"));
+    let mut audit = File::open(audit_path).unwrap_or_else(|error| panic!("reopen packet-audit sidecar {}: {error}", audit_path.display()));
+    audit.seek(SeekFrom::Start(HEADER_BYTES as u64)).unwrap_or_else(|error| panic!("seek packet-audit payload: {error}"));
+    verify_raw_packet_audit_pair(
+        BufReader::new(main),
+        BufReader::new(audit),
+        main_header.count,
+        payload_digest_from_header(raw_header),
+        audit_header.payload_digest,
+    )
+    .unwrap_or_else(|error| panic!("v6 manifest/packet-audit payload authentication failed: {error}"));
 }
 
 fn optional_usize_env(name: &str) -> Result<Option<usize>, String> {
@@ -509,6 +601,14 @@ fn parity_batch_limit(
     })
 }
 
+fn is_partial_lifecycle_manifest(header: &support::large_parity_manifest::Header) -> bool {
+    header.semantic_version != 6
+        && header.dimension != Dimension::End
+        && header.count == 256
+        && i64::from(header.cx1) - i64::from(header.cx0) == 15
+        && i64::from(header.cz1) - i64::from(header.cz0) == 15
+}
+
 #[test]
 fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
     assert_eq!(
@@ -526,6 +626,56 @@ fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
         lifecycle_target_selection(256, Some(2), None, false),
         Ok(LifecycleTargetSelection::Prefix { limit: 2 }),
     );
+}
+
+#[test]
+fn manifest_record_reader_seeks_using_the_authenticated_record_width() {
+    let mut bytes = vec![0u8; HEADER_BYTES];
+    bytes.extend([0x10, 0x11, 0x20, 0x21, 0x30, 0x31]);
+    let mut reader = std::io::Cursor::new(bytes);
+    assert_eq!(read_manifest_record_at(&mut reader, 1, RAW_PACKET_HASH_BYTES).unwrap(), vec![0x20, 0x21]);
+    assert_eq!(reader.position(), HEADER_BYTES as u64 + 2 * RAW_PACKET_HASH_BYTES as u64);
+}
+
+#[test]
+fn raw_v6_16x16_shards_never_enter_lifecycle_replay() {
+    let header = support::large_parity_manifest::Header {
+        semantic_version: 6,
+        cx0: 0,
+        cx1: 15,
+        cz0: 0,
+        cz1: 15,
+        count: 256,
+        frozen_world: [1; 32],
+        dimension: Dimension::Overworld,
+        record_width: RAW_PACKET_HASH_BYTES as u16,
+        kind: 2,
+    };
+    assert!(!is_partial_lifecycle_manifest(&header));
+}
+
+#[test]
+fn raw_packet_mismatch_marks_same_prefix_different_full_digest_as_collision() {
+    let expected_full = [0x11; PACKET_AUDIT_RECORD_BYTES];
+    let mut actual_full = expected_full;
+    actual_full[PACKET_AUDIT_RECORD_BYTES - 1] ^= 1;
+    let collision = RawPacketMismatch {
+        target: (3, 4),
+        index: 17,
+        expected_prefix: [0x11, 0x22],
+        actual_prefix: [0x11, 0x22],
+        expected_full,
+        actual_full,
+        payload_bytes: 123,
+    };
+    assert!(collision.collision());
+    let prefix_mismatch = RawPacketMismatch {
+        actual_prefix: [0x11, 0x23],
+        ..collision
+    };
+    assert!(!prefix_mismatch.collision());
+    let summary = format_diagnostic_summary(true, 1, 1, &[], &[collision], &[]);
+    assert!(summary.contains("raw-packet mismatches=1 collisions=1"));
 }
 
 #[test]
@@ -777,6 +927,56 @@ fn java_and_rust_canonical_records_agree() {
     assert_eq!(rust_digest, java_digest, "Rust digest must authenticate the same canonical bytes");
 }
 
+/// Cross-language control for P06: the Rust comparator hashes the exact packet
+/// body emitted by the independent exporter, then checks both the two-byte
+/// manifest record and its full-digest audit sidecar.
+#[test]
+#[ignore = "requires a one-chunk Java v6 raw export; see docs/worldgen-large-parity.md"]
+fn java_and_rust_raw_packet_digests_agree() {
+    let packet_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_PACKET")
+        .expect("set LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_PACKET to Java's one-chunk packet body");
+    let manifest_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_MANIFEST")
+        .expect("set LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_MANIFEST to Java's one-chunk v6 manifest");
+    let audit_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_PACKET_AUDIT")
+        .unwrap_or_else(|_| format!("{manifest_path}.packet-audit"));
+    let manifest_bytes = std::fs::read(&manifest_path).expect("read Java v6 manifest");
+    assert!(manifest_bytes.len() >= HEADER_BYTES + RAW_PACKET_HASH_BYTES);
+    let mut raw_header = [0u8; HEADER_BYTES];
+    raw_header.copy_from_slice(&manifest_bytes[..HEADER_BYTES]);
+    let header = read_header(&raw_header[..]).expect("validate Java v6 manifest header");
+    assert_eq!(header.semantic_version, 6, "raw packet control requires P06");
+    assert_eq!(header.count, 1, "raw packet control must use exactly one chunk");
+    let expected_prefix: [u8; RAW_PACKET_HASH_BYTES] = manifest_bytes
+        [HEADER_BYTES..HEADER_BYTES + RAW_PACKET_HASH_BYTES]
+        .try_into()
+        .expect("v6 manifest prefix width");
+
+    let audit_bytes = std::fs::read(&audit_path).expect("read Java v6 packet-audit sidecar");
+    assert!(audit_bytes.len() >= HEADER_BYTES + PACKET_AUDIT_RECORD_BYTES);
+    let mut audit_raw_header = [0u8; HEADER_BYTES];
+    audit_raw_header.copy_from_slice(&audit_bytes[..HEADER_BYTES]);
+    let audit = read_packet_audit_header(&audit_raw_header[..])
+        .expect("validate Java v6 packet-audit header");
+    validate_packet_audit_header(&header, &audit).expect("sidecar identity must match manifest");
+    let expected_full: [u8; PACKET_AUDIT_RECORD_BYTES] = audit_bytes
+        [HEADER_BYTES..HEADER_BYTES + PACKET_AUDIT_RECORD_BYTES]
+        .try_into()
+        .expect("packet-audit digest width");
+    verify_raw_packet_audit_pair(
+        std::io::Cursor::new(expected_prefix),
+        std::io::Cursor::new(expected_full),
+        1,
+        payload_digest_from_header(&raw_header),
+        audit.payload_digest,
+    )
+    .expect("Java manifest and packet-audit records must authenticate together");
+
+    let packet = std::fs::read(packet_path).expect("read Java packet body");
+    let actual_full = raw_packet_full_digest(&packet);
+    assert_eq!(actual_full, expected_full, "Rust SHA-256 of Java's exact body must match audit digest");
+    assert_eq!([actual_full[0], actual_full[1]], expected_prefix, "Rust raw prefix must match Java manifest");
+}
+
 /// Reads any authenticated frozen-world shard strictly sequentially and uses
 /// only one full semantic digest at a time.
 #[test]
@@ -785,20 +985,58 @@ fn parity_manifest_streams_before_rust_comparison() {
     let path = std::env::var("LODESTONE_LARGE_PARITY_MANIFEST").expect("set LODESTONE_LARGE_PARITY_MANIFEST=/absolute/path/to/merged.lwp");
     let mut raw_header = [0; HEADER_BYTES]; let mut f = File::open(&path).expect("open manifest"); f.read_exact(&mut raw_header).expect("read header");
     let h = read_header(&raw_header[..]).expect("valid parity shard header");
+    let raw_packet = h.semantic_version == 6;
     if std::env::var_os("LODESTONE_LARGE_PARITY_REQUIRE_FULL_GRID").is_some() {
+        let (grid_min, grid_max, grid_count) = if raw_packet {
+            (
+                support::large_parity_manifest::RAW_GRID_MIN,
+                support::large_parity_manifest::RAW_GRID_MAX,
+                support::large_parity_manifest::RAW_GRID_COUNT,
+            )
+        } else {
+            (
+                support::large_parity_manifest::GRID_MIN,
+                support::large_parity_manifest::GRID_MAX,
+                support::large_parity_manifest::GRID_COUNT,
+            )
+        };
         assert_eq!((h.cx0,h.cx1,h.cz0,h.cz1,h.count), (
-            support::large_parity_manifest::GRID_MIN,
-            support::large_parity_manifest::GRID_MAX,
-            support::large_parity_manifest::GRID_MIN,
-            support::large_parity_manifest::GRID_MAX,
-            support::large_parity_manifest::GRID_COUNT,
+            grid_min, grid_max, grid_min, grid_max, grid_count,
         ));
     }
-    let mut payload_file = File::open(&path).expect("reopen manifest"); payload_file.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek payload");
-    verify_payload(BufReader::new(payload_file), h.count, payload_digest_from_header(&raw_header)).expect("payload integrity");
+    let audit = if raw_packet {
+        Some(load_raw_packet_audit(Path::new(&path), &h))
+    } else {
+        None
+    };
+    if let Some((audit_path, audit_header)) = &audit {
+        verify_raw_packet_audit_files(
+            Path::new(&path),
+            &raw_header,
+            &h,
+            audit_path,
+            audit_header,
+        );
+    } else {
+        let mut payload_file = File::open(&path).expect("reopen manifest");
+        payload_file.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek payload");
+        verify_manifest_payload(
+            BufReader::new(payload_file),
+            &h,
+            payload_digest_from_header(&raw_header),
+        )
+        .expect("payload integrity");
+    }
     let mut payload_file = File::open(&path).expect("reopen manifest payload");
     payload_file.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek payload");
     let mut expected = BufReader::new(payload_file);
+    let mut expected_audit = audit.as_ref().map(|(audit_path, _)| {
+        let mut file = File::open(audit_path)
+            .unwrap_or_else(|error| panic!("reopen packet-audit sidecar {}: {error}", audit_path.display()));
+        file.seek(SeekFrom::Start(HEADER_BYTES as u64))
+            .unwrap_or_else(|error| panic!("seek packet-audit payload {}: {error}", audit_path.display()));
+        BufReader::new(file)
+    });
     let dimension = h.dimension;
     let server_dimension = match dimension {
         Dimension::Overworld => ServerDimension::Overworld,
@@ -815,13 +1053,17 @@ fn parity_manifest_streams_before_rust_comparison() {
     let scan_all = std::env::var_os("LODESTONE_LARGE_PARITY_SCAN_ALL").is_some();
     let target_index = optional_usize_env("LODESTONE_LARGE_PARITY_TARGET_INDEX")
         .unwrap_or_else(|error| panic!("invalid lifecycle target selection: {error}"));
+    if raw_packet && target_index.is_some() {
+        panic!("LODESTONE_LARGE_PARITY_TARGET_INDEX is only supported for semantic lifecycle manifests");
+    }
     let batch_size = optional_u64_env("LODESTONE_LARGE_PARITY_BATCH_SIZE")
         .unwrap_or_else(|error| panic!("invalid parity batch selection: {error}"));
     let limit = parity_batch_limit(h.count, max_chunks, batch_size, target_index, scan_all)
         .unwrap_or_else(|error| panic!("invalid parity batch selection: {error}"));
     if batch_size.is_some() {
         eprintln!(
-            "large semantic parity: authenticated scan-all batch selected ({limit} targets)"
+            "large {} parity: authenticated scan-all batch selected ({limit} targets)",
+            if raw_packet { "raw-packet" } else { "semantic" },
         );
     }
     let reference_packets = if scan_all {
@@ -830,11 +1072,9 @@ fn parity_manifest_streams_before_rust_comparison() {
         BTreeMap::new()
     };
     let mut digest_mismatches = Vec::new();
+    let mut raw_mismatches = Vec::new();
     let mut component_reports = Vec::new();
-    let partial_lifecycle = dimension != Dimension::End
-        && h.count == 256
-        && h.cx1 - h.cx0 == 15
-        && h.cz1 - h.cz0 == 15;
+    let partial_lifecycle = is_partial_lifecycle_manifest(&h);
     if target_index.is_some() {
         assert!(
             partial_lifecycle,
@@ -884,10 +1124,24 @@ fn parity_manifest_streams_before_rust_comparison() {
             Dimension::End => Box::new(retained_chunk_source_for_view_radius(end_chunk_source(42), 8)),
         };
         let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
-        let width = (h.cx1 - h.cx0 + 1) as u64;
+        let width = u64::try_from(i64::from(h.cx1) - i64::from(h.cx0) + 1)
+            .expect("authenticated manifest coordinate width fits u64");
         let mut expected_digest = [0u8; 32];
         for index in 0..limit {
-            expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
+            let (expected_prefix, expected_full) = if raw_packet {
+                let mut prefix = [0u8; RAW_PACKET_HASH_BYTES];
+                expected.read_exact(&mut prefix).expect("manifest raw packet hash prefix");
+                let mut full = [0u8; PACKET_AUDIT_RECORD_BYTES];
+                expected_audit
+                    .as_mut()
+                    .expect("v6 raw-packet comparison has an audit reader")
+                    .read_exact(&mut full)
+                    .expect("packet-audit full packet digest");
+                (Some(prefix), Some(full))
+            } else {
+                expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
+                (None, None)
+            };
             let cx = h.cx0 + (index % width) as i32;
             let cz = h.cz0 + (index / width) as i32;
             let column = column_for(cx, cz);
@@ -920,23 +1174,56 @@ fn parity_manifest_streams_before_rust_comparison() {
                     std::fs::write(&path, &payload).expect("write requested Lodestone packet capture");
                 }
             }
-            let decoded = packet_decode_for_dimension(&payload, dimension);
-            let full = match h.semantic_version {
-                3 => semantic_digest(&decoded),
-                4 => semantic_digest_for_dimension(&decoded, dimension),
-                5 => semantic_digest_v5_for_dimension(&decoded, dimension),
-                version => panic!("unsupported parity semantic version {version}"),
-            };
-            if full != expected_digest {
-                if !scan_all {
-                    let packet_summary = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET")
-                        .map(|path| packet_difference_summary(&std::fs::read(path).expect("read authoritative packet capture"), &payload, dimension));
-                    panic!(
-                        "large semantic parity mismatch at ({cx},{cz}) after {index} matching chunks: reference SHA-256 {}, Lodestone SHA-256 {}{}",
-                        hex(&expected_digest), hex(&full), packet_summary.as_deref().unwrap_or(""),
-                    );
+            if raw_packet {
+                let expected_prefix = expected_prefix.expect("raw prefix selected");
+                let expected_full = expected_full.expect("raw full digest selected");
+                let actual_full = raw_packet_full_digest(&payload);
+                let actual_prefix = [actual_full[0], actual_full[1]];
+                if actual_prefix != expected_prefix || actual_full != expected_full {
+                    let mismatch = RawPacketMismatch {
+                        target: (cx, cz),
+                        index,
+                        expected_prefix,
+                        actual_prefix,
+                        expected_full,
+                        actual_full,
+                        payload_bytes: payload.len(),
+                    };
+                    if !scan_all {
+                        let packet_summary = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET")
+                            .map(|path| packet_difference_summary(&std::fs::read(path).expect("read authoritative packet capture"), &payload, dimension));
+                        panic!(
+                            "large raw-packet parity mismatch at ({cx},{cz}) after {index} matching chunks: expected prefix {}, actual prefix {}, expected full SHA-256 {}, actual full SHA-256 {}, collision={}, payload bytes={}{}",
+                            hex(&mismatch.expected_prefix),
+                            hex(&mismatch.actual_prefix),
+                            hex(&mismatch.expected_full),
+                            hex(&mismatch.actual_full),
+                            mismatch.collision(),
+                            mismatch.payload_bytes,
+                            packet_summary.as_deref().unwrap_or(""),
+                        );
+                    }
+                    raw_mismatches.push(mismatch);
                 }
-                digest_mismatches.push((cx, cz, expected_digest, full));
+            } else {
+                let decoded = packet_decode_for_dimension(&payload, dimension);
+                let full = match h.semantic_version {
+                    3 => semantic_digest(&decoded),
+                    4 => semantic_digest_for_dimension(&decoded, dimension),
+                    5 => semantic_digest_v5_for_dimension(&decoded, dimension),
+                    version => panic!("unsupported parity semantic version {version}"),
+                };
+                if full != expected_digest {
+                    if !scan_all {
+                        let packet_summary = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET")
+                            .map(|path| packet_difference_summary(&std::fs::read(path).expect("read authoritative packet capture"), &payload, dimension));
+                        panic!(
+                            "large semantic parity mismatch at ({cx},{cz}) after {index} matching chunks: reference SHA-256 {}, Lodestone SHA-256 {}{}",
+                            hex(&expected_digest), hex(&full), packet_summary.as_deref().unwrap_or(""),
+                        );
+                    }
+                    digest_mismatches.push((cx, cz, expected_digest, full));
+                }
             }
             if let Some(reference_path) = reference_packets.get(&(cx, cz)) {
                 let reference_packet = std::fs::read(reference_path)
@@ -945,23 +1232,49 @@ fn parity_manifest_streams_before_rust_comparison() {
                 component_reports.push(((cx, cz), report));
             }
             if (index + 1) % 256 == 0 || index + 1 == limit {
-                eprintln!("large semantic parity: compared {}/{} chunks (batch boundary at ({cx},{cz}))", index + 1, limit);
+                eprintln!(
+                    "large {} parity: compared {}/{} chunks (batch boundary at ({cx},{cz}))",
+                    if raw_packet { "raw-packet" } else { "semantic" },
+                    index + 1,
+                    limit,
+                );
             }
         }
     }
     if limit < h.count {
-        eprintln!("large semantic parity: bounded pilot completed successfully at {} chunks; full grid remains pending", limit);
+        eprintln!(
+            "large {} parity: bounded pilot completed successfully at {} chunks; full grid remains pending",
+            if raw_packet { "raw-packet" } else { "semantic" },
+            limit,
+        );
     }
-    let diagnostic = format_diagnostic_report(limit, h.count, &digest_mismatches, &component_reports);
+    let diagnostic = format_diagnostic_report(
+        raw_packet,
+        limit,
+        h.count,
+        &digest_mismatches,
+        &raw_mismatches,
+        &component_reports,
+    );
     let has_component_mismatches = component_reports.iter().any(|(_, report)| report.has_mismatch());
     let has_failing_component_mismatches = component_reports.iter().any(|(_, report)| report.has_failing_mismatch());
-    if !digest_mismatches.is_empty() || has_component_mismatches {
+    if !digest_mismatches.is_empty() || !raw_mismatches.is_empty() || has_component_mismatches {
         if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_DIAGNOSTIC_OUT") {
             std::fs::write(path, &diagnostic).expect("write parity diagnostic report");
         }
     }
-    if !digest_mismatches.is_empty() || has_failing_component_mismatches {
-        panic!("{}", format_diagnostic_summary(limit, h.count, &digest_mismatches, &component_reports));
+    if !digest_mismatches.is_empty() || !raw_mismatches.is_empty() || has_failing_component_mismatches {
+        panic!(
+            "{}",
+            format_diagnostic_summary(
+                raw_packet,
+                limit,
+                h.count,
+                &digest_mismatches,
+                &raw_mismatches,
+                &component_reports,
+            )
+        );
     }
 }
 
@@ -1737,8 +2050,47 @@ fn component_signature_groups(
     groups
 }
 
-fn format_diagnostic_report(limit: u64, total: u64, digest: &[(i32, i32, [u8; 32], [u8; 32])], components: &[((i32, i32), PacketComponentReport)]) -> String {
-    let mut output = format!("large semantic parity diagnostic: compared {limit}/{total} chunks; digest mismatches={} coordinates={:?}\n", digest.len(), digest.iter().map(|(x, z, _, _)| (*x, *z)).collect::<Vec<_>>());
+fn raw_packet_diagnostic_groups(
+    mismatches: &[RawPacketMismatch],
+) -> BTreeMap<(String, String, String, String, bool), (usize, Vec<ChunkPos>)> {
+    let mut groups = BTreeMap::new();
+    for mismatch in mismatches {
+        let key = (
+            hex(&mismatch.expected_prefix),
+            hex(&mismatch.actual_prefix),
+            hex(&mismatch.expected_full),
+            hex(&mismatch.actual_full),
+            mismatch.collision(),
+        );
+        if !groups.contains_key(&key) && groups.len() >= MAX_RAW_DIAGNOSTIC_GROUPS {
+            continue;
+        }
+        let entry = groups.entry(key).or_insert_with(|| (0, Vec::new()));
+        entry.0 += 1;
+        if entry.1.len() < MAX_RAW_DIAGNOSTIC_EXAMPLES {
+            entry.1.push(mismatch.target);
+        }
+    }
+    groups
+}
+
+fn format_diagnostic_report(
+    raw_packet: bool,
+    limit: u64,
+    total: u64,
+    digest: &[(i32, i32, [u8; 32], [u8; 32])],
+    raw: &[RawPacketMismatch],
+    components: &[((i32, i32), PacketComponentReport)],
+) -> String {
+    let label = if raw_packet { "raw-packet" } else { "semantic" };
+    let raw_collisions = raw.iter().filter(|mismatch| mismatch.collision()).count();
+    let mut output = format!(
+        "large {label} parity diagnostic: compared {limit}/{total} chunks; digest mismatches={}; raw-packet mismatches={} collisions={} coordinates={:?}\n",
+        digest.len(),
+        raw.len(),
+        raw_collisions,
+        raw.iter().take(MAX_RAW_DIAGNOSTIC_EXAMPLES).map(|mismatch| (mismatch.index, mismatch.target)).collect::<Vec<_>>(),
+    );
     let mut digest_groups = BTreeMap::<(String, String), BTreeSet<ChunkPos>>::new();
     for &(x, z, expected, actual) in digest {
         digest_groups
@@ -1751,7 +2103,12 @@ fn format_diagnostic_report(limit: u64, total: u64, digest: &[(i32, i32, [u8; 32
             "digest group expected={expected} actual={actual} chunks={coordinates:?}\n"
         ));
     }
-    if !digest.is_empty() && components.is_empty() {
+    for ((expected_prefix, actual_prefix, expected_full, actual_full, collision), (count, coordinates)) in raw_packet_diagnostic_groups(raw) {
+        output.push_str(&format!(
+            "raw packet group expected_prefix={expected_prefix} actual_prefix={actual_prefix} expected_full={expected_full} actual_full={actual_full} collision={collision} mismatches={count} example_coordinates={coordinates:?}\n"
+        ));
+    }
+    if (!digest.is_empty() || !raw.is_empty()) && components.is_empty() {
         output.push_str("component reports unavailable: set LODESTONE_LARGE_PARITY_REFERENCE_PACKET to an authoritative raw packet (or LODESTONE_LARGE_PARITY_REFERENCE_PACKET_DIR to reference*.packet files)\n");
     }
     for ((x, z), report) in components {
@@ -1768,9 +2125,25 @@ fn format_diagnostic_report(limit: u64, total: u64, digest: &[(i32, i32, [u8; 32
     output
 }
 
-fn format_diagnostic_summary(limit: u64, total: u64, digest: &[(i32, i32, [u8; 32], [u8; 32])], components: &[((i32, i32), PacketComponentReport)]) -> String {
-    let mut output = format!("large semantic parity diagnostic: compared {limit}/{total} chunks; digest mismatches={} coordinates={:?}", digest.len(), digest.iter().map(|(x, z, _, _)| (*x, *z)).collect::<Vec<_>>());
-    if !digest.is_empty() && components.is_empty() {
+fn format_diagnostic_summary(
+    raw_packet: bool,
+    limit: u64,
+    total: u64,
+    digest: &[(i32, i32, [u8; 32], [u8; 32])],
+    raw: &[RawPacketMismatch],
+    components: &[((i32, i32), PacketComponentReport)],
+) -> String {
+    let label = if raw_packet { "raw-packet" } else { "semantic" };
+    let raw_collisions = raw.iter().filter(|mismatch| mismatch.collision()).count();
+    let mut output = format!(
+        "large {label} parity diagnostic: compared {limit}/{total} chunks; digest mismatches={} coordinates={:?}; raw-packet mismatches={} collisions={} coordinates={:?}",
+        digest.len(),
+        digest.iter().map(|(x, z, _, _)| (*x, *z)).collect::<Vec<_>>(),
+        raw.len(),
+        raw_collisions,
+        raw.iter().take(MAX_RAW_DIAGNOSTIC_EXAMPLES).map(|mismatch| (mismatch.index, mismatch.target)).collect::<Vec<_>>(),
+    );
+    if (!digest.is_empty() || !raw.is_empty()) && components.is_empty() {
         output.push_str("; component reports unavailable: set LODESTONE_LARGE_PARITY_REFERENCE_PACKET to an authoritative raw packet (or LODESTONE_LARGE_PARITY_REFERENCE_PACKET_DIR to reference*.packet files)");
     }
     for ((x, z), report) in components {

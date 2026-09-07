@@ -2,9 +2,9 @@
 # Export and validate one authenticated multi-thousand-chunk parity shard.
 #
 # This is deliberately a thin orchestration layer around large-parity.sh.  It
-# does not create a baseline or reinterpret legacy fingerprints: the Java
-# exporter reads the sealed frozen world and the manifest validator authenticates
-# the v4/v5 semantic payload before the shard is handed to the Rust comparator.
+# does not create a baseline or reinterpret legacy fingerprints: the exporter
+# reads the sealed frozen world and the manifest validator authenticates the
+# selected payload before the shard is handed to the Rust comparator.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -24,17 +24,17 @@ Options:
   --out <relative-path>              output below LODESTONE_ORACLE_OUTPUT_ROOT
 
 With no coordinate options this exports 50 x 40 = 2,000 chunks at
-cx=-250..-201, cz=-250..-211.  The range must stay inside the authenticated
-501 x 501 target grid and contain at least 2,000 chunks.
+cx=-500..-451, cz=-500..-461.  The range must stay inside the authenticated
+1001 x 1001 target grid and contain at least 2,000 chunks.
 EOF
   exit "${1:-2}"
 }
 
 dimension="${LODESTONE_ORACLE_DIMENSION:-overworld}"
-cx0=-250
-cx1=-201
-cz0=-250
-cz1=-211
+cx0=-500
+cx1=-451
+cz0=-500
+cz1=-461
 out="batch-${dimension}-2000.lwp"
 cx_set=0
 cz_set=0
@@ -97,8 +97,8 @@ for coordinate in "$cx0" "$cx1" "$cz0" "$cz1"; do
     exit 2
   fi
 done
-if ((cx0 < -250 || cx1 > 250 || cz0 < -250 || cz1 > 250 || cx0 > cx1 || cz0 > cz1)); then
-  echo "coordinate bounds must lie within -250..250 and be ordered" >&2
+if ((cx0 < -500 || cx1 > 500 || cz0 < -500 || cz1 > 500 || cx0 > cx1 || cz0 > cz1)); then
+  echo "coordinate bounds must lie within -500..500 and be ordered" >&2
   exit 2
 fi
 
