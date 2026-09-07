@@ -129,7 +129,9 @@ use crate::feature::PlacedOre;
 use crate::interner::{StateId, StateInterner};
 use crate::overworld::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
 use crate::structure::beardifier::Beardifier;
-use crate::structure::{HeightmapKind, PieceRefinement, StartContext, StructureRegistry, StructureStart};
+use crate::structure::{
+    CodedLoot, HeightmapKind, PieceRefinement, StartContext, StructureRegistry, StructureStart,
+};
 use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
 
 /// One generated Nether chunk: the block column plus its 16 horizontal biome
@@ -149,12 +151,14 @@ pub struct NetherColumn {
     /// Biome id per horizontal quart, row-major `qz * 4 + qx` — the whole answer
     /// for this dimension, see the module doc's 2-D section.
     biome_quarts: [String; 16],
+    placement_loot: Vec<CodedLoot>,
 }
 
 type PreDecorationResult = (
     Arc<crate::dense_grid::DenseBlockGrid>,
     [i32; 256],
     [String; 16],
+    Vec<CodedLoot>,
 );
 
 type DecorationFeatures = Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>;
@@ -204,6 +208,13 @@ impl NetherColumn {
     #[must_use]
     pub fn biome_at_quart(&self, qx: usize, qz: usize) -> &str {
         &self.biome_quarts[qz * 4 + qx]
+    }
+
+    /// Coded containers created by the receiving chunk's structure-placement
+    /// pass, after neighbor-facing resolution and placement-stream seeding.
+    #[must_use]
+    pub fn placement_loot(&self) -> &[CodedLoot] {
+        &self.placement_loot
     }
 
     /// The biome covering local column `(lx, lz)`.
@@ -620,6 +631,7 @@ impl NetherGenerator {
             palette,
             blocks,
             biome_quarts: pre.2.clone(),
+            placement_loot: pre.3.clone(),
         }
     }
 
@@ -813,10 +825,12 @@ impl NetherGenerator {
         let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         let world = self.carve_stage(cx, cz, &aquifer, world);
+        let (world, placement_loot) = self.structure_place_stage(cx, cz, &refs, world);
         let computed = Arc::new((
-            Arc::new(self.structure_place_stage(cx, cz, &refs, world)),
+            Arc::new(world),
             heights,
             biome_quarts,
+            placement_loot,
         ));
         let mut memo = self
             .pre_decoration
@@ -1251,9 +1265,9 @@ impl NetherGenerator {
         cz: i32,
         refs: &StructureRefs,
         mut world: crate::dense_grid::DenseBlockGrid,
-    ) -> crate::dense_grid::DenseBlockGrid {
+    ) -> (crate::dense_grid::DenseBlockGrid, Vec<CodedLoot>) {
         let Some(registry) = &self.structures else {
-            return world;
+            return (world, Vec::new());
         };
         let seed = registry.seed();
         let (bx, bz) = (cx * 16, cz * 16);
@@ -1261,14 +1275,40 @@ impl NetherGenerator {
             String,
             crate::rng::WorldgenRandom<crate::rng::LegacyRandomSource>,
         > = HashMap::new();
+        let mut structure_randoms: HashMap<
+            String,
+            crate::rng::WorldgenRandom<crate::rng::XoroshiroRandomSource>,
+        > = HashMap::new();
+        let mut placement_loot = Vec::new();
         for (_, _, start) in &refs.entries {
             if !start.pieces_complete {
                 continue;
             }
-            if start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15)
-                && registry.place_fortress_for_chunk(start, cx, cz, &mut world)
-            {
-                continue;
+            if start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) {
+                if let Some((step, index)) = registry.runtime_decoration_key(&start.structure) {
+                    let structure_random = structure_randoms.entry(start.structure.clone()).or_insert_with(|| {
+                        let mut random = crate::rng::WorldgenRandom::new(
+                            crate::rng::XoroshiroRandomSource::new(0),
+                        );
+                        let decoration_seed = random.set_decoration_seed(seed, bx, bz);
+                        random.set_feature_seed(decoration_seed, index as i32, step);
+                        random
+                    });
+                    let solid_render = |state: &str| {
+                        self.veg_tags.simple_block_support.solid_render.test(state)
+                    };
+                    if let Some(mut loot) = registry.place_fortress_for_chunk_with(
+                        start,
+                        cx,
+                        cz,
+                        &mut world,
+                        structure_random,
+                        &solid_render,
+                    ) {
+                        placement_loot.append(&mut loot);
+                        continue;
+                    }
+                }
             }
             // One `referencePos` per start, from its **first** piece's box, before
             // the per-piece loop — vanilla's own structure-start place-in-chunk step's own derivation. It
@@ -1352,7 +1392,7 @@ impl NetherGenerator {
                 }
             }
         }
-        world
+        (world, placement_loot)
     }
 
     /// Every start whose origin is `(cx, cz)` and whose piece list is complete —

@@ -841,7 +841,7 @@ fn emit_end_cap(blocks: &mut Vec<CodedBlock>, piece: &Node) {
 
 /// Replays each piece's local block-writing sequence. Supports remain in the
 /// placement pass because only that pass can see the receiving chunk's terrain.
-fn emit_blocks<R: RandomSource>(piece: &Node, random: &mut R) -> (Vec<CodedBlock>, Vec<CodedLoot>) {
+fn emit_blocks(piece: &Node) -> Vec<CodedBlock> {
     let mut blocks = Vec::new();
     match piece.kind {
         Kind::LongBridge => emit_long_bridge(&mut blocks, piece),
@@ -856,7 +856,6 @@ fn emit_blocks<R: RandomSource>(piece: &Node, random: &mut R) -> (Vec<CodedBlock
         Kind::Garden => emit_garden(&mut blocks, piece),
         Kind::EndCap => emit_end_cap(&mut blocks, piece),
     }
-    let mut loot = Vec::new();
     if piece.chest {
         let x = if matches!(piece.kind, Kind::RightElbow) { 1 } else { 3 };
         let pos = local_pos(piece, x, 2, 3);
@@ -867,14 +866,68 @@ fn emit_blocks<R: RandomSource>(piece: &Node, random: &mut R) -> (Vec<CodedBlock
             pos,
             state: "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
         });
-        loot.push(CodedLoot { pos, table: "minecraft:chests/nether_bridge".to_string(), seed: random.next_long() });
     }
-    (blocks, loot)
+    blocks
 }
 
-fn finish<R: RandomSource>(tree: Tree, random: &mut R) -> Vec<StructurePiece> {
+fn chest_position(piece: &Node) -> Option<[i32; 3]> {
+    piece.chest.then(|| {
+        let x = if matches!(piece.kind, Kind::RightElbow) { 1 } else { 3 };
+        local_pos(piece, x, 2, 3)
+    })
+}
+
+fn base_name(state: &str) -> &str {
+    state.split_once('[').map_or(state, |(base, _)| base)
+}
+
+fn chest_state(
+    world: &DenseBlockGrid,
+    pos: [i32; 3],
+    solid_render: &dyn Fn(&str) -> bool,
+) -> String {
+    const DIRECTIONS: [(&str, i32, i32, &str); 4] = [
+        ("north", 0, -1, "south"),
+        ("east", 1, 0, "west"),
+        ("south", 0, 1, "north"),
+        ("west", -1, 0, "east"),
+    ];
+    let mut single_solid = None;
+    for (direction, dx, dz, opposite) in DIRECTIONS {
+        let neighbor = world.get(pos[0] + dx, pos[1], pos[2] + dz);
+        if base_name(neighbor) == "minecraft:chest" {
+            return "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string();
+        }
+        if solid_render(neighbor) {
+            if single_solid.is_some() {
+                single_solid = None;
+                break;
+            }
+            single_solid = Some(opposite);
+        }
+        let _ = direction;
+    }
+    if let Some(facing) = single_solid {
+        return format!("minecraft:chest[facing={facing},type=single,waterlogged=false]");
+    }
+
+    let mut facing = 0usize;
+    for turn in [2usize, 1, 2] {
+        let (_, dx, dz, _) = DIRECTIONS[facing];
+        if !solid_render(world.get(pos[0] + dx, pos[1], pos[2] + dz)) {
+            break;
+        }
+        facing = (facing + turn) % DIRECTIONS.len();
+    }
+    format!(
+        "minecraft:chest[facing={},type=single,waterlogged=false]",
+        DIRECTIONS[facing].0,
+    )
+}
+
+fn finish(tree: Tree) -> Vec<StructurePiece> {
     tree.pieces.into_iter().map(|piece| {
-        let (blocks, loot) = emit_blocks(&piece, random);
+        let blocks = emit_blocks(&piece);
         StructurePiece {
         id: piece.kind.id().to_string(),
         bounding_box: piece.box_,
@@ -884,7 +937,7 @@ fn finish<R: RandomSource>(tree: Tree, random: &mut R) -> Vec<StructurePiece> {
         placement: None,
         extra_placements: Vec::new(),
         blocks: Some(Arc::new(blocks)),
-        loot,
+        loot: Vec::new(),
         beard: None,
         refine: None,
     }}).collect()
@@ -916,32 +969,52 @@ fn build_tree<R: RandomSource>(cx: i32, cz: i32, random: &mut R) -> (Tree, [i32;
 #[must_use]
 pub fn generate<R: RandomSource>(cx: i32, cz: i32, random: &mut R) -> (Vec<StructurePiece>, [i32; 3]) {
     let (tree, origin) = build_tree(cx, cz, random);
-    (finish(tree, random), origin)
+    (finish(tree), origin)
 }
 
 /// Places one fortress start into its current receiving chunk, including
 /// supports that need the post-carve grid to locate their solid boundary.
-pub fn place_for_chunk<R: RandomSource>(
+pub fn place_for_chunk<R: RandomSource, P: RandomSource>(
     start_cx: i32,
     start_cz: i32,
     placing_cx: i32,
     placing_cz: i32,
     world: &mut DenseBlockGrid,
-    random: &mut R,
-) {
-    let (tree, _) = build_tree(start_cx, start_cz, random);
+    tree_random: &mut R,
+    placement_random: &mut P,
+    solid_render: &dyn Fn(&str) -> bool,
+) -> Vec<CodedLoot> {
+    let (tree, _) = build_tree(start_cx, start_cz, tree_random);
+    let mut loot = Vec::new();
     for piece in tree.pieces {
-        let (blocks, _) = emit_blocks(&piece, random);
+        let blocks = emit_blocks(&piece);
         for block in blocks {
+            if chest_position(&piece) == Some(block.pos) {
+                continue;
+            }
             world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+        }
+        if let Some(pos) = chest_position(&piece)
+            && pos[0].div_euclid(16) == placing_cx
+            && pos[2].div_euclid(16) == placing_cz
+            && base_name(world.get(pos[0], pos[1], pos[2])) != "minecraft:chest"
+        {
+            let state = chest_state(world, pos, solid_render);
+            world.set(pos[0], pos[1], pos[2], &state);
+            loot.push(CodedLoot {
+                pos,
+                table: "minecraft:chests/nether_bridge".to_string(),
+                seed: placement_random.next_long(),
+            });
         }
         place_supports_in_chunk(&piece, placing_cx, placing_cz, world);
     }
+    loot
 }
 
 #[cfg(test)]
 mod tests {
-    use lodestone_worldgen_core::rng::{LegacyRandomSource, WorldgenRandom};
+    use lodestone_worldgen_core::rng::{LegacyRandomSource, WorldgenRandom, XoroshiroRandomSource};
     use super::*;
 
     fn stream(seed: i64, cx: i32, cz: i32) -> WorldgenRandom<LegacyRandomSource> {
@@ -982,7 +1055,19 @@ mod tests {
             world.set(x, y, z, "minecraft:cave_air");
         }
         let mut random = stream(42, 0, 0);
-        place_for_chunk(0, 0, 0, 0, &mut world, &mut random);
+        let mut placement = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = placement.set_decoration_seed(42, 0, 0);
+        placement.set_feature_seed(decoration_seed, 1, 7);
+        place_for_chunk(
+            0,
+            0,
+            0,
+            0,
+            &mut world,
+            &mut random,
+            &mut placement,
+            &|state| !matches!(base_name(state), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | "minecraft:lava"),
+        );
         for [x, y, z] in expected {
             assert_eq!(world.get(x, y, z), "minecraft:nether_bricks", "support at ({x},{y},{z})");
         }

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use lodestone_worldgen::rng::{LegacyRandomSource, WorldgenRandom};
+use lodestone_worldgen::rng::{LegacyRandomSource, WorldgenRandom, XoroshiroRandomSource};
 use lodestone_worldgen::dense_grid::DenseBlockGrid;
 use lodestone_worldgen::structure::{BoundingBox, fortress};
 
@@ -19,6 +19,20 @@ fn stream(seed: i64, cx: i32, cz: i32) -> WorldgenRandom<LegacyRandomSource> {
     let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
     random.set_large_feature_seed(seed, cx, cz);
     random
+}
+
+fn placement_stream(seed: i64, cx: i32, cz: i32) -> WorldgenRandom<XoroshiroRandomSource> {
+    let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+    let decoration_seed = random.set_decoration_seed(seed, cx * 16, cz * 16);
+    random.set_feature_seed(decoration_seed, 1, 7);
+    random
+}
+
+fn solid_render(state: &str) -> bool {
+    !matches!(
+        state.split_once('[').map_or(state, |(base, _)| base),
+        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | "minecraft:lava"
+    )
 }
 
 #[test]
@@ -136,25 +150,28 @@ fn seed_42_external_castle_support_columns_reach_the_captured_depths() {
         world.set(-37, y, 78, "minecraft:cave_air");
     }
     let mut random = stream(42, 0, 0);
-    fortress::place_for_chunk(0, 0, -3, 4, &mut world, &mut random);
+    let mut placement = placement_stream(42, -3, 4);
+    fortress::place_for_chunk(
+        0,
+        0,
+        -3,
+        4,
+        &mut world,
+        &mut random,
+        &mut placement,
+        &solid_render,
+    );
     for pos in [[-36, 41, 67], [-36, 50, 67], [-37, 22, 78], [-37, 60, 78]] {
         assert_eq!(world.get(pos[0], pos[1], pos[2]), "minecraft:nether_bricks", "external support {pos:?}");
     }
 }
 
-/// The captured rows retain the neighbor-derived facing and placement-stream
-/// seed required for packet parity. The eager piece list does not have the
-/// receiving chunk grid or its random stream, so this test records the two
-/// boundaries explicitly instead of treating its fallback data as an oracle.
+/// Four externally captured containers jointly control the receiving-grid
+/// facing rule and the per-chunk placement stream. Two share one chunk, so
+/// their reversed coordinate/stream order catches a position-derived seed.
 #[test]
-fn seed_42_external_chest_rows_cover_state_and_expose_the_placement_rng_boundary() {
-    let mut random = stream(42, 0, 0);
-    let (pieces, _) = fortress::generate(0, 0, &mut random);
-    let actual_seeds: BTreeSet<_> = pieces
-        .iter()
-        .flat_map(|piece| piece.loot.iter().map(|loot| (loot.pos, loot.seed)))
-        .collect();
-    let expected: Vec<_> = EXTERNAL
+fn seed_42_external_chests_match_facing_and_placement_seed() {
+    let expected: BTreeSet<_> = EXTERNAL
         .lines()
         .filter_map(|line| line.strip_prefix("chest="))
         .map(|row| {
@@ -165,27 +182,47 @@ fn seed_42_external_chest_rows_cover_state_and_expose_the_placement_rng_boundary
             let mut coordinates = location.split(',').map(|value| value.parse::<i32>().unwrap());
             (
                 [coordinates.next().unwrap(), coordinates.next().unwrap(), coordinates.next().unwrap()],
-                _facing.to_string(),
+                format!("minecraft:chest[facing={_facing},type=single,waterlogged=false]"),
                 seed.parse::<i64>().unwrap(),
             )
         })
         .collect();
-    let expected_positions: BTreeSet<_> = expected.iter().map(|(pos, _, _)| *pos).collect();
-    let actual_positions: BTreeSet<_> = actual_seeds.iter().map(|(pos, _)| *pos).collect();
-    assert!(
-        actual_positions.is_superset(&expected_positions),
-        "the external chest positions must stay attached to their piece writers; actual={actual_positions:?}"
+    let mut actual = BTreeSet::new();
+    for (cx, cz) in [(-3, 4), (-2, 4), (-1, 5)] {
+        let mut world = DenseBlockGrid::new(cx * 16, 0, cz * 16, 16, 128, 16, "minecraft:netherrack");
+        let mut tree = stream(42, 0, 0);
+        let mut placement = placement_stream(42, cx, cz);
+        for loot in fortress::place_for_chunk(
+            0,
+            0,
+            cx,
+            cz,
+            &mut world,
+            &mut tree,
+            &mut placement,
+            &solid_render,
+        ) {
+            actual.insert((loot.pos, world.get(loot.pos[0], loot.pos[1], loot.pos[2]).to_string(), loot.seed));
+        }
+    }
+    assert_eq!(actual, expected);
+
+    let mut world = DenseBlockGrid::new(-32, 0, 64, 16, 128, 16, "minecraft:netherrack");
+    let mut tree = stream(42, 0, 0);
+    let mut wrong = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+    let decoration_seed = wrong.set_decoration_seed(42, -32, 64);
+    wrong.set_feature_seed(decoration_seed, 0, 7);
+    let wrong_loot = fortress::place_for_chunk(
+        0,
+        0,
+        -2,
+        4,
+        &mut world,
+        &mut tree,
+        &mut wrong,
+        &solid_render,
     );
-    assert_eq!(
-        expected.iter().map(|(_, facing, _)| facing.as_str()).collect::<BTreeSet<_>>(),
-        BTreeSet::from(["south", "west"]),
-        "fixture must retain the captured neighbor-derived chest facings"
-    );
-    let expected_seeds: BTreeSet<_> = expected.iter().map(|(pos, _, seed)| (*pos, *seed)).collect();
-    assert_ne!(
-        actual_seeds, expected_seeds,
-        "the eager start stream must not be mistaken for the external placement stream; replace this boundary assertion with equality when chunk placement owns the draws"
-    );
+    assert_ne!(wrong_loot[0].seed, -783_213_331_306_481_740, "the runtime structure index is observable");
 }
 
 /// A compact block control read from the external seed-42 chunk packet. The
