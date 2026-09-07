@@ -13,7 +13,8 @@ use lodestone_server::dimension::Dimension as ServerDimension;
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use lodestone_worldgen_parity::lifecycle::{
-    LifecycleCompletion, LifecycleMaterializer, LifecycleWorldgenSource,
+    LifecycleCompletion, LifecycleMaterializer, LifecycleReplayEvent, LifecycleReplayPlan,
+    LifecycleWorldgenSource,
 };
 use support::large_parity_manifest::{Dimension, HEADER_BYTES, canonical_nbt, read_header, payload_digest_from_header, semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension, semantic_record, semantic_record_for_dimension, semantic_record_v5_for_dimension, verify_payload};
 
@@ -666,7 +667,8 @@ fn parity_manifest_streams_before_rust_comparison() {
     };
     let mut digest_mismatches = Vec::new();
     let mut component_reports = Vec::new();
-    let partial_lifecycle = h.count == 256
+    let partial_lifecycle = dimension != Dimension::End
+        && h.count == 256
         && h.cx1 - h.cx0 == 15
         && h.cz1 - h.cz0 == 15;
     if partial_lifecycle {
@@ -686,16 +688,7 @@ fn parity_manifest_streams_before_rust_comparison() {
                 &mut component_reports,
             ),
             Dimension::Nether => compare_lifecycle_manifest(
-                {
-                    let mut materializer = LifecycleMaterializer::new(nether_chunk_source(42));
-                    let admissions = capture
-                        .admissions
-                        .iter()
-                        .map(|admission| admission.chunk)
-                        .collect::<Vec<_>>();
-                    materializer.prepare_lifecycle_replay(&admissions);
-                    materializer
-                },
+                LifecycleMaterializer::new(nether_chunk_source(42)),
                 &capture,
                 &mut expected,
                 &h,
@@ -798,6 +791,122 @@ fn parity_manifest_streams_before_rust_comparison() {
     }
 }
 
+fn lifecycle_replay_events(capture: &LifecycleCapture) -> Vec<LifecycleReplayEvent> {
+    capture.feature_events.iter().map(|event| LifecycleReplayEvent {
+        source: event.source,
+        stage: event.stage,
+        sequence: event.completion_sequence,
+    }).collect()
+}
+
+fn replay_full_capture<S: LifecycleWorldgenSource>(
+    mut materializer: LifecycleMaterializer<S>,
+    capture: &LifecycleCapture,
+) -> LifecycleMaterializer<S> {
+    for admission in &capture.admissions { materializer.admit(admission.chunk); }
+    for event in &capture.feature_events {
+        materializer.complete(event.source, event.stage, event.completion_sequence);
+    }
+    materializer
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LifecycleReplayMode {
+    Full,
+    Pruned,
+}
+
+fn lifecycle_replay_mode(limit: u64, scan_all: bool) -> LifecycleReplayMode {
+    if limit == 1 && !scan_all {
+        LifecycleReplayMode::Pruned
+    } else {
+        LifecycleReplayMode::Full
+    }
+}
+
+#[test]
+fn lifecycle_replay_mode_only_prunes_single_fail_fast_target() {
+    assert_eq!(lifecycle_replay_mode(1, false), LifecycleReplayMode::Pruned);
+    assert_eq!(lifecycle_replay_mode(2, false), LifecycleReplayMode::Full);
+    assert_eq!(lifecycle_replay_mode(1, true), LifecycleReplayMode::Full);
+    assert_eq!(lifecycle_replay_mode(256, true), LifecycleReplayMode::Full);
+}
+
+fn lifecycle_packet_payload<S: LifecycleWorldgenSource>(
+    materializer: &LifecycleMaterializer<S>,
+    target: ChunkPos,
+    dimension: ServerDimension,
+) -> Vec<u8> {
+    let column = materializer.snapshot_for_packet(target);
+    let mut neighbours = Vec::with_capacity(8);
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            if (dx, dz) == (0, 0) { continue; }
+            let neighbour = (target.0 + dx, target.1 + dz);
+            let column = materializer.resident_column(neighbour).unwrap_or_else(|| {
+                panic!("target {target:?} is missing admitted packet-light neighbour {neighbour:?}")
+            });
+            neighbours.push((dx, dz, column.clone()));
+        }
+    }
+    let directive = V770ServerProtocol
+        .try_encode_chunk_with_neighbours_in_dimension(target.0, target.1, &column, &neighbours, dimension)
+        .expect("production neighbour-aware chunk encoder");
+    match directive {
+        ServerDirective::Send { packet_id, payload } => {
+            assert_eq!(packet_id, lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
+            payload
+        }
+        other => panic!("production chunk encoder returned {other:?} at {target:?}"),
+    }
+}
+
+/// Full replay remains the acceptance authority; this checks the static
+/// target optimisation against its raw packet bytes at the audited corner.
+#[test]
+#[ignore = "requires an authenticated lifecycle capture and accepted manifest; see docs/worldgen-large-parity.md"]
+fn full_and_pruned_lifecycle_replay_have_identical_target_packet_bytes() {
+    let path = std::env::var("LODESTONE_LARGE_PARITY_MANIFEST")
+        .expect("set LODESTONE_LARGE_PARITY_MANIFEST to an accepted 16x16 manifest");
+    let mut raw_header = [0; HEADER_BYTES];
+    let mut manifest = File::open(&path).expect("open accepted manifest");
+    manifest.read_exact(&mut raw_header).expect("read manifest header");
+    let header = read_header(&raw_header[..]).expect("validate accepted manifest header");
+    assert_eq!(header.count, 256, "the lifecycle byte control requires the accepted 16x16 manifest");
+    let capture = LifecycleCapture::load(header.dimension, &header, Path::new(&path));
+    let target = (-8, -8);
+    let admissions = capture.admissions.iter().map(|admission| admission.chunk).collect::<Vec<_>>();
+    let events = lifecycle_replay_events(&capture);
+    let plan = LifecycleReplayPlan::for_target(target, &admissions, &events)
+        .unwrap_or_else(|error| panic!("static target replay plan rejected authenticated capture: {error}"));
+    assert_eq!(plan.target(), target);
+    assert_eq!(plan.feature_events().len(), 59, "audited tiled target closure must retain 59 FEATURES events");
+    assert_eq!(plan.admissions().len(), 105, "audited target closure must admit 105 resident destinations");
+    let server_dimension = match header.dimension {
+        Dimension::Overworld => ServerDimension::Overworld,
+        Dimension::Nether => ServerDimension::Nether,
+        Dimension::End => panic!("lifecycle byte control has no End capture"),
+    };
+    match header.dimension {
+        Dimension::Overworld => {
+            let full = replay_full_capture(LifecycleMaterializer::new(overworld_chunk_source(42)), &capture);
+            let mut pruned = LifecycleMaterializer::new(overworld_chunk_source(42));
+            pruned.replay_plan(&plan);
+            assert_eq!(lifecycle_packet_payload(&full, target, server_dimension), lifecycle_packet_payload(&pruned, target, server_dimension));
+        }
+        Dimension::Nether => {
+            let mut full_source = LifecycleMaterializer::new(nether_chunk_source(42));
+            full_source.prepare_lifecycle_replay(&admissions);
+            let full = replay_full_capture(full_source, &capture);
+            let mut pruned = LifecycleMaterializer::new(nether_chunk_source(42));
+            pruned.prepare_lifecycle_replay(plan.admissions());
+            pruned.replay_plan(&plan);
+            assert_eq!(lifecycle_packet_payload(&full, target, server_dimension), lifecycle_packet_payload(&pruned, target, server_dimension));
+        }
+        Dimension::End => unreachable!(),
+    }
+}
+
 fn compare_lifecycle_manifest<S: LifecycleWorldgenSource>(
     mut materializer: LifecycleMaterializer<S>,
     capture: &LifecycleCapture,
@@ -811,32 +920,56 @@ fn compare_lifecycle_manifest<S: LifecycleWorldgenSource>(
     digest_mismatches: &mut Vec<(i32, i32, [u8; 32], [u8; 32])>,
     component_reports: &mut Vec<((i32, i32), PacketComponentReport)>,
 ) {
+    let replay_mode = lifecycle_replay_mode(limit, scan_all);
+    let full_admissions = capture.admissions.iter().map(|admission| admission.chunk).collect::<Vec<_>>();
     // The external rows repeat the same source completion once per target that
-    // observes it. Admit the complete authenticated 18x18 halo first, then
-    // run each source's FEATURES body exactly once in replay.tsv admission
-    // order. FULL/fence telemetry is diagnostic only: the accepted manifest is
-    // a sealed final-world state, not a set of target-fence snapshots.
-    for admission in &capture.admissions {
-        materializer.admit(admission.chunk);
-    }
-    eprintln!(
-        "large lifecycle replay: admitted {} halo columns, applying {} FEATURES events; ignoring {} FULL telemetry events",
-        capture.admissions.len(),
-        capture.feature_events.len(),
-        capture.full_event_count,
-    );
-    for event in &capture.feature_events {
-        materializer.complete(event.source, event.stage, event.completion_sequence);
+    // observes it. The one-target, fail-fast pilot uses the authenticated
+    // static dependency closure; every multi-target or scan-all run remains a
+    // complete replay and therefore the acceptance authority. FULL/fence
+    // telemetry is diagnostic only: the accepted manifest is a sealed final
+    // world state, not a set of target-fence snapshots.
+    match replay_mode {
+        LifecycleReplayMode::Pruned => {
+            let target = capture.target_order.first().copied().expect("capture target order must be non-empty");
+            let events = lifecycle_replay_events(capture);
+            let plan = LifecycleReplayPlan::for_target(target, &full_admissions, &events)
+                .unwrap_or_else(|error| panic!("static target replay plan rejected authenticated capture: {error}"));
+            assert_eq!(plan.target(), target);
+            assert_eq!(plan.feature_events().len(), 59);
+            assert_eq!(plan.admissions().len(), 105);
+            materializer.prepare_lifecycle_replay(plan.admissions());
+            materializer.replay_plan(&plan);
+            eprintln!("large lifecycle replay: pruned target {target:?}, admitted {} destinations, applied {} FEATURES events", plan.admissions().len(), plan.feature_events().len());
+        }
+        LifecycleReplayMode::Full => {
+            materializer.prepare_lifecycle_replay(&full_admissions);
+            for &admission in &full_admissions {
+                materializer.admit(admission);
+            }
+            eprintln!(
+                "large lifecycle replay: admitted {} halo columns, applying {} FEATURES events; ignoring {} FULL telemetry events",
+                full_admissions.len(),
+                capture.feature_events.len(),
+                capture.full_event_count,
+            );
+            for event in &capture.feature_events {
+                materializer.complete(event.source, event.stage, event.completion_sequence);
+            }
+        }
     }
     if let Some(computations) = materializer.lifecycle_pre_decoration_computations() {
-        // The accepted 18x18 capture's 5x5 source context is a 22x22 closure.
-        // This is a performance control only; it must never influence replay.
-        assert_eq!(
-            computations, 484,
-            "Nether lifecycle replay recomputed outside its admitted 22x22 closure",
-        );
+        // The full 18x18 capture's 5x5 source context is a 22x22 closure. The
+        // one-target plan only reaches 159 unique pre-decoration source
+        // columns after clipping its irregular destination rows to the
+        // authenticated halo. This is a performance control only; it must
+        // never influence replay.
+        let expected_computations = match replay_mode {
+            LifecycleReplayMode::Full => 484,
+            LifecycleReplayMode::Pruned => 159,
+        };
+        assert_eq!(computations, expected_computations, "Nether lifecycle replay recomputed outside its admitted source closure");
         eprintln!(
-            "large lifecycle replay: Nether pre-decoration computations={computations} (expected unique closure)"
+            "large lifecycle replay: Nether pre-decoration computations={computations} (expected unique closure for {replay_mode:?} replay)"
         );
     }
 
