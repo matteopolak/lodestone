@@ -27,8 +27,9 @@ pub struct BlockAction {
 /// Clientbound `block_break_animation` — a block's break-progress overlay.
 ///
 /// Wire layout: varint breaker entity id, packed [`Position`], signed byte
-/// destroy stage. Verified against minecraft-data's 1.8
-/// `packet_block_break_animation`.
+/// destroy stage. The byte is a raw token: values `0..=9` select a crack
+/// sprite, while `-1` (`0xff` on the wire) clears the overlay. Verified
+/// against minecraft-data's 1.8 `packet_block_break_animation`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:block_break_animation", state = Play, bound = Client)]
 pub struct BlockBreakAnimation {

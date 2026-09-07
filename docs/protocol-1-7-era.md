@@ -68,7 +68,10 @@ keep-alive challenge and lifts the exact serverbound echo to
 `ServerBound::KeepAlive`, so `lodestone-server` can clear its pending challenge.
 Protocol 5 uses a fixed signed `i32` body in both directions; the server
 protocol test pins literal bytes and rejects a trailing byte instead of
-acknowledging a malformed response.
+acknowledging a malformed response. The clientbound block-break animation
+carries its stage as a signed byte in the packet description, but the shared
+event owns the raw byte. Thus `-1` is preserved as `255`, the clear-overlay
+sentinel, while visible stages retain their numeric values.
 The clientbound `explosion` frame is decoded from its independently sourced
 legacy layout: four `f32` values for centre and radius, an `i32` offset count,
 signed-byte `(x, y, z)` offsets, then three unconditional `f32` player-motion

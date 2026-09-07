@@ -166,6 +166,13 @@ reason 2 begins it, 3 changes the local game mode only when the float is integra
 7 and 8 update rain and thunder intensity respectively. Other reason codes are fully decoded and
 dropped until the model has an honest carrier.
 
+All four play tables now consume `block_break_animation`. The adapter decodes the VarInt breaker
+id, packed block position, and signed stage byte, then preserves that byte as
+`ClientEvent::BlockDestruction`; stages `0..=9` select visible crack sprites and the `-1` sentinel
+clears the overlay. Literal bytes for both a visible stage and the clear sentinel pass through each
+protocol's own dispatch table in `tests/game_events.rs`, so this path is exercised beyond the
+derived packet codec.
+
 `entity_update_attributes` uses a VarInt entity id, a fixed signed `i32` property count, textual
 dotted camel-case keys, `f64` bases, and VarInt-counted UUID modifiers. The decoder bounds
 properties at 128 and modifiers per property at 1,024 before allocating, accepts only the three

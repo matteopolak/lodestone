@@ -519,6 +519,25 @@ pub struct BlockAction {
     pub block_id: i32,
 }
 
+/// Clientbound `block_break_animation` — a block's break-progress overlay.
+///
+/// Wire layout: VarInt breaker entity id, packed [`Position`], and a signed
+/// stage byte. Values `0..=9` select a crack stage; `-1` (encoded as `0xff`)
+/// clears the overlay. The stage remains signed here so the wire's clear
+/// sentinel is preserved until the adapter lifts it into the canonical raw
+/// byte event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:block_break_animation", state = Play, bound = Client)]
+pub struct BlockBreakAnimation {
+    /// Entity id of the player or mob breaking the block.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Block position being broken.
+    pub location: Position,
+    /// Raw break-stage byte, including the signed `-1` clear sentinel.
+    pub destroy_stage: i8,
+}
+
 /// Clientbound `entity_equipment` — one entity equipment slot changed.
 ///
 /// Verified against minecraft-data's 1.12.2 `packet_entity_equipment`: a

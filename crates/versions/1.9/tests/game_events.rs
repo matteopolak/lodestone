@@ -37,6 +37,10 @@ fn encode<T: Encode>(value: &T) -> Vec<u8> {
 
 fn dispatch(packet_id: i32, payload: &[u8]) -> Vec<Directive> {
     let adapter = V340Adapter::new();
+    dispatch_with(&adapter, packet_id, payload)
+}
+
+fn dispatch_with(adapter: &V340Adapter, packet_id: i32, payload: &[u8]) -> Vec<Directive> {
     adapter
         .handle_packet(&mut World::new(), ConnectionState::Play, packet_id, payload)
         .expect("handle_packet")
@@ -47,6 +51,98 @@ fn dispatch_err(packet_id: i32, payload: &[u8]) -> AdapterError {
     adapter
         .handle_packet(&mut World::new(), ConnectionState::Play, packet_id, payload)
         .expect_err("expected a decode error")
+}
+
+// ---------------------------------------------------------------------------
+// BLOCK_BREAK_ANIMATION
+// ---------------------------------------------------------------------------
+
+#[test]
+fn block_break_animation_dispatches_literal_visible_stage_on_every_protocol() {
+    // VarInt entity id 300 (ac 02), packed position (-12, 64, 37), and stage
+    // 5. The packet is sent through each protocol's real dispatch table.
+    let payload = [
+        0xac, 0x02, 0xff, 0xff, 0xfd, 0x01, 0x00, 0x00, 0x00, 0x25, 0x05,
+    ];
+    let protocols = [
+        (
+            110,
+            lodestone_v1_9::packet_ids_110::play::clientbound::BLOCK_BREAK_ANIMATION,
+        ),
+        (
+            210,
+            lodestone_v1_9::packet_ids_210::play::clientbound::BLOCK_BREAK_ANIMATION,
+        ),
+        (
+            316,
+            lodestone_v1_9::packet_ids_316::play::clientbound::BLOCK_BREAK_ANIMATION,
+        ),
+        (
+            340,
+            lodestone_v1_9::packet_ids::play::clientbound::BLOCK_BREAK_ANIMATION,
+        ),
+    ];
+
+    for (protocol, packet_id) in protocols {
+        let adapter = V340Adapter::for_protocol(protocol);
+        let directives = dispatch_with(&adapter, packet_id, &payload);
+        match directives.as_slice() {
+            [Directive::Emit(ClientEvent::BlockDestruction {
+                entity_id,
+                pos,
+                progress,
+            })] => {
+                assert_eq!(*entity_id, 300, "protocol {protocol}");
+                assert_eq!((pos.x, pos.y, pos.z), (-12, 64, 37), "protocol {protocol}");
+                assert_eq!(*progress, 5, "protocol {protocol}");
+            }
+            other => panic!("protocol {protocol} emitted {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn block_break_animation_preserves_literal_clear_stage_on_every_protocol() {
+    // Same position and entity as above, with the signed -1 clear sentinel
+    // represented by ff on the wire.
+    let payload = [
+        0xac, 0x02, 0xff, 0xff, 0xfd, 0x01, 0x00, 0x00, 0x00, 0x25, 0xff,
+    ];
+    let protocols = [
+        (
+            110,
+            lodestone_v1_9::packet_ids_110::play::clientbound::BLOCK_BREAK_ANIMATION,
+        ),
+        (
+            210,
+            lodestone_v1_9::packet_ids_210::play::clientbound::BLOCK_BREAK_ANIMATION,
+        ),
+        (
+            316,
+            lodestone_v1_9::packet_ids_316::play::clientbound::BLOCK_BREAK_ANIMATION,
+        ),
+        (
+            340,
+            lodestone_v1_9::packet_ids::play::clientbound::BLOCK_BREAK_ANIMATION,
+        ),
+    ];
+
+    for (protocol, packet_id) in protocols {
+        let adapter = V340Adapter::for_protocol(protocol);
+        let directives = dispatch_with(&adapter, packet_id, &payload);
+        match directives.as_slice() {
+            [Directive::Emit(ClientEvent::BlockDestruction {
+                entity_id,
+                pos,
+                progress,
+            })] => {
+                assert_eq!(*entity_id, 300, "protocol {protocol}");
+                assert_eq!((pos.x, pos.y, pos.z), (-12, 64, 37), "protocol {protocol}");
+                assert_eq!(*progress, 255, "protocol {protocol}");
+            }
+            other => panic!("protocol {protocol} emitted {other:?}"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

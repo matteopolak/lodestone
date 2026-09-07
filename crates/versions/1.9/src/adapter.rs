@@ -36,7 +36,7 @@ use crate::packets::entity::{
     SpawnEntityLivingByteType, SpawnEntityPainting, SpawnEntityWeather, SpawnObject, UpdateAttributes,
 };
 use crate::packets::game::{
-    Animation, AttachEntity, BlockAction, BlockDig, BlockPlace, BlockPlaceByteCursor,
+    Animation, AttachEntity, BlockAction, BlockBreakAnimation, BlockDig, BlockPlace, BlockPlaceByteCursor,
     ClientCommand, ClientboundChat, ClientboundEntityEquipment, ClientboundPositionLook, Collect,
     DifficultyPacket, EntityAction, EntityEffect, Explosion, GameStateChange, JoinGame, KickDisconnect, NamedSoundEffect,
     NamedSoundEffectBytePitch, OpenSignEntity, PlayerlistHeader, RemoveEntityEffect, Respawn,
@@ -988,6 +988,7 @@ static PLAY_CLIENTBOUND_HANDLERS: &[(&str, lodestone_core::dispatch::Handler<Pla
     ("minecraft:entity_velocity", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_velocity)),
     ("minecraft:entity_destroy", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_destroy)),
     ("minecraft:entity_metadata", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_entity_metadata)),
+    ("minecraft:block_break_animation", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_block_break_animation)),
     ("minecraft:kick_disconnect", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_kick_disconnect)),
     ("minecraft:update_health", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_update_health)),
     ("minecraft:respawn", lodestone_core::dispatch::Handler::new(ProtocolRange::ALL, V340Adapter::play_respawn)),
@@ -1043,7 +1044,6 @@ static PLAY_CLIENTBOUND_HANDLERS: &[(&str, lodestone_core::dispatch::Handler<Pla
 
 static PLAY_CLIENTBOUND_IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new("minecraft:statistics", "v26-2 has this; backport"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:block_break_animation", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:tile_entity_data", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:transaction", "confirm-transaction handshake removed after 1.16; v26-2 has no clientbound equivalent"),
     lodestone_core::dispatch::IGNORED::new("minecraft:custom_payload", "v26-2 has this; backport"),
@@ -1467,6 +1467,23 @@ impl V340Adapter {
         return Ok(vec![Directive::Emit(ClientEvent::EntityRemoved {
             entity_ids: body.entity_ids,
         })]);
+    }
+
+    fn play_block_break_animation(
+        &self,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        // The four protocols in this era share this wire shape: a VarInt
+        // breaker id, one packed block position, and a signed stage byte.
+        // Preserve the byte verbatim in the canonical event so the -1 clear
+        // sentinel remains distinguishable from the visible stages.
+        let body: BlockBreakAnimation = self.decode_body_exact(payload)?;
+        Ok(vec![Directive::Emit(ClientEvent::BlockDestruction {
+            entity_id: body.entity_id,
+            pos: body.location.0,
+            progress: body.destroy_stage as u8,
+        })])
     }
 
     fn play_entity_metadata(

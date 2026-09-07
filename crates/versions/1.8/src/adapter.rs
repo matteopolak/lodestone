@@ -2601,7 +2601,10 @@ impl V47Adapter {
     ) -> Result<Vec<Directive>, AdapterError> {
 
             let body: BlockBreakAnimation = decode_body(payload)?;
-            let progress = u8::try_from(body.destroy_stage).unwrap_or(0);
+            // The signed byte is a raw stage token.  In particular, -1 is
+            // encoded as 0xff and means "clear"; do not collapse it into
+            // stage zero, which would render a fresh crack overlay.
+            let progress = body.destroy_stage as u8;
             return Ok(vec![Directive::Emit(ClientEvent::BlockDestruction {
                 entity_id: body.entity_id,
                 pos: body.location.0,
